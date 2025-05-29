@@ -71,14 +71,14 @@ The core local recording management features (access, download, play, delete, fo
 ### **Installation**
 
 1. **Clone the repository:**  
-   git clone [https://github.com/sgeraldes/hidock-next.git](https://github.com/sgeraldes/hidock-next.git)
+   git clone https://github.com/sgeraldes/hidock-next.git
    cd Hidock-Next
 
-2. **Create a virtual environment (recommended):**  
+3. **Create a virtual environment (recommended):**  
    python \-m venv venv  
    source venv/bin/activate  \# On Windows: venv\\Scripts\\activate
 
-3. **Install dependencies:**  
+4. **Install dependencies:**  
    pip install \-r requirements.txt
 
    *(Note: requirements.txt will be provided once initial dependencies are finalized.)*
