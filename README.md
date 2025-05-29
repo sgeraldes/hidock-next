@@ -71,7 +71,7 @@ The core local recording management features (access, download, play, delete, fo
 ### **Installation**
 
 1. **Clone the repository:**  
-   git clone \[https://github.com/sgeraldes/hidock-next.git\](https://github.com/sgeraldes/hidock-next.git)
+   git clone \https://github.com/sgeraldes/hidock-next.git\(https://github.com/sgeraldes/hidock-next.git)
    cd Hidock-Next
 
 2. **Create a virtual environment (recommended):**  
