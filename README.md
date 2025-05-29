@@ -65,13 +65,13 @@ The core local recording management features (access, download, play, delete, fo
 * **libusb:** You'll need libusb (or its equivalent like libusb-1.0) installed on your system.  
   * **Linux:** sudo apt-get install libusb-1.0-0-dev (Debian/Ubuntu) or equivalent.  
   * **macOS:** brew install libusb  
-  * **Windows:** Requires careful setup (e.g., using [Zadig](https://zadig.akeo.ie/) to install WinUSB driver for the HiDock device). **Be cautious with Zadig.**  
+  * **Windows:** Decompress libusb-1.0.dll from the libusb x64 distribution. Alternative: requires careful setup (e.g., using [Zadig](https://zadig.akeo.ie/) to install WinUSB driver for the HiDock device). **Be cautious with Zadig.**  
 * **HiDock Device:** A HiDock H1, H1E, or compatible variant.
 
 ### **Installation**
 
 1. **Clone the repository:**  
-   git clone \https://github.com/sgeraldes/hidock-next.git\(https://github.com/sgeraldes/hidock-next.git)
+   git clone [https://github.com/sgeraldes/hidock-next.git](https://github.com/sgeraldes/hidock-next.git)
    cd Hidock-Next
 
 2. **Create a virtual environment (recommended):**  
