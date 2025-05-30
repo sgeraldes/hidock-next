@@ -1,7 +1,7 @@
 {
     "autoconnect": true,
     "download_directory": "D:/Documents/hidock-next",
-    "log_level": "DEBUG",
+    "log_level": "INFO",
     "target_interface": 0,
     "autoconnect_interval_s": 7,
     "recording_check_interval_s": 0,

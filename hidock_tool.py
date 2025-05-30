@@ -115,9 +115,9 @@ class Logger:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         # Ensure module and procedure are strings, even if None or other types are passed.
         log_message = f"[{timestamp}][{level_str.upper()}] {str(module)}::{str(procedure)} - {message}"
-        print(log_message) # Keep console logging for debugging
-        if self.gui_log_callback:
-            self.gui_log_callback(log_message + "\n")
+        print(log_message) 
+        if self.gui_log_callback: # Pass level_str to the callback
+            self.gui_log_callback(log_message + "\n", level_str.upper())
     def info(self, module, procedure, message):
         self._log("info", module, procedure, message)
 
@@ -342,7 +342,7 @@ class HiDockJensen:
                 # Max packet size is usually 64 for Full Speed bulk, or 512 for High Speed.
                 # Reading a larger amount to reduce number of calls, if data is available.
                 # Use a short timeout for individual read attempts to remain responsive.
-                read_attempt_size = self.ep_in.wMaxPacketSize * 16 if self.ep_in.wMaxPacketSize else 512 * 16 # Increased multiplier
+                read_attempt_size = self.ep_in.wMaxPacketSize * 32 if self.ep_in.wMaxPacketSize else 512 * 32 # Further increased multiplier
                 # Individual read timeout should be small, e.g., 100ms, to allow loop to check overall_timeout_sec
                 data_chunk = self.device.read(self.ep_in.bEndpointAddress, read_attempt_size, timeout=100)
                 if data_chunk:
@@ -697,76 +697,112 @@ class HiDockJensen:
 
     def stream_file(self, filename, file_length, data_callback, progress_callback=None, timeout_s=180, cancel_event: threading.Event = None):
         with self._usb_lock: # Acquire lock for the entire streaming operation
-            logger.info("Jensen", "stream_file", f"Streaming {filename}, length {file_length}")
-            filename_bytes = filename.encode('ascii', errors='ignore')
+            status_to_return = "fail" # Default status, will be updated on success or specific failure types
+            try:
+                logger.info("Jensen", "stream_file", f"Streaming {filename}, length {file_length}")
+                filename_bytes = filename.encode('ascii', errors='ignore')
 
-            # Send initial command to start streaming
-            initial_seq_id = self._send_command(CMD_TRANSFER_FILE, filename_bytes, timeout_ms=10000) # Use int for timeout
-            
-            if cancel_event and cancel_event.is_set():
-                logger.info("Jensen", "stream_file", f"Streaming cancelled for {filename} before receiving data.")
-                return "cancelled"
-                
-            bytes_received = 0
-            start_time = time.time()
-            
-            while bytes_received < file_length and time.time() - start_time < timeout_s:
-                # For the first response, expect the initial_seq_id. For subsequent, expect CMD_TRANSFER_FILE.
-                current_expected_seq_id = initial_seq_id if bytes_received == 0 else None # None means don't strictly check sequence for subsequent stream packets
+                # Send initial command to start streaming
+                initial_seq_id = self._send_command(CMD_TRANSFER_FILE, filename_bytes, timeout_ms=10000) # Use int for timeout
                 
                 if cancel_event and cancel_event.is_set():
-                    logger.info("Jensen", "stream_file", f"Streaming cancelled for {filename} during data reception.")
-                    return "cancelled"
-
-                response = self._receive_response(
-                    expected_seq_id=current_expected_seq_id if current_expected_seq_id else initial_seq_id, # Pass initial for logging, but rely on streaming_cmd_id
-                    timeout_ms=15000, # Use int for timeout
-                    streaming_cmd_id=CMD_TRANSFER_FILE # Tell _receive_response we are in streaming mode for this CMD
-                )
-
-                if response and response["id"] == CMD_TRANSFER_FILE:
-                    # The first data packet's sequence ID might differ from initial_seq_id if the device
-                    # starts the data stream with a new sequence. We rely on the command ID (CMD_TRANSFER_FILE)
-                    # and the _usb_lock to ensure we're getting the correct stream.
-                    # The _receive_response method's streaming_cmd_id logic handles this.
-                    chunk = response["body"]
-                    if not chunk:
-                        logger.warning("Jensen", "stream_file", "Received empty chunk during stream.")
-                        if bytes_received >= file_length: break 
-                        time.sleep(0.1) 
-                        continue
-
-                    bytes_received += len(chunk)
-                    data_callback(chunk)
-                    if progress_callback:
-                        progress_callback(bytes_received, file_length)
+                    logger.info("Jensen", "stream_file", f"Streaming cancelled for {filename} before receiving data.")
+                    status_to_return = "cancelled"
+                    return status_to_return # Exit early
                     
-                    if bytes_received >= file_length:
-                        # Ensure final progress update if callback exists
-                        if progress_callback: progress_callback(file_length, file_length)
-                        logger.info("Jensen", "stream_file", f"File {filename} streamed successfully (received {bytes_received} of {file_length}).")
-                        return "OK"
-                elif response is None:
-                    logger.error("Jensen", "stream_file", f"Timeout or error receiving next chunk for {filename}. Received {bytes_received}/{file_length} so far.")
-                    # If device disconnected during _receive_response, self.is_connected() will be false
-                    if not self.is_connected(): logger.error("Jensen", "stream_file", "Device appears disconnected.")
-                    return "fail"
-                else: # Should not happen if streaming_cmd_id logic is correct
-                    logger.warning("Jensen", "stream_file", f"Unexpected response ID {response['id']} during stream.")
-                    return "fail" # Treat unexpected command ID during stream as failure
+                bytes_received = 0
+                start_time = time.time()
+                
+                while bytes_received < file_length and time.time() - start_time < timeout_s:
+                    # For the first response, expect the initial_seq_id. For subsequent, expect CMD_TRANSFER_FILE.
+                    current_expected_seq_id = initial_seq_id if bytes_received == 0 else None 
+                    
+                    if cancel_event and cancel_event.is_set():
+                        logger.info("Jensen", "stream_file", f"Streaming cancelled for {filename} during data reception.")
+                        status_to_return = "cancelled"
+                        return status_to_return # Exit early
 
-            if bytes_received < file_length:
-                logger.error("Jensen", "stream_file", f"Streaming incomplete for {filename}. Received {bytes_received}/{file_length} within timeout.")
-                # Check if cancellation or disconnect was the reason for incompleteness
-                if not self.is_connected(): # Check if device disconnected
-                    logger.error("Jensen", "stream_file", f"Device disconnected during stream for {filename}.")
-                    return "fail_disconnected"
-                if cancel_event and cancel_event.is_set():
-                    return "cancelled"
-                return "fail" # Otherwise, it's a fail due to timeout or other issue
-            
-            logger.info("Jensen", "stream_file", f"File {filename} streaming finished (final check).")
-            return "OK"
+                    response = self._receive_response(
+                        expected_seq_id=current_expected_seq_id if current_expected_seq_id else initial_seq_id, 
+                        timeout_ms=15000, 
+                        streaming_cmd_id=CMD_TRANSFER_FILE 
+                    )
+
+                    if response and response["id"] == CMD_TRANSFER_FILE:
+                        chunk = response["body"]
+                        if not chunk:
+                            logger.warning("Jensen", "stream_file", "Received empty chunk during stream.")
+                            if bytes_received >= file_length: break 
+                            time.sleep(0.1) 
+                            continue
+
+                        bytes_received += len(chunk)
+                        data_callback(chunk)
+                        if progress_callback:
+                            progress_callback(bytes_received, file_length)
+                        
+                        if bytes_received >= file_length:
+                            if progress_callback: progress_callback(file_length, file_length)
+                            logger.info("Jensen", "stream_file", f"File {filename} streamed successfully (received {bytes_received} of {file_length}).")
+                            status_to_return = "OK"
+                            break # Exit while loop
+                    elif response is None:
+                        logger.error("Jensen", "stream_file", f"Timeout or error receiving next chunk for {filename}. Received {bytes_received}/{file_length} so far.")
+                        if not self.is_connected(): logger.error("Jensen", "stream_file", "Device appears disconnected.")
+                        status_to_return = "fail"
+                        break # Exit while loop
+                    else: 
+                        logger.warning("Jensen", "stream_file", f"Unexpected response ID {response['id']} during stream.")
+                        status_to_return = "fail" 
+                        break # Exit while loop
+
+                # After the loop, check the final status if not already "OK" or "cancelled"
+                if status_to_return == "fail" and bytes_received < file_length : 
+                    logger.error("Jensen", "stream_file", f"Streaming incomplete for {filename}. Received {bytes_received}/{file_length} within timeout.")
+                    if not self.is_connected():
+                        status_to_return = "fail_disconnected"
+                    elif cancel_event and cancel_event.is_set():
+                         status_to_return = "cancelled"
+                    # else status_to_return remains "fail" from loop exit
+                elif status_to_return == "OK": # If loop completed successfully and set status_to_return to "OK"
+                     logger.info("Jensen", "stream_file", f"File {filename} streaming finished (final check).")
+
+            finally:
+                # This block executes regardless of how the try block finishes (success, error, return).
+                # It's crucial for cleanup actions that must happen while the lock is held.
+                self.receive_buffer.clear()
+                logger.debug("Jensen", "stream_file", "Python receive_buffer cleared after stream operation (within lock).")
+
+                # Attempt to flush any lingering data from the hardware/OS input buffer if the operation
+                # didn't complete successfully, as the device might still be sending data.
+                if status_to_return != "OK" and self.device and self.ep_in:
+                    logger.debug("Jensen", "stream_file", f"Attempting to flush stale IN endpoint data after stream status: {status_to_return}")
+                    flush_attempts = 0
+                    max_flush_attempts = 20 # e.g., 20 attempts * 50ms timeout = up to 1 second of flushing
+                    while flush_attempts < max_flush_attempts:
+                        try:
+                            # Read a moderate chunk with a short timeout for each flush attempt.
+                            read_size = self.ep_in.wMaxPacketSize * 16 if self.ep_in.wMaxPacketSize else 512 * 16
+                            stale_data = self.device.read(self.ep_in.bEndpointAddress,
+                                                          read_size,
+                                                          timeout=50) # Short timeout (ms)
+                            if stale_data:
+                                logger.debug("Jensen", "stream_file", f"Flushed {len(stale_data)} bytes of stale data from USB pipe.")
+                                # Data is read and discarded. Continue to see if there's more.
+                            else:
+                                # No data read in this attempt, pipe might be clear.
+                                logger.debug("Jensen", "stream_file", "No stale data in this flush read, pipe may be clear.")
+                                break
+                        except usb.core.USBTimeoutError: # This is expected if the pipe is empty
+                            logger.debug("Jensen", "stream_file", "USBTimeoutError during flush, pipe likely clear.")
+                            break
+                        except usb.core.USBError as e: # Other USB errors
+                            logger.warning("Jensen", "stream_file", f"USBError during endpoint flush: {e}. Stopping flush.")
+                            break # Stop flushing on other USB errors
+                        flush_attempts += 1
+                    if flush_attempts >= max_flush_attempts:
+                        logger.debug("Jensen", "stream_file", "Reached max flush attempts for stale data.")
+            return status_to_return # Return the determined status
 
     def delete_file(self, filename, timeout_s=10):
         logger.info("Jensen", "delete_file", f"Attempting to delete file: {filename}")
@@ -980,7 +1016,7 @@ class HiDockToolGUI:
         
         # Configure logger to output to GUI
         logger.set_level(self.log_level_var.get()) # Ensure logger uses the loaded config level
-        logger.set_gui_log_callback(self.log_to_gui_widget)
+        logger.set_gui_log_callback(self.log_to_gui_widget) # Logger will now pass (message, level_name)
 
         # Apply initial theme before creating widgets
         self.apply_theme(self.theme_var.get())
@@ -1032,11 +1068,10 @@ class HiDockToolGUI:
         self.total_files_label.pack(side=tk.LEFT, padx=5)
         self.selected_files_label = ttk.Label(files_info_frame, text="Selected: 0 files, 0.00 MB") # Keep this as is or adjust if needed
         self.selected_files_label.pack(side=tk.LEFT, padx=10) 
-        self.card_info_label = ttk.Label(files_info_frame, text="Storage: --- / --- MB (Status: ---)") # Changed "Card" to "Storage"
-        self.card_info_label.pack(side=tk.RIGHT, padx=5)
         # self.recording_status_label = ttk.Label(top_frame, text="Recording: N/A") # REMOVED - Will integrate into file list
         # self.recording_status_label.pack(side=tk.LEFT, padx=10, after=self.status_label)
-        self.selected_files_label.pack(side=tk.RIGHT, padx=5)
+        self.card_info_label = ttk.Label(files_info_frame, text="Storage: --- / --- MB (Status: ---)")
+        self.card_info_label.pack(side=tk.RIGHT, padx=5)
 
         self.refresh_files_button = ttk.Button(files_frame, text="🔄 Refresh File List", command=self.refresh_file_list_gui, state=tk.DISABLED)
         self.refresh_files_button.pack(pady=5)
@@ -1144,6 +1179,13 @@ class HiDockToolGUI:
         self.log_text_area = tk.Text(self.log_frame, height=10, state='disabled', wrap=tk.WORD)
         log_scrollbar = ttk.Scrollbar(self.log_frame, orient=tk.VERTICAL, command=self.log_text_area.yview)
         self.log_text_area.config(yscrollcommand=log_scrollbar.set)
+        
+        # Configure tags for log message colors
+        self.log_text_area.tag_configure("ERROR", background="#FFC0CB", foreground="black") # Light Pink
+        self.log_text_area.tag_configure("WARNING", background="#FFFFE0", foreground="black") # Light Yellow
+        self.log_text_area.tag_configure("INFO", background="white", foreground="black") # Or system default
+        self.log_text_area.tag_configure("DEBUG", background="#E0FFFF", foreground="black") # Light Cyan
+        self.log_text_area.tag_configure("CRITICAL", background="#FF6347", foreground="white") # Tomato Red
         log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text_area.pack(fill=tk.BOTH, expand=True) 
         # Playback Controls Frame will be created after controls_toggle_frame
@@ -1157,7 +1199,20 @@ class HiDockToolGUI:
         settings_win.grab_set() # Modal behavior
 
         # Store initial state for cancel
-        initial_autoconnect_state = self.autoconnect_var.get()
+        initial_config_vars = {
+            "autoconnect": self.autoconnect_var.get(),
+            "log_level": self.log_level_var.get(),
+            "selected_vid": self.selected_vid_var.get(),
+            "selected_pid": self.selected_pid_var.get(),
+            "target_interface": self.target_interface_var.get(),
+            "recording_check_interval_s": self.recording_check_interval_var.get(),
+            "default_command_timeout_ms": self.default_command_timeout_ms_var.get(),
+            "file_stream_timeout_s": self.file_stream_timeout_s_var.get(),
+            "auto_refresh_files": self.auto_refresh_files_var.get(),
+            "auto_refresh_interval_s": self.auto_refresh_interval_s_var.get(),
+            "quit_without_prompt_if_connected": self.quit_without_prompt_var.get(),
+            "theme": self.theme_var.get()
+        }
         initial_log_level = self.log_level_var.get()
         initial_selected_vid = self.selected_vid_var.get()
         initial_selected_pid = self.selected_pid_var.get()
@@ -1168,7 +1223,8 @@ class HiDockToolGUI:
         initial_auto_refresh_files = self.auto_refresh_files_var.get()
         initial_auto_refresh_interval = self.auto_refresh_interval_s_var.get()
         initial_quit_without_prompt = self.quit_without_prompt_var.get()
-        initial_theme = self.theme_var.get()
+        initial_theme = self.theme_var.get() # Already captured in initial_config_vars
+        initial_download_directory = self.download_directory # String, not a tk.Var
         
         # Store initial state of device behavior vars (what's currently in UI)
         initial_device_settings_ui_state = {
@@ -1176,6 +1232,11 @@ class HiDockToolGUI:
             "autoPlay": self.device_setting_auto_play_var.get(),
             "bluetoothTone": self.device_setting_bluetooth_tone_var.get(),
             "notificationSound": self.device_setting_notification_sound_var.get()}
+
+        # --- State tracking for changes ---
+        settings_changed_tracker = [False] # Use a list to pass by reference for modification
+        # Temporary storage for download directory changes within this dialog session
+        current_dialog_download_dir = [self.download_directory] 
 
         settings_frame = ttk.Frame(settings_win, padding="10")
         settings_frame.pack(fill=tk.BOTH, expand=True)
@@ -1270,15 +1331,18 @@ class HiDockToolGUI:
         current_dl_dir_label_settings = ttk.Label(download_settings_frame, text=self.download_directory, relief="sunken", padding=2, wraplength=380)
         current_dl_dir_label_settings.pack(fill=tk.X, pady=2, side=tk.TOP)
 
+        # Forward declare buttons for callbacks
+        apply_button = ttk.Button(None) # Dummy, will be replaced
+        cancel_close_button = ttk.Button(None) # Dummy, will be replaced
+
         select_dir_button_settings = ttk.Button(
             dir_buttons_frame, 
             text="Select Download Directory...", 
-            command=lambda: self.select_download_dir(settings_dl_dir_label_widget=current_dl_dir_label_settings)
+            command=lambda: self._select_download_dir_for_settings(current_dl_dir_label_settings, current_dialog_download_dir, settings_changed_tracker, apply_button, cancel_close_button)
         )
         select_dir_button_settings.pack(side=tk.LEFT, pady=(5,0))
-
         reset_dir_button = ttk.Button(dir_buttons_frame, text="Reset to App Folder",
-                                      command=lambda: self.reset_download_dir_to_default(settings_dl_dir_label_widget=current_dl_dir_label_settings))
+                                      command=lambda: self._reset_download_dir_for_settings(current_dl_dir_label_settings, current_dialog_download_dir, settings_changed_tracker, apply_button, cancel_close_button))
         reset_dir_button.pack(side=tk.LEFT, padx=5, pady=(5,0))
 
         # --- Device Behavior Settings ---
@@ -1304,77 +1368,154 @@ class HiDockToolGUI:
             # Checkboxes remain disabled, implying connection is needed.
             pass 
 
+        # --- Action Buttons (OK, Apply, Cancel/Close) ---
         buttons_frame = ttk.Frame(settings_frame)
         buttons_frame.pack(fill=tk.X, pady=10, side=tk.BOTTOM)
 
-        def apply_settings_action():
-            # Save all settings
-            self.config["autoconnect"] = self.autoconnect_var.get()
-            self.config["log_level"] = self.log_level_var.get()
-            self.config["selected_vid"] = self.selected_vid_var.get()
-            self.config["selected_pid"] = self.selected_pid_var.get()
-            self.config["target_interface"] = self.target_interface_var.get()
-            self.config["recording_check_interval_s"] = self.recording_check_interval_var.get()
-            self.config["default_command_timeout_ms"] = self.default_command_timeout_ms_var.get()
-            self.config["file_stream_timeout_s"] = self.file_stream_timeout_s_var.get()
-            self.config["auto_refresh_files"] = self.auto_refresh_files_var.get()
-            self.config["auto_refresh_interval_s"] = self.auto_refresh_interval_s_var.get()
-            self.config["quit_without_prompt_if_connected"] = self.quit_without_prompt_var.get()
-            self.config["theme"] = self.theme_var.get()
+        action_buttons_subframe = ttk.Frame(buttons_frame)
+        action_buttons_subframe.pack(side=tk.RIGHT)
+
+        ok_button = ttk.Button(action_buttons_subframe, text="OK")
+        # apply_button and cancel_close_button were forward-declared for download dir callbacks
+        apply_button.master = action_buttons_subframe # Set actual master
+        apply_button.config(text="Apply", state=tk.DISABLED)
+        cancel_close_button.master = action_buttons_subframe # Set actual master
+        cancel_close_button.config(text="Close")
+
+        # --- Helper to update button states on any setting change ---
+        def _update_button_states_on_change(*args): # *args for trace callback
+            if not settings_changed_tracker[0]: # Only update if not already marked
+                settings_changed_tracker[0] = True
+                if apply_button.winfo_exists(): apply_button.config(state=tk.NORMAL)
+                if cancel_close_button.winfo_exists(): cancel_close_button.config(text="Cancel")
+
+        # --- Trace changes for tk.Variables ---
+        vars_to_trace = [
+            self.autoconnect_var, self.log_level_var, self.selected_vid_var, self.selected_pid_var,
+            self.target_interface_var, self.recording_check_interval_var,
+            self.default_command_timeout_ms_var, self.file_stream_timeout_s_var,
+            self.auto_refresh_files_var, self.auto_refresh_interval_s_var,
+            self.quit_without_prompt_var, self.theme_var,
+            self.device_setting_auto_record_var, self.device_setting_auto_play_var,
+            self.device_setting_bluetooth_tone_var, self.device_setting_notification_sound_var
+        ]
+        for var_to_trace in vars_to_trace:
+            var_to_trace.trace_add('write', _update_button_states_on_change)
+
+        # --- Core logic for applying settings ---
+        def _perform_apply_settings_logic(update_dialog_baseline=False):
+            nonlocal initial_download_directory # To modify the outer scope's variable if baseline is updated
+
+            # 1. Update self.config and self attributes from current UI values
+            for key in initial_config_vars: # Iterate through keys of original dict
+                var_attr = getattr(self, f"{key}_var", None) # e.g., self.autoconnect_var
+                if var_attr:
+                    self.config[key] = var_attr.get()
             
+            self.download_directory = current_dialog_download_dir[0] # Update actual from dialog's temp
+            self.config["download_directory"] = self.download_directory
+
             # Apply device behavior settings
             if self.dock.is_connected() and self._fetched_device_settings_for_dialog:
                 changed_device_settings = {}
-                if self.device_setting_auto_record_var.get() != self._fetched_device_settings_for_dialog.get("autoRecord"):
+                # Compare against the state when dialog opened OR last apply
+                baseline_auto_record = self._fetched_device_settings_for_dialog.get("autoRecord")
+                if self.device_setting_auto_record_var.get() != baseline_auto_record:
                     changed_device_settings["autoRecord"] = self.device_setting_auto_record_var.get()
-                if self.device_setting_auto_play_var.get() != self._fetched_device_settings_for_dialog.get("autoPlay"):
+                
+                baseline_auto_play = self._fetched_device_settings_for_dialog.get("autoPlay")
+                if self.device_setting_auto_play_var.get() != baseline_auto_play:
                     changed_device_settings["autoPlay"] = self.device_setting_auto_play_var.get()
-                if self.device_setting_bluetooth_tone_var.get() != self._fetched_device_settings_for_dialog.get("bluetoothTone"):
+
+                baseline_bt_tone = self._fetched_device_settings_for_dialog.get("bluetoothTone")
+                if self.device_setting_bluetooth_tone_var.get() != baseline_bt_tone:
                     changed_device_settings["bluetoothTone"] = self.device_setting_bluetooth_tone_var.get()
-                if self.device_setting_notification_sound_var.get() != self._fetched_device_settings_for_dialog.get("notificationSound"):
+
+                baseline_notif_sound = self._fetched_device_settings_for_dialog.get("notificationSound")
+                if self.device_setting_notification_sound_var.get() != baseline_notif_sound:
                     changed_device_settings["notificationSound"] = self.device_setting_notification_sound_var.get()
                 
-                threading.Thread(target=self._apply_device_settings_thread, args=(changed_device_settings,), daemon=True).start()
-            # Download directory is saved immediately upon selection via select_download_dir
+                if changed_device_settings:
+                    threading.Thread(target=self._apply_device_settings_thread, args=(changed_device_settings,), daemon=True).start()
+            
             save_config(self.config)
 
             # Apply settings that have immediate effect
             logger.set_level(self.log_level_var.get())
             self.apply_theme(self.theme_var.get()) # Apply theme change
+            if hasattr(self, 'download_dir_label') and self.download_dir_label.winfo_exists():
+                self.download_dir_label.config(text=f"Dir: {self.download_directory}")
+
             if self.dock.is_connected(): 
                 self.start_recording_status_check() # Restart with new interval
                 self.start_auto_file_refresh_periodic_check() # Restart with new interval/state
 
-
             logger.info("GUI", "apply_settings_action", "Settings applied and saved.")
+
+            if update_dialog_baseline:
+                # Current UI state becomes the new baseline for this dialog session
+                for key in initial_config_vars:
+                    var_attr = getattr(self, f"{key}_var", None)
+                    if var_attr: initial_config_vars[key] = var_attr.get()
+                
+                initial_download_directory = current_dialog_download_dir[0]
+                
+                # Update baseline for device settings if they were applied
+                # self._fetched_device_settings_for_dialog should be updated by _apply_device_settings_thread
+                # or we can update it here based on the UI vars.
+                # Or, more directly:
+                if self._fetched_device_settings_for_dialog: # Ensure it's not empty
+                    self._fetched_device_settings_for_dialog["autoRecord"] = self.device_setting_auto_record_var.get()
+                    self._fetched_device_settings_for_dialog["autoPlay"] = self.device_setting_auto_play_var.get()
+                    self._fetched_device_settings_for_dialog["bluetoothTone"] = self.device_setting_bluetooth_tone_var.get()
+                    self._fetched_device_settings_for_dialog["notificationSound"] = self.device_setting_notification_sound_var.get()
+
+        # --- Button Action Implementations ---
+        def ok_action():
+            if settings_changed_tracker[0]:
+                _perform_apply_settings_logic(update_dialog_baseline=False)
             settings_win.destroy()
 
-        def cancel_settings_action():
-            # Revert all variables to their initial states
-            self.autoconnect_var.set(initial_autoconnect_state) # Revert to initial state
-            self.log_level_var.set(initial_log_level)
-            self.selected_vid_var.set(initial_selected_vid)
-            self.selected_pid_var.set(initial_selected_pid)
-            self.target_interface_var.set(initial_target_interface)
-            self.recording_check_interval_var.set(initial_recording_check_interval)
-            self.default_command_timeout_ms_var.set(initial_default_cmd_timeout)
-            self.file_stream_timeout_s_var.set(initial_file_stream_timeout)
-            self.auto_refresh_files_var.set(initial_auto_refresh_files)
-            self.auto_refresh_interval_s_var.set(initial_auto_refresh_interval)
-            self.quit_without_prompt_var.set(initial_quit_without_prompt)
-            self.theme_var.set(initial_theme)
+        def apply_action_ui_handler(): # Renamed to avoid conflict
+            if settings_changed_tracker[0]:
+                _perform_apply_settings_logic(update_dialog_baseline=True)
+                settings_changed_tracker[0] = False # Reset changed flag
+                if apply_button.winfo_exists(): apply_button.config(state=tk.DISABLED)
+                if cancel_close_button.winfo_exists(): cancel_close_button.config(text="Close")
+
+        def cancel_close_action():
+            if settings_changed_tracker[0]: # If "Cancel" was clicked
+                # Revert all tk.Variables to their initial states from dialog open/last apply
+                for key, initial_value in initial_config_vars.items():
+                    var_attr = getattr(self, f"{key}_var", None)
+                    if var_attr: var_attr.set(initial_value)
+                
+                # Revert download directory in dialog and its label
+                current_dialog_download_dir[0] = initial_download_directory
+                if current_dl_dir_label_settings.winfo_exists():
+                    current_dl_dir_label_settings.config(text=current_dialog_download_dir[0])
             
-            # Revert device behavior vars to their state when dialog opened
-            self.device_setting_auto_record_var.set(initial_device_settings_ui_state["autoRecord"])
-            self.device_setting_auto_play_var.set(initial_device_settings_ui_state["autoPlay"])
-            self.device_setting_bluetooth_tone_var.set(initial_device_settings_ui_state["bluetoothTone"])
-            self.device_setting_notification_sound_var.set(initial_device_settings_ui_state["notificationSound"])
-
-            logger.info("GUI", "cancel_settings_action", "Settings changes cancelled.")
+                # Revert device behavior vars to their state when dialog opened / last apply
+                if self._fetched_device_settings_for_dialog: # Ensure it's not empty
+                    self.device_setting_auto_record_var.set(self._fetched_device_settings_for_dialog.get("autoRecord", False))
+                    self.device_setting_auto_play_var.set(self._fetched_device_settings_for_dialog.get("autoPlay", False))
+                    self.device_setting_bluetooth_tone_var.set(self._fetched_device_settings_for_dialog.get("bluetoothTone", False))
+                    self.device_setting_notification_sound_var.set(self._fetched_device_settings_for_dialog.get("notificationSound", False))
+                logger.info("GUI", "cancel_close_action", "Settings changes cancelled.")
             settings_win.destroy()
 
-        ttk.Button(buttons_frame, text="Apply", command=apply_settings_action).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(buttons_frame, text="Cancel", command=cancel_settings_action).pack(side=tk.RIGHT)
+        ok_button.config(command=ok_action)
+        apply_button.config(command=apply_action_ui_handler)
+        cancel_close_button.config(command=cancel_close_action)
+
+        ok_button.pack(side=tk.LEFT, padx=(0,5)) # OK on the far left of the right-aligned group
+        apply_button.pack(side=tk.LEFT, padx=5)
+        cancel_close_button.pack(side=tk.LEFT, padx=(5,0)) # Cancel/Close on the far right of the group
+
+        # Default button behavior
+        ok_button.focus_set()
+        settings_win.bind('<Return>', lambda event: ok_button.invoke())
+        settings_win.bind('<Escape>', lambda event: cancel_close_button.invoke())
 
     def _load_device_settings_for_dialog(self, settings_win_ref):
         try:
@@ -1415,7 +1556,7 @@ class HiDockToolGUI:
             # Optionally re-fetch to confirm, or assume success updates the internal cache in HiDockJensen
             # For now, we assume HiDockJensen's cache is updated on successful set.
 
-    def scan_usb_devices_for_settings(self, parent_window, initial_load=False):
+    def scan_usb_devices_for_settings(self, parent_window, initial_load=False, change_callback=None):
         if not self._initialize_backend():
             messagebox.showerror("USB Error", "Libusb backend not initialized. Cannot scan devices.", parent=parent_window)
             return
@@ -1510,6 +1651,8 @@ class HiDockToolGUI:
                         self.selected_vid_var.set(vid)
                         self.selected_pid_var.set(pid)
                         logger.debug("Settings", "scan_usb_devices", f"Auto-selected first available device: {first_selectable_item} -> VID={hex(vid)}, PID={hex(pid)}")
+                        if change_callback: # If a change callback is provided (e.g., for Apply button)
+                            change_callback()
                     else: # Should not happen if logic is correct
                         logger.warning("Settings", "scan_usb_devices", f"Could not find details for auto-selected device: {first_selectable_item}")
             elif not combobox_display_list: # If list is truly empty after filtering (e.g. only contained separator)
@@ -1520,16 +1663,16 @@ class HiDockToolGUI:
             self.settings_device_combobox.current(0)
         logger.info("GUI", "scan_usb_devices", f"Processed {len(good_devices_tuples) + len(problem_devices_tuples)} devices. Good: {len(good_devices_tuples)}, Problematic: {len(problem_devices_tuples)}.")
 
-    def log_to_gui_widget(self, message):
-        def _update_log():
+    def log_to_gui_widget(self, message, level_name="INFO"): # Added level_name parameter
+        def _update_log(msg_to_log, lvl_name): # Pass parameters to inner function
             if not self.log_text_area.winfo_exists(): # Check if widget still exists
                 return
             self.log_text_area.config(state='normal')
-            self.log_text_area.insert(tk.END, message)
+            self.log_text_area.insert(tk.END, msg_to_log, lvl_name) # Apply tag based on level_name
             self.log_text_area.see(tk.END)
             self.log_text_area.config(state='disabled')
         if self.master.winfo_exists(): # Check if window still exists
-            self.master.after(0, _update_log)
+            self.master.after(0, _update_log, message, level_name) # Pass args to the scheduled call
 
     def toggle_logs(self):
         if self.logs_visible:
@@ -2022,38 +2165,56 @@ class HiDockToolGUI:
 
         self._auto_file_refresh_timer_id = self.master.after(interval_ms, self._check_auto_file_refresh_periodically)
 
-    def select_download_dir(self, settings_dl_dir_label_widget=None):
-        selected_dir = filedialog.askdirectory(initialdir=self.download_directory)
-        if selected_dir:
-            self.download_directory = selected_dir
-            self.config["download_directory"] = self.download_directory # Update config directly
-            save_config(self.config) # Save config immediately for this change
-            
-            # Update label in main UI
-            if hasattr(self, 'download_dir_label') and self.download_dir_label.winfo_exists():
-                self.download_dir_label.config(text=f"Dir: {self.download_directory}")
-            
-            # Update label in settings UI if provided and exists
-            if settings_dl_dir_label_widget and settings_dl_dir_label_widget.winfo_exists():
-                settings_dl_dir_label_widget.config(text=self.download_directory)
-            
-            logger.info("GUI", "select_download_dir", f"Download directory changed to: {self.download_directory}")
-
-    def reset_download_dir_to_default(self, settings_dl_dir_label_widget=None):
+    def _reset_download_dir_for_settings(self, label_widget, dialog_dir_tracker, change_tracker, apply_btn, cancel_btn):
+        """Handles resetting download directory specifically for the settings dialog."""
         default_dir = os.getcwd() # Application's current working directory
-        self.download_directory = default_dir
-        self.config["download_directory"] = self.download_directory
-        save_config(self.config)
+        if default_dir != dialog_dir_tracker[0]:
+            dialog_dir_tracker[0] = default_dir
+            if label_widget and label_widget.winfo_exists():
+                label_widget.config(text=dialog_dir_tracker[0])
 
-        # Update label in main UI
-        if hasattr(self, 'download_dir_label') and self.download_dir_label.winfo_exists():
-            self.download_dir_label.config(text=f"Dir: {self.download_directory}")
-        
-        # Update label in settings UI if provided and exists
-        if settings_dl_dir_label_widget and settings_dl_dir_label_widget.winfo_exists():
-            settings_dl_dir_label_widget.config(text=self.download_directory)
-        
-        logger.info("GUI", "reset_download_dir_to_default", f"Download directory reset to: {self.download_directory}")
+            if not change_tracker[0]: # Mark as changed and update buttons
+                change_tracker[0] = True
+                if apply_btn.winfo_exists(): apply_btn.config(state=tk.NORMAL)
+                if cancel_btn.winfo_exists(): cancel_btn.config(text="Cancel")
+            logger.debug("GUI", "_reset_download_dir_for_settings", f"Download directory selection reset in dialog to: {dialog_dir_tracker[0]}")
+
+    def select_download_dir(self): # This is the old one, for a button outside settings if any.
+        """Allows user to select download directory - updates config immediately."""
+        # This method is now primarily for if there was a button outside settings.
+        # The settings dialog uses _select_download_dir_for_settings.
+        # For now, let's assume this method is not directly used by a UI element
+        # that expects immediate save without the Apply/OK flow.
+        # If it were, it would need to be self.download_directory = selected_dir, etc.
+        logger.warning("GUI", "select_download_dir", "This method is deprecated for settings dialog. Use internal version.")
+    
+    def _set_long_operation_active_state(self, active: bool, operation_name: str = ""):
+        self.is_long_operation_active = active
+        if active:
+            self.play_button.config(state=tk.DISABLED)
+            self.download_button.config(state=tk.DISABLED)
+            self.delete_button.config(state=tk.DISABLED)
+            if hasattr(self, 'format_card_button'): self.format_card_button.config(state=tk.DISABLED)
+            if hasattr(self, 'sync_time_button'): self.sync_time_button.config(state=tk.DISABLED)
+            self.refresh_files_button.config(state=tk.DISABLED)
+            self.cancel_button.config(state=tk.NORMAL)
+            self.cancel_operation_event = threading.Event() # Fresh event for this operation
+            logger.info("GUI", "_set_long_operation_active_state", f"Long operation '{operation_name}' started.")
+        else:
+            # Re-enable based on connection status and selection
+            is_connected = self.dock.is_connected()
+            has_selection = bool(self.file_tree.selection())
+
+            self.play_button.config(state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
+            self.download_button.config(state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
+            self.delete_button.config(state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
+            if hasattr(self, 'format_card_button'): self.format_card_button.config(state=tk.NORMAL if is_connected else tk.DISABLED)
+            if hasattr(self, 'sync_time_button'): self.sync_time_button.config(state=tk.NORMAL if is_connected else tk.DISABLED)
+            self.refresh_files_button.config(state=tk.NORMAL if is_connected else tk.DISABLED)
+            self.cancel_button.config(state=tk.DISABLED)
+            self.cancel_operation_event = None # Clear the event
+            logger.info("GUI", "_set_long_operation_active_state", f"Long operation '{operation_name}' ended.")
+            self.on_file_selection_change(None) # Re-evaluate button states/text
 
     def play_selected_audio_gui(self):
         if not pygame:
@@ -2066,6 +2227,10 @@ class HiDockToolGUI:
             return
         if len(selected_iids) > 1:
             messagebox.showinfo("Multiple Selection", "Please select only one audio file to play at a time.")
+            return
+        
+        if self.is_long_operation_active:
+            messagebox.showwarning("Busy", "Another operation is already in progress. Please wait.")
             return
 
         file_iid = selected_iids[0]
@@ -2099,11 +2264,7 @@ class HiDockToolGUI:
         # If not found locally, proceed to download to a temporary file
         logger.info("GUI", "play_selected_audio_gui", f"Local file not found. Will download {file_detail['name']} to temporary location for playback.")
 
-        self.play_button.config(state=tk.DISABLED)
-        # For playback prep, create a new cancel event and enable button
-        self.cancel_operation_event = threading.Event()
-        self.cancel_button.config(state=tk.NORMAL)
-        self.is_long_operation_active = True # Mark as long operation
+        self._set_long_operation_active_state(True, "Playback Preparation")
 
         self.update_overall_progress_label(f"Preparing to play {file_detail['name']}...")
         
@@ -2119,7 +2280,7 @@ class HiDockToolGUI:
         except Exception as e:
             logger.error("GUI", "play_selected_audio", f"Failed to create temporary file: {e}")
             messagebox.showerror("Playback Error", f"Failed to create temporary file: {e}")
-            self.play_button.config(state=tk.NORMAL)
+            self._set_long_operation_active_state(False, "Playback Preparation") # Reset state
             return
 
         self.current_playing_filename_for_replay = file_detail['name'] # Store for potential replay
@@ -2143,18 +2304,21 @@ class HiDockToolGUI:
             
             if status == "OK":
                 self.master.after(0, self._start_playback_local_file, self.current_playing_temp_file, file_info)
-            else:
-                logger.error("GUI", "_download_for_playback_thread", f"Failed to download {file_info['name']} for playback.")
-                messagebox.showerror("Playback Error", f"Failed to download {file_info['name']} for playback.")
-                self._cleanup_temp_playback_file()
-                self.master.after(0, lambda: self.play_button.config(state=tk.NORMAL))
-                if status == "cancelled":
-                    self.master.after(0, self.update_overall_progress_label, f"Playback prep for {file_info['name']} cancelled.")
-                elif status == "fail_disconnected":
-                    self.master.after(0, self.update_overall_progress_label, "Playback prep failed: Device disconnected.")
-                    self.master.after(0, self.handle_auto_disconnect_ui)
-                else:
-                    self.master.after(0, self.update_overall_progress_label, "Playback preparation failed.")
+            elif status == "cancelled":
+                logger.info("GUI", "_download_for_playback_thread", f"Download for playback of {file_info['name']} was cancelled.")
+                self.master.after(0, self.update_overall_progress_label, f"Playback prep for {file_info['name']} cancelled.")
+                self._cleanup_temp_playback_file() # Ensure temp file is deleted
+            elif status == "fail_disconnected":
+                logger.error("GUI", "_download_for_playback_thread", f"Download for playback of {file_info['name']} failed: Device disconnected.")
+                self.master.after(0, self.update_overall_progress_label, "Playback prep failed: Device disconnected.")
+                self._cleanup_temp_playback_file() # Ensure temp file is deleted
+                self.master.after(0, self.handle_auto_disconnect_ui)
+            else: # Other failures
+                logger.error("GUI", "_download_for_playback_thread", f"Download for playback of {file_info['name']} failed. Status: {status}")
+                messagebox.showerror("Playback Error", f"Failed to download {file_info['name']} for playback. Status: {status}")
+                self._cleanup_temp_playback_file() # Ensure temp file is deleted
+                # Update progress label for generic failure
+                self.master.after(0, self.update_overall_progress_label, f"Playback preparation for {file_info['name']} failed.")
         except Exception as e:
             # This exception block might catch errors from self.dock.stream_file if it raises
             # an exception not handled internally (e.g., ConnectionError if _send_command fails hard).
@@ -2162,13 +2326,10 @@ class HiDockToolGUI:
                 self.master.after(0, self.handle_auto_disconnect_ui)
             logger.error("GUI", "_download_for_playback_thread", f"Error downloading for playback: {e}\n{traceback.format_exc()}")
             messagebox.showerror("Playback Error", f"Error during download for playback: {e}")
-            self._cleanup_temp_playback_file()
-            self.master.after(0, lambda: self.play_button.config(state=tk.NORMAL))
+            self._cleanup_temp_playback_file() # Ensure temp file is deleted
             self.master.after(0, self.update_overall_progress_label, "Playback preparation failed.")
         finally:
-            # Ensure long operation flag is reset and cancel button is disabled
-            self.master.after(0, lambda: setattr(self, 'is_long_operation_active', False))
-            self.master.after(0, lambda: self.cancel_button.config(state=tk.DISABLED))
+            self.master.after(0, self._set_long_operation_active_state, False, "Playback Preparation")
             self.master.after(0, self.start_auto_file_refresh_periodic_check) # Restart auto-refresh
 
     def _start_playback_local_file(self, filepath, original_file_info):
@@ -2213,11 +2374,10 @@ class HiDockToolGUI:
             self.play_button.config(text="⏹️ Stop Playback") # Change button text
         except Exception as e:
             logger.error("GUI", "_start_playback_local_file", f"Error starting playback: {e}\n{traceback.format_exc()}")
-            messagebox.showerror("Playback Error", f"Could not play audio file: {e}")
+            messagebox.showerror("Playback Error", f"Could not play audio file {os.path.basename(filepath)}: {e}")
             self._cleanup_temp_playback_file()
             self.is_audio_playing = False
-        finally:
-            self.play_button.config(state=tk.NORMAL) 
+        # finally: # Button state is managed by on_file_selection_change or _set_long_operation_active_state
             # self.on_file_selection_change(None) # Re-evaluate button after attempt
 
     def _create_playback_controls_frame(self):
@@ -2319,36 +2479,45 @@ class HiDockToolGUI:
             pygame.mixer.music.play(loops=(-1 if self.loop_playback_var.get() else 0), start=current_pos_sec)
 
     def on_file_selection_change(self, event):
+        is_connected = self.dock.is_connected()
         selected_items = self.file_tree.selection()
         num_selected = len(selected_items)
         size_selected_bytes = 0
 
-        for item_iid in selected_items:
-            # Find the corresponding full file_info dict
-            # This assumes iid was set to filename during insertion
-            file_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid), None)
-            if file_detail:
-                size_selected_bytes += file_detail['length']
-        self.selected_files_label.config(text=f"Selected: {num_selected} files, {size_selected_bytes / (1024*1024):.2f} MB")
+        if not self.is_long_operation_active: # Only update if no long operation is running
+            for item_iid in selected_items:
+                file_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid), None)
+                if file_detail:
+                    size_selected_bytes += file_detail.get('length', 0) # Use .get for safety
+            self.selected_files_label.config(text=f"Selected: {num_selected} files, {size_selected_bytes / (1024*1024):.2f} MB")
 
-        # Update Play button state and text
-        if self.is_audio_playing:
-            self.play_button.config(state=tk.NORMAL, text="⏹️ Stop Playback")
-        elif num_selected == 1:
-            file_iid = selected_items[0]
-            file_detail = next((f for f in self.displayed_files_details if f['name'] == file_iid), None)
-            can_play = file_detail and (file_detail['name'].lower().endswith(".wav") or file_detail['name'].lower().endswith(".hda"))
-            
-            if can_play:
-                local_filepath_check = self._get_local_filepath(file_detail['name'])
-                if os.path.exists(local_filepath_check):
-                    self.play_button.config(state=tk.NORMAL, text="▶️ Play Local")
+            # Update Play button state and text
+            if self.is_audio_playing: # If audio is currently playing, button is always "Stop"
+                self.play_button.config(state=tk.NORMAL, text="⏹️ Stop Playback")
+            elif num_selected == 1 and is_connected: # Playable if one item selected and connected
+                file_iid = selected_items[0]
+                file_detail = next((f for f in self.displayed_files_details if f['name'] == file_iid), None)
+                can_play = file_detail and (file_detail['name'].lower().endswith(".wav") or file_detail['name'].lower().endswith(".hda"))
+                
+                if can_play:
+                    local_filepath_check = self._get_local_filepath(file_detail['name'])
+                    if os.path.exists(local_filepath_check):
+                        self.play_button.config(state=tk.NORMAL, text="▶️ Play Local")
+                    else:
+                        self.play_button.config(state=tk.NORMAL, text="▶️ Play (Download)")
                 else:
-                    self.play_button.config(state=tk.NORMAL, text="▶️ Play (Download)")
+                    self.play_button.config(state=tk.DISABLED, text="▶️ Play Selected") # Not a playable file type
             else:
-                self.play_button.config(state=tk.DISABLED, text="▶️ Play Selected")
-        else:
-            self.play_button.config(state=tk.DISABLED, text="▶️ Play Selected")
+                self.play_button.config(state=tk.DISABLED, text="▶️ Play Selected") # 0 or >1 selected, or not connected
+
+            # Update Download and Delete button states
+            if num_selected > 0 and is_connected:
+                self.download_button.config(state=tk.NORMAL)
+                self.delete_button.config(state=tk.NORMAL)
+            else: # No selection or not connected
+                self.download_button.config(state=tk.DISABLED)
+                self.delete_button.config(state=tk.DISABLED)
+        # If a long operation is active, _set_long_operation_active_state handles button states.
 
     def _stop_audio_playback(self, mode="user_stop"):
         if pygame and pygame.mixer.get_init(): # Check if mixer is initialized
@@ -2391,6 +2560,10 @@ class HiDockToolGUI:
         if not self.download_directory or not os.path.isdir(self.download_directory):
             messagebox.showerror("Error", "Please select a valid download directory first.")
             return
+        
+        if self.is_long_operation_active:
+            messagebox.showwarning("Busy", "Another operation is already in progress. Please wait.")
+            return
 
         files_to_download_info = []
         for iid in selected_iids:
@@ -2398,16 +2571,12 @@ class HiDockToolGUI:
             if file_detail:
                 files_to_download_info.append(file_detail)
         
-        self.download_button.config(state=tk.DISABLED)
-        self.refresh_files_button.config(state=tk.DISABLED) # Disable refresh during download
-        # self.active_download_threads = len(files_to_download_info) # No longer needed with sequential download
+        self._set_long_operation_active_state(True, "Download Queue")
 
         # Start a single thread to process the download queue sequentially
         threading.Thread(target=self._process_download_queue_thread,
                          args=(files_to_download_info,),
-                         daemon=True).start() # Ensure cancel event is cleared before starting
-        self.cancel_operation_event = threading.Event() # Create a new event for this operation batch
-        self.cancel_button.config(state=tk.NORMAL) # Enable cancel button
+                         daemon=True).start()
 
     def _process_download_queue_thread(self, files_to_download_info):
         self.is_long_operation_active = True
@@ -2453,9 +2622,7 @@ class HiDockToolGUI:
         # If aborted due to disconnect, handle_auto_disconnect_ui would have set a message.
         
         self.master.after(0, lambda: self.refresh_files_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
-        self.master.after(0, lambda: self.download_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
-        self.master.after(0, lambda: self.cancel_button.config(state=tk.DISABLED) if self.cancel_button.winfo_exists() else None)
-        self.master.after(0, lambda: setattr(self, 'is_long_operation_active', False) if hasattr(self, 'is_long_operation_active') else None)
+        self.master.after(0, self._set_long_operation_active_state, False, "Download Queue")
         self.master.after(0, self.start_auto_file_refresh_periodic_check) 
         self.master.after(0, lambda: self.file_progress_bar.config(value=0) if self.file_progress_bar.winfo_exists() else None)
 
@@ -2570,15 +2737,21 @@ class HiDockToolGUI:
 
         download_start_time = time.time()
         safe_filename = file_info['name'].replace(':','-').replace(' ','_').replace('\\','_').replace('/','_')
-        full_download_path = os.path.join(self.download_directory, safe_filename)
+        
+        # Define temporary and final paths
+        temp_download_filename = f"_temp_download_{safe_filename}" # Keep this for messages
+        temp_download_path = os.path.join(self.download_directory, temp_download_filename)
+        final_download_path = os.path.join(self.download_directory, safe_filename)
+
+        status = "fail" # Default status, will be updated by stream_file
 
         try:
-            with open(full_download_path, "wb") as outfile_handle:
+            with open(temp_download_path, "wb") as outfile_handle: # Write to temporary path
                 def gui_data_cb(chunk):
                     try:
                         outfile_handle.write(chunk)
                     except Exception as e_write:
-                        logger.error("GUI", "gui_data_cb", f"Error writing chunk to {full_download_path}: {e_write}")
+                        logger.error("GUI", "gui_data_cb", f"Error writing chunk to {temp_download_path}: {e_write}")
                         # This error should ideally stop the stream_file or be reported back
 
                 def gui_progress_cb(received, total):
@@ -2610,32 +2783,52 @@ class HiDockToolGUI:
                     timeout_s=self.file_stream_timeout_s_var.get(), # Ensure this is an int
                     cancel_event=self.cancel_operation_event # Pass the event
                 )
-                if status == "OK":
-                    self.master.after(0, logger.info, "GUI", "_download_file_thread", f"Successfully downloaded {file_info['name']} to {full_download_path}")
+            # 'with open' block has exited, so outfile_handle is closed.
+            # Now process based on status.
+            if status == "OK":
+                try:
+                    if os.path.exists(final_download_path):
+                        logger.info("GUI", "_execute_single_download", f"Target file {final_download_path} already exists. Attempting to overwrite.")
+                        os.remove(final_download_path) # Attempt to remove the existing file
+                    
+                    os.rename(temp_download_path, final_download_path)
+                    logger.info("GUI", "_execute_single_download", f"Successfully downloaded and renamed {file_info['name']} to {final_download_path}")
+                except OSError as e_os_finalize: # Catch errors from os.remove or os.rename
+                    logger.error("GUI", "_execute_single_download", f"OS error during finalization of {file_info['name']} (temp: {temp_download_path}, final: {final_download_path}): {e_os_finalize}. Temporary file kept as {temp_download_filename}.")
+                    self.master.after(0, self.update_overall_progress_label, f"Download OK, finalize failed for: {file_info['name']}. Temp file kept as {temp_download_filename}")
+                    # Do not return; let the function complete its course for this file.
+                    # The overall batch processing will continue.
+                else: # os.remove (if needed) and os.rename were successful
                     self.master.after(0, self.update_file_progress, file_info['length'], file_info['length'], file_info['name']) # Ensure 100%
-                    # Keep the final status message showing completion time until the next operation
-                    # This message will persist if it's the last file in a queue or a single download.
                     final_elapsed_time = time.time() - download_start_time
                     self.master.after(0, self.update_overall_progress_label, f"Completed: {file_info['name']} in {final_elapsed_time:.2f}s.")
-                    # Color the file in the treeview as downloaded
                     self.master.after(0, lambda f_name=file_info['name']: self.file_tree.item(f_name, tags=('downloaded',)) if self.file_tree.exists(f_name) else None)
-                else:
-                    self.master.after(0, logger.error, "GUI", "_download_file_thread", f"Download failed for {file_info['name']}. Status: {status}")
-                    if status == "fail_disconnected" or not self.dock.is_connected(): # If stream_file caused disconnect
-                        self.master.after(0, self.handle_auto_disconnect_ui)
-                    elif status == "cancelled":
-                        # The main _process_download_queue_thread loop will handle the "cancelled" message.
-                        # Here, we just ensure the event is set if it came from stream_file.
-                        if hasattr(self, 'cancel_operation_event') and self.cancel_operation_event: 
-                            self.cancel_operation_event.set()
-                        logger.info("GUI", "_execute_single_download", f"Download of {file_info['name']} was cancelled.")
+            
+            else: # status is not "OK"
+                self.master.after(0, logger.error, "GUI", "_execute_single_download", f"Download failed for {file_info['name']}. Status: {status}")
+                if status == "fail_disconnected" or not self.dock.is_connected():
+                    self.master.after(0, self.handle_auto_disconnect_ui)
+                    self.master.after(0, self.update_overall_progress_label, f"Disconnected: {file_info['name']}. Partial file kept as {temp_download_filename}")
+                elif status == "cancelled":
+                    if hasattr(self, 'cancel_operation_event') and self.cancel_operation_event: 
+                        self.cancel_operation_event.set() # Ensure event is set if stream_file reported cancel
+                    logger.info("GUI", "_execute_single_download", f"Download of {file_info['name']} was cancelled.")
+                    self.master.after(0, self.update_overall_progress_label, f"Cancelled: {file_info['name']}. Partial file kept as {temp_download_filename}")
+                else: # Generic "fail" from stream_file
+                    self.master.after(0, self.update_overall_progress_label, f"Failed: {file_info['name']}. Partial file kept as {temp_download_filename}")
+                # In all these non-"OK" cases, the temporary file (potentially partial) is kept.
+
         except ConnectionError as ce:
-            self.master.after(0, logger.error, "GUI", "_download_file_thread", f"ConnectionError during download for {file_info['name']}: {ce}")
+            self.master.after(0, logger.error, "GUI", "_execute_single_download", f"ConnectionError during download for {file_info['name']}: {ce}")
             self.master.after(0, self.handle_auto_disconnect_ui)
+            # If a ConnectionError occurs, the temp file might exist. It's kept.
+            self.master.after(0, self.update_overall_progress_label, f"Connection Error with {file_info['name']}. Temp file kept as {temp_download_filename}")
         except Exception as e: # Catch other exceptions for this specific file download
             self.master.after(0, logger.error, "GUI", "_execute_single_download", f"Error during download of {file_info['name']}: {e}\n{traceback.format_exc()}")
             if not self.dock.is_connected(): # If any other exception also led to disconnect
                 self.master.after(0, self.handle_auto_disconnect_ui)
+            # An unexpected error occurred. The temp file might exist. It's kept.
+            self.master.after(0, self.update_overall_progress_label, f"Error with {file_info['name']}. Temp file kept as {temp_download_filename}")
 
     def update_file_progress(self, received, total, file_name):
         if total > 0:
