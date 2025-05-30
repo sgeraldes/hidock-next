@@ -981,7 +981,8 @@ class HiDockToolGUI:
             "size": "Size (KB)",
             "duration": "Duration (s)",
             "date": "Date",
-            "time": "Time"
+            "time": "Time",
+            "status": "Status" # Ensure this is present
         }
         # Variables for device behavior settings in the Settings window
         self.device_setting_auto_record_var = tk.BooleanVar()
@@ -1028,17 +1029,54 @@ class HiDockToolGUI:
             self.master.after(500, self.attempt_autoconnect_on_startup) # Delay slightly
 
     def apply_theme(self, theme_name):
+        # Renamed parameter for clarity
+        theme_name_from_config_or_selection = theme_name
         try:
             style = ttk.Style(self.master)
+            # Default to light variant if "azure" is specified
+            azure_variant_to_set = "light" # Could be "dark" or configurable later
+
+            if theme_name_from_config_or_selection == "azure":
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                azure_tcl_path = os.path.join(script_dir, "themes", "azure", "azure.tcl")
+
+                if os.path.exists(azure_tcl_path):
+                    try:
+                        self.master.tk.call("source", azure_tcl_path)
+                        self.master.tk.call("set_theme", azure_variant_to_set)
+                        # The actual theme name used by ttk will be 'azure-light' or 'azure-dark'.
+                        # set_theme procedure handles calling 'ttk::style theme use'.
+                        logger.info("GUI", "apply_theme", f"Azure theme ('{azure_variant_to_set}' variant) sourced and applied.")
+                        return # Successfully applied Azure theme
+                    except tk.TclError as e:
+                        logger.error("GUI", "apply_theme", f"TclError sourcing/using Azure theme from {azure_tcl_path}: {e}")
+                        # Fall through to standard theme logic, try to apply theme_name_from_config_or_selection as a standard theme
+                else:
+                    logger.warning("GUI", "apply_theme", f"Azure theme file not found at {azure_tcl_path}. Falling back.")
+                    # Fall through to standard theme logic
+            
+            # Standard theme logic (if Azure wasn't requested, or if it failed to load)
             available_themes = style.theme_names()
-            if theme_name in available_themes:
-                style.theme_use(theme_name)
-                logger.info("GUI", "apply_theme", f"Theme set to '{theme_name}'.")
-            else: # Fallback to default if chosen theme is not available
-                style.theme_use("default") # Or another sensible default like 'clam'
-                logger.warning("GUI", "apply_theme", f"Theme '{theme_name}' not available. Fell back to 'default'. Available: {available_themes}")
-        except Exception as e:
-            logger.error("GUI", "apply_theme", f"Error applying theme '{theme_name}': {e}")
+            if theme_name_from_config_or_selection in available_themes:
+                style.theme_use(theme_name_from_config_or_selection)
+                logger.info("GUI", "apply_theme", f"Theme set to '{theme_name_from_config_or_selection}'.")
+            else:
+                # Fallback logic
+                fallback_theme_to_try = "vista" 
+                if fallback_theme_to_try not in available_themes: fallback_theme_to_try = "clam" 
+                if fallback_theme_to_try not in available_themes: fallback_theme_to_try = "default"
+
+                if fallback_theme_to_try in available_themes:
+                    style.theme_use(fallback_theme_to_try)
+                    logger.warning("GUI", "apply_theme", f"Theme '{theme_name_from_config_or_selection}' not available or failed to load. Fell back to '{fallback_theme_to_try}'. Available: {available_themes}")
+                    # If the original request was "azure" and it failed, update theme_var to the fallback.
+                    if self.theme_var.get() == "azure" and theme_name_from_config_or_selection == "azure":
+                        self.theme_var.set(fallback_theme_to_try)
+                        self.config["theme"] = fallback_theme_to_try # Update config as well
+                else:
+                    logger.error("GUI", "apply_theme", f"Critical: Even fallback theme '{fallback_theme_to_try}' not available. No theme explicitly set. Available: {available_themes}")
+        except Exception as e: # pragma: no cover
+            logger.error("GUI", "apply_theme", f"Generic error applying theme '{theme_name_from_config_or_selection}': {e}\n{traceback.format_exc()}")
 
     def create_widgets(self):
         # Top frame for connection and general controls
@@ -1070,8 +1108,19 @@ class HiDockToolGUI:
         self.selected_files_label.pack(side=tk.LEFT, padx=10) 
         # self.recording_status_label = ttk.Label(top_frame, text="Recording: N/A") # REMOVED - Will integrate into file list
         # self.recording_status_label.pack(side=tk.LEFT, padx=10, after=self.status_label)
-        self.card_info_label = ttk.Label(files_info_frame, text="Storage: --- / --- MB (Status: ---)")
-        self.card_info_label.pack(side=tk.RIGHT, padx=5)
+        self.card_info_label = ttk.Label(files_info_frame, text="Storage: --- / --- MB (Status: ---)") # Keep this on the right
+        self.card_info_label.pack(side=tk.RIGHT, padx=5) # Pack card info to the right first
+
+        # Frame for list action buttons (Refresh, Select All, Clear Selection)
+        list_actions_frame = ttk.Frame(files_frame)
+        list_actions_frame.pack(fill=tk.X, pady=5)
+
+        self.select_all_button = ttk.Button(list_actions_frame, text="Select All", command=self.select_all_files_action, state=tk.DISABLED)
+        self.select_all_button.pack(side=tk.LEFT, padx=(0,5))
+
+        self.clear_selection_button = ttk.Button(list_actions_frame, text="Clear Selection", command=self.clear_selection_action, state=tk.DISABLED)
+        self.clear_selection_button.pack(side=tk.LEFT, padx=5)
+
 
         self.refresh_files_button = ttk.Button(files_frame, text="🔄 Refresh File List", command=self.refresh_file_list_gui, state=tk.DISABLED)
         self.refresh_files_button.pack(pady=5)
@@ -1080,7 +1129,7 @@ class HiDockToolGUI:
         tree_frame = ttk.Frame(files_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("name", "size", "duration", "date", "time")
+        columns = ("name", "size", "duration", "date", "time", "status") # Add "status" column
         self.file_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
         
         self.file_tree.heading("name", text=self.original_tree_headings["name"], command=lambda: self.sort_treeview_column("name", False))
@@ -1098,16 +1147,31 @@ class HiDockToolGUI:
         self.file_tree.heading("time", text=self.original_tree_headings["time"], command=lambda: self.sort_treeview_column("time", False))
         self.file_tree.column("time", width=80, minwidth=70, anchor=tk.CENTER)
 
+        self.file_tree.heading("status", text=self.original_tree_headings["status"], command=lambda: self.sort_treeview_column("status", False))
+        self.file_tree.column("status", width=100, minwidth=80, anchor=tk.W)
+
 
 
         self.file_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.file_tree.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y) # Original tags - some might be superseded or removed if not used
         # Configure tags for downloaded and recording files
         self.file_tree.tag_configure('downloaded', foreground='blue')
         self.file_tree.tag_configure('recording', foreground='red', font=('TkDefaultFont', 9, 'bold'))
+        self.file_tree.tag_configure('size_mismatch', foreground='red') # New tag for size mismatch
+        # New tags for detailed status
+        self.file_tree.tag_configure('downloaded_ok', foreground='green')
+        self.file_tree.tag_configure('downloading', foreground='dark orange')
+        self.file_tree.tag_configure('queued', foreground='gray50') # A dim gray
+        self.file_tree.tag_configure('cancelled', foreground='firebrick3') # A dull red
+        self.file_tree.tag_configure('playing', foreground='purple')
+        # 'on_device' will use default colors (no specific tag for foreground needed unless theme overrides)
+
+
         self.file_tree.config(yscrollcommand=scrollbar.set)
         self.file_tree.bind("<<TreeviewSelect>>", self.on_file_selection_change)
+        self.file_tree.bind("<Double-1>", self._on_file_double_click)
+        self.file_tree.bind("<Button-3>", self._on_file_right_click) # Button-3 for Windows/Linux
 
         # Frame for download controls
         # Download directory selection button moved to settings. Label remains here.
@@ -1285,10 +1349,29 @@ class HiDockToolGUI:
         appearance_settings_frame = ttk.LabelFrame(settings_frame, text="Appearance", padding="5")
         appearance_settings_frame.pack(fill=tk.X, pady=5)
         ttk.Label(appearance_settings_frame, text="Application Theme:").pack(anchor=tk.W, pady=(5,0))
-        available_themes = sorted(ttk.Style().theme_names())
-        if self.theme_var.get() not in available_themes and self.theme_var.get() != "default": # Ensure current theme is selectable
-            available_themes.insert(0, self.theme_var.get())
-        theme_combo = ttk.Combobox(appearance_settings_frame, textvariable=self.theme_var, values=available_themes, state="readonly")
+        
+        # Get system/Tk-known themes
+        try:
+            system_themes = list(ttk.Style().theme_names())
+        except tk.TclError: # pragma: no cover
+            system_themes = ["default", "clam", "alt", "vista", "xpnative"] 
+            logger.warning("GUI", "open_settings_window", "Could not query ttk.Style().theme_names(), using a default list.")
+
+        all_selectable_themes = set(system_themes)
+
+        # Check for Azure theme file and add "azure" to the list if its files exist
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        azure_tcl_path = os.path.join(script_dir, "themes", "azure", "azure.tcl")
+        
+        if os.path.exists(azure_tcl_path):
+            all_selectable_themes.add("azure") # User selects "azure" which implies a default variant (e.g., light)
+            logger.debug("GUI", "open_settings_window", "Azure theme files found, adding 'azure' to selectable themes.")
+        else:
+            logger.debug("GUI", "open_settings_window", f"Azure theme file not found at {azure_tcl_path}. 'azure' not added to theme list.")
+
+        sorted_selectable_themes = sorted(list(all_selectable_themes))
+        
+        theme_combo = ttk.Combobox(appearance_settings_frame, textvariable=self.theme_var, values=sorted_selectable_themes, state="readonly")
         theme_combo.pack(fill=tk.X, pady=2)
 
         # --- Operational Settings ---
@@ -1824,6 +1907,8 @@ class HiDockToolGUI:
         self.delete_button.config(state=tk.DISABLED)
         self.play_button.config(state=tk.DISABLED)
         self.format_card_button.config(state=tk.DISABLED)
+        self.select_all_button.config(state=tk.DISABLED)
+        self.clear_selection_button.config(state=tk.DISABLED)
         self.sync_time_button.config(state=tk.DISABLED)
         for item in self.file_tree.get_children():
             # Stop periodic check on disconnect
@@ -1850,6 +1935,8 @@ class HiDockToolGUI:
         self.download_button.config(state=tk.DISABLED)
         self.delete_button.config(state=tk.DISABLED)
         self.sync_time_button.config(state=tk.DISABLED)
+        self.select_all_button.config(state=tk.DISABLED)
+        self.clear_selection_button.config(state=tk.DISABLED)
         for item in self.file_tree.get_children():
             self.file_tree.delete(item)
         self.stop_auto_file_refresh_periodic_check()
@@ -1862,6 +1949,8 @@ class HiDockToolGUI:
         if not self.dock.is_connected():
             messagebox.showerror("Error", "Not connected to HiDock device.")
             self.refresh_files_button.config(state=tk.DISABLED) # Ensure it's disabled if called when not connected
+            self.select_all_button.config(state=tk.DISABLED)
+            self.clear_selection_button.config(state=tk.DISABLED)
             return
         
         if self._is_ui_refresh_in_progress:
@@ -1870,6 +1959,8 @@ class HiDockToolGUI:
             
         self._is_ui_refresh_in_progress = True
         self.refresh_files_button.config(state=tk.DISABLED)
+        self.select_all_button.config(state=tk.DISABLED) # Disable during refresh
+        self.clear_selection_button.config(state=tk.DISABLED) # Disable during refresh
         self.total_files_label.config(text="Total: Fetching...")
         # self.recording_status_label.config(text="Recording: Fetching...") # REMOVED - Status is now in the list
         self.card_info_label.config(text="Storage: Fetching...") # Changed "Card" to "Storage"
@@ -1935,30 +2026,61 @@ class HiDockToolGUI:
                     all_files_to_display = self._sort_files_data(all_files_to_display, self.treeview_sort_column, self.treeview_sort_reverse)
                 
                 for f_info in all_files_to_display: # Use the correct list here
-                    if f_info.get("is_recording"):
+                    # Determine initial status text and tags if not already present in f_info
+                    # (e.g., if f_info comes directly from device list vs. from sorted displayed_files_details)
+                    status_text_for_display = f_info.get('gui_status')
+                    tags_for_display = f_info.get('gui_tags')
+
+                    if status_text_for_display is None: # Not previously set, determine initial status
+                        if f_info.get("is_recording"):
+                            status_text_for_display = "Recording"
+                            tags_for_display = ('recording',) 
+                        else:
+                            local_filepath = self._get_local_filepath(f_info['name'])
+                            if os.path.exists(local_filepath):
+                                try:
+                                    local_size = os.path.getsize(local_filepath)
+                                    if local_size != f_info['length']:
+                                        status_text_for_display = "Mismatch"
+                                        tags_for_display = ('size_mismatch',)
+                                    else:
+                                        status_text_for_display = "Downloaded"
+                                        tags_for_display = ('downloaded_ok',)
+                                except OSError: # pragma: no cover
+                                    status_text_for_display = "Error Checking Size"
+                                    tags_for_display = ('size_mismatch',) 
+                            else: # File does not exist locally
+                                status_text_for_display = "On Device"
+                                tags_for_display = () 
+                        
+                        # Store the determined initial status back into f_info for consistency
+                        f_info['gui_status'] = status_text_for_display
+                        f_info['gui_tags'] = tags_for_display
+
+                    # Prepare values for Treeview insertion
+                    if f_info.get("is_recording"): # This check is still useful for size/duration display
                         values = (
                             f_info['name'],
                             "-", # Size
                             f_info['duration'], # "Grabando..."
                             f_info.get('createDate', ''), # "En curso"
-                            f_info.get('createTime', '')
+                            f_info.get('createTime', ''),
+                            status_text_for_display # Add status text
                         )
-                        tags_to_apply = ('recording',)
                     else:
                         values = (
                             f_info['name'],
                             f"{f_info['length'] / 1024:.2f}", # Size in KB
                             f"{f_info['duration']:.2f}", # Duration in seconds
                             f_info.get('createDate', ''), 
-                            f_info.get('createTime', '')
+                            f_info.get('createTime', ''),
+                            status_text_for_display # Add status text
                         )
-                        local_filepath = self._get_local_filepath(f_info['name'])
-                        tags_to_apply = ('downloaded',) if os.path.exists(local_filepath) else ()
 
-                    self.master.after(0, lambda f_info=f_info, values=values, tags=tags_to_apply: \
-                                      self.file_tree.insert("", tk.END, values=values, iid=f_info['name'], tags=tags) \
+                    self.master.after(0, lambda f_info_closure=f_info, values_closure=values, tags_closure=tags_for_display: \
+                                      self.file_tree.insert("", tk.END, values=values_closure, iid=f_info_closure['name'], tags=tags_closure) \
                                       if self.file_tree.winfo_exists() else None)
-                    self.master.after(0, lambda f_info=f_info: self.displayed_files_details.append(f_info))
+                    self.master.after(0, lambda f_info_closure=f_info: self.displayed_files_details.append(f_info_closure))
             else:
                 if list_result.get("error"):
                     self.master.after(0, lambda: self.total_files_label.config(text=f"Total: Error - {list_result.get('error', 'Unknown')}") if self.total_files_label.winfo_exists() else None)
@@ -1977,8 +2099,170 @@ class HiDockToolGUI:
             self.master.after(0, lambda: self.refresh_files_button.config(state=tk.NORMAL) if self.refresh_files_button.winfo_exists() else None)
             self.master.after(0, lambda: self.on_file_selection_change(None) if self.file_tree.winfo_exists() else None) # Update selected stats
             # Reset the flag in the main thread after all UI updates are likely queued
+            self.master.after(0, self.update_select_all_clear_buttons_state) # Update these buttons too
             self.master.after(0, lambda: setattr(self, '_is_ui_refresh_in_progress', False) if hasattr(self, '_is_ui_refresh_in_progress') else None)
 
+    def _on_file_double_click(self, event):
+        if not self.dock.is_connected():
+            return
+
+        item_iid = self.file_tree.identify_row(event.y)
+        if not item_iid: # Double-clicked on empty area
+            return
+
+        # Ensure the double-clicked item is the only one "acted upon"
+        # by temporarily making it the sole selection for action context.
+        current_selection = self.file_tree.selection()
+        self.file_tree.selection_set(item_iid) # Make it the sole selection
+
+        file_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid), None)
+        if not file_detail:
+            self.file_tree.selection_set(current_selection) # Restore original selection
+            return
+
+        status = file_detail.get('gui_status', "On Device")
+        action_taken = False
+
+        logger.info("GUI", "_on_file_double_click", f"File '{item_iid}' double-clicked. Status: '{status}'")
+
+        if status in ["On Device", "Mismatch", "Cancelled"] or "Error" in status:
+            if not file_detail.get("is_recording"): # Don't try to download a recording file
+                logger.info("GUI", "_on_file_double_click", f"Initiating download for '{item_iid}'.")
+                self.download_selected_files_gui() # Uses current selection (which we just set)
+                action_taken = True
+        elif status in ["Downloaded", "Downloaded OK"]:
+            logger.info("GUI", "_on_file_double_click", f"Initiating playback for '{item_iid}'.")
+            self.play_selected_audio_gui() # Uses current selection
+            action_taken = True
+        
+        if not action_taken: # If no action was taken, restore original selection
+            self.file_tree.selection_set(current_selection)
+        # If an action was taken, the respective GUI methods (download/play) will handle selection and UI updates.
+
+    def _on_file_right_click(self, event):
+        if not self.dock.is_connected() and not self.file_tree.identify_row(event.y): # Allow refresh even if not connected
+            # If not connected and clicked on empty space, only allow limited general actions
+            menu = tk.Menu(self.master, tearoff=0)
+            if self.file_tree.get_children(): # If there are items (even if not connected, list might be stale)
+                menu.add_command(label="Select All", command=self.select_all_files_action, state=tk.NORMAL if self.file_tree.get_children() else tk.DISABLED)
+                menu.add_command(label="Clear Selection", command=self.clear_selection_action, state=tk.NORMAL if self.file_tree.selection() else tk.DISABLED)
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+            return
+
+        clicked_item_iid = self.file_tree.identify_row(event.y)
+        current_selection = self.file_tree.selection()
+
+        if clicked_item_iid:
+            if clicked_item_iid not in current_selection:
+                self.file_tree.selection_set(clicked_item_iid)
+                current_selection = (clicked_item_iid,) # Update current_selection to reflect the change
+        # If clicked_item_iid is None (empty area) or already in selection, current_selection remains as is.
+
+        menu = tk.Menu(self.master, tearoff=0)
+        num_selected = len(current_selection)
+
+        if num_selected == 1:
+            item_iid = current_selection[0]
+            file_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid), None)
+            if file_detail:
+                status = file_detail.get('gui_status', "On Device")
+                is_playable = file_detail['name'].lower().endswith((".wav", ".hda"))
+
+                if self.is_audio_playing and self.current_playing_filename_for_replay == item_iid:
+                    menu.add_command(label="⏹️ Stop Playback", command=self._stop_audio_playback)
+                elif is_playable:
+                    play_label = "▶️ Play"
+                    local_path = self._get_local_filepath(item_iid)
+                    if os.path.exists(local_path) and status not in ["Mismatch", "Error (Download)"]: # Play local if it exists and isn't problematic
+                        play_label = "▶️ Play Local"
+                    elif status not in ["Recording", "Downloading", "Queued"]:
+                        play_label = "▶️ Play (Download)"
+                    
+                    if status not in ["Recording", "Downloading", "Queued"]:
+                         menu.add_command(label=play_label, command=self.play_selected_audio_gui)
+
+                if status in ["On Device", "Mismatch", "Cancelled"] or "Error" in status:
+                     if not file_detail.get("is_recording"):
+                        menu.add_command(label="💾 Download", command=self.download_selected_files_gui)
+                elif status == "Downloaded" or status == "Downloaded OK": # Already downloaded
+                    menu.add_command(label="💾 Re-download", command=self.download_selected_files_gui)
+
+                if status in ["Downloading", "Queued"] or "(Play)" in status or "Preparing Playback" in status :
+                    menu.add_command(label="🚫 Cancel Operation", command=self.request_cancel_operation)
+                
+                if not file_detail.get("is_recording"): # Cannot delete a recording file
+                    menu.add_command(label="🗑️ Delete", command=self.delete_selected_files_gui)
+        
+        elif num_selected > 1: # Multiple items selected
+            menu.add_command(label=f"💾 Download Selected ({num_selected})", command=self.download_selected_files_gui)
+            # Check if any selected file is currently recording
+            any_recording = False
+            for item_iid in current_selection:
+                file_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid), None)
+                if file_detail and file_detail.get("is_recording"):
+                    any_recording = True
+                    break
+            if not any_recording:
+                menu.add_command(label=f"🗑️ Delete Selected ({num_selected})", command=self.delete_selected_files_gui)
+            else:
+                menu.add_command(label=f"🗑️ Delete Selected ({num_selected})", state=tk.DISABLED, 
+                                 command=lambda: messagebox.showinfo("Info", "Cannot delete files that are currently recording."))
+
+
+        # General actions, available if connected (unless specified otherwise)
+        if menu.index(tk.END) is not None: # Add separator if other items were added
+             menu.add_separator()
+
+        menu.add_command(label="🔄 Refresh File List", command=self.refresh_file_list_gui, state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED)
+        
+        can_select_all = self.file_tree.get_children() and len(self.file_tree.selection()) < len(self.file_tree.get_children())
+        menu.add_command(label="Select All", command=self.select_all_files_action, state=tk.NORMAL if can_select_all else tk.DISABLED)
+        
+        can_clear_selection = bool(self.file_tree.selection())
+        menu.add_command(label="Clear Selection", command=self.clear_selection_action, state=tk.NORMAL if can_clear_selection else tk.DISABLED)
+
+        if menu.index(tk.END) is None: # No items added at all (e.g. not connected, clicked empty space, no general actions made sense)
+            logger.debug("GUI", "_on_file_right_click", "No context menu items to show.")
+            return
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _update_file_status_in_treeview(self, filename_iid, new_status_text, new_tags_tuple=()):
+        """Updates the status column and tags for a given file item in the Treeview."""
+        if not self.master.winfo_exists() or not self.file_tree.winfo_exists(): return # Window or widget gone
+
+        if not self.file_tree.exists(filename_iid):
+            logger.debug("GUI", "_update_file_status_in_treeview", f"Item {filename_iid} not found in treeview. Cannot update status.")
+            return
+
+        try:
+            current_values = list(self.file_tree.item(filename_iid, 'values'))
+            col_ids = self.file_tree['columns']
+            try:
+                status_col_idx = col_ids.index('status')
+            except ValueError:
+                logger.error("GUI", "_update_file_status_in_treeview", "'status' column not found in treeview columns.")
+                return
+
+            if status_col_idx < len(current_values):
+                current_values[status_col_idx] = new_status_text
+                self.file_tree.item(filename_iid, values=tuple(current_values), tags=new_tags_tuple)
+                
+                # Update the master list `displayed_files_details` as well
+                for detail in self.displayed_files_details:
+                    if detail['name'] == filename_iid:
+                        detail['gui_status'] = new_status_text # Store the new status text
+                        detail['gui_tags'] = new_tags_tuple   # Store the new tags
+                        break
+                logger.debug("GUI", "_update_file_status_in_treeview", f"Updated status for {filename_iid} to '{new_status_text}' with tags {new_tags_tuple}")
+        except Exception as e: # pragma: no cover
+            logger.error("GUI", "_update_file_status_in_treeview", f"Error updating status for {filename_iid}: {e}\n{traceback.format_exc()}")
     def _get_local_filepath(self, device_filename):
         """Generates the expected local file path for a given device filename."""
         # This sanitization must match the one in _execute_single_download
@@ -2003,20 +2287,23 @@ class HiDockToolGUI:
                 return item.get('time', datetime.min) # datetime.min for items without time
             elif column_key == "time": # Sort by actual datetime object if available
                 return item.get('time', datetime.min)
+            elif column_key == "status": # Sort by status text
+                return item.get('gui_status', '').lower()
             return item.get(column_key, '') # Fallback
 
         return sorted(files_data, key=get_sort_key, reverse=reverse_order)
 
     def sort_treeview_column(self, column_name_map, is_numeric_string):
-        """Sorts the treeview by the clicked column header."""
+        """Sorts the treeview by the clicked column header.""" # Add status to column_data_key if needed
         # Map display column name to actual data key in self.displayed_files_details
         column_data_key = {
             "name": "name",
             "size": "size", # Will sort by 'length' in displayed_files_details
             "duration": "duration",
             "date": "date", # Will sort by 'time' (datetime object)
-            "time": "time"  # Will sort by 'time' (datetime object)
-        }.get(column_name_map, column_name_map)
+            "time": "time",  # Will sort by 'time' (datetime object)
+            "status": "status" # Sort by 'gui_status' in displayed_files_details
+        }.get(column_name_map) # Use .get() without default to catch if key is missing
 
         if self.treeview_sort_column == column_data_key:
             self.treeview_sort_reverse = not self.treeview_sort_reverse
@@ -2045,24 +2332,26 @@ class HiDockToolGUI:
             self.file_tree.delete(item)
         
         for f_info in self.displayed_files_details:
+            # Use stored gui_status and gui_tags if available, otherwise determine default
+            status_text_for_display = f_info.get('gui_status', "On Device")
+            tags_for_display = f_info.get('gui_tags', ()) # Default to empty tuple for default color
+
             if f_info.get("is_recording"):
                 values = (
                     f_info['name'],
                     "-", 
                     f_info['duration'], # "Grabando..."
                     f_info.get('createDate', ''), 
-                    f_info.get('createTime', '')
+                    f_info.get('createTime', ''),
+                    status_text_for_display 
                 )
             else:
                 values = (
                     f_info['name'], f"{f_info['length'] / 1024:.2f}", f"{f_info['duration']:.2f}",
-                    f_info.get('createDate', ''), f_info.get('createTime', '')
+                    f_info.get('createDate', ''), f_info.get('createTime', ''),
+                    status_text_for_display
                 )
-            # Preserve tags when re-inserting after sort
-            local_filepath = self._get_local_filepath(f_info['name'])
-            tags_for_sorted_item = ('recording',) if f_info.get("is_recording") else \
-                                   (('downloaded',) if os.path.exists(local_filepath) else ())
-            self.file_tree.insert("", tk.END, values=values, iid=f_info['name'], tags=tags_for_sorted_item)
+            self.file_tree.insert("", tk.END, values=values, iid=f_info['name'], tags=tags_for_display)
 
         self.on_file_selection_change(None) # Update selection stats
 
@@ -2085,6 +2374,11 @@ class HiDockToolGUI:
             # The operation ending (success, fail, cancel) should re-evaluate button states.
             # Ensure the button exists before trying to configure it.
             if hasattr(self, 'cancel_button') and self.cancel_button.winfo_exists():
+                # Update status of any 'Queued' or 'Downloading' files to 'Cancelled'
+                for item_iid in self.file_tree.get_children():
+                    item_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid and f.get('gui_status') in ["Queued", "Downloading"]), None)
+                    if item_detail:
+                        self._update_file_status_in_treeview(item_iid, "Cancelled", ('cancelled',))
                 self.cancel_button.config(state=tk.DISABLED)
             else: # Should not happen if GUI is constructed correctly
                 logger.warning("GUI", "request_cancel_operation", "Cancel button widget not found or does not exist.")
@@ -2196,6 +2490,8 @@ class HiDockToolGUI:
             self.delete_button.config(state=tk.DISABLED)
             if hasattr(self, 'format_card_button'): self.format_card_button.config(state=tk.DISABLED)
             if hasattr(self, 'sync_time_button'): self.sync_time_button.config(state=tk.DISABLED)
+            self.select_all_button.config(state=tk.DISABLED)
+            self.clear_selection_button.config(state=tk.DISABLED)
             self.refresh_files_button.config(state=tk.DISABLED)
             self.cancel_button.config(state=tk.NORMAL)
             self.cancel_operation_event = threading.Event() # Fresh event for this operation
@@ -2210,6 +2506,8 @@ class HiDockToolGUI:
             self.delete_button.config(state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
             if hasattr(self, 'format_card_button'): self.format_card_button.config(state=tk.NORMAL if is_connected else tk.DISABLED)
             if hasattr(self, 'sync_time_button'): self.sync_time_button.config(state=tk.NORMAL if is_connected else tk.DISABLED)
+            # Select All/Clear Selection states are handled by on_file_selection_change, which will be called
+            # or by refresh_file_list_gui
             self.refresh_files_button.config(state=tk.NORMAL if is_connected else tk.DISABLED)
             self.cancel_button.config(state=tk.DISABLED)
             self.cancel_operation_event = None # Clear the event
@@ -2251,21 +2549,19 @@ class HiDockToolGUI:
             # If the same file is selected, it might become "Replay"
             return 
         
-        # Check if the file already exists in the permanent download directory
+        # --- Playback Logic (handles starting new, or stopping then starting new/same) ---
+        # This section is now part of the main flow of play_selected_audio_gui
         local_filepath = self._get_local_filepath(file_detail['name'])
         if os.path.exists(local_filepath):
-            logger.info("GUI", "play_selected_audio_gui", f"Playing existing local file: {local_filepath}")
             self._cleanup_temp_playback_file() # Clean up any previous temp file
             self.current_playing_temp_file = None # Not using a temp file for this session
             self.current_playing_filename_for_replay = file_detail['name']
             self._start_playback_local_file(local_filepath, file_detail)
             return
+        self._update_file_status_in_treeview(file_detail['name'], "Preparing Playback...", ('queued',)) # Indicate prep
 
-        # If not found locally, proceed to download to a temporary file
         logger.info("GUI", "play_selected_audio_gui", f"Local file not found. Will download {file_detail['name']} to temporary location for playback.")
-
         self._set_long_operation_active_state(True, "Playback Preparation")
-
         self.update_overall_progress_label(f"Preparing to play {file_detail['name']}...")
         
         self._cleanup_temp_playback_file() # Clean up any previous temp file before creating a new one
@@ -2283,8 +2579,59 @@ class HiDockToolGUI:
             self._set_long_operation_active_state(False, "Playback Preparation") # Reset state
             return
 
-        self.current_playing_filename_for_replay = file_detail['name'] # Store for potential replay
+        # self.current_playing_filename_for_replay will be set by _start_playback_local_file or _download_for_playback_thread
         threading.Thread(target=self._download_for_playback_thread, args=(file_detail,), daemon=True).start()
+
+    def play_selected_audio_gui(self): # Renamed from _play_selected_audio_gui for clarity if it's a primary action
+        if not pygame:
+            messagebox.showerror("Playback Error", "Pygame library is not installed. Please install it to enable audio playback (pip install pygame).")
+            return
+
+        selected_iids = self.file_tree.selection()
+        if not selected_iids: # Should be rare if button states are correct
+            return
+        if len(selected_iids) > 1: # Should also be rare
+            return
+        
+        file_iid = selected_iids[0]
+        file_detail = next((f for f in self.displayed_files_details if f['name'] == file_iid), None)
+
+        if not file_detail:
+            messagebox.showerror("Error", "Could not find details for the selected file.")
+            return
+
+        if not (file_detail['name'].lower().endswith(".wav") or file_detail['name'].lower().endswith(".hda")):
+            messagebox.showwarning("Unsupported Format", "Playback is attempted for .wav and .hda files.")
+            return
+
+        # If another long operation (not playback itself) is active, prevent starting new playback.
+        if self.is_long_operation_active and not self.is_audio_playing:
+            messagebox.showwarning("Busy", "Another operation (e.g., download) is in progress. Please wait.")
+            return
+
+        # --- Core Playback Logic ---
+        if self.is_audio_playing:
+            currently_playing_file_name = self.current_playing_filename_for_replay
+            self._stop_audio_playback(mode="user_request_new_play") # Stop current playback
+            
+            if currently_playing_file_name == file_iid:
+                logger.info("GUI", "play_selected_audio_gui", f"Restarting playback for {file_iid}")
+            else:
+                logger.info("GUI", "play_selected_audio_gui", f"Switching playback from {currently_playing_file_name} to {file_iid}")
+        
+        # Proceed to play/prepare the selected file_iid
+        local_filepath = self._get_local_filepath(file_detail['name'])
+        if os.path.exists(local_filepath) and file_detail.get('gui_status') not in ["Mismatch", "Error (Download)"]:
+            logger.info("GUI", "play_selected_audio_gui", f"Playing existing local file: {local_filepath}")
+            self._cleanup_temp_playback_file() 
+            self.current_playing_temp_file = None 
+            self._start_playback_local_file(local_filepath, file_detail)
+        else: # Not local, or local but has issues, so download to temp
+            self._update_file_status_in_treeview(file_detail['name'], "Preparing Playback...", ('queued',))
+            logger.info("GUI", "play_selected_audio_gui", f"File '{file_detail['name']}' not suitable for local play. Downloading to temporary location.")
+            self._set_long_operation_active_state(True, "Playback Preparation")
+            self.update_overall_progress_label(f"Preparing to play {file_detail['name']}...")
+            self._download_to_temp_for_playback(file_detail) # New helper for clarity
 
     def _download_for_playback_thread(self, file_info):
         try:
@@ -2294,7 +2641,8 @@ class HiDockToolGUI:
                 def progress_cb(received, total):
                     # Can update a specific progress for this download if needed
                     self.master.after(0, self.update_file_progress, received, total, f"(Playback) {file_info['name']}")
-                
+                    self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Downloading (Play)", ('downloading',))
+
                 # Ensure cancel_operation_event is passed
                 status = self.dock.stream_file(
                     file_info['name'], file_info['length'], data_cb, progress_cb,
@@ -2307,21 +2655,25 @@ class HiDockToolGUI:
             elif status == "cancelled":
                 logger.info("GUI", "_download_for_playback_thread", f"Download for playback of {file_info['name']} was cancelled.")
                 self.master.after(0, self.update_overall_progress_label, f"Playback prep for {file_info['name']} cancelled.")
+                self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Cancelled", ('cancelled',))
                 self._cleanup_temp_playback_file() # Ensure temp file is deleted
             elif status == "fail_disconnected":
                 logger.error("GUI", "_download_for_playback_thread", f"Download for playback of {file_info['name']} failed: Device disconnected.")
                 self.master.after(0, self.update_overall_progress_label, "Playback prep failed: Device disconnected.")
+                self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Disconnect)", ('size_mismatch',))
                 self._cleanup_temp_playback_file() # Ensure temp file is deleted
                 self.master.after(0, self.handle_auto_disconnect_ui)
             else: # Other failures
                 logger.error("GUI", "_download_for_playback_thread", f"Download for playback of {file_info['name']} failed. Status: {status}")
                 messagebox.showerror("Playback Error", f"Failed to download {file_info['name']} for playback. Status: {status}")
+                self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Download)", ('size_mismatch',))
                 self._cleanup_temp_playback_file() # Ensure temp file is deleted
                 # Update progress label for generic failure
                 self.master.after(0, self.update_overall_progress_label, f"Playback preparation for {file_info['name']} failed.")
         except Exception as e:
             # This exception block might catch errors from self.dock.stream_file if it raises
             # an exception not handled internally (e.g., ConnectionError if _send_command fails hard).
+            self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Playback Prep)", ('size_mismatch',))
             if not self.dock.is_connected():
                 self.master.after(0, self.handle_auto_disconnect_ui)
             logger.error("GUI", "_download_for_playback_thread", f"Error downloading for playback: {e}\n{traceback.format_exc()}")
@@ -2372,6 +2724,7 @@ class HiDockToolGUI:
             self.update_overall_progress_label(f"Playing: {os.path.basename(filepath)}")
             self.current_playing_filename_for_replay = original_file_info['name'] # Store for replay
             self.play_button.config(text="⏹️ Stop Playback") # Change button text
+            self._update_file_status_in_treeview(original_file_info['name'], "Playing", ('playing',))
         except Exception as e:
             logger.error("GUI", "_start_playback_local_file", f"Error starting playback: {e}\n{traceback.format_exc()}")
             messagebox.showerror("Playback Error", f"Could not play audio file {os.path.basename(filepath)}: {e}")
@@ -2518,6 +2871,10 @@ class HiDockToolGUI:
                 self.download_button.config(state=tk.DISABLED)
                 self.delete_button.config(state=tk.DISABLED)
         # If a long operation is active, _set_long_operation_active_state handles button states.
+        
+        # Update Select All / Clear Selection button states
+        self.update_select_all_clear_buttons_state()
+
 
     def _stop_audio_playback(self, mode="user_stop"):
         if pygame and pygame.mixer.get_init(): # Check if mixer is initialized
@@ -2539,10 +2896,53 @@ class HiDockToolGUI:
         # After stopping, re-evaluate button state based on current selection
         self.on_file_selection_change(None) 
 
+        # Update status of the file that WAS playing
+        if was_playing_filename: # was_playing_filename was captured at the start of this method
+            file_detail_that_was_playing = next((f for f in self.displayed_files_details if f['name'] == was_playing_filename), None)
+            if file_detail_that_was_playing:
+                # Determine its correct post-playback status
+                new_status_for_old_file = "On Device" 
+                new_tags_for_old_file = ()
+                local_filepath_of_old_file = self._get_local_filepath(was_playing_filename)
+
+                if os.path.exists(local_filepath_of_old_file):
+                    try:
+                        local_size = os.path.getsize(local_filepath_of_old_file)
+                        # Use .get for length to avoid KeyError if file_detail is incomplete
+                        if local_size == file_detail_that_was_playing.get('length'):
+                            new_status_for_old_file = "Downloaded"
+                            new_tags_for_old_file = ('downloaded_ok',)
+                        else:
+                            new_status_for_old_file = "Mismatch"
+                            new_tags_for_old_file = ('size_mismatch',)
+                    except OSError: # pragma: no cover
+                        new_status_for_old_file = "Error Checking Size"
+                        new_tags_for_old_file = ('size_mismatch',)
+                
+                self._update_file_status_in_treeview(was_playing_filename, new_status_for_old_file, new_tags_for_old_file)
+
         if mode != "natural_end": # Only update label if stopped by user or error
             self.master.after(0, self.update_overall_progress_label, "Playback stopped.")
 
     def _cleanup_temp_playback_file(self):
+        # Before deleting the temp file, if a file was being played from temp,
+        # update its status back to "On Device" or "Error" if the original file info is available.
+        if self.current_playing_temp_file and self.current_playing_filename_for_replay:
+            file_detail = next((f for f in self.displayed_files_details if f['name'] == self.current_playing_filename_for_replay), None)
+            if file_detail:
+                # If the temp file was used, it means the original wasn't "Downloaded" or "Mismatch" prior to play.
+                # So, its status should revert to "On Device" unless an error occurred during temp download.
+                # The status update for "Playing" would have happened. Now revert.
+                # Check if the file exists in the permanent download directory to determine if it became "Downloaded"
+                # This check is a bit redundant if play_selected_audio_gui already handles playing local files.
+                # For simplicity, if it was played from temp, assume it's "On Device" after temp cleanup.
+                # A more robust way is to check its actual state (downloaded, mismatch, on device)
+                # For now, let's assume if it was played from temp, it's not permanently downloaded by this action.
+                # The _stop_audio_playback method already has logic to re-evaluate status.
+                # This cleanup is mostly about the temp file itself.
+                pass # Status update is handled by _stop_audio_playback's call to on_file_selection_change
+                     # or more directly if _stop_audio_playback updates status.
+
         if self.current_playing_temp_file and os.path.exists(self.current_playing_temp_file):
             try:
                 os.remove(self.current_playing_temp_file)
@@ -2580,12 +2980,20 @@ class HiDockToolGUI:
 
     def _process_download_queue_thread(self, files_to_download_info):
         self.is_long_operation_active = True
+        total_files_in_queue = len(files_to_download_info)
+        self.master.after(0, self.update_overall_progress_label, f"Batch Download: Initializing {total_files_in_queue} file(s)...")
+
+        # Initial pass to mark all files in the batch as "Queued (X/N)"
+        for i, file_info in enumerate(files_to_download_info):
+            queue_status_text = f"Queued ({i + 1}/{total_files_in_queue})"
+            self.master.after(0, self._update_file_status_in_treeview, file_info['name'], queue_status_text, ('queued',))
+
         batch_start_time = time.time() # Record start time for the whole batch
         # Ensure cancel button is enabled at the start of the operation,
         # as download_selected_files_gui might have been called while another op was finishing.
         self.master.after(0, lambda: self.cancel_button.config(state=tk.NORMAL) if self.cancel_button.winfo_exists() else None)
-        total_files_in_queue = len(files_to_download_info)
         operation_aborted = False
+        completed_count = 0
         for i, file_info in enumerate(files_to_download_info):
             if not self.dock.is_connected(): # Check connection before each download
                 logger.error("GUI", "_process_download_queue_thread", "Device disconnected, aborting download queue.")
@@ -2597,7 +3005,12 @@ class HiDockToolGUI:
                 self.master.after(0, self.update_overall_progress_label, "Download queue cancelled.")
                 operation_aborted = True
                 break
-            self._execute_single_download(file_info, i + 1, total_files_in_queue)
+            # The status is already "Queued (X/N)". _execute_single_download will change it to "Downloading".
+            # Pass completed_count to _execute_single_download for its label updates if needed, or manage here.
+            # For now, _execute_single_download focuses on the current file.
+            download_successful = self._execute_single_download(file_info, i + 1, total_files_in_queue)
+            if download_successful:
+                completed_count += 1
             # After _execute_single_download, check if it caused a disconnect or cancellation
             # The cancel_operation_event check is crucial here.
             # _execute_single_download might set it if its internal stream_file was cancelled.
@@ -2613,10 +3026,11 @@ class HiDockToolGUI:
         # Actions after the entire queue is processed (or aborted)
         batch_end_time = time.time()
         total_batch_duration = batch_end_time - batch_start_time
+        remaining_files = total_files_in_queue - completed_count if not operation_aborted else total_files_in_queue - i -1 # Adjust if loop broke early
         
         if not operation_aborted:
-            self.master.after(0, self.update_overall_progress_label, f"All {len(files_to_download_info)} file(s) downloaded in {total_batch_duration:.2f}s.")
-        elif self.cancel_operation_event and self.cancel_operation_event.is_set():
+            self.master.after(0, self.update_overall_progress_label, f"Batch: {completed_count}/{total_files_in_queue} completed in {total_batch_duration:.2f}s.")
+        elif self.cancel_operation_event and self.cancel_operation_event.is_set() and operation_aborted:
             # If cancelled, the "Download queue cancelled." message is already set. We can append time.
             self.master.after(0, self.update_overall_progress_label, f"Download queue cancelled after {total_batch_duration:.2f}s.")
         # If aborted due to disconnect, handle_auto_disconnect_ui would have set a message.
@@ -2666,6 +3080,30 @@ class HiDockToolGUI:
         self.master.after(0, lambda: self.delete_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
         self.master.after(0, lambda: self.refresh_files_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
         self.master.after(0, lambda: self.download_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
+
+    def select_all_files_action(self):
+        """Selects all files in the Treeview."""
+        if not self.file_tree.winfo_exists(): return
+        all_items = self.file_tree.get_children()
+        if all_items:
+            self.file_tree.selection_set(all_items) # Selects all, triggers on_file_selection_change
+        # on_file_selection_change will update button states
+
+    def clear_selection_action(self):
+        """Clears the current selection in the Treeview."""
+        if not self.file_tree.winfo_exists(): return
+        self.file_tree.selection_set([]) # Clears selection, triggers on_file_selection_change
+        # on_file_selection_change will update button states
+
+    def update_select_all_clear_buttons_state(self):
+        """Updates the state of Select All and Clear Selection buttons."""
+        if not self.file_tree.winfo_exists(): return
+
+        total_items = len(self.file_tree.get_children())
+        selected_items_count = len(self.file_tree.selection())
+
+        self.select_all_button.config(state=tk.NORMAL if total_items > 0 and selected_items_count < total_items else tk.DISABLED)
+        self.clear_selection_button.config(state=tk.NORMAL if selected_items_count > 0 else tk.DISABLED)
 
     def format_sd_card_gui(self):
         if not self.dock.is_connected():
@@ -2721,6 +3159,7 @@ class HiDockToolGUI:
         self.master.after(0, self.update_overall_progress_label, "Syncing device time...")
         current_time = datetime.now()
         result = self.dock.set_device_time(current_time)
+
         if result and result.get("result") == "success":
             self.master.after(0, messagebox.showinfo, "Time Sync", "Device time synchronized successfully.")
         else:
@@ -2731,11 +3170,13 @@ class HiDockToolGUI:
         self.master.after(0, lambda: self.sync_time_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
         self.master.after(0, self.update_overall_progress_label, "Time sync operation finished.")
     def _execute_single_download(self, file_info, file_index, total_files_to_download):
-        self.master.after(0, self.update_overall_progress_label, f"Downloading {file_info['name']} ({file_index}/{total_files_to_download})...")
+        self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Downloading", ('downloading',))
+        self.master.after(0, self.update_overall_progress_label, f"Batch ({file_index}/{total_files_to_download}): Downloading {file_info['name']}...")
         # Reset progress bar for the new file
         self.master.after(0, lambda: self.file_progress_bar.config(value=0))
 
         download_start_time = time.time()
+        operation_succeeded = False # Track if this specific download was OK
         safe_filename = file_info['name'].replace(':','-').replace(' ','_').replace('\\','_').replace('/','_')
         
         # Define temporary and final paths
@@ -2775,7 +3216,7 @@ class HiDockToolGUI:
                     self.master.after(0, self.update_file_progress, received, total, file_info['name'])
                     self.master.after(0, self.update_overall_progress_label, f"Current: {file_info['name']} | {speed_str} | {elapsed_str} | {etr_str}")
 
-                status = self.dock.stream_file(
+                stream_status = self.dock.stream_file(
                     file_info['name'],
                     file_info['length'],
                     gui_data_cb,
@@ -2785,7 +3226,7 @@ class HiDockToolGUI:
                 )
             # 'with open' block has exited, so outfile_handle is closed.
             # Now process based on status.
-            if status == "OK":
+            if stream_status == "OK":
                 try:
                     if os.path.exists(final_download_path):
                         logger.info("GUI", "_execute_single_download", f"Target file {final_download_path} already exists. Attempting to overwrite.")
@@ -2803,25 +3244,32 @@ class HiDockToolGUI:
                     final_elapsed_time = time.time() - download_start_time
                     self.master.after(0, self.update_overall_progress_label, f"Completed: {file_info['name']} in {final_elapsed_time:.2f}s.")
                     self.master.after(0, lambda f_name=file_info['name']: self.file_tree.item(f_name, tags=('downloaded',)) if self.file_tree.exists(f_name) else None)
+                    self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Downloaded", ('downloaded_ok',)) # This is the final status for this file
+                    operation_succeeded = True
             
-            else: # status is not "OK"
-                self.master.after(0, logger.error, "GUI", "_execute_single_download", f"Download failed for {file_info['name']}. Status: {status}")
-                if status == "fail_disconnected" or not self.dock.is_connected():
+            else: # stream_status is not "OK"
+                self.master.after(0, logger.error, "GUI", "_execute_single_download", f"Download failed for {file_info['name']}. Status: {stream_status}")
+                if stream_status == "fail_disconnected" or not self.dock.is_connected():
                     self.master.after(0, self.handle_auto_disconnect_ui)
                     self.master.after(0, self.update_overall_progress_label, f"Disconnected: {file_info['name']}. Partial file kept as {temp_download_filename}")
-                elif status == "cancelled":
+                    self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Disconnect)", ('size_mismatch',))
+                elif stream_status == "cancelled":
                     if hasattr(self, 'cancel_operation_event') and self.cancel_operation_event: 
                         self.cancel_operation_event.set() # Ensure event is set if stream_file reported cancel
                     logger.info("GUI", "_execute_single_download", f"Download of {file_info['name']} was cancelled.")
                     self.master.after(0, self.update_overall_progress_label, f"Cancelled: {file_info['name']}. Partial file kept as {temp_download_filename}")
+                    # Status "Cancelled" would have been set by request_cancel_operation or here if stream_file itself cancelled
+                    self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Cancelled", ('cancelled',))
                 else: # Generic "fail" from stream_file
                     self.master.after(0, self.update_overall_progress_label, f"Failed: {file_info['name']}. Partial file kept as {temp_download_filename}")
+                    self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Download Failed", ('size_mismatch',))
                 # In all these non-"OK" cases, the temporary file (potentially partial) is kept.
 
         except ConnectionError as ce:
             self.master.after(0, logger.error, "GUI", "_execute_single_download", f"ConnectionError during download for {file_info['name']}: {ce}")
             self.master.after(0, self.handle_auto_disconnect_ui)
             # If a ConnectionError occurs, the temp file might exist. It's kept.
+            self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Connection)", ('size_mismatch',))
             self.master.after(0, self.update_overall_progress_label, f"Connection Error with {file_info['name']}. Temp file kept as {temp_download_filename}")
         except Exception as e: # Catch other exceptions for this specific file download
             self.master.after(0, logger.error, "GUI", "_execute_single_download", f"Error during download of {file_info['name']}: {e}\n{traceback.format_exc()}")
@@ -2829,6 +3277,8 @@ class HiDockToolGUI:
                 self.master.after(0, self.handle_auto_disconnect_ui)
             # An unexpected error occurred. The temp file might exist. It's kept.
             self.master.after(0, self.update_overall_progress_label, f"Error with {file_info['name']}. Temp file kept as {temp_download_filename}")
+            self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Download)", ('size_mismatch',))
+        return operation_succeeded
 
     def update_file_progress(self, received, total, file_name):
         if total > 0:
