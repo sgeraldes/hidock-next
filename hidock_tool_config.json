@@ -1,0 +1,16 @@
+{
+    "autoconnect": true,
+    "download_directory": "D:/Documents/hidock-next",
+    "log_level": "DEBUG",
+    "target_interface": 0,
+    "autoconnect_interval_s": 7,
+    "recording_check_interval_s": 0,
+    "selected_vid": 4310,
+    "selected_pid": 45069,
+    "default_command_timeout_ms": 5000,
+    "file_stream_timeout_s": 180,
+    "auto_refresh_files": false,
+    "auto_refresh_interval_s": 30,
+    "quit_without_prompt_if_connected": true,
+    "theme": "vista"
+}
