@@ -11,7 +11,8 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
 import traceback # For detailed error logging
 import tempfile # For temporary audio files
-# from tkinter import simpledialog
+import subprocess # For opening directories
+import sys # For platform detection
 
 try:
     import pygame
@@ -42,8 +43,6 @@ CMD_SET_SETTINGS = 12       # For autoRecord, autoPlay, etc.
 CMD_GET_CARD_INFO = 16
 CMD_FORMAT_CARD = 17
 CMD_GET_RECORDING_FILE = 18
-# ... add other command IDs as needed
-
 
 # --- Logger ---
 CONFIG_FILE = "hidock_tool_config.json"
@@ -899,18 +898,37 @@ class HiDockToolGUI:
         
         self.status_download_dir_label = ttk.Label(self.status_bar_frame, text=f"Dir: {os.path.basename(self.download_directory)}", anchor=tk.E, relief=tk.FLAT)
         self.status_download_dir_label.pack(side=tk.RIGHT, padx=5)
-        self.status_download_dir_label.bind("<Button-1>", lambda e: self._select_download_dir_from_status_bar())
+        self.status_download_dir_label.bind("<Button-1>", self._open_download_dir_in_explorer)
 
+    def _open_download_dir_in_explorer(self, event=None): # Added event=None for direct binding
+        if not self.download_directory or not os.path.isdir(self.download_directory):
+            messagebox.showwarning("Open Directory", 
+                                    f"Download directory is not set or does not exist:\n{self.download_directory}",
+                                    parent=self.master)
+            logger.warning("GUI", "_open_download_dir_in_explorer",
+                            f"Download directory '{self.download_directory}' not valid or not set.")
+            return
 
-    def _select_download_dir_from_status_bar(self):
-        new_dir = filedialog.askdirectory(initialdir=self.download_directory, title="Select Download Directory")
-        if new_dir:
-            self.download_directory = new_dir
-            self.config["download_directory"] = new_dir # Update config
-            save_config(self.config) # Save immediately
-            self.update_status_bar(download_dir=self.download_directory)
-            logger.info("GUI", "_select_download_dir_from_status_bar", f"Download directory changed to: {new_dir}")
-
+        try:
+            logger.info("GUI", "_open_download_dir_in_explorer", f"Opening download directory: {self.download_directory}")
+            if sys.platform == "win32":
+                os.startfile(os.path.realpath(self.download_directory)) # os.realpath for robustness
+            elif sys.platform == "darwin": # macOS
+                subprocess.call(["open", self.download_directory])
+            else: # Linux and other UNIX-like systems (e.g., BSD)
+                subprocess.call(["xdg-open", self.download_directory])
+        except FileNotFoundError: 
+            # This might happen if xdg-open is not installed on a Linux system, for example.
+            messagebox.showerror("Open Directory", 
+                                f"Could not open directory. Associated command not found for your system ('{sys.platform}').",
+                                parent=self.master)
+            logger.error("GUI", "_open_download_dir_in_explorer", f"File explorer command not found for {sys.platform}.")
+        except Exception as e:
+            messagebox.showerror("Open Directory",
+                                f"Failed to open directory:\n{self.download_directory}\nError: {e}",
+                                parent=self.master)
+            logger.error("GUI", "_open_download_dir_in_explorer",
+                        f"Failed to open directory '{self.download_directory}': {e}")
 
     def update_status_bar(self, connection_status=None, storage_info=None, file_counts_info=None, progress_text=None, download_dir=None):
         if hasattr(self, 'status_connection_label') and self.status_connection_label.winfo_exists():
@@ -1982,6 +2000,7 @@ class HiDockToolGUI:
         
         menu = tk.Menu(self.master, tearoff=0)
         num_selected = len(current_selection)
+        thin_space = "\u2009"
 
         if num_selected == 1:
             item_iid = current_selection[0]
@@ -1991,23 +2010,23 @@ class HiDockToolGUI:
                 is_playable = file_detail['name'].lower().endswith((".wav", ".hda"))
 
                 if self.is_audio_playing and self.current_playing_filename_for_replay == item_iid:
-                    menu.add_command(label="⏹️ Stop Playback", command=self._stop_audio_playback)
+                    menu.add_command(label=f"Stop Playback", command=self._stop_audio_playback)
                 elif is_playable and status not in ["Recording", "Downloading", "Queued"]:
-                     menu.add_command(label="▶️ Play", command=self.play_selected_audio_gui)
+                     menu.add_command(label=f"Play", command=self.play_selected_audio_gui)
                 
                 if status in ["On Device", "Mismatch", "Cancelled"] or "Error" in status:
-                     if not file_detail.get("is_recording"): menu.add_command(label="💾 Download", command=self.download_selected_files_gui)
-                elif status == "Downloaded" or status == "Downloaded OK": menu.add_command(label="💾 Re-download", command=self.download_selected_files_gui)
+                     if not file_detail.get("is_recording"): menu.add_command(label=f"Download", command=self.download_selected_files_gui)
+                elif status == "Downloaded" or status == "Downloaded OK": menu.add_command(label=f"Re-download", command=self.download_selected_files_gui)
                 
-                if status in ["Downloading", "Queued"] or "Preparing Playback" in status: menu.add_command(label="🚫 Cancel Operation", command=self.request_cancel_operation)
-                if not file_detail.get("is_recording"): menu.add_command(label="🗑️ Delete", command=self.delete_selected_files_gui)
+                if status in ["Downloading", "Queued"] or "Preparing Playback" in status: menu.add_command(label=f"Cancel Operation", command=self.request_cancel_operation)
+                if not file_detail.get("is_recording"): menu.add_command(label=f"Delete", command=self.delete_selected_files_gui)
         elif num_selected > 1:
-            menu.add_command(label=f"💾 Download Selected ({num_selected})", command=self.download_selected_files_gui)
+            menu.add_command(label=f"Download Selected ({num_selected})", command=self.download_selected_files_gui)
             if not any(next((f for f in self.displayed_files_details if f['name'] == iid), {}).get("is_recording") for iid in current_selection):
-                menu.add_command(label=f"🗑️ Delete Selected ({num_selected})", command=self.delete_selected_files_gui)
+                menu.add_command(label=f"Delete Selected ({num_selected})", command=self.delete_selected_files_gui)
         
         if menu.index(tk.END) is not None: menu.add_separator()
-        menu.add_command(label="🔄 Refresh List", command=self.refresh_file_list_gui, state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED)
+        menu.add_command(label=f"Refresh List", command=self.refresh_file_list_gui, state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED)
         if menu.index(tk.END) is None: return
         try: menu.tk_popup(event.x_root, event.y_root)
         finally: menu.grab_release()
@@ -2485,16 +2504,35 @@ class HiDockToolGUI:
         if pygame and pygame.mixer.get_init(): pygame.mixer.quit()
         
         # Save config
-        # Save operational settings
-        operational_keys = [
-            "autoconnect", "log_level", "selected_vid", "selected_pid", "target_interface", 
-            "recording_check_interval_s", "default_command_timeout_ms", "file_stream_timeout_s",
-            "auto_refresh_files", "auto_refresh_interval_s", "quit_without_prompt_if_connected",
-            "theme", "suppress_console_output"
-        ]
-        for key in operational_keys:
-            if hasattr(self, f"{key}_var"): 
-                self.config[key] = getattr(self, f"{key}_var").get()
+        # Define a mapping from configuration keys to the names of their Tkinter variable attributes
+        config_to_var_map = {
+            "autoconnect": "autoconnect_var",
+            "log_level": "logger_processing_level_var", # Corrected mapping
+            "selected_vid": "selected_vid_var",
+            "selected_pid": "selected_pid_var",
+            "target_interface": "target_interface_var",
+            "recording_check_interval_s": "recording_check_interval_var", # Corrected mapping (variable name differs slightly from key)
+            "default_command_timeout_ms": "default_command_timeout_ms_var",
+            "file_stream_timeout_s": "file_stream_timeout_s_var",
+            "auto_refresh_files": "auto_refresh_files_var",
+            "auto_refresh_interval_s": "auto_refresh_interval_s_var",
+            "quit_without_prompt_if_connected": "quit_without_prompt_var", # Corrected mapping for the reported bug
+            "theme": "theme_var",
+            "suppress_console_output": "suppress_console_output_var"
+        }
+
+        for config_key, var_attr_name_str in config_to_var_map.items():
+            if hasattr(self, var_attr_name_str):
+                tk_variable_instance = getattr(self, var_attr_name_str)
+                # Ensure it's a Tkinter Variable before calling .get()
+                if isinstance(tk_variable_instance, (tk.BooleanVar, tk.StringVar, tk.IntVar, tk.DoubleVar)):
+                    self.config[config_key] = tk_variable_instance.get()
+                else:
+                    logger.warning("ConfigSave", "on_closing", 
+                                   f"Attribute '{var_attr_name_str}' for config key '{config_key}' is not a recognized tk.Variable type.")
+            else:
+                logger.warning("ConfigSave", "on_closing", 
+                               f"Attribute '{var_attr_name_str}' for config key '{config_key}' not found on self.")
         
         self.config["download_directory"] = self.download_directory
 
