@@ -130,7 +130,6 @@ def save_config(config_data): # Ensure save_config uses the logger if available
     except Exception as e:
         logger.error("Config", "save_config", f"Unexpected error saving config: {e}")
 
-
 # --- HiDock Communication Class ---
 class HiDockJensen:
     def __init__(self, usb_backend_instance_ref): # Modified to accept backend
@@ -653,10 +652,21 @@ class HiDockJensen:
 class HiDockToolGUI:
     def __init__(self, master):
         self.master = master
+        self.config = load_config()
+
         master.title("HiDock Explorer Tool")
-        master.geometry("850x750") # Adjusted initial size
+        saved_geometry = self.config.get("window_geometry", "850x750+100+100") # Now self.config is defined
+        try:
+            master.geometry(saved_geometry)
+        except tk.TclError:
+            # Logger might not be fully initialized yet if its config depends on self.config,
+            # so using print here for safety, or ensure logger is configured after self.config
+            print(f"[WARNING] GUI::__init__ - Failed to apply saved geometry '{saved_geometry}'. Using default.") 
+            # logger.warning("GUI", "__init__", f"Failed to apply saved geometry '{saved_geometry}'. Using default.") # If logger is safe to use
+            master.geometry("850x750+100+100") # Fallback
 
         self.usb_backend_instance = None
+        # ... (other initializations like self.backend_initialized_successfully)
         self.backend_initialized_successfully = False
         self.backend_init_error_message = "USB backend not yet initialized."
         try:
@@ -669,7 +679,6 @@ class HiDockToolGUI:
             logger.error("GUI", "__init__", f"CRITICAL: {self.backend_init_error_message}\n{traceback.format_exc()}")
 
         self.dock = HiDockJensen(self.usb_backend_instance)
-        self.config = load_config()
         # Initialize tk Variables
         self.autoconnect_var = tk.BooleanVar(value=self.config.get("autoconnect", False))
         self.download_directory = self.config.get("download_directory", os.getcwd())
@@ -692,6 +701,30 @@ class HiDockToolGUI:
         self.device_setting_auto_play_var = tk.BooleanVar()
         self.device_setting_bluetooth_tone_var = tk.BooleanVar()
         self.device_setting_notification_sound_var = tk.BooleanVar()
+        self.device_setting_auto_record_var = tk.BooleanVar()
+        self.device_setting_auto_play_var = tk.BooleanVar()
+        self.device_setting_bluetooth_tone_var = tk.BooleanVar()
+        self.device_setting_notification_sound_var = tk.BooleanVar()
+
+        # --- Load additional persistent UI settings ---
+        self.treeview_columns_display_order_str = self.config.get("treeview_columns_display_order", "") # Saved as comma-separated string
+        
+        self.logs_visible_var = tk.BooleanVar(value=self.config.get("logs_pane_visible", False))
+        self.device_tools_visible_var = tk.BooleanVar(value=self.config.get("device_tools_pane_visible", False))
+        # Sync internal state if needed, though vars are primary now
+        self.logs_visible = self.logs_visible_var.get()
+        self.device_tools_visible = self.device_tools_visible_var.get()
+
+        self.gui_log_filter_level_var = tk.StringVar(value=self.config.get("gui_log_filter_level", "DEBUG"))
+        
+        self.loop_playback_var = tk.BooleanVar(value=self.config.get("loop_playback", False))
+        self.volume_var = tk.DoubleVar(value=self.config.get("playback_volume", 0.5))
+
+        # For restoring sort state (loaded here, applied after data load)
+        self.saved_treeview_sort_column = self.config.get("treeview_sort_col_id", None)
+        self.saved_treeview_sort_reverse = self.config.get("treeview_sort_descending", False)
+        # These will be transferred to self.treeview_sort_column and self.treeview_sort_reverse 
+        # by _apply_saved_sort_state_to_tree_and_ui before data is displayed with that sort.
 
         # Other attributes
         self.available_usb_devices = []
@@ -710,6 +743,7 @@ class HiDockToolGUI:
         self._fetched_device_settings_for_dialog = {}
         self.is_long_operation_active = False
         self.cancel_operation_event = None
+        self.active_operation_name = None # To store the type of active long operation
         
         # Audio playback attributes
         self.is_audio_playing = False
@@ -720,7 +754,7 @@ class HiDockToolGUI:
         self.volume_var = tk.DoubleVar(value=0.5) 
         self._user_is_dragging_slider = False
         self.playback_total_duration = 0.0
-
+        self.playback_controls_frame = None
 
         self.original_tree_headings = {"name": "Name", "size": "Size (KB)", "duration": "Duration (s)", "date": "Date", "time": "Time", "status": "Status"}
 
@@ -742,6 +776,10 @@ class HiDockToolGUI:
             self.update_status_bar(connection_status=f"USB Backend Error! Check logs.")
             if hasattr(self, 'file_menu'):
                  self.file_menu.entryconfig("Connect to HiDock", state=tk.DISABLED)
+            # Also disable toolbar connect button if backend failed
+            if hasattr(self, 'toolbar_connect_button'):
+                self.toolbar_connect_button.config(state=tk.DISABLED)
+
 
         self.apply_theme(self.theme_var.get())
         self.update_all_status_info() # Initialize status bar text
@@ -795,6 +833,49 @@ class HiDockToolGUI:
         menubar.add_cascade(label="Device", menu=self.device_menu)
         self.device_menu.add_command(label="Sync Device Time", command=self.sync_device_time_gui, state=tk.DISABLED)
         self.device_menu.add_command(label="Format Storage", command=self.format_sd_card_gui, state=tk.DISABLED)
+
+    def _create_toolbar(self):
+        self.toolbar_frame = ttk.Frame(self.master, padding=(2,2,2,0)) # Add a little padding
+        # In a real scenario, you would load icons here e.g. using Pillow's ImageTk.PhotoImage
+        # Example: self.connect_icon = ImageTk.PhotoImage(Image.open("connect_icon.png"))
+        # Then use image=self.connect_icon in the button. For now, text only.
+
+        # Connect/Disconnect Button (toggles)
+        self.toolbar_connect_button = ttk.Button(self.toolbar_frame, text="Connect", command=self.connect_device, width=10)
+        self.toolbar_connect_button.pack(side=tk.LEFT, padx=(0, 2))
+
+        # Refresh Button
+        self.toolbar_refresh_button = ttk.Button(self.toolbar_frame, text="Refresh", command=self.refresh_file_list_gui)
+        self.toolbar_refresh_button.pack(side=tk.LEFT, padx=2)
+        
+        # Separator
+        #ttk.Separator(self.toolbar_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=2)
+
+        # Download Button
+        self.toolbar_download_button = ttk.Button(self.toolbar_frame, text="Download", command=self.download_selected_files_gui)
+        self.toolbar_download_button.pack(side=tk.LEFT, padx=2)
+
+        # Play Button
+        # Initial configuration, will be updated by _update_menu_states
+        self.toolbar_play_button = ttk.Button(self.toolbar_frame, text="Play", command=self.play_selected_audio_gui)
+        self.toolbar_play_button.pack(side=tk.LEFT, padx=2)
+
+        # (If using icons, you would ensure 'stop_icon_img' is loaded and stored here or in __init__)
+        # self.toolbar_icons['stop_icon_img'] = self._load_icon("stop", "Stop") 
+
+        # Delete Button
+        self.toolbar_delete_button = ttk.Button(self.toolbar_frame, text="Delete", command=self.delete_selected_files_gui)
+        self.toolbar_delete_button.pack(side=tk.LEFT, padx=2)
+        
+        # Separator (optional, if more buttons were to follow on the right)
+        #ttk.Separator(self.toolbar_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=2)
+
+        # Settings Button (on the right)
+        self.toolbar_settings_button = ttk.Button(self.toolbar_frame, text="Settings", command=self.open_settings_window)
+        self.toolbar_settings_button.pack(side=tk.RIGHT, padx=2) # Pack to the right
+
+        self.toolbar_frame.pack(side=tk.TOP, fill=tk.X, pady=(0,2))
+
 
     def _create_status_bar(self):
         self.status_bar_frame = ttk.Frame(self.master, relief=tk.SUNKEN, padding=2)
@@ -884,30 +965,30 @@ class HiDockToolGUI:
             download_dir=self.download_directory
         )
 
-    def _update_menu_states(self):
-        """Updates the state (enabled/disabled) of menu items based on app state."""
+    def _update_menu_states(self): # Now also updates toolbar button states
+        """Updates the state (enabled/disabled) of menu items and toolbar buttons based on app state."""
         is_connected = self.dock.is_connected()
         has_selection = bool(hasattr(self, 'file_tree') and self.file_tree.winfo_exists() and self.file_tree.selection())
         num_selected = len(self.file_tree.selection()) if has_selection else 0
 
+        # Menu states
         if hasattr(self, 'file_menu'):
             self.file_menu.entryconfig("Connect to HiDock", state=tk.NORMAL if not is_connected and self.backend_initialized_successfully else tk.DISABLED)
             self.file_menu.entryconfig("Disconnect", state=tk.NORMAL if is_connected else tk.DISABLED)
 
         if hasattr(self, 'view_menu'):
             self.view_menu.entryconfig("Refresh File List", state=tk.NORMAL if is_connected else tk.DISABLED)
-            self.view_menu.entryconfig("Show Logs", variable=self.logs_visible_var) # Ensure var is linked
+            self.view_menu.entryconfig("Show Logs", variable=self.logs_visible_var) 
             self.view_menu.entryconfig("Show Device Tools", variable=self.device_tools_visible_var)
 
-
+        can_play_selected = is_connected and num_selected == 1
+        if can_play_selected: # Further check if the selected file is playable
+            file_iid = self.file_tree.selection()[0]
+            file_detail = next((f for f in self.displayed_files_details if f['name'] == file_iid), None)
+            if not (file_detail and (file_detail['name'].lower().endswith(".wav") or file_detail['name'].lower().endswith(".hda"))):
+                can_play_selected = False
+        
         if hasattr(self, 'actions_menu'):
-            can_play_selected = is_connected and num_selected == 1
-            if can_play_selected:
-                file_iid = self.file_tree.selection()[0]
-                file_detail = next((f for f in self.displayed_files_details if f['name'] == file_iid), None)
-                if not (file_detail and (file_detail['name'].lower().endswith(".wav") or file_detail['name'].lower().endswith(".hda"))):
-                    can_play_selected = False 
-            
             self.actions_menu.entryconfig("Download Selected", state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
             self.actions_menu.entryconfig("Play Selected", state=tk.NORMAL if can_play_selected else tk.DISABLED)
             self.actions_menu.entryconfig("Delete Selected", state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
@@ -921,6 +1002,68 @@ class HiDockToolGUI:
         if hasattr(self, 'device_menu'):
             self.device_menu.entryconfig("Sync Device Time", state=tk.NORMAL if is_connected else tk.DISABLED)
             self.device_menu.entryconfig("Format Storage", state=tk.NORMAL if is_connected else tk.DISABLED)
+
+        # Toolbar button states
+        if hasattr(self, 'toolbar_connect_button'):
+            # This button's logic is for connection state, not generic long operations
+            if is_connected:
+                self.toolbar_connect_button.config(text="Disconnect", command=self.disconnect_device, state=tk.NORMAL)
+            else:
+                self.toolbar_connect_button.config(text="Connect", command=self.connect_device, 
+                                                   state=tk.NORMAL if self.backend_initialized_successfully else tk.DISABLED)
+        
+        if hasattr(self, 'toolbar_refresh_button'):
+            # Refresh button is disabled during its own operation or any other long operation.
+            # It does not currently have a 'Cancel' state.
+            self.toolbar_refresh_button.config(state=tk.NORMAL if is_connected and not self._is_ui_refresh_in_progress and not self.is_long_operation_active else tk.DISABLED)
+        
+        if hasattr(self, 'toolbar_download_button'):
+            if self.is_long_operation_active and self.active_operation_name == "Download Queue":
+                self.toolbar_download_button.config(
+                    text="Cancel DL",
+                    command=self.request_cancel_operation,
+                    state=tk.NORMAL)
+            else:
+                self.toolbar_download_button.config(
+                    text="Download",
+                    command=self.download_selected_files_gui,
+                    state=tk.NORMAL if is_connected and has_selection and not self.is_long_operation_active and not self.is_audio_playing else tk.DISABLED)
+
+        if hasattr(self, 'toolbar_play_button'):
+            if self.is_audio_playing:
+                # State 1: Audio is currently playing
+                self.toolbar_play_button.config(
+                    text="Stop",
+                    command=self._stop_audio_playback,
+                    state=tk.NORMAL)
+            elif self.is_long_operation_active and self.active_operation_name == "Playback Preparation":
+                # State 2: Audio not playing, but we are preparing (e.g., downloading for playback)
+                self.toolbar_play_button.config(
+                    text="Cancel Prep", 
+                    command=self.request_cancel_operation,
+                    state=tk.NORMAL 
+                )
+            else:
+                # State 3: Default "Play" state (audio not playing, not preparing for playback)
+                self.toolbar_play_button.config(
+                    text="Play",
+                    command=self.play_selected_audio_gui,
+                    state=tk.NORMAL if can_play_selected and not self.is_long_operation_active else tk.DISABLED)
+
+        if hasattr(self, 'toolbar_delete_button'):
+            if self.is_long_operation_active and self.active_operation_name == "Deletion":
+                self.toolbar_delete_button.config(
+                    text="Cancel Del.",
+                    command=self.request_cancel_operation,
+                    state=tk.NORMAL)
+            else:
+                self.toolbar_delete_button.config(
+                    text="Delete",
+                    command=self.delete_selected_files_gui,
+                    state=tk.NORMAL if is_connected and has_selection and not self.is_long_operation_active and not self.is_audio_playing else tk.DISABLED)
+        
+        if hasattr(self, 'toolbar_settings_button'):
+            self.toolbar_settings_button.config(state=tk.NORMAL) # Settings always available
 
     def apply_theme(self, theme_name):
         theme_name_from_config_or_selection = theme_name
@@ -965,6 +1108,7 @@ class HiDockToolGUI:
 
     def create_widgets(self):
         self._create_menubar() 
+        self._create_toolbar() # ADDED: Create toolbar here
         self._create_status_bar() 
 
         main_content_frame = ttk.Frame(self.master, padding="5")
@@ -978,6 +1122,24 @@ class HiDockToolGUI:
 
         columns = ("name", "size", "duration", "date", "time", "status")
         self.file_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
+
+        # Apply saved column display order
+        if self.treeview_columns_display_order_str:
+            loaded_column_order = self.treeview_columns_display_order_str.split(',')
+            # Validate against actual columns to prevent errors if config is stale
+            valid_loaded_order = [c for c in loaded_column_order if c in columns]
+            if len(valid_loaded_order) == len(columns) and set(valid_loaded_order) == set(columns):
+                try:
+                    self.file_tree["displaycolumns"] = valid_loaded_order
+                    logger.info("GUI", "create_widgets", f"Applied saved column order: {valid_loaded_order}")
+                except tk.TclError as e:
+                    logger.warning("GUI", "create_widgets", f"Failed to apply saved column order '{valid_loaded_order}': {e}. Using default.")
+                    self.file_tree["displaycolumns"] = columns # Fallback to default
+            else:
+                logger.warning("GUI", "create_widgets", "Saved column order mismatch or invalid. Using default.")
+                self.file_tree["displaycolumns"] = columns # Fallback
+        else: # No saved order, use default
+             self.file_tree["displaycolumns"] = columns
         
         for col, text in self.original_tree_headings.items():
             is_numeric = col in ["size", "duration"]
@@ -1035,7 +1197,11 @@ class HiDockToolGUI:
         self.device_tools_frame = ttk.LabelFrame(self.optional_sections_pane, text="🛠️ Device Tools", padding="5")
         ttk.Label(self.device_tools_frame, text="Device tools (Format, Sync Time) are now in the 'Device' menu.").pack(padx=5, pady=5)
 
-        self._update_menu_states() 
+        self._update_menu_states() # This will now also update toolbar button states
+        # If backend init failed earlier, explicitly disable connect button again, as _update_menu_states might re-enable it
+        # This is now handled within _update_menu_states and the __init__ for the toolbar button
+        if not self.backend_initialized_successfully and hasattr(self, 'toolbar_connect_button'):
+            self.toolbar_connect_button.config(state=tk.DISABLED)
 
     def _update_optional_panes_visibility(self):
         if not hasattr(self, 'optional_sections_pane') or not self.optional_sections_pane.winfo_exists():
@@ -1406,6 +1572,55 @@ class HiDockToolGUI:
         settings_win.geometry(f"{final_width}x{final_height}")
         settings_win.minsize(final_width, final_height)
     
+    def _apply_saved_sort_state_to_tree_and_ui(self, files_data_list):
+        """
+        Applies the loaded sort state (if any) to the files_data_list and
+        updates the Treeview column headers to show the sort indicator.
+        This should be called BEFORE data is inserted into the tree for the first time
+        or after a full refresh if restoring saved sort.
+        Returns the sorted files_data_list.
+        """
+        if self.saved_treeview_sort_column and self.saved_treeview_sort_column in self.original_tree_headings:
+            logger.info("GUI", "_apply_saved_sort_state", f"Applying saved sort: Col='{self.saved_treeview_sort_column}', Reverse={self.saved_treeview_sort_reverse}")
+            # Set the active sort parameters for the GUI state
+            self.treeview_sort_column = self.saved_treeview_sort_column
+            self.treeview_sort_reverse = self.saved_treeview_sort_reverse
+            
+            # Sort the data directly
+            files_data_list = self._sort_files_data(
+                files_data_list, 
+                self.treeview_sort_column, 
+                self.treeview_sort_reverse
+            )
+            
+            # Update treeview headings in the main thread
+            # Ensure this runs after the treeview widget is fully available.
+            self.master.after(0, self._update_treeview_sort_indicator_ui_only)
+            
+            # Clear the saved state after applying it once, so subsequent user clicks behave normally
+            self.saved_treeview_sort_column = None 
+        return files_data_list
+
+    def _update_treeview_sort_indicator_ui_only(self):
+        """Updates only the Treeview column header texts with sort arrows."""
+        if not hasattr(self, 'file_tree') or not self.file_tree.winfo_exists():
+            return
+        if not self.treeview_sort_column: # No active sort column
+            # Clear all arrows if needed
+            for col_id, original_text in self.original_tree_headings.items():
+                self.file_tree.heading(col_id, text=original_text)
+            return
+
+        for col_id, original_text in self.original_tree_headings.items():
+            arrow = ""
+            if col_id == self.treeview_sort_column:
+                arrow = " ▼" if self.treeview_sort_reverse else " ▲"
+            try:
+                if self.file_tree.winfo_exists(): # Check if widget still exists
+                    self.file_tree.heading(col_id, text=original_text + arrow)
+            except tk.TclError as e:
+                logger.warning("GUI", "_update_treeview_sort_indicator", f"Error updating heading for {col_id}: {e}")
+
     def _select_download_dir_for_settings_dialog(self, label_widget, dialog_dir_tracker, change_tracker, apply_btn, cancel_btn):
         selected_dir = filedialog.askdirectory(initialdir=dialog_dir_tracker[0], title="Select Download Directory")
         if selected_dir and selected_dir != dialog_dir_tracker[0]:
@@ -1560,18 +1775,6 @@ class HiDockToolGUI:
             if self.optional_sections_pane.winfo_ismapped():
                 self.optional_sections_pane.pack_forget()
 
-    def toggle_logs(self):
-        # The variable self.logs_visible_var is already updated by the checkbutton itself.
-        # We just need to sync self.logs_visible (if still used elsewhere) and update visibility.
-        self.logs_visible = self.logs_visible_var.get() 
-        self._update_optional_panes_visibility()
-
-
-    def toggle_device_tools(self):
-        self.device_tools_visible = self.device_tools_visible_var.get() 
-        self._update_optional_panes_visibility()
-
-
     def clear_log_gui(self):
         if self.log_text_area.winfo_exists():
             self.log_text_area.config(state='normal'); self.log_text_area.delete(1.0, tk.END); self.log_text_area.config(state='disabled')
@@ -1692,10 +1895,11 @@ class HiDockToolGUI:
         if not self.backend_initialized_successfully: logger.warning("GUI", "refresh_file_list_gui", "Backend not init."); return
         if not self.dock.is_connected(): messagebox.showerror("Error", "Not connected."); self._update_menu_states(); return
         if self._is_ui_refresh_in_progress: logger.debug("GUI", "refresh_file_list_gui", "Refresh in progress."); return
+        if self.is_long_operation_active : logger.debug("GUI", "refresh_file_list_gui", "Long operation active, refresh deferred."); return
             
         self._is_ui_refresh_in_progress = True
         self.update_status_bar(progress_text="Fetching file list...")
-        self._update_menu_states() # Disable refresh menu item
+        self._update_menu_states() # Disable refresh menu item and toolbar button
         threading.Thread(target=self._refresh_file_list_thread, daemon=True).start()
 
     def _refresh_file_list_thread(self):
@@ -1717,9 +1921,17 @@ class HiDockToolGUI:
                 all_files_to_display.insert(0, {"name": recording_info['name'], "length": 0, "duration": "Recording...", "createDate": "In Progress", "createTime": "", "time": datetime.now(), "is_recording": True})
 
             if all_files_to_display:
-                if self.treeview_sort_column:
+                # Apply saved sort state ONCE after loading/full refresh if available
+                if self.saved_treeview_sort_column and self.saved_treeview_sort_column in self.original_tree_headings:
+                    all_files_to_display = self._apply_saved_sort_state_to_tree_and_ui(all_files_to_display)
+                    # _apply_saved_sort_state_to_tree_and_ui will set self.treeview_sort_column
+                    # and self.treeview_sort_reverse, and also clear self.saved_treeview_sort_column
+                elif self.treeview_sort_column: # Apply current in-session sort if no saved sort was pending
                     all_files_to_display = self._sort_files_data(all_files_to_display, self.treeview_sort_column, self.treeview_sort_reverse)
-                
+                    # Ensure UI indicator is correct for in-session sort too
+                    self.master.after(0, self._update_treeview_sort_indicator_ui_only)
+
+
                 for f_info in all_files_to_display:
                     status_text, tags = f_info.get('gui_status'), f_info.get('gui_tags')
                     if status_text is None:
@@ -1828,22 +2040,42 @@ class HiDockToolGUI:
             return val if val is not None else '' # Fallback
         return sorted(files_data, key=get_sort_key, reverse=reverse_order)
 
-    def sort_treeview_column(self, column_name_map_key, is_numeric_string_unused): # is_numeric_string no longer needed
-        column_data_key = column_name_map_key # Direct mapping now
-        if self.treeview_sort_column == column_data_key: self.treeview_sort_reverse = not self.treeview_sort_reverse
-        else: self.treeview_sort_column, self.treeview_sort_reverse = column_data_key, False
+    def sort_treeview_column(self, column_name_map_key, is_numeric_string_unused):
+        column_data_key = column_name_map_key
+        if self.treeview_sort_column == column_data_key:
+            self.treeview_sort_reverse = not self.treeview_sort_reverse
+        else:
+            self.treeview_sort_column = column_data_key
+            self.treeview_sort_reverse = False
         
-        for col_id, original_text in self.original_tree_headings.items():
-            arrow = " ▲" if not self.treeview_sort_reverse else " ▼"
-            self.file_tree.heading(col_id, text=original_text + (arrow if col_id == column_data_key else ""))
+        # Clear any "saved" sort state as user has now actively clicked a column
+        self.saved_treeview_sort_column = None
+        self.saved_treeview_sort_reverse = False
 
-        self.displayed_files_details = self._sort_files_data(self.displayed_files_details, self.treeview_sort_column, self.treeview_sort_reverse)
-        for item in self.file_tree.get_children(): self.file_tree.delete(item)
-        for f_info in self.displayed_files_details:
-            status, tags = f_info.get('gui_status',"On Device"), f_info.get('gui_tags',())
-            vals = (f_info['name'], "-", status, f_info.get('createDate',''), f_info.get('createTime',''), status) if f_info.get("is_recording") \
-                   else (f_info['name'], f"{f_info['length']/1024:.2f}", f"{f_info['duration']:.2f}", f_info.get('createDate',''), f_info.get('createTime',''), status)
-            self.file_tree.insert("", tk.END, values=vals, iid=f_info['name'], tags=tags)
+        self._update_treeview_sort_indicator_ui_only()
+        
+        self.displayed_files_details = self._sort_files_data(
+            self.displayed_files_details, 
+            self.treeview_sort_column, 
+            self.treeview_sort_reverse
+        )
+        
+        if hasattr(self, 'file_tree') and self.file_tree.winfo_exists():
+            # Store selection before clearing (optional, for better UX)
+            # current_selection_iids = self.file_tree.selection()
+
+            for item in self.file_tree.get_children():
+                self.file_tree.delete(item)
+            for f_info in self.displayed_files_details:
+                status, tags = f_info.get('gui_status',"On Device"), f_info.get('gui_tags',())
+                vals = (f_info['name'], "-", status, f_info.get('createDate',''), f_info.get('createTime',''), status) if f_info.get("is_recording") \
+                    else (f_info['name'], f"{f_info['length']/1024:.2f}", f"{f_info['duration']:.2f}", f_info.get('createDate',''), f_info.get('createTime',''), status)
+                self.file_tree.insert("", tk.END, values=vals, iid=f_info['name'], tags=tags)
+            
+            # Restore selection (optional)
+            # if current_selection_iids:
+            #     self.file_tree.selection_set(current_selection_iids)
+        
         self.on_file_selection_change(None)
 
     def start_recording_status_check(self):
@@ -1894,14 +2126,15 @@ class HiDockToolGUI:
     def _check_auto_file_refresh_periodically(self):
         try:
             if not self.dock.is_connected() or not self.auto_refresh_files_var.get(): self.stop_auto_file_refresh_periodic_check(); return
-            if self.is_long_operation_active: return
+            if self.is_long_operation_active: return # Don't refresh if something like a download is happening
             self.refresh_file_list_gui()
         except Exception as e: logger.error("GUI", "_check_auto_refresh", f"Unhandled: {e}\n{traceback.format_exc()}")
         finally:
-            if self._auto_file_refresh_timer_id is not None:
+            if self._auto_file_refresh_timer_id is not None: # Check if it was cancelled by stop_auto_file_refresh_periodic_check
                 interval_ms = self.auto_refresh_interval_s_var.get() * 1000
                 if interval_ms <= 0: self.stop_auto_file_refresh_periodic_check()
                 else: self._auto_file_refresh_timer_id = self.master.after(interval_ms, self._check_auto_file_refresh_periodically)
+
 
     def _reset_download_dir_for_settings(self, label_widget, dialog_dir_tracker, change_tracker, apply_btn, cancel_btn):
         default_dir = os.getcwd()
@@ -1918,10 +2151,12 @@ class HiDockToolGUI:
         if active:
             self.update_status_bar(progress_text=f"{operation_name} in progress...")
             self.cancel_operation_event = threading.Event()
+            self.active_operation_name = operation_name # Store the current operation type
         else:
             self.update_status_bar(progress_text=f"{operation_name} finished." if operation_name else "Ready.")
             self.cancel_operation_event = None
-        self._update_menu_states() 
+            self.active_operation_name = None # Clear the operation type
+        self._update_menu_states() # This will also update toolbar buttons
         self.on_file_selection_change(None) 
 
     def play_selected_audio_gui(self):
@@ -1974,7 +2209,7 @@ class HiDockToolGUI:
             self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Playback Prep)", ('size_mismatch',))
         finally:
             self.master.after(0, self._set_long_operation_active_state, False, "Playback Preparation")
-            self.master.after(0, self.start_auto_file_refresh_periodic_check)
+            self.master.after(0, self.start_auto_file_refresh_periodic_check) # Resume auto-refresh if it was paused
 
     def _start_playback_local_file(self, filepath, original_file_info):
         try:
@@ -1999,7 +2234,12 @@ class HiDockToolGUI:
             self._update_menu_states()
 
     def _create_playback_controls_frame(self):
-        if hasattr(self, 'playback_controls_frame') and self.playback_controls_frame.winfo_exists(): self.playback_controls_frame.destroy()
+        # Check if the attribute exists and is a valid widget that might exist
+        if hasattr(self, 'playback_controls_frame') and \
+           self.playback_controls_frame is not None and \
+           self.playback_controls_frame.winfo_exists():
+            self.playback_controls_frame.destroy()
+        # Now, create the new frame
         self.playback_controls_frame = ttk.Frame(self.master, padding="5")
         self.current_time_label = ttk.Label(self.playback_controls_frame, text="00:00"); self.current_time_label.pack(side=tk.LEFT, padx=5)
         self.playback_slider = ttk.Scale(self.playback_controls_frame, from_=0, to=100, orient=tk.HORIZONTAL, length=300, command=self._on_slider_value_changed_by_command)
@@ -2041,7 +2281,7 @@ class HiDockToolGUI:
     def on_file_selection_change(self, event=None):
         try:
             self.update_all_status_info() # Update file counts in status bar
-            self._update_menu_states()   # Update menu item states based on selection
+            self._update_menu_states()   # Update menu item states and toolbar based on selection
         except Exception as e: logger.error("GUI", "on_file_selection_change", f"Unhandled: {e}\n{traceback.format_exc()}")
 
     def _on_delete_key_press(self, event):
@@ -2115,7 +2355,7 @@ class HiDockToolGUI:
         final_msg = f"Batch: {completed_count}/{total_files} completed in {duration:.2f}s." if not operation_aborted else f"Download queue {'cancelled' if self.cancel_operation_event and self.cancel_operation_event.is_set() else 'aborted'} after {duration:.2f}s."
         self.master.after(0, lambda: self.update_status_bar(progress_text=final_msg))
         self.master.after(0, self._set_long_operation_active_state, False, "Download Queue")
-        self.master.after(0, self.start_auto_file_refresh_periodic_check)
+        self.master.after(0, self.start_auto_file_refresh_periodic_check) # Resume auto-refresh
         self.master.after(0, lambda: self.status_file_progress_bar.config(value=0) if hasattr(self, 'status_file_progress_bar') and self.status_file_progress_bar.winfo_exists() else None)
 
 
@@ -2245,12 +2485,68 @@ class HiDockToolGUI:
         if pygame and pygame.mixer.get_init(): pygame.mixer.quit()
         
         # Save config
-        for key in ["autoconnect", "log_level", "selected_vid", "selected_pid", "target_interface", 
-                    "recording_check_interval_s", "default_command_timeout_ms", "file_stream_timeout_s",
-                    "auto_refresh_files", "auto_refresh_interval_s", "quit_without_prompt_if_connected",
-                    "theme", "suppress_console_output"]:
-            if hasattr(self, f"{key}_var"): self.config[key] = getattr(self, f"{key}_var").get()
+        # Save operational settings
+        operational_keys = [
+            "autoconnect", "log_level", "selected_vid", "selected_pid", "target_interface", 
+            "recording_check_interval_s", "default_command_timeout_ms", "file_stream_timeout_s",
+            "auto_refresh_files", "auto_refresh_interval_s", "quit_without_prompt_if_connected",
+            "theme", "suppress_console_output"
+        ]
+        for key in operational_keys:
+            if hasattr(self, f"{key}_var"): 
+                self.config[key] = getattr(self, f"{key}_var").get()
+        
         self.config["download_directory"] = self.download_directory
+
+        # --- Save additional persistent UI settings ---
+        if hasattr(self, 'file_tree') and self.file_tree.winfo_exists():
+            try:
+                current_display_order = list(self.file_tree["displaycolumns"])
+                # #all is the default when not explicitly set, meaning it follows columns= order
+                # So, only save if it's not #all and differs from the initial default order
+                default_initial_order = self.config.get("treeview_columns_display_order", "name,size,duration,date,time,status").split(',')
+                if current_display_order and current_display_order[0] != "#all":
+                    self.config["treeview_columns_display_order"] = ",".join(current_display_order)
+                elif current_display_order[0] == "#all" and "treeview_columns_display_order" in self.config:
+                     # If current is #all (meaning it's default order based on `columns` tuple)
+                     # and a different order was previously saved, remove the saved one to revert to actual default
+                     if self.config["treeview_columns_display_order"] != ",".join(list(self.file_tree["columns"])):
+                         del self.config["treeview_columns_display_order"]
+                elif "treeview_columns_display_order" in self.config and current_display_order[0] == "#all":
+                     # If it became "#all" but was something else, remove to use default next time
+                     del self.config["treeview_columns_display_order"]
+
+            except tk.TclError:
+                logger.warning("GUI", "on_closing", "Could not retrieve treeview displaycolumns.")
+        
+        if hasattr(self, 'master') and self.master.winfo_exists():
+            try:
+                self.config["window_geometry"] = self.master.geometry()
+            except tk.TclError:
+                logger.warning("GUI", "on_closing", "Could not retrieve window geometry.")
+
+        if hasattr(self, 'logs_visible_var'):
+            self.config["logs_pane_visible"] = self.logs_visible_var.get()
+        if hasattr(self, 'device_tools_visible_var'): # Assuming this var exists as per your __init__ setup
+            self.config["device_tools_pane_visible"] = self.device_tools_visible_var.get()
+        
+        if hasattr(self, 'gui_log_filter_level_var'):
+            self.config["gui_log_filter_level"] = self.gui_log_filter_level_var.get()
+
+        if hasattr(self, 'loop_playback_var'):
+            self.config["loop_playback"] = self.loop_playback_var.get()
+        if hasattr(self, 'volume_var'):
+            self.config["playback_volume"] = self.volume_var.get()
+
+        # Save current sort state (not the "saved_..." ones which are for loading)
+        if hasattr(self, 'treeview_sort_column') and self.treeview_sort_column:
+            self.config["treeview_sort_col_id"] = self.treeview_sort_column
+            self.config["treeview_sort_descending"] = self.treeview_sort_reverse
+        elif "treeview_sort_col_id" in self.config: # Clear if no sort active
+            del self.config["treeview_sort_col_id"]
+            if "treeview_sort_descending" in self.config:
+                del self.config["treeview_sort_descending"]
+
         save_config(self.config)
 
         if self.dock and self.dock.is_connected():
