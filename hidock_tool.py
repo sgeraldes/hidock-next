@@ -53,7 +53,8 @@ def load_config():
         with open(CONFIG_FILE, 'r') as f:
             return json.load(f)
     except FileNotFoundError:
-        logger.info("Config", "load_config", f"{CONFIG_FILE} not found, using defaults.")
+        # Logger might not be fully initialized yet, so use print for this specific case
+        print(f"[INFO] Config::load_config - {CONFIG_FILE} not found, using defaults.")
         return {
             "autoconnect": False,
             "download_directory": os.getcwd(),
@@ -68,80 +69,67 @@ def load_config():
             "auto_refresh_interval_s": 30,
             "quit_without_prompt_if_connected": False, # Default to prompt
             "theme": "default",
-            "suppress_console_output": False # New setting
+            "suppress_console_output": False
         }
     except json.JSONDecodeError:
-        logger.error("Config", "load_config", f"Error decoding {CONFIG_FILE}. Using defaults.")
-        return {
-            "autoconnect": False,
-            "download_directory": os.getcwd(),
-            "log_level": "INFO",
-            "selected_vid": DEFAULT_VENDOR_ID,
-            "selected_pid": DEFAULT_PRODUCT_ID,
-            "target_interface": 0,
-            "recording_check_interval_s": 3,
-            "default_command_timeout_ms": 5000,
-            "file_stream_timeout_s": 180,
-            "auto_refresh_files": False,
-            "auto_refresh_interval_s": 30,
-            "quit_without_prompt_if_connected": False, # Default to prompt
-            "theme": "default",
-            "suppress_console_output": False # New setting
+        print(f"[ERROR] Config::load_config - Error decoding {CONFIG_FILE}. Using defaults.")
+        return { # Return defaults on decode error as well
+            "autoconnect": False, "download_directory": os.getcwd(), "log_level": "INFO",
+            "selected_vid": DEFAULT_VENDOR_ID, "selected_pid": DEFAULT_PRODUCT_ID,
+            "target_interface": 0, "recording_check_interval_s": 3,
+            "default_command_timeout_ms": 5000, "file_stream_timeout_s": 180,
+            "auto_refresh_files": False, "auto_refresh_interval_s": 30,
+            "quit_without_prompt_if_connected": False, "theme": "default",
+            "suppress_console_output": False
         }
 
-def save_config(config_data):
-    try:
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(config_data, f, indent=4)
-        logger.info("Config", "save_config", f"Configuration saved to {CONFIG_FILE}")
-    except IOError:
-        logger.error("Config", "save_config", f"Error writing to {CONFIG_FILE}.")
 class Logger:
     LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
     def __init__(self, initial_config=None): # Accept initial config
         self.gui_log_callback = None
         self.config = initial_config if initial_config else {} # Store config
         self.set_level(self.config.get("log_level", "INFO"))
-        # self.suppress_console_output = self.config.get("suppress_console_output", False) # Get initial state
 
     def set_gui_log_callback(self, callback):
         self.gui_log_callback = callback
 
     def set_level(self, level_name):
         self.level = self.LEVELS.get(level_name.upper(), self.LEVELS["INFO"])
-        # Log this change using a direct print or a fixed high-level log if logger itself is being configured.
         print(f"[INFO] Logger::set_level - Log level set to {level_name.upper()}")
 
     def update_config(self, new_config_dict):
         self.config.update(new_config_dict)
-        # self.suppress_console_output = self.config.get("suppress_console_output", False)
 
     def _log(self, level_str, module, procedure, message):
         msg_level_val = self.LEVELS.get(level_str.upper())
-        if msg_level_val is None or msg_level_val < self.level: # Check against current log level
+        if msg_level_val is None or msg_level_val < self.level:
             return
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        # Ensure module and procedure are strings, even if None or other types are passed.
         log_message = f"[{timestamp}][{level_str.upper()}] {str(module)}::{str(procedure)} - {message}"
 
-        if not self.config.get("suppress_console_output", False): # Check the setting
+        if not self.config.get("suppress_console_output", False):
             print(log_message)
-        if self.gui_log_callback: # Pass level_str to the callback
+        if self.gui_log_callback:
             self.gui_log_callback(log_message + "\n", level_str.upper())
-    def info(self, module, procedure, message):
-        self._log("info", module, procedure, message)
 
-    def debug(self, module, procedure, message):
-        self._log("debug", module, procedure, message)
+    def info(self, module, procedure, message): self._log("info", module, procedure, message)
+    def debug(self, module, procedure, message): self._log("debug", module, procedure, message)
+    def error(self, module, procedure, message): self._log("error", module, procedure, message)
+    def warning(self, module, procedure, message): self._log("warning", module, procedure, message)
 
-    def error(self, module, procedure, message):
-        self._log("error", module, procedure, message)
+logger = Logger(initial_config=load_config())
 
-    def warning(self, module, procedure, message):
-        self._log("warning", module, procedure, message)
+def save_config(config_data): # Ensure save_config uses the logger if available
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config_data, f, indent=4)
+        logger.info("Config", "save_config", f"Configuration saved to {CONFIG_FILE}")
+    except IOError:
+        logger.error("Config", "save_config", f"Error writing to {CONFIG_FILE}.")
+    except Exception as e:
+        logger.error("Config", "save_config", f"Unexpected error saving config: {e}")
 
-logger = Logger(initial_config=load_config()) # Pass the whole config
 
 # --- HiDock Communication Class ---
 class HiDockJensen:
@@ -187,29 +175,26 @@ class HiDockJensen:
         self.device = self._find_device(vid, pid)
         self.claimed_interface_number = -1 # Reset
 
-        # On Windows, detaching kernel driver is usually not needed if using WinUSB via Zadig,
-        # or not possible if using default drivers that PyUSB can't override without Zadig.
-        # This call is more relevant for Linux/macOS.
         try:
             if self.device.is_kernel_driver_active(target_interface_number):
                 logger.info("Jensen", "connect", f"Kernel driver is active on Interface {target_interface_number}. Attempting to detach.")
                 self.device.detach_kernel_driver(target_interface_number)
                 logger.info("Jensen", "connect", f"Detached kernel driver from Interface {target_interface_number}.")
-                self.detached_kernel_driver_on_interface = target_interface_number # Store if successful
+                self.detached_kernel_driver_on_interface = target_interface_number
         except usb.core.USBError as e:
             logger.info("Jensen", "connect", f"Could not detach kernel driver from Interface {target_interface_number}: {e} (This is often ignorable on Windows or if no driver was attached).")
-        except NotImplementedError: # pragma: no cover
+        except NotImplementedError:
             logger.info("Jensen", "connect", "Kernel driver detach not implemented/needed on this platform (e.g., Windows).")
 
         try:
             self.device.set_configuration()
             logger.info("Jensen", "connect", "Device configuration set.")
         except usb.core.USBError as e:
-            if e.errno == 16: # Resource busy (LIBUSB_ERROR_BUSY)
+            if e.errno == 16: 
                 logger.info("Jensen", "connect", "Configuration already set or interface busy (this is often OK).")
             else:
                 logger.error("Jensen", "connect", f"Could not set configuration: {e} (errno: {e.errno})")
-                self.disconnect() # Ensure cleanup
+                self.disconnect() 
                 return False
 
         cfg = self.device.get_active_configuration()
@@ -217,11 +202,11 @@ class HiDockJensen:
         try:
             intf = usb.util.find_descriptor(cfg, bInterfaceNumber=target_interface_number)
             if intf is None:
-                raise usb.core.USBError(f"Interface {target_interface_number} found but is None (should not happen if find_descriptor succeeded).")
+                raise usb.core.USBError(f"Interface {target_interface_number} found but is None.")
             logger.info("Jensen", "connect", f"Found Interface {intf.bInterfaceNumber}, Alternate Setting {intf.bAlternateSetting}")
         except usb.core.USBError as e:
             logger.error("Jensen", "connect", f"Could not find Interface {target_interface_number}: {e}")
-            self.disconnect() # Ensure cleanup
+            self.disconnect()
             return False
 
         try:
@@ -230,9 +215,9 @@ class HiDockJensen:
             logger.info("Jensen", "connect", f"Claimed Interface {self.claimed_interface_number}")
         except usb.core.USBError as e:
             logger.error("Jensen", "connect", f"Could not claim Interface {intf.bInterfaceNumber}: {e} (errno: {e.errno})")
-            if e.errno == 16: # LIBUSB_ERROR_BUSY
-                logger.error("Jensen", "connect", "Interface busy. Another program (e.g. browser WebUSB) or driver might be using it. On Windows, Zadig might be needed for this interface.")
-            self.disconnect() # Ensure cleanup
+            if e.errno == 16: 
+                logger.error("Jensen", "connect", "Interface busy. Another program or driver might be using it.")
+            self.disconnect() 
             return False
 
         self.ep_out = usb.util.find_descriptor(
@@ -243,39 +228,33 @@ class HiDockJensen:
         self.ep_in = usb.util.find_descriptor(
             intf,
             custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN and \
-                                   (e.bEndpointAddress & 0x0F) == (EP_IN_ADDR & 0x7F) # Mask out direction bit for IN
+                                   (e.bEndpointAddress & 0x0F) == (EP_IN_ADDR & 0x7F) 
         )
 
         if self.ep_out is None or self.ep_in is None:
             logger.error("Jensen", "connect", f"Could not find required IN/OUT endpoints ({hex(EP_OUT_ADDR)}/{hex(EP_IN_ADDR)}) on Interface {target_interface_number}.")
-            self.disconnect() # Ensure cleanup
+            self.disconnect()
             return False
 
         logger.info("Jensen", "connect", f"Using Interface {target_interface_number}. EP_OUT: {hex(self.ep_out.bEndpointAddress)}, EP_IN: {hex(self.ep_in.bEndpointAddress)}")
 
-        # Model determination
-        if self.device.idProduct == 0xAF0C: self.model = "hidock-h1"        # 45068 in jensen.js
-        elif self.device.idProduct == 0xAF0D: self.model = "hidock-h1e"     # 45069 in jensen.js
-        elif self.device.idProduct == 0xAF0E: self.model = "hidock-p1"      # 45070 in jensen.js
-        elif self.device.idProduct == pid : self.model = f"HiDock Device (PID: {hex(pid)})" # Use the connected PID
+        if self.device.idProduct == 0xAF0C: self.model = "hidock-h1"
+        elif self.device.idProduct == 0xAF0D: self.model = "hidock-h1e"
+        elif self.device.idProduct == 0xAF0E: self.model = "hidock-p1"
+        elif self.device.idProduct == pid : self.model = f"HiDock Device (PID: {hex(pid)})"
         else: self.model = f"unknown (PID: {hex(self.device.idProduct)})"
         logger.info("Jensen", "connect", f"Device model determined as: {self.model}")
-
+        
         self.is_connected_flag = True
         return True
 
     def disconnect(self):
-        with self._usb_lock: # Ensure disconnect operations are also serialized
-            if not self.is_connected_flag and not self.device: # Already disconnected or nothing to do
+        with self._usb_lock:
+            if not self.is_connected_flag and not self.device:
                 logger.info("Jensen", "disconnect", "Already disconnected or no device object.")
-                # Ensure all relevant flags are reset even if called multiple times
-                self.device = None
-                self.ep_out = None
-                self.ep_in = None
-                self.claimed_interface_number = -1
-                self.detached_kernel_driver_on_interface = -1
-                self.is_connected_flag = False
-                self.receive_buffer.clear()
+                self.device = None; self.ep_out = None; self.ep_in = None
+                self.claimed_interface_number = -1; self.detached_kernel_driver_on_interface = -1
+                self.is_connected_flag = False; self.receive_buffer.clear()
                 return
 
             logger.info("Jensen", "disconnect", "Disconnecting from device...")
@@ -284,31 +263,25 @@ class HiDockJensen:
                     try:
                         usb.util.release_interface(self.device, self.claimed_interface_number)
                         logger.info("Jensen", "disconnect", f"Released Interface {self.claimed_interface_number}.")
-                    except usb.core.USBError as e: # pragma: no cover
-                        logger.warning("Jensen", "disconnect", f"Could not release Interface {self.claimed_interface_number}: {e} (errno: {e.errno})")
-
+                    except usb.core.USBError as e:
+                        logger.warning("Jensen", "disconnect", f"Could not release Interface {self.claimed_interface_number}: {e}")
+                
                 if self.detached_kernel_driver_on_interface != -1:
                     try:
                         self.device.attach_kernel_driver(self.detached_kernel_driver_on_interface)
                         logger.info("Jensen", "disconnect", f"Re-attached kernel driver to Interface {self.detached_kernel_driver_on_interface}.")
-                    except Exception as e: # pragma: no cover
-                        logger.info("Jensen", "disconnect", f"Could not re-attach kernel driver to Interface {self.detached_kernel_driver_on_interface}: {e} (often ignorable).")
+                    except Exception as e:
+                        logger.info("Jensen", "disconnect", f"Could not re-attach kernel driver: {e} (often ignorable).")
 
                 usb.util.dispose_resources(self.device)
-            self.device = None
-            self.ep_out = None
-            self.ep_in = None
-            self.claimed_interface_number = -1
-            self.detached_kernel_driver_on_interface = -1
-            self.is_connected_flag = False
-            self.receive_buffer.clear() # Clear any pending receive data
-            self.device_info = {} # Clear cached device info
-            self.model = "unknown"
+            self.device = None; self.ep_out = None; self.ep_in = None
+            self.claimed_interface_number = -1; self.detached_kernel_driver_on_interface = -1
+            self.is_connected_flag = False; self.receive_buffer.clear()
+            self.device_info = {}; self.model = "unknown"
             logger.info("Jensen", "disconnect", "Disconnected and resources disposed.")
 
     def _build_packet(self, command_id, body_bytes=b''):
         self.sequence_id += 1
-        # Header: 0x12, 0x34, cmd_id (2B BE), seq_id (4B BE), body_len (4B BE)
         header = bytearray([0x12, 0x34])
         header.extend(struct.pack('>H', command_id))
         header.extend(struct.pack('>I', self.sequence_id))
@@ -317,204 +290,126 @@ class HiDockJensen:
 
     def _send_command(self, command_id, body_bytes=b'', timeout_ms=5000):
         if not self.device or not self.ep_out:
-            # Log and raise, or handle disconnect if appropriate
-            logger.error("Jensen", "_send_command", "Attempted to send command while not connected or ep_out missing.")
-            if self.is_connected(): self.disconnect() # Consider auto-disconnect
+            logger.error("Jensen", "_send_command", "Not connected or ep_out missing.")
+            if self.is_connected(): self.disconnect()
             raise ConnectionError("Device not connected or output endpoint not found.")
-
+        
         packet = self._build_packet(command_id, body_bytes)
         logger.debug("Jensen", "_send_command", f"Sending CMD: {command_id}, Seq: {self.sequence_id}, Len: {len(body_bytes)}, Data: {packet.hex()[:64]}...")
         try:
-            bytes_sent = self.ep_out.write(packet, timeout=int(timeout_ms)) # Ensure timeout is int
+            bytes_sent = self.ep_out.write(packet, timeout=int(timeout_ms))
             if bytes_sent != len(packet):
-                logger.warning("Jensen", "_send_command", f"Bytes sent ({bytes_sent}) does not match packet length ({len(packet)}) for CMD {command_id}.")
+                logger.warning("Jensen", "_send_command", f"Sent {bytes_sent} != packet len {len(packet)} for CMD {command_id}.")
         except usb.core.USBError as e:
-            logger.error("Jensen", "_send_command", f"USB write error for CMD {command_id}: {e} (errno: {e.errno})")
-            if e.errno == 32: # LIBUSB_ERROR_PIPE / EPIPE (Stall)
-                try:
-                    self.device.clear_halt(self.ep_out.bEndpointAddress)
-                    logger.info("Jensen", "_send_command", "Cleared halt on EP_OUT")
-                except Exception as ce: # pragma: no cover
-                    logger.error("Jensen", "_send_command", f"Failed to clear halt: {ce}")
-            raise # Re-raise to be caught by _send_and_receive or higher
+            logger.error("Jensen", "_send_command", f"USB write error CMD {command_id}: {e}")
+            if e.errno == 32: # LIBUSB_ERROR_PIPE
+                try: self.device.clear_halt(self.ep_out.bEndpointAddress); logger.info("Jensen", "_send_command", "Cleared halt on EP_OUT")
+                except Exception as ce: logger.error("Jensen", "_send_command", f"Failed to clear halt: {ce}")
+            raise 
         return self.sequence_id
 
-    def _receive_response(self, expected_seq_id, timeout_ms=5000, streaming_cmd_id=None): # Added streaming_cmd_id
+    def _receive_response(self, expected_seq_id, timeout_ms=5000, streaming_cmd_id=None):
         if not self.device or not self.ep_in:
-            logger.error("Jensen", "_receive_response", "Attempted to receive response while not connected or ep_in missing.")
+            logger.error("Jensen", "_receive_response", "Not connected or ep_in missing.")
             if self.is_connected(): self.disconnect()
             raise ConnectionError("Device not connected or input endpoint not found.")
 
         start_time = time.time()
-        # The overall timeout for receiving a complete, valid response for the expected_seq_id
         overall_timeout_sec = timeout_ms / 1000.0
 
         while time.time() - start_time < overall_timeout_sec:
             try:
-                # Max packet size is usually 64 for Full Speed bulk, or 512 for High Speed.
-                # Reading a larger amount to reduce number of calls, if data is available.
-                # Use a short timeout for individual read attempts to remain responsive.
-                read_attempt_size = self.ep_in.wMaxPacketSize * 32 if self.ep_in.wMaxPacketSize else 512 * 32 # Further increased multiplier
-                # Individual read timeout should be small, e.g., 100ms, to allow loop to check overall_timeout_sec
-                data_chunk = self.device.read(self.ep_in.bEndpointAddress, read_attempt_size, timeout=100)
+                read_size = self.ep_in.wMaxPacketSize * 32 if self.ep_in.wMaxPacketSize else 2048 # Increased read size
+                data_chunk = self.device.read(self.ep_in.bEndpointAddress, read_size, timeout=100) # Short individual timeout
                 if data_chunk:
                     self.receive_buffer.extend(data_chunk)
-                    logger.debug("Jensen", "_receive_response", f"Rcvd chunk: {bytes(data_chunk).hex()[:64]}... Buf len: {len(self.receive_buffer)}")
-            except usb.core.USBTimeoutError:
-                # This is an expected timeout for a single read attempt if no data is immediately available.
-                # The outer loop will continue until the overall_timeout_sec is reached.
-                pass
+                    logger.debug("Jensen", "_receive_response", f"Rcvd chunk: {bytes(data_chunk).hex()[:32]}... Buf len: {len(self.receive_buffer)}")
+            except usb.core.USBTimeoutError: pass # Expected if no data
             except usb.core.USBError as e:
-                logger.error("Jensen", "_receive_response", f"USB read error: {e} (errno: {e.errno})")
-                if e.errno == 32: # LIBUSB_ERROR_PIPE / EPIPE (Stall)
-                    try:
-                        self.device.clear_halt(self.ep_in.bEndpointAddress)
-                        logger.info("Jensen", "_receive_response", "Cleared halt on EP_IN")
-                    except Exception as ce: # pragma: no cover
-                        logger.error("Jensen", "_receive_response", f"Failed to clear halt on EP_IN: {ce}")
-                # For other USB errors, it might be fatal for this attempt.
-                # Consider if self.disconnect() should be called here.
-                return None # Or raise
+                logger.error("Jensen", "_receive_response", f"USB read error: {e}")
+                if e.errno == 32: # LIBUSB_ERROR_PIPE
+                    try: self.device.clear_halt(self.ep_in.bEndpointAddress); logger.info("Jensen", "_receive_response", "Cleared halt on EP_IN")
+                    except Exception as ce: logger.error("Jensen", "_receive_response", f"Failed to clear halt on EP_IN: {ce}")
+                return None 
 
-            # Efficiently find the start of a valid packet (0x1234)
-            if len(self.receive_buffer) >= 2: # Need at least 2 bytes to check for sync
-                if not (self.receive_buffer[0] == 0x12 and self.receive_buffer[1] == 0x34):
-                    # Sync bytes not at the beginning, try to find them
-                    sync_marker = b'\x12\x34'
-                    try:
-                        offset = self.receive_buffer.find(sync_marker)
-                        if offset != -1:
-                            # Sync marker found
-                            if offset > 0:
-                                discarded_bytes = self.receive_buffer[:offset]
-                                logger.warning("Jensen", "_receive_response",
-                                               f"Discarded {offset} prefix bytes: {discarded_bytes.hex()[:64]}...")
-                                # Slice the buffer to start from the sync marker
-                                temp_buffer = self.receive_buffer[offset:]
-                                self.receive_buffer.clear()
-                                self.receive_buffer.extend(temp_buffer)
-                            # Now self.receive_buffer should start with sync_marker or be empty if marker was at the end
-                        # else: Sync marker not found in the current buffer.
-                        # The outer loop will continue to read more data if timeout hasn't occurred.
-                    except Exception as e_find: # Should not happen with bytearray.find
-                        logger.error("Jensen", "_receive_response", f"Error during sync marker find operation: {e_find}")
+            # Find sync marker if buffer is misaligned
+            if len(self.receive_buffer) >= 2 and not (self.receive_buffer[0] == 0x12 and self.receive_buffer[1] == 0x34):
+                sync_offset = self.receive_buffer.find(b'\x12\x34')
+                if sync_offset != -1:
+                    if sync_offset > 0: logger.warning("Jensen", "_receive_response", f"Discarded {sync_offset} prefix bytes: {self.receive_buffer[:sync_offset].hex()}")
+                    self.receive_buffer = self.receive_buffer[sync_offset:]
+                # else: marker not found yet, continue reading
 
-            # Try to parse a complete message from the buffer
-            while len(self.receive_buffer) >= 12: # Minimum header size (2 sync + 2 cmd + 4 seq + 4 len)
+            while len(self.receive_buffer) >= 12: # Min header size
                 if not (self.receive_buffer[0] == 0x12 and self.receive_buffer[1] == 0x34):
-                    # This should be rare if the pre-sync logic above is effective.
-                    # If hit, it means the buffer is still misaligned. Break to allow pre-sync on next iteration or more data.
-                    logger.error("Jensen", "_receive_response", f"Post-sync check: Invalid header sync bytes: {self.receive_buffer[:2].hex()}. Breaking inner parse loop.")
-                    break # Break from this inner while loop to re-evaluate buffer or get more data
+                    logger.error("Jensen", "_receive_response", f"Invalid header sync after find: {self.receive_buffer[:2].hex()}. Breaking parse.")
+                    # This indicates a persistent misalignment or corrupted data.
+                    # Clearing buffer might be too aggressive, but consider if this state is recoverable.
+                    # For now, break to allow more data or timeout.
+                    break 
 
                 header_prefix = self.receive_buffer[:12]
-                response_cmd_id = struct.unpack('>H', header_prefix[2:4])[0]
-                response_seq_id = struct.unpack('>I', header_prefix[4:8])[0]
-                body_len_from_header = struct.unpack('>I', header_prefix[8:12])[0]
-
-                # Implement checksum_len and body_len extraction as per jensen.js
+                response_cmd_id, response_seq_id, body_len_from_header = struct.unpack('>HII', header_prefix[2:])
                 checksum_len = (body_len_from_header >> 24) & 0xFF
-                body_len = body_len_from_header & 0x00FFFFFF # Mask for lower 3 bytes
-
-                total_msg_len = 12 + body_len + checksum_len # Header + actual body + checksum
+                body_len = body_len_from_header & 0x00FFFFFF
+                total_msg_len = 12 + body_len + checksum_len
 
                 if len(self.receive_buffer) >= total_msg_len:
                     msg_bytes_full = self.receive_buffer[:total_msg_len]
-                    self.receive_buffer = self.receive_buffer[total_msg_len:] # Consume the message
+                    self.receive_buffer = self.receive_buffer[total_msg_len:] 
 
-                    # Check sequence ID (and command ID if streaming)
-                    # For streaming, stream_file method handles more detailed logic.
-                    # This part primarily ensures we got the response for the command we sent.
-                    if response_seq_id == expected_seq_id: # Exact match for non-streaming or first packet of stream if seq matches
-                        logger.debug("Jensen", "_receive_response", f"RSP for CMD: {response_cmd_id}, Seq: {response_seq_id}, BodyLen: {body_len}, ChecksumLen: {checksum_len}, Body: {msg_bytes_full[12:12+body_len].hex()[:64]}...")
-                        return {"id": response_cmd_id, "sequence": response_seq_id, "body": msg_bytes_full[12:12+body_len]}
-                    elif streaming_cmd_id is not None and response_cmd_id == streaming_cmd_id:
-                        # For subsequent (or even first if seq_id differs) packets of a known streaming command
-                        logger.debug("Jensen", "_receive_response", f"Streaming RSP for CMD: {response_cmd_id}, Seq: {response_seq_id} (command's initial_seq_id: {expected_seq_id}), BodyLen: {body_len}, ChecksumLen: {checksum_len}, Body: {msg_bytes_full[12:12+body_len].hex()[:64]}...")
+                    if response_seq_id == expected_seq_id or \
+                       (streaming_cmd_id is not None and response_cmd_id == streaming_cmd_id):
+                        logger.debug("Jensen", "_receive_response", f"RSP for CMD: {response_cmd_id}, Seq: {response_seq_id}, BodyLen: {body_len}, Body: {msg_bytes_full[12:12+body_len].hex()[:64]}...")
                         return {"id": response_cmd_id, "sequence": response_seq_id, "body": msg_bytes_full[12:12+body_len]}
                     else:
-                        logger.warning("Jensen", "_receive_response", f"Seq ID mismatch or unexpected packet. Expected Seq: {expected_seq_id}, Got CMD: {response_cmd_id} Seq: {response_seq_id}, BodyLen: {body_len}, ChecksumLen: {checksum_len}. Discarding.")
-                        # The message is consumed, loop continues to check buffer or outer timeout.
-                else:
-                    break # Not enough data in buffer for this full message yet, wait for more data
+                        logger.warning("Jensen", "_receive_response", f"Seq/CMD mismatch. Expected Seq: {expected_seq_id}, Got CMD: {response_cmd_id} Seq: {response_seq_id}. Discarding.")
+                else: break # Not enough data for full message
 
-            # Check overall timeout again before next read attempt or if buffer was processed
-            if time.time() - start_time >= overall_timeout_sec:
-                break
+            if time.time() - start_time >= overall_timeout_sec: break
 
-        logger.warning("Jensen", "_receive_response", f"Timeout waiting for response to seq_id {expected_seq_id}. Buffer: {self.receive_buffer.hex()}")
+        logger.warning("Jensen", "_receive_response", f"Timeout for seq_id {expected_seq_id}. Buffer: {self.receive_buffer.hex()}")
         return None
 
     def _send_and_receive(self, command_id, body_bytes=b'', timeout_ms=5000):
-        with self._usb_lock: # Acquire lock for the entire send-receive operation
+        with self._usb_lock:
             try:
-                # Clear buffer before new non-streaming command to avoid processing stale data
-                if command_id != CMD_TRANSFER_FILE: # Assuming CMD_TRANSFER_FILE is the only streaming one for now
-                    self.receive_buffer.clear()
-
+                if command_id != CMD_TRANSFER_FILE: self.receive_buffer.clear()
                 seq_id = self._send_command(command_id, body_bytes, timeout_ms)
                 return self._receive_response(seq_id, int(timeout_ms), streaming_cmd_id=CMD_TRANSFER_FILE if command_id == CMD_TRANSFER_FILE else None)
             except usb.core.USBError as e:
-                logger.error("Jensen", "_send_and_receive", f"USBError in send/receive for CMD {command_id}: {e}")
-                if self.is_connected():
-                    self.disconnect() # Auto-disconnect on USB error during a locked operation
+                logger.error("Jensen", "_send_and_receive", f"USBError CMD {command_id}: {e}")
+                if self.is_connected(): self.disconnect()
                 raise
-            # Lock is released automatically when exiting 'with' block
-
-    # --- Device Interaction Methods (Ported from jensen.js) ---
+            except ConnectionError as e: # Catch ConnectionError from _send_command or _receive_response
+                logger.error("Jensen", "_send_and_receive", f"ConnectionError CMD {command_id}: {e}")
+                # self.disconnect() would have been called internally if it was due to missing device/ep
+                raise # Re-raise for higher level handling if needed
 
     def get_device_info(self, timeout_s=5):
         response = self._send_and_receive(CMD_GET_DEVICE_INFO, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_GET_DEVICE_INFO:
             body = response["body"]
-            logger.debug("Jensen", "get_device_info", f"Received body for device info (len {len(body)}): {body.hex()}")
-
-            # Expect at least 4 bytes for the version. SN is variable.
             if len(body) >= 4:
                 version_code_bytes = body[0:4]
-                # JS logic: r |= a << 8 * (4 - h - 1) -> Big Endian integer
                 version_number_raw = struct.unpack('>I', version_code_bytes)[0]
-
-                # JS logic for string: n.push(String(a)) for h > 0
-                # This means byte 0 is part of the number, but not the string representation.
-                # Bytes 1, 2, 3 form the string parts.
-                version_code_str_parts = [str(b) for b in version_code_bytes[1:]]
-                version_code_str = ".".join(version_code_str_parts)
-
-                logger.debug("Jensen", "get_device_info", f"Raw Version Bytes: {version_code_bytes.hex()}, Int: {version_number_raw}, String Parts: {version_code_str_parts}")
-
-                serial_number_str = "N/A" # Default if SN part is missing or empty
-                if len(body) > 4: # If there are bytes beyond the version
-                    # The slice body[4:20] will correctly handle cases where len(body) < 20.
-                    # e.g., if len(body) is 17, body[4:20] becomes body[4:17].
+                version_code_str = ".".join(map(str, version_code_bytes[1:]))
+                serial_number_str = "N/A"
+                if len(body) > 4:
                     serial_number_bytes = body[4:20]
                     try:
-                        printable_sn_bytes = bytearray()
-                        for b_val in serial_number_bytes: # This loop iterates over the actual available SN bytes
-                            if 32 <= b_val <= 126: # Printable ASCII
-                                printable_sn_bytes.append(b_val)
-                            elif b_val == 0: # Stop at first null
-                                break
-                            # else: skip non-printable if not null
-
+                        printable_sn_bytes = bytearray(b for b in serial_number_bytes if 32 <= b <= 126 or b == 0)
+                        null_idx = printable_sn_bytes.find(0)
+                        if null_idx != -1: printable_sn_bytes = printable_sn_bytes[:null_idx]
                         serial_number_str = printable_sn_bytes.decode('ascii', errors='ignore').strip()
-                        if not serial_number_str: # If all were filtered or only nulls/non-printable
-                            serial_number_str = serial_number_bytes.hex() # Fallback to hex
-                    except UnicodeDecodeError: # pragma: no cover
-                        serial_number_str = serial_number_bytes.hex() # Fallback to hex
-                # else: SN remains "N/A" if len(body) <= 4
-
-                self.device_info = {
-                    "versionCode": version_code_str,       # String like "6.2.5"
-                    "versionNumber": version_number_raw,   # Integer representation
-                    "sn": serial_number_str
-                }
+                        if not serial_number_str: serial_number_str = serial_number_bytes.hex()
+                    except UnicodeDecodeError: serial_number_str = serial_number_bytes.hex()
+                
+                self.device_info = {"versionCode": version_code_str, "versionNumber": version_number_raw, "sn": serial_number_str}
                 logger.info("Jensen", "get_device_info", f"Parsed Device Info: {self.device_info}")
                 return self.device_info
-            else:
-                logger.error("Jensen", "get_device_info", f"Received body too short for version info (len {len(body)}, expected at least 4).")
-
-        logger.error("Jensen", "get_device_info", "Failed to get device info or invalid response ID.")
+            else: logger.error("Jensen", "get_device_info", "Body too short for version.")
+        logger.error("Jensen", "get_device_info", "Failed to get device info or invalid response.")
         return None
 
     def get_file_count(self, timeout_s=5):
@@ -526,468 +421,258 @@ class HiDockJensen:
                 count = struct.unpack('>I', body[:4])[0]
                 logger.info("Jensen", "get_file_count", f"File count: {count}")
                 return {"count": count}
-        logger.error("Jensen", "get_file_count", "Failed to get file count or invalid response.")
+        logger.error("Jensen", "get_file_count", "Failed to get file count.")
         return None
 
     def list_files(self, timeout_s=20):
         if not self.device_info.get("versionNumber"):
-            logger.info("Jensen", "list_files", "Device info not available, fetching...")
             if not self.get_device_info():
-                logger.error("Jensen", "list_files", "Failed to fetch device info for version check.")
-                return None
+                logger.error("Jensen", "list_files", "Failed to get device info for version check.")
+                return None # Or an error structure
 
         file_list_aggregate_data = bytearray()
         expected_files_from_count_cmd = -1
-
-        # Version check for getFileCount pre-fetch
         current_version_number = self.device_info.get("versionNumber", float('inf'))
-        if current_version_number <= 327722: # 0x5002A in hex
-            logger.debug("Jensen", "list_files", f"Device version {current_version_number} <= 327722, getting file count first.")
+
+        if current_version_number <= 327722: # 0x5002A
             count_info = self.get_file_count(timeout_s=5)
             if not count_info or count_info.get("count", -1) == 0:
-                logger.info("Jensen", "list_files", "No files based on early count or count failed.")
                 return {"files": [], "totalFiles": 0, "totalSize": 0}
             expected_files_from_count_cmd = count_info["count"]
-        else:
-            logger.debug("Jensen", "list_files", f"Device version {current_version_number} > 327722, not pre-fetching file count.")
-
-
-        logger.info("Jensen", "list_files", "Requesting file list...")
+        
         response = self._send_and_receive(CMD_GET_FILE_LIST, timeout_ms=int(timeout_s * 1000))
-
         if not response or response["id"] != CMD_GET_FILE_LIST:
-            logger.error("Jensen", "list_files", "Failed to get file list or wrong response ID.")
             return {"files": [], "totalFiles": 0, "totalSize": 0, "error": "Failed to get file list"}
-
+        
         file_list_aggregate_data.extend(response["body"])
-
         files = []
         offset = 0
         data_view = memoryview(file_list_aggregate_data)
-
         total_size_bytes = 0
         total_files_from_header = -1
+
         if len(data_view) >= 6 and data_view[offset] == 0xFF and data_view[offset+1] == 0xFF:
             total_files_from_header = struct.unpack('>I', data_view[offset+2:offset+6])[0]
             offset += 6
-            logger.debug("Jensen", "list_files_parser", f"Total files from list header: {total_files_from_header}")
-
-        logger.debug("Jensen", "list_files_parser", f"Parsing {len(data_view)} bytes, starting at offset {offset}")
-
+        
         parsed_file_count = 0
         while offset < len(data_view):
             try:
-                if offset + 4 > len(data_view): logger.debug("Parser", "list_files", "Partial entry: Not enough data for version+name_len"); break
-                file_version = data_view[offset]
-                offset += 1
-                name_len_bytes = data_view[offset:offset+3]
-                name_len = struct.unpack('>I', b'\x00' + name_len_bytes)[0] # Prepend null byte for 3-byte to 4-byte int
-                offset += 3
+                if offset + 4 > len(data_view): break
+                file_version = data_view[offset]; offset += 1
+                name_len = struct.unpack('>I', b'\x00' + data_view[offset:offset+3])[0]; offset += 3
+                if offset + name_len > len(data_view): break
+                filename = "".join(chr(b) for b in data_view[offset : offset + name_len] if b > 0); offset += name_len
+                
+                min_remaining = 4 + 6 + 16 # length + unknown + signature
+                if offset + min_remaining > len(data_view): break
+                file_length_bytes = struct.unpack('>I', data_view[offset : offset + 4])[0]; offset += 4
+                offset += 6 # Skip unknown
+                signature_hex = data_view[offset : offset + 16].hex(); offset += 16
 
-                if offset + name_len > len(data_view): logger.debug("Parser", "list_files", "Partial entry: Not enough data for name"); break
-                filename_bytes = data_view[offset : offset + name_len]
-                filename = "".join(chr(b) for b in filename_bytes if b > 0)
-                offset += name_len
-
-                min_remaining_for_entry_suffix = 4 + 6 + 16 # file_length_bytes + unknown_6 + signature_16
-                if offset + min_remaining_for_entry_suffix > len(data_view):
-                    logger.debug("Parser", "list_files", f"Partial entry: Not enough data for rest of entry. Need {min_remaining_for_entry_suffix}, have {len(data_view) - offset}")
-                    break
-
-                file_length_bytes = struct.unpack('>I', data_view[offset : offset + 4])[0]
-                offset += 4
-                offset += 6 # Skip 6 unknown/padding bytes
-
-                signature_bytes = data_view[offset : offset + 16]
-                signature_hex = signature_bytes.hex()
-                offset += 16
-
-    # ... inside list_files method, after parsing individual file entry components ...
                 create_date_str, create_time_str, time_obj, duration_sec = "", "", None, 0
-
                 try:
-                    # Pattern 1: YYYYMMDDHHMMSSREC*.wav (or .hda)
-                    # Example: 20250512114141-Rec44.hda
-                    # jensen.js: m.match(/^\d{14}REC\d+\.wav$/gi) -> replace to YYYY-MM-DD HH:MM:SS
-                    if (filename.endswith(".wav") or filename.endswith(".hda")) and \
-                       "REC" in filename.upper() and \
-                       len(filename) >= 14 and \
-                       filename[:14].isdigit():
-                        ts_str = filename[:14]
-                        time_obj = datetime.strptime(ts_str, "%Y%m%d%H%M%S")
-
-                    # Pattern 2: YYMMMDD-HHMMSS-*.hda/wav (from jensen.js regex and replace)
-                    # Example from your logs: 2025May12-114141-Rec44.hda
-                    # Jensen.js replaces this with "20YY MMM DD HH:MM:SS" for `new Date()`
-                    # e.g., "2025 May 12 11:41:41"
-                    elif (filename.endswith(".hda") or filename.endswith(".wav")):
+                    if (filename.endswith((".wav", ".hda"))) and "REC" in filename.upper() and len(filename) >= 14 and filename[:14].isdigit():
+                        time_obj = datetime.strptime(filename[:14], "%Y%m%d%H%M%S")
+                    elif (filename.endswith((".hda", ".wav"))):
                         name_parts = filename.split('-')
                         if len(name_parts) > 1:
-                            date_str_part = name_parts[0] # e.g., "23May12" or "2025May12"
-                            time_part_str = name_parts[1][:6] if len(name_parts[1]) >=6 else "000000" # HHMMSS
-
+                            date_str_part, time_part_str = name_parts[0], name_parts[1][:6]
                             year_str, month_str_abbr, day_str = "", "", ""
-
-                            # Try to parse YYYYMMMDD or YYMMMDD
-                            if len(date_str_part) >= 7: # Min length for YYMMMDD
-                                if date_str_part[:-5].isdigit() and len(date_str_part[:-5]) == 4: # YYYY
-                                    year_str = date_str_part[:4]
-                                    month_str_abbr = date_str_part[4:7]
-                                    day_str = date_str_part[7:]
+                            if len(date_str_part) >= 7:
+                                if date_str_part[:-5].isdigit() and len(date_str_part[:-5]) == 4: #
+                                    year_str, month_str_abbr, day_str = date_str_part[:4], date_str_part[4:7], date_str_part[7:]
                                 elif date_str_part[:-5].isdigit() and len(date_str_part[:-5]) == 2: # YY
-                                    year_str = "20" + date_str_part[:2] # Prepend "20" as in jensen.js
-                                    month_str_abbr = date_str_part[2:5]
-                                    day_str = date_str_part[5:]
-                                else: # Fallback for other potential formats if first part is date-like
-                                    # This part is less certain without more examples of jensen.js inputs
-                                    pass
-
-                            # Map month abbreviation to number
-                            month_map_abbr = {
-                                "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
-                                "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12
-                            }
-                            if year_str and month_str_abbr in month_map_abbr and \
-                               day_str.isdigit() and time_part_str.isdigit() and len(day_str) > 0:
-                                time_obj = datetime(
-                                    int(year_str),
-                                    month_map_abbr[month_str_abbr],
-                                    int(day_str),
-                                    int(time_part_str[0:2]),
-                                    int(time_part_str[2:4]),
-                                    int(time_part_str[4:6])
-                                )
-                            else:
-                                logger.debug("Parser", "list_files", f"Could not parse date components from filename pattern 2: {filename} (date_str_part: {date_str_part}, time_part_str: {time_part_str})")
-
-                except ValueError as date_e:
-                    logger.debug("Parser", "list_files", f"Date parsing ValueError for {filename}: {date_e}")
-                except Exception as date_e_gen: # Catch any other unexpected error during date parsing
-                    logger.error("Parser", "list_files", f"Generic date parsing error for {filename}: {date_e_gen}")
-
-
+                                    year_str, month_str_abbr, day_str = "20" + date_str_part[:2], date_str_part[2:5], date_str_part[5:]
+                            month_map = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6, "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+                            if year_str and month_str_abbr in month_map and day_str.isdigit() and time_part_str.isdigit() and len(day_str)>0:
+                                time_obj = datetime(int(year_str), month_map[month_str_abbr], int(day_str), int(time_part_str[0:2]), int(time_part_str[2:4]), int(time_part_str[4:6]))
+                except (ValueError, IndexError) as date_e: logger.debug("Parser", "list_files_date", f"Date parse error for {filename}: {date_e}")
+                
                 if time_obj:
-                    create_date_str = time_obj.strftime("%Y/%m/%d")
-                    create_time_str = time_obj.strftime("%H:%M:%S")
-                else: # If time_obj is still None, log it
-                    logger.warning("Parser", "list_files", f"Failed to parse date for filename: {filename}")
+                    create_date_str, create_time_str = time_obj.strftime("%Y/%m/%d"), time_obj.strftime("%H:%M:%S")
+                else: logger.warning("Parser", "list_files", f"Failed to parse date for: {filename}")
 
+                if file_version == 1: duration_sec = (file_length_bytes / 32) * 2 
+                elif file_version == 2: duration_sec = (file_length_bytes - 44) / (48000 * 2 * 1) if file_length_bytes > 44 else 0 
+                elif file_version == 3: duration_sec = (file_length_bytes - 44) / (24000 * 2 * 1) if file_length_bytes > 44 else 0
+                elif file_version == 5: duration_sec = file_length_bytes / 12000 
+                else: duration_sec = file_length_bytes / (16000*2*1) 
 
-                # Duration calculation (seems mostly okay from jensen.js)
-                if file_version == 1: duration_sec = (file_length_bytes / 32) * 2
-                elif file_version == 2: duration_sec = (file_length_bytes - 44) / (48000 * 2 * 1) if file_length_bytes > 44 else 0
-                elif file_version == 3: duration_sec = (file_length_bytes - 44) / (24000 * 2 * 1) if file_length_bytes > 44 else 0 # ADPCM example rate
-                elif file_version == 5: duration_sec = file_length_bytes / 12000
-                else: duration_sec = file_length_bytes / (16000*2*1) # Default (16kHz, 16-bit, mono)
-
-                files.append({
-                    "name": filename, "createDate": create_date_str, "createTime": create_time_str,
-                    "time": time_obj, "duration": duration_sec, "version": file_version,
-                    "length": file_length_bytes, "signature": signature_hex
-                })
+                files.append({"name": filename, "createDate": create_date_str, "createTime": create_time_str, "time": time_obj, "duration": duration_sec, "version": file_version, "length": file_length_bytes, "signature": signature_hex})
                 total_size_bytes += file_length_bytes
                 parsed_file_count += 1
-                # ... (rest of the loop remains the same)
-
-                if total_files_from_header != -1 and parsed_file_count >= total_files_from_header: break
-                if expected_files_from_count_cmd != -1 and parsed_file_count >= expected_files_from_count_cmd: break
-
-            except struct.error as e:
-                logger.error("Jensen", "list_files_parser", f"Struct error: {e}. Offset: {offset}, Buf len: {len(data_view)}")
+                if (total_files_from_header != -1 and parsed_file_count >= total_files_from_header) or \
+                   (expected_files_from_count_cmd != -1 and parsed_file_count >= expected_files_from_count_cmd): break
+            except (struct.error, IndexError) as e:
+                logger.error("Jensen", "list_files_parser", f"Parsing error: {e}. Offset: {offset}, Buf len: {len(data_view)}")
                 break
-            except IndexError as e:
-                logger.error("Jensen", "list_files_parser", f"Index error: {e}. Offset: {offset}, Buf len: {len(data_view)}")
-                break
-
-        logger.info("Jensen", "list_files", f"Parsed {len(files)} files from list.")
+        
         valid_files = [f for f in files if f.get("time")]
-        return {
-            "files": valid_files,
-            "totalFiles": len(valid_files),
-            "totalSize": total_size_bytes # This is total size of all parsed files, not just valid ones by date
-        }
+        logger.info("Jensen", "list_files", f"Parsed {len(valid_files)} valid files.")
+        return {"files": valid_files, "totalFiles": len(valid_files), "totalSize": total_size_bytes}
 
     def stream_file(self, filename, file_length, data_callback, progress_callback=None, timeout_s=180, cancel_event: threading.Event = None):
-        with self._usb_lock: # Acquire lock for the entire streaming operation
-            status_to_return = "fail" # Default status, will be updated on success or specific failure types
+        with self._usb_lock:
+            status_to_return = "fail"
             try:
                 logger.info("Jensen", "stream_file", f"Streaming {filename}, length {file_length}")
-                filename_bytes = filename.encode('ascii', errors='ignore')
-
-                # Send initial command to start streaming
-                initial_seq_id = self._send_command(CMD_TRANSFER_FILE, filename_bytes, timeout_ms=10000) # Use int for timeout
-
-                if cancel_event and cancel_event.is_set():
-                    logger.info("Jensen", "stream_file", f"Streaming cancelled for {filename} before receiving data.")
-                    status_to_return = "cancelled"
-                    return status_to_return # Exit early
-
+                initial_seq_id = self._send_command(CMD_TRANSFER_FILE, filename.encode('ascii', errors='ignore'), timeout_ms=10000)
+                if cancel_event and cancel_event.is_set(): return "cancelled"
+                
                 bytes_received = 0
                 start_time = time.time()
-
                 while bytes_received < file_length and time.time() - start_time < timeout_s:
-                    # For the first response, expect the initial_seq_id. For subsequent, expect CMD_TRANSFER_FILE.
-                    current_expected_seq_id = initial_seq_id if bytes_received == 0 else None
-
-                    if cancel_event and cancel_event.is_set():
-                        logger.info("Jensen", "stream_file", f"Streaming cancelled for {filename} during data reception.")
-                        status_to_return = "cancelled"
-                        return status_to_return # Exit early
-
-                    response = self._receive_response(
-                        expected_seq_id=current_expected_seq_id if current_expected_seq_id else initial_seq_id,
-                        timeout_ms=15000,
-                        streaming_cmd_id=CMD_TRANSFER_FILE
-                    )
-
+                    if cancel_event and cancel_event.is_set(): status_to_return = "cancelled"; break
+                    
+                    response = self._receive_response(initial_seq_id, 15000, streaming_cmd_id=CMD_TRANSFER_FILE)
                     if response and response["id"] == CMD_TRANSFER_FILE:
                         chunk = response["body"]
                         if not chunk:
-                            logger.warning("Jensen", "stream_file", "Received empty chunk during stream.")
                             if bytes_received >= file_length: break
-                            time.sleep(0.1)
-                            continue
-
+                            time.sleep(0.1); continue
                         bytes_received += len(chunk)
                         data_callback(chunk)
-                        if progress_callback:
-                            progress_callback(bytes_received, file_length)
-
-                        if bytes_received >= file_length:
-                            if progress_callback: progress_callback(file_length, file_length)
-                            logger.info("Jensen", "stream_file", f"File {filename} streamed successfully (received {bytes_received} of {file_length}).")
-                            status_to_return = "OK"
-                            break # Exit while loop
-                    elif response is None:
-                        logger.error("Jensen", "stream_file", f"Timeout or error receiving next chunk for {filename}. Received {bytes_received}/{file_length} so far.")
-                        if not self.is_connected(): logger.error("Jensen", "stream_file", "Device appears disconnected.")
-                        status_to_return = "fail"
-                        break # Exit while loop
-                    else:
-                        logger.warning("Jensen", "stream_file", f"Unexpected response ID {response['id']} during stream.")
-                        status_to_return = "fail"
-                        break # Exit while loop
-
-                # After the loop, check the final status if not already "OK" or "cancelled"
-                if status_to_return == "fail" and bytes_received < file_length :
-                    logger.error("Jensen", "stream_file", f"Streaming incomplete for {filename}. Received {bytes_received}/{file_length} within timeout.")
-                    if not self.is_connected():
-                        status_to_return = "fail_disconnected"
-                    elif cancel_event and cancel_event.is_set():
-                        status_to_return = "cancelled"
-                    # else status_to_return remains "fail" from loop exit
-                elif status_to_return == "OK": # If loop completed successfully and set status_to_return to "OK"
-                    logger.info("Jensen", "stream_file", f"File {filename} streaming finished (final check).")
-
+                        if progress_callback: progress_callback(bytes_received, file_length)
+                        if bytes_received >= file_length: status_to_return = "OK"; break
+                    elif response is None: logger.error("Jensen", "stream_file", "Timeout/error receiving chunk."); break
+                    else: logger.warning("Jensen", "stream_file", f"Unexpected response ID {response['id']}."); break
+                
+                if status_to_return == "fail" and bytes_received < file_length:
+                    logger.error("Jensen", "stream_file", f"Incomplete: {bytes_received}/{file_length}")
+                    if not self.is_connected(): status_to_return = "fail_disconnected"
+                elif status_to_return == "OK": logger.info("Jensen", "stream_file", "Stream success.")
+            
             finally:
-                # This block executes regardless of how the try block finishes (success, error, return).
-                # It's crucial for cleanup actions that must happen while the lock is held.
                 self.receive_buffer.clear()
-                logger.debug("Jensen", "stream_file", "Python receive_buffer cleared after stream operation (within lock).")
-
-                # Attempt to flush any lingering data from the hardware/OS input buffer if the operation
-                # didn't complete successfully, as the device might still be sending data.
-                if status_to_return != "OK" and self.device and self.ep_in:
-                    logger.debug("Jensen", "stream_file", f"Attempting to flush stale IN endpoint data after stream status: {status_to_return}")
-                    flush_attempts = 0
-                    max_flush_attempts = 20 # e.g., 20 attempts * 50ms timeout = up to 1 second of flushing
-                    while flush_attempts < max_flush_attempts:
+                if status_to_return != "OK" and self.device and self.ep_in: # Flush stale data
+                    logger.debug("Jensen", "stream_file", "Attempting to flush stale IN data.")
+                    for _ in range(20): # Max attempts
                         try:
-                            # Read a moderate chunk with a short timeout for each flush attempt.
-                            read_size = self.ep_in.wMaxPacketSize * 16 if self.ep_in.wMaxPacketSize else 512 * 16
-                            stale_data = self.device.read(self.ep_in.bEndpointAddress,
-                                                          read_size,
-                                                          timeout=50) # Short timeout (ms)
-                            if stale_data:
-                                logger.debug("Jensen", "stream_file", f"Flushed {len(stale_data)} bytes of stale data from USB pipe.")
-                                # Data is read and discarded. Continue to see if there's more.
-                            else:
-                                # No data read in this attempt, pipe might be clear.
-                                logger.debug("Jensen", "stream_file", "No stale data in this flush read, pipe may be clear.")
-                                break
-                        except usb.core.USBTimeoutError: # This is expected if the pipe is empty
-                            logger.debug("Jensen", "stream_file", "USBTimeoutError during flush, pipe likely clear.")
-                            break
-                        except usb.core.USBError as e: # Other USB errors
-                            logger.warning("Jensen", "stream_file", f"USBError during endpoint flush: {e}. Stopping flush.")
-                            break # Stop flushing on other USB errors
-                        flush_attempts += 1
-                    if flush_attempts >= max_flush_attempts:
-                        logger.debug("Jensen", "stream_file", "Reached max flush attempts for stale data.")
-            return status_to_return # Return the determined status
+                            if not self.device.read(self.ep_in.bEndpointAddress, self.ep_in.wMaxPacketSize * 16, timeout=50): break
+                        except usb.core.USBTimeoutError: break
+                        except usb.core.USBError: break
+            return status_to_return
 
     def delete_file(self, filename, timeout_s=10):
-        logger.info("Jensen", "delete_file", f"Attempting to delete file: {filename}")
-        filename_bytes = filename.encode('ascii', errors='ignore')
-        response = self._send_and_receive(CMD_DELETE_FILE, filename_bytes, timeout_ms=int(timeout_s * 1000))
+        response = self._send_and_receive(CMD_DELETE_FILE, filename.encode('ascii', errors='ignore'), timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_DELETE_FILE:
-            # jensen.js handler: 0=success, 1=not-exists, 2=failed
-            result_code = response["body"][0] if response["body"] else 2 # Default to failed if no body
+            result_code = response["body"][0] if response["body"] else 2
             status_map = {0: "success", 1: "not-exists", 2: "failed"}
             status_str = status_map.get(result_code, "unknown_error")
-            logger.info("Jensen", "delete_file", f"Delete status for {filename}: {status_str} (code: {result_code})")
+            logger.info("Jensen", "delete_file", f"Delete {filename}: {status_str} (code: {result_code})")
             return {"result": status_str, "code": result_code}
-        logger.error("Jensen", "delete_file", f"Failed to get delete response for {filename} or invalid response ID.")
+        logger.error("Jensen", "delete_file", f"Failed delete response for {filename}.")
         return {"result": "failed", "code": -1, "error": "No/invalid response"}
 
     def get_card_info(self, timeout_s=5):
         response = self._send_and_receive(CMD_GET_CARD_INFO, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_GET_CARD_INFO and len(response["body"]) >= 12:
             body = response["body"]
-            used_space = struct.unpack('>I', body[0:4])[0]
-            total_capacity = struct.unpack('>I', body[4:8])[0]
-            status_code = struct.unpack('>I', body[8:12])[0] # Raw status code
-            logger.info("Jensen", "get_card_info", f"Card Info: Used={used_space}, Total={total_capacity}, Status Code={hex(status_code)}")
-            return {"used": used_space, "capacity": total_capacity, "status_raw": status_code}
-        logger.error("Jensen", "get_card_info", "Failed to get card info or invalid response.")
+            used, capacity, status_raw = struct.unpack('>III', body[:12])
+            logger.info("Jensen", "get_card_info", f"Card: Used={used}, Total={capacity}, Status={hex(status_raw)}")
+            return {"used": used, "capacity": capacity, "status_raw": status_raw}
+        logger.error("Jensen", "get_card_info", "Failed to get card info.")
         return None
 
-    def format_card(self, timeout_s=60): # Formatting can take time
-        logger.info("Jensen", "format_card", "Attempting to format card...")
-        # Body [1,2,3,4] as per jensen.js
+    def format_card(self, timeout_s=60):
         response = self._send_and_receive(CMD_FORMAT_CARD, body_bytes=bytes([1,2,3,4]), timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_FORMAT_CARD:
-            result_code = response["body"][0] if response["body"] else 1 # Default to failed
+            result_code = response["body"][0] if response["body"] else 1
             status_str = "success" if result_code == 0 else "failed"
-            logger.info("Jensen", "format_card", f"Format card status: {status_str} (code: {result_code})")
+            logger.info("Jensen", "format_card", f"Format status: {status_str} (code: {result_code})")
             return {"result": status_str, "code": result_code}
-        logger.error("Jensen", "format_card", "Failed to get format card response or invalid response ID.")
+        logger.error("Jensen", "format_card", "Failed format response.")
         return {"result": "failed", "code": -1, "error": "No/invalid response"}
 
     def get_recording_file(self, timeout_s=5):
-        logger.debug("Jensen", "get_recording_file", "Requesting current/last recording file...") # Changed to debug
         response = self._send_and_receive(CMD_GET_RECORDING_FILE, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_GET_RECORDING_FILE:
-            if not response["body"]: # No active recording or last recording info
-                logger.debug("Jensen", "get_recording_file", "No recording file info returned (empty body). Device might not be recording.") # Changed to debug
+            if not response["body"]: 
+                logger.debug("Jensen", "get_recording_file", "No recording file info (empty body).")
                 return None
-
             filename_bytes = response["body"]
-            filename = ""
             try:
-                # jensen.js simply joins char codes. We should filter for printable and stop at null.
-                printable_bytes = bytearray()
-                for b_val in filename_bytes:
-                    if 32 <= b_val <= 126: # Printable ASCII
-                        printable_bytes.append(b_val)
-                    elif b_val == 0: # Stop at first null
-                        break
+                printable_bytes = bytearray(b for b in filename_bytes if 32 <= b <= 126 or b == 0)
+                null_idx = printable_bytes.find(0)
+                if null_idx != -1: printable_bytes = printable_bytes[:null_idx]
                 filename = printable_bytes.decode('ascii').strip()
-            except UnicodeDecodeError:
-                filename = filename_bytes.hex() # Fallback to hex
-                logger.warning("Jensen", "get_recording_file", f"Could not decode recording filename as ASCII: {filename_bytes.hex()}")
-
-            if not filename:
-                logger.info("Jensen", "get_recording_file", "Decoded recording filename is empty.")
-                return None
-
-            # TODO: Parse date/time from filename if needed, similar to list_files or jensen.js s.handlers[18]
-            logger.debug("Jensen", "get_recording_file", f"Current/Last recording file: {filename}") # Changed to debug
-            return {"name": filename, "status": "recording_active_or_last"} # Placeholder status
-
-        logger.error("Jensen", "get_recording_file", "Failed to get recording file info or invalid response ID.")
+            except UnicodeDecodeError: filename = filename_bytes.hex()
+            
+            if not filename: logger.info("Jensen", "get_recording_file", "Decoded recording filename is empty."); return None
+            logger.debug("Jensen", "get_recording_file", f"Current/Last recording: {filename}")
+            return {"name": filename, "status": "recording_active_or_last"}
+        logger.error("Jensen", "get_recording_file", "Failed to get recording file info.")
         return None
 
     def _to_bcd(self, value: int) -> int:
-        """Converts a 2-digit integer to BCD."""
-        if not (0 <= value <= 99):
-            # logger.warning("Jensen", "_to_bcd", f"Value {value} out of BCD range (0-99). Returning 0.")
-            return 0 # Or raise error
+        if not (0 <= value <= 99): return 0
         return (value // 10 << 4) | (value % 10)
 
     def set_device_time(self, dt_object: datetime, timeout_s=5):
-        logger.info("Jensen", "set_device_time", f"Setting device time to: {dt_object.strftime('%Y-%m-%d %H:%M:%S')}")
-        year_full = dt_object.year
-        # Split the full year into century and year-of-century for BCD conversion
-        # e.g., 2025 -> bcd_20, bcd_25
-        payload = bytes([
-            self._to_bcd(year_full // 100),    # BCD for century part (e.g., 20)
-            self._to_bcd(year_full % 100),     # BCD for year-of-century part (e.g., 25)
-            self._to_bcd(dt_object.month),
-            self._to_bcd(dt_object.day),
-            self._to_bcd(dt_object.hour),
-            self._to_bcd(dt_object.minute),
-            self._to_bcd(dt_object.second)     # This creates a 7-byte payload
-        ])
+        year = dt_object.year
+        payload = bytes([self._to_bcd(year // 100), self._to_bcd(year % 100),
+                         self._to_bcd(dt_object.month), self._to_bcd(dt_object.day),
+                         self._to_bcd(dt_object.hour), self._to_bcd(dt_object.minute),
+                         self._to_bcd(dt_object.second)])
         response = self._send_and_receive(CMD_SET_DEVICE_TIME, payload, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_SET_DEVICE_TIME and response["body"] and response["body"][0] == 0:
             logger.info("Jensen", "set_device_time", "Device time set successfully.")
             return {"result": "success"}
-
-        device_error_code = response["body"][0] if response and response["body"] else -1 # -1 if no body/response
-        logger.error("Jensen", "set_device_time", f"Failed to set device time. Device returned code: {device_error_code}. Full response: {response}")
-        return {"result": "failed", "error": "Device reported an error.", "device_code": device_error_code}
+        err_code = response["body"][0] if response and response["body"] else -1
+        logger.error("Jensen", "set_device_time", f"Failed to set time. Device code: {err_code}.")
+        return {"result": "failed", "error": "Device error.", "device_code": err_code}
 
     def get_device_settings(self, timeout_s=5):
-        logger.info("Jensen", "get_device_settings", "Requesting device behavior settings...")
         response = self._send_and_receive(CMD_GET_SETTINGS, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_GET_SETTINGS and len(response["body"]) >= 4:
             body = response["body"]
-            settings = {
-                "autoRecord": bool(body[0]),
-                "autoPlay": bool(body[1]),
-                "bluetoothTone": bool(body[2]),
-                "notificationSound": bool(body[3])
-                # Add more if other models/firmwares support them and indices are known
-            }
-            self.device_behavior_settings.update(settings) # Cache them
-            logger.info("Jensen", "get_device_settings", f"Received device settings: {settings}")
+            settings = {"autoRecord": bool(body[0]), "autoPlay": bool(body[1]),
+                        "bluetoothTone": bool(body[2]), "notificationSound": bool(body[3])}
+            self.device_behavior_settings.update(settings)
+            logger.info("Jensen", "get_device_settings", f"Received settings: {settings}")
             return settings
-        logger.error("Jensen", "get_device_settings", f"Failed to get device settings. Response: {response}")
+        logger.error("Jensen", "get_device_settings", f"Failed to get settings. Response: {response}")
         return None
 
     def set_device_setting(self, setting_name: str, value: bool, timeout_s=5):
-        logger.info("Jensen", "set_device_setting", f"Setting '{setting_name}' to {value}")
-        setting_map = {
-            "autoRecord": 0,
-            "autoPlay": 1,
-            "bluetoothTone": 2,
-            "notificationSound": 3
-        }
+        setting_map = {"autoRecord": 0, "autoPlay": 1, "bluetoothTone": 2, "notificationSound": 3}
         if setting_name not in setting_map:
-            logger.error("Jensen", "set_device_setting", f"Unknown setting name: {setting_name}")
+            logger.error("Jensen", "set_device_setting", f"Unknown setting: {setting_name}")
             return {"result": "failed", "error": "Unknown setting name"}
-
         payload = bytes([setting_map[setting_name], 1 if value else 0])
         response = self._send_and_receive(CMD_SET_SETTINGS, payload, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_SET_SETTINGS and response["body"] and response["body"][0] == 0:
-            logger.info("Jensen", "set_device_setting", f"Successfully set '{setting_name}' to {value}.")
-            self.device_behavior_settings[setting_name] = value # Update cache
+            logger.info("Jensen", "set_device_setting", f"Set '{setting_name}' to {value}.")
+            self.device_behavior_settings[setting_name] = value
             return {"result": "success"}
         logger.error("Jensen", "set_device_setting", f"Failed to set '{setting_name}'. Response: {response}")
-        return {"result": "failed", "error": "Invalid response or error code from device."}
+        return {"result": "failed", "error": "Device error or invalid response."}
+
 # --- Tkinter GUI Application ---
 class HiDockToolGUI:
     def __init__(self, master):
         self.master = master
         master.title("HiDock Explorer Tool")
-        master.geometry("800x700")
+        master.geometry("850x750") # Adjusted initial size
 
-        # Initialize backend related attributes first
-        self.usb_backend_instance = None # Will hold the actual libusb backend object
+        self.usb_backend_instance = None
         self.backend_initialized_successfully = False
         self.backend_init_error_message = "USB backend not yet initialized."
-
-        # --- Early USB Backend Initialization ---
-        # This must happen before self.dock is initialized and before create_widgets
         try:
             self.backend_initialized_successfully, self.backend_init_error_message, self.usb_backend_instance = self._initialize_backend_early()
             if not self.backend_initialized_successfully:
-                logger.error("GUI", "__init__", f"CRITICAL: USB backend initialization failed on startup: {self.backend_init_error_message}")
-                # A message will be shown in create_widgets or via status_label after widgets are created
-        except Exception as e_backend_startup: # Catch any unexpected error during this critical early init
+                logger.error("GUI", "__init__", f"CRITICAL: USB backend init failed: {self.backend_init_error_message}")
+        except Exception as e_backend_startup:
             self.backend_initialized_successfully = False
             self.backend_init_error_message = f"Unexpected Python error during USB backend init: {e_backend_startup}"
             logger.error("GUI", "__init__", f"CRITICAL: {self.backend_init_error_message}\n{traceback.format_exc()}")
 
-        # Now initialize self.dock ONCE, using the (potentially None) backend instance
         self.dock = HiDockJensen(self.usb_backend_instance)
-
         self.config = load_config()
+        # Initialize tk Variables
         self.autoconnect_var = tk.BooleanVar(value=self.config.get("autoconnect", False))
         self.download_directory = self.config.get("download_directory", os.getcwd())
-
-        # Initialize new config variables for settings
         self.logger_processing_level_var = tk.StringVar(value=self.config.get("log_level", "INFO"))
         self.selected_vid_var = tk.IntVar(value=self.config.get("selected_vid", DEFAULT_VENDOR_ID))
         self.selected_pid_var = tk.IntVar(value=self.config.get("selected_pid", DEFAULT_PRODUCT_ID))
@@ -1000,97 +685,248 @@ class HiDockToolGUI:
         self.quit_without_prompt_var = tk.BooleanVar(value=self.config.get("quit_without_prompt_if_connected", False))
         self.theme_var = tk.StringVar(value=self.config.get("theme", "default"))
         self.suppress_console_output_var = tk.BooleanVar(value=self.config.get("suppress_console_output", False))
-
-        self.gui_log_filter_level_var = tk.StringVar(value="DEBUG") # Default GUI filter to show most things
-        self.available_usb_devices = [] # To store (description, vid, pid) tuples
-
-        self.displayed_files_details = [] # To store full details of files in listbox
-        self.active_download_threads = 0
-        self.logs_visible = False # State for log visibility
-        self.treeview_sort_column = None
-        self.device_tools_visible = False # New state for device tools visibility
-        self._recording_check_timer_id = None # Timer for periodic recording check
-        self.original_tree_headings = { # Store original heading texts for sort indicators
-            "name": "Name",
-            "size": "Size (KB)",
-            "duration": "Duration (s)",
-            "date": "Date",
-            "time": "Time",
-            "status": "Status" # Ensure this is present
-        }
-        # Variables for device behavior settings in the Settings window
+        self.gui_log_filter_level_var = tk.StringVar(value="DEBUG")
+        
+        # Device behavior tk.BooleanVars
         self.device_setting_auto_record_var = tk.BooleanVar()
         self.device_setting_auto_play_var = tk.BooleanVar()
         self.device_setting_bluetooth_tone_var = tk.BooleanVar()
         self.device_setting_notification_sound_var = tk.BooleanVar()
-        self._fetched_device_settings_for_dialog = {} # To store settings loaded when dialog opens
 
-        self._is_ui_refresh_in_progress = False # Flag to prevent overlapping UI refreshes
-        self._previous_recording_filename = None # Store the last known recording filename
+        # Other attributes
+        self.available_usb_devices = []
+        self.displayed_files_details = []
+        self.logs_visible = False # Tracks if the log_frame is intended to be visible
+        self.device_tools_visible = False # Tracks if device_tools_frame is intended to be visible
+        self.logs_visible_var = tk.BooleanVar(value=self.logs_visible) # For menu checkbutton
+        self.device_tools_visible_var = tk.BooleanVar(value=self.device_tools_visible) # For menu checkbutton
+
+        self.treeview_sort_column = None
         self.treeview_sort_reverse = False
+        self._recording_check_timer_id = None
         self._auto_file_refresh_timer_id = None
-
-        # For settings window device list
-        self.settings_device_combobox = None
-
+        self._is_ui_refresh_in_progress = False
+        self._previous_recording_filename = None
+        self._fetched_device_settings_for_dialog = {}
+        self.is_long_operation_active = False
+        self.cancel_operation_event = None
+        
         # Audio playback attributes
         self.is_audio_playing = False
         self.current_playing_temp_file = None
+        self.current_playing_filename_for_replay = None
         self.playback_update_timer_id = None
         self.loop_playback_var = tk.BooleanVar(value=False)
-        self.volume_var = tk.DoubleVar(value=0.5) # Default volume 50%
+        self.volume_var = tk.DoubleVar(value=0.5) 
+        self._user_is_dragging_slider = False
+        self.playback_total_duration = 0.0
 
-        # Declare pygame as global here if we intend to modify the global 'pygame' variable
-        # (e.g., set it to None on error) within this method's scope.
+
+        self.original_tree_headings = {"name": "Name", "size": "Size (KB)", "duration": "Duration (s)", "date": "Date", "time": "Time", "status": "Status"}
+
         global pygame
-
-        if pygame: # Check if the pygame module was successfully imported
+        if pygame:
             try:
-                pygame.mixer.init() # Initialize the mixer
-                logger.info("GUI", "__init__", "Pygame mixer initialized successfully.")
-            except Exception as e: # Catch generic Exception, could be pygame.error or other
-                logger.error("GUI", "__init__", f"Failed to initialize Pygame mixer: {e}")
-                print(f"WARNING: Failed to initialize Pygame mixer: {e}. Playback disabled.")
-                # 'pygame' is already declared global for this scope, so this assignment modifies the global variable.
-                pygame = None # Disable pygame features if mixer init fails by setting the global reference to None
-
-        self.cancel_operation_event = None # For cancelling downloads/playback prep
-        self.is_long_operation_active = False # To pause background checks
-
-        # Create widgets first, as the logger callback and theme application might use them or log.
-        # self.dock is now initialized, so create_widgets can safely set up button commands.
-        self.create_widgets()
-
-        # Now that widgets (like log_text_area) are created, set up the GUI logger callback.
-        logger.set_level(self.logger_processing_level_var.get()) # Ensure logger level is current
+                pygame.mixer.init()
+                logger.info("GUI", "__init__", "Pygame mixer initialized.")
+            except Exception as e:
+                logger.error("GUI", "__init__", f"Pygame mixer init failed: {e}")
+                pygame = None
+        
+        self.create_widgets() # Create all widgets, including menubar and status bar
+        
+        logger.set_level(self.logger_processing_level_var.get())
         logger.set_gui_log_callback(self.log_to_gui_widget)
 
-        # If backend init failed, update status label now that it exists
         if not self.backend_initialized_successfully:
-            if hasattr(self, 'status_label') and self.status_label.winfo_exists():
-                self.status_label.config(text=f"Status: USB Backend Error! Check logs.")
-            if hasattr(self, 'connect_button') and self.connect_button.winfo_exists(): # Also disable connect button
-                self.connect_button.config(state=tk.DISABLED)
+            self.update_status_bar(connection_status=f"USB Backend Error! Check logs.")
+            if hasattr(self, 'file_menu'):
+                 self.file_menu.entryconfig("Connect to HiDock", state=tk.DISABLED)
 
-        # Apply initial theme. Any logging from apply_theme can now use the GUI callback.
         self.apply_theme(self.theme_var.get())
+        self.update_all_status_info() # Initialize status bar text
+        self._update_optional_panes_visibility() # Ensure panes are correctly hidden/shown initially
 
-        # Keyboard shortcut for F5 (Refresh) - bound to master window
-        # Moved here from open_settings_window to be a global shortcut
         self.master.bind("<F5>", self._on_f5_key_press)
-
         self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         if self.autoconnect_var.get():
-            self.master.after(500, self.attempt_autoconnect_on_startup) # Delay slightly
+            self.master.after(500, self.attempt_autoconnect_on_startup)
+
+    def _create_menubar(self):
+        menubar = tk.Menu(self.master)
+        self.master.config(menu=menubar)
+
+        # File Menu
+        self.file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=self.file_menu)
+        self.file_menu.add_command(label="Connect to HiDock", command=self.connect_device, accelerator="Ctrl+O")
+        self.file_menu.add_command(label="Disconnect", command=self.disconnect_device, state=tk.DISABLED, accelerator="Ctrl+D")
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Settings", command=self.open_settings_window, accelerator="Ctrl+,")
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Exit", command=self.on_closing, accelerator="Alt+F4")
+        self.master.bind_all("<Control-o>", lambda e: self.connect_device() if self.file_menu.entrycget("Connect to HiDock", "state") == tk.NORMAL else None)
+        self.master.bind_all("<Control-d>", lambda e: self.disconnect_device() if self.file_menu.entrycget("Disconnect", "state") == tk.NORMAL else None)
+        self.master.bind_all("<Control-comma>", lambda e: self.open_settings_window())
+
+
+        # View Menu
+        self.view_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="View", menu=self.view_menu)
+        self.view_menu.add_command(label="Refresh File List", command=self.refresh_file_list_gui, state=tk.DISABLED, accelerator="F5")
+        self.view_menu.add_separator()
+        self.view_menu.add_checkbutton(label="Show Logs", onvalue=True, offvalue=False, variable=self.logs_visible_var, command=self.toggle_logs) 
+        self.view_menu.add_checkbutton(label="Show Device Tools", onvalue=True, offvalue=False, variable=self.device_tools_visible_var, command=self.toggle_device_tools)
+
+
+        # Actions Menu
+        self.actions_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Actions", menu=self.actions_menu)
+        self.actions_menu.add_command(label="Download Selected", command=self.download_selected_files_gui, state=tk.DISABLED)
+        self.actions_menu.add_command(label="Play Selected", command=self.play_selected_audio_gui, state=tk.DISABLED)
+        self.actions_menu.add_command(label="Delete Selected", command=self.delete_selected_files_gui, state=tk.DISABLED)
+        self.actions_menu.add_separator()
+        self.actions_menu.add_command(label="Select All", command=self.select_all_files_action, state=tk.DISABLED, accelerator="Ctrl+A")
+        self.actions_menu.add_command(label="Clear Selection", command=self.clear_selection_action, state=tk.DISABLED)
+        
+        # Device Menu (for device-specific tools)
+        self.device_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Device", menu=self.device_menu)
+        self.device_menu.add_command(label="Sync Device Time", command=self.sync_device_time_gui, state=tk.DISABLED)
+        self.device_menu.add_command(label="Format Storage", command=self.format_sd_card_gui, state=tk.DISABLED)
+
+    def _create_status_bar(self):
+        self.status_bar_frame = ttk.Frame(self.master, relief=tk.SUNKEN, padding=2)
+        self.status_bar_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        self.status_connection_label = ttk.Label(self.status_bar_frame, text="Status: Disconnected", anchor=tk.W)
+        self.status_connection_label.pack(side=tk.LEFT, padx=5)
+
+        self.status_storage_label = ttk.Label(self.status_bar_frame, text="Storage: ---", anchor=tk.W)
+        self.status_storage_label.pack(side=tk.LEFT, padx=10)
+        
+        self.status_file_counts_label = ttk.Label(self.status_bar_frame, text="Files: 0 total / 0 selected", anchor=tk.W)
+        self.status_file_counts_label.pack(side=tk.LEFT, padx=10)
+
+        # Progress bar and its label will be part of the status bar now
+        self.status_progress_text_label = ttk.Label(self.status_bar_frame, text="", anchor=tk.W, width=40) # For text like "Downloading..."
+        self.status_progress_text_label.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+        
+        self.status_file_progress_bar = ttk.Progressbar(self.status_bar_frame, orient=tk.HORIZONTAL, length=150, mode='determinate')
+        self.status_file_progress_bar.pack(side=tk.LEFT, padx=5)
+        
+        self.status_download_dir_label = ttk.Label(self.status_bar_frame, text=f"Dir: {os.path.basename(self.download_directory)}", anchor=tk.E, relief=tk.FLAT)
+        self.status_download_dir_label.pack(side=tk.RIGHT, padx=5)
+        self.status_download_dir_label.bind("<Button-1>", lambda e: self._select_download_dir_from_status_bar())
+
+
+    def _select_download_dir_from_status_bar(self):
+        new_dir = filedialog.askdirectory(initialdir=self.download_directory, title="Select Download Directory")
+        if new_dir:
+            self.download_directory = new_dir
+            self.config["download_directory"] = new_dir # Update config
+            save_config(self.config) # Save immediately
+            self.update_status_bar(download_dir=self.download_directory)
+            logger.info("GUI", "_select_download_dir_from_status_bar", f"Download directory changed to: {new_dir}")
+
+
+    def update_status_bar(self, connection_status=None, storage_info=None, file_counts_info=None, progress_text=None, download_dir=None):
+        if hasattr(self, 'status_connection_label') and self.status_connection_label.winfo_exists():
+            if connection_status is not None: self.status_connection_label.config(text=connection_status)
+        if hasattr(self, 'status_storage_label') and self.status_storage_label.winfo_exists():
+            if storage_info is not None: self.status_storage_label.config(text=storage_info)
+        if hasattr(self, 'status_file_counts_label') and self.status_file_counts_label.winfo_exists():
+            if file_counts_info is not None: self.status_file_counts_label.config(text=file_counts_info)
+        if hasattr(self, 'status_progress_text_label') and self.status_progress_text_label.winfo_exists():
+            if progress_text is not None: self.status_progress_text_label.config(text=progress_text)
+        if hasattr(self, 'status_download_dir_label') and self.status_download_dir_label.winfo_exists():
+            if download_dir is not None: self.status_download_dir_label.config(text=f"Dir: {os.path.basename(download_dir)}")
+
+
+    def update_all_status_info(self):
+        """Updates all parts of the status bar based on current app state."""
+        conn_status_text = "Status: Disconnected"
+        if self.dock.is_connected():
+            conn_status_text = f"Status: Connected ({self.dock.model or 'HiDock'})"
+            if self.dock.device_info and self.dock.device_info.get('sn'):
+                 conn_status_text += f" SN: {self.dock.device_info['sn']}"
+        elif not self.backend_initialized_successfully:
+            conn_status_text = "Status: USB Backend FAILED!"
+        
+        storage_text = "Storage: ---"
+        if self.dock.is_connected():
+            card_info = self.dock.device_info.get("_cached_card_info") 
+            if card_info: 
+                used_mb = card_info['used']
+                capacity_mb = card_info['capacity']
+                unit = "MB"
+                if capacity_mb > 1024:
+                    used_mb /= 1024; capacity_mb /= 1024; unit = "GB"
+                storage_text = f"Storage: {used_mb:.2f}/{capacity_mb:.2f} {unit} (Status: {hex(card_info['status_raw'])})"
+            else:
+                storage_text = "Storage: Fetching..." 
+
+        total_items = len(self.file_tree.get_children()) if hasattr(self, 'file_tree') and self.file_tree.winfo_exists() else 0
+        selected_items_count = len(self.file_tree.selection()) if hasattr(self, 'file_tree') and self.file_tree.winfo_exists() else 0
+        size_selected_bytes = 0
+        if selected_items_count > 0 and hasattr(self, 'file_tree') and self.file_tree.winfo_exists():
+             for item_iid in self.file_tree.selection():
+                file_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid), None)
+                if file_detail: size_selected_bytes += file_detail.get('length', 0)
+        
+        file_counts_text = f"Files: {total_items} total / {selected_items_count} selected ({size_selected_bytes / (1024*1024):.2f} MB)"
+
+        self.update_status_bar(
+            connection_status=conn_status_text,
+            storage_info=storage_text,
+            file_counts_info=file_counts_text,
+            download_dir=self.download_directory
+        )
+
+    def _update_menu_states(self):
+        """Updates the state (enabled/disabled) of menu items based on app state."""
+        is_connected = self.dock.is_connected()
+        has_selection = bool(hasattr(self, 'file_tree') and self.file_tree.winfo_exists() and self.file_tree.selection())
+        num_selected = len(self.file_tree.selection()) if has_selection else 0
+
+        if hasattr(self, 'file_menu'):
+            self.file_menu.entryconfig("Connect to HiDock", state=tk.NORMAL if not is_connected and self.backend_initialized_successfully else tk.DISABLED)
+            self.file_menu.entryconfig("Disconnect", state=tk.NORMAL if is_connected else tk.DISABLED)
+
+        if hasattr(self, 'view_menu'):
+            self.view_menu.entryconfig("Refresh File List", state=tk.NORMAL if is_connected else tk.DISABLED)
+            self.view_menu.entryconfig("Show Logs", variable=self.logs_visible_var) # Ensure var is linked
+            self.view_menu.entryconfig("Show Device Tools", variable=self.device_tools_visible_var)
+
+
+        if hasattr(self, 'actions_menu'):
+            can_play_selected = is_connected and num_selected == 1
+            if can_play_selected:
+                file_iid = self.file_tree.selection()[0]
+                file_detail = next((f for f in self.displayed_files_details if f['name'] == file_iid), None)
+                if not (file_detail and (file_detail['name'].lower().endswith(".wav") or file_detail['name'].lower().endswith(".hda"))):
+                    can_play_selected = False 
+            
+            self.actions_menu.entryconfig("Download Selected", state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
+            self.actions_menu.entryconfig("Play Selected", state=tk.NORMAL if can_play_selected else tk.DISABLED)
+            self.actions_menu.entryconfig("Delete Selected", state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
+            
+            can_select_all = (hasattr(self, 'file_tree') and self.file_tree.winfo_exists() and 
+                              len(self.file_tree.get_children()) > 0 and 
+                              num_selected < len(self.file_tree.get_children()))
+            self.actions_menu.entryconfig("Select All", state=tk.NORMAL if can_select_all else tk.DISABLED)
+            self.actions_menu.entryconfig("Clear Selection", state=tk.NORMAL if has_selection else tk.DISABLED)
+
+        if hasattr(self, 'device_menu'):
+            self.device_menu.entryconfig("Sync Device Time", state=tk.NORMAL if is_connected else tk.DISABLED)
+            self.device_menu.entryconfig("Format Storage", state=tk.NORMAL if is_connected else tk.DISABLED)
 
     def apply_theme(self, theme_name):
-        # Renamed parameter for clarity
         theme_name_from_config_or_selection = theme_name
         try:
             style = ttk.Style(self.master)
-            # Default to light variant if "azure" is specified
-            azure_variant_to_set = "light" # Could be "dark" or configurable later
+            azure_variant_to_set = "light" 
 
             if theme_name_from_config_or_selection == "azure":
                 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1100,239 +936,203 @@ class HiDockToolGUI:
                     try:
                         self.master.tk.call("source", azure_tcl_path)
                         self.master.tk.call("set_theme", azure_variant_to_set)
-                        # The actual theme name used by ttk will be 'azure-light' or 'azure-dark'.
-                        # set_theme procedure handles calling 'ttk::style theme use'.
                         logger.info("GUI", "apply_theme", f"Azure theme ('{azure_variant_to_set}' variant) sourced and applied.")
-                        return # Successfully applied Azure theme
+                        return 
                     except tk.TclError as e:
                         logger.error("GUI", "apply_theme", f"TclError sourcing/using Azure theme from {azure_tcl_path}: {e}")
-                        # Fall through to standard theme logic, try to apply theme_name_from_config_or_selection as a standard theme
                 else:
                     logger.warning("GUI", "apply_theme", f"Azure theme file not found at {azure_tcl_path}. Falling back.")
-                    # Fall through to standard theme logic
-
-            # Standard theme logic (if Azure wasn't requested, or if it failed to load)
+            
             available_themes = style.theme_names()
             if theme_name_from_config_or_selection in available_themes:
                 style.theme_use(theme_name_from_config_or_selection)
                 logger.info("GUI", "apply_theme", f"Theme set to '{theme_name_from_config_or_selection}'.")
             else:
-                # Fallback logic
-                fallback_theme_to_try = "vista"
-                if fallback_theme_to_try not in available_themes: fallback_theme_to_try = "clam"
+                fallback_theme_to_try = "vista" 
+                if fallback_theme_to_try not in available_themes: fallback_theme_to_try = "clam" 
                 if fallback_theme_to_try not in available_themes: fallback_theme_to_try = "default"
 
                 if fallback_theme_to_try in available_themes:
                     style.theme_use(fallback_theme_to_try)
-                    logger.warning("GUI", "apply_theme", f"Theme '{theme_name_from_config_or_selection}' not available or failed to load. Fell back to '{fallback_theme_to_try}'. Available: {available_themes}")
-                    # If the original request was "azure" and it failed, update theme_var to the fallback.
+                    logger.warning("GUI", "apply_theme", f"Theme '{theme_name_from_config_or_selection}' not available. Fell back to '{fallback_theme_to_try}'.")
                     if self.theme_var.get() == "azure" and theme_name_from_config_or_selection == "azure":
                         self.theme_var.set(fallback_theme_to_try)
-                        self.config["theme"] = fallback_theme_to_try # Update config as well
+                        self.config["theme"] = fallback_theme_to_try 
                 else:
-                    logger.error("GUI", "apply_theme", f"Critical: Even fallback theme '{fallback_theme_to_try}' not available. No theme explicitly set. Available: {available_themes}")
-        except Exception as e: # pragma: no cover
+                    logger.error("GUI", "apply_theme", f"Critical: Even fallback theme '{fallback_theme_to_try}' not available.")
+        except Exception as e: 
             logger.error("GUI", "apply_theme", f"Generic error applying theme '{theme_name_from_config_or_selection}': {e}\n{traceback.format_exc()}")
 
     def create_widgets(self):
-        # Top frame for connection and general controls
-        top_frame = ttk.Frame(self.master, padding="10")
-        top_frame.pack(fill=tk.X)
+        self._create_menubar() 
+        self._create_status_bar() 
 
-        self.connect_button = ttk.Button(top_frame, text="🔌 Connect to HiDock", command=self.connect_device)
-        self.connect_button.pack(side=tk.LEFT, padx=5)
+        main_content_frame = ttk.Frame(self.master, padding="5")
+        main_content_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.settings_button = ttk.Button(top_frame, text="⚙️ Settings", command=self.open_settings_window)
-        self.settings_button.pack(side=tk.LEFT, padx=5)
-
-        self.disconnect_button = ttk.Button(top_frame, text="❌ Disconnect", command=self.disconnect_device, state=tk.DISABLED)
-        self.disconnect_button.pack(side=tk.LEFT, padx=5)
-
-        initial_status = "Status: Disconnected"
-        if not self.backend_initialized_successfully:
-            initial_status = "Status: USB Backend FAILED!"
-        self.status_label = ttk.Label(top_frame, text=initial_status)
-        self.status_label.pack(side=tk.LEFT, padx=5)
-
-        # Frame for file listing
-        files_frame = ttk.LabelFrame(self.master, text="📄 Available Files", padding="10")
-        files_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        # Files info bar
-        files_info_frame = ttk.Frame(files_frame)
-        files_info_frame.pack(fill=tk.X, pady=(0,5))
-        self.total_files_label = ttk.Label(files_info_frame, text="Total: 0 files, 0.00 MB")
-        self.total_files_label.pack(side=tk.LEFT, padx=5)
-        self.selected_files_label = ttk.Label(files_info_frame, text="Selected: 0 files, 0.00 MB") # Keep this as is or adjust if needed
-        self.selected_files_label.pack(side=tk.LEFT, padx=10)
-        # self.recording_status_label = ttk.Label(top_frame, text="Recording: N/A") # REMOVED - Will integrate into file list
-        # self.recording_status_label.pack(side=tk.LEFT, padx=10, after=self.status_label)
-        self.card_info_label = ttk.Label(files_info_frame, text="Storage: --- / --- MB (Status: ---)") # Keep this on the right
-        self.card_info_label.pack(side=tk.RIGHT, padx=5) # Pack card info to the right first
-
-        # Frame for list action buttons (Refresh, Select All, Clear Selection)
-        list_actions_frame = ttk.Frame(files_frame)
-        list_actions_frame.pack(fill=tk.X, pady=5)
-
-        self.select_all_button = ttk.Button(list_actions_frame, text="Select All", command=self.select_all_files_action, state=tk.DISABLED)
-        self.select_all_button.pack(side=tk.LEFT, padx=(0,5))
-
-        self.clear_selection_button = ttk.Button(list_actions_frame, text="Clear Selection", command=self.clear_selection_action, state=tk.DISABLED)
-        self.clear_selection_button.pack(side=tk.LEFT, padx=5)
-
-
-        self.refresh_files_button = ttk.Button(files_frame, text="🔄 Refresh File List", command=self.refresh_file_list_gui, state=tk.DISABLED)
-        self.refresh_files_button.pack(pady=5)
-
-        # Treeview for files
+        files_frame = ttk.LabelFrame(main_content_frame, text="📄 Available Files", padding="10")
+        files_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
         tree_frame = ttk.Frame(files_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("name", "size", "duration", "date", "time", "status") # Add "status" column
+        columns = ("name", "size", "duration", "date", "time", "status")
         self.file_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
-
-        self.file_tree.heading("name", text=self.original_tree_headings["name"], command=lambda: self.sort_treeview_column("name", False))
-        self.file_tree.column("name", width=250, minwidth=150, stretch=tk.YES)
-
-        self.file_tree.heading("size", text=self.original_tree_headings["size"], command=lambda: self.sort_treeview_column("size", True))
-        self.file_tree.column("size", width=80, minwidth=60, anchor=tk.E)
-
-        self.file_tree.heading("duration", text=self.original_tree_headings["duration"], command=lambda: self.sort_treeview_column("duration", True))
-        self.file_tree.column("duration", width=80, minwidth=60, anchor=tk.E)
-
-        self.file_tree.heading("date", text=self.original_tree_headings["date"], command=lambda: self.sort_treeview_column("date", False))
-        self.file_tree.column("date", width=100, minwidth=80, anchor=tk.CENTER)
-
-        self.file_tree.heading("time", text=self.original_tree_headings["time"], command=lambda: self.sort_treeview_column("time", False))
-        self.file_tree.column("time", width=80, minwidth=70, anchor=tk.CENTER)
-
-        self.file_tree.heading("status", text=self.original_tree_headings["status"], command=lambda: self.sort_treeview_column("status", False))
-        self.file_tree.column("status", width=100, minwidth=80, anchor=tk.W)
-
-
+        
+        for col, text in self.original_tree_headings.items():
+            is_numeric = col in ["size", "duration"]
+            self.file_tree.heading(col, text=text, command=lambda c=col, n=is_numeric: self.sort_treeview_column(c, n))
+            if col == "name": self.file_tree.column(col, width=250, minwidth=150, stretch=tk.YES)
+            elif col in ["size", "duration"]: self.file_tree.column(col, width=80, minwidth=60, anchor=tk.E)
+            elif col in ["date", "time"]: self.file_tree.column(col, width=100, minwidth=80, anchor=tk.CENTER)
+            else: self.file_tree.column(col, width=100, minwidth=80, anchor=tk.W) # status
 
         self.file_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.file_tree.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y) # Original tags - some might be superseded or removed if not used
-        # Configure tags for downloaded and recording files
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
         self.file_tree.tag_configure('downloaded', foreground='blue')
         self.file_tree.tag_configure('recording', foreground='red', font=('TkDefaultFont', 9, 'bold'))
-        self.file_tree.tag_configure('size_mismatch', foreground='red') # New tag for size mismatch
-        # New tags for detailed status
+        self.file_tree.tag_configure('size_mismatch', foreground='red')
         self.file_tree.tag_configure('downloaded_ok', foreground='green')
         self.file_tree.tag_configure('downloading', foreground='dark orange')
-        self.file_tree.tag_configure('queued', foreground='gray50') # A dim gray
-        self.file_tree.tag_configure('cancelled', foreground='firebrick3') # A dull red
+        self.file_tree.tag_configure('queued', foreground='gray50')
+        self.file_tree.tag_configure('cancelled', foreground='firebrick3')
         self.file_tree.tag_configure('playing', foreground='purple')
-        # 'on_device' will use default colors (no specific tag for foreground needed unless theme overrides)
-
 
         self.file_tree.config(yscrollcommand=scrollbar.set)
         self.file_tree.bind("<<TreeviewSelect>>", self.on_file_selection_change)
         self.file_tree.bind("<Double-1>", self._on_file_double_click)
-        self.file_tree.bind("<Button-3>", self._on_file_right_click) # Button-3 for Windows/Linux
-        # Keyboard shortcuts for file_tree
+        self.file_tree.bind("<Button-3>", self._on_file_right_click)
         self.file_tree.bind("<Control-a>", lambda event: self.select_all_files_action())
-        self.file_tree.bind("<Control-A>", lambda event: self.select_all_files_action()) # For uppercase A
+        self.file_tree.bind("<Control-A>", lambda event: self.select_all_files_action())
         self.file_tree.bind("<Delete>", self._on_delete_key_press)
         self.file_tree.bind("<Return>", self._on_enter_key_press)
+        
+        self.optional_sections_pane = ttk.PanedWindow(main_content_frame, orient=tk.VERTICAL)
+        # Packed by _update_optional_panes_visibility if needed
 
-        # Frame for download controls
-        # Download directory selection button moved to settings. Label remains here.
-        download_controls_frame = ttk.Frame(self.master, padding="5 10 5 10") # Adjusted padding
-        download_controls_frame.pack(fill=tk.X, side=tk.BOTTOM, anchor=tk.SW) # Move below progress bar
-
-        self.download_dir_label = ttk.Label(download_controls_frame, text=f"Dir: {self.download_directory}")
-        self.download_dir_label.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-
-        self.delete_button = ttk.Button(download_controls_frame, text="🗑️ Delete Selected", command=self.delete_selected_files_gui, state=tk.DISABLED)
-        self.delete_button.pack(side=tk.RIGHT, padx=5)
-
-        self.play_button = ttk.Button(download_controls_frame, text="▶️ Play Selected", command=self.play_selected_audio_gui, state=tk.DISABLED)
-        self.play_button.pack(side=tk.RIGHT, padx=5)
-
-        self.download_button = ttk.Button(download_controls_frame, text="💾 Download Selected", command=self.download_selected_files_gui, state=tk.DISABLED)
-        self.download_button.pack(side=tk.RIGHT, padx=5)
-
-        # Device Tools Frame
-        self.device_tools_frame = ttk.LabelFrame(self.master, text="🛠️ Device Tools", padding="5")
-        # self.device_tools_frame will be packed/unpacked by toggle_device_tools, packed before log toggles
-        self.format_card_button = ttk.Button(self.device_tools_frame, text="⚠️ Format Storage", command=self.format_sd_card_gui, state=tk.DISABLED)
-        self.format_card_button.pack(side=tk.LEFT, padx=5)
-
-        self.sync_time_button = ttk.Button(self.device_tools_frame, text="🕒 Sync Device Time", command=self.sync_device_time_gui, state=tk.DISABLED)
-        self.sync_time_button.pack(side=tk.LEFT, padx=5)
-
-        # Progress Bar
-        progress_frame = ttk.Frame(self.master, padding="5")
-        progress_frame.pack(fill=tk.X)
-        self.overall_progress_label = ttk.Label(progress_frame, text="Download Progress:")
-        self.overall_progress_label.pack(side=tk.LEFT, padx=5)
-        self.file_progress_bar = ttk.Progressbar(progress_frame, orient=tk.HORIZONTAL, length=300, mode='determinate')
-        self.file_progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-
-        # Log toggle button
-        controls_toggle_frame = ttk.Frame(self.master, padding="5 10 5 10") # Frame for toggle buttons
-        self.controls_toggle_frame = controls_toggle_frame # Assign to self
-        self.controls_toggle_frame.pack(fill=tk.X, side=tk.BOTTOM, anchor=tk.SW)
-        self.log_toggle_button = ttk.Button(self.controls_toggle_frame, text="📜 Show Logs", command=self.toggle_logs)
-        self.log_toggle_button.pack(side=tk.LEFT)
-        self.device_tools_toggle_button = ttk.Button(self.controls_toggle_frame, text="🛠️ Show Device Tools", command=self.toggle_device_tools)
-        self.device_tools_toggle_button.pack(side=tk.LEFT, padx=5)
-
-        # Log area - initially not packed, will be packed above toggle buttons
-        self.log_frame = ttk.LabelFrame(self.master, text="Logs", padding="10")
-
-        # Create a sub-frame for log controls (clear button, level dropdown)
+        self.log_frame = ttk.LabelFrame(self.optional_sections_pane, text="Logs", padding="10")
         log_controls_sub_frame = ttk.Frame(self.log_frame)
-        log_controls_sub_frame.pack(fill=tk.X, pady=(0, 5)) # Pack at the top of log_frame
-
+        log_controls_sub_frame.pack(fill=tk.X, pady=(0, 5))
         self.clear_log_button = ttk.Button(log_controls_sub_frame, text="Clear Log", command=self.clear_log_gui)
         self.clear_log_button.pack(side=tk.LEFT, padx=(0, 10))
-
         ttk.Label(log_controls_sub_frame, text="Log Level:").pack(side=tk.LEFT, padx=(0, 5))
-        self.log_section_level_combo = ttk.Combobox(
-            log_controls_sub_frame,
-            textvariable=self.gui_log_filter_level_var, # Use the new filter var
-            values=list(Logger.LEVELS.keys()),
-            state="readonly",
-            width=10
-        )
+        self.log_section_level_combo = ttk.Combobox(log_controls_sub_frame, textvariable=self.gui_log_filter_level_var, values=list(Logger.LEVELS.keys()), state="readonly", width=10)
         self.log_section_level_combo.pack(side=tk.LEFT)
-        self.log_section_level_combo.bind("<<ComboboxSelected>>", self.on_gui_log_filter_change) # New handler
-
+        self.log_section_level_combo.bind("<<ComboboxSelected>>", self.on_gui_log_filter_change)
         self.download_logs_button = ttk.Button(log_controls_sub_frame, text="Download Logs", command=self.download_gui_logs)
         self.download_logs_button.pack(side=tk.LEFT, padx=(10,0))
-
-        self.log_text_area = tk.Text(self.log_frame, height=10, state='disabled', wrap=tk.WORD)
-        log_scrollbar = ttk.Scrollbar(self.log_frame, orient=tk.VERTICAL, command=self.log_text_area.yview)
-        self.log_text_area.config(yscrollcommand=log_scrollbar.set)
-
-        # Configure tags for log message colors
-        self.log_text_area.tag_configure("ERROR", background="#FFC0CB", foreground="black") # Light Pink
-        self.log_text_area.tag_configure("WARNING", background="#FFFFE0", foreground="black") # Light Yellow
-        self.log_text_area.tag_configure("INFO", background="white", foreground="black") # Or system default
-        self.log_text_area.tag_configure("DEBUG", background="#E0FFFF", foreground="black") # Light Cyan
-        self.log_text_area.tag_configure("CRITICAL", background="#FF6347", foreground="white") # Tomato Red
-        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text_area = tk.Text(self.log_frame, height=8, state='disabled', wrap=tk.WORD) 
+        log_scrollbar_y = ttk.Scrollbar(self.log_frame, orient=tk.VERTICAL, command=self.log_text_area.yview)
+        self.log_text_area.config(yscrollcommand=log_scrollbar_y.set)
+        log_scrollbar_y.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text_area.pack(fill=tk.BOTH, expand=True)
-        # Playback Controls Frame will be created after controls_toggle_frame
+        for tag, color in [("ERROR", "#FFC0CB"), ("WARNING", "#FFFFE0"), ("INFO", "white"), ("DEBUG", "#E0FFFF"), ("CRITICAL", "#FF6347")]:
+            fg = "white" if tag == "CRITICAL" else "black"
+            self.log_text_area.tag_configure(tag, background=color, foreground=fg)
+
+        self.device_tools_frame = ttk.LabelFrame(self.optional_sections_pane, text="🛠️ Device Tools", padding="5")
+        ttk.Label(self.device_tools_frame, text="Device tools (Format, Sync Time) are now in the 'Device' menu.").pack(padx=5, pady=5)
+
+        self._update_menu_states() 
+
+    def _update_optional_panes_visibility(self):
+        if not hasattr(self, 'optional_sections_pane') or not self.optional_sections_pane.winfo_exists():
+            logger.error("GUI", "_update_optional_panes_visibility", "optional_sections_pane does not exist.")
+            return
+
+        # Get current managed child widgets of the paned window
+        current_managed_children = []
+        try:
+            for pane_path in self.optional_sections_pane.panes():
+                try:
+                    current_managed_children.append(self.optional_sections_pane.nametowidget(pane_path))
+                except tk.TclError:
+                    pass # Widget path might be stale
+        except tk.TclError: # Panes might be empty
+            pass
+
+        # --- Manage Log Frame ---
+        log_frame_should_be_visible = self.logs_visible_var.get()
+        log_frame_is_currently_managed = self.log_frame in current_managed_children
+
+        if log_frame_should_be_visible and not log_frame_is_currently_managed:
+            try:
+                # If device_tools_frame is also going to be visible and is already managed, add log_frame before it.
+                if self.device_tools_visible_var.get() and self.device_tools_frame in current_managed_children:
+                     self.optional_sections_pane.insert(self.device_tools_frame, self.log_frame, weight=1)
+                else: # Add at the end or as the only one
+                    self.optional_sections_pane.add(self.log_frame, weight=1)
+                current_managed_children.append(self.log_frame) # Reflect change
+            except tk.TclError as e:
+                logger.warning("GUI", "_update_optional_panes_visibility", f"Error adding log_frame: {e}")
+        elif not log_frame_should_be_visible and log_frame_is_currently_managed:
+            try:
+                self.optional_sections_pane.forget(self.log_frame)
+                if self.log_frame in current_managed_children: current_managed_children.remove(self.log_frame) # Reflect
+            except tk.TclError as e:
+                logger.warning("GUI", "_update_optional_panes_visibility", f"Error forgetting log_frame: {e}")
+
+        # --- Manage Device Tools Frame ---
+        # Re-check current_managed_children as it might have changed
+        current_managed_children = []
+        try:
+            for pane_path in self.optional_sections_pane.panes():
+                try: current_managed_children.append(self.optional_sections_pane.nametowidget(pane_path))
+                except tk.TclError: pass
+        except tk.TclError: pass
+
+        device_tools_frame_should_be_visible = self.device_tools_visible_var.get()
+        device_tools_frame_is_currently_managed = self.device_tools_frame in current_managed_children
+
+        if device_tools_frame_should_be_visible and not device_tools_frame_is_currently_managed:
+            try:
+                self.optional_sections_pane.add(self.device_tools_frame, weight=1) # Adds at the end
+                current_managed_children.append(self.device_tools_frame) # Reflect
+            except tk.TclError as e:
+                logger.warning("GUI", "_update_optional_panes_visibility", f"Error adding device_tools_frame: {e}")
+        elif not device_tools_frame_should_be_visible and device_tools_frame_is_currently_managed:
+            try:
+                self.optional_sections_pane.forget(self.device_tools_frame)
+                if self.device_tools_frame in current_managed_children: current_managed_children.remove(self.device_tools_frame) # Reflect
+            except tk.TclError as e:
+                logger.warning("GUI", "_update_optional_panes_visibility", f"Error forgetting device_tools_frame: {e}")
+
+        # --- Manage visibility of the PanedWindow itself ---
+        any_pane_content_intended_to_be_visible = self.logs_visible_var.get() or self.device_tools_visible_var.get()
+
+        if any_pane_content_intended_to_be_visible:
+            if not self.optional_sections_pane.winfo_ismapped():
+                # Pack it into its correct parent, which is main_content_frame
+                self.optional_sections_pane.pack(fill=tk.BOTH, expand=True, pady=(5,0)) # before=self.status_bar_frame is wrong here
+        else:
+            if self.optional_sections_pane.winfo_ismapped():
+                self.optional_sections_pane.pack_forget()
+
+    def toggle_logs(self):
+        # self.logs_visible is the internal state, self.logs_visible_var is for the menu
+        self.logs_visible = self.logs_visible_var.get() # Sync internal state from menu var
+        self._update_optional_panes_visibility()
+
+
+    def toggle_device_tools(self):
+        self.device_tools_visible = self.device_tools_visible_var.get() # Sync internal state
+        self._update_optional_panes_visibility()
+
 
     def open_settings_window(self):
         settings_win = tk.Toplevel(self.master)
         settings_win.title("Application Settings")
-        # Geometry and minsize will be set dynamically at the end
-        settings_win.transient(self.master) # Keep on top of main window
-        settings_win.grab_set() # Modal behavior
+        settings_win.transient(self.master) 
+        settings_win.grab_set() 
 
-        # Main frame to hold the notebook and the action buttons
         main_content_frame = ttk.Frame(settings_win, padding="10")
         main_content_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Store initial state for cancel
         initial_config_vars = {
             "autoconnect": self.autoconnect_var.get(),
-            "log_level": self.logger_processing_level_var.get(), # Use renamed var
+            "log_level": self.logger_processing_level_var.get(),
             "selected_vid": self.selected_vid_var.get(),
             "selected_pid": self.selected_pid_var.get(),
             "target_interface": self.target_interface_var.get(),
@@ -1343,10 +1143,9 @@ class HiDockToolGUI:
             "auto_refresh_interval_s": self.auto_refresh_interval_s_var.get(),
             "quit_without_prompt_if_connected": self.quit_without_prompt_var.get(),
             "theme": self.theme_var.get(),
-            "suppress_console_output": self.suppress_console_output_var.get() # New var
+            "suppress_console_output": self.suppress_console_output_var.get()
         }
-        # Add initial state of device behavior vars as they are when dialog opens (before fetching from device)
-        # These are the conceptual names from the device's perspective or settings dialog structure
+        
         conceptual_device_setting_keys = {
             "autoRecord": "auto_record", 
             "autoPlay": "auto_play",
@@ -1354,207 +1153,117 @@ class HiDockToolGUI:
             "notificationSound": "notification_sound"
         }
         for conceptual_key, snake_case_part in conceptual_device_setting_keys.items():
-            tk_var_attribute_name = f"device_setting_{snake_case_part}_var" 
+            tk_var_attribute_name = f"device_setting_{snake_case_part}_var"
             if hasattr(self, tk_var_attribute_name):
                 initial_config_vars[tk_var_attribute_name] = getattr(self, tk_var_attribute_name).get()
             else: 
                 logger.error("Settings", "open_settings_window", f"Attribute {tk_var_attribute_name} for {conceptual_key} not found.")
+        
+        initial_download_directory = self.download_directory 
+        settings_changed_tracker = [False] 
+        current_dialog_download_dir = [self.download_directory] 
 
-        initial_download_directory = self.download_directory # String, not a tk.Var
-
-        # --- Helper to check if any settings actually changed from initial state ---
-        def _check_if_settings_actually_changed():
-            # Compare app config vars
-            for key, initial_val in initial_config_vars.items():
-                # For regular config keys like "autoconnect", "log_level", etc.
-                var_attr_app = getattr(self, f"{key}_var", None)
-                if var_attr_app and var_attr_app.get() != initial_val:
-                    return True
-                # For device setting vars stored in initial_config_vars like "device_setting_autoRecord_var"
-                elif key.startswith("device_setting_") and hasattr(self, key) and getattr(self, key).get() != initial_val:
-                    return True
-
-            if current_dialog_download_dir[0] != initial_download_directory:
-                return True
-
-            return False
-
-        # --- State tracking for changes ---
-        settings_changed_tracker = [False] # Use a list to pass by reference for modification
-        # Temporary storage for download directory changes within this dialog session
-        current_dialog_download_dir = [self.download_directory]
-
-        # --- Notebook for Tabs ---
         notebook = ttk.Notebook(main_content_frame)
-
-        # --- Action Buttons Frame (created early so buttons can be captured by lambdas) ---
-        buttons_frame = ttk.Frame(main_content_frame) # Buttons will be below the notebook
+        buttons_frame = ttk.Frame(main_content_frame) 
         action_buttons_subframe = ttk.Frame(buttons_frame)
-
-        # Create buttons with the correct master from the start
+        
         ok_button = ttk.Button(action_buttons_subframe, text="OK")
         apply_button = ttk.Button(action_buttons_subframe, text="Apply", state=tk.DISABLED)
         cancel_close_button = ttk.Button(action_buttons_subframe, text="Close")
 
-        # --- Helper to update button states on any setting change ---
-        # Defined early as it's used by traces and download dir selection logic
-        def _update_button_states_on_change(*args): # *args for trace callback
-            # Ensure settings_win itself still exists before trying to configure its children
+        def _update_button_states_on_change(*args): 
             if settings_win.winfo_exists():
-                if not settings_changed_tracker[0]: # Only update if not already marked
+                if not settings_changed_tracker[0]: 
                     settings_changed_tracker[0] = True
                     if apply_button.winfo_exists(): apply_button.config(state=tk.NORMAL)
                     if cancel_close_button.winfo_exists(): cancel_close_button.config(text="Cancel")
-
-        # --- Create Tab Frames ---
+            
         tab_general = ttk.Frame(notebook, padding="10")
         tab_connection = ttk.Frame(notebook, padding="10")
         tab_operation = ttk.Frame(notebook, padding="10")
         tab_device_specific = ttk.Frame(notebook, padding="10")
 
-        notebook.add(tab_general, text=" General ") # Added spaces for padding
+        notebook.add(tab_general, text=" General ")
         notebook.add(tab_connection, text=" Connection ")
         notebook.add(tab_operation, text=" Operation ")
         notebook.add(tab_device_specific, text=" Device Specific ")
-
-        notebook.pack(expand=True, fill="both", pady=(0, 10)) # Pack notebook above buttons
+        notebook.pack(expand=True, fill="both", pady=(0, 10))
 
         # --- Populate Tab 1: General ---
-        # Appearance Settings
         appearance_settings_frame = ttk.LabelFrame(tab_general, text="Appearance", padding="5")
         appearance_settings_frame.pack(fill=tk.X, pady=5, anchor=tk.N)
         ttk.Label(appearance_settings_frame, text="Application Theme:").pack(anchor=tk.W, pady=(5,0))
+        try: system_themes = list(ttk.Style().theme_names())
+        except tk.TclError: system_themes = ["default", "clam", "alt", "vista", "xpnative"]
+        all_selectable_themes = set(system_themes)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        azure_tcl_path = os.path.join(script_dir, "themes", "azure", "azure.tcl")
+        if os.path.exists(azure_tcl_path): all_selectable_themes.add("azure")
+        sorted_selectable_themes = sorted(list(all_selectable_themes))
+        theme_combo = ttk.Combobox(appearance_settings_frame, textvariable=self.theme_var, values=sorted_selectable_themes, state="readonly")
+        theme_combo.pack(fill=tk.X, pady=2)
 
-        # --- USB Device Selection ---
+        log_settings_frame = ttk.LabelFrame(tab_general, text="Logging", padding="5")
+        log_settings_frame.pack(fill=tk.X, pady=5, anchor=tk.N)
+        ttk.Label(log_settings_frame, text="Logger Processing Level:").pack(anchor=tk.W, pady=(5,0))
+        log_level_combo = ttk.Combobox(log_settings_frame, textvariable=self.logger_processing_level_var, values=list(Logger.LEVELS.keys()), state="readonly")
+        log_level_combo.pack(fill=tk.X, pady=2)
+        suppress_console_check = ttk.Checkbutton(log_settings_frame, text="Suppress console output (logs still go to GUI)", variable=self.suppress_console_output_var)
+        suppress_console_check.pack(anchor=tk.W, pady=(5,0))
+        
+        quit_prompt_frame = ttk.LabelFrame(tab_general, text="Application Exit", padding="5")
+        quit_prompt_frame.pack(fill=tk.X, pady=5, anchor=tk.N)
+        quit_checkbutton = ttk.Checkbutton(quit_prompt_frame, text="Quit without confirmation if device is connected", variable=self.quit_without_prompt_var)
+        quit_checkbutton.pack(anchor=tk.W, pady=(5,0))
+
+        download_settings_frame = ttk.LabelFrame(tab_general, text="Download Settings", padding="5")
+        download_settings_frame.pack(fill=tk.X, pady=5, anchor=tk.N)
+        dir_buttons_frame = ttk.Frame(download_settings_frame)
+        dir_buttons_frame.pack(fill=tk.X, pady=(0,5))
+        current_dl_dir_label_settings = ttk.Label(download_settings_frame, text=self.download_directory, relief="sunken", padding=2, wraplength=380)
+        current_dl_dir_label_settings.pack(fill=tk.X, pady=2, side=tk.TOP)
+        select_dir_button_settings = ttk.Button(dir_buttons_frame, text="Select Download Directory...", command=lambda: self._select_download_dir_for_settings_dialog(current_dl_dir_label_settings, current_dialog_download_dir, settings_changed_tracker, apply_button, cancel_close_button))
+        select_dir_button_settings.pack(side=tk.LEFT, pady=(5,0))
+        reset_dir_button = ttk.Button(dir_buttons_frame, text="Reset to App Folder", command=lambda: self._reset_download_dir_for_settings(current_dl_dir_label_settings, current_dialog_download_dir, settings_changed_tracker, apply_button, cancel_close_button))
+        reset_dir_button.pack(side=tk.LEFT, padx=5, pady=(5,0))
+
+        # --- Populate Tab 2: Connection ---
         device_selection_frame = ttk.LabelFrame(tab_connection, text="USB Device Selection", padding="5")
         device_selection_frame.pack(fill=tk.X, pady=5, anchor=tk.N)
+        self.settings_device_combobox = ttk.Combobox(device_selection_frame, state="readonly", width=50)
+        self.settings_device_combobox.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,5))
+        scan_button = ttk.Button(device_selection_frame, text="Scan", command=lambda: self.scan_usb_devices_for_settings(settings_win, change_callback=_update_button_states_on_change))
+        scan_button.pack(side=tk.LEFT, padx=5)
+        self.scan_usb_devices_for_settings(settings_win, initial_load=True, change_callback=_update_button_states_on_change) # Pass callback
+        self.settings_device_combobox.bind("<<ComboboxSelected>>", lambda e: on_device_selected(settings_changed_tracker, apply_button, cancel_close_button)) 
 
-        self.settings_device_combobox = ttk.Combobox(device_selection_frame, state="readonly", width=50) # Reduced width
-        self.settings_device_combobox.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,5)) # Allow combobox to expand
-
-        scan_button = ttk.Button(device_selection_frame, text="Scan", command=lambda: self.scan_usb_devices_for_settings(settings_win))
-        scan_button.pack(side=tk.LEFT, padx=5) # Add some padding
-
-        # Populate initially
-        self.scan_usb_devices_for_settings(settings_win, initial_load=True)
-
-        def on_device_selected(event=None): # Allow calling without event
-            if not self.settings_device_combobox or not self.settings_device_combobox.winfo_exists():
-                return # Combobox not ready
-
-            selection = self.settings_device_combobox.get()
-            if not selection or selection == "--- Devices with Issues ---": # Ignore separator
-                return
-            # Find the (desc, vid, pid) tuple from self.available_usb_devices
-            selected_device_info = next((dev for dev in self.available_usb_devices if dev[0] == selection), None)
-            if selected_device_info:
-                _, vid, pid = selected_device_info
-                self.selected_vid_var.set(vid)
-                self.selected_pid_var.set(pid)
-                logger.debug("Settings", "on_device_selected", f"Selected device in settings: VID={hex(vid)}, PID={hex(pid)}")
-            else:
-                logger.warning("Settings", "on_device_selected", f"Could not find details for selection: '{selection}' in self.available_usb_devices. This might be a separator or an unhandled case.")
-
-        self.settings_device_combobox.bind("<<ComboboxSelected>>", on_device_selected)
-
-        # --- Connection Settings ---
-        # (Part of tab_connection now)
         autoconnect_checkbutton = ttk.Checkbutton(tab_connection, text="Autoconnect on startup", variable=self.autoconnect_var)
         autoconnect_checkbutton.pack(pady=10, anchor=tk.W)
         ttk.Label(tab_connection, text="Target USB Interface Number:").pack(anchor=tk.W, pady=(5,0))
         target_interface_spinbox = ttk.Spinbox(tab_connection, from_=0, to=10, textvariable=self.target_interface_var, width=5)
         target_interface_spinbox.pack(anchor=tk.W, pady=2)
-
-        # Get system/Tk-known themes
-        try:
-            system_themes = list(ttk.Style().theme_names())
-        except tk.TclError: # pragma: no cover
-            system_themes = ["default", "clam", "alt", "vista", "xpnative"]
-            logger.warning("GUI", "open_settings_window", "Could not query ttk.Style().theme_names(), using a default list.")
-
-        all_selectable_themes = set(system_themes)
-
-        # Check for Azure theme file and add "azure" to the list if its files exist
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        azure_tcl_path = os.path.join(script_dir, "themes", "azure", "azure.tcl")
-
-        if os.path.exists(azure_tcl_path):
-            all_selectable_themes.add("azure") # User selects "azure" which implies a default variant (e.g., light)
-            logger.debug("GUI", "open_settings_window", "Azure theme files found, adding 'azure' to selectable themes.")
-        else:
-            logger.debug("GUI", "open_settings_window", f"Azure theme file not found at {azure_tcl_path}. 'azure' not added to theme list.")
-
-        sorted_selectable_themes = sorted(list(all_selectable_themes))
-
-        theme_combo = ttk.Combobox(appearance_settings_frame, textvariable=self.theme_var, values=sorted_selectable_themes, state="readonly")
-        theme_combo.pack(fill=tk.X, pady=2)
-
-        # Log Level (Processing) - moved to General Tab
-        log_settings_frame = ttk.LabelFrame(tab_general, text="Logging", padding="5")
-        log_settings_frame.pack(fill=tk.X, pady=5, anchor=tk.N)
-
-        ttk.Label(log_settings_frame, text="Logger Processing Level:").pack(anchor=tk.W, pady=(5,0))
-        log_level_combo = ttk.Combobox(log_settings_frame, # Corrected: Use log_settings_frame
-                                       textvariable=self.logger_processing_level_var, # Use renamed var
-                                       values=list(Logger.LEVELS.keys()),
-                                       state="readonly")
-        log_level_combo.pack(fill=tk.X, pady=2)
-
-        suppress_console_check = ttk.Checkbutton(log_settings_frame, text="Suppress console output (logs still go to GUI)", variable=self.suppress_console_output_var)
-        suppress_console_check.pack(anchor=tk.W, pady=(5,0))
-
-        # --- Operational Settings (Timings & Refresh) --- moved to Operation Tab ---
+        
+        # --- Populate Tab 3: Operation ---
         operational_settings_frame = ttk.LabelFrame(tab_operation, text="Timings & Auto-Refresh", padding="5")
         operational_settings_frame.pack(fill=tk.X, pady=5, anchor=tk.N)
         ttk.Label(operational_settings_frame, text="Recording Status Check Interval (seconds):").pack(anchor=tk.W, pady=(5,0))
-        recording_interval_spinbox = ttk.Spinbox(operational_settings_frame, from_=1, to=60, textvariable=self.recording_check_interval_var, width=5)
+        recording_interval_spinbox = ttk.Spinbox(operational_settings_frame, from_=0, to=60, textvariable=self.recording_check_interval_var, width=5) 
         recording_interval_spinbox.pack(anchor=tk.W, pady=2)
-
         ttk.Label(operational_settings_frame, text="Default Command Timeout (ms):").pack(anchor=tk.W, pady=(5,0))
         cmd_timeout_spinbox = ttk.Spinbox(operational_settings_frame, from_=500, to=30000, increment=100, textvariable=self.default_command_timeout_ms_var, width=8)
         cmd_timeout_spinbox.pack(anchor=tk.W, pady=2)
-
         ttk.Label(operational_settings_frame, text="File Streaming Timeout (seconds):").pack(anchor=tk.W, pady=(5,0))
         stream_timeout_spinbox = ttk.Spinbox(operational_settings_frame, from_=30, to=600, increment=10, textvariable=self.file_stream_timeout_s_var, width=8)
         stream_timeout_spinbox.pack(anchor=tk.W, pady=2)
-
         auto_refresh_check = ttk.Checkbutton(operational_settings_frame, text="Automatically refresh file list when connected", variable=self.auto_refresh_files_var)
         auto_refresh_check.pack(anchor=tk.W, pady=(5,0))
         ttk.Label(operational_settings_frame, text="Auto Refresh Interval (seconds):").pack(anchor=tk.W, pady=(0,0))
         auto_refresh_interval_spinbox = ttk.Spinbox(operational_settings_frame, from_=5, to=300, increment=5, textvariable=self.auto_refresh_interval_s_var, width=5)
         auto_refresh_interval_spinbox.pack(anchor=tk.W, pady=2)
 
-        # Quit without prompt - moved to General Tab
-        quit_prompt_frame = ttk.LabelFrame(tab_general, text="Application Exit", padding="5")
-        quit_prompt_frame.pack(fill=tk.X, pady=5, anchor=tk.N)
-        quit_checkbutton = ttk.Checkbutton(quit_prompt_frame, text="Quit without confirmation if device is connected", variable=self.quit_without_prompt_var)
-        quit_checkbutton.pack(anchor=tk.W, pady=(5,0))
-
-        # --- Download Settings - moved to General Tab ---
-        download_settings_frame = ttk.LabelFrame(tab_general, text="Download Settings", padding="5")
-        download_settings_frame.pack(fill=tk.X, pady=5, anchor=tk.N)
-
-        # Frame to hold the label and buttons in one row
-        dir_buttons_frame = ttk.Frame(download_settings_frame)
-        dir_buttons_frame.pack(fill=tk.X, pady=(0,5))
-
-        current_dl_dir_label_settings = ttk.Label(download_settings_frame, text=self.download_directory, relief="sunken", padding=2, wraplength=380)
-        current_dl_dir_label_settings.pack(fill=tk.X, pady=2, side=tk.TOP)
-
-        select_dir_button_settings = ttk.Button(
-            dir_buttons_frame,
-            text="Select Download Directory...",
-            command=lambda: self._select_download_dir_for_settings_dialog(current_dl_dir_label_settings, current_dialog_download_dir, settings_changed_tracker, apply_button, cancel_close_button)
-        )
-        select_dir_button_settings.pack(side=tk.LEFT, pady=(5,0))
-        reset_dir_button = ttk.Button(dir_buttons_frame, text="Reset to App Folder",
-                                      command=lambda: self._reset_download_dir_for_settings(current_dl_dir_label_settings, current_dialog_download_dir, settings_changed_tracker, apply_button, cancel_close_button))
-        reset_dir_button.pack(side=tk.LEFT, padx=5, pady=(5,0))
-
-        # --- Device Behavior Settings - moved to Device Specific Tab ---
+        # --- Populate Tab 4: Device Specific ---
         device_behavior_frame = ttk.LabelFrame(tab_device_specific, text="Device Behavior Settings (Requires Connection)", padding="5")
         device_behavior_frame.pack(fill=tk.X, pady=5, anchor=tk.N)
-
         self.auto_record_checkbox = ttk.Checkbutton(device_behavior_frame, text="Auto Record on Power On", variable=self.device_setting_auto_record_var, state=tk.DISABLED)
         self.auto_record_checkbox.pack(anchor=tk.W)
         self.auto_play_checkbox = ttk.Checkbutton(device_behavior_frame, text="Auto Play on Insert (if applicable)", variable=self.device_setting_auto_play_var, state=tk.DISABLED)
@@ -1564,820 +1273,501 @@ class HiDockToolGUI:
         self.notification_sound_checkbox = ttk.Checkbutton(device_behavior_frame, text="Notification Sounds", variable=self.device_setting_notification_sound_var, state=tk.DISABLED)
         self.notification_sound_checkbox.pack(anchor=tk.W)
 
-        # Load device settings if connected
         if self.dock.is_connected():
-            # Checkboxes will be enabled once settings are loaded by the thread
-            def _after_device_settings_loaded_hook():
-                """Called after device settings are fetched and UI vars are set."""
-                if not _check_if_settings_actually_changed(): # Double check
+            def _after_device_settings_loaded_hook_settings():
+                if not _check_if_settings_actually_changed_settings(): 
                     settings_changed_tracker[0] = False
                     if apply_button.winfo_exists(): apply_button.config(state=tk.DISABLED)
                     if cancel_close_button.winfo_exists(): cancel_close_button.config(text="Close")
-
-            threading.Thread(target=self._load_device_settings_for_dialog,
-                             args=(settings_win, _after_device_settings_loaded_hook), # Pass hook
-                             daemon=True).start()
+            threading.Thread(target=self._load_device_settings_for_dialog, args=(settings_win, _after_device_settings_loaded_hook_settings), daemon=True).start()
         else:
-            settings_changed_tracker[0] = False # No device settings to load, so no changes yet
+            settings_changed_tracker[0] = False
             if apply_button.winfo_exists(): apply_button.config(state=tk.DISABLED)
             if cancel_close_button.winfo_exists(): cancel_close_button.config(text="Close")
-
-        # --- Trace changes for tk.Variables ---
-        vars_to_trace = [
-            self.autoconnect_var, self.logger_processing_level_var, self.selected_vid_var, self.selected_pid_var,
-            self.target_interface_var, self.recording_check_interval_var,
-            self.default_command_timeout_ms_var, self.file_stream_timeout_s_var,
-            self.auto_refresh_files_var, self.auto_refresh_interval_s_var,
-            self.quit_without_prompt_var, self.theme_var,
-            self.suppress_console_output_var, self.device_setting_auto_record_var, self.device_setting_auto_play_var,
-            self.device_setting_bluetooth_tone_var, self.device_setting_notification_sound_var
-        ]
+        
+        vars_to_trace = [self.autoconnect_var, self.logger_processing_level_var, self.selected_vid_var, self.selected_pid_var,
+                         self.target_interface_var, self.recording_check_interval_var, self.default_command_timeout_ms_var,
+                         self.file_stream_timeout_s_var, self.auto_refresh_files_var, self.auto_refresh_interval_s_var,
+                         self.quit_without_prompt_var, self.theme_var, self.suppress_console_output_var,
+                         self.device_setting_auto_record_var, self.device_setting_auto_play_var,
+                         self.device_setting_bluetooth_tone_var, self.device_setting_notification_sound_var]
         for var_to_trace in vars_to_trace:
             var_to_trace.trace_add('write', _update_button_states_on_change)
 
-        # --- Core logic for applying settings ---
+        def on_device_selected(change_tracker_ref, apply_btn_ref, cancel_btn_ref, event=None):
+            if not self.settings_device_combobox or not self.settings_device_combobox.winfo_exists(): return
+            selection = self.settings_device_combobox.get()
+            if not selection or selection == "--- Devices with Issues ---": return
+            selected_device_info = next((dev for dev in self.available_usb_devices if dev[0] == selection), None)
+            if selected_device_info:
+                _, vid, pid = selected_device_info
+                # Only update if different, to avoid unnecessary trace fires if re-selecting same
+                if self.selected_vid_var.get() != vid: self.selected_vid_var.set(vid)
+                if self.selected_pid_var.get() != pid: self.selected_pid_var.set(pid)
+                logger.debug("Settings", "on_device_selected", f"Selected device: VID={hex(vid)}, PID={hex(pid)}")
+                # Manually trigger change update if needed, as .set() might not if value is same
+                _update_button_states_on_change() 
+            else:
+                logger.warning("Settings", "on_device_selected", f"Could not find details for: '{selection}'")
+
+
+        def _check_if_settings_actually_changed_settings(): # Renamed for clarity within this scope
+            for key, initial_val in initial_config_vars.items():
+                # Handle tk.var attributes directly (like device_setting_auto_record_var)
+                if hasattr(self, key) and isinstance(getattr(self, key), tk.Variable):
+                    if getattr(self, key).get() != initial_val: return True
+                # Handle short config keys (like autoconnect -> autoconnect_var)
+                elif hasattr(self, f"{key}_var") and isinstance(getattr(self, f"{key}_var"), tk.Variable):
+                     if getattr(self, f"{key}_var").get() != initial_val: return True
+            if current_dialog_download_dir[0] != initial_download_directory: return True
+            return False
+
         def _perform_apply_settings_logic(update_dialog_baseline=False):
-            nonlocal initial_download_directory # To modify the outer scope's variable if baseline is updated
+            nonlocal initial_download_directory 
+            for key in initial_config_vars: 
+                var_attr_name = key # For full names like "device_setting_auto_record_var"
+                if not (hasattr(self, key) and isinstance(getattr(self, key), tk.Variable)):
+                    var_attr_name = f"{key}_var" # For short names like "autoconnect"
+                
+                if hasattr(self, var_attr_name) and isinstance(getattr(self, var_attr_name), tk.Variable):
+                    self.config[key] = getattr(self, var_attr_name).get() 
+                # Else, it might be a key that doesn't have a direct _var, like download_directory
 
-            # 1. Update self.config and self attributes from current UI values
-            for key in initial_config_vars: # Iterate through keys of original dict
-                var_attr = getattr(self, f"{key}_var", None) # e.g., self.autoconnect_var
-                if var_attr:
-                    self.config[key] = var_attr.get()
-
-            self.download_directory = current_dialog_download_dir[0] # Update actual from dialog's temp
+            self.download_directory = current_dialog_download_dir[0] 
             self.config["download_directory"] = self.download_directory
 
-            # Apply device behavior settings
             if self.dock.is_connected() and self._fetched_device_settings_for_dialog:
                 changed_device_settings = {}
-                baseline_auto_record = self._fetched_device_settings_for_dialog.get("autoRecord")
-                if self.device_setting_auto_record_var.get() != baseline_auto_record:
-                    changed_device_settings["autoRecord"] = self.device_setting_auto_record_var.get()
-
-                baseline_auto_play = self._fetched_device_settings_for_dialog.get("autoPlay")
-                if self.device_setting_auto_play_var.get() != baseline_auto_play:
-                    changed_device_settings["autoPlay"] = self.device_setting_auto_play_var.get()
-
-                baseline_bt_tone = self._fetched_device_settings_for_dialog.get("bluetoothTone")
-                if self.device_setting_bluetooth_tone_var.get() != baseline_bt_tone:
-                    changed_device_settings["bluetoothTone"] = self.device_setting_bluetooth_tone_var.get()
-
-                baseline_notif_sound = self._fetched_device_settings_for_dialog.get("notificationSound")
-                if self.device_setting_notification_sound_var.get() != baseline_notif_sound:
-                    changed_device_settings["notificationSound"] = self.device_setting_notification_sound_var.get()
-
+                for conceptual_key, snake_case_part in conceptual_device_setting_keys.items():
+                    tk_var_attr = getattr(self, f"device_setting_{snake_case_part}_var")
+                    fetched_val = self._fetched_device_settings_for_dialog.get(conceptual_key) # Use conceptual key
+                    if tk_var_attr.get() != fetched_val:
+                        changed_device_settings[conceptual_key] = tk_var_attr.get()
                 if changed_device_settings:
                     threading.Thread(target=self._apply_device_settings_thread, args=(changed_device_settings,), daemon=True).start()
-
+            
             save_config(self.config)
-
-            # Apply settings that have immediate effect
             logger.set_level(self.logger_processing_level_var.get())
-            logger.update_config({"suppress_console_output": self.suppress_console_output_var.get()}) # Update logger's view
-            self.apply_theme(self.theme_var.get()) # Apply theme change
-            if hasattr(self, 'download_dir_label') and self.download_dir_label.winfo_exists():
-                self.download_dir_label.config(text=f"Dir: {self.download_directory}")
+            logger.update_config({"suppress_console_output": self.suppress_console_output_var.get()})
+            self.apply_theme(self.theme_var.get())
+            self.update_status_bar(download_dir=self.download_directory) # Update status bar with new dir
 
-            if self.dock.is_connected():
-                self.start_recording_status_check() # Restart with new interval
-                self.start_auto_file_refresh_periodic_check() # Restart with new interval/state
-
+            if self.dock.is_connected(): 
+                self.start_recording_status_check() 
+                self.start_auto_file_refresh_periodic_check() 
             logger.info("GUI", "apply_settings_action", "Settings applied and saved.")
 
             if update_dialog_baseline:
-                # Current UI state becomes the new baseline for this dialog session
                 for key in initial_config_vars:
-                    var_attr = getattr(self, f"{key}_var", None)
-                    if var_attr: initial_config_vars[key] = var_attr.get()
-
+                    var_attr_name = key
+                    if not (hasattr(self, key) and isinstance(getattr(self, key), tk.Variable)):
+                        var_attr_name = f"{key}_var"
+                    if hasattr(self, var_attr_name): initial_config_vars[key] = getattr(self, var_attr_name).get()
                 initial_download_directory = current_dialog_download_dir[0]
+                if self._fetched_device_settings_for_dialog:
+                    for conceptual_key, snake_case_part in conceptual_device_setting_keys.items():
+                        self._fetched_device_settings_for_dialog[conceptual_key] = getattr(self, f"device_setting_{snake_case_part}_var").get()
 
-                if self._fetched_device_settings_for_dialog: # Ensure it's not empty
-                    self._fetched_device_settings_for_dialog["autoRecord"] = self.device_setting_auto_record_var.get()
-                    self._fetched_device_settings_for_dialog["autoPlay"] = self.device_setting_auto_play_var.get()
-                    self._fetched_device_settings_for_dialog["bluetoothTone"] = self.device_setting_bluetooth_tone_var.get()
-                    self._fetched_device_settings_for_dialog["notificationSound"] = self.device_setting_notification_sound_var.get()
-
-        # --- Button Action Implementations ---
         def ok_action():
-            if settings_changed_tracker[0]:
-                _perform_apply_settings_logic(update_dialog_baseline=False)
+            if settings_changed_tracker[0]: _perform_apply_settings_logic(update_dialog_baseline=False)
             settings_win.destroy()
-
-        def apply_action_ui_handler(): # Renamed to avoid conflict
+        def apply_action_ui_handler():
             if settings_changed_tracker[0]:
                 _perform_apply_settings_logic(update_dialog_baseline=True)
-                settings_changed_tracker[0] = False # Reset changed flag
+                settings_changed_tracker[0] = False 
                 if apply_button.winfo_exists(): apply_button.config(state=tk.DISABLED)
                 if cancel_close_button.winfo_exists(): cancel_close_button.config(text="Close")
-
         def cancel_close_action():
-            if settings_changed_tracker[0]: # If "Cancel" was clicked
-                # Revert all tk.Variables to their initial states from dialog open/last apply
-                for dict_key_from_initial_config, initial_tk_var_value in initial_config_vars.items():
+            if settings_changed_tracker[0]: 
+                for dict_key, initial_val in initial_config_vars.items():
                     tk_var_to_reset = None
-                    # Check if dict_key_from_initial_config is already a full tk.var attribute name
-                    if hasattr(self, dict_key_from_initial_config) and isinstance(getattr(self, dict_key_from_initial_config), tk.Variable):
-                        tk_var_to_reset = getattr(self, dict_key_from_initial_config)
-                    else:
-                        # Assume it's a short key like "autoconnect", form "autoconnect_var"
-                        potential_long_name = f"{dict_key_from_initial_config}_var"
-                        if hasattr(self, potential_long_name) and isinstance(getattr(self, potential_long_name), tk.Variable):
-                            tk_var_to_reset = getattr(self, potential_long_name)
-
-                    if tk_var_to_reset:
-                        tk_var_to_reset.set(initial_tk_var_value)
-                    else:
-                        logger.debug("Settings", "cancel_close_action", f"Key '{dict_key_from_initial_config}' from initial_config_vars did not resolve to a resettable tk.Variable on self.")
-
-                # Revert download directory in dialog and its label
+                    if hasattr(self, dict_key) and isinstance(getattr(self, dict_key), tk.Variable):
+                        tk_var_to_reset = getattr(self, dict_key)
+                    elif hasattr(self, f"{dict_key}_var") and isinstance(getattr(self, f"{dict_key}_var"), tk.Variable):
+                        tk_var_to_reset = getattr(self, f"{dict_key}_var")
+                    if tk_var_to_reset: tk_var_to_reset.set(initial_val)
                 current_dialog_download_dir[0] = initial_download_directory
-                if current_dl_dir_label_settings.winfo_exists():
-                    current_dl_dir_label_settings.config(text=current_dialog_download_dir[0])
-
-                # Revert device behavior vars to their state when dialog opened / last apply
-                if self._fetched_device_settings_for_dialog: # Ensure it's not empty
-                    self.device_setting_auto_record_var.set(self._fetched_device_settings_for_dialog.get("autoRecord", False))
-                    self.device_setting_auto_play_var.set(self._fetched_device_settings_for_dialog.get("autoPlay", False))
-                    self.device_setting_bluetooth_tone_var.set(self._fetched_device_settings_for_dialog.get("bluetoothTone", False))
-                    self.device_setting_notification_sound_var.set(self._fetched_device_settings_for_dialog.get("notificationSound", False))
+                if current_dl_dir_label_settings.winfo_exists(): current_dl_dir_label_settings.config(text=current_dialog_download_dir[0])
                 logger.info("GUI", "cancel_close_action", "Settings changes cancelled.")
             settings_win.destroy()
 
         ok_button.config(command=ok_action)
         apply_button.config(command=apply_action_ui_handler)
         cancel_close_button.config(command=cancel_close_action)
-
-        ok_button.pack(side=tk.LEFT, padx=(0,5)) # OK on the far left of the right-aligned group
-        apply_button.pack(side=tk.LEFT, padx=5)
-        cancel_close_button.pack(side=tk.LEFT, padx=(5,0)) # Cancel/Close on the far right of the group
-        action_buttons_subframe.pack(side=tk.RIGHT) # Align the group of buttons to the right
-        buttons_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10,0)) # Pack the main button frame at the bottom
-
-        # Default button behavior
+        ok_button.pack(side=tk.LEFT, padx=(0,5)); apply_button.pack(side=tk.LEFT, padx=5); cancel_close_button.pack(side=tk.LEFT, padx=(5,0))
+        action_buttons_subframe.pack(side=tk.RIGHT) 
+        buttons_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10,0)) 
         ok_button.focus_set()
         settings_win.bind('<Return>', lambda event: ok_button.invoke())
         settings_win.bind('<Escape>', lambda event: cancel_close_button.invoke())
-
-        # --- Dynamic Sizing (at the very end) ---
-        settings_win.update_idletasks() # Allow Tkinter to calculate sizes
-        req_width = settings_win.winfo_reqwidth()
-        req_height = settings_win.winfo_reqheight()
-
-        # Ensure a minimum reasonable width, but let height be more dynamic
-        final_width = max(550, req_width + 20) # Min width 550px, or required + padding
-        final_height = req_height + 20 # Required height + padding for buttons/margins
-
+        settings_win.update_idletasks() 
+        req_width, req_height = settings_win.winfo_reqwidth(), settings_win.winfo_reqheight()
+        final_width, final_height = max(550, req_width + 20), req_height + 20
         settings_win.geometry(f"{final_width}x{final_height}")
-        settings_win.minsize(final_width, final_height) # Set minsize to the calculated size
-
+        settings_win.minsize(final_width, final_height)
+    
     def _select_download_dir_for_settings_dialog(self, label_widget, dialog_dir_tracker, change_tracker, apply_btn, cancel_btn):
-        """Handles selecting download directory specifically for the settings dialog."""
-        selected_dir = filedialog.askdirectory(
-            initialdir=dialog_dir_tracker[0], # Start from current selection in dialog
-            title="Select Download Directory"
-        )
+        selected_dir = filedialog.askdirectory(initialdir=dialog_dir_tracker[0], title="Select Download Directory")
         if selected_dir and selected_dir != dialog_dir_tracker[0]:
             dialog_dir_tracker[0] = selected_dir
-            if label_widget and label_widget.winfo_exists():
-                label_widget.config(text=dialog_dir_tracker[0])
-
-            if not change_tracker[0]: # Mark as changed and update buttons
+            if label_widget and label_widget.winfo_exists(): label_widget.config(text=dialog_dir_tracker[0])
+            if not change_tracker[0]: 
                 change_tracker[0] = True
                 if apply_btn.winfo_exists(): apply_btn.config(state=tk.NORMAL)
                 if cancel_btn.winfo_exists(): cancel_btn.config(text="Cancel")
-            logger.debug("GUI", "_select_download_dir_for_settings", f"Download directory selection changed in dialog to: {dialog_dir_tracker[0]}")
-
+            logger.debug("GUI", "_select_download_dir_for_settings", f"Download dir selection changed to: {dialog_dir_tracker[0]}")
 
     def _load_device_settings_for_dialog(self, settings_win_ref, on_complete_hook=None):
         try:
             settings = self.dock.get_device_settings()
-
-            # Helper lambda to safely update UI elements within settings_win_ref
-            def safe_update_settings_widget_task(task_to_run):
-                if settings_win_ref.winfo_exists():
-                    task_to_run()
-
+            def safe_update(task): 
+                if settings_win_ref.winfo_exists(): task()
             if settings:
-                self._fetched_device_settings_for_dialog = settings.copy() # Store for comparison on apply
-                # These .set() calls will trigger traces.
-                self.master.after(0, lambda: safe_update_settings_widget_task(
-                    lambda: self.device_setting_auto_record_var.set(settings.get("autoRecord", False))))
-                self.master.after(0, lambda: safe_update_settings_widget_task(
-                    lambda: self.device_setting_auto_play_var.set(settings.get("autoPlay", False))))
-                self.master.after(0, lambda: safe_update_settings_widget_task(
-                    lambda: self.device_setting_bluetooth_tone_var.set(settings.get("bluetoothTone", False))))
-                self.master.after(0, lambda: safe_update_settings_widget_task(
-                    lambda: self.device_setting_notification_sound_var.set(settings.get("notificationSound", False))))
-
-                # Enable checkboxes safely
-                self.master.after(0, lambda: safe_update_settings_widget_task(
-                    lambda: self.auto_record_checkbox.config(state=tk.NORMAL)))
-                self.master.after(0, lambda: safe_update_settings_widget_task(
-                    lambda: self.auto_play_checkbox.config(state=tk.NORMAL)))
-                self.master.after(0, lambda: safe_update_settings_widget_task(
-                    lambda: self.bt_tone_checkbox.config(state=tk.NORMAL)))
-                self.master.after(0, lambda: safe_update_settings_widget_task(
-                    lambda: self.notification_sound_checkbox.config(state=tk.NORMAL)))
-            else:
-                logger.warning("GUI", "_load_device_settings_for_dialog", "Failed to load device settings (no settings returned).")
+                self._fetched_device_settings_for_dialog = settings.copy()
+                self.master.after(0, lambda: safe_update(lambda: self.device_setting_auto_record_var.set(settings.get("autoRecord", False))))
+                self.master.after(0, lambda: safe_update(lambda: self.device_setting_auto_play_var.set(settings.get("autoPlay", False))))
+                self.master.after(0, lambda: safe_update(lambda: self.device_setting_bluetooth_tone_var.set(settings.get("bluetoothTone", False))))
+                self.master.after(0, lambda: safe_update(lambda: self.device_setting_notification_sound_var.set(settings.get("notificationSound", False))))
+                for cb in [self.auto_record_checkbox, self.auto_play_checkbox, self.bt_tone_checkbox, self.notification_sound_checkbox]:
+                    self.master.after(0, lambda widget=cb: safe_update(lambda: widget.config(state=tk.NORMAL)))
+            else: logger.warning("GUI", "_load_device_settings_for_dialog", "Failed to load device settings.")
         except Exception as e:
             logger.error("GUI", "_load_device_settings_for_dialog", f"Error loading device settings: {e}")
-            # No label to update, error logged and shown in messagebox
-            if settings_win_ref.winfo_exists(): # Check if window still exists
-                    messagebox.showerror("Error", f"Failed to load device settings: {e}", parent=settings_win_ref)
+            if settings_win_ref.winfo_exists(): messagebox.showerror("Error", f"Failed to load device settings: {e}", parent=settings_win_ref)
         finally:
-            if on_complete_hook: # Call the hook regardless of success/failure of fetch
-                self.master.after(0, lambda: on_complete_hook() if settings_win_ref.winfo_exists() else None)
+            if on_complete_hook: self.master.after(0, lambda: safe_update(on_complete_hook))
 
     def _apply_device_settings_thread(self, settings_to_apply):
-        if not settings_to_apply:
-            logger.info("GUI", "_apply_device_settings_thread", "No device behavior settings changed.")
-            return
-
+        if not settings_to_apply: logger.info("GUI", "_apply_device_settings_thread", "No device behavior settings changed."); return
         all_successful = True
         for name, value in settings_to_apply.items():
             result = self.dock.set_device_setting(name, value)
             if not result or result.get("result") != "success":
                 all_successful = False
                 logger.error("GUI", "_apply_device_settings_thread", f"Failed to set '{name}' to {value}.")
-                self.master.after(0, messagebox.showwarning, "Settings Error", f"Failed to apply setting: {name}", parent=self.master) # Show on main window if settings dialog closed
-        if all_successful:
-            logger.info("GUI", "_apply_device_settings_thread", "All changed device settings applied successfully.")
+                self.master.after(0, messagebox.showwarning, "Settings Error", f"Failed to apply setting: {name}", parent=self.master)
+        if all_successful: logger.info("GUI", "_apply_device_settings_thread", "All changed device settings applied.")
 
     def scan_usb_devices_for_settings(self, parent_window, initial_load=False, change_callback=None):
         try:
             logger.info("GUI", "scan_usb_devices", "Scanning for USB devices...")
             self.available_usb_devices.clear()
-
             if not self.backend_initialized_successfully:
-                messagebox.showerror("USB Error", "Libusb backend not initialized. Cannot scan devices.", parent=parent_window)
+                messagebox.showerror("USB Error", "Libusb backend not initialized.", parent=parent_window)
                 if self.settings_device_combobox and self.settings_device_combobox.winfo_exists():
-                    self.settings_device_combobox['values'] = ["USB Backend Error - Cannot Scan"]
-                    self.settings_device_combobox.current(0)
+                    self.settings_device_combobox['values'] = ["USB Backend Error"]; self.settings_device_combobox.current(0)
                 return
 
-            found_devices_from_usb_core = usb.core.find(find_all=True, backend=self.usb_backend_instance) # Use the initialized backend
-
-            if not found_devices_from_usb_core: # find_all returns an iterable; empty if none found
-                logger.warning("GUI", "scan_usb_devices", "No USB devices found by backend.")
+            found_devices = usb.core.find(find_all=True, backend=self.usb_backend_instance)
+            if not found_devices:
                 if self.settings_device_combobox and self.settings_device_combobox.winfo_exists():
-                    self.settings_device_combobox['values'] = ["No devices found"]
-                    self.settings_device_combobox.current(0)
+                    self.settings_device_combobox['values'] = ["No devices found"]; self.settings_device_combobox.current(0)
                 return
 
-            good_devices_tuples = [] # To store (desc, vid, pid) for successfully read devices
-            problem_devices_tuples = [] # To store (desc, vid, pid) for devices with read errors
-
-            for dev in found_devices_from_usb_core:
-                is_configured_target_device = (dev.idVendor == self.selected_vid_var.get() and
-                                               dev.idProduct == self.selected_pid_var.get())
-                is_actively_connected_by_app = (self.dock.is_connected() and
-                                                self.dock.device is not None and # Ensure dock.device exists
-                                                dev.idVendor == self.dock.device.idVendor and # Check against actual connected device's VID/PID
-                                                dev.idProduct == self.dock.device.idProduct)
-
+            good_devs, problem_devs = [], []
+            for dev in found_devices:
+                is_target = (dev.idVendor == self.selected_vid_var.get() and dev.idProduct == self.selected_pid_var.get())
+                is_active = (self.dock.is_connected() and self.dock.device and dev.idVendor == self.dock.device.idVendor and dev.idProduct == self.dock.device.idProduct)
                 try:
-                    manufacturer = usb.util.get_string(dev, dev.iManufacturer) if dev.iManufacturer else "N/A"
-                    product = usb.util.get_string(dev, dev.iProduct) if dev.iProduct else "N/A"
-                    desc = f"{manufacturer} - {product} (VID: {hex(dev.idVendor)}, PID: {hex(dev.idProduct)})"
-                    good_devices_tuples.append((desc, dev.idVendor, dev.idProduct))
-
+                    mfg = usb.util.get_string(dev, dev.iManufacturer) if dev.iManufacturer else "N/A"
+                    prod = usb.util.get_string(dev, dev.iProduct) if dev.iProduct else "N/A"
+                    desc = f"{mfg} - {prod} (VID: {hex(dev.idVendor)}, PID: {hex(dev.idProduct)})"
+                    good_devs.append((desc, dev.idVendor, dev.idProduct))
                 except Exception as e:
-                    logger.warning("GUI", "scan_usb_devices", f"Error getting string info for device VID={hex(dev.idVendor)} PID={hex(dev.idProduct)}: {e}")
-                    if is_configured_target_device and is_actively_connected_by_app:
-                        device_name_for_display = self.dock.model if self.dock.model and self.dock.model != "unknown" else "HiDock Device"
-                        desc = f"Currently Connected: {device_name_for_display} (VID: {hex(dev.idVendor)}, PID: {hex(dev.idProduct)})"
-                        good_devices_tuples.insert(0, (desc, dev.idVendor, dev.idProduct))
-                    else:
-                        desc = f"[Error Reading] Unknown Device (VID: {hex(dev.idVendor)}, PID: {hex(dev.idProduct)})"
-                        problem_devices_tuples.append((desc, dev.idVendor, dev.idProduct))
+                    logger.warning("GUI", "scan_usb_devices", f"Error getting string for VID={hex(dev.idVendor)} PID={hex(dev.idProduct)}: {e}")
+                    name_disp = self.dock.model if self.dock.model != "unknown" else "HiDock Device"
+                    desc = f"Currently Connected: {name_disp} (VID={hex(dev.idVendor)}, PID={hex(dev.idProduct)})" if is_target and is_active else f"[Error Reading] (VID={hex(dev.idVendor)}, PID={hex(dev.idProduct)})"
+                    (good_devs if is_target and is_active else problem_devs).insert(0 if is_target and is_active else len(problem_devs), (desc, dev.idVendor, dev.idProduct))
+            
+            if good_devs and "Currently Connected" in good_devs[0][0]: good_devs = [good_devs[0]] + sorted(good_devs[1:], key=lambda x: x[0])
+            else: good_devs.sort(key=lambda x: x[0])
+            problem_devs.sort(key=lambda x: x[0])
+            self.available_usb_devices.extend(good_devs + problem_devs)
+            
+            combo_list = [t[0] for t in good_devs]
+            if problem_devs:
+                if combo_list: combo_list.append("--- Devices with Issues ---")
+                combo_list.extend([t[0] for t in problem_devs])
+            
+            current_sel_str = next((d for d,v,p in self.available_usb_devices if v == self.selected_vid_var.get() and p == self.selected_pid_var.get()), None)
 
-            if good_devices_tuples and "Currently Connected" in good_devices_tuples[0][0]:
-                temp_list_to_sort = sorted(good_devices_tuples[1:], key=lambda x: x[0])
-                good_devices_tuples = [good_devices_tuples[0]] + temp_list_to_sort
-            else:
-                good_devices_tuples.sort(key=lambda x: x[0])
-            problem_devices_tuples.sort(key=lambda x: x[0])
-
-            self.available_usb_devices.extend(good_devices_tuples)
-            self.available_usb_devices.extend(problem_devices_tuples)
-
-            combobox_display_list = [t[0] for t in good_devices_tuples]
-            if problem_devices_tuples:
-                if combobox_display_list:
-                    combobox_display_list.append("--- Devices with Issues ---")
-                combobox_display_list.extend([t[0] for t in problem_devices_tuples])
-
-            current_selection_str = None
-            for desc_str, v, p in self.available_usb_devices:
-                if v == self.selected_vid_var.get() and p == self.selected_pid_var.get():
-                    current_selection_str = desc_str
-                    break
             if self.settings_device_combobox and self.settings_device_combobox.winfo_exists():
-                self.settings_device_combobox['values'] = combobox_display_list
-
-                if current_selection_str and current_selection_str in combobox_display_list:
-                    self.settings_device_combobox.set(current_selection_str)
-                elif combobox_display_list:
-                    first_selectable_item = next((item for item in combobox_display_list if item != "--- Devices with Issues ---"), None)
-                    if first_selectable_item:
-                        if not initial_load:
-                            self.settings_device_combobox.set(first_selectable_item)
-                            selected_device_info_tuple = next((dev_tuple for dev_tuple in self.available_usb_devices if dev_tuple[0] == first_selectable_item), None)
-                            if selected_device_info_tuple:
-                                _, vid, pid = selected_device_info_tuple
-                                self.selected_vid_var.set(vid)
-                                self.selected_pid_var.set(pid)
-                                logger.debug("Settings", "scan_usb_devices", f"Auto-selected first available device: {first_selectable_item} -> VID={hex(vid)}, PID={hex(pid)}")
-                                if change_callback:
-                                    change_callback()
-                            else:
-                                logger.warning("Settings", "scan_usb_devices", f"Could not find details for auto-selected device: {first_selectable_item}")
-                    elif not combobox_display_list:
-                         self.settings_device_combobox['values'] = ["No devices found or accessible"]
-                         self.settings_device_combobox.current(0)
-                else:
-                    self.settings_device_combobox['values'] = ["No devices found or accessible"]
-                    self.settings_device_combobox.current(0)
-            logger.info("GUI", "scan_usb_devices", f"Processed {len(good_devices_tuples) + len(problem_devices_tuples)} devices. Good: {len(good_devices_tuples)}, Problematic: {len(problem_devices_tuples)}.")
+                self.settings_device_combobox['values'] = combo_list if combo_list else ["No devices accessible"]
+                if current_sel_str and current_sel_str in combo_list: self.settings_device_combobox.set(current_sel_str)
+                elif combo_list and combo_list[0] != "--- Devices with Issues ---":
+                    if not initial_load:
+                        self.settings_device_combobox.set(combo_list[0])
+                        sel_info = next((dt for dt in self.available_usb_devices if dt[0] == combo_list[0]), None)
+                        if sel_info: self.selected_vid_var.set(sel_info[1]); self.selected_pid_var.set(sel_info[2])
+                        if change_callback: change_callback() # Call the passed callback
+                elif not combo_list : self.settings_device_combobox.current(0) # For "No devices accessible"
+            logger.info("GUI", "scan_usb_devices", f"Found {len(good_devs)} good, {len(problem_devs)} problem devices.")
         except Exception as e:
             logger.error("GUI", "scan_usb_devices_for_settings", f"Unhandled exception: {e}\n{traceback.format_exc()}")
-            if parent_window and parent_window.winfo_exists():
-                messagebox.showerror("Scan Error", f"An unexpected error occurred during USB device scan: {e}", parent=parent_window)
+            if parent_window and parent_window.winfo_exists(): messagebox.showerror("Scan Error", f"Error during USB scan: {e}", parent=parent_window)
 
+    def log_to_gui_widget(self, message, level_name="INFO"):
+        def _update_log_task(msg, lvl):
+            gui_filter_val = Logger.LEVELS.get(self.gui_log_filter_level_var.get().upper(), Logger.LEVELS["DEBUG"])
+            msg_level_val = Logger.LEVELS.get(lvl.upper(), 0)
+            if msg_level_val < gui_filter_val: return
+            if self.log_text_area.winfo_exists():
+                self.log_text_area.config(state='normal')
+                self.log_text_area.insert(tk.END, msg, lvl)
+                self.log_text_area.see(tk.END)
+                self.log_text_area.config(state='disabled')
+        if self.master.winfo_exists(): self.master.after(0, _update_log_task, message, level_name)
 
-    def log_to_gui_widget(self, message, level_name="INFO"): # Added level_name parameter
-        def _update_log(msg_to_log, lvl_name): # Pass parameters to inner function
-            # Filter based on GUI filter level
-            gui_filter_level_str = self.gui_log_filter_level_var.get()
-            msg_level_val = Logger.LEVELS.get(lvl_name.upper(), 0)
-            gui_filter_level_val = Logger.LEVELS.get(gui_filter_level_str.upper(), Logger.LEVELS["DEBUG"]) # Default to DEBUG if invalid
+    def _update_optional_panes_visibility(self):
+        if not hasattr(self, 'optional_sections_pane') or not self.optional_sections_pane.winfo_exists():
+            logger.error("GUI", "_update_optional_panes_visibility", "optional_sections_pane does not exist.")
+            return
 
-            if msg_level_val < gui_filter_level_val:
-                return # Don't display if below GUI filter level
+        current_managed_children_paths = self.optional_sections_pane.panes()
+        current_managed_widgets = []
+        for pane_path in current_managed_children_paths:
+            try:
+                current_managed_widgets.append(self.optional_sections_pane.nametowidget(pane_path))
+            except tk.TclError: pass
 
-            if not self.log_text_area.winfo_exists(): # Check if widget still exists
-                return
-            self.log_text_area.config(state='normal')
-            self.log_text_area.insert(tk.END, msg_to_log, lvl_name) # Apply tag based on level_name
-            self.log_text_area.see(tk.END)
-            self.log_text_area.config(state='disabled') # Keep disabled for select/copy
-        if self.master.winfo_exists(): # Check if window still exists
-            self.master.after(0, _update_log, message, level_name) # Pass args to the scheduled call
+        # Order of operations: forget everything, then add back in desired order
+        for widget in [self.log_frame, self.device_tools_frame]:
+            if widget in current_managed_widgets:
+                try:
+                    self.optional_sections_pane.forget(widget)
+                except tk.TclError: pass
+        
+        something_added = False
+        if self.logs_visible_var.get():
+            try:
+                self.optional_sections_pane.add(self.log_frame, weight=1) # Adjust weight as needed
+                something_added = True
+            except tk.TclError as e:
+                logger.warning("GUI", "_update_optional_panes", f"Error re-adding log_frame: {e}")
+
+        if self.device_tools_visible_var.get():
+            try:
+                self.optional_sections_pane.add(self.device_tools_frame, weight=1) # Adjust weight
+                something_added = True
+            except tk.TclError as e:
+                logger.warning("GUI", "_update_optional_panes", f"Error re-adding device_tools_frame: {e}")
+
+        if something_added:
+            if not self.optional_sections_pane.winfo_ismapped():
+                # optional_sections_pane is a child of main_content_frame
+                self.optional_sections_pane.pack(fill=tk.BOTH, expand=True, pady=(5,0)) # expand=True to take available space
+        else:
+            if self.optional_sections_pane.winfo_ismapped():
+                self.optional_sections_pane.pack_forget()
 
     def toggle_logs(self):
-        if self.logs_visible:
-            self.log_frame.pack_forget()
-            self.log_toggle_button.config(text="📜 Show Logs")
-        else:
-            self.log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5, side=tk.BOTTOM, anchor=tk.SW)
-            self.log_toggle_button.config(text="📜 Hide Logs")
-        self.logs_visible = not self.logs_visible
+        # The variable self.logs_visible_var is already updated by the checkbutton itself.
+        # We just need to sync self.logs_visible (if still used elsewhere) and update visibility.
+        self.logs_visible = self.logs_visible_var.get() 
+        self._update_optional_panes_visibility()
 
-    def clear_log_gui(self):
-        """Clears the content of the log text area."""
-        if self.log_text_area.winfo_exists():
-            self.log_text_area.config(state='normal')
-            self.log_text_area.delete(1.0, tk.END)
-            self.log_text_area.config(state='disabled') # Keep disabled
-            logger.info("GUI", "clear_log_gui", "Log display cleared by user.")
-
-    def on_gui_log_filter_change(self, event=None):
-        """Handles log filter level change from the log section's combobox."""
-        new_filter_level = self.gui_log_filter_level_var.get()
-        logger.info("GUI", "on_gui_log_filter_change", f"GUI log display filter changed to {new_filter_level}.")
-        # Note: This does not re-filter existing logs. It applies to new logs.
-        # To re-filter, we'd need to store all logs and repopulate the text area.
-
-    def download_gui_logs(self):
-        """Saves the content of the GUI log text area to a file."""
-        if not self.log_text_area.winfo_exists():
-            return
-
-        log_content = self.log_text_area.get(1.0, tk.END)
-        if not log_content.strip():
-            messagebox.showinfo("Download Logs", "Log display is empty.", parent=self.master)
-            return
-
-        filepath = filedialog.asksaveasfilename(
-            defaultextension=".log",
-            filetypes=[("Log files", "*.log"), ("Text files", "*.txt"), ("All files", "*.*")],
-            title="Save GUI Logs As..."
-        )
-        if filepath:
-            try:
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(log_content)
-                logger.info("GUI", "download_gui_logs", f"GUI logs saved to {filepath}")
-                messagebox.showinfo("Download Logs", f"Logs successfully saved to:\n{filepath}", parent=self.master)
-            except Exception as e:
-                logger.error("GUI", "download_gui_logs", f"Error saving logs to {filepath}: {e}")
-                messagebox.showerror("Download Logs Error", f"Failed to save logs: {e}", parent=self.master)
 
     def toggle_device_tools(self):
-        if self.device_tools_visible:
-            self.device_tools_frame.pack_forget()
-            self.device_tools_toggle_button.config(text="🛠️ Show Device Tools")
-        else:
-            # Determine the correct widget to pack 'before'
-            # self.log_frame is packed above self.controls_toggle_frame when visible.
-            # self.controls_toggle_frame is always packed and is above download_controls_frame.
-            reference_widget_for_before = None
-            if self.logs_visible and self.log_frame.winfo_ismapped(): # ismapped checks if widget is visible (packed)
-                reference_widget_for_before = self.log_frame
-            else:
-                # Fallback to controls_toggle_frame, which is always packed in this area
-                reference_widget_for_before = self.controls_toggle_frame
+        self.device_tools_visible = self.device_tools_visible_var.get() 
+        self._update_optional_panes_visibility()
 
-            self.device_tools_frame.pack(fill=tk.X, padx=10, pady=5, side=tk.BOTTOM, anchor=tk.SW, before=reference_widget_for_before)
-            self.device_tools_toggle_button.config(text="🛠️ Hide Device Tools")
-        self.device_tools_visible = not self.device_tools_visible
+
+    def clear_log_gui(self):
+        if self.log_text_area.winfo_exists():
+            self.log_text_area.config(state='normal'); self.log_text_area.delete(1.0, tk.END); self.log_text_area.config(state='disabled')
+            logger.info("GUI", "clear_log_gui", "Log display cleared.")
+
+    def on_gui_log_filter_change(self, event=None):
+        logger.info("GUI", "on_gui_log_filter_change", f"GUI log display filter to {self.gui_log_filter_level_var.get()}.")
+
+    def download_gui_logs(self):
+        if not self.log_text_area.winfo_exists(): return
+        log_content = self.log_text_area.get(1.0, tk.END)
+        if not log_content.strip(): messagebox.showinfo("Download Logs", "Log display is empty.", parent=self.master); return
+        filepath = filedialog.asksaveasfilename(defaultextension=".log", filetypes=[("Log files", "*.log"), ("Text", "*.txt")], title="Save GUI Logs")
+        if filepath:
+            try:
+                with open(filepath, 'w', encoding='utf-8') as f: f.write(log_content)
+                logger.info("GUI", "download_gui_logs", f"GUI logs saved to {filepath}")
+                messagebox.showinfo("Download Logs", f"Logs saved to:\n{filepath}", parent=self.master)
+            except Exception as e:
+                logger.error("GUI", "download_gui_logs", f"Error saving logs: {e}")
+                messagebox.showerror("Download Logs Error", f"Failed to save logs: {e}", parent=self.master)
 
     def _initialize_backend_early(self):
-        """
-        Initializes the libusb backend. Called once during GUI __init__.
-        Returns: (success_bool, error_message_str, backend_instance_or_None)
-        """
-        error_to_report = None # Initialize error message
-        local_backend_instance = None # Temporary variable for the backend instance
-
-        try: # This try-except is for Python-level errors during the process.
+        error_to_report, local_backend_instance = None, None
+        try:
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            possible_dll_names = ["libusb-1.0.dll"] # Add other common names if needed
-            dll_path = None
-            for name in possible_dll_names:
-                path_candidate = os.path.join(script_dir, name)
-                if os.path.exists(path_candidate): dll_path = path_candidate; break
-                path_candidate_ms64 = os.path.join(script_dir, "MS64", "dll", name)
-                if os.path.exists(path_candidate_ms64): dll_path = path_candidate_ms64; break
-                path_candidate_ms32 = os.path.join(script_dir, "MS32", "dll", name)
-                if os.path.exists(path_candidate_ms32): dll_path = path_candidate_ms32; break
+            dll_paths_to_try = [os.path.join(script_dir, name) for name in ["libusb-1.0.dll"]] + \
+                               [os.path.join(script_dir, "MS64", "dll", name) for name in ["libusb-1.0.dll"]] + \
+                               [os.path.join(script_dir, "MS32", "dll", name) for name in ["libusb-1.0.dll"]]
+            dll_path = next((p for p in dll_paths_to_try if os.path.exists(p)), None)
 
             if not dll_path:
-                logger.warning("GUI", "_initialize_backend", "libusb-1.0.dll not found locally. PyUSB will try system paths.")
-                # The call to usb.backend.libusb1.get_backend() is where a hard crash might occur if DLLs are bad.
+                logger.warning("GUI", "_initialize_backend_early", "libusb-1.0.dll not found locally. Trying system paths.")
                 local_backend_instance = usb.backend.libusb1.get_backend()
-                if not local_backend_instance:
-                    error_to_report = "Libusb backend failed from system paths. Ensure libusb-1.0 is installed and accessible."
-                    logger.error("GUI", "_initialize_backend_early", error_to_report)
-                    return False, error_to_report, None
+                if not local_backend_instance: error_to_report = "Libusb backend failed from system paths."
             else:
-                logger.info("GUI", "_initialize_backend_early", f"Attempting to load backend using DLL: {dll_path}")
-                # The call to usb.backend.libusb1.get_backend() is where a hard crash might occur.
+                logger.info("GUI", "_initialize_backend_early", f"Attempting backend with DLL: {dll_path}")
                 local_backend_instance = usb.backend.libusb1.get_backend(find_library=lambda x: dll_path)
-                if not local_backend_instance:
-                    error_to_report = f"Failed to initialize libusb backend with DLL: {dll_path}. Ensure correct 32/64 bit version."
-                    logger.error("GUI", "_initialize_backend_early", error_to_report)
-                    return False, error_to_report, None
-
-            logger.info("GUI", "_initialize_backend_early", f"Successfully initialized backend: {local_backend_instance}")
-            return True, None, local_backend_instance # Success
-        except Exception as e: # Catches Python-level exceptions during the above process
-            error_to_report = f"An unexpected error occurred while initializing libusb: {e}"
+                if not local_backend_instance: error_to_report = f"Failed with DLL: {dll_path}. Check 32/64 bit."
+            
+            if error_to_report: logger.error("GUI", "_initialize_backend_early", error_to_report); return False, error_to_report, None
+            logger.info("GUI", "_initialize_backend_early", f"Backend initialized: {local_backend_instance}")
+            return True, None, local_backend_instance
+        except Exception as e:
+            error_to_report = f"Unexpected error initializing libusb: {e}"
             logger.error("GUI", "_initialize_backend_early", f"{error_to_report}\n{traceback.format_exc()}")
             return False, error_to_report, None
 
     def attempt_autoconnect_on_startup(self):
-        if not self.backend_initialized_successfully:
-            logger.warning("GUI", "attempt_autoconnect_on_startup", "Skipping autoconnect, USB backend not initialized.")
-            return
+        if not self.backend_initialized_successfully: logger.warning("GUI", "attempt_autoconnect", "Skipping autoconnect, USB backend error."); return
         if self.autoconnect_var.get() and not self.dock.is_connected():
-            logger.info("GUI", "attempt_autoconnect_on_startup", "Attempting autoconnect...")
-            self.connect_device()
+            logger.info("GUI", "attempt_autoconnect", "Attempting autoconnect..."); self.connect_device()
 
     def connect_device(self):
         if not self.backend_initialized_successfully:
-            logger.error("GUI", "connect_device", "Cannot connect: USB backend is not initialized.")
-            if hasattr(self, 'status_label') and self.status_label.winfo_exists():
-                self.status_label.config(text="Status: USB Backend FAILED!")
-            if hasattr(self, 'connect_button') and self.connect_button.winfo_exists():
-                self.connect_button.config(state=tk.DISABLED) # Keep connect button disabled
-            if self.backend_init_error_message and self.master.winfo_exists(): # Show original error if available
-                 messagebox.showerror("USB Backend Error", self.backend_init_error_message, parent=self.master)
+            logger.error("GUI", "connect_device", "Cannot connect: USB backend not initialized.")
+            self.update_status_bar(connection_status="Status: USB Backend FAILED!")
+            if self.backend_init_error_message: messagebox.showerror("USB Backend Error", self.backend_init_error_message, parent=self.master)
+            self._update_menu_states()
             return
-
-        # This method is often called from an 'after' callback (autoconnect) or button press.
-        # Ensure master window exists before proceeding with UI updates or messagebox.
-        if not self.master.winfo_exists():
-            logger.warning("GUI", "connect_device", "Master window destroyed, aborting connection attempt.")
-            return
-
-        if hasattr(self, 'connect_button') and self.connect_button.winfo_exists():
-            self.connect_button.config(state=tk.DISABLED)
-        if hasattr(self, 'status_label') and self.status_label.winfo_exists():
-            self.status_label.config(text="Status: Connecting...")
+        if not self.master.winfo_exists(): logger.warning("GUI", "connect_device", "Master window gone, aborting."); return
+        
+        self.update_status_bar(connection_status="Status: Connecting...")
+        self._update_menu_states() # Disable connect while attempting
         threading.Thread(target=self._connect_device_thread, daemon=True).start()
 
     def _connect_device_thread(self):
         try:
-            # Disable settings button during connection attempt to prevent concurrent USB scans
-            if hasattr(self, 'settings_button') and self.settings_button.winfo_exists():
-                self.master.after(0, lambda: self.settings_button.config(state=tk.DISABLED))
-
-            vid_to_connect = self.selected_vid_var.get()
-            pid_to_connect = self.selected_pid_var.get()
-            target_interface = self.target_interface_var.get()
-
-            if self.dock.connect(target_interface_number=target_interface, vid=vid_to_connect, pid=pid_to_connect):
-                self.master.after(0, lambda: self.status_label.config(text=f"Status: Connected ({self.dock.model})"))
-                self.master.after(0, lambda: self.disconnect_button.config(state=tk.NORMAL))
-                self.master.after(0, lambda: self.refresh_files_button.config(state=tk.NORMAL))
-                # Buttons related to file operations will be enabled/disabled by on_file_selection_change or refresh
-                self.master.after(0, lambda: self.delete_button.config(state=tk.NORMAL))
-                self.master.after(0, lambda: self.play_button.config(state=tk.NORMAL))
-                self.master.after(0, lambda: self.format_card_button.config(state=tk.NORMAL))
-                self.master.after(0, lambda: self.sync_time_button.config(state=tk.NORMAL))
-
-                device_info = self.dock.get_device_info() # This logs itself
+            vid, pid, interface = self.selected_vid_var.get(), self.selected_pid_var.get(), self.target_interface_var.get()
+            if self.dock.connect(target_interface_number=interface, vid=vid, pid=pid):
+                device_info = self.dock.get_device_info() # Fetch info
+                self.dock.device_info['_cached_card_info'] = self.dock.get_card_info() # Cache card info
+                self.master.after(0, self.update_all_status_info) # Update status bar with all new info
+                self.master.after(0, self._update_menu_states)
                 if device_info:
-                     self.master.after(0, self.refresh_file_list_gui) # Auto-refresh files on connect
-                     # Start periodic checks AFTER initial info and refresh
+                     self.master.after(0, self.refresh_file_list_gui)
                      self.start_recording_status_check()
-                     if self.auto_refresh_files_var.get():
-                         self.start_auto_file_refresh_periodic_check()
+                     if self.auto_refresh_files_var.get(): self.start_auto_file_refresh_periodic_check()
                 else:
-                    # Connected at USB level, but couldn't get device info.
-                    self.master.after(0, lambda: self.status_label.config(text="Status: Connected, but failed to get device info."))
-                    self.stop_recording_status_check() # Don't start if device info failed
-                    self.stop_auto_file_refresh_periodic_check() # Also stop auto-refresh
-            else:
-                # self.dock.connect() returned False, meaning it failed and called its own internal disconnect.
-                # Ensure UI is fully reset to a disconnected state.
-                logger.error("GUI", "_connect_device_thread", "self.dock.connect returned False. Ensuring UI reflects disconnected state.")
+                    self.master.after(0, lambda: self.update_status_bar(connection_status="Status: Connected, but failed to get device info."))
+                    self.stop_recording_status_check(); self.stop_auto_file_refresh_periodic_check()
+            else: 
+                logger.error("GUI", "_connect_device_thread", "dock.connect returned False.")
                 self.master.after(0, lambda: self.handle_auto_disconnect_ui() if self.master.winfo_exists() else None)
-
         except Exception as e:
-            error_message = f"Status: Connection Error ({type(e).__name__})"
             logger.error("GUI", "_connect_device_thread", f"Connection error: {e}\n{traceback.format_exc()}")
-
             if self.master.winfo_exists():
-                error_message_text = f"Status: Connection Error ({type(e).__name__})"
-                self.master.after(0, lambda: self.status_label.config(text=error_message_text) if hasattr(self,'status_label') and self.status_label.winfo_exists() else None)
-                self.master.after(0, lambda: self.connect_button.config(state=tk.NORMAL) if hasattr(self,'connect_button') and self.connect_button.winfo_exists() else None)
-
-                if not self.dock.is_connected():
-                    self.master.after(0, lambda: self.handle_auto_disconnect_ui() if self.master.winfo_exists() else None)
-            else:
-                logger.warning("GUI", "_connect_device_thread", "Master window destroyed during connection error handling.")
+                self.master.after(0, lambda: self.update_status_bar(connection_status=f"Status: Connection Error ({type(e).__name__})"))
+                if not self.dock.is_connected(): self.master.after(0, lambda: self.handle_auto_disconnect_ui() if self.master.winfo_exists() else None)
         finally:
-            # Re-enable settings button once connection attempt is fully resolved
-            if hasattr(self, 'settings_button') and self.settings_button.winfo_exists():
-                self.master.after(0, lambda: self.settings_button.config(state=tk.NORMAL))
+            if self.master.winfo_exists(): self.master.after(0, self._update_menu_states)
 
 
     def handle_auto_disconnect_ui(self):
         logger.warning("GUI", "handle_auto_disconnect_ui", "Device auto-disconnected or connection lost.")
-        self.status_label.config(text="Status: Disconnected (Error/Lost)")
-        self.connect_button.config(state=tk.NORMAL)
-        self.disconnect_button.config(state=tk.DISABLED)
-        self.refresh_files_button.config(state=tk.DISABLED)
-        self.download_button.config(state=tk.DISABLED)
-        self.delete_button.config(state=tk.DISABLED)
-        self.play_button.config(state=tk.DISABLED)
-        self.format_card_button.config(state=tk.DISABLED)
-        self.select_all_button.config(state=tk.DISABLED)
-        self.clear_selection_button.config(state=tk.DISABLED)
-        self.sync_time_button.config(state=tk.DISABLED)
-        for item in self.file_tree.get_children():
-            # Stop periodic check on disconnect
-            self.file_tree.delete(item)
+        self.update_status_bar(connection_status="Status: Disconnected (Error/Lost)")
+        if hasattr(self, 'file_tree') and self.file_tree.winfo_exists():
+            for item in self.file_tree.get_children(): self.file_tree.delete(item)
         self.displayed_files_details.clear()
-        self.total_files_label.config(text="Total: 0 files, 0.00 MB")
-        self.selected_files_label.config(text="Selected: 0 files, 0.00 MB")
-        # self.recording_status_label.config(text="Recording: N/A") # REMOVED
-        self.card_info_label.config(text="Storage: --- / --- MB (Status: ---)") # Changed "Card" to "Storage"
-        # self.card_info_label.config(text="Card: --- / --- MB (Status: ---)")
+        self.update_all_status_info() # Update all parts of status bar
         self.stop_auto_file_refresh_periodic_check()
-        self.stop_recording_status_check() # Stop periodic check on disconnect
-        # If we want to ensure the GUI's dock object is also reset if it wasn't the source:
-        if self.dock.is_connected(): # Should be false if Jensen disconnected itself
-            self.dock.disconnect() # Ensure GUI's perspective is also disconnected
+        self.stop_recording_status_check()
+        if self.dock.is_connected(): self.dock.disconnect()
+        self._update_menu_states()
 
     def disconnect_device(self):
         self.dock.disconnect()
-        self.status_label.config(text="Status: Disconnected")
-        self.connect_button.config(state=tk.NORMAL)
-        self.disconnect_button.config(state=tk.DISABLED)
-        self.refresh_files_button.config(state=tk.DISABLED)
-        self.play_button.config(state=tk.DISABLED)
-        self.download_button.config(state=tk.DISABLED)
-        self.delete_button.config(state=tk.DISABLED)
-        self.sync_time_button.config(state=tk.DISABLED)
-        self.select_all_button.config(state=tk.DISABLED)
-        self.clear_selection_button.config(state=tk.DISABLED)
-        for item in self.file_tree.get_children():
-            self.file_tree.delete(item)
-        self.stop_auto_file_refresh_periodic_check()
-        self.stop_recording_status_check() # Stop periodic check on manual disconnect
+        self.update_status_bar(connection_status="Status: Disconnected")
+        if hasattr(self, 'file_tree') and self.file_tree.winfo_exists():
+            for item in self.file_tree.get_children(): self.file_tree.delete(item)
         self.displayed_files_details.clear()
-        self.total_files_label.config(text="Total: 0 files, 0.00 MB")
-        self.selected_files_label.config(text="Selected: 0 files, 0.00 MB")
+        self.stop_auto_file_refresh_periodic_check()
+        self.stop_recording_status_check()
+        self.update_all_status_info() # Update status bar
+        self._update_menu_states() # Update menu states
 
     def refresh_file_list_gui(self):
-        if not self.backend_initialized_successfully: # Check backend status
-            logger.warning("GUI", "refresh_file_list_gui", "Cannot refresh, USB backend not initialized.")
-            return
-        if not self.dock.is_connected():
-            messagebox.showerror("Error", "Not connected to HiDock device.")
-            self.refresh_files_button.config(state=tk.DISABLED) # Ensure it's disabled if called when not connected
-            self.select_all_button.config(state=tk.DISABLED)
-            self.clear_selection_button.config(state=tk.DISABLED)
-            return
-
-        if self._is_ui_refresh_in_progress:
-            logger.debug("GUI", "refresh_file_list_gui", "UI refresh already in progress, skipping new request.")
-            return
-
+        if not self.backend_initialized_successfully: logger.warning("GUI", "refresh_file_list_gui", "Backend not init."); return
+        if not self.dock.is_connected(): messagebox.showerror("Error", "Not connected."); self._update_menu_states(); return
+        if self._is_ui_refresh_in_progress: logger.debug("GUI", "refresh_file_list_gui", "Refresh in progress."); return
+            
         self._is_ui_refresh_in_progress = True
-        self.refresh_files_button.config(state=tk.DISABLED)
-        self.select_all_button.config(state=tk.DISABLED) # Disable during refresh
-        self.clear_selection_button.config(state=tk.DISABLED) # Disable during refresh
-        self.total_files_label.config(text="Total: Fetching...")
-        # self.recording_status_label.config(text="Recording: Fetching...") # REMOVED - Status is now in the list
-        self.card_info_label.config(text="Storage: Fetching...") # Changed "Card" to "Storage"
-        self.selected_files_label.config(text="Selected: 0 files, 0.00 MB")
+        self.update_status_bar(progress_text="Fetching file list...")
+        self._update_menu_states() # Disable refresh menu item
         threading.Thread(target=self._refresh_file_list_thread, daemon=True).start()
 
     def _refresh_file_list_thread(self):
         try:
             list_result = self.dock.list_files(timeout_s=self.default_command_timeout_ms_var.get() / 1000)
-            if not self.dock.is_connected(): # Check if list_files caused a disconnect
-                self.master.after(0, self.handle_auto_disconnect_ui)
-                return
+            if not self.dock.is_connected(): self.master.after(0, self.handle_auto_disconnect_ui); return
 
             files = list_result.get("files", [])
-            total_files = list_result.get("totalFiles", 0)
-            total_size_bytes = list_result.get("totalSize", 0)
-            self.master.after(0, lambda: self.total_files_label.config(text=f"Total: {total_files} files, {total_size_bytes / (1024*1024):.2f} MB") if self.total_files_label.winfo_exists() else None)
+            self.dock.device_info['_cached_card_info'] = self.dock.get_card_info() # Cache for status bar
+            self.master.after(0, self.update_all_status_info) # Update status bar with new counts/storage
 
-            # Fetch and display card info
-            card_info = self.dock.get_card_info(timeout_s=self.default_command_timeout_ms_var.get() / 1000)
-            if card_info:
-                # Device reports 'used' and 'capacity' directly in Megabytes (MB)
-                used_storage_val = card_info['used'] # This is in MB
-                total_storage_val = card_info['capacity'] # This is in MB
-                unit = "MB"
-                if total_storage_val > 1024: # If capacity is over 1024 MB, display in GB
-                    used_storage_val /= 1024
-                    total_storage_val /= 1024
-                    unit = "GB"
-                self.master.after(0, lambda: self.card_info_label.config(text=f"Storage: {used_storage_val:.2f}/{total_storage_val:.2f} {unit} (Status: {hex(card_info['status_raw'])})") if self.card_info_label.winfo_exists() else None)
-            else:
-                self.master.after(0, lambda: self.card_info_label.config(text="Storage: Info N/A") if self.card_info_label.winfo_exists() else None) # Changed "Card" to "Storage"
+            if hasattr(self, 'file_tree') and self.file_tree.winfo_exists():
+                for item in self.file_tree.get_children(): self.master.after(0, lambda i=item: self.file_tree.delete(i) if self.file_tree.exists(i) else None)
+            self.master.after(0, self.displayed_files_details.clear)
 
-            for item in self.file_tree.get_children(): # Clear existing items
-                self.master.after(0, lambda item=item: self.file_tree.delete(item) if self.file_tree.exists(item) else None)
-            self.master.after(0, self.displayed_files_details.clear) # This should be fine
-
-            # Fetch recording status and add to the list if active
-            all_files_to_display = list(files) # Make a mutable copy
-
+            all_files_to_display = list(files)
             recording_info = self.dock.get_recording_file()
-            if recording_info and recording_info.get("name"):
-                is_already_listed = any(f.get("name") == recording_info['name'] for f in files)
-                if not is_already_listed:
-                    recording_file_entry = {
-                        "name": recording_info['name'],
-                        "length": 0,
-                        "duration": "Recording...",
-                        "createDate": "In Progress", # Use "In Progress" for clarity
-                        "createTime": "",
-                        "time": datetime.now(), # For sorting purposes
-                        "is_recording": True
-                    }
-                    all_files_to_display.insert(0, recording_file_entry) # Add to the beginning
+            if recording_info and recording_info.get("name") and not any(f.get("name") == recording_info['name'] for f in files):
+                all_files_to_display.insert(0, {"name": recording_info['name'], "length": 0, "duration": "Recording...", "createDate": "In Progress", "createTime": "", "time": datetime.now(), "is_recording": True})
 
-            if all_files_to_display: # Iterate over the combined list
+            if all_files_to_display:
                 if self.treeview_sort_column:
                     all_files_to_display = self._sort_files_data(all_files_to_display, self.treeview_sort_column, self.treeview_sort_reverse)
-
-                for f_info in all_files_to_display: # Use the correct list here
-                    status_text_for_display = f_info.get('gui_status')
-                    tags_for_display = f_info.get('gui_tags')
-
-                    if status_text_for_display is None: # Not previously set, determine initial status
-                        if f_info.get("is_recording"):
-                            status_text_for_display = "Recording"
-                            tags_for_display = ('recording',)
+                
+                for f_info in all_files_to_display:
+                    status_text, tags = f_info.get('gui_status'), f_info.get('gui_tags')
+                    if status_text is None:
+                        if f_info.get("is_recording"): status_text, tags = "Recording", ('recording',)
                         else:
-                            local_filepath = self._get_local_filepath(f_info['name'])
-                            if os.path.exists(local_filepath):
+                            local_path = self._get_local_filepath(f_info['name'])
+                            if os.path.exists(local_path):
                                 try:
-                                    local_size = os.path.getsize(local_filepath)
-                                    if local_size != f_info['length']:
-                                        status_text_for_display = "Mismatch"
-                                        tags_for_display = ('size_mismatch',)
-                                    else:
-                                        status_text_for_display = "Downloaded"
-                                        tags_for_display = ('downloaded_ok',)
-                                except OSError: # pragma: no cover
-                                    status_text_for_display = "Error Checking Size"
-                                    tags_for_display = ('size_mismatch',)
-                            else: # File does not exist locally
-                                status_text_for_display = "On Device"
-                                tags_for_display = ()
-
-                        f_info['gui_status'] = status_text_for_display
-                        f_info['gui_tags'] = tags_for_display
-
-                    if f_info.get("is_recording"): # This check is still useful for size/duration display
-                        values = (
-                            f_info['name'],
-                            "-", # Size
-                            f_info['duration'], # "Grabando..."
-                            f_info.get('createDate', ''), # "En curso"
-                            f_info.get('createTime', ''),
-                            status_text_for_display # Add status text
-                        )
-                    else:
-                        values = (
-                            f_info['name'],
-                            f"{f_info['length'] / 1024:.2f}", # Size in KB
-                            f"{f_info['duration']:.2f}", # Duration in seconds
-                            f_info.get('createDate', ''),
-                            f_info.get('createTime', ''),
-                            status_text_for_display # Add status text
-                        )
-
-                    self.master.after(0, lambda f_info_closure=f_info, values_closure=values, tags_closure=tags_for_display: \
-                                      self.file_tree.insert("", tk.END, values=values_closure, iid=f_info_closure['name'], tags=tags_closure) \
-                                      if self.file_tree.winfo_exists() else None)
-                    self.master.after(0, lambda f_info_closure=f_info: self.displayed_files_details.append(f_info_closure))
+                                    status_text, tags = ("Mismatch", ('size_mismatch',)) if os.path.getsize(local_path) != f_info['length'] else ("Downloaded", ('downloaded_ok',))
+                                except OSError: status_text, tags = "Error Checking Size", ('size_mismatch',)
+                            else: status_text, tags = "On Device", ()
+                        f_info['gui_status'], f_info['gui_tags'] = status_text, tags
+                    
+                    vals = (f_info['name'], "-", f_info['duration'], f_info.get('createDate',''), f_info.get('createTime',''), status_text) if f_info.get("is_recording") \
+                           else (f_info['name'], f"{f_info['length']/1024:.2f}", f"{f_info['duration']:.2f}", f_info.get('createDate',''), f_info.get('createTime',''), status_text)
+                    self.master.after(0, lambda fi=f_info, v=vals, t=tags: self.file_tree.insert("",tk.END,values=v,iid=fi['name'],tags=t) if self.file_tree.winfo_exists() else None)
+                    self.master.after(0, lambda fi=f_info: self.displayed_files_details.append(fi))
             else:
-                if list_result.get("error"):
-                    self.master.after(0, lambda: self.total_files_label.config(text=f"Total: Error - {list_result.get('error', 'Unknown')}") if self.total_files_label.winfo_exists() else None)
-                else:
-                    self.master.after(0, lambda: self.total_files_label.config(text="Total: 0 files, 0.00 MB") if self.total_files_label.winfo_exists() else None)
-
-        except ConnectionError as ce: # Catch connection errors specifically if raised by list_files
-            logger.error("GUI", "_refresh_file_list_thread", f"ConnectionError during file list: {ce}")
-            self.master.after(0, self.handle_auto_disconnect_ui)
-        except Exception as e:
-            logger.error("GUI", "_refresh_file_list_thread", f"Error refreshing file list: {e}\n{traceback.format_exc()}")
-            self.master.after(0, lambda: self.total_files_label.config(text="Total: Error loading files."))
-            if not self.dock.is_connected() and self.master.winfo_exists(): # If any other exception also led to disconnect
-                self.master.after(0, self.handle_auto_disconnect_ui)
+                self.master.after(0, lambda: self.update_status_bar(progress_text=f"Error: {list_result.get('error','Unknown')}" if list_result.get("error") else "No files found."))
+        except ConnectionError as ce: logger.error("GUI","_refresh_thread",f"ConnErr: {ce}"); self.master.after(0,self.handle_auto_disconnect_ui)
+        except Exception as e: logger.error("GUI","_refresh_thread",f"Error: {e}\n{traceback.format_exc()}"); self.master.after(0, lambda: self.update_status_bar(progress_text="Error loading files."))
         finally:
-            self.master.after(0, lambda: self.refresh_files_button.config(state=tk.NORMAL) if self.refresh_files_button.winfo_exists() else None)
-            self.master.after(0, lambda: self.on_file_selection_change(None) if self.file_tree.winfo_exists() else None) # Update selected stats
-            self.master.after(0, self.update_select_all_clear_buttons_state) # Update these buttons too
-            self.master.after(0, lambda: setattr(self, '_is_ui_refresh_in_progress', False) if hasattr(self, '_is_ui_refresh_in_progress') else None)
+            self.master.after(0, lambda: setattr(self, '_is_ui_refresh_in_progress', False))
+            self.master.after(0, self._update_menu_states)
+            self.master.after(0, lambda: self.update_status_bar(progress_text="Ready." if self.dock.is_connected() else "Disconnected.")) # Clear progress text
+            self.master.after(0, self.update_all_status_info) # Final update for counts
+
 
     def _on_file_double_click(self, event):
-        # Allow double-click to stop playback even if not connected
-        if not self.dock.is_connected() and not self.is_audio_playing:
-            return
-
+        if not self.dock.is_connected() and not self.is_audio_playing: return
         item_iid = self.file_tree.identify_row(event.y)
-        if not item_iid: # Double-clicked on empty area
-            return
-
-        self.file_tree.selection_set(item_iid) # Make it the sole selection
-
+        if not item_iid: return
+        self.file_tree.selection_set(item_iid)
         file_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid), None)
-        if not file_detail:
-            return
-
+        if not file_detail: return
         status = file_detail.get('gui_status', "On Device")
-        logger.info("GUI", "_on_file_double_click", f"File '{item_iid}' double-clicked. Status: '{status}'")
-
-        # If it's the currently playing file, double-clicking it should stop it.
-        if self.is_audio_playing and self.current_playing_filename_for_replay == item_iid:
-            logger.info("GUI", "_on_file_double_click", f"Stopping playback for currently playing file '{item_iid}'.")
-            self._stop_audio_playback(mode="user_request_stop_via_doubleclick") # Stop playback
-            return # Explicitly return to prevent falling through to other conditions
-        elif status in ["Downloaded", "Downloaded OK"]:
-            logger.info("GUI", "_on_file_double_click", f"Initiating playback for '{item_iid}'.")
-            self.play_selected_audio_gui()
-        elif status in ["On Device", "Mismatch", "Cancelled"] or "Error" in status: # Includes "Error (Download)", etc.
-            if not file_detail.get("is_recording"): # Don't try to download a recording file
-                logger.info("GUI", "_on_file_double_click", f"Initiating download for '{item_iid}'.")
-                self.download_selected_files_gui() # Uses current selection (which we just set)
+        if self.is_audio_playing and self.current_playing_filename_for_replay == item_iid: self._stop_audio_playback(); return
+        elif status in ["Downloaded", "Downloaded OK"]: self.play_selected_audio_gui()
+        elif status in ["On Device", "Mismatch", "Cancelled"] or "Error" in status:
+            if not file_detail.get("is_recording"): self.download_selected_files_gui()
 
     def _on_file_right_click(self, event):
-        if not self.dock.is_connected() and not self.file_tree.identify_row(event.y): # Allow refresh even if not connected
-            # If not connected and clicked on empty space, only allow limited general actions
-            menu = tk.Menu(self.master, tearoff=0)
-            if self.file_tree.get_children(): # If there are items (even if not connected, list might be stale)
-                menu.add_command(label="Select All", command=self.select_all_files_action, state=tk.NORMAL if self.file_tree.get_children() else tk.DISABLED)
-                menu.add_command(label="Clear Selection", command=self.clear_selection_action, state=tk.NORMAL if self.file_tree.selection() else tk.DISABLED)
-            try:
-                menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                menu.grab_release()
-            return
-
         clicked_item_iid = self.file_tree.identify_row(event.y)
         current_selection = self.file_tree.selection()
-
-        if clicked_item_iid:
-            if clicked_item_iid not in current_selection:
-                self.file_tree.selection_set(clicked_item_iid)
-                current_selection = (clicked_item_iid,) # Update current_selection to reflect the change
-        # If clicked_item_iid is None (empty area) or already in selection, current_selection remains as is.
-
+        if clicked_item_iid and clicked_item_iid not in current_selection:
+            self.file_tree.selection_set(clicked_item_iid)
+            current_selection = (clicked_item_iid,)
+        
         menu = tk.Menu(self.master, tearoff=0)
         num_selected = len(current_selection)
 
@@ -2390,1108 +1780,502 @@ class HiDockToolGUI:
 
                 if self.is_audio_playing and self.current_playing_filename_for_replay == item_iid:
                     menu.add_command(label="⏹️ Stop Playback", command=self._stop_audio_playback)
-                elif is_playable:
-                    play_label = "▶️ Play"
-                    local_path = self._get_local_filepath(item_iid)
-                    if os.path.exists(local_path) and status not in ["Mismatch", "Error (Download)"]: # Play local if it exists and isn't problematic
-                        play_label = "▶️ Play Local"
-                    elif status not in ["Recording", "Downloading", "Queued"]:
-                        play_label = "▶️ Play (Download)"
-
-                    if status not in ["Recording", "Downloading", "Queued"]:
-                         menu.add_command(label=play_label, command=self.play_selected_audio_gui)
-
+                elif is_playable and status not in ["Recording", "Downloading", "Queued"]:
+                     menu.add_command(label="▶️ Play", command=self.play_selected_audio_gui)
+                
                 if status in ["On Device", "Mismatch", "Cancelled"] or "Error" in status:
-                     if not file_detail.get("is_recording"):
-                        menu.add_command(label="💾 Download", command=self.download_selected_files_gui)
-                elif status == "Downloaded" or status == "Downloaded OK": # Already downloaded
-                    menu.add_command(label="💾 Re-download", command=self.download_selected_files_gui)
-
-                if status in ["Downloading", "Queued"] or "(Play)" in status or "Preparing Playback" in status :
-                    menu.add_command(label="🚫 Cancel Operation", command=self.request_cancel_operation)
-
-                if not file_detail.get("is_recording"): # Cannot delete a recording file
-                    menu.add_command(label="🗑️ Delete", command=self.delete_selected_files_gui)
-
-        elif num_selected > 1: # Multiple items selected
+                     if not file_detail.get("is_recording"): menu.add_command(label="💾 Download", command=self.download_selected_files_gui)
+                elif status == "Downloaded" or status == "Downloaded OK": menu.add_command(label="💾 Re-download", command=self.download_selected_files_gui)
+                
+                if status in ["Downloading", "Queued"] or "Preparing Playback" in status: menu.add_command(label="🚫 Cancel Operation", command=self.request_cancel_operation)
+                if not file_detail.get("is_recording"): menu.add_command(label="🗑️ Delete", command=self.delete_selected_files_gui)
+        elif num_selected > 1:
             menu.add_command(label=f"💾 Download Selected ({num_selected})", command=self.download_selected_files_gui)
-            # Check if any selected file is currently recording
-            any_recording = False
-            for item_iid in current_selection:
-                file_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid), None)
-                if file_detail and file_detail.get("is_recording"):
-                    any_recording = True
-                    break
-            if not any_recording:
+            if not any(next((f for f in self.displayed_files_details if f['name'] == iid), {}).get("is_recording") for iid in current_selection):
                 menu.add_command(label=f"🗑️ Delete Selected ({num_selected})", command=self.delete_selected_files_gui)
-            else:
-                menu.add_command(label=f"🗑️ Delete Selected ({num_selected})", state=tk.DISABLED,
-                                 command=lambda: messagebox.showinfo("Info", "Cannot delete files that are currently recording."))
+        
+        if menu.index(tk.END) is not None: menu.add_separator()
+        menu.add_command(label="🔄 Refresh List", command=self.refresh_file_list_gui, state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED)
+        if menu.index(tk.END) is None: return
+        try: menu.tk_popup(event.x_root, event.y_root)
+        finally: menu.grab_release()
 
-
-        # General actions, available if connected (unless specified otherwise)
-        if menu.index(tk.END) is not None: # Add separator if other items were added
-             menu.add_separator()
-
-        menu.add_command(label="🔄 Refresh File List", command=self.refresh_file_list_gui, state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED)
-
-        can_select_all = self.file_tree.get_children() and len(self.file_tree.selection()) < len(self.file_tree.get_children())
-        menu.add_command(label="Select All", command=self.select_all_files_action, state=tk.NORMAL if can_select_all else tk.DISABLED)
-
-        can_clear_selection = bool(self.file_tree.selection())
-        menu.add_command(label="Clear Selection", command=self.clear_selection_action, state=tk.NORMAL if can_clear_selection else tk.DISABLED)
-
-        if menu.index(tk.END) is None: # No items added at all (e.g. not connected, clicked empty space, no general actions made sense)
-            logger.debug("GUI", "_on_file_right_click", "No context menu items to show.")
-            return
-
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
 
     def _update_file_status_in_treeview(self, filename_iid, new_status_text, new_tags_tuple=()):
-        """Updates the status column and tags for a given file item in the Treeview."""
-        if not self.master.winfo_exists() or not self.file_tree.winfo_exists(): return # Window or widget gone
-
-        if not self.file_tree.exists(filename_iid):
-            logger.debug("GUI", "_update_file_status_in_treeview", f"Item {filename_iid} not found in treeview. Cannot update status.")
-            return
-
+        if not self.master.winfo_exists() or not self.file_tree.winfo_exists() or not self.file_tree.exists(filename_iid): return
         try:
             current_values = list(self.file_tree.item(filename_iid, 'values'))
-            col_ids = self.file_tree['columns']
-            try:
-                status_col_idx = col_ids.index('status')
-            except ValueError:
-                logger.error("GUI", "_update_file_status_in_treeview", "'status' column not found in treeview columns.")
-                return
-
+            status_col_idx = self.file_tree['columns'].index('status')
             if status_col_idx < len(current_values):
                 current_values[status_col_idx] = new_status_text
                 self.file_tree.item(filename_iid, values=tuple(current_values), tags=new_tags_tuple)
-
-                # Update the master list `displayed_files_details` as well
                 for detail in self.displayed_files_details:
-                    if detail['name'] == filename_iid:
-                        detail['gui_status'] = new_status_text # Store the new status text
-                        detail['gui_tags'] = new_tags_tuple   # Store the new tags
-                        break
-                logger.debug("GUI", "_update_file_status_in_treeview", f"Updated status for {filename_iid} to '{new_status_text}' with tags {new_tags_tuple}")
-        except Exception as e: # pragma: no cover
-            logger.error("GUI", "_update_file_status_in_treeview", f"Error updating status for {filename_iid}: {e}\n{traceback.format_exc()}")
+                    if detail['name'] == filename_iid: detail['gui_status'], detail['gui_tags'] = new_status_text, new_tags_tuple; break
+        except Exception as e: logger.error("GUI", "_update_file_status_in_treeview", f"Error for {filename_iid}: {e}\n{traceback.format_exc()}")
+
     def _get_local_filepath(self, device_filename):
-        """Generates the expected local file path for a given device filename."""
-        # This sanitization must match the one in _execute_single_download
         safe_filename = device_filename.replace(':','-').replace(' ','_').replace('\\','_').replace('/','_')
         return os.path.join(self.download_directory, safe_filename)
 
     def _sort_files_data(self, files_data, column_key, reverse_order):
-        """Helper function to sort the file data list."""
         def get_sort_key(item):
-            if column_key == "name":
-                return item.get('name', '').lower()
-            elif column_key == "size":
-                return item.get('length', 0)
-            elif column_key == "duration":
-                duration_val = item.get('duration', 0)
-                if isinstance(duration_val, str): # Handle "Grabando..." or other string representations
-                    # Return a tuple that sorts strings before numbers, or based on specific string content
-                    return (0, duration_val.lower())
-                else: # Assumed to be a number (float or int)
-                    return (1, duration_val)
-            elif column_key == "date": # Sort by actual datetime object if available
-                return item.get('time', datetime.min) # datetime.min for items without time
-            elif column_key == "time": # Sort by actual datetime object if available
-                return item.get('time', datetime.min)
-            elif column_key == "status": # Sort by status text
-                return item.get('gui_status', '').lower()
-            return item.get(column_key, '') # Fallback
-
+            val = item.get(column_key)
+            if column_key == "name": return item.get('name', '').lower()
+            if column_key == "size": return item.get('length', 0)
+            if column_key == "duration": return (0, item.get('duration','').lower()) if isinstance(item.get('duration'),str) else (1, item.get('duration',0))
+            if column_key in ["date", "time"]: return item.get('time', datetime.min)
+            if column_key == "status": return item.get('gui_status', '').lower()
+            return val if val is not None else '' # Fallback
         return sorted(files_data, key=get_sort_key, reverse=reverse_order)
 
-    def sort_treeview_column(self, column_name_map, is_numeric_string):
-        """Sorts the treeview by the clicked column header.""" # Add status to column_data_key if needed
-        # Map display column name to actual data key in self.displayed_files_details
-        column_data_key = {
-            "name": "name",
-            "size": "size", # Will sort by 'length' in displayed_files_details
-            "duration": "duration",
-            "date": "date", # Will sort by 'time' (datetime object)
-            "time": "time",  # Will sort by 'time' (datetime object)
-            "status": "status" # Sort by 'gui_status' in displayed_files_details
-        }.get(column_name_map) # Use .get() without default to catch if key is missing
+    def sort_treeview_column(self, column_name_map_key, is_numeric_string_unused): # is_numeric_string no longer needed
+        column_data_key = column_name_map_key # Direct mapping now
+        if self.treeview_sort_column == column_data_key: self.treeview_sort_reverse = not self.treeview_sort_reverse
+        else: self.treeview_sort_column, self.treeview_sort_reverse = column_data_key, False
+        
+        for col_id, original_text in self.original_tree_headings.items():
+            arrow = " ▲" if not self.treeview_sort_reverse else " ▼"
+            self.file_tree.heading(col_id, text=original_text + (arrow if col_id == column_data_key else ""))
 
-        if self.treeview_sort_column == column_data_key:
-            self.treeview_sort_reverse = not self.treeview_sort_reverse
-        else:
-            self.treeview_sort_column = column_data_key
-            self.treeview_sort_reverse = False
-
-        # Update column headings with sort indicators
-        for col_id_key, original_text in self.original_tree_headings.items():
-            # `col_id_key` is the key from original_tree_headings (e.g., "name", "size")
-            if col_id_key == column_name_map: # Check if this is the column that was clicked
-                arrow = " ▲" if not self.treeview_sort_reverse else " ▼"
-                self.file_tree.heading(col_id_key, text=original_text + arrow)
-            else: # Other columns
-                self.file_tree.heading(col_id_key, text=original_text) # Reset to original text
-
-        # Sort the master list of file details
-        self.displayed_files_details = self._sort_files_data(
-            self.displayed_files_details,
-            self.treeview_sort_column,
-            self.treeview_sort_reverse
-        )
-
-        # Clear and repopulate the Treeview
-        for item in self.file_tree.get_children():
-            self.file_tree.delete(item)
-
+        self.displayed_files_details = self._sort_files_data(self.displayed_files_details, self.treeview_sort_column, self.treeview_sort_reverse)
+        for item in self.file_tree.get_children(): self.file_tree.delete(item)
         for f_info in self.displayed_files_details:
-            # Use stored gui_status and gui_tags if available, otherwise determine default
-            status_text_for_display = f_info.get('gui_status', "On Device")
-            tags_for_display = f_info.get('gui_tags', ()) # Default to empty tuple for default color
-
-            if f_info.get("is_recording"):
-                values = (
-                    f_info['name'],
-                    "-",
-                    f_info['duration'], # "Grabando..."
-                    f_info.get('createDate', ''),
-                    f_info.get('createTime', ''),
-                    status_text_for_display
-                )
-            else:
-                values = (
-                    f_info['name'], f"{f_info['length'] / 1024:.2f}", f"{f_info['duration']:.2f}",
-                    f_info.get('createDate', ''), f_info.get('createTime', ''),
-                    status_text_for_display
-                )
-            self.file_tree.insert("", tk.END, values=values, iid=f_info['name'], tags=tags_for_display)
-
-        self.on_file_selection_change(None) # Update selection stats
+            status, tags = f_info.get('gui_status',"On Device"), f_info.get('gui_tags',())
+            vals = (f_info['name'], "-", status, f_info.get('createDate',''), f_info.get('createTime',''), status) if f_info.get("is_recording") \
+                   else (f_info['name'], f"{f_info['length']/1024:.2f}", f"{f_info['duration']:.2f}", f_info.get('createDate',''), f_info.get('createTime',''), status)
+            self.file_tree.insert("", tk.END, values=vals, iid=f_info['name'], tags=tags)
+        self.on_file_selection_change(None)
 
     def start_recording_status_check(self):
-        """Starts the periodic check for recording status."""
         interval_s = self.recording_check_interval_var.get()
-        if interval_s <= 0:
-            logger.info("GUI", "start_recording_status_check", "Recording check interval is 0 or less, check disabled.")
-            self.stop_recording_status_check() # Ensure it's stopped if it was running
-            return
-        self.stop_recording_status_check() # Ensure any existing timer is stopped
-        self._check_recording_status_periodically() # Run immediately and schedule next
+        if interval_s <= 0: logger.info("GUI", "start_rec_check", "Rec check interval <= 0, disabled."); self.stop_recording_status_check(); return
+        self.stop_recording_status_check() 
+        self._check_recording_status_periodically()
 
     def request_cancel_operation(self):
         if self.cancel_operation_event:
-            logger.info("GUI", "request_cancel_operation", "Cancellation requested by user.")
+            logger.info("GUI", "request_cancel_operation", "Cancellation requested.")
             self.cancel_operation_event.set()
-            self.download_button.config(state=tk.DISABLED) # Disable to prevent re-click while cancelling
+            self._set_long_operation_active_state(False, "Operation Cancelled") 
+            self.update_status_bar(progress_text="Operation cancelling...")
 
-            for item_iid in self.file_tree.get_children():
-                item_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid and (f.get('gui_status','').startswith("Queued") or f.get('gui_status','').startswith("Downloading") or f.get('gui_status','').startswith("Preparing Playback"))), None)
-                if item_detail:
-                    self._update_file_status_in_treeview(item_iid, "Cancelled", ('cancelled',))
 
     def stop_recording_status_check(self):
-        """Stops the periodic check for recording status."""
-        if self._recording_check_timer_id:
-            self.master.after_cancel(self._recording_check_timer_id)
-            self._recording_check_timer_id = None
+        if self._recording_check_timer_id: self.master.after_cancel(self._recording_check_timer_id); self._recording_check_timer_id = None
 
     def _check_recording_status_periodically(self):
-        """Checks recording status and updates GUI if it changes."""
         try:
-            if not self.dock.is_connected():
-                self.stop_recording_status_check() # Stop if device is no longer connected
-                return
-            if self.is_long_operation_active: # Skip if a download/playback prep is active
-                logger.debug("GUI", "_check_recording_status_periodically", "Long operation active, skipping recording status check.")
-                return # Return to wait for next scheduled check
+            if not self.dock.is_connected(): self.stop_recording_status_check(); return
+            if self.is_long_operation_active: return 
 
             recording_info = self.dock.get_recording_file(timeout_s=self.default_command_timeout_ms_var.get() / 1000)
-            if not self.dock.is_connected(): # Check again after the call, in case it disconnected
-                self.stop_recording_status_check()
-                return
-
+            if not self.dock.is_connected(): self.stop_recording_status_check(); return
             current_recording_filename = recording_info.get("name") if recording_info else None
-
             if current_recording_filename != self._previous_recording_filename:
-                logger.info("GUI", "_check_recording_status_periodically", f"Recording status changed: {self._previous_recording_filename} -> {current_recording_filename}. Refreshing file list.")
                 self._previous_recording_filename = current_recording_filename
-                self.refresh_file_list_gui() # Refresh the list to show/hide the recording entry
-
-        except Exception as e:
-            logger.error("GUI", "_check_recording_status_periodically", f"Unhandled exception: {e}\n{traceback.format_exc()}")
-            # Optionally stop the timer to prevent repeated errors if this is a persistent issue
-            # self.stop_recording_status_check()
+                self.refresh_file_list_gui() 
+        except Exception as e: logger.error("GUI", "_check_rec_status", f"Unhandled: {e}\n{traceback.format_exc()}")
         finally:
-            # Always reschedule if the timer hasn't been explicitly stopped by other logic
-            if self._recording_check_timer_id is not None: # Check if it was cancelled by an error handler
+            if self._recording_check_timer_id is not None:
                 interval_ms = self.recording_check_interval_var.get() * 1000
-                if interval_ms <= 0:
-                    logger.warning("GUI", "_check_recording_status_periodically", "Interval is 0 or less, stopping check.")
-                    self.stop_recording_status_check()
-                else:
-                    self._recording_check_timer_id = self.master.after(interval_ms, self._check_recording_status_periodically)
-
+                if interval_ms <= 0: self.stop_recording_status_check()
+                else: self._recording_check_timer_id = self.master.after(interval_ms, self._check_recording_status_periodically)
 
     def start_auto_file_refresh_periodic_check(self):
         self.stop_auto_file_refresh_periodic_check()
         if self.auto_refresh_files_var.get() and self.dock.is_connected():
             interval_s = self.auto_refresh_interval_s_var.get()
-            if interval_s <= 0:
-                logger.info("GUI", "start_auto_file_refresh_periodic_check", "Auto refresh interval is 0 or less, auto refresh disabled.")
-                return
-            logger.info("GUI", "start_auto_file_refresh_periodic_check", f"Starting auto file refresh with interval {interval_s}s.")
+            if interval_s <= 0: logger.info("GUI", "start_auto_refresh", "Interval <=0, disabled."); return
             self._check_auto_file_refresh_periodically()
 
     def stop_auto_file_refresh_periodic_check(self):
-        if self._auto_file_refresh_timer_id:
-            self.master.after_cancel(self._auto_file_refresh_timer_id)
-            self._auto_file_refresh_timer_id = None
-            logger.debug("GUI", "stop_auto_file_refresh", "Auto file refresh stopped.")
+        if self._auto_file_refresh_timer_id: self.master.after_cancel(self._auto_file_refresh_timer_id); self._auto_file_refresh_timer_id = None
 
     def _check_auto_file_refresh_periodically(self):
         try:
-            if not self.dock.is_connected() or not self.auto_refresh_files_var.get():
-                self.stop_auto_file_refresh_periodic_check()
-                return
-
-            if self.is_long_operation_active: # Skip if a download/playback prep is active
-                logger.debug("GUI", "_check_auto_file_refresh_periodically", "Long operation active, skipping auto file refresh.")
-                return
-
-            logger.debug("GUI", "_check_auto_file_refresh_periodically", "Auto-refreshing file list.")
+            if not self.dock.is_connected() or not self.auto_refresh_files_var.get(): self.stop_auto_file_refresh_periodic_check(); return
+            if self.is_long_operation_active: return
             self.refresh_file_list_gui()
-
-        except Exception as e:
-            logger.error("GUI", "_check_auto_file_refresh_periodically", f"Unhandled exception: {e}\n{traceback.format_exc()}")
-            # Optionally stop the timer
-            # self.stop_auto_file_refresh_periodic_check()
+        except Exception as e: logger.error("GUI", "_check_auto_refresh", f"Unhandled: {e}\n{traceback.format_exc()}")
         finally:
             if self._auto_file_refresh_timer_id is not None:
                 interval_ms = self.auto_refresh_interval_s_var.get() * 1000
-                if interval_ms <= 0: # Safeguard
-                    logger.warning("GUI", "_check_auto_file_refresh_periodically", "Interval is 0 or less, stopping auto-refresh.")
-                    self.stop_auto_file_refresh_periodic_check()
-                else:
-                    self._auto_file_refresh_timer_id = self.master.after(interval_ms, self._check_auto_file_refresh_periodically)
-
+                if interval_ms <= 0: self.stop_auto_file_refresh_periodic_check()
+                else: self._auto_file_refresh_timer_id = self.master.after(interval_ms, self._check_auto_file_refresh_periodically)
 
     def _reset_download_dir_for_settings(self, label_widget, dialog_dir_tracker, change_tracker, apply_btn, cancel_btn):
-        """Handles resetting download directory specifically for the settings dialog."""
-        default_dir = os.getcwd() # Application's current working directory
+        default_dir = os.getcwd()
         if default_dir != dialog_dir_tracker[0]:
             dialog_dir_tracker[0] = default_dir
-            if label_widget and label_widget.winfo_exists():
-                label_widget.config(text=dialog_dir_tracker[0])
-
-            if not change_tracker[0]: # Mark as changed and update buttons
+            if label_widget and label_widget.winfo_exists(): label_widget.config(text=dialog_dir_tracker[0])
+            if not change_tracker[0]: 
                 change_tracker[0] = True
                 if apply_btn.winfo_exists(): apply_btn.config(state=tk.NORMAL)
                 if cancel_btn.winfo_exists(): cancel_btn.config(text="Cancel")
-            logger.debug("GUI", "_reset_download_dir_for_settings", f"Download directory selection reset in dialog to: {dialog_dir_tracker[0]}")
-
-    def select_download_dir(self): # This is the old one, for a button outside settings if any.
-        logger.warning("GUI", "select_download_dir", "This method is deprecated for settings dialog. Use internal version.")
 
     def _set_long_operation_active_state(self, active: bool, operation_name: str = ""):
         self.is_long_operation_active = active
         if active:
-            self.play_button.config(state=tk.DISABLED)
-            self.download_button.config(state=tk.DISABLED)
-            self.delete_button.config(state=tk.DISABLED)
-            if hasattr(self, 'format_card_button'): self.format_card_button.config(state=tk.DISABLED)
-            if hasattr(self, 'sync_time_button'): self.sync_time_button.config(state=tk.DISABLED)
-            self.select_all_button.config(state=tk.DISABLED)
-            self.clear_selection_button.config(state=tk.DISABLED)
-            self.refresh_files_button.config(state=tk.DISABLED)
-            self.cancel_operation_event = threading.Event() # Fresh event for this operation
-            logger.info("GUI", "_set_long_operation_active_state", f"Long operation '{operation_name}' started.")
-            if operation_name in ["Download Queue", "Playback Preparation", "Download Selected"]: # Check against operation names
-                self.download_button.config(text="🚫 Cancel Download", command=self.request_cancel_operation, state=tk.NORMAL)
+            self.update_status_bar(progress_text=f"{operation_name} in progress...")
+            self.cancel_operation_event = threading.Event()
         else:
-            is_connected = self.dock.is_connected()
-            has_selection = bool(self.file_tree.selection())
-
-            self.download_button.config(text="💾 Download Selected", command=self.download_selected_files_gui) # Reset text and command first
-
-            self.play_button.config(state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
-            self.download_button.config(state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
-            self.delete_button.config(state=tk.NORMAL if is_connected and has_selection else tk.DISABLED)
-            if hasattr(self, 'format_card_button'): self.format_card_button.config(state=tk.NORMAL if is_connected else tk.DISABLED)
-            if hasattr(self, 'sync_time_button'): self.sync_time_button.config(state=tk.NORMAL if is_connected else tk.DISABLED)
-            self.refresh_files_button.config(state=tk.NORMAL if is_connected else tk.DISABLED)
-            self.cancel_operation_event = None # Clear the event
-            logger.info("GUI", "_set_long_operation_active_state", f"Long operation '{operation_name}' ended.")
-            self.on_file_selection_change(None) # Re-evaluate button states/text
+            self.update_status_bar(progress_text=f"{operation_name} finished." if operation_name else "Ready.")
+            self.cancel_operation_event = None
+        self._update_menu_states() 
+        self.on_file_selection_change(None) 
 
     def play_selected_audio_gui(self):
-        if not pygame:
-            messagebox.showerror("Playback Error", "Pygame library is not installed. Please install it to enable audio playback (pip install pygame).")
-            return
-
+        if not pygame: messagebox.showerror("Playback Error", "Pygame not installed."); return
         selected_iids = self.file_tree.selection()
-        if not selected_iids: # Should be rare if button states are correct
-            return
-        if len(selected_iids) > 1: # Should also be rare
-            return
-
+        if not selected_iids or len(selected_iids) > 1: return
         file_iid = selected_iids[0]
         file_detail = next((f for f in self.displayed_files_details if f['name'] == file_iid), None)
+        if not file_detail or not (file_detail['name'].lower().endswith((".wav", ".hda"))): return
 
-        if not file_detail:
-            messagebox.showerror("Error", "Could not find details for the selected file.")
-            return
-
-        if not (file_detail['name'].lower().endswith(".wav") or file_detail['name'].lower().endswith(".hda")):
-            messagebox.showwarning("Unsupported Format", "Playback is attempted for .wav and .hda files.")
-            return
-
-        if self.is_long_operation_active and not self.is_audio_playing:
-            messagebox.showwarning("Busy", "Another operation (e.g., download) is in progress. Please wait.")
-            return
-
-        if self.is_audio_playing:
-            logger.info("GUI", "play_selected_audio_gui", f"Stop playback requested for {self.current_playing_filename_for_replay} via button.")
-            self._stop_audio_playback(mode="user_stop_via_button") # Stop current playback
-            return # Crucial: exit after stopping, do not proceed to play logic
+        if self.is_long_operation_active and not self.is_audio_playing: messagebox.showwarning("Busy", "Another operation in progress."); return
+        if self.is_audio_playing: self._stop_audio_playback(mode="user_stop_via_button"); return
 
         local_filepath = self._get_local_filepath(file_detail['name'])
         if os.path.exists(local_filepath) and file_detail.get('gui_status') not in ["Mismatch", "Error (Download)"]:
-            logger.info("GUI", "play_selected_audio_gui", f"Playing existing local file: {local_filepath}")
-            self._cleanup_temp_playback_file()
-            self.current_playing_temp_file = None
+            self._cleanup_temp_playback_file(); self.current_playing_temp_file = None
             self._start_playback_local_file(local_filepath, file_detail)
-        else: # Not local, or local but has issues, so download to temp
+        else:
             self._update_file_status_in_treeview(file_detail['name'], "Preparing Playback...", ('queued',))
-            logger.info("GUI", "play_selected_audio_gui", f"File '{file_detail['name']}' not suitable for local play. Downloading to temporary location.")
             self._set_long_operation_active_state(True, "Playback Preparation")
-            self.update_overall_progress_label(f"Preparing to play {file_detail['name']}...")
-            self._cleanup_temp_playback_file() # Ensure old temp is gone
+            self.update_status_bar(progress_text=f"Preparing to play {file_detail['name']}...")
+            self._cleanup_temp_playback_file()
             try:
-                file_suffix = ".wav" if file_detail['name'].lower().endswith(".wav") else ".hda"
-                temp_fd, self.current_playing_temp_file = tempfile.mkstemp(suffix=file_suffix)
+                temp_fd, self.current_playing_temp_file = tempfile.mkstemp(suffix=".wav" if file_detail['name'].lower().endswith(".wav") else ".hda")
                 os.close(temp_fd)
-                logger.info("GUI", "play_selected_audio_gui", f"Created temporary file for playback: {self.current_playing_temp_file}")
                 threading.Thread(target=self._download_for_playback_thread, args=(file_detail,), daemon=True).start()
             except Exception as e:
-                logger.error("GUI", "play_selected_audio_gui", f"Failed to create temporary file for playback: {e}")
-                messagebox.showerror("Playback Error", f"Failed to create temporary file: {e}")
-                self._set_long_operation_active_state(False, "Playback Preparation") # Reset state
-                self._update_file_status_in_treeview(file_detail['name'], "Error (Playback Prep)", ('size_mismatch',)) # Revert status
-                return
+                logger.error("GUI", "play_selected_audio_gui", f"Temp file error: {e}")
+                messagebox.showerror("Playback Error", f"Temp file error: {e}")
+                self._set_long_operation_active_state(False, "Playback Preparation")
+                self._update_file_status_in_treeview(file_detail['name'], "Error (Playback Prep)", ('size_mismatch',))
 
     def _download_for_playback_thread(self, file_info):
         try:
-            with open(self.current_playing_temp_file, "wb") as outfile_handle:
-                def data_cb(chunk):
-                    outfile_handle.write(chunk)
-                def progress_cb(received, total):
-                    self.master.after(0, self.update_file_progress, received, total, f"(Playback) {file_info['name']}")
+            with open(self.current_playing_temp_file, "wb") as outfile:
+                def data_cb(chunk): outfile.write(chunk)
+                def progress_cb(rcvd, total):
+                    self.master.after(0, self.update_file_progress, rcvd, total, f"(Playback) {file_info['name']}")
                     self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Downloading (Play)", ('downloading',))
-
-                status = self.dock.stream_file(
-                    file_info['name'], file_info['length'], data_cb, progress_cb,
-                    timeout_s=self.file_stream_timeout_s_var.get(), # Ensure this is an int
-                    cancel_event=self.cancel_operation_event # Pass the event
-                )
-
-            if status == "OK":
-                self.master.after(0, self._start_playback_local_file, self.current_playing_temp_file, file_info)
-            elif status == "cancelled":
-                logger.info("GUI", "_download_for_playback_thread", f"Download for playback of {file_info['name']} was cancelled.")
-                self.master.after(0, self.update_overall_progress_label, f"Playback prep for {file_info['name']} cancelled.")
-                self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Cancelled", ('cancelled',))
-                self._cleanup_temp_playback_file() # Ensure temp file is deleted
-            elif status == "fail_disconnected":
-                logger.error("GUI", "_download_for_playback_thread", f"Download for playback of {file_info['name']} failed: Device disconnected.")
-                self.master.after(0, self.update_overall_progress_label, "Playback prep failed: Device disconnected.")
-                self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Disconnect)", ('size_mismatch',))
-                self._cleanup_temp_playback_file() # Ensure temp file is deleted
-                self.master.after(0, self.handle_auto_disconnect_ui)
-            else: # Other failures
-                logger.error("GUI", "_download_for_playback_thread", f"Download for playback of {file_info['name']} failed. Status: {status}")
-                messagebox.showerror("Playback Error", f"Failed to download {file_info['name']} for playback. Status: {status}")
-                self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Download)", ('size_mismatch',))
-                self._cleanup_temp_playback_file() # Ensure temp file is deleted
-                self.master.after(0, self.update_overall_progress_label, f"Playback preparation for {file_info['name']} failed.")
+                status = self.dock.stream_file(file_info['name'], file_info['length'], data_cb, progress_cb, timeout_s=self.file_stream_timeout_s_var.get(), cancel_event=self.cancel_operation_event)
+            
+            if status == "OK": self.master.after(0, self._start_playback_local_file, self.current_playing_temp_file, file_info)
+            elif status == "cancelled": self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Cancelled", ('cancelled',)); self._cleanup_temp_playback_file()
+            elif status == "fail_disconnected": self.master.after(0, self.handle_auto_disconnect_ui); self._cleanup_temp_playback_file()
+            else: messagebox.showerror("Playback Error", f"Download failed: {status}"); self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Download)", ('size_mismatch',)); self._cleanup_temp_playback_file()
         except Exception as e:
+            if not self.dock.is_connected(): self.master.after(0, self.handle_auto_disconnect_ui)
+            logger.error("GUI", "_download_for_playback_thread", f"Error: {e}\n{traceback.format_exc()}")
+            messagebox.showerror("Playback Error", f"Error: {e}"); self._cleanup_temp_playback_file()
             self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Playback Prep)", ('size_mismatch',))
-            if not self.dock.is_connected():
-                self.master.after(0, self.handle_auto_disconnect_ui)
-            logger.error("GUI", "_download_for_playback_thread", f"Error downloading for playback: {e}\n{traceback.format_exc()}")
-            messagebox.showerror("Playback Error", f"Error during download for playback: {e}")
-            self._cleanup_temp_playback_file() # Ensure temp file is deleted
-            self.master.after(0, self.update_overall_progress_label, "Playback preparation failed.")
         finally:
             self.master.after(0, self._set_long_operation_active_state, False, "Playback Preparation")
-            self.master.after(0, self.start_auto_file_refresh_periodic_check) # Restart auto-refresh
+            self.master.after(0, self.start_auto_file_refresh_periodic_check)
 
     def _start_playback_local_file(self, filepath, original_file_info):
         try:
-            if not pygame: # Guard against pygame being None
-                logger.error("GUI", "_start_playback_local_file", "Pygame is not available. Cannot play audio.")
-                messagebox.showerror("Playback Error", "Pygame module not initialized. Cannot play audio.", parent=self.master)
-                return
-
+            if not pygame: messagebox.showerror("Playback Error", "Pygame not initialized.", parent=self.master); return
             pygame.mixer.music.load(filepath)
-            sound = pygame.mixer.Sound(filepath)
-            self.playback_total_duration = sound.get_length() # in seconds
-            del sound # free the sound object
-            self.is_audio_playing = True # Set before configuring button
-
-            force_recreate_controls = False
-            if not hasattr(self, 'playback_controls_frame') or \
-               not self.playback_controls_frame.winfo_exists():
-                force_recreate_controls = True
-            else:
-                if not hasattr(self, 'total_duration_label') or \
-                   not hasattr(self, 'playback_slider') or \
-                   not hasattr(self, 'current_time_label'):
-                    logger.warning("GUI", "_start_playback_local_file",
-                                   "Playback frame widget exists, but essential control attributes are missing. Forcing recreation.")
-                    force_recreate_controls = True
-
-            if force_recreate_controls:
-                self._create_playback_controls_frame()
-
+            sound = pygame.mixer.Sound(filepath); self.playback_total_duration = sound.get_length(); del sound
+            self.is_audio_playing = True
+            if not hasattr(self, 'playback_controls_frame') or not self.playback_controls_frame.winfo_exists(): self._create_playback_controls_frame()
+            
             self.total_duration_label.config(text=time.strftime('%M:%S', time.gmtime(self.playback_total_duration)))
-            self.playback_slider.config(to=self.playback_total_duration)
-            self.playback_slider.set(0) # Reset slider to beginning
-
-            loops = -1 if self.loop_playback_var.get() else 0
-            pygame.mixer.music.play(loops=loops)
-            self.playback_controls_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5, before=self.controls_toggle_frame)
+            self.playback_slider.config(to=self.playback_total_duration); self.playback_slider.set(0)
+            pygame.mixer.music.play(loops=(-1 if self.loop_playback_var.get() else 0))
+            self.playback_controls_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=5, before=self.status_bar_frame) # Pack above status bar
             self._update_playback_progress()
-            self.update_overall_progress_label(f"Playing: {os.path.basename(filepath)}")
-            self.current_playing_filename_for_replay = original_file_info['name'] # Store for replay
-            self.play_button.config(text="⏹️ Stop Playback") # Change button text
-            self.download_button.config(state=tk.DISABLED)
-            self.delete_button.config(state=tk.DISABLED)
-
+            self.update_status_bar(progress_text=f"Playing: {os.path.basename(filepath)}")
+            self.current_playing_filename_for_replay = original_file_info['name']
             self._update_file_status_in_treeview(original_file_info['name'], "Playing", ('playing',))
+            self._update_menu_states() # Update play/stop in menu
         except Exception as e:
-            logger.error("GUI", "_start_playback_local_file", f"Error starting playback: {e}\n{traceback.format_exc()}")
-            messagebox.showerror("Playback Error", f"Could not play audio file {os.path.basename(filepath)}: {e}")
-            self._cleanup_temp_playback_file()
-            self.is_audio_playing = False
+            logger.error("GUI", "_start_playback_local_file", f"Error: {e}\n{traceback.format_exc()}")
+            messagebox.showerror("Playback Error", f"Could not play: {e}"); self._cleanup_temp_playback_file(); self.is_audio_playing = False
+            self._update_menu_states()
 
     def _create_playback_controls_frame(self):
+        if hasattr(self, 'playback_controls_frame') and self.playback_controls_frame.winfo_exists(): self.playback_controls_frame.destroy()
         self.playback_controls_frame = ttk.Frame(self.master, padding="5")
-
-        self.current_time_label = ttk.Label(self.playback_controls_frame, text="00:00")
-        self.current_time_label.pack(side=tk.LEFT, padx=5)
-
+        self.current_time_label = ttk.Label(self.playback_controls_frame, text="00:00"); self.current_time_label.pack(side=tk.LEFT, padx=5)
         self.playback_slider = ttk.Scale(self.playback_controls_frame, from_=0, to=100, orient=tk.HORIZONTAL, length=300, command=self._on_slider_value_changed_by_command)
         self.playback_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.playback_slider.bind("<ButtonPress-1>", self._on_slider_press)
-        self.playback_slider.bind("<ButtonRelease-1>", self._on_slider_release)
-        self._user_is_dragging_slider = False # Initialize here as well
-
-        self.total_duration_label = ttk.Label(self.playback_controls_frame, text="00:00")
-        self.total_duration_label.pack(side=tk.LEFT, padx=5)
-
+        self.playback_slider.bind("<ButtonPress-1>", self._on_slider_press); self.playback_slider.bind("<ButtonRelease-1>", self._on_slider_release)
+        self.total_duration_label = ttk.Label(self.playback_controls_frame, text="00:00"); self.total_duration_label.pack(side=tk.LEFT, padx=5)
         ttk.Label(self.playback_controls_frame, text="Vol:").pack(side=tk.LEFT, padx=(10,0))
         self.volume_slider_widget = ttk.Scale(self.playback_controls_frame, from_=0, to=1, variable=self.volume_var, command=self._on_volume_change, orient=tk.HORIZONTAL, length=80)
-        self.volume_slider_widget.pack(side=tk.LEFT, padx=(0,5))
-        pygame.mixer.music.set_volume(self.volume_var.get()) # Set initial volume
-
+        self.volume_slider_widget.pack(side=tk.LEFT, padx=(0,5)); pygame.mixer.music.set_volume(self.volume_var.get())
         self.loop_checkbox = ttk.Checkbutton(self.playback_controls_frame, text="Loop", variable=self.loop_playback_var, command=self._on_loop_toggle)
         self.loop_checkbox.pack(side=tk.LEFT, padx=5)
-        logger.debug("GUI", "_create_playback_controls_frame", "Playback controls frame created.")
 
     def _update_playback_progress(self):
-        if self.is_audio_playing and pygame.mixer.music.get_busy():
-            if not pygame: # Should not happen if is_audio_playing is true, but defensive
-                self._stop_audio_playback(mode="error_pygame_gone")
-                return
-            if not pygame.mixer.get_init(): # Mixer was quit unexpectedly
-                self._stop_audio_playback(mode="error_mixer_gone")
-                return
-            current_pos_sec = pygame.mixer.music.get_pos() / 1000.0
-            current_pos_sec = min(current_pos_sec, self.playback_total_duration) # Cap at total duration
-            if not self._user_is_dragging_slider:
-                 if abs(self.playback_slider.get() - current_pos_sec) > 0.5: # Threshold of 0.5s
-                    self.playback_slider.set(current_pos_sec)
+        if self.is_audio_playing and pygame and pygame.mixer.get_init() and pygame.mixer.music.get_busy():
+            current_pos_sec = min(pygame.mixer.music.get_pos() / 1000.0, self.playback_total_duration)
+            if not self._user_is_dragging_slider and abs(self.playback_slider.get() - current_pos_sec) > 0.5: self.playback_slider.set(current_pos_sec)
             self.current_time_label.config(text=time.strftime('%M:%S', time.gmtime(current_pos_sec)))
-            self.playback_update_timer_id = self.master.after(250, self._update_playback_progress) # Update 4 times a second
-        elif self.is_audio_playing: # Music finished
-            self._stop_audio_playback(mode="natural_end")
+            self.playback_update_timer_id = self.master.after(250, self._update_playback_progress)
+        elif self.is_audio_playing: self._stop_audio_playback(mode="natural_end")
 
-    def _on_slider_press(self, event):
-        self._user_is_dragging_slider = True
-        if self.playback_update_timer_id:
-            self.master.after_cancel(self.playback_update_timer_id)
-            self.playback_update_timer_id = None
-
+    def _on_slider_press(self, event): self._user_is_dragging_slider = True; self.master.after_cancel(self.playback_update_timer_id) if self.playback_update_timer_id else None
     def _on_slider_release(self, event):
-        seek_pos_sec = self.playback_slider.get() # Get the slider's current value
-        self._user_is_dragging_slider = False # Reset the flag
-
-        if self.is_audio_playing:
-            try: # Add check for pygame
-                if not pygame or not pygame.mixer.get_init(): return
-                logger.debug("GUI", "_on_slider_release", f"User released slider. Seeking to: {seek_pos_sec:.2f}s")
-                loops = -1 if self.loop_playback_var.get() else 0
-
-                pygame.mixer.music.stop()
-                pygame.mixer.music.play(loops=loops, start=seek_pos_sec)
-
-                self.current_time_label.config(text=time.strftime('%M:%S', time.gmtime(seek_pos_sec)))
-
-                if pygame.mixer.music.get_busy():
-                    if self.playback_update_timer_id: # Cancel any existing timer just in case
-                        self.master.after_cancel(self.playback_update_timer_id)
-                    self._update_playback_progress() # Restart UI progress updates
-            except Exception as e:
-                logger.error("GUI", "_on_slider_release_seek", f"Error seeking audio: {e}")
-
-    def _on_slider_value_changed_by_command(self, value_str):
-        self.latest_slider_value_from_command = float(value_str)
-        self.current_time_label.config(text=time.strftime('%M:%S', time.gmtime(self.latest_slider_value_from_command)))
-
-    def _on_volume_change(self, value_str):
-        if pygame and pygame.mixer.get_init(): # Check pygame here
+        seek_pos_sec = self.playback_slider.get(); self._user_is_dragging_slider = False
+        if self.is_audio_playing and pygame and pygame.mixer.get_init():
             try:
-                volume = float(value_str)
-                pygame.mixer.music.set_volume(volume)
-            except Exception as e:
-                logger.error("GUI", "_on_volume_change", f"Error setting volume: {e}")
-
+                pygame.mixer.music.stop(); pygame.mixer.music.play(loops=(-1 if self.loop_playback_var.get() else 0), start=seek_pos_sec)
+                self.current_time_label.config(text=time.strftime('%M:%S', time.gmtime(seek_pos_sec)))
+                if pygame.mixer.music.get_busy(): self._update_playback_progress()
+            except Exception as e: logger.error("GUI", "_on_slider_release_seek", f"Error seeking: {e}")
+    def _on_slider_value_changed_by_command(self, value_str): self.current_time_label.config(text=time.strftime('%M:%S', time.gmtime(float(value_str))))
+    def _on_volume_change(self, value_str): 
+        if pygame and pygame.mixer.get_init(): 
+            try: pygame.mixer.music.set_volume(float(value_str))
+            except Exception as e: logger.error("GUI", "_on_volume_change", f"Error setting volume: {e}")
     def _on_loop_toggle(self):
-        if self.is_audio_playing and pygame.mixer.music.get_busy():
-            if pygame and pygame.mixer.get_init(): # Check pygame here
-                current_pos_sec = pygame.mixer.music.get_pos() / 1000.0
-                pygame.mixer.music.play(loops=(-1 if self.loop_playback_var.get() else 0), start=current_pos_sec)
+        if self.is_audio_playing and pygame and pygame.mixer.get_init() and pygame.mixer.music.get_busy():
+            pygame.mixer.music.play(loops=(-1 if self.loop_playback_var.get() else 0), start=pygame.mixer.music.get_pos()/1000.0)
 
-    def on_file_selection_change(self, event):
+    def on_file_selection_change(self, event=None):
         try:
-            is_connected = self.dock.is_connected()
-            selected_items = self.file_tree.selection()
-            num_selected = len(selected_items)
-            size_selected_bytes = 0
-
-            if not self.is_long_operation_active: # Only update if no long operation is running
-                for item_iid in selected_items:
-                    file_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid), None)
-                    if file_detail:
-                        size_selected_bytes += file_detail.get('length', 0) # Use .get for safety
-                self.selected_files_label.config(text=f"Selected: {num_selected} files, {size_selected_bytes / (1024*1024):.2f} MB")
-
-                if self.is_audio_playing: # If audio is currently playing, button is always "Stop"
-                    self.play_button.config(state=tk.NORMAL, text="⏹️ Stop Playback")
-                elif num_selected == 1 and is_connected: # Playable if one item selected and connected
-                    file_iid = selected_items[0]
-                    file_detail = next((f for f in self.displayed_files_details if f['name'] == file_iid), None)
-                    can_play = file_detail and (file_detail['name'].lower().endswith(".wav") or file_detail['name'].lower().endswith(".hda"))
-
-                    if can_play:
-                        local_filepath_check = self._get_local_filepath(file_detail['name'])
-                        if os.path.exists(local_filepath_check):
-                            self.play_button.config(state=tk.NORMAL, text="▶️ Play Local")
-                        else:
-                            self.play_button.config(state=tk.NORMAL, text="▶️ Play (Download)")
-                    else:
-                        self.play_button.config(state=tk.DISABLED, text="▶️ Play Selected") # Not a playable file type
-                else:
-                    self.play_button.config(state=tk.DISABLED, text="▶️ Play Selected") # 0 or >1 selected, or not connected
-
-                if num_selected > 0 and is_connected:
-                    self.download_button.config(state=tk.NORMAL)
-                    self.delete_button.config(state=tk.NORMAL)
-                else: # No selection or not connected
-                    self.download_button.config(state=tk.DISABLED)
-                    self.delete_button.config(state=tk.DISABLED)
-
-            self.update_select_all_clear_buttons_state()
-        except Exception as e:
-            logger.error("GUI", "on_file_selection_change", f"Unhandled exception: {e}\n{traceback.format_exc()}")
-
+            self.update_all_status_info() # Update file counts in status bar
+            self._update_menu_states()   # Update menu item states based on selection
+        except Exception as e: logger.error("GUI", "on_file_selection_change", f"Unhandled: {e}\n{traceback.format_exc()}")
 
     def _on_delete_key_press(self, event):
-        """Handles the Delete key press event on the file tree."""
-        if self.dock.is_connected() and self.file_tree.selection():
-            if self.delete_button['state'] == tk.NORMAL:
-                self.delete_selected_files_gui()
-            else:
-                logger.debug("GUI", "_on_delete_key_press", "Delete action not available (e.g., long operation active).")
-        return "break" # Prevents default handling of the event
-
-    def _on_enter_key_press(self, event):
-        """Handles the Enter key press event on the file tree, mimicking double-click."""
-        if not self.dock.is_connected():
-            return "break"
-
-        selected_iids = self.file_tree.selection()
-        if len(selected_iids) == 1:
-            try:
-                bbox = self.file_tree.bbox(selected_iids[0])
-                if bbox: # Item is visible
-                    dummy_event = tk.Event()
-                    dummy_event.y = bbox[1] + bbox[3] // 2 # Middle y of the item
-                    self._on_file_double_click(dummy_event)
-            except Exception as e:
-                logger.warning("GUI", "_on_enter_key_press", f"Could not simulate double click for Enter: {e}")
+        if self.dock.is_connected() and self.file_tree.selection() and self.actions_menu.entrycget("Delete Selected", "state") == tk.NORMAL:
+            self.delete_selected_files_gui()
         return "break"
-
-    def _on_f5_key_press(self, event):
-        """Handles the F5 key press event for refreshing the file list."""
-        if self.dock.is_connected():
-            if self.refresh_files_button['state'] == tk.NORMAL:
-                self.refresh_file_list_gui()
-            else:
-                logger.debug("GUI", "_on_f5_key_press", "Refresh action not available (e.g., refresh already in progress).")
-        self.update_select_all_clear_buttons_state()
-
+    def _on_enter_key_press(self, event):
+        if not self.dock.is_connected() or len(self.file_tree.selection()) != 1: return "break"
+        try:
+            bbox = self.file_tree.bbox(self.file_tree.selection()[0])
+            if bbox: dummy_event = tk.Event(); dummy_event.y = bbox[1] + bbox[3]//2; self._on_file_double_click(dummy_event)
+        except Exception as e: logger.warning("GUI", "_on_enter_key_press", f"Could not simulate double click: {e}")
+        return "break"
+    def _on_f5_key_press(self, event=None): # Allow calling without event
+        if self.dock.is_connected() and self.view_menu.entrycget("Refresh File List", "state") == tk.NORMAL:
+            self.refresh_file_list_gui()
+        # self.update_select_all_clear_buttons_state() # This is now part of _update_menu_states
 
     def _stop_audio_playback(self, mode="user_stop"):
         was_playing_filename = self.current_playing_filename_for_replay
-
-        if pygame and pygame.mixer.get_init(): # Check if pygame and mixer are initialized
-            pygame.mixer.music.stop()
-            try:
-                pygame.mixer.music.unload() # Explicitly unload to release file handle
-                logger.debug("GUI", "_stop_audio_playback", "Pygame music unloaded.")
-            except Exception as e:
-                logger.warning("GUI", "_stop_audio_playback", f"Could not unload pygame music: {e}")
+        if pygame and pygame.mixer.get_init():
+            pygame.mixer.music.stop(); 
+            try: pygame.mixer.music.unload()
+            except Exception as e: logger.warning("GUI", "_stop_audio_playback", f"Unload error: {e}")
         self.is_audio_playing = False
-        if self.playback_update_timer_id:
-            self.master.after_cancel(self.playback_update_timer_id)
-            self.playback_update_timer_id = None
-
-        if hasattr(self, 'playback_controls_frame') and self.playback_controls_frame.winfo_exists():
-            self.playback_controls_frame.pack_forget() # Hide controls
+        if self.playback_update_timer_id: self.master.after_cancel(self.playback_update_timer_id); self.playback_update_timer_id = None
+        if hasattr(self, 'playback_controls_frame') and self.playback_controls_frame.winfo_exists(): self.playback_controls_frame.pack_forget()
         self._cleanup_temp_playback_file()
+        self.on_file_selection_change(None) # Updates menu states and status bar
+        if was_playing_filename:
+            file_detail = next((f for f in self.displayed_files_details if f['name'] == was_playing_filename), None)
+            if file_detail:
+                new_status, new_tags = "On Device", ()
+                local_path = self._get_local_filepath(was_playing_filename)
+                if os.path.exists(local_path):
+                    try: new_status, new_tags = ("Mismatch",('size_mismatch',)) if os.path.getsize(local_path) != file_detail.get('length') else ("Downloaded",('downloaded_ok',))
+                    except OSError: new_status, new_tags = "Error Checking Size", ('size_mismatch',)
+                self._update_file_status_in_treeview(was_playing_filename, new_status, new_tags)
+        if mode != "natural_end": self.update_status_bar(progress_text="Playback stopped.")
+        self._update_menu_states()
 
-        self.on_file_selection_change(None)
-
-        if was_playing_filename: # was_playing_filename was captured at the start of this method
-            file_detail_that_was_playing = next((f for f in self.displayed_files_details if f['name'] == was_playing_filename), None)
-            if file_detail_that_was_playing:
-                new_status_for_old_file = "On Device"
-                new_tags_for_old_file = ()
-                local_filepath_of_old_file = self._get_local_filepath(was_playing_filename)
-
-                if os.path.exists(local_filepath_of_old_file):
-                    try:
-                        local_size = os.path.getsize(local_filepath_of_old_file)
-                        if local_size == file_detail_that_was_playing.get('length'):
-                            new_status_for_old_file = "Downloaded"
-                            new_tags_for_old_file = ('downloaded_ok',)
-                        else:
-                            new_status_for_old_file = "Mismatch"
-                            new_tags_for_old_file = ('size_mismatch',)
-                    except OSError: # pragma: no cover
-                        new_status_for_old_file = "Error Checking Size"
-                        new_tags_for_old_file = ('size_mismatch',)
-
-                self._update_file_status_in_treeview(was_playing_filename, new_status_for_old_file, new_tags_for_old_file)
-
-        if mode != "natural_end": # Only update label if stopped by user or error
-            self.master.after(0, self.update_overall_progress_label, "Playback stopped.")
 
     def _cleanup_temp_playback_file(self):
-        if self.current_playing_temp_file and self.current_playing_filename_for_replay:
-            pass # Status update is handled by _stop_audio_playback
-
         if self.current_playing_temp_file and os.path.exists(self.current_playing_temp_file):
-            try:
-                os.remove(self.current_playing_temp_file)
-                logger.info("GUI", "_cleanup_temp_playback_file", f"Deleted temp file: {self.current_playing_temp_file}")
-            except Exception as e:
-                logger.error("GUI", "_cleanup_temp_playback_file", f"Error deleting temp file {self.current_playing_temp_file}: {e}")
-        self.current_playing_temp_file = None
-        self.current_playing_filename_for_replay = None # Clear this too
+            try: os.remove(self.current_playing_temp_file); logger.info("GUI", "_cleanup_temp", f"Deleted temp: {self.current_playing_temp_file}")
+            except Exception as e: logger.error("GUI", "_cleanup_temp", f"Error deleting temp: {e}")
+        self.current_playing_temp_file = None; self.current_playing_filename_for_replay = None
 
     def download_selected_files_gui(self):
         selected_iids = self.file_tree.selection()
-        if not selected_iids:
-            messagebox.showinfo("No Selection", "Please select one or more files to download.")
-            return
-        if not self.download_directory or not os.path.isdir(self.download_directory):
-            messagebox.showerror("Error", "Please select a valid download directory first.")
-            return
-
-        if self.is_long_operation_active:
-            messagebox.showwarning("Busy", "Another operation is already in progress. Please wait.")
-            return
-
-        files_to_download_info = []
-        for iid in selected_iids:
-            file_detail = next((f for f in self.displayed_files_details if f['name'] == iid), None)
-            if file_detail:
-                files_to_download_info.append(file_detail)
-
+        if not selected_iids: messagebox.showinfo("No Selection", "Please select files to download."); return
+        if not self.download_directory or not os.path.isdir(self.download_directory): messagebox.showerror("Error", "Invalid download directory."); return
+        if self.is_long_operation_active: messagebox.showwarning("Busy", "Another operation in progress."); return
+        files_to_download_info = [f for iid in selected_iids if (f := next((fd for fd in self.displayed_files_details if fd['name'] == iid), None))]
         self._set_long_operation_active_state(True, "Download Queue")
-
-        threading.Thread(target=self._process_download_queue_thread,
-                         args=(files_to_download_info,),
-                         daemon=True).start()
+        threading.Thread(target=self._process_download_queue_thread, args=(files_to_download_info,), daemon=True).start()
 
     def _process_download_queue_thread(self, files_to_download_info):
-        self.is_long_operation_active = True
-        total_files_in_queue = len(files_to_download_info)
-        self.master.after(0, self.update_overall_progress_label, f"Batch Download: Initializing {total_files_in_queue} file(s)...")
-
+        total_files = len(files_to_download_info)
+        self.master.after(0, lambda: self.update_status_bar(progress_text=f"Batch Download: Initializing {total_files} file(s)..."))
+        for i, file_info in enumerate(files_to_download_info): self.master.after(0, self._update_file_status_in_treeview, file_info['name'], f"Queued ({i+1}/{total_files})", ('queued',))
+        
+        batch_start_time, completed_count, operation_aborted = time.time(), 0, False
         for i, file_info in enumerate(files_to_download_info):
-            queue_status_text = f"Queued ({i + 1}/{total_files_in_queue})"
-            self.master.after(0, self._update_file_status_in_treeview, file_info['name'], queue_status_text, ('queued',))
-
-        batch_start_time = time.time()
-        operation_aborted = False
-        completed_count = 0
-        for i, file_info in enumerate(files_to_download_info):
-            if not self.dock.is_connected(): # Check connection before each download
-                logger.error("GUI", "_process_download_queue_thread", "Device disconnected, aborting download queue.")
-                self.master.after(0, self.handle_auto_disconnect_ui)
-                operation_aborted = True
-                break
-            if self.cancel_operation_event and self.cancel_operation_event.is_set():
-                logger.info("GUI", "_process_download_queue_thread", "Download queue cancelled by user.")
-                self.master.after(0, self.update_overall_progress_label, "Download queue cancelled.")
-                operation_aborted = True
-                break
-
-            download_successful = self._execute_single_download(file_info, i + 1, total_files_in_queue)
-            if download_successful:
-                completed_count += 1
-
-            if not self.dock.is_connected() or \
-               (hasattr(self, 'cancel_operation_event') and self.cancel_operation_event and self.cancel_operation_event.is_set()):
-                operation_aborted = True
-                if self.cancel_operation_event and self.cancel_operation_event.is_set():
-                    logger.info("GUI", "_process_download_queue_thread", "Download queue aborted due to cancellation during a file download.")
-                break
-
-        batch_end_time = time.time()
-        total_batch_duration = batch_end_time - batch_start_time
-
-        if not operation_aborted:
-            self.master.after(0, self.update_overall_progress_label, f"Batch: {completed_count}/{total_files_in_queue} completed in {total_batch_duration:.2f}s.")
-        elif self.cancel_operation_event and self.cancel_operation_event.is_set() and operation_aborted:
-            self.master.after(0, self.update_overall_progress_label, f"Download queue cancelled after {total_batch_duration:.2f}s.")
-
-        self.master.after(0, lambda: self.refresh_files_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
+            if not self.dock.is_connected(): logger.error("GUI", "_process_dl_q", "Disconnected."); self.master.after(0, self.handle_auto_disconnect_ui); operation_aborted=True; break
+            if self.cancel_operation_event and self.cancel_operation_event.is_set(): logger.info("GUI", "_process_dl_q", "Cancelled."); operation_aborted=True; break
+            if self._execute_single_download(file_info, i + 1, total_files): completed_count += 1
+            if not self.dock.is_connected() or (self.cancel_operation_event and self.cancel_operation_event.is_set()): operation_aborted=True; break
+        
+        duration = time.time() - batch_start_time
+        final_msg = f"Batch: {completed_count}/{total_files} completed in {duration:.2f}s." if not operation_aborted else f"Download queue {'cancelled' if self.cancel_operation_event and self.cancel_operation_event.is_set() else 'aborted'} after {duration:.2f}s."
+        self.master.after(0, lambda: self.update_status_bar(progress_text=final_msg))
         self.master.after(0, self._set_long_operation_active_state, False, "Download Queue")
         self.master.after(0, self.start_auto_file_refresh_periodic_check)
-        self.master.after(0, lambda: self.file_progress_bar.config(value=0) if self.file_progress_bar.winfo_exists() else None)
+        self.master.after(0, lambda: self.status_file_progress_bar.config(value=0) if hasattr(self, 'status_file_progress_bar') and self.status_file_progress_bar.winfo_exists() else None)
+
 
     def delete_selected_files_gui(self):
         selected_iids = self.file_tree.selection()
-        if not selected_iids:
-            messagebox.showinfo("No Selection", "Please select one or more files to delete.")
-            return
-
-        if not messagebox.askyesno("Confirm Delete", f"Are you sure you want to permanently delete {len(selected_iids)} selected file(s)? This cannot be undone."):
-            return
-
-        files_to_delete_names = [iid for iid in selected_iids] # iid is the filename
-
-        self.delete_button.config(state=tk.DISABLED)
-        self.refresh_files_button.config(state=tk.DISABLED)
-        self.download_button.config(state=tk.DISABLED)
-
-        threading.Thread(target=self._delete_files_thread, args=(files_to_delete_names,), daemon=True).start()
+        if not selected_iids: messagebox.showinfo("No Selection", "Please select files to delete."); return
+        if not messagebox.askyesno("Confirm Delete", f"Permanently delete {len(selected_iids)} selected file(s)? This cannot be undone."): return
+        self._set_long_operation_active_state(True, "Deletion") # Use a generic name
+        threading.Thread(target=self._delete_files_thread, args=([iid for iid in selected_iids],), daemon=True).start()
 
     def _delete_files_thread(self, filenames):
-        success_count = 0
-        fail_count = 0
+        success, fail = 0,0
         for i, filename in enumerate(filenames):
-            if not self.dock.is_connected():
-                logger.error("GUI", "_delete_files_thread", "Device disconnected, aborting delete queue.")
-                self.master.after(0, self.handle_auto_disconnect_ui)
-                break
+            if not self.dock.is_connected(): logger.error("GUI", "_delete_thread", "Disconnected."); self.master.after(0, self.handle_auto_disconnect_ui); break
+            self.master.after(0, lambda fn=filename, cur=i+1, tot=len(filenames): self.update_status_bar(progress_text=f"Deleting {fn} ({cur}/{tot})..."))
+            status = self.dock.delete_file(filename, timeout_s=self.default_command_timeout_ms_var.get() / 1000)
+            if status and status.get("result") == "success": success += 1
+            else: fail += 1; logger.error("GUI", "_delete_thread", f"Failed to delete {filename}: {status.get('error', status.get('result'))}")
+        
+        self.master.after(0, lambda s=success, f=fail: self.update_status_bar(progress_text=f"Deletion complete. Succeeded: {s}, Failed: {f}"))
+        self.master.after(0, self.refresh_file_list_gui)
+        self.master.after(0, self._set_long_operation_active_state, False, "Deletion")
 
-            self.master.after(0, self.update_overall_progress_label, f"Deleting {filename} ({i+1}/{len(filenames)})...")
-            delete_status = self.dock.delete_file(filename, timeout_s=self.default_command_timeout_ms_var.get() / 1000)
-            if delete_status and delete_status.get("result") == "success":
-                success_count += 1
-                logger.info("GUI", "_delete_files_thread", f"Successfully deleted {filename}")
-            else:
-                fail_count += 1
-                logger.error("GUI", "_delete_files_thread", f"Failed to delete {filename}: {delete_status.get('error', delete_status.get('result'))}")
-
-        self.master.after(0, self.update_overall_progress_label, f"Deletion complete. Succeeded: {success_count}, Failed: {fail_count}")
-        self.master.after(0, self.refresh_file_list_gui) # Refresh list after deletions
-        self.master.after(0, lambda: self.delete_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
-        self.master.after(0, lambda: self.refresh_files_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
-        self.master.after(0, lambda: self.download_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
 
     def select_all_files_action(self):
-        """Selects all files in the Treeview."""
-        if not self.file_tree.winfo_exists(): return
-        all_items = self.file_tree.get_children()
-        if all_items:
-            self.file_tree.selection_set(all_items) # Selects all, triggers on_file_selection_change
-        # on_file_selection_change will update button states
-
+        if self.file_tree.winfo_exists(): self.file_tree.selection_set(self.file_tree.get_children())
     def clear_selection_action(self):
-        """Clears the current selection in the Treeview."""
-        if not self.file_tree.winfo_exists(): return
-        self.file_tree.selection_set([]) # Clears selection, triggers on_file_selection_change
-        # on_file_selection_change will update button states
-
-    def update_select_all_clear_buttons_state(self):
-        """Updates the state of Select All and Clear Selection buttons."""
-        try:
-            if not self.file_tree.winfo_exists(): return
-
-            total_items = len(self.file_tree.get_children())
-            selected_items_count = len(self.file_tree.selection())
-
-            self.select_all_button.config(state=tk.NORMAL if total_items > 0 and selected_items_count < total_items else tk.DISABLED)
-            self.clear_selection_button.config(state=tk.NORMAL if selected_items_count > 0 else tk.DISABLED)
-        except Exception as e:
-            logger.error("GUI", "update_select_all_clear_buttons_state", f"Unhandled exception: {e}\n{traceback.format_exc()}")
+        if self.file_tree.winfo_exists(): self.file_tree.selection_set([])
+    # def update_select_all_clear_buttons_state(self): # Now handled by _update_menu_states
+    #     pass
 
 
     def format_sd_card_gui(self):
-        if not self.dock.is_connected():
-            messagebox.showerror("Error", "Not connected to HiDock device.")
-            return
-
-        if not messagebox.askyesno("Confirm Format Internal Storage", "WARNING: This will erase ALL data on the HiDock's internal storage. This action cannot be undone. Are you absolutely sure you want to proceed?"):
-            return
-        if not messagebox.askyesno("Final Confirmation", "FINAL WARNING: Formatting will erase everything. Continue?"):
-            return
-
-        confirmation_text = simpledialog.askstring("Type Confirmation",
-                                                      "To confirm formatting the internal storage, please type 'FORMAT' in the box below.",
-                                                      parent=self.master)
-
-        if confirmation_text is None or confirmation_text.upper() != "FORMAT":
-            messagebox.showwarning("Format Cancelled", "Storage formatting was cancelled. Confirmation text did not match.", parent=self.master)
-            return
-
-        self.format_card_button.config(state=tk.DISABLED)
+        if not self.dock.is_connected(): messagebox.showerror("Error", "Not connected."); return
+        if not messagebox.askyesno("Confirm Format", "WARNING: This will erase ALL data. Continue?") or \
+           not messagebox.askyesno("Final Confirmation", "FINAL WARNING: Formatting will erase everything. Continue?"): return
+        confirm_text = simpledialog.askstring("Type Confirmation", "Type 'FORMAT' to confirm formatting.", parent=self.master)
+        if confirm_text is None or confirm_text.upper() != "FORMAT": messagebox.showwarning("Format Cancelled", "Confirmation text mismatch.", parent=self.master); return
+        self._set_long_operation_active_state(True, "Formatting Storage")
         threading.Thread(target=self._format_sd_card_thread, daemon=True).start()
 
     def _format_sd_card_thread(self):
-        self.master.after(0, self.update_overall_progress_label, "Formatting Internal Storage... Please wait.")
-        logger.info("GUI", "_format_sd_card_thread", "Starting internal storage format operation.")
-        format_status = self.dock.format_card(timeout_s=max(60, self.default_command_timeout_ms_var.get() / 1000)) # Ensure at least 60s
+        self.master.after(0, lambda: self.update_status_bar(progress_text="Formatting Storage... Please wait."))
+        status = self.dock.format_card(timeout_s=max(60, self.default_command_timeout_ms_var.get() / 1000))
+        if status and status.get("result") == "success": messagebox.showinfo("Format Success", "Storage formatted successfully.", parent=self.master)
+        else: messagebox.showerror("Format Failed", f"Failed to format storage: {status.get('error', status.get('result', 'Unknown'))}", parent=self.master)
+        self.master.after(0, lambda: self.update_status_bar(progress_text="Format operation finished."))
+        self.master.after(0, self.refresh_file_list_gui)
+        self.master.after(0, self._set_long_operation_active_state, False, "Formatting Storage")
 
-        if format_status and format_status.get("result") == "success":
-            self.master.after(0, messagebox.showinfo, "Format Success", "Internal storage formatted successfully.")
-            logger.info("GUI", "_format_sd_card_thread", "Internal storage formatted successfully.")
-        else:
-            error_msg = format_status.get('error', format_status.get('result', 'Unknown error'))
-            self.master.after(0, messagebox.showerror, "Format Failed", f"Failed to format internal storage: {error_msg}")
-            logger.error("GUI", "_format_sd_card_thread", f"Internal storage format failed: {error_msg}")
-
-        self.master.after(0, self.update_overall_progress_label, "Format operation finished.")
-        self.master.after(0, self.refresh_file_list_gui) # Refresh list and card info
-        self.master.after(0, lambda: self.format_card_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
 
     def sync_device_time_gui(self):
-        if not self.dock.is_connected():
-            messagebox.showerror("Error", "Not connected to HiDock device.")
-            return
-
-        if not messagebox.askyesno("Confirm Sync Time", "This will set the HiDock device's time to your computer's current time. Continue?"):
-            return
-
-        self.sync_time_button.config(state=tk.DISABLED)
+        if not self.dock.is_connected(): messagebox.showerror("Error", "Not connected."); return
+        if not messagebox.askyesno("Confirm Sync Time", "Set device time to computer's current time?"): return
+        self._set_long_operation_active_state(True, "Time Sync")
         threading.Thread(target=self._sync_device_time_thread, daemon=True).start()
 
     def _sync_device_time_thread(self):
-        self.master.after(0, self.update_overall_progress_label, "Syncing device time...")
-        current_time = datetime.now()
-        result = self.dock.set_device_time(current_time)
-
-        if result and result.get("result") == "success":
-            self.master.after(0, messagebox.showinfo, "Time Sync", "Device time synchronized successfully.")
+        self.master.after(0, lambda: self.update_status_bar(progress_text="Syncing device time..."))
+        result = self.dock.set_device_time(datetime.now())
+        if result and result.get("result") == "success": messagebox.showinfo("Time Sync", "Device time synchronized.", parent=self.master)
         else:
-            error_detail = result.get('error', 'Unknown error') if result else "Communication error"
-            if result and 'device_code' in result:
-                error_detail += f" (Device code: {result['device_code']})"
-            self.master.after(0, messagebox.showerror, "Time Sync Error", f"Failed to sync device time: {error_detail}")
-        self.master.after(0, lambda: self.sync_time_button.config(state=tk.NORMAL if self.dock.is_connected() else tk.DISABLED))
-        self.master.after(0, self.update_overall_progress_label, "Time sync operation finished.")
+            err = result.get('error','Unknown') if result else "Comm error"
+            if result and 'device_code' in result: err += f" (Dev code: {result['device_code']})"
+            messagebox.showerror("Time Sync Error", f"Failed to sync time: {err}", parent=self.master)
+        self.master.after(0, self._set_long_operation_active_state, False, "Time Sync")
+        self.master.after(0, lambda: self.update_status_bar(progress_text="Time sync finished."))
+
     def _execute_single_download(self, file_info, file_index, total_files_to_download):
         self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Downloading", ('downloading',))
-        self.master.after(0, self.update_overall_progress_label, f"Batch ({file_index}/{total_files_to_download}): Downloading {file_info['name']}...")
-        self.master.after(0, lambda: self.file_progress_bar.config(value=0))
-
-        download_start_time = time.time()
-        operation_succeeded = False # Track if this specific download was OK
-        safe_filename = file_info['name'].replace(':','-').replace(' ','_').replace('\\','_').replace('/','_')
-
-        temp_download_filename = f"_temp_download_{safe_filename}" # Keep this for messages
-        temp_download_path = os.path.join(self.download_directory, temp_download_filename)
-        final_download_path = os.path.join(self.download_directory, safe_filename)
-
-        status = "fail" # Default status, will be updated by stream_file
+        self.master.after(0, lambda: self.update_status_bar(progress_text=f"Batch ({file_index}/{total_files_to_download}): Downloading {file_info['name']}..."))
+        self.master.after(0, lambda: self.status_file_progress_bar.config(value=0) if hasattr(self, 'status_file_progress_bar') else None)
+        
+        start_time, operation_succeeded = time.time(), False
+        safe_name = file_info['name'].replace(':','-').replace(' ','_').replace('\\','_').replace('/','_')
+        temp_path = os.path.join(self.download_directory, f"_temp_{safe_name}")
+        final_path = os.path.join(self.download_directory, safe_name)
 
         try:
-            with open(temp_download_path, "wb") as outfile_handle: # Write to temporary path
-                def gui_data_cb(chunk):
-                    try:
-                        outfile_handle.write(chunk)
-                    except Exception as e_write:
-                        logger.error("GUI", "gui_data_cb", f"Error writing chunk to {temp_download_path}: {e_write}")
+            with open(temp_path, "wb") as outfile:
+                def data_cb(chunk): outfile.write(chunk)
+                def progress_cb(rcvd, total):
+                    elapsed = time.time() - start_time
+                    speed_bps = rcvd / elapsed if elapsed > 0 else 0
+                    etr_s = (total - rcvd) / speed_bps if speed_bps > 0 else float('inf')
+                    etr_str = f"ETR: {time.strftime('%M:%S',time.gmtime(etr_s))}" if etr_s != float('inf') else "ETR: ..."
+                    speed_str = f"{speed_bps/1024:.1f}KB/s" if speed_bps < 1024*1024 else f"{speed_bps/(1024*1024):.1f}MB/s"
+                    self.master.after(0, self.update_file_progress, rcvd, total, f"{file_info['name']} | {speed_str} | {etr_str}")
+                
+                stream_status = self.dock.stream_file(file_info['name'], file_info['length'], data_cb, progress_cb, timeout_s=self.file_stream_timeout_s_var.get(), cancel_event=self.cancel_operation_event)
 
-                def gui_progress_cb(received, total):
-                    elapsed_time = time.time() - download_start_time
-
-                    if elapsed_time > 0:
-                        speed_bps = received / elapsed_time  # bytes per second
-                        if speed_bps > 0:
-                            bytes_remaining = total - received
-                            etr_seconds = bytes_remaining / speed_bps
-                            etr_str = f"ETR: {time.strftime('%M:%S', time.gmtime(etr_seconds))}"
-                        else:
-                            etr_str = "ETR: calculating..."
-                        speed_str = f"{speed_bps / 1024:.2f} KB/s" if speed_bps < 1024*1024 else f"{speed_bps / (1024*1024):.2f} MB/s"
-                    else:
-                        speed_str = "Speed: calculating..."
-                        etr_str = "ETR: calculating..."
-
-                    elapsed_str = f"Elapsed: {time.strftime('%M:%S', time.gmtime(elapsed_time))}"
-
-                    self.master.after(0, self.update_file_progress, received, total, file_info['name'])
-                    self.master.after(0, self.update_overall_progress_label, f"Current: {file_info['name']} | {speed_str} | {elapsed_str} | {etr_str}")
-
-                stream_status = self.dock.stream_file(
-                    file_info['name'],
-                    file_info['length'],
-                    gui_data_cb,
-                    gui_progress_cb,
-                    timeout_s=self.file_stream_timeout_s_var.get(), # Ensure this is an int
-                    cancel_event=self.cancel_operation_event # Pass the event
-                )
             if stream_status == "OK":
-                try:
-                    if os.path.exists(final_download_path):
-                        logger.info("GUI", "_execute_single_download", f"Target file {final_download_path} already exists. Attempting to overwrite.")
-                        os.remove(final_download_path) # Attempt to remove the existing file
-
-                    os.rename(temp_download_path, final_download_path)
-                    logger.info("GUI", "_execute_single_download", f"Successfully downloaded and renamed {file_info['name']} to {final_download_path}")
-                except OSError as e_os_finalize: # Catch errors from os.remove or os.rename
-                    logger.error("GUI", "_execute_single_download", f"OS error during finalization of {file_info['name']} (temp: {temp_download_path}, final: {final_download_path}): {e_os_finalize}. Temporary file kept as {temp_download_filename}.")
-                    self.master.after(0, self.update_overall_progress_label, f"Download OK, finalize failed for: {file_info['name']}. Temp file kept as {temp_download_filename}")
-                else: # os.remove (if needed) and os.rename were successful
-                    self.master.after(0, self.update_file_progress, file_info['length'], file_info['length'], file_info['name']) # Ensure 100%
-                    self.master.after(0, lambda f_name=file_info['name']: self.file_tree.item(f_name, tags=('downloaded_ok',)) if self.file_tree.exists(f_name) else None)
-                    self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Downloaded", ('downloaded_ok',)) # This is the final status for this file
-                    operation_succeeded = True
-
-            else: # stream_status is not "OK"
-                self.master.after(0, logger.error, "GUI", "_execute_single_download", f"Download failed for {file_info['name']}. Status: {stream_status}")
-                if stream_status == "fail_disconnected" or not self.dock.is_connected():
-                    self.master.after(0, self.handle_auto_disconnect_ui)
-                    self.master.after(0, self.update_overall_progress_label, f"Disconnected: {file_info['name']}. Partial file kept as {temp_download_filename}")
-                    self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Disconnect)", ('size_mismatch',))
-                elif stream_status == "cancelled":
-                    if hasattr(self, 'cancel_operation_event') and self.cancel_operation_event:
-                        self.cancel_operation_event.set() # Ensure event is set if stream_file reported cancel
-                    logger.info("GUI", "_execute_single_download", f"Download of {file_info['name']} was cancelled.")
-                    self.master.after(0, self.update_overall_progress_label, f"Cancelled: {file_info['name']}. Partial file kept as {temp_download_filename}")
-                    self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Cancelled", ('cancelled',))
-                else: # Generic "fail" from stream_file
-                    self.master.after(0, self.update_overall_progress_label, f"Failed: {file_info['name']}. Partial file kept as {temp_download_filename}")
-                    self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Download Failed", ('size_mismatch',))
-
-        except ConnectionError as ce:
-            self.master.after(0, logger.error, "GUI", "_execute_single_download", f"ConnectionError during download for {file_info['name']}: {ce}")
-            self.master.after(0, self.handle_auto_disconnect_ui)
-            self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Connection)", ('size_mismatch',))
-            self.master.after(0, self.update_overall_progress_label, f"Connection Error with {file_info['name']}. Temp file kept as {temp_download_filename}")
-        except Exception as e: # Catch other exceptions for this specific file download
-            self.master.after(0, logger.error, "GUI", "_execute_single_download", f"Error during download of {file_info['name']}: {e}\n{traceback.format_exc()}")
-            if not self.dock.is_connected(): # If any other exception also led to disconnect
-                self.master.after(0, self.handle_auto_disconnect_ui)
-            self.master.after(0, self.update_overall_progress_label, f"Error with {file_info['name']}. Temp file kept as {temp_download_filename}")
+                if os.path.exists(final_path): os.remove(final_path)
+                os.rename(temp_path, final_path)
+                self.master.after(0, self.update_file_progress, file_info['length'], file_info['length'], file_info['name'])
+                self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Downloaded", ('downloaded_ok',))
+                operation_succeeded = True
+            else:
+                msg = f"Download failed for {file_info['name']}. Status: {stream_status}. Temp file kept: {os.path.basename(temp_path)}"
+                logger.error("GUI", "_execute_single_download", msg)
+                self.master.after(0, lambda m=msg: self.update_status_bar(progress_text=m))
+                final_status_text, final_tags = ("Error (Disconnect)", ('size_mismatch',)) if stream_status == "fail_disconnected" else \
+                                                ("Cancelled", ('cancelled',)) if stream_status == "cancelled" else \
+                                                ("Download Failed", ('size_mismatch',))
+                self.master.after(0, self._update_file_status_in_treeview, file_info['name'], final_status_text, final_tags)
+                if stream_status == "fail_disconnected": self.master.after(0, self.handle_auto_disconnect_ui)
+                if stream_status == "cancelled" and self.cancel_operation_event: self.cancel_operation_event.set() # Ensure it's set
+        except Exception as e:
+            logger.error("GUI", "_execute_single_download", f"Error DL {file_info['name']}: {e}\n{traceback.format_exc()}")
+            self.master.after(0, lambda: self.update_status_bar(progress_text=f"Error with {file_info['name']}. Temp file kept."))
             self.master.after(0, self._update_file_status_in_treeview, file_info['name'], "Error (Download)", ('size_mismatch',))
+            if not self.dock.is_connected(): self.master.after(0, self.handle_auto_disconnect_ui)
         return operation_succeeded
 
-    def update_file_progress(self, received, total, file_name):
-        if total > 0:
-            percentage = (received / total) * 100
-            self.file_progress_bar['value'] = percentage
-        else:
-            self.file_progress_bar['value'] = 0
-        self.master.update_idletasks() # Force update of progress bar
-
-    def update_overall_progress_label(self, message):
-        self.overall_progress_label.config(text=message)
+    def update_file_progress(self, received, total, status_text_prefix=""):
+        if hasattr(self, 'status_file_progress_bar') and self.status_file_progress_bar.winfo_exists():
+            percentage = (received / total) * 100 if total > 0 else 0
+            self.status_file_progress_bar['value'] = percentage
+        # Update the text part of the status bar
+        self.update_status_bar(progress_text=f"{status_text_prefix} ({received/ (1024*1024):.2f}/{total/ (1024*1024):.2f} MB)")
+        self.master.update_idletasks()
 
     def on_closing(self):
-        if self._recording_check_timer_id:
-            self.master.after_cancel(self._recording_check_timer_id)
-            self._recording_check_timer_id = None
-
-        if self._auto_file_refresh_timer_id:
-            self.master.after_cancel(self._auto_file_refresh_timer_id)
-            self._auto_file_refresh_timer_id = None
-
-        if self.is_audio_playing:
-            self._stop_audio_playback()
+        if self._recording_check_timer_id: self.master.after_cancel(self._recording_check_timer_id)
+        if self._auto_file_refresh_timer_id: self.master.after_cancel(self._auto_file_refresh_timer_id)
+        if self.is_audio_playing: self._stop_audio_playback()
         if pygame and pygame.mixer.get_init(): pygame.mixer.quit()
-
-        self.config["autoconnect"] = self.autoconnect_var.get() # Ensure latest state is saved
+        
+        # Save config
+        for key in ["autoconnect", "log_level", "selected_vid", "selected_pid", "target_interface", 
+                    "recording_check_interval_s", "default_command_timeout_ms", "file_stream_timeout_s",
+                    "auto_refresh_files", "auto_refresh_interval_s", "quit_without_prompt_if_connected",
+                    "theme", "suppress_console_output"]:
+            if hasattr(self, f"{key}_var"): self.config[key] = getattr(self, f"{key}_var").get()
         self.config["download_directory"] = self.download_directory
-        self.config["log_level"] = self.logger_processing_level_var.get() # Use renamed var
-        self.config["selected_vid"] = self.selected_vid_var.get()
-        self.config["selected_pid"] = self.selected_pid_var.get()
-        self.config["target_interface"] = self.target_interface_var.get()
-        self.config["recording_check_interval_s"] = self.recording_check_interval_var.get()
-        self.config["default_command_timeout_ms"] = self.default_command_timeout_ms_var.get()
-        self.config["file_stream_timeout_s"] = self.file_stream_timeout_s_var.get()
-        self.config["auto_refresh_files"] = self.auto_refresh_files_var.get()
-        self.config["auto_refresh_interval_s"] = self.auto_refresh_interval_s_var.get()
-        self.config["quit_without_prompt_if_connected"] = self.quit_without_prompt_var.get()
-        self.config["theme"] = self.theme_var.get()
-        self.config["suppress_console_output"] = self.suppress_console_output_var.get() # New
         save_config(self.config)
 
-        should_prompt_disconnect = self.dock and self.dock.is_connected()
-
-        if should_prompt_disconnect:
-            if self.quit_without_prompt_var.get() or \
-               messagebox.askokcancel("Quit", "Do you want to quit? This will disconnect the HiDock device."):
-                logger.info("GUI", "on_closing", "Quit without prompt enabled or confirmed. Disconnecting and closing.")
+        if self.dock and self.dock.is_connected():
+            if self.quit_without_prompt_var.get() or messagebox.askokcancel("Quit", "Disconnect HiDock and quit?"):
                 self.dock.disconnect()
                 self.master.destroy()
-            else:
-                logger.info("GUI", "on_closing", "Quit cancelled by user.")
+            else: logger.info("GUI", "on_closing", "Quit cancelled by user.") # Stay open
         else:
             self.master.destroy()
 
 # --- Main Execution ---
 if __name__ == "__main__":
     root = tk.Tk()
-    app = None # Initialize app to None
+    app = None 
     try:
-        # app is created after root, so theme can be applied to root in app.__init__
         app = HiDockToolGUI(root)
         root.mainloop()
     except Exception as e:
-        # Fallback error reporting if GUI initialization fails catastrophically
-        print("CRITICAL ERROR DURING GUI INITIALIZATION:")
-        # import traceback # Already imported at the top
-        print(traceback.format_exc())
-
+        print(f"CRITICAL ERROR DURING GUI INITIALIZATION:\n{traceback.format_exc()}")
         try:
-            if root and root.winfo_exists(): # Check if root window was created and still exists
-                root.withdraw()
-                messagebox.showerror("Fatal Initialization Error",
-                                     f"A critical error occurred during application startup:\n\n{e}\n\n"
-                                     "The application will now close.\n\n"
-                                     "Please check the console output for more details.")
-            else: # If root window doesn't exist, create a temporary one for the error message
-                error_root = tk.Tk()
-                error_root.withdraw() # Hide the temp root window
-                messagebox.showerror("Fatal Initialization Error",
-                                     f"A critical error occurred during application startup (root window issue):\n\n{e}\n\n"
-                                     "The application will now close.\n\n"
-                                     "Please check the console output for more details.",
-                                     parent=None) # No parent
-                if error_root.winfo_exists(): error_root.destroy()
-        except Exception as e_diag:
-            print(f"Could not display Tkinter error dialog during critical failure: {e_diag}")
+            if root and root.winfo_exists(): root.withdraw()
+            temp_root = tk.Tk() if not (root and root.winfo_exists()) else None
+            if temp_root: temp_root.withdraw()
+            messagebox.showerror("Fatal Initialization Error", f"Critical error during startup:\n\n{e}\n\nApp will close. Check console.", parent=temp_root if temp_root else root if root and root.winfo_exists() else None)
+            if temp_root and temp_root.winfo_exists(): temp_root.destroy()
+        except Exception as e_diag: print(f"Could not display Tkinter error dialog: {e_diag}")
         import sys
         sys.exit(1)
