@@ -1,7 +1,7 @@
 {
-    "autoconnect": true,
+    "autoconnect": false,
     "download_directory": "D:/Documents/hidock-next",
-    "log_level": "INFO",
+    "log_level": "DEBUG",
     "target_interface": 0,
     "autoconnect_interval_s": 7,
     "recording_check_interval_s": 0,
@@ -11,6 +11,7 @@
     "file_stream_timeout_s": 180,
     "auto_refresh_files": false,
     "auto_refresh_interval_s": 30,
-    "quit_without_prompt_if_connected": true,
-    "theme": "vista"
+    "quit_without_prompt_if_connected": false,
+    "theme": "azure-dark",
+    "suppress_console_output": false
 }
