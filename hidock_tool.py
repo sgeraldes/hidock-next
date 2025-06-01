@@ -1,7 +1,9 @@
+import os # For PYGAME_HIDE_SUPPORT_PROMPT
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1" # Suppress Pygame welcome message
+
 import usb.core
 import usb.util
 import usb.backend.libusb1 # Explicitly import the backend
-import os
 import time
 import struct
 from datetime import datetime
@@ -52,7 +54,7 @@ CONFIG_FILE = "hidock_tool_config.json"
 
 def load_config():
     try:
-        with open(CONFIG_FILE, 'r') as f:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     except FileNotFoundError:
         print(f"[INFO] Config::load_config - {CONFIG_FILE} not found, using defaults.")
@@ -79,7 +81,15 @@ def load_config():
             "loop_playback": False,
             "playback_volume": 0.5,
             "treeview_sort_col_id": "time", # Default sort by time
-            "treeview_sort_descending": True # Default sort descending (newest first)
+            "treeview_sort_descending": True, # Default sort descending (newest first),
+            "suppress_gui_log_output": False, # ADDED: New setting
+            "log_colors": { # ADDED: Default log colors
+                "ERROR":    ["#FF6347", "#FF4747"],    # Tomato Red / Lighter Red
+                "WARNING":  ["#FFA500", "#FFB732"],    # Orange / Lighter Orange
+                "INFO":     ["#606060", "#A0A0A0"],    # Dark Grey / Light Grey
+                "DEBUG":    ["#202020", "#D0D0D0"],    # Very Dark Grey / Very Light Grey
+                "CRITICAL": ["#DC143C", "#FF0000"]     # Crimson / Bright Red
+            }
         }
     except json.JSONDecodeError:
         print(f"[ERROR] Config::load_config - Error decoding {CONFIG_FILE}. Using defaults.")
@@ -100,11 +110,26 @@ def load_config():
             "loop_playback": False,
             "playback_volume": 0.5,
             "treeview_sort_col_id": "time",
-            "treeview_sort_descending": True
+            "treeview_sort_descending": True,
+            "suppress_gui_log_output": False, # ADDED: New setting
+            "log_colors": {
+                "ERROR":    ["#FF6347", "#FF4747"],
+                "WARNING":  ["#FFA500", "#FFB732"],
+                "INFO":     ["#606060", "#A0A0A0"],
+                "DEBUG":    ["#202020", "#D0D0D0"],
+                "CRITICAL": ["#DC143C", "#FF0000"]
+            }
         }
 
 class Logger:
     LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
+    # ANSI escape codes for console colors
+    COLOR_RED = '\033[91m'      # Error, Critical
+    COLOR_YELLOW = '\033[93m'   # Warning
+    COLOR_GREY = '\033[90m'     # Debug (Bright Black / Dark Grey)
+    COLOR_WHITE = '\033[97m'    # Info (Bright White)
+    COLOR_RESET = '\033[0m'     # Reset all attributes
+
     def __init__(self, initial_config=None):
         self.gui_log_callback = None
         self.config = initial_config if initial_config else {}
@@ -114,8 +139,19 @@ class Logger:
         self.gui_log_callback = callback
 
     def set_level(self, level_name):
-        self.level = self.LEVELS.get(level_name.upper(), self.LEVELS["INFO"])
-        print(f"[INFO] Logger::set_level - Log level set to {level_name.upper()}")
+        # Store the current level if it exists, to correctly log the change message
+        # This ensures the "Log level set to..." message itself is logged correctly.
+        # previous_internal_level = self.level if hasattr(self, 'level') else self.LEVELS["INFO"]
+        
+        new_level_value = self.LEVELS.get(level_name.upper(), self.LEVELS["INFO"])
+        self.level = new_level_value # Set the new level first
+
+        # Log the change. If the new level is very high (e.g., CRITICAL),
+        # this INFO message might be suppressed. So, temporarily use INFO level for this specific log.
+        current_actual_level = self.level
+        if current_actual_level > self.LEVELS["INFO"]: self.level = self.LEVELS["INFO"]
+        self._log("info", "Logger", "set_level", f"Log level set to {level_name.upper()}")
+        self.level = current_actual_level # Restore the actual new level
 
     def update_config(self, new_config_dict):
         self.config.update(new_config_dict)
@@ -126,12 +162,33 @@ class Logger:
             return
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        log_message = f"[{timestamp}][{level_str.upper()}] {str(module)}::{str(procedure)} - {message}"
+        # Base log message (uncolored, for GUI and potentially for non-error console)
+        base_log_message = f"[{timestamp}][{level_str.upper()}] {str(module)}::{str(procedure)} - {message}"
 
         if not self.config.get("suppress_console_output", False):
-            print(log_message)
+            level_upper = level_str.upper()
+            console_message = base_log_message
+
+            if level_upper in ["ERROR", "CRITICAL"]:
+                console_message = f"{self.COLOR_RED}{base_log_message}{self.COLOR_RESET}"
+                sys.stderr.write(console_message + "\n")
+                sys.stderr.flush() # Ensure it's written immediately
+            elif level_upper == "WARNING":
+                console_message = f"{self.COLOR_YELLOW}{base_log_message}{self.COLOR_RESET}"
+                print(console_message) # Warnings can go to stdout
+            elif level_upper == "INFO":
+                console_message = f"{self.COLOR_WHITE}{base_log_message}{self.COLOR_RESET}"
+                print(console_message) # Info to stdout
+            elif level_upper == "DEBUG":
+                console_message = f"{self.COLOR_GREY}{base_log_message}{self.COLOR_RESET}"
+                print(console_message) # Debug to stdout
+            else: # Fallback for any other unforeseen level
+                print(base_log_message) # Regular print to stdout
+
         if self.gui_log_callback:
-            self.gui_log_callback(log_message + "\n", level_str.upper())
+            if not self.config.get("suppress_gui_log_output", False): # Check new flag
+                # GUI callback always gets the uncolored base message
+                self.gui_log_callback(base_log_message + "\n", level_str.upper())
 
     def info(self, module, procedure, message): self._log("info", module, procedure, message)
     def debug(self, module, procedure, message): self._log("debug", module, procedure, message)
@@ -142,7 +199,7 @@ logger = Logger(initial_config=load_config())
 
 def save_config(config_data):
     try:
-        with open(CONFIG_FILE, 'w') as f:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config_data, f, indent=4)
         logger.info("Config", "save_config", f"Configuration saved to {CONFIG_FILE}")
     except IOError:
@@ -711,6 +768,7 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         self.color_theme_var = ctk.StringVar(value=self.config.get("color_theme", "blue")) # MODIFIED
 
         self.suppress_console_output_var = ctk.BooleanVar(value=self.config.get("suppress_console_output", False))
+        self.suppress_gui_log_output_var = ctk.BooleanVar(value=self.config.get("suppress_gui_log_output", False)) # ADDED
         self.gui_log_filter_level_var = ctk.StringVar(value=self.config.get("gui_log_filter_level", "DEBUG"))
         
         self.device_setting_auto_record_var = ctk.BooleanVar()
@@ -728,6 +786,18 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
 
         self.saved_treeview_sort_column = self.config.get("treeview_sort_col_id", "time")
         self.saved_treeview_sort_reverse = self.config.get("treeview_sort_descending", True)
+
+        # Initialize log color StringVars
+        default_log_colors = {
+            "ERROR":    ["#FF6347", "#FF4747"], "WARNING":  ["#FFA500", "#FFB732"],
+            "INFO":     ["#606060", "#A0A0A0"], "DEBUG":    ["#202020", "#D0D0D0"],
+            "CRITICAL": ["#DC143C", "#FF0000"]
+        }
+        loaded_log_colors = self.config.get("log_colors", default_log_colors)
+        for level in Logger.LEVELS.keys():
+            colors = loaded_log_colors.get(level, default_log_colors.get(level, ["#000000", "#FFFFFF"])) # Fallback
+            setattr(self, f"log_color_{level.lower()}_light_var", ctk.StringVar(value=colors[0]))
+            setattr(self, f"log_color_{level.lower()}_dark_var", ctk.StringVar(value=colors[1]))
 
         self.available_usb_devices = []
         self.displayed_files_details = []
@@ -750,6 +820,13 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         self._user_is_dragging_slider = False
         self.playback_total_duration = 0.0
         self.playback_controls_frame = None
+
+        self._is_button1_pressed_on_item = None # ADDED: For drag selection
+        self._last_dragged_over_iid = None      # ADDED: For drag selection
+        self._drag_action_is_deselect = False   # ADDED: To determine drag behavior
+
+        self.default_progressbar_fg_color = None
+        self.default_progressbar_progress_color = None
 
         self.original_tree_headings = {"name": "Name", "size": "Size (KB)", "duration": "Duration (s)", "date": "Date", "time": "Time", "status": "Status"}
         self.icons = {} # To store CTkImage objects
@@ -893,26 +970,31 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
             logger.error("GUI", "_update_menubar_style", f"Error applying style to menubar: {e}")
 
     def _create_toolbar(self):
+        spacing_options = {"side": "left", "padx": 2, "pady": 5} # Or padx=4 if 5 is too much
+
         self.toolbar_frame = ctk.CTkFrame(self, corner_radius=0) # MODIFIED
         self.toolbar_frame.pack(side="top", fill="x", pady=(0,2))
 
         self.toolbar_connect_button = ctk.CTkButton(self.toolbar_frame, text="Connect", command=self.connect_device, width=100, image=self.icons.get("connect")) # MODIFIED
-        self.toolbar_connect_button.pack(side="left", padx=(5, 2), pady=5)
-
         self.toolbar_refresh_button = ctk.CTkButton(self.toolbar_frame, text="Refresh", command=self.refresh_file_list_gui, width=100, image=self.icons.get("refresh")) # MODIFIED
-        self.toolbar_refresh_button.pack(side="left", padx=2, pady=5)
-        
         self.toolbar_download_button = ctk.CTkButton(self.toolbar_frame, text="Download", command=self.download_selected_files_gui, width=100, image=self.icons.get("download")) # MODIFIED
-        self.toolbar_download_button.pack(side="left", padx=2, pady=5)
-
         self.toolbar_play_button = ctk.CTkButton(self.toolbar_frame, text="Play", command=self.play_selected_audio_gui, width=100, image=self.icons.get("play")) # MODIFIED
-        self.toolbar_play_button.pack(side="left", padx=2, pady=5)
-
         self.toolbar_delete_button = ctk.CTkButton(self.toolbar_frame, text="Delete", command=self.delete_selected_files_gui, width=100, image=self.icons.get("delete")) # MODIFIED
-        self.toolbar_delete_button.pack(side="left", padx=2, pady=5)
-        
+
+        # self.toolbar_connect_button.pack(side="left", padx=(5, 2), pady=5)
+        # self.toolbar_refresh_button.pack(side="left", padx=2, pady=5)
+        # self.toolbar_download_button.pack(side="left", padx=2, pady=5)
+        # self.toolbar_play_button.pack(side="left", padx=2, pady=5)
+        # self.toolbar_delete_button.pack(side="left", padx=2, pady=5)
+                
+        self.toolbar_connect_button.pack(**spacing_options)
+        self.toolbar_refresh_button.pack(**spacing_options)
+        self.toolbar_download_button.pack(**spacing_options)
+        self.toolbar_play_button.pack(**spacing_options)
+        self.toolbar_delete_button.pack(**spacing_options)
+
         self.toolbar_settings_button = ctk.CTkButton(self.toolbar_frame, text="Settings", command=self.open_settings_window, width=100, image=self.icons.get("settings")) # MODIFIED
-        self.toolbar_settings_button.pack(side="right", padx=2, pady=5)
+        self.toolbar_settings_button.pack(side="right", padx=5, pady=5)
 
     def _create_status_bar(self):
         self.status_bar_frame = ctk.CTkFrame(self, height=30, corner_radius=0) # MODIFIED
@@ -958,6 +1040,30 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
             logger.error("GUI", "_open_download_dir_in_explorer",
                         f"Failed to open directory '{self.download_directory}': {e}")
 
+    def _select_download_dir_from_header_button(self, event=None):
+        """Handles selecting the download directory via right-click on the header button."""
+        new_dir = self._prompt_for_directory(initial_dir=self.download_directory, parent_window_for_dialog=self)
+        
+        if new_dir and new_dir != self.download_directory:
+            self.download_directory = new_dir
+            self.config["download_directory"] = new_dir
+            save_config(self.config)
+            
+            if hasattr(self, 'download_dir_button_header') and self.download_dir_button_header.winfo_exists():
+                self.download_dir_button_header.configure(text=f"Dir: {os.path.basename(self.download_directory)}")
+            
+            logger.info("GUI", "_select_download_dir_from_header_button", f"Download directory changed to: {new_dir}")
+            self.update_all_status_info() # This will update the status bar and other relevant parts
+
+    def _prompt_for_directory(self, initial_dir, parent_window_for_dialog):
+        """Prompts the user to select a directory and returns the path."""
+        new_dir = filedialog.askdirectory(
+            initialdir=initial_dir,
+            title="Select Download Directory",
+            parent=parent_window_for_dialog
+        )
+        return new_dir
+    
     def update_status_bar(self, connection_status=None, progress_text=None):
         # Check if widget exists before configuring (important for CTk widgets during setup/teardown)
         if hasattr(self, 'status_connection_label') and self.status_connection_label.winfo_exists():
@@ -971,7 +1077,7 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         if self.dock.is_connected():
             conn_status_text = f"Status: Connected ({self.dock.model or 'HiDock'})"
             if self.dock.device_info and 'sn' in self.dock.device_info and self.dock.device_info['sn'] != "N/A":
-                 conn_status_text += f" SN: {self.dock.device_info['sn']}"
+                conn_status_text += f" SN: {self.dock.device_info['sn']}"
         elif not self.backend_initialized_successfully:
             conn_status_text = "Status: USB Backend FAILED!"
         
@@ -996,7 +1102,7 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         selected_items_count = len(self.file_tree.selection()) if hasattr(self, 'file_tree') and self.file_tree.winfo_exists() else 0
         size_selected_bytes = 0
         if selected_items_count > 0 and hasattr(self, 'file_tree') and self.file_tree.winfo_exists():
-             for item_iid in self.file_tree.selection():
+            for item_iid in self.file_tree.selection():
                 file_detail = next((f for f in self.displayed_files_details if f['name'] == item_iid), None)
                 if file_detail: size_selected_bytes += file_detail.get('length', 0)
         
@@ -1120,39 +1226,74 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         if tag_font_size < 9: tag_font_size = 9 # Minimum size
         tag_font_bold = (font_family, tag_font_size, "bold")
 
+        # Get current appearance mode
+        current_mode = ctk.get_appearance_mode()
+
         try:
-            bg_color = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
-            text_color = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
-            selected_color = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkButton"]["fg_color"])
-            heading_bg_color = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkButton"]["hover_color"])
+            # Colors for Treeview body
+            tree_body_bg_color = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
+            tree_body_text_color = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
+            tree_selected_bg_color = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkButton"]["fg_color"])
+            tree_selected_text_color = tree_body_text_color # Selected text often same as body text
+
+            # Colors for Treeview.Heading (DEFAULT state)
+            # Align with a subtle button color (less emphasis than main button fill)
+            default_heading_bg = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkFrame"]["top_fg_color"])
+            default_heading_fg = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkButton"]["text_color"]) # Default text color for headings
+
+            # Colors for Treeview.Heading (ACTIVE/HOVER state)
+            active_heading_bg = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkButton"]["hover_color"])
+            #     # Active heading text color should contrast with active_heading_bg. Often same as default_heading_fg.
+            active_heading_fg = default_heading_fg
+
         except KeyError as e:
-            logger.error("GUI", "_update_treeview_style", f"Theme color key missing: {e}. Treeview may not be styled correctly.")
-            # Fallback to some defaults if a key is missing to prevent crashes
-            current_mode = ctk.get_appearance_mode()
-            bg_color = "#2b2b2b" if current_mode == "Dark" else "#ebebeb"
-            text_color = "white" if current_mode == "Dark" else "black"
-            selected_color = "#325882" # A generic blue
-            heading_bg_color = "#3b3b3b" if current_mode == "Dark" else "#dbdbdb"
-            # Fonts are already defined above using CTkFont defaults, so they act as fallbacks for font properties.
+            logger.error("GUI", "_update_treeview_style", f"Theme color key missing: {e}. Using fallbacks.")
+            tree_body_bg_color = "#ebebeb" if current_mode == "Light" else "#2b2b2b"
+            tree_body_text_color = "black" if current_mode == "Light" else "white"
+            tree_selected_bg_color = "#325882" 
+            tree_selected_text_color = tree_body_text_color
 
-        style.theme_use('default') 
+            default_heading_bg = "#dbdbdb" if current_mode == "Light" else "#3b3b3b"
+            default_heading_fg = "black" if current_mode == "Light" else "white"
+            active_heading_bg = "#c8c8c8" if current_mode == "Light" else "#4f4f4f" # Slightly different for active
+            active_heading_fg = default_heading_fg
 
-        style.map("Treeview", background=[('selected', selected_color)], foreground=[('selected', text_color)])
-        style.configure("Treeview", background=bg_color, foreground=text_color, fieldbackground=bg_color, rowheight=25, font=tree_font)
-        style.configure("Treeview.Heading", background=heading_bg_color,
-                        foreground=text_color, relief="flat", font=heading_font)
-        style.map("Treeview.Heading", relief=[('active','groove'),('pressed','sunken')])
-        
-        # Update Treeview tag colors
-        self.file_tree.tag_configure('downloaded', foreground='blue')
-        self.file_tree.tag_configure('recording', foreground='red', font=tag_font_bold)
-        self.file_tree.tag_configure('size_mismatch', foreground='orange')
-        self.file_tree.tag_configure('downloaded_ok', foreground='green')
-        self.file_tree.tag_configure('downloading', foreground='dark orange')
-        self.file_tree.tag_configure('queued', foreground='gray50')
-        self.file_tree.tag_configure('cancelled', foreground='firebrick3')
-        self.file_tree.tag_configure('playing', foreground='purple')
-        logger.info("GUI", "_update_treeview_style", "Treeview style updated.")
+        # Explicitly use a theme that allows more customization, like "clam"
+        # This is crucial for Treeview.Heading styling to take effect on some platforms.
+        style.theme_use('clam') 
+        logger.debug("GUI", "_update_treeview_style", "Set ttk theme to 'clam'.")
+
+        # --- custom ttk.Scrollbar styling ---
+        try:
+            trough_color = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkScrollbar"]["fg_color"]) 
+            thumb_color = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkScrollbar"]["button_color"])
+            arrow_color = self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkScrollbar"]["button_hover_color"]) 
+
+            style.configure("Treeview.Scrollbar", troughcolor=trough_color, background=thumb_color, arrowcolor=arrow_color)
+            style.map("Treeview.Scrollbar",
+                    background=[('active', self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkScrollbar"]["button_hover_color"]))],
+                    arrowcolor=[('active', self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"]))]) 
+            logger.debug("GUI", "_update_treeview_style", "Attempted to style ttk.Scrollbar.")
+        except KeyError as e:
+            logger.warning("GUI", "_update_treeview_style", f"Theme key missing for ttk.Scrollbar styling: {e}")
+        except Exception as e:
+            logger.error("GUI", "_update_treeview_style", f"Error styling ttk.Scrollbar: {e}")
+
+        # Configure Treeview body
+        style.configure("Treeview", background=tree_body_bg_color, foreground=tree_body_text_color, fieldbackground=tree_body_bg_color, font=tree_font)
+        style.map("Treeview", 
+                  background=[('selected', tree_selected_bg_color)], 
+                  foreground=[('selected', tree_body_text_color)]) # REVERTED: Explicitly set selected foreground
+
+        # Configure Treeview.Heading (default and states)
+        style.configure("Treeview.Heading", 
+                        background=default_heading_bg, 
+                        foreground=default_heading_fg, 
+                        relief="flat", font=heading_font)
+        style.map("Treeview.Heading",
+                  background=[('active', active_heading_bg), ('pressed', tree_selected_bg_color)],
+                  foreground=[('active', active_heading_fg), ('pressed', tree_selected_text_color)],
+                  relief=[('active', 'groove'), ('pressed', 'sunken')])
 
     def apply_theme_and_color(self):
         mode = self.appearance_mode_var.get()
@@ -1172,6 +1313,7 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         # Defer Treeview style update to allow CTk to process its theme changes first.
         self.after(50, self._update_treeview_style)
         self.after(55, self._update_menubar_style) # Also update menubar style
+        self.after(60, self._update_default_progressbar_colors)
 
     def _apply_appearance_mode_theme_color(self, color_tuple_or_str):
         """ Gets the correct color from a (light, dark) tuple based on current appearance mode. """
@@ -1195,8 +1337,8 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         self.main_content_frame = main_content_frame # Store reference
         self.main_content_frame.grid_rowconfigure(0, weight=1) # files_frame, initially takes all space
         self.main_content_frame.grid_rowconfigure(1, weight=0) # log_frame, initially no space
-        main_content_frame.grid_columnconfigure(0, weight=1)
-        
+        self.main_content_frame.grid_columnconfigure(0, weight=1)
+
         files_frame = ctk.CTkFrame(self.main_content_frame) # Child of self.main_content_frame
         files_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=(0,5))
         files_frame.grid_columnconfigure(0, weight=1) # For files_header_frame and tree_frame
@@ -1207,32 +1349,68 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         files_header_frame = ctk.CTkFrame(files_frame, fg_color="transparent")
         files_header_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=(5,2))
 
-        self.files_label = ctk.CTkLabel(files_header_frame, text="📄 Available Files", font=ctk.CTkFont(weight="bold"))
-        self.files_label.pack(side="left", padx=(0, 15), pady=2)
+        # Uncomment if you want a label in the header
+        # This label is not needed as we have the download directory button
+        # self.files_label = ctk.CTkLabel(files_header_frame, text="📄 Available Files")
+        # self.files_label.pack(side="left", padx=(0, 15), pady=2)
 
+        # --- Status Labels in Header ---
         self.status_storage_label_header = ctk.CTkLabel(files_header_frame, text="Storage: ---", anchor="w")
         self.status_storage_label_header.pack(side="left", padx=10, pady=2)
 
+        # File counts label in header
+        # This label shows total files and selected files in the header
         self.status_file_counts_label_header = ctk.CTkLabel(files_header_frame, text="Files: 0 / 0", anchor="w")
         self.status_file_counts_label_header.pack(side="left", padx=10, pady=2)
 
+        # --- Pack order for right-aligned items in header: Dir button is furthest right ---
         self.download_dir_button_header = ctk.CTkButton(files_header_frame,
                                                  text=f"Dir: {os.path.basename(self.download_directory)}",
                                                  image=self.icons.get("folder"), compound="left",
                                                  anchor="center", width=130, height=24, # Adjusted size
                                                  command=self._open_download_dir_in_explorer)
+        self.download_dir_button_header.bind("<Button-3>", self._select_download_dir_from_header_button) 
         self.download_dir_button_header.pack(side="right", padx=(10,0), pady=2)
+
+        # Clear Selection Button (to the left of Dir button)
+        self.clear_selection_button_header = ctk.CTkButton(files_header_frame,
+                                                           text="-",
+                                                           width=30,
+                                                           height=24,
+                                                           command=self.clear_selection_action)
+        self.clear_selection_button_header.pack(side="right", padx=(2, 5), pady=2)
+
+        # Select All Button (to the left of Clear Selection button)
+        self.select_all_button_header = ctk.CTkButton(files_header_frame,
+                                                      text="*",
+                                                      width=30,
+                                                      height=24,
+                                                      command=self.select_all_files_action)
+        self.select_all_button_header.pack(side="right", padx=(2, 2), pady=2)
         
         # --- Treeview (using ttk.Treeview) ---
         from tkinter import ttk # Keep ttk for Treeview
-        tree_frame = ctk.CTkFrame(files_frame, fg_color="transparent") # MODIFIED
-        tree_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
-        tree_frame.grid_columnconfigure(0, weight=1)
-        tree_frame.grid_rowconfigure(0, weight=1)
+        # The ttk.Treeview widget is placed inside a ctk.CTkFrame
+        tree_frame = ctk.CTkFrame(files_frame, fg_color="transparent", border_width=0) # Use transparent background for consistency
+        tree_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5) # Use grid for layout
+        tree_frame.grid_columnconfigure(0, weight=1) # Treeview takes all horizontal space
+        tree_frame.grid_rowconfigure(0, weight=1) # Treeview takes all vertical space
+        # tree_frame.grid_columnconfigure(1, weight=0) # Ensure minspace for scrollbar
 
         columns = ("name", "size", "duration", "date", "time", "status")
         self.file_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
 
+        self.file_tree.tag_configure("downloaded", foreground="blue")
+        self.file_tree.tag_configure("recording", foreground="red", font=("Arial", 10, "bold"))
+        self.file_tree.tag_configure("size_mismatch", foreground="orange")
+        self.file_tree.tag_configure("downloaded_ok", foreground="green")
+        self.file_tree.tag_configure("downloading", foreground="dark orange")
+        self.file_tree.tag_configure("queued", foreground="gray50")
+        self.file_tree.tag_configure("cancelled", foreground="firebrick3")
+        self.file_tree.tag_configure("playing", foreground="purple")
+        logger.info("GUI", "create_widgets", "Treeview style updated.")
+
+        # Store original headings for later use
         if self.treeview_columns_display_order_str:
             loaded_column_order = self.treeview_columns_display_order_str.split(',')
             valid_loaded_order = [c for c in loaded_column_order if c in columns]
@@ -1245,7 +1423,7 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
             else:
                 self.file_tree["displaycolumns"] = columns
         else:
-             self.file_tree["displaycolumns"] = columns
+            self.file_tree["displaycolumns"] = columns
         
         for col, text in self.original_tree_headings.items():
             is_numeric = col in ["size", "duration"]
@@ -1255,7 +1433,7 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
             elif col in ["date", "time"]: self.file_tree.column(col, width=100, minwidth=80, anchor="center")
             else: self.file_tree.column(col, width=100, minwidth=80, anchor="w")
 
-        self.file_tree.grid(row=0, column=0, sticky="nsew")
+        self.file_tree.grid(row=0, column=0, sticky="nsew") # Fill available space in tree_frame
         
         # CTkScrollbar might not work directly with ttk.Treeview. Use ttk.Scrollbar.
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.file_tree.yview)
@@ -1264,7 +1442,6 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         self.file_tree.configure(yscrollcommand=scrollbar.set)
         
         # Tag configurations are applied after theme in apply_theme_and_color
-        
         self.file_tree.bind("<<TreeviewSelect>>", self.on_file_selection_change)
         self.file_tree.bind("<Double-1>", self._on_file_double_click)
         self.file_tree.bind("<Button-3>", self._on_file_right_click) # Button-3 for Tkinter/TTK context menu
@@ -1272,7 +1449,10 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         self.file_tree.bind("<Control-A>", lambda event: self.select_all_files_action()) # For uppercase A
         self.file_tree.bind("<Delete>", self._on_delete_key_press)
         self.file_tree.bind("<Return>", self._on_enter_key_press)
-        
+        self.file_tree.bind("<ButtonPress-1>", self._on_file_button1_press)
+        self.file_tree.bind("<B1-Motion>", self._on_file_b1_motion)
+        self.file_tree.bind("<ButtonRelease-1>", self._on_file_button1_release)
+
         # --- Optional Panes (Logs, Device Tools) ---
         # log_frame is now a direct child of main_content_frame
         self.log_frame = ctk.CTkFrame(self.main_content_frame)
@@ -1295,17 +1475,104 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         self.log_text_area = ctk.CTkTextbox(self.log_frame, height=100, state='disabled', wrap="word") # MODIFIED
         self.log_text_area.pack(fill="both", expand=True, padx=5, pady=(0,5))
         
-        # Tag colors for CTkTextbox
-        self.log_text_area.tag_config("ERROR", foreground="#FF6347") # Tomato Red
-        self.log_text_area.tag_config("WARNING", foreground="#FFA500") # Orange
-        self.log_text_area.tag_config("INFO", foreground=self._apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"])) # Default text color
-        self.log_text_area.tag_config("DEBUG", foreground="#1E90FF") # DodgerBlue
-        self.log_text_area.tag_config("CRITICAL", foreground="#DC143C") # Crimson (font styling per-tag is restricted)
+        self._update_log_text_area_tag_colors() # Apply initial log colors
 
+    def _on_file_button1_press(self, event):
+        item_iid = self.file_tree.identify_row(event.y)
+        self._is_button1_pressed_on_item = item_iid # Anchor for potential drag
+        self._last_dragged_over_iid = item_iid     # Initialize for drag logic
+        self._drag_action_is_deselect = False      # Default to select-drag
+
+        if not item_iid: # Clicked on empty space
+            self._is_button1_pressed_on_item = None # No valid anchor
+            logger.debug("GUI", "_on_file_button1_press", "Button 1 pressed on empty space.")
+            return # Let default Treeview behavior handle (deselect all)
+
+        current_selection = self.file_tree.selection()
+        is_currently_selected_before_toggle = item_iid in current_selection
+
+        # Determine drag action based on item's state *before* this click's toggle action
+        if is_currently_selected_before_toggle:
+            self._drag_action_is_deselect = True
+            logger.debug("GUI", "_on_file_button1_press", f"Drag will DESELECT. Anchor '{item_iid}' was selected.")
+        else:
+            # _drag_action_is_deselect remains False (default)
+            logger.debug("GUI", "_on_file_button1_press", f"Drag will SELECT. Anchor '{item_iid}' was not selected.")
+
+        # Check for modifier keys
+        ctrl_pressed = (event.state & 0x0004) != 0
+        shift_pressed = (event.state & 0x0001) != 0
+
+        if shift_pressed:
+            logger.debug("GUI", "_on_file_button1_press", f"Shift+Click on item: {item_iid}. Allowing default range selection.")
+            # For Shift+Click, allow default Treeview processing for range selection.
+            # Our _is_button1_pressed_on_item serves as anchor if a drag follows immediately.
+            return # Do NOT return "break"
+
+        # For simple click (no modifiers) or Ctrl+Click, toggle the specific item.
+        if is_currently_selected_before_toggle:
+            self.file_tree.selection_remove(item_iid)
+            logger.debug("GUI", "_on_file_button1_press", f"Toggled OFF item: {item_iid} (Modifier: {'Ctrl' if ctrl_pressed else 'None'})")
+        else:
+            self.file_tree.selection_add(item_iid)
+            logger.debug("GUI", "_on_file_button1_press", f"Toggled ON item: {item_iid} (Modifier: {'Ctrl' if ctrl_pressed else 'None'})")
+        
+        return "break" # Prevent default Treeview behavior that would deselect others on simple click.
+    
+    def _on_file_b1_motion(self, event):
+        if not hasattr(self, '_is_button1_pressed_on_item') or not self._is_button1_pressed_on_item:
+            return # No drag anchor established by _on_file_button1_press
+
+        item_iid_under_cursor = self.file_tree.identify_row(event.y)
+        
+        # Process only if actually moved to a new distinct item to avoid excessive processing
+        if item_iid_under_cursor != self._last_dragged_over_iid: # Can be None if dragged to empty space
+            self._last_dragged_over_iid = item_iid_under_cursor
+            
+            if self._is_button1_pressed_on_item: # If drag started on a valid item
+                all_children = self.file_tree.get_children('')
+                try:
+                    anchor_index = all_children.index(self._is_button1_pressed_on_item)
+                    
+                    # If dragging off items, we might want to select up to the edge.
+                    # For now, if not over a valid item, use the anchor itself as the current end.
+                    # This means dragging into empty space doesn't change selection beyond the last item.
+                    current_motion_index = -1
+                    if item_iid_under_cursor and item_iid_under_cursor in all_children:
+                        current_motion_index = all_children.index(item_iid_under_cursor)
+                    else: # Dragged to empty space or invalid item
+
+                        if not item_iid_under_cursor: # Strict: if not over an item, no range change by motion.
+                            return
+                        # Fallthrough if item_iid_under_cursor was initially valid but not in all_children (should not happen)
+
+                    start_range_idx = min(anchor_index, current_motion_index)
+                    end_range_idx = max(anchor_index, current_motion_index)
+                    
+                    items_in_current_drag_sweep = all_children[start_range_idx : end_range_idx + 1]
+                    
+                    if self._drag_action_is_deselect:
+                        logger.debug("GUI", "_on_file_b1_motion", f"Drag-DESELECTING items in sweep: {items_in_current_drag_sweep}")
+                        for item_to_process in items_in_current_drag_sweep:
+                            self.file_tree.selection_remove(item_to_process)
+                    else: # Default drag action is to select (add to selection)
+                        logger.debug("GUI", "_on_file_b1_motion", f"Drag-SELECTING items in sweep: {items_in_current_drag_sweep}")
+                        for item_to_process in items_in_current_drag_sweep:
+                            self.file_tree.selection_add(item_to_process)
+                except ValueError:
+                    logger.warning("GUI", "_on_file_b1_motion", "Anchor or current item not found in tree children during drag.")
+                    pass # Item not found in children list
+    
+    def _on_file_button1_release(self, event):
+        logger.debug("GUI", "_on_file_button1_release", f"Button 1 released. Final selection: {self.file_tree.selection()}")
+        self._is_button1_pressed_on_item = None
+        self._last_dragged_over_iid = None
+        self._drag_action_is_deselect = False # Reset drag action mode
+        
+        # The _update_menu_states() and the backend check should be at the end of create_widgets(),
+        # but calling _update_menu_states() after a selection change via drag might be useful here.
         self._update_menu_states()
-        if not self.backend_initialized_successfully and hasattr(self, 'toolbar_connect_button') and self.toolbar_connect_button.winfo_exists():
-            self.toolbar_connect_button.configure(state="disabled")
-
+        
     def _update_optional_panes_visibility(self):
         if not hasattr(self, 'main_content_frame'):
             logger.error("GUI", "_update_optional_panes_visibility", "main_content_frame not found.")
@@ -1333,11 +1600,36 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         self.logs_visible = self.logs_visible_var.get()
         self._update_optional_panes_visibility()
 
+    def _update_log_text_area_tag_colors(self):
+        if not (hasattr(self, 'log_text_area') and self.log_text_area.winfo_exists()):
+            return
+        
+        log_levels_to_configure = ["ERROR", "WARNING", "INFO", "DEBUG", "CRITICAL"]
+
+        for level_name_upper in log_levels_to_configure:
+            level_name_lower = level_name_upper.lower()
+            light_var = getattr(self, f"log_color_{level_name_lower}_light_var", None)
+            dark_var = getattr(self, f"log_color_{level_name_lower}_dark_var", None)
+
+            if light_var and dark_var:
+                color_tuple = (light_var.get(), dark_var.get())
+                try:
+                    self.log_text_area.tag_config(level_name_upper, foreground=self._apply_appearance_mode_theme_color(color_tuple))
+                except Exception as e:
+                    logger.error("GUI", "_update_log_text_area_tag_colors", f"Error applying color for {level_name_upper} with {color_tuple}: {e}")
+            else:
+                logger.warning("GUI", "_update_log_text_area_tag_colors", f"Color StringVars for log level {level_name_upper} not found.")
+        logger.info("GUI", "_update_log_text_area_tag_colors", "Log text area tag colors updated.")
+
     def open_settings_window(self):
         settings_win = ctk.CTkToplevel(self) # MODIFIED
         settings_win.title("Application Settings")
-        settings_win.transient(self) 
-        settings_win.grab_set() 
+        settings_win.transient(self)
+        settings_win.attributes("-alpha", 0) # Start fully transparent
+        settings_win.grab_set()
+
+        # Flag to prevent button state updates during initial population
+        self._settings_dialog_initializing = True
 
         main_content_frame = ctk.CTkFrame(settings_win, fg_color="transparent") # MODIFIED
         main_content_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -1356,8 +1648,14 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
             "quit_without_prompt_if_connected": self.quit_without_prompt_var.get(),
             "appearance_mode": self.appearance_mode_var.get(), # MODIFIED
             "color_theme": self.color_theme_var.get(),       # MODIFIED
-            "suppress_console_output": self.suppress_console_output_var.get()
+            "suppress_console_output": self.suppress_console_output_var.get(),
+            "suppress_gui_log_output": self.suppress_gui_log_output_var.get() # ADDED
         }
+        # Add initial log color vars
+        for level_key in Logger.LEVELS.keys():
+            level_lower = level_key.lower()
+            initial_config_vars[f"log_color_{level_lower}_light"] = getattr(self, f"log_color_{level_lower}_light_var").get()
+            initial_config_vars[f"log_color_{level_lower}_dark"] = getattr(self, f"log_color_{level_lower}_dark_var").get()
         
         conceptual_device_setting_keys = {
             "autoRecord": "auto_record", 
@@ -1372,7 +1670,7 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
             else: 
                 logger.error("Settings", "open_settings_window", f"Attribute {tk_var_attribute_name} for {conceptual_key} not found.")
         
-        initial_download_directory = self.download_directory 
+        _initial_download_directory_container = [self.download_directory] # MODIFIED: Use a list container
         settings_changed_tracker = [False] 
         current_dialog_download_dir = [self.download_directory] 
 
@@ -1380,27 +1678,106 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         # These frames and buttons are defined here. Their packing into the layout happens later.
         buttons_frame = ctk.CTkFrame(main_content_frame, fg_color="transparent") 
         action_buttons_subframe = ctk.CTkFrame(buttons_frame, fg_color="transparent")
+        
+        # Define colors for buttons
+        COLOR_OK_BLUE = "#3B8ED0"       # A standard CTk blue
+        COLOR_CANCEL_RED = "#D32F2F"    # A material design red
+        COLOR_APPLY_GREY = "#757575"    # A medium dark grey
+        COLOR_CLOSE_GREY = "#757575"    # Same dark grey for Close
 
-        ok_button = ctk.CTkButton(action_buttons_subframe, text="OK") # MODIFIED
-        apply_button = ctk.CTkButton(action_buttons_subframe, text="Apply", state="disabled") # MODIFIED
-        cancel_close_button = ctk.CTkButton(action_buttons_subframe, text="Close") # MODIFIED
+        ok_button = ctk.CTkButton(action_buttons_subframe, text="OK", state="disabled", fg_color=COLOR_OK_BLUE) # Created disabled
+        apply_button = ctk.CTkButton(action_buttons_subframe, text="Apply", fg_color=COLOR_APPLY_GREY, state="disabled") # Created disabled
+        cancel_close_button = ctk.CTkButton(action_buttons_subframe, text="Close", fg_color=COLOR_CLOSE_GREY)
 
-        # Initial state for buttons if not connected. self.dock should be available here.
-        if not self.dock.is_connected(): 
-            apply_button.configure(state="disabled")
-            cancel_close_button.configure(text="Close")
+        # Initial packing: Only Close button. OK and Apply are created but not packed.
+        cancel_close_button.pack(side="left", padx=(0,0)) # Will be the only button initially
+
+        # Helper to finalize initialization and set button states
+        def _finalize_initialization_and_button_states():
+            # This outer function is what's called by the hook or directly.
+            # It schedules the core finalization logic to run after a brief delay,
+            # allowing any pending var.set() traces (which are also often after(0)) to fire
+            # while _settings_dialog_initializing is still True.
+
+            def _core_final_setup():
+                if not settings_win.winfo_exists():
+                    logger.warning("SettingsDialog", "_core_final_setup", "Settings window closed before core final setup.")
+                    return
+
+                # Now, set initializing to False, as all programmatic changes should be done.
+                self._settings_dialog_initializing = False
+                settings_changed_tracker[0] = False # Reset tracker: UI is now "clean"
+                logger.debug("SettingsDialog", "_core_final_setup", "Core final setup: Dialog initialization complete. Change tracking active.")
+
+                # Ensure initial button state is correctly "Close" only
+                # And that OK/Apply are properly configured (disabled) even if not visible
+                if ok_button.winfo_exists():
+                    if ok_button.winfo_ismapped(): ok_button.pack_forget()
+                    ok_button.configure(state="disabled") 
+                if apply_button.winfo_exists():
+                    if apply_button.winfo_ismapped(): apply_button.pack_forget()
+                    apply_button.configure(state="disabled")
+                
+                if cancel_close_button.winfo_exists():
+                    cancel_close_button.configure(text="Close", fg_color=COLOR_CLOSE_GREY, state="normal")
+                    if not cancel_close_button.winfo_ismapped():
+                        # If cancel_close_button was somehow forgotten, re-pack it.
+                        # This also ensures it's the only one if ok/apply were just forgotten.
+                        cancel_close_button.pack(side="left", padx=(0,0))
+                
+                settings_win.update_idletasks() 
+                settings_win.attributes("-alpha", 1.0) 
+                settings_win.after(100, lambda: settings_win.focus_set() if settings_win.winfo_exists() else None)
+
+            if settings_win.winfo_exists():
+                # Use a small delay (e.g., 50ms). after(0) might still have race conditions
+                # with other after(0) tasks like var.set(). A slightly longer delay gives
+                # a higher chance for those to complete while _settings_dialog_initializing is True.
+                settings_win.after(50, _core_final_setup) 
+            else:
+                logger.warning("SettingsDialog", "_finalize_init_outer", "Settings window closed before scheduling core final setup.")
 
         def _update_button_states_on_change(*args): 
-            if settings_win.winfo_exists():
-                if not settings_changed_tracker[0]: 
-                    settings_changed_tracker[0] = True
-                    # apply_button and cancel_close_button are now defined in this scope
-                    if apply_button.winfo_exists(): apply_button.configure(state="normal")
-                    if cancel_close_button.winfo_exists(): cancel_close_button.configure(text="Cancel")
+            if not settings_win.winfo_exists(): return
+
+            if self._settings_dialog_initializing:
+                logger.debug("SettingsDialog", "_update_button_states_on_change", "Dialog initializing, skipping button update.")
+                return
+
+            if not settings_changed_tracker[0]:
+                settings_changed_tracker[0] = True
+                logger.debug("SettingsDialog", "_update_button_states_on_change", "First change post-init, transitioning buttons to OK/Apply/Cancel.")
+
+                if ok_button.winfo_exists() and ok_button.winfo_ismapped(): ok_button.pack_forget()
+                if apply_button.winfo_exists() and apply_button.winfo_ismapped(): apply_button.pack_forget()
+                if cancel_close_button.winfo_exists() and cancel_close_button.winfo_ismapped(): cancel_close_button.pack_forget()
+
+                ok_button.pack(side="left", padx=(0,5))
+                apply_button.pack(side="left", padx=5)
+                cancel_close_button.pack(side="left", padx=(5,0))
+
+                ok_button.configure(state="normal")
+                apply_button.configure(state="normal" if self.dock.is_connected() else "disabled")
+                cancel_close_button.configure(text="Cancel", fg_color=COLOR_CANCEL_RED)
+
+            elif apply_button.winfo_exists() and apply_button.winfo_ismapped(): # If already changed, update Apply state
+                apply_button.configure(state="normal" if self.dock.is_connected() else "disabled")
         # --- End of early definitions ---
 
+        # --- Define helper functions for settings dialog ---
+        def _check_if_settings_actually_changed_settings():
+            for key, initial_val in initial_config_vars.items():
+                current_var = None
+                if hasattr(self, key) and isinstance(getattr(self, key), ctk.Variable): # ctk.BooleanVar etc.
+                    current_var = getattr(self, key)
+                elif hasattr(self, f"{key}_var") and isinstance(getattr(self, f"{key}_var"), ctk.Variable):
+                    current_var = getattr(self, f"{key}_var")
+                
+                if current_var and current_var.get() != initial_val: return True
 
-
+            # MODIFIED: Compare with container's content
+            if current_dialog_download_dir[0] != _initial_download_directory_container[0]: return True
+            return False
 
         tabview = ctk.CTkTabview(main_content_frame) # MODIFIED
         tabview.pack(expand=True, fill="both", pady=(0, 10))
@@ -1409,6 +1786,7 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         tab_connection = tabview.add(" Connection ")
         tab_operation = tabview.add(" Operation ")
         tab_device_specific = tabview.add(" Device Specific ")
+        tab_logging = tabview.add(" Logging ") # MODIFIED: Renamed tab
         
         # --- Populate Tab 1: General ---
         gen_scroll_frame = ctk.CTkScrollableFrame(tab_general, fg_color="transparent")
@@ -1426,17 +1804,6 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
                                              values=["blue", "dark-blue", "green"], state="readonly") # MODIFIED (add custom theme paths here if any)
         color_theme_combo.pack(fill="x", pady=(2,10), padx=10)
 
-
-        log_settings_frame = ctk.CTkFrame(gen_scroll_frame) # MODIFIED
-        log_settings_frame.pack(fill="x", pady=5, anchor="n")
-        ctk.CTkLabel(log_settings_frame, text="Logging:", font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(5,2), padx=5)
-        ctk.CTkLabel(log_settings_frame, text="Logger Processing Level:").pack(anchor="w", pady=(5,0), padx=10)
-        log_level_combo = ctk.CTkComboBox(log_settings_frame, variable=self.logger_processing_level_var, 
-                                          values=list(Logger.LEVELS.keys()), state="readonly") # MODIFIED
-        log_level_combo.pack(fill="x", pady=2, padx=10)
-        suppress_console_check = ctk.CTkCheckBox(log_settings_frame, text="Suppress console output (logs still go to GUI)", 
-                                                 variable=self.suppress_console_output_var) # MODIFIED
-        suppress_console_check.pack(anchor="w", pady=(5,10), padx=10)
         
         quit_prompt_frame = ctk.CTkFrame(gen_scroll_frame) # MODIFIED
         quit_prompt_frame.pack(fill="x", pady=5, anchor="n")
@@ -1538,11 +1905,8 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
 
         if self.dock.is_connected():
             def _after_device_settings_loaded_hook_settings():
-                if not _check_if_settings_actually_changed_settings(): 
-                    settings_changed_tracker[0] = False
-                    if apply_button.winfo_exists(): apply_button.configure(state="disabled")
-                    if cancel_close_button.winfo_exists(): cancel_close_button.configure(text="Close")
-            threading.Thread(target=self._load_device_settings_for_dialog, args=(settings_win, _after_device_settings_loaded_hook_settings), daemon=True).start()
+                _finalize_initialization_and_button_states()
+            threading.Thread(target=self._load_device_settings_for_dialog, args=(settings_win, _after_device_settings_loaded_hook_settings), daemon=True).start() # Pass the new hook
         else:
             settings_changed_tracker[0] = False
             # apply_button and cancel_close_button defined later, state set there.
@@ -1550,20 +1914,77 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         vars_to_trace = [self.autoconnect_var, self.logger_processing_level_var, self.selected_vid_var, self.selected_pid_var,
                          self.target_interface_var, self.recording_check_interval_var, self.default_command_timeout_ms_var,
                          self.file_stream_timeout_s_var, self.auto_refresh_files_var, self.auto_refresh_interval_s_var,
-                         self.quit_without_prompt_var, self.appearance_mode_var, self.color_theme_var, self.suppress_console_output_var, # MODIFIED
-                         self.device_setting_auto_record_var, self.device_setting_auto_play_var,
-                         self.device_setting_bluetooth_tone_var, self.device_setting_notification_sound_var]
-        
+                         self.quit_without_prompt_var, self.appearance_mode_var, self.color_theme_var, 
+                         self.suppress_console_output_var, self.suppress_gui_log_output_var, # MODIFIED (added new var)
+                         self.device_setting_auto_record_var, self.device_setting_auto_play_var, self.device_setting_bluetooth_tone_var, self.device_setting_notification_sound_var]
+        for level_key_trace in Logger.LEVELS.keys():
+            level_lower_trace = level_key_trace.lower()
+            vars_to_trace.append(getattr(self, f"log_color_{level_lower_trace}_light_var"))
+            vars_to_trace.append(getattr(self, f"log_color_{level_lower_trace}_dark_var"))
+
+        # --- Populate Tab 5: Logging (formerly Log Colors) ---
+        logging_tab_scroll_frame = ctk.CTkScrollableFrame(tab_logging, fg_color="transparent") # MODIFIED: Parent is tab_logging
+        logging_tab_scroll_frame.pack(fill="both", expand=True)
+
+        # Moved Log Settings Frame (originally from General tab)
+        log_settings_frame = ctk.CTkFrame(logging_tab_scroll_frame) # MODIFIED: Parent is logging_tab_scroll_frame
+        log_settings_frame.pack(fill="x", pady=5, anchor="n")
+        ctk.CTkLabel(log_settings_frame, text="General Logging Settings:", font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(5,2), padx=5) # MODIFIED: Label text
+        ctk.CTkLabel(log_settings_frame, text="Logger Processing Level:").pack(anchor="w", pady=(5,0), padx=10)
+        log_level_combo = ctk.CTkComboBox(log_settings_frame, variable=self.logger_processing_level_var, 
+                                          values=list(Logger.LEVELS.keys()), state="readonly")
+        log_level_combo.pack(fill="x", pady=2, padx=10)
+        suppress_console_check = ctk.CTkCheckBox(log_settings_frame, text="Suppress console output (logs still go to GUI)", 
+                                                 variable=self.suppress_console_output_var)
+        suppress_console_check.pack(anchor="w", pady=(5,0), padx=10)
+        suppress_gui_log_check = ctk.CTkCheckBox(log_settings_frame, text="Suppress GUI log output (logs only to console/stderr)",
+                                                 variable=self.suppress_gui_log_output_var)
+        suppress_gui_log_check.pack(anchor="w", pady=(0,10), padx=10)
+
+        # Log Color Settings Group
+        log_color_settings_group_frame = ctk.CTkFrame(logging_tab_scroll_frame) # MODIFIED: Parent is logging_tab_scroll_frame
+        log_color_settings_group_frame.pack(fill="x", pady=5, anchor="n", padx=0) # Use padx=0 if individual items have padx
+
+        ctk.CTkLabel(log_color_settings_group_frame, text="Log Level Colors (Hex Codes, e.g., #RRGGBB):", font=ctk.CTkFont(weight="bold")).pack(anchor="w", pady=(5,10), padx=5)
+
+        for level_name_upper in ["ERROR", "WARNING", "INFO", "DEBUG", "CRITICAL"]:
+            level_name_lower = level_name_upper.lower()
+            level_frame = ctk.CTkFrame(log_color_settings_group_frame) # MODIFIED: Parent is log_color_settings_group_frame
+            level_frame.pack(fill="x", pady=3, padx=5)
+            
+            ctk.CTkLabel(level_frame, text=f"{level_name_upper}:", width=80, anchor="w").pack(side="left", padx=(0,10))
+            
+            ctk.CTkLabel(level_frame, text="Light:", width=40).pack(side="left", padx=(0,2))
+            light_entry = ctk.CTkEntry(level_frame, textvariable=getattr(self, f"log_color_{level_name_lower}_light_var"), width=90)
+            light_entry.pack(side="left", padx=(0,2)) # Added small padx
+            
+            light_color_var_ref = getattr(self, f"log_color_{level_name_lower}_light_var")
+            light_preview_frame = ctk.CTkFrame(level_frame, width=20, height=20, corner_radius=3, border_width=1)
+            light_preview_frame.pack(side="left", padx=(0, 10)) # Adjusted padx
+            light_color_var_ref.trace_add("write", lambda *args, f=light_preview_frame, v=light_color_var_ref: self._update_color_preview_widget(f, v))
+            self._update_color_preview_widget(light_preview_frame, light_color_var_ref) # Initial update
+            
+            ctk.CTkLabel(level_frame, text="Dark:", width=40).pack(side="left", padx=(0,2))
+            dark_entry = ctk.CTkEntry(level_frame, textvariable=getattr(self, f"log_color_{level_name_lower}_dark_var"), width=90)
+            dark_entry.pack(side="left", padx=(0,2)) # Added small padx
+
+            dark_color_var_ref = getattr(self, f"log_color_{level_name_lower}_dark_var")
+            dark_preview_frame = ctk.CTkFrame(level_frame, width=20, height=20, corner_radius=3, border_width=1)
+            dark_preview_frame.pack(side="left", padx=(3, 5))
+            dark_color_var_ref.trace_add("write", lambda *args, f=dark_preview_frame, v=dark_color_var_ref: self._update_color_preview_widget(f, v))
+            self._update_color_preview_widget(dark_preview_frame, dark_color_var_ref) # Initial update
+           
         # --- Layout for Buttons Frame (at the end of main_content_frame) ---
         buttons_frame.pack(fill="x", side="bottom", pady=(10,0), padx=10)
         action_buttons_subframe.pack(side="right")
-
-        # Button variables (ok_button, apply_button, cancel_close_button) are already defined.
-
+        
+        # Add a note about restarting for some settings if needed
+        ctk.CTkLabel(main_content_frame, text="Note: Appearance/Theme changes apply immediately. Other settings update on Apply/OK.",
+                      font=ctk.CTkFont(size=10, slant="italic")).pack(side="bottom", fill="x", pady=(5,0), padx=10)
+        
         for var_to_trace in vars_to_trace:
             var_to_trace.trace_add('write', _update_button_states_on_change)
-
-
+        # Bind
         def on_device_selected(change_tracker_ref, apply_btn_ref, cancel_btn_ref, event=None): # event can be choice string for CTkComboBox
             if not self.settings_device_combobox or not self.settings_device_combobox.winfo_exists(): return
             selection = self.settings_device_combobox.get()
@@ -1576,66 +1997,53 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
                 logger.debug("Settings", "on_device_selected", f"Selected device: VID={hex(vid)}, PID={hex(pid)}")
                 # If .set() didn't change value, trace isn't fired, so manually call
                 if self.selected_vid_var.get() == vid and self.selected_pid_var.get() == pid:
-                     _update_button_states_on_change()
+                    _update_button_states_on_change()
             else:
                 logger.warning("Settings", "on_device_selected", f"Could not find details for: '{selection}'")
 
-        def _check_if_settings_actually_changed_settings():
-            for key, initial_val in initial_config_vars.items():
-                current_var = None
-                if hasattr(self, key) and isinstance(getattr(self, key), ctk.Variable): # ctk.BooleanVar etc.
-                    current_var = getattr(self, key)
-                elif hasattr(self, f"{key}_var") and isinstance(getattr(self, f"{key}_var"), ctk.Variable):
-                     current_var = getattr(self, f"{key}_var")
-                
-                if current_var and current_var.get() != initial_val: return True
-
-            if current_dialog_download_dir[0] != initial_download_directory: return True
-            return False
-
         def _perform_apply_settings_logic(update_dialog_baseline=False):
-            nonlocal initial_download_directory 
-            for key in initial_config_vars: 
-                var_attr_name = key 
-                # Check if the key itself is the name of a CTk Variable attribute
-                if hasattr(self, key) and isinstance(getattr(self, key), ctk.Variable):
-                    pass # var_attr_name is already correct
-                # Else, assume it's a base name and append _var
-                elif hasattr(self, f"{key}_var") and isinstance(getattr(self, f"{key}_var"), ctk.Variable):
-                    var_attr_name = f"{key}_var" 
+            # nonlocal initial_download_directory # MODIFIED: No longer needed due to container
+            for config_key in initial_config_vars: # config_key is the actual key for self.config
+                ctk_var_to_get_from = None
+                if config_key == "appearance_mode":
+                    ctk_var_to_get_from = self.appearance_mode_var
+                elif config_key == "color_theme":
+                    ctk_var_to_get_from = self.color_theme_var
+                elif config_key == "quit_without_prompt_if_connected":
+                    ctk_var_to_get_from = self.quit_without_prompt_var
+                # For device settings, the key in initial_config_vars is the var attribute name
+                # e.g., "device_setting_auto_record_var"
+                elif config_key.startswith("device_setting_") and hasattr(self, config_key) and isinstance(getattr(self, config_key), ctk.Variable):
+                    ctk_var_to_get_from = getattr(self, config_key)
+                # For log color vars, key is "log_color_level_mode", var is "log_color_level_mode_var"
+                # The key in initial_config_vars is like "log_color_error_light"
+                # The ctk.Variable is like self.log_color_error_light_var
+                elif config_key.startswith("log_color_") and hasattr(self, f"{config_key}_var") and isinstance(getattr(self, f"{config_key}_var"), ctk.Variable):
+                    ctk_var_to_get_from = getattr(self, f"{config_key}_var")
+                # For general settings like "autoconnect" (config_key) -> self.autoconnect_var
+                elif hasattr(self, f"{config_key}_var"): 
+                    ctk_var_to_get_from = getattr(self, f"{config_key}_var")
                 
-                if hasattr(self, var_attr_name) and isinstance(getattr(self, var_attr_name), ctk.Variable):
-                    self.config[key] = getattr(self, var_attr_name).get() 
-                # else: logger.warning or error if var not found for config key
+                if ctk_var_to_get_from is not None and isinstance(ctk_var_to_get_from, ctk.Variable):
+                    self.config[config_key] = ctk_var_to_get_from.get()
+                # else:
+                #    logger.warning("GUI", "_perform_apply_settings_logic", f"Config key '{config_key}' from initial_config_vars not mapped to a ctk.Variable for self.config update.")
+            
+            # Save log colors
+            if "log_colors" not in self.config: self.config["log_colors"] = {}
+            for level_key_save in Logger.LEVELS.keys():
+                level_lower_save = level_key_save.lower()
+                light_var_name = f"log_color_{level_lower_save}_light_var"
+                dark_var_name = f"log_color_{level_lower_save}_dark_var"
+                if hasattr(self, light_var_name) and hasattr(self, dark_var_name):
+                    self.config["log_colors"][level_key_save] = [
+                        getattr(self, light_var_name).get(), 
+                        getattr(self, dark_var_name).get()
+                    ]
 
             self.download_directory = current_dialog_download_dir[0] 
             self.config["download_directory"] = self.download_directory
-
-            # --- Theme Change Section: Temporarily unbind keys ---
-            original_return_binding = None
-            original_escape_binding = None
-            if settings_win.winfo_exists():
-                original_return_binding = settings_win.bind('<Return>')
-                original_escape_binding = settings_win.bind('<Escape>')
-                settings_win.unbind('<Return>')
-                settings_win.unbind('<Escape>')
-                logger.debug("GUI", "_perform_apply_settings_logic", "Temporarily unbound Return/Escape for theme change.")
-
-            try:
-                self.apply_theme_and_color() # This applies CTk theme changes and schedules Treeview update
-            finally:
-                # Schedule re-binding to occur after CTk's internal processing 
-                # (including its own .after calls from apply_theme_and_color) has had a chance to run.
-                def _restore_key_bindings_after_theme_change():
-                    if settings_win.winfo_exists():
-                        settings_win.bind('<Return>', original_return_binding if original_return_binding else (lambda event: ok_button.invoke() if ok_button.winfo_exists() else None))
-                        settings_win.bind('<Escape>', original_escape_binding if original_escape_binding else (lambda event: cancel_close_button.invoke() if cancel_close_button.winfo_exists() else None))
-                        logger.debug("GUI", "_perform_apply_settings_logic", "Restored Return/Escape bindings post-theme change.")
-                    else:
-                        logger.warning("GUI", "_perform_apply_settings_logic", "Settings window closed before Return/Escape bindings could be restored.")
-                
-                if settings_win.winfo_exists():
-                    settings_win.after(150, _restore_key_bindings_after_theme_change) # Delay to allow CTk's own after() calls to process
+            self.apply_theme_and_color() # Apply theme changes
 
             if self.dock.is_connected() and self._fetched_device_settings_for_dialog:
                 changed_device_settings = {}
@@ -1644,14 +2052,14 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
                     fetched_val = self._fetched_device_settings_for_dialog.get(conceptual_key)
                     if tk_var_attr and tk_var_attr.get() != fetched_val: 
                         if fetched_val is not None or tk_var_attr.get() is not None: # Ensure actual change, not None vs None
-                             changed_device_settings[conceptual_key] = tk_var_attr.get()
+                            changed_device_settings[conceptual_key] = tk_var_attr.get()
                 if changed_device_settings:
                     threading.Thread(target=self._apply_device_settings_thread, args=(changed_device_settings,), daemon=True).start()
             
             save_config(self.config)
             logger.set_level(self.logger_processing_level_var.get())
-            logger.update_config({"suppress_console_output": self.suppress_console_output_var.get()})
-            # self.apply_theme_and_color() is now called within the try/finally block above
+            logger.update_config({"suppress_console_output": self.suppress_console_output_var.get(), "suppress_gui_log_output": self.suppress_gui_log_output_var.get()})
+            self._update_log_text_area_tag_colors() # Apply new log colors to the GUI
             self.update_all_status_info() # This will update the download_dir display and other status elements
 
             if self.dock.is_connected(): 
@@ -1661,39 +2069,62 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
 
             if update_dialog_baseline:
                 for key in initial_config_vars:
-                    var_attr_name = key
-                    if hasattr(self, key) and isinstance(getattr(self, key), ctk.Variable):
-                        pass
-                    elif hasattr(self, f"{key}_var") and isinstance(getattr(self, f"{key}_var"), ctk.Variable):
-                        var_attr_name = f"{key}_var"
-                    if hasattr(self, var_attr_name) and isinstance(getattr(self, var_attr_name), ctk.Variable): initial_config_vars[key] = getattr(self, var_attr_name).get()
-                initial_download_directory = current_dialog_download_dir[0]
+                    ctk_var_for_baseline = None
+                    if key == "appearance_mode": ctk_var_for_baseline = self.appearance_mode_var
+                    elif key == "color_theme": ctk_var_for_baseline = self.color_theme_var
+                    elif key == "quit_without_prompt_if_connected": ctk_var_for_baseline = self.quit_without_prompt_var
+                    elif key.startswith("device_setting_") and hasattr(self, key) and isinstance(getattr(self, key), ctk.Variable):
+                        ctk_var_for_baseline = getattr(self, key)
+                    elif key.startswith("log_color_") and hasattr(self, f"{key}_var") and isinstance(getattr(self, f"{key}_var"), ctk.Variable):
+                        ctk_var_for_baseline = getattr(self, f"{key}_var")
+                    elif hasattr(self, f"{key}_var"):
+                        ctk_var_for_baseline = getattr(self, f"{key}_var")
+                    
+                    if ctk_var_for_baseline:
+                        initial_config_vars[key] = ctk_var_for_baseline.get()
+                
+                # Update baseline for log colors (already handled by the loop above if keys are in initial_config_vars)
+                # The initial_config_vars keys for log colors are like "log_color_error_light",
+                # and the corresponding ctk.Variables are "log_color_error_light_var".
+                # The loop above with `elif config_key.startswith("log_color_") and hasattr(self, f"{config_key}_var")`
+                # should correctly get their values for the baseline.
+
+                _initial_download_directory_container[0] = current_dialog_download_dir[0] # MODIFIED: Update container
                 if self._fetched_device_settings_for_dialog:
                     for conceptual_key, snake_case_part in conceptual_device_setting_keys.items():
-                         # Ensure fetched_dialog is updated with current var values before reset
-                         var_to_get_from = getattr(self, f"device_setting_{snake_case_part}_var")
-                         if var_to_get_from: # Check if var exists
+                        # Ensure fetched_dialog is updated with current var values before reset
+                        var_to_get_from = getattr(self, f"device_setting_{snake_case_part}_var")
+                        if var_to_get_from: # Check if var exists
                             self._fetched_device_settings_for_dialog[conceptual_key] = var_to_get_from.get()
 
 
         def ok_action():
             if settings_changed_tracker[0]: _perform_apply_settings_logic(update_dialog_baseline=False)
+            # Key unbinding/rebinding for theme changes is handled by _perform_apply_settings_logic.
             settings_win.destroy()
+
         def apply_action_ui_handler():
             if settings_changed_tracker[0]:
                 # This part applies the theme and updates the internal config model and device settings
                 _perform_apply_settings_logic(update_dialog_baseline=True) 
+                # Key unbinding/rebinding for theme changes is handled by _perform_apply_settings_logic.
 
-                # Defer subsequent UI updates to the settings dialog itself.
                 # This allows CTk theme changes to settle before we modify dialog widgets or focus.
                 def _update_dialog_ui_after_apply():
                     if settings_win.winfo_exists(): # Ensure window wasn't closed by an unexpected side effect
                         logger.debug("GUI", "_update_dialog_ui_after_apply", "Attempting to restore settings dialog state post-theme-apply.")
                         settings_changed_tracker[0] = False # Reset tracker as changes are now baseline
-                        if apply_button.winfo_exists(): 
-                            apply_button.configure(state="disabled")
+                        
+                        if ok_button.winfo_exists():
+                            ok_button.configure(state="disabled") # OK is disabled
+                            ok_button.pack_forget() # Hide OK button
+
+                        if apply_button.winfo_exists() and apply_button.winfo_ismapped(): 
+                            apply_button.configure(state="disabled") # Disable it
+                            apply_button.pack_forget() # Hide Apply button
+
                         if cancel_close_button.winfo_exists(): 
-                            cancel_close_button.configure(text="Close")
+                            cancel_close_button.configure(text="Close", fg_color=COLOR_CLOSE_GREY) # Back to Close, dark grey
                         
                         # Forcefully bring the dialog back to a visible and interactive state
                         settings_win.update_idletasks() # Process any pending geometry/drawing tasks
@@ -1729,7 +2160,12 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
                     
                     if tk_var_to_reset: tk_var_to_reset.set(initial_val)
                 
-                current_dialog_download_dir[0] = initial_download_directory
+                for level_key_revert in Logger.LEVELS.keys(): # Revert log color vars
+                    level_l_revert = level_key_revert.lower()
+                    getattr(self, f"log_color_{level_l_revert}_light_var").set(initial_config_vars[f"log_color_{level_l_revert}_light"])
+                    getattr(self, f"log_color_{level_l_revert}_dark_var").set(initial_config_vars[f"log_color_{level_l_revert}_dark"])
+                
+                current_dialog_download_dir[0] = _initial_download_directory_container[0] # MODIFIED: Revert from container
                 if current_dl_dir_label_settings.winfo_exists(): current_dl_dir_label_settings.configure(text=current_dialog_download_dir[0])
                 logger.info("GUI", "cancel_close_action", "Settings changes cancelled.")
             settings_win.destroy()
@@ -1737,19 +2173,37 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         ok_button.configure(command=ok_action)
         apply_button.configure(command=apply_action_ui_handler)
         cancel_close_button.configure(command=cancel_close_action)
-        ok_button.pack(side="left", padx=(0,5)); apply_button.pack(side="left", padx=5); cancel_close_button.pack(side="left", padx=(5,0))
+        # Buttons are packed dynamically by _update_button_states_on_change or initially only cancel_close_button
         
         settings_win.bind('<Return>', lambda event: ok_button.invoke())
         settings_win.bind('<Escape>', lambda event: cancel_close_button.invoke())
         
-        settings_win.after(100, ok_button.focus_set) # Give it a moment to draw
-        settings_win.update_idletasks() 
-        
+        # If not connected, async load won't happen, so call finalize init here.
+        # If connected, _after_device_settings_loaded_hook_settings will call _finalize_initialization_and_button_states.
+        if not self.dock.is_connected():
+            _finalize_initialization_and_button_states() # This will schedule the _core_final_setup
+
         # Adjust window size after content is packed
         min_width, min_height = 600, 550 
         settings_win.geometry(f"{max(min_width, settings_win.winfo_reqwidth()+20)}x{max(min_height, settings_win.winfo_reqheight()+20)}")
         settings_win.minsize(min_width, min_height)
 
+    def _update_color_preview_widget(self, frame_widget, color_string_var):
+        if not frame_widget.winfo_exists():
+            return
+        color_hex = color_string_var.get()
+        try:
+            # Basic validation: starts with # and is 7 chars long (#RRGGBB) or 9 chars long (#RRGGBBAA for CTk)
+            if color_hex.startswith("#") and (len(color_hex) == 7 or len(color_hex) == 9):
+                frame_widget.configure(fg_color=color_hex)
+            else:
+                # Invalid format, set to a neutral/error color (light grey for light mode, dark grey for dark mode)
+                frame_widget.configure(fg_color=self._apply_appearance_mode_theme_color(("#e0e0e0", "#404040")))
+        except tkinter.TclError: # Handles invalid color names if not caught by basic check
+            frame_widget.configure(fg_color=self._apply_appearance_mode_theme_color(("#e0e0e0", "#404040")))
+        except Exception as e:
+            logger.error("GUI", "_update_color_preview_widget", f"Unexpected error updating preview for color '{color_hex}': {e}")
+            frame_widget.configure(fg_color=self._apply_appearance_mode_theme_color(("#e0e0e0", "#404040"))) # Fallback
 
     def _apply_saved_sort_state_to_tree_and_ui(self, files_data_list):
         if self.saved_treeview_sort_column and self.saved_treeview_sort_column in self.original_tree_headings:
@@ -1923,8 +2377,7 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
 
     def _initialize_backend_early(self):
         # This method is non-UI, so it remains largely unchanged.
-        # Logger might not be fully available yet if its config depends on self.config,
-        # so initial prints are fine.
+        # Using global logger for early messages.
         error_to_report, local_backend_instance = None, None
         try:
             script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1934,20 +2387,20 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
             dll_path = next((p for p in dll_paths_to_try if os.path.exists(p)), None)
 
             if not dll_path:
-                print("[WARNING] GUI::_initialize_backend_early - libusb-1.0.dll not found locally. Trying system paths.")
+                logger.warning("GUI", "_initialize_backend_early", "libusb-1.0.dll not found locally. Trying system paths.")
                 local_backend_instance = usb.backend.libusb1.get_backend()
                 if not local_backend_instance: error_to_report = "Libusb backend failed from system paths."
             else:
-                print(f"[INFO] GUI::_initialize_backend_early - Attempting backend with DLL: {dll_path}")
+                logger.info("GUI", "_initialize_backend_early", f"Attempting backend with DLL: {dll_path}")
                 local_backend_instance = usb.backend.libusb1.get_backend(find_library=lambda x: dll_path)
                 if not local_backend_instance: error_to_report = f"Failed with DLL: {dll_path}. Check 32/64 bit."
             
-            if error_to_report: print(f"[ERROR] GUI::_initialize_backend_early - {error_to_report}"); return False, error_to_report, None
-            print(f"[INFO] GUI::_initialize_backend_early - Backend initialized: {local_backend_instance}")
+            if error_to_report: logger.error("GUI", "_initialize_backend_early", error_to_report); return False, error_to_report, None
+            logger.info("GUI", "_initialize_backend_early", f"Backend initialized: {local_backend_instance}")
             return True, None, local_backend_instance
         except Exception as e:
             error_to_report = f"Unexpected error initializing libusb: {e}"
-            print(f"[ERROR] GUI::_initialize_backend_early - {error_to_report}\n{traceback.format_exc()}")
+            logger.error("GUI", "_initialize_backend_early", f"{error_to_report}\n{traceback.format_exc()}")
             return False, error_to_report, None
 
 
@@ -1978,9 +2431,9 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
                 self.after(0, self.update_all_status_info) # MODIFIED self.after
                 self.after(0, self._update_menu_states)
                 if device_info:
-                     self.after(0, self.refresh_file_list_gui)
-                     self.start_recording_status_check()
-                     if self.auto_refresh_files_var.get(): self.start_auto_file_refresh_periodic_check()
+                    self.after(0, self.refresh_file_list_gui)
+                    self.start_recording_status_check()
+                    if self.auto_refresh_files_var.get(): self.start_auto_file_refresh_periodic_check()
                 else:
                     self.after(0, lambda: self.update_status_bar(connection_status="Status: Connected, but failed to get device info."))
                     self.stop_recording_status_check(); self.stop_auto_file_refresh_periodic_check()
@@ -2135,15 +2588,15 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
                 if self.is_audio_playing and self.current_playing_filename_for_replay == item_iid:
                     context_menu.add_command(label=f"Stop Playback", command=self._stop_audio_playback, image=self.icons.get("stop"), compound="left")
                 elif is_playable and status not in ["Recording", "Downloading", "Queued"]:
-                     context_menu.add_command(label=f"Play", command=self.play_selected_audio_gui, image=self.icons.get("play"), compound="left")
+                    context_menu.add_command(label=f"Play", command=self.play_selected_audio_gui, image=self.icons.get("play"), compound="left")
                 
                 if status in ["On Device", "Mismatch", "Cancelled"] or "Error" in status:
-                     if not file_detail.get("is_recording"): context_menu.add_command(label=f"Download", command=self.download_selected_files_gui, image=self.icons.get("download"), compound="left")
+                    if not file_detail.get("is_recording"): context_menu.add_command(label=f"Download", command=self.download_selected_files_gui, image=self.icons.get("download"), compound="left")
                 elif status == "Downloaded" or status == "Downloaded OK" or status == "downloaded_ok": 
-                     context_menu.add_command(label=f"Re-download", command=self.download_selected_files_gui, image=self.icons.get("download"), compound="left")
+                    context_menu.add_command(label=f"Re-download", command=self.download_selected_files_gui, image=self.icons.get("download"), compound="left")
                 
                 if status in ["Downloading", "Queued"] or "Preparing Playback" in status or self.active_operation_name: # Generic cancel
-                     context_menu.add_command(label=f"Cancel Operation", command=self.request_cancel_operation, image=self.icons.get("stop"), compound="left")
+                    context_menu.add_command(label=f"Cancel Operation", command=self.request_cancel_operation, image=self.icons.get("stop"), compound="left")
                 if not file_detail.get("is_recording"): 
                     context_menu.add_command(label=f"Delete", command=self.delete_selected_files_gui, image=self.icons.get("delete"), compound="left")
         elif num_selected > 1:
@@ -2418,7 +2871,7 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
             try:
                 pygame.mixer.music.stop(); pygame.mixer.music.play(loops=(-1 if self.loop_playback_var.get() else 0), start=seek_pos_sec)
                 if hasattr(self, 'current_time_label') and self.current_time_label.winfo_exists():
-                     self.current_time_label.configure(text=time.strftime('%M:%S', time.gmtime(seek_pos_sec)))
+                    self.current_time_label.configure(text=time.strftime('%M:%S', time.gmtime(seek_pos_sec)))
                 if pygame.mixer.music.get_busy(): self._update_playback_progress()
             except Exception as e: logger.error("GUI", "_on_slider_release_seek", f"Error seeking: {e}")
     
@@ -2606,7 +3059,13 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
                     etr_s = (total - rcvd) / speed_bps if speed_bps > 0 else float('inf')
                     etr_str = f"ETR: {time.strftime('%M:%S',time.gmtime(etr_s))}" if etr_s != float('inf') else "ETR: ..."
                     speed_str = f"{speed_bps/1024:.1f}KB/s" if speed_bps < 1024*1024 else f"{speed_bps/(1024*1024):.1f}MB/s"
-                    self.after(0, self.update_file_progress, rcvd, total, f"{file_info['name']} | {speed_str} | {etr_str}") # MODIFIED
+                    
+                    # Update Treeview status column with percentage
+                    percentage_val = (rcvd / total) * 100 if total > 0 else 0
+                    tree_status_text = f"Downloading ({percentage_val:.0f}%)"
+                    self.after(0, self._update_file_status_in_treeview, file_info['name'], tree_status_text, ('downloading',))
+                    # MODIFIED: Changed file_info['name'] to Batch X/Y
+                    self.after(0, self.update_file_progress, rcvd, total, f"Batch {file_index}/{total_files_to_download} | {speed_str} | {etr_str}")
                 
                 stream_status = self.dock.stream_file(file_info['name'], file_info['length'], data_cb, progress_cb, timeout_s=self.file_stream_timeout_s_var.get(), cancel_event=self.cancel_operation_event)
 
@@ -2657,6 +3116,30 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         if self.winfo_exists(): # Check if main window exists
             self.update_idletasks()
 
+    def _update_default_progressbar_colors(self):
+        if hasattr(self, 'status_file_progress_bar') and self.status_file_progress_bar.winfo_exists():
+            # fg_color is the trough, progress_color is the bar
+            # These cget calls return (light_color, dark_color) tuples from CTk
+            fg_color_tuple = self.status_file_progress_bar.cget("fg_color")
+            progress_color_tuple = self.status_file_progress_bar.cget("progress_color")
+
+            self.default_progressbar_fg_color = self._apply_appearance_mode_theme_color(fg_color_tuple)
+            self.default_progressbar_progress_color = self._apply_appearance_mode_theme_color(progress_color_tuple)
+            
+            # If the progress bar is currently at 0 (or effectively 0),
+            # ensure its progress_color is set to the fg_color (trough color)
+            # to make the bar "invisible", matching the behavior at 0% during updates.
+            current_progress_value = self.status_file_progress_bar.get()
+            epsilon = 0.001
+            if current_progress_value <= epsilon and self.default_progressbar_fg_color:
+                self.status_file_progress_bar.configure(progress_color=self.default_progressbar_fg_color)
+                logger.debug("GUI", "_update_default_progressbar_colors",
+                             f"Progress bar at {current_progress_value}%. Set progress_color to default fg_color: {self.default_progressbar_fg_color} to hide initial sliver.")
+            # If it's not at 0%, update_file_progress will handle setting the correct
+            # progress_color during actual download/playback progress updates.
+        else:
+            logger.warning("GUI", "_update_default_progressbar_colors", "Could not update progressbar colors as widget not ready.")
+
     def on_closing(self):
         if self._recording_check_timer_id: self.after_cancel(self._recording_check_timer_id) # MODIFIED
         if self._auto_file_refresh_timer_id: self.after_cancel(self._auto_file_refresh_timer_id) # MODIFIED
@@ -2666,19 +3149,37 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
         operational_keys = [
             "autoconnect", "log_level", "selected_vid", "selected_pid", "target_interface", 
             "recording_check_interval_s", "default_command_timeout_ms", "file_stream_timeout_s",
-            "auto_refresh_files", "auto_refresh_interval_s", "quit_without_prompt_if_connected",
+            "auto_refresh_files", "auto_refresh_interval_s", "suppress_gui_log_output", # ADDED new key
+            "quit_without_prompt_if_connected",
             "appearance_mode", "color_theme", "suppress_console_output" # MODIFIED
         ]
-        for key in operational_keys:
-            var_name = f"{key}_var"
-            # Special handling for theme vars if they use a different naming
-            if key == "appearance_mode": var_name = "appearance_mode_var"
-            elif key == "color_theme": var_name = "color_theme_var"
+        for config_key_on_close in operational_keys:
+            var_to_get_from_on_close = None
+            if config_key_on_close == "appearance_mode":
+                var_to_get_from_on_close = self.appearance_mode_var
+            elif config_key_on_close == "color_theme":
+                var_to_get_from_on_close = self.color_theme_var
+            elif config_key_on_close == "quit_without_prompt_if_connected":
+                var_to_get_from_on_close = self.quit_without_prompt_var
+            elif config_key_on_close == "log_level": # Config key
+                var_to_get_from_on_close = self.logger_processing_level_var # Actual variable name
+            elif config_key_on_close == "recording_check_interval_s": # Config key
+                var_to_get_from_on_close = self.recording_check_interval_var # Actual variable name
+            elif hasattr(self, f"{config_key_on_close}_var"): # General case like autoconnect -> autoconnect_var
+                var_to_get_from_on_close = getattr(self, f"{config_key_on_close}_var")
 
-            if hasattr(self, var_name): 
-                self.config[key] = getattr(self, var_name).get()
+            if var_to_get_from_on_close is not None and isinstance(var_to_get_from_on_close, ctk.Variable):
+                self.config[config_key_on_close] = var_to_get_from_on_close.get()
+            else:
+                logger.warning("GUI", "on_closing", f"Could not find ctk.Variable for config key '{config_key_on_close}' during on_closing.")
         
         self.config["download_directory"] = self.download_directory
+        
+        # Save log colors
+        if "log_colors" not in self.config: self.config["log_colors"] = {}
+        for level_key_save_exit in Logger.LEVELS.keys():
+            level_l_save_exit = level_key_save_exit.lower()
+            self.config["log_colors"][level_key_save_exit] = [getattr(self, f"log_color_{level_l_save_exit}_light_var").get(), getattr(self, f"log_color_{level_l_save_exit}_dark_var").get()]
 
         if hasattr(self, 'file_tree') and self.file_tree.winfo_exists():
             try:
@@ -2688,12 +3189,12 @@ class HiDockToolGUI(ctk.CTk): # MODIFIED: Inherit from ctk.CTk
                 if current_display_order and current_display_order[0] != "#all": # #all means default order
                     self.config["treeview_columns_display_order"] = ",".join(current_display_order)
                 elif current_display_order and current_display_order[0] == "#all" and "treeview_columns_display_order" in self.config:
-                     # If current is #all (meaning it's default based on `columns` tuple)
-                     # and a different order was previously saved, remove the saved one.
-                     if self.config["treeview_columns_display_order"] != ",".join(list(self.file_tree["columns"])):
-                         del self.config["treeview_columns_display_order"]
+                    # If current is #all (meaning it's default based on `columns` tuple)
+                    # and a different order was previously saved, remove the saved one.
+                    if self.config["treeview_columns_display_order"] != ",".join(list(self.file_tree["columns"])):
+                        del self.config["treeview_columns_display_order"]
                 elif "treeview_columns_display_order" in self.config and current_display_order and current_display_order[0] == "#all":
-                     del self.config["treeview_columns_display_order"]
+                    del self.config["treeview_columns_display_order"]
 
             except Exception: # MODIFIED: Generic TclError
                 logger.warning("GUI", "on_closing", "Could not retrieve treeview displaycolumns.")
@@ -2804,4 +3305,3 @@ if __name__ == "__main__":
             if temp_root_for_error and temp_root_for_error.winfo_exists():
                 temp_root_for_error.destroy()
         sys.exit(1)
-        
