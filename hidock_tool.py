@@ -709,13 +709,9 @@ class HiDockToolGUI:
         self.treeview_columns_display_order_str = self.config.get("treeview_columns_display_order", "") # Saved as comma-separated string
         
         self.logs_visible_var = tk.BooleanVar(value=self.config.get("logs_pane_visible", False))
-        self.device_tools_visible_var = tk.BooleanVar(value=self.config.get("device_tools_pane_visible", False))
         # Sync internal state if needed, though vars are primary now
         self.logs_visible = self.logs_visible_var.get()
-        self.device_tools_visible = self.device_tools_visible_var.get()
-
         self.gui_log_filter_level_var = tk.StringVar(value=self.config.get("gui_log_filter_level", "DEBUG"))
-        
         self.loop_playback_var = tk.BooleanVar(value=self.config.get("loop_playback", False))
         self.volume_var = tk.DoubleVar(value=self.config.get("playback_volume", 0.5))
 
@@ -729,9 +725,7 @@ class HiDockToolGUI:
         self.available_usb_devices = []
         self.displayed_files_details = []
         self.logs_visible = False # Tracks if the log_frame is intended to be visible
-        self.device_tools_visible = False # Tracks if device_tools_frame is intended to be visible
         self.logs_visible_var = tk.BooleanVar(value=self.logs_visible) # For menu checkbutton
-        self.device_tools_visible_var = tk.BooleanVar(value=self.device_tools_visible) # For menu checkbutton
 
         self.treeview_sort_column = None
         self.treeview_sort_reverse = False
@@ -814,8 +808,6 @@ class HiDockToolGUI:
         self.view_menu.add_command(label="Refresh File List", command=self.refresh_file_list_gui, state=tk.DISABLED, accelerator="F5")
         self.view_menu.add_separator()
         self.view_menu.add_checkbutton(label="Show Logs", onvalue=True, offvalue=False, variable=self.logs_visible_var, command=self.toggle_logs) 
-        self.view_menu.add_checkbutton(label="Show Device Tools", onvalue=True, offvalue=False, variable=self.device_tools_visible_var, command=self.toggle_device_tools)
-
 
         # Actions Menu
         self.actions_menu = tk.Menu(menubar, tearoff=0)
@@ -997,7 +989,6 @@ class HiDockToolGUI:
         if hasattr(self, 'view_menu'):
             self.view_menu.entryconfig("Refresh File List", state=tk.NORMAL if is_connected else tk.DISABLED)
             self.view_menu.entryconfig("Show Logs", variable=self.logs_visible_var) 
-            self.view_menu.entryconfig("Show Device Tools", variable=self.device_tools_visible_var)
 
         can_play_selected = is_connected and num_selected == 1
         if can_play_selected: # Further check if the selected file is playable
@@ -1212,9 +1203,6 @@ class HiDockToolGUI:
             fg = "white" if tag == "CRITICAL" else "black"
             self.log_text_area.tag_configure(tag, background=color, foreground=fg)
 
-        self.device_tools_frame = ttk.LabelFrame(self.optional_sections_pane, text="🛠️ Device Tools", padding="5")
-        ttk.Label(self.device_tools_frame, text="Device tools (Format, Sync Time) are now in the 'Device' menu.").pack(padx=5, pady=5)
-
         self._update_menu_states() # This will now also update toolbar button states
         # If backend init failed earlier, explicitly disable connect button again, as _update_menu_states might re-enable it
         # This is now handled within _update_menu_states and the __init__ for the toolbar button
@@ -1298,12 +1286,6 @@ class HiDockToolGUI:
         # self.logs_visible is the internal state, self.logs_visible_var is for the menu
         self.logs_visible = self.logs_visible_var.get() # Sync internal state from menu var
         self._update_optional_panes_visibility()
-
-
-    def toggle_device_tools(self):
-        self.device_tools_visible = self.device_tools_visible_var.get() # Sync internal state
-        self._update_optional_panes_visibility()
-
 
     def open_settings_window(self):
         settings_win = tk.Toplevel(self.master)
@@ -1753,45 +1735,46 @@ class HiDockToolGUI:
 
     def _update_optional_panes_visibility(self):
         if not hasattr(self, 'optional_sections_pane') or not self.optional_sections_pane.winfo_exists():
-            logger.error("GUI", "_update_optional_panes_visibility", "optional_sections_pane does not exist.")
+            # logger.error("GUI", "_update_optional_panes_visibility", "optional_sections_pane does not exist.") # Optional: keep for debugging
             return
 
-        current_managed_children_paths = self.optional_sections_pane.panes()
-        current_managed_widgets = []
-        for pane_path in current_managed_children_paths:
-            try:
-                current_managed_widgets.append(self.optional_sections_pane.nametowidget(pane_path))
-            except tk.TclError: pass
+        log_frame_should_be_visible = self.logs_visible_var.get()
 
-        # Order of operations: forget everything, then add back in desired order
-        for widget in [self.log_frame, self.device_tools_frame]:
-            if widget in current_managed_widgets:
+        is_log_frame_managed = False
+        try:
+            # Check if log_frame is currently a pane in optional_sections_pane
+            for pane_path in self.optional_sections_pane.panes():
+                if self.optional_sections_pane.nametowidget(pane_path) == self.log_frame:
+                    is_log_frame_managed = True
+                    break
+        except tk.TclError: # Handles cases where panes() is empty or widget path is invalid
+            pass
+
+        if log_frame_should_be_visible:
+            if not is_log_frame_managed:
                 try:
-                    self.optional_sections_pane.forget(widget)
-                except tk.TclError: pass
-        
-        something_added = False
-        if self.logs_visible_var.get():
-            try:
-                self.optional_sections_pane.add(self.log_frame, weight=1) # Adjust weight as needed
-                something_added = True
-            except tk.TclError as e:
-                logger.warning("GUI", "_update_optional_panes", f"Error re-adding log_frame: {e}")
+                    # Add log_frame if it's not already there
+                    self.optional_sections_pane.add(self.log_frame, weight=1)
+                except tk.TclError as e:
+                    logger.warning("GUI", "_update_optional_panes_visibility", f"Error adding log_frame: {e}")
 
-        if self.device_tools_visible_var.get():
-            try:
-                self.optional_sections_pane.add(self.device_tools_frame, weight=1) # Adjust weight
-                something_added = True
-            except tk.TclError as e:
-                logger.warning("GUI", "_update_optional_panes", f"Error re-adding device_tools_frame: {e}")
-
-        if something_added:
+            # Ensure the optional_sections_pane itself is visible
             if not self.optional_sections_pane.winfo_ismapped():
-                # optional_sections_pane is a child of main_content_frame
-                self.optional_sections_pane.pack(fill=tk.BOTH, expand=True, pady=(5,0)) # expand=True to take available space
-        else:
+                self.optional_sections_pane.pack(fill=tk.BOTH, expand=True, pady=(5,0))
+        else: # Log frame should not be visible
+            if is_log_frame_managed:
+                try:
+                    self.optional_sections_pane.forget(self.log_frame)
+                except tk.TclError as e:
+                    logger.warning("GUI", "_update_optional_panes_visibility", f"Error forgetting log_frame: {e}")
+
+            # If the optional_sections_pane is now empty and still mapped, hide it
             if self.optional_sections_pane.winfo_ismapped():
-                self.optional_sections_pane.pack_forget()
+                try:
+                    if not self.optional_sections_pane.panes(): # Check if it has any child panes left
+                        self.optional_sections_pane.pack_forget()
+                except tk.TclError: # panes() might raise error if just emptied and not fully updated
+                    self.optional_sections_pane.pack_forget()
 
     def clear_log_gui(self):
         if self.log_text_area.winfo_exists():
@@ -2565,8 +2548,6 @@ class HiDockToolGUI:
 
         if hasattr(self, 'logs_visible_var'):
             self.config["logs_pane_visible"] = self.logs_visible_var.get()
-        if hasattr(self, 'device_tools_visible_var'): # Assuming this var exists as per your __init__ setup
-            self.config["device_tools_pane_visible"] = self.device_tools_visible_var.get()
         
         if hasattr(self, 'gui_log_filter_level_var'):
             self.config["gui_log_filter_level"] = self.gui_log_filter_level_var.get()
