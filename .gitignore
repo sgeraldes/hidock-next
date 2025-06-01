@@ -172,5 +172,11 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+#  These are local resources that should not be included in the repository.
 *.hda
-reference/
+reference
+# Ignoring 'Icons' directory to exclude asset files from version control
+icons
+# Ignore the 'themes' directory; ensure it does not contain necessary styling resources
+themes
