@@ -38,24 +38,111 @@ The HiDock hardware is innovative, but users often face challenges with the offi
 
 ## **Current Status**
 
-Alpha/Beta Stage.  
-The core local recording management features (access, download, play, delete, format) using Python and libusb are functional in a prototype. GUI development and preparation for initial release are underway.
+**Functional Application - Development Ongoing.**
+HiDock Next is a functional desktop application providing local management for HiDock devices. Key aspects of the current version include:
 
-## **Roadmap Highlights**
+* **Modern User Interface:** Built with **CustomTkinter**, featuring **Font Awesome icons** for an intuitive experience.
+* **Modular Codebase:** Organized into distinct Python modules (e.g., `main.py`, `gui_main_window.py`, `settings_window.py`, `hidock_device.py`, `config_and_logger.py`, `constants.py`) for clarity and maintainability.
+* **Core Local Management:** Robust Python/libusb backend for accessing, listing, playing, downloading, deleting recordings, and formatting device storage.
+* **Comprehensive GUI Features:**
+  * Advanced file list management (drag-selection, status indicators, context menus, header controls with live storage/file counts, sorting).
+  * Theming support (light/dark modes, Azure theme).
+  * Detailed settings configuration (download directory, logging levels & colors, UI preferences, device-specific settings) via a dedicated `SettingsDialog`.
+  * Enhanced logging system (colored console, configurable GUI log pane with live color previews and suppression options).
+  * Standard application controls (Menubar, Toolbar, Status Bar) with synchronized states and icons.
+  * Persistent settings saved to `hidock_tool_config.json`.
+Development is ongoing to add further enhancements and refine existing functionality.
 
-* **Phase 1 (Ongoing): Robust Local Management**  
-  * Solidify and enhance the Python/libusb prototype for reliable local recording management.  
-  * Develop a user-friendly Graphical User Interface (GUI) for all core local management tasks.  
-  * Prepare for an initial public release focusing on these local capabilities.  
-* **Phase 2: Enhanced Local Tools & Community Feedback**  
-  * Implement auto-download functionality.  
-  * Refine the GUI based on user feedback.  
-  * Actively engage with the community to identify priorities for future development.  
-* **Phase 3: Introducing Transcription Capabilities (Community Driven)**  
-  * Based on community interest and contributions, begin implementing support for transcription engines.  
-  * Focus on a flexible architecture supporting BYOK and exploring local transcription solutions.  
-* **Phase 4: Continued Development & Advanced Features**  
-  * Ongoing maintenance, improvements, and development of further advanced features as prioritized by the community.
+## **Development Focus: Implemented Features & Future Plans**
+
+This section outlines the features already implemented in HiDock Next and the planned enhancements.
+
+### **Implemented Features**
+
+**Core Local Device Management:**
+
+* Direct USB communication with HiDock devices (via Python & libusb).
+* List audio recordings stored on the device.
+* Download recordings to the local computer.
+* Play audio recordings directly from the device (after a temporary download if not already local).
+* Delete recordings from the device.
+* Format the device's storage.
+* View device information (model, SN, firmware version).
+* View storage card information (capacity, used space).
+* Synchronize device time with the computer.
+
+**Graphical User Interface (GUI) & User Experience (UX):**
+
+* Modern interface built with CustomTkinter.
+* Theming support (Light/Dark modes, configurable color themes e.g., 'blue', 'dark-blue', 'green').
+* Integrated Font Awesome icons for toolbar, menus, and buttons.
+* **File List:**
+  * Detailed Treeview display of files with columns for name, size, duration, date, time, and status.
+  * Sortable columns.
+  * Real-time status indicators (e.g., "Recording", "Downloaded", "Mismatch", "Playing", "Queued", "Cancelled").
+  * Click-and-drag selection/deselection of multiple files.
+  * "Select All" & "Clear Selection" controls.
+  * Right-click context menu for file-specific actions.
+  * Double-click actions (download or play based on status).
+* **Main Controls:**
+  * Menubar for access to all application functions.
+  * Toolbar for quick access to common actions.
+  * Status bar displaying connection status, device info, storage usage, file counts, and operation progress.
+* **Header Panel:**
+  * Live display of storage usage and file counts (total/selected).
+  * Button to open current download directory (left-click) or select a new one (right-click).
+* **Playback Controls:**
+  * Dedicated playback control bar with play/pause, progress slider, current/total time display, volume control, and loop option.
+* **Logging Pane:**
+  * In-GUI display of application logs.
+  * Configurable log level filtering for the GUI pane.
+  * Option to clear or save GUI logs to a file.
+
+**Configuration & Logging:**
+
+* Persistent application settings saved to `hidock_tool_config.json`.
+* **Settings Dialog:**
+  * Organized into tabs (General, Connection, Operation, Device Specific, Logging).
+  * Configuration for:
+    * Appearance (theme, mode).
+    * Download directory.
+    * USB device selection (VID/PID), target interface.
+    * Autoconnect on startup.
+    * Operation timeouts, auto-refresh intervals.
+    * Device-specific behavior (auto-record, auto-play, tones - if supported by device).
+    * Logging levels (processing level, console/GUI suppression).
+    * Customizable GUI log colors for each level (with live previews).
+* **Logging System:**
+  * Modern theming and styling (light/dark modes, styled Treeview and scrollbars, Font Awesome icons).
+  * Robust logging system (colored console output, configurable GUI log pane with custom colors, suppression options).
+
+**Application Structure & Dependencies:**
+
+* Modular codebase organized into logical Python files (`main.py`, `gui_main_window.py`, `settings_window.py`, `hidock_device.py`, `config_and_logger.py`, `constants.py`, etc.).
+* Dependencies managed via `requirements.txt`.
+
+### **Planned Enhancements (Developer To-Do List)**
+
+The following features are planned for future development:
+
+* **Auto-Download Functionality:**
+  * Implement logic to automatically detect and download new recordings when the HiDock device is connected.
+* **Transcription Capabilities:**
+  * Develop support for various transcription engines.
+  * Design for a "Bring Your Own Key" (BYOK) model for cloud-based services.
+  * Research and implement options for local, on-device transcription engines.
+* **GUI & UX Refinements:**
+  * Continuously improve the user interface based on personal use and identified areas for enhancement.
+  * Explore additional theming options or UI customizations.
+* **Advanced File Management:**
+  * Consider adding batch renaming capabilities.
+  * Investigate metadata editing (if feasible with device protocol).
+* **Error Handling & Robustness:**
+  * Ongoing enhancements to error reporting and recovery mechanisms.
+* **Developer Documentation:**
+  * Create `CONTRIBUTING.md` for developer guidelines.
+* **Code Polish & Optimization:**
+  * Regularly review and refactor code for clarity, efficiency, and adherence to best practices.
 
 ## **Getting Started**
 
@@ -71,29 +158,33 @@ The core local recording management features (access, download, play, delete, fo
 ### **Installation**
 
 1. **Clone the repository:**  
-   git clone https://github.com/sgeraldes/hidock-next.git  
-   cd Hidock-Next
+   git clone <https://github.com/sgeraldes/hidock-next.git>  
+   cd hidock-next
 
-3. **Create a virtual environment (recommended):**  
+2. **Create a virtual environment (recommended):**  
    python \-m venv venv  
    source venv/bin/activate  \# On Windows: venv\\Scripts\\activate
 
-4. **Install dependencies:**  
+3. **Install dependencies:**  
    pip install \-r requirements.txt
-
-   *(Note: requirements.txt will be provided once initial dependencies are finalized.)*
 
 ## **Usage**
 
-*(Detailed usage instructions for the command-line interface or GUI will be provided here as the application matures.)*
+Once dependencies are installed, you can run the HiDock Next GUI application using the main entry point (`main.py`) from the project's root directory:
 
-**Conceptual Example (for core local management):**
+```bash
+python hidock_tool_gui.py
+```
 
-\# List recordings  
-python hidock\_next.py \--list
+**Brief GUI Overview:**
 
-\# Download a recording  
-python hidock\_next.py \--download REC001.wav
+* **Menubar:** Access all application functions including File (Connect, Settings, Exit), View (Toggle Panes), Actions (Refresh, Download, Play, Delete), and Device (Sync Time, Format).
+* **Toolbar:** Quick access buttons for common actions like Connect/Disconnect, Refresh, Download, Play, Delete, and Settings.
+* **File List:** Displays recordings from your HiDock. Supports selection, sorting, context-menu actions, and shows file status.
+* **Status Bar:** Shows connection status, device info, storage usage, file counts, download progress, and current download directory.
+* **Settings Window:** Configure application behavior, appearance, logging, download directory, and device-specific options.
+
+More detailed user guides and feature explanations will be added to the project Wiki
 
 ## **Transcription Setup (Future Feature)**
 
@@ -105,11 +196,13 @@ When transcription features are implemented, HiDock Next will aim to use a "Brin
 
 ## **Contributing**
 
-We welcome contributions\! Please read our CONTRIBUTING.md file (to be created) for details on our code of conduct and the process for submitting pull requests.
+We welcome contributions! If you're interested in helping, please check out our GitHub Issues to see where you can help or to report new bugs/suggest features.
+
+For more detailed guidelines on contributing, please see the `CONTRIBUTING.md` file (coming soon).
 
 You can also help by:
 
-* Reporting bugs or suggesting features for the current local management capabilities on our [GitHub Issues](https://github.com/YOUR_USERNAME/Hidock-Next/issues). \* Sharing your experience with other HiDock users.  
+* Reporting bugs or suggesting features for the current local management capabilities on our [GitHub Issues](https://github.com/sgeraldes/hidock-next/issues).
 * Indicating interest in future features like transcription support.
 
 ## **Support the Project**
@@ -120,7 +213,7 @@ Your support helps cover development time and resources.
 
 ## **License**
 
-This project is licensed under the **MIT License**. See the [LICENSE](http://docs.google.com/LICENSE) file for details.
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
 
 ## **Acknowledgements**
 

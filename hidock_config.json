@@ -1,0 +1,56 @@
+{
+    "autoconnect": true,
+    "download_directory": "audio",
+    "log_level": "DEBUG",
+    "selected_vid": 4310,
+    "selected_pid": 45069,
+    "target_interface": 0,
+    "recording_check_interval_s": 3,
+    "default_command_timeout_ms": 5000,
+    "file_stream_timeout_s": 180,
+    "auto_refresh_files": false,
+    "auto_refresh_interval_s": 30,
+    "quit_without_prompt_if_connected": true,
+    "appearance_mode": "System",
+    "color_theme": "blue",
+    "suppress_console_output": false,
+    "suppress_gui_log_output": true,
+    "window_geometry": "798x325+-1062+424",
+    "treeview_columns_display_order": "name,size,duration,date,time,status",
+    "logs_pane_visible": false,
+    "gui_log_filter_level": "DEBUG",
+    "loop_playback": false,
+    "playback_volume": 0.5,
+    "treeview_sort_col_id": "time",
+    "treeview_sort_descending": true,
+    "log_colors": {
+        "ERROR": [
+            "#FF6347",
+            "#FF4747"
+        ],
+        "WARNING": [
+            "#FFA500",
+            "#FFB732"
+        ],
+        "INFO": [
+            "#606060",
+            "#A0A0A0"
+        ],
+        "DEBUG": [
+            "#202020",
+            "#D0D0D0"
+        ],
+        "CRITICAL": [
+            "#DC143C",
+            "#FF0000"
+        ]
+    },
+    "icon_theme_color_light": "black",
+    "icon_theme_color_dark": "white",
+    "icon_fallback_color_1": "blue",
+    "icon_fallback_color_2": "default",
+    "icon_size_str": "32",
+    "logger_processing_level": "DEBUG",
+    "recording_check_interval": 3,
+    "quit_without_prompt": true
+}

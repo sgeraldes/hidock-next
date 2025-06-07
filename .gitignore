@@ -180,3 +180,6 @@ reference
 icons
 # Ignore the 'themes' directory; ensure it does not contain necessary styling resources
 themes
+# archived is ignored to prevent committing old or unused files
+archived
+audio-insights-extractor
