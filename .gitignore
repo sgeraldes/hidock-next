@@ -177,7 +177,13 @@ cython_debug/
 *.hda
 reference
 # Ignoring 'Icons' directory to exclude asset files from version control
-icons
+# icons
+icons/black
+icons/white
+icons/blue
+icons/green
+icons/red
+icons/yellow
 # Ignore the 'themes' directory; ensure it does not contain necessary styling resources
 themes
 # archived is ignored to prevent committing old or unused files
