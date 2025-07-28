@@ -1,0 +1,174 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # Python Desktop Application Tests
+  test-desktop:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: [3.8, 3.9, '3.10', '3.11']
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install system dependencies (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libusb-1.0-0-dev
+
+    - name: Install system dependencies (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install libusb
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Lint with flake8
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
+
+    - name: Format check with black
+      run: |
+        black --check --diff .
+
+    - name: Type check with mypy
+      run: |
+        mypy . --ignore-missing-imports
+
+    - name: Test with pytest
+      run: |
+        pytest tests/ -v --cov=. --cov-report=xml --cov-report=term-missing
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: desktop
+        name: desktop-${{ matrix.os }}-${{ matrix.python-version }}
+
+  # Web Application Tests
+  test-web:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+        cache-dependency-path: hidock-web-app/package-lock.json
+
+    - name: Install dependencies
+      working-directory: ./hidock-web-app
+      run: npm ci
+
+    - name: Lint
+      working-directory: ./hidock-web-app
+      run: npm run lint
+
+    - name: Type check
+      working-directory: ./hidock-web-app
+      run: npx tsc --noEmit
+
+    - name: Run tests
+      working-directory: ./hidock-web-app
+      run: npm run test:coverage
+
+    - name: Build
+      working-directory: ./hidock-web-app
+      run: npm run build
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./hidock-web-app/coverage/coverage-final.json
+        flags: web
+        name: web-node-${{ matrix.node-version }}
+
+  # Security Scanning
+  security:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run Python security scan
+      uses: pypa/gh-action-pip-audit@v1.0.8
+      with:
+        inputs: requirements.txt
+
+    - name: Run npm audit
+      working-directory: ./hidock-web-app
+      run: npm audit --audit-level=moderate
+
+  # Code Quality
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run pylint
+      run: |
+        pylint --exit-zero --output-format=json --reports=y . > pylint-report.json
+
+    - name: Use Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: 'npm'
+        cache-dependency-path: hidock-web-app/package-lock.json
+
+    - name: Install web dependencies
+      working-directory: ./hidock-web-app
+      run: npm ci
+
+    - name: Run ESLint
+      working-directory: ./hidock-web-app
+      run: npx eslint . --ext .ts,.tsx --format json --output-file eslint-report.json || true
+
+    - name: Upload code quality reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: code-quality-reports
+        path: |
+          pylint-report.json
+          hidock-web-app/eslint-report.json
