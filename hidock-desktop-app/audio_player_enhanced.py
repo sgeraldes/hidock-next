@@ -493,11 +493,16 @@ class EnhancedAudioPlayer:
     def load_track(self, filepath: str) -> bool:
         """Load a single track"""
         try:
+            # Stop previous playback and reset position
             self.stop()
+            self.current_position = 0.0
             self.playlist.clear()
 
             if self.playlist.add_track(filepath):
                 self.playlist.set_current_track(0)
+                # Reset position to zero when loading new track
+                self.current_position = 0.0
+                self._notify_position_changed()
                 self._notify_track_changed()
                 self._notify_playlist_changed()
                 return True

@@ -989,12 +989,20 @@ class HiDockJensen:
                 return None
             # --- END MODIFICATION ---
 
-        logger.warning(
-            "Jensen",
-            "_receive_response",
-            f"Timeout waiting for response to SeqID {expected_seq_id}. "
-            f"Buffer content (first 128 bytes): {self.receive_buffer.hex()[:128]}",
-        )
+        # Use DEBUG level for streaming timeouts as they are expected behavior during multi-chunk transfers
+        if streaming_cmd_id is not None:
+            logger.debug(
+                "Jensen",
+                "_receive_response",
+                f"Expected streaming timeout for SeqID {expected_seq_id} (CMD {streaming_cmd_id}) - device pausing between chunks",
+            )
+        else:
+            logger.warning(
+                "Jensen",
+                "_receive_response",
+                f"Timeout waiting for response to SeqID {expected_seq_id}. "
+                f"Buffer content (first 128 bytes): {self.receive_buffer.hex()[:128]}",
+            )
         return None
 
     def _send_and_receive(self, command_id, body_bytes=b"", timeout_ms=5000):
@@ -1117,6 +1125,11 @@ class HiDockJensen:
             dict or None: A dictionary like {"count": number_of_files} if successful,
                           None otherwise.
         """
+        # Avoid command conflicts during file list streaming
+        if self.is_file_list_streaming():
+            logger.debug("Jensen", "get_file_count", "Skipping during file list streaming")
+            return None
+            
         response = self._send_and_receive(
             CMD_GET_FILE_COUNT, timeout_ms=int(timeout_s * 1000)
         )
@@ -1216,114 +1229,156 @@ class HiDockJensen:
 
         # This operation needs to be atomic to prevent other commands from interfering
         # with the multi-packet response of the file list.
-        with self._usb_lock:
-            try:
-                self.receive_buffer.clear()
-                seq_id = self._send_command(
-                    CMD_GET_FILE_LIST, timeout_ms=int(timeout_s * 1000)
-                )
-            except (usb.core.USBError, ConnectionError) as e:
-                logger.error(
-                    "Jensen", "list_files", f"Failed to send list_files command: {e}"
-                )
-                return {
-                    "files": [],
-                    "totalFiles": 0,
-                    "totalSize": 0,
-                    "error": "Failed to send command",
-                }
-
-            file_list_aggregate_data = bytearray()
-
-            # Stream file list data until we have enough data to parse all expected files
-            # This is much more efficient than timeout-based detection and scales properly
-            expected_file_count = None
-            parsed_file_count = 0
-            consecutive_timeouts = 0
-            max_consecutive_timeouts = 3  # Prevent infinite loops (3 * 2s = 6s max wait)
+        # Critical: Set a flag to prevent other operations during streaming
+        was_streaming = getattr(self, '_file_list_streaming', False)
+        if was_streaming:
+            logger.warning("Jensen", "list_files", "File list operation already in progress, skipping")
+            return {"files": [], "totalFiles": 0, "totalSize": 0, "error": "Operation already in progress"}
             
-            while True:
-                response = self._receive_response(
-                    seq_id, timeout_ms=2000, streaming_cmd_id=CMD_GET_FILE_LIST  # Shorter timeout to fail faster
-                )
+        self._file_list_streaming = True
+        try:
+            with self._usb_lock:
+                try:
+                    self.receive_buffer.clear()
+                    seq_id = self._send_command(
+                        CMD_GET_FILE_LIST, timeout_ms=int(timeout_s * 1000)
+                    )
+                except (usb.core.USBError, ConnectionError) as e:
+                    logger.error(
+                        "Jensen", "list_files", f"Failed to send list_files command: {e}"
+                    )
+                    return {
+                        "files": [],
+                        "totalFiles": 0,
+                        "totalSize": 0,
+                        "error": "Failed to send command",
+                    }
 
-                if response and response["id"] == CMD_GET_FILE_LIST:
-                    file_list_aggregate_data.extend(response["body"])
-                    seq_id = response["sequence"]
-                    consecutive_timeouts = 0  # Reset timeout counter on successful response
+                # Web-style handler approach: accumulate data chunks and continue until completion
+                file_list_chunks = []
+                expected_file_count = None
+                
+                # Handler function mimicking the web version's Jensen.registerHandler pattern
+                def file_list_handler(response_data):
+                    nonlocal file_list_chunks, expected_file_count
                     
-                    # Check if we can determine expected file count from header
-                    if expected_file_count is None and len(file_list_aggregate_data) >= 6:
-                        # Use a scoped memoryview to avoid preventing bytearray resizing
-                        if file_list_aggregate_data[0] == 0xFF and file_list_aggregate_data[1] == 0xFF:
-                            expected_file_count = struct.unpack(">I", file_list_aggregate_data[2:6])[0]
-                            logger.info(
-                                "Jensen",
-                                "list_files",
-                                f"Expected {expected_file_count} files from device header"
-                            )
+                    if not response_data or len(response_data) == 0:
+                        # Empty response signals end of transmission
+                        logger.info("Jensen", "list_files", "Empty response received, completing file list")
+                        return self._parse_file_list_chunks(file_list_chunks) if file_list_chunks else []
                     
-                    # If we know how many files to expect, check if we can parse that many
-                    if expected_file_count is not None:
-                        # Quick parsing check - count how many complete file entries we have
-                        parsed_file_count = self._count_parseable_files(file_list_aggregate_data)
+                    # Accumulate this chunk
+                    file_list_chunks.append(response_data)
+                    logger.debug("Jensen", "list_files", f"Accumulated chunk {len(file_list_chunks)}, size: {len(response_data)} bytes")
+                    
+                    # Parse accumulated file data to check completion
+                    files = self._parse_file_list_chunks(file_list_chunks)
+                    
+                    # Get expected count from first chunk header if available
+                    if expected_file_count is None and file_list_chunks:
+                        first_chunk = file_list_chunks[0]
+                        if len(first_chunk) >= 6 and first_chunk[0] == 0xFF and first_chunk[1] == 0xFF:
+                            expected_file_count = struct.unpack(">I", first_chunk[2:6])[0]
+                            logger.info("Jensen", "list_files", f"Expected {expected_file_count} files from header")
+                    
+                    # Log current progress
+                    files_parsed = len(files)
+                    logger.debug("Jensen", "list_files", f"Parsed {files_parsed}/{expected_file_count or '?'} files so far")
+                    
+                    # Check if we have all expected files
+                    if expected_file_count is not None and files_parsed >= expected_file_count:
+                        logger.info("Jensen", "list_files", f"Received all {expected_file_count} files, completing")
+                        return files  # Complete - return final file list
+                    
+                    # Continue receiving more data - this is critical for multi-chunk transfers
+                    logger.debug("Jensen", "list_files", f"Continue receiving: need {(expected_file_count or 0) - files_parsed} more files")
+                    return None
+                
+                # Web-style continuous receiving until handler indicates completion
+                final_files = None
+                consecutive_timeouts = 0
+                max_consecutive_timeouts = 5  # Increased from 3 to be more patient
+                
+                while final_files is None:
+                    response = self._receive_response(
+                        seq_id, timeout_ms=2000, streaming_cmd_id=CMD_GET_FILE_LIST  # Increased timeout
+                    )
+                    
+                    if response and response["id"] == CMD_GET_FILE_LIST:
+                        seq_id = response["sequence"]
+                        consecutive_timeouts = 0
                         
-                        if parsed_file_count >= expected_file_count:
-                            logger.info(
-                                "Jensen", 
-                                "list_files",
-                                f"Received all {expected_file_count} files, ending stream"
-                            )
+                        # Process this chunk through our handler
+                        result = file_list_handler(response["body"])
+                        
+                        if result is not None:
+                            # Handler indicates completion
+                            final_files = result
                             break
                             
-                elif response is None:  # Timeout - only acceptable if we have all expected files
-                    consecutive_timeouts += 1
-                    
-                    if expected_file_count is not None and parsed_file_count >= expected_file_count:
-                        logger.info(
-                            "Jensen",
-                            "list_files", 
-                            f"Stream timeout but have all {expected_file_count} files, completing"
-                        )
-                        break
-                    elif consecutive_timeouts >= max_consecutive_timeouts:
-                        # Too many consecutive timeouts - device may be unresponsive
-                        logger.warning(
-                            "Jensen",
-                            "list_files",
-                            f"Device stream incomplete after {max_consecutive_timeouts} timeouts. "
-                            f"Got {parsed_file_count}/{expected_file_count or '?'} files. "
-                            f"Proceeding with partial data."
-                        )
-                        break
+                    elif response is None:  # Timeout
+                        consecutive_timeouts += 1
+                        logger.debug("Jensen", "list_files", f"Timeout {consecutive_timeouts}/{max_consecutive_timeouts}")
+                        
+                        # Don't give up too early - only complete if we're confident we have all data
+                        if consecutive_timeouts >= max_consecutive_timeouts:
+                            logger.warning("Jensen", "list_files", 
+                                f"Max timeouts reached, completing with {len(file_list_chunks)} chunks")
+                            # Give the handler a chance to process final data
+                            final_files = file_list_handler(b'')  # Empty data signals completion
+                            break
                     else:
-                        # Timeout but still within limits
-                        logger.warning(
-                            "Jensen",
-                            "list_files",
-                            f"Stream timeout {consecutive_timeouts}/{max_consecutive_timeouts} with {parsed_file_count}/{expected_file_count or '?'} files. Retrying..."
-                        )
-                        continue  # Keep trying
-                else:
-                    # Unexpected packet - log and continue
-                    logger.warning(
-                        "Jensen",
-                        "list_files",
-                        f"Received unexpected response {response['id']} while waiting for file list"
-                    )
-                    continue
+                        # Unexpected response - log and continue
+                        logger.debug("Jensen", "list_files", 
+                            f"Unexpected response CMD:{response.get('id', 'unknown')} SEQ:{response.get('sequence', 'unknown')} during file list")
+                        continue
 
-        if not file_list_aggregate_data:
-            return {
-                "files": [],
-                "totalFiles": 0,
-                "totalSize": 0,
-                "error": "No data received for file list",
-            }
+                if not final_files:
+                    return {
+                        "files": [],
+                        "totalFiles": 0,
+                        "totalSize": 0,
+                        "error": "No files received from device",
+                    }
+                    
+                # Calculate total size from final files
+                total_size_bytes = sum(file_info.get("length", 0) for file_info in final_files)
+                
+                return {
+                    "files": final_files,
+                    "totalFiles": len(final_files),
+                    "totalSize": total_size_bytes,
+                }
+        finally:
+            self._file_list_streaming = False
+    def is_file_list_streaming(self):
+        """Check if file list streaming is currently in progress."""
+        return getattr(self, '_file_list_streaming', False)
+
+    def _parse_file_list_chunks(self, chunks):
+        """
+        Parse file list data from accumulated chunks, similar to web version's _parseFileListData.
+        
+        Args:
+            chunks: List of byte arrays from device responses
+        
+        Returns:
+            List of file info dictionaries
+        """
         files = []
+        
+        # Combine all chunks into a single byte array
+        file_list_aggregate_data = bytearray()
+        for chunk in chunks:
+            file_list_aggregate_data.extend(chunk)
+            
+        if not file_list_aggregate_data:
+            return files
+            
         offset = 0
-        total_size_bytes = 0
         total_files_from_header = -1
+        
+        # Check for header with total file count
         if (
             len(file_list_aggregate_data) >= 6
             and file_list_aggregate_data[offset] == 0xFF
@@ -1333,162 +1388,120 @@ class HiDockJensen:
                 ">I", file_list_aggregate_data[offset + 2 : offset + 6]
             )[0]
             offset += 6
+            
         parsed_file_count = 0
         while offset < len(file_list_aggregate_data):
             try:
                 if offset + 4 > len(file_list_aggregate_data):
                     break
+                    
                 file_version = file_list_aggregate_data[offset]
                 offset += 1
+                
                 name_len = struct.unpack(
                     ">I", b"\x00" + file_list_aggregate_data[offset : offset + 3]
                 )[0]
                 offset += 3
+                
                 if offset + name_len > len(file_list_aggregate_data):
                     break
+                    
                 filename = "".join(
                     chr(b) for b in file_list_aggregate_data[offset : offset + name_len] if b > 0
                 )
                 offset += name_len
+                
                 min_remaining = 4 + 6 + 16
                 if offset + min_remaining > len(file_list_aggregate_data):
                     break
-                file_length_bytes = struct.unpack(">I", file_list_aggregate_data[offset : offset + 4])[
-                    0
-                ]
+                    
+                file_length_bytes = struct.unpack(">I", file_list_aggregate_data[offset : offset + 4])[0]
                 offset += 4
-                offset += 6
+                offset += 6  # Skip 6 bytes
                 signature_hex = file_list_aggregate_data[offset : offset + 16].hex()
                 offset += 16
-                create_date_str, create_time_str, time_obj, duration_sec = (
-                    "",
-                    "",
-                    None,
-                    0,
-                )
-                try:
-                    if (
-                        (filename.endswith((".wav", ".hda")))
-                        and "REC" in filename.upper()
-                        and len(filename) >= 14
-                        and filename[:14].isdigit()
-                    ):
-                        time_obj = datetime.strptime(filename[:14], "%Y%m%d%H%M%S")
-                    elif filename.endswith((".hda", ".wav")):
-                        name_parts = filename.split("-")
-                        if len(name_parts) > 1:
-                            date_str_part, time_part_str = (
-                                name_parts[0],
-                                name_parts[1][:6],
-                            )
-                            year_str, month_str_abbr, day_str = "", "", ""
-                            if len(date_str_part) >= 7:
-                                if (
-                                    date_str_part[:-5].isdigit()
-                                    and len(date_str_part[:-5]) == 4
-                                ):
-                                    year_str, month_str_abbr, day_str = (
-                                        date_str_part[:4],
-                                        date_str_part[4:7],
-                                        date_str_part[7:],
-                                    )
-                                elif (
-                                    date_str_part[:-5].isdigit()
-                                    and len(date_str_part[:-5]) == 2
-                                ):
-                                    year_str, month_str_abbr, day_str = (
-                                        "20" + date_str_part[:2],
-                                        date_str_part[2:5],
-                                        date_str_part[5:],
-                                    )
-                            month_map = {
-                                "Jan": 1,
-                                "Feb": 2,
-                                "Mar": 3,
-                                "Apr": 4,
-                                "May": 5,
-                                "Jun": 6,
-                                "Jul": 7,
-                                "Aug": 8,
-                                "Sep": 9,
-                                "Oct": 10,
-                                "Nov": 11,
-                                "Dec": 12,
-                            }
-                            if (
-                                year_str
-                                and month_str_abbr in month_map
-                                and day_str.isdigit()
-                                and time_part_str.isdigit()
-                                and len(day_str) > 0
-                            ):
-                                time_obj = datetime(
-                                    int(year_str),
-                                    month_map[month_str_abbr],
-                                    int(day_str),
-                                    int(time_part_str[0:2]),
-                                    int(time_part_str[2:4]),
-                                    int(time_part_str[4:6]),
-                                )
-                except (ValueError, IndexError) as date_e:
-                    logger.debug(
-                        "Jensen",
-                        "list_files_date_parser",
-                        f"Date parse error for '{filename}': {date_e}",
-                    )
-                if time_obj:
-                    create_date_str, create_time_str = time_obj.strftime(
-                        "%Y/%m/%d"
-                    ), time_obj.strftime("%H:%M:%S")
-                else:
-                    logger.warning(
-                        "Jensen",
-                        "list_files_date_parser",
-                        f"Failed to parse date/time for: {filename}. Using placeholders.",
-                    )
-                duration_sec = self._calculate_file_duration(
-                    file_length_bytes, file_version
-                )
-                # Always append the file, even if date parsing fails.
-                # The GUI can handle displaying placeholder data.
-                files.append(
-                    {
-                        "name": filename,
-                        "createDate": create_date_str,
-                        "createTime": create_time_str,
-                        "time": time_obj,  # This can be None, and the GUI should handle it
-                        "duration": duration_sec,
-                        "version": file_version,
-                        "length": file_length_bytes,
-                        "signature": signature_hex,
-                    }
-                )
-                total_size_bytes += file_length_bytes
+                
+                # Parse date/time from filename
+                create_date_str, create_time_str, time_obj = self._parse_filename_datetime(filename)
+                
+                duration_sec = self._calculate_file_duration(file_length_bytes, file_version)
+                
+                files.append({
+                    "name": filename,
+                    "createDate": create_date_str,
+                    "createTime": create_time_str,
+                    "time": time_obj,
+                    "duration": duration_sec,
+                    "version": file_version,
+                    "length": file_length_bytes,
+                    "signature": signature_hex,
+                })
+                
                 parsed_file_count += 1
-                if (
-                    total_files_from_header != -1
-                    and parsed_file_count >= total_files_from_header
-                ):
+                if total_files_from_header != -1 and parsed_file_count >= total_files_from_header:
                     break
+                    
             except (struct.error, IndexError) as e:
                 logger.error(
-                    "Jensen",
-                    "list_files_parser",
-                    f"Parsing error at offset {offset} "
-                    f"(len {len(file_list_aggregate_data)}): {e}. "
-                    f"Data: {file_list_aggregate_data[offset-10:offset+20].hex()}",
+                    "Jensen", "parse_file_list_chunks",
+                    f"Parsing error at offset {offset}: {e}"
                 )
                 break
+                
         logger.info(
-            "Jensen",
-            "list_files",
-            f"Successfully parsed {len(files)} files. Total size: {total_size_bytes} bytes.",
+            "Jensen", "parse_file_list_chunks",
+            f"Successfully parsed {len(files)} files from {len(chunks)} chunks"
         )
-        return {
-            "files": files,
-            "totalFiles": len(files),
-            "totalSize": total_size_bytes,
-        }
+        return files
+    
+    def _parse_filename_datetime(self, filename):
+        """Extract date/time from filename, returning formatted strings and datetime object."""
+        create_date_str, create_time_str, time_obj = "", "", None
+        
+        try:
+            if (
+                filename.endswith((".wav", ".hda"))
+                and "REC" in filename.upper()
+                and len(filename) >= 14
+                and filename[:14].isdigit()
+            ):
+                time_obj = datetime.strptime(filename[:14], "%Y%m%d%H%M%S")
+            elif filename.endswith((".hda", ".wav")):
+                name_parts = filename.split("-")
+                if len(name_parts) > 1:
+                    date_str_part, time_part_str = name_parts[0], name_parts[1][:6]
+                    year_str, month_str_abbr, day_str = "", "", ""
+                    
+                    if len(date_str_part) >= 7:
+                        if date_str_part[:-5].isdigit() and len(date_str_part[:-5]) == 4:
+                            year_str, month_str_abbr, day_str = (
+                                date_str_part[:4], date_str_part[4:7], date_str_part[7:]
+                            )
+                        elif date_str_part[:-5].isdigit() and len(date_str_part[:-5]) == 2:
+                            year_str, month_str_abbr, day_str = (
+                                "20" + date_str_part[:2], date_str_part[2:5], date_str_part[5:]
+                            )
+                            
+                    month_map = {
+                        "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+                        "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+                    }
+                    
+                    if (year_str and month_str_abbr in month_map and day_str.isdigit() 
+                        and time_part_str.isdigit() and len(day_str) > 0):
+                        time_obj = datetime(
+                            int(year_str), month_map[month_str_abbr], int(day_str),
+                            int(time_part_str[0:2]), int(time_part_str[2:4]), int(time_part_str[4:6])
+                        )
+        except (ValueError, IndexError) as date_e:
+            logger.debug("Jensen", "parse_filename_datetime", f"Date parse error for '{filename}': {date_e}")
+            
+        if time_obj:
+            create_date_str, create_time_str = time_obj.strftime("%Y/%m/%d"), time_obj.strftime("%H:%M:%S")
+        else:
+            logger.warning("Jensen", "parse_filename_datetime", f"Failed to parse date/time for: {filename}")
+            
+        return create_date_str, create_time_str, time_obj
 
     def _count_parseable_files(self, data):
         """
@@ -1765,6 +1778,11 @@ class HiDockJensen:
                   and "code" (int, device's status code). Includes an "error" key on
                   communication failure.
         """
+        # Avoid command conflicts during file list streaming
+        if self.is_file_list_streaming():
+            logger.debug("Jensen", "delete_file", "Skipping during file list streaming")
+            return {"result": "failed", "error": "Device busy with file list streaming"}
+            
         response = self._send_and_receive(
             CMD_DELETE_FILE,
             filename.encode("ascii", errors="ignore"),
@@ -1803,6 +1821,10 @@ class HiDockJensen:
                           and "status_raw" (int) if successful, None otherwise.
                           Units (MB) are assumed based on typical device behavior.
         """
+        # Avoid command conflicts during file list streaming
+        if self.is_file_list_streaming():
+            logger.debug("Jensen", "get_card_info", "Skipping during file list streaming")
+            return None
         response = self._send_and_receive(
             CMD_GET_CARD_INFO, timeout_ms=int(timeout_s * 1000)
         )
@@ -1849,6 +1871,11 @@ class HiDockJensen:
                   and "code" (int, device's status code). Includes an "error" key on
                   communication failure.
         """
+        # Avoid command conflicts during file list streaming
+        if self.is_file_list_streaming():
+            logger.debug("Jensen", "format_card", "Skipping during file list streaming")
+            return {"result": "failed", "error": "Device busy with file list streaming"}
+            
         response = self._send_and_receive(
             CMD_FORMAT_CARD,
             body_bytes=bytes([1, 2, 3, 4]),
@@ -1886,6 +1913,11 @@ class HiDockJensen:
                           if a recording file is reported. Returns None if no file info is available,
                           the filename is empty, or an error occurs.
         """
+        # Avoid command conflicts during file list streaming
+        if self.is_file_list_streaming():
+            logger.debug("Jensen", "get_recording_file", "Skipping during file list streaming")
+            return None
+            
         response = self._send_and_receive(
             CMD_GET_RECORDING_FILE, timeout_ms=int(timeout_s * 1000)
         )

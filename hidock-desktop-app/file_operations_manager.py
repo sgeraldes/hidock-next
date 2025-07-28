@@ -346,6 +346,16 @@ class FileOperationsManager:
                 if operation is None:  # Shutdown signal
                     break
 
+                # Check if operation was cancelled before execution
+                if operation.status == FileOperationStatus.CANCELLED:
+                    logger.info(
+                        "FileOpsManager",
+                        "_worker_thread", 
+                        f"Skipping cancelled operation {operation.operation_id}"
+                    )
+                    self.operation_queue.task_done()
+                    continue
+
                 self._execute_operation(operation)
                 self.operation_queue.task_done()
 
@@ -362,6 +372,15 @@ class FileOperationsManager:
         operation.start_time = datetime.now()
 
         try:
+            # Check for cancellation before starting execution
+            if operation.status == FileOperationStatus.CANCELLED:
+                logger.info(
+                    "FileOpsManager",
+                    "_execute_operation",
+                    f"Operation {operation.operation_id} was cancelled before execution"
+                )
+                return
+
             if operation.operation_type == FileOperationType.DOWNLOAD:
                 self._execute_download(operation)
             elif operation.operation_type == FileOperationType.DELETE:
@@ -371,18 +390,29 @@ class FileOperationsManager:
             elif operation.operation_type == FileOperationType.ANALYZE:
                 self._execute_analyze(operation)
 
+            # Check for cancellation after execution (in case it was cancelled during execution)
+            if operation.status == FileOperationStatus.CANCELLED:
+                logger.info(
+                    "FileOpsManager",
+                    "_execute_operation",
+                    f"Operation {operation.operation_id} was cancelled during execution"
+                )
+                return
+
             operation.status = FileOperationStatus.COMPLETED
             operation.progress = 100.0
 
         except (IOError, ValueError, FileNotFoundError) as e:
-            operation.status = FileOperationStatus.FAILED
-            operation.error_message = str(e)
-            self.operation_stats["failed_operations"] += 1
-            logger.error(
-                "FileOpsManager",
-                "_execute_operation",
-                f"Operation {operation.operation_id} failed: {e}",
-            )
+            # Don't mark as failed if it was actually cancelled
+            if operation.status != FileOperationStatus.CANCELLED:
+                operation.status = FileOperationStatus.FAILED
+                operation.error_message = str(e)
+                self.operation_stats["failed_operations"] += 1
+                logger.error(
+                    "FileOpsManager",
+                    "_execute_operation",
+                    f"Operation {operation.operation_id} failed: {e}",
+                )
 
         finally:
             operation.end_time = datetime.now()
@@ -764,10 +794,29 @@ class FileOperationsManager:
         return operation_ids
 
     def cancel_operation(self, operation_id: str) -> bool:
-        """Cancel a specific operation."""
+        """Cancel a specific operation and clean up partial files."""
         if operation_id in self.active_operations:
             operation = self.active_operations[operation_id]
             operation.status = FileOperationStatus.CANCELLED
+            
+            # Clean up partial downloads
+            if operation.operation_type == FileOperationType.DOWNLOAD:
+                partial_file_path = self.download_dir / operation.filename
+                if partial_file_path.exists():
+                    try:
+                        partial_file_path.unlink()
+                        logger.info(
+                            "FileOpsManager",
+                            "cancel_operation",
+                            f"Cleaned up partial download: {partial_file_path}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "FileOpsManager",
+                            "cancel_operation",
+                            f"Failed to clean up partial download {partial_file_path}: {e}"
+                        )
+            
             logger.info(
                 "FileOpsManager",
                 "cancel_operation",

@@ -74,15 +74,16 @@ class TreeViewMixin:
                 self.file_tree.column(col, width=100, minwidth=80, anchor="w")
         self.file_tree.grid(row=0, column=0, sticky="nsew")
 
-        # Create and configure scrollbar
+        # Create and configure scrollbar - simplest possible approach
         self.tree_scrollbar = ttk.Scrollbar(
             tree_frame, orient="vertical", command=self.file_tree.yview
         )
         self.tree_scrollbar.grid(row=0, column=1, sticky="ns")
         self.file_tree.configure(yscrollcommand=self.tree_scrollbar.set)
 
-        # Ensure the tree_frame has proper column configuration for the scrollbar
-        tree_frame.grid_columnconfigure(1, weight=0, minsize=20)
+        # Configure frame columns
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(1, weight=0)
         self.file_tree.bind("<<TreeviewSelect>>", self.on_file_selection_change)
         self.file_tree.bind("<Double-1>", self._on_file_double_click_filtered)
         self.file_tree.bind("<Button-3>", self._on_file_right_click)

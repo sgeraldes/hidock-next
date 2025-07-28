@@ -802,6 +802,13 @@ class DeviceActionsMixin:
 
             if self.device_lock.acquire(blocking=False):
                 try:
+                    # Skip recording check if file list streaming is active to avoid command conflicts
+                    if (hasattr(self.device_manager.device_interface, 'jensen_device') and 
+                        hasattr(self.device_manager.device_interface.jensen_device, 'is_file_list_streaming') and 
+                        self.device_manager.device_interface.jensen_device.is_file_list_streaming()):
+                        logger.debug("GUI", "_check_recording_status_periodically", "Skipping recording check during file list streaming")
+                        return
+                        
                     # Use the new lightweight method instead of the heavy get_recordings()
                     current_recording_filename = asyncio.run(
                         self.device_manager.device_interface.get_current_recording_filename()

@@ -1,5 +1,5 @@
 {
-    "autoconnect": false,
+    "autoconnect": true,
     "download_directory": "audio",
     "log_level": "DEBUG",
     "selected_vid": 4310,

@@ -353,6 +353,12 @@ class WaveformVisualizer:
         self._update_zoom_display()
         self._initialize_plot()
 
+    def clear_position_indicator(self):
+        """Clear only the position indicator without affecting the waveform"""
+        self.current_position = 0.0
+        if self.waveform_data is not None:
+            self._update_waveform_display()
+
 
 class SpectrumAnalyzer:
     """Real-time spectrum analyzer visualization"""
@@ -864,3 +870,8 @@ class AudioVisualizationWidget(ctk.CTkFrame):
         """Clear all visualizations"""
         self.waveform_visualizer.clear()
         self.spectrum_analyzer.stop_analysis()
+
+    def clear_position_indicators(self):
+        """Clear position indicators from all visualizations"""
+        self.waveform_visualizer.clear_position_indicator()
+        # Spectrum analyzer position is updated per frame, no persistent indicator to clear

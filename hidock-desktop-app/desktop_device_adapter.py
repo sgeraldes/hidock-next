@@ -215,25 +215,35 @@ class DesktopDeviceAdapter(IDeviceInterface):
             raise ConnectionError("No device connected")
 
         try:
-            # Get card info from Jensen device
-            card_info = self.jensen_device.get_card_info()
-            if card_info:
-                status_raw = card_info.get("status_raw", 0)
-                total_capacity = (
-                    card_info.get("capacity", 0) * 1024 * 1024
-                )  # Convert MB to bytes
-                used_space = card_info.get("used", 0) * 1024 * 1024
-                free_space = total_capacity - used_space
-            else:
-                # Fallback values
-                total_capacity = 8 * 1024 * 1024 * 1024  # 8GB
+            # Check if file list streaming is in progress to avoid command collisions
+            if (hasattr(self.jensen_device, 'is_file_list_streaming') and 
+                self.jensen_device.is_file_list_streaming()):
+                # Return cached/fallback values during streaming to avoid collisions
+                total_capacity = 8 * 1024 * 1024 * 1024  # 8GB fallback
                 used_space = 0
                 status_raw = 0
                 free_space = total_capacity
+                file_count = 0
+            else:
+                # Get card info from Jensen device
+                card_info = self.jensen_device.get_card_info()
+                if card_info:
+                    status_raw = card_info.get("status_raw", 0)
+                    total_capacity = (
+                        card_info.get("capacity", 0) * 1024 * 1024
+                    )  # Convert MB to bytes
+                    used_space = card_info.get("used", 0) * 1024 * 1024
+                    free_space = total_capacity - used_space
+                else:
+                    # Fallback values
+                    total_capacity = 8 * 1024 * 1024 * 1024  # 8GB
+                    used_space = 0
+                    status_raw = 0
+                    free_space = total_capacity
 
-            # Get file count
-            file_count_info = self.jensen_device.get_file_count()
-            file_count = file_count_info.get("count", 0) if file_count_info else 0
+                # Get file count
+                file_count_info = self.jensen_device.get_file_count()
+                file_count = file_count_info.get("count", 0) if file_count_info else 0
 
             return StorageInfo(
                 total_capacity=total_capacity,
@@ -280,6 +290,12 @@ class DesktopDeviceAdapter(IDeviceInterface):
             raise ConnectionError("No device connected")
 
         try:
+            # Check if file list streaming is in progress to avoid command collisions
+            if (hasattr(self.jensen_device, 'is_file_list_streaming') and 
+                self.jensen_device.is_file_list_streaming()):
+                # Return None during streaming to avoid collisions
+                return None
+                
             # This is a lightweight command to check for an active recording
             recording_info = self.jensen_device.get_recording_file()
             if not recording_info or not recording_info.get("name"):

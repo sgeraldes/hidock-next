@@ -936,9 +936,15 @@ class HiDockToolGUI(
                         )
                         if device_info.serial_number != "N/A":
                             conn_status_text += f" SN: {device_info.serial_number}"
-                    card_info = asyncio.run(
-                        self.device_manager.device_interface.get_storage_info()
-                    )
+                    # Avoid getting storage info during file list streaming to prevent command conflicts
+                    if hasattr(self.device_manager.device_interface, 'jensen_device') and \
+                       hasattr(self.device_manager.device_interface.jensen_device, 'is_file_list_streaming') and \
+                       self.device_manager.device_interface.jensen_device.is_file_list_streaming():
+                        card_info = None  # Skip during streaming
+                    else:
+                        card_info = asyncio.run(
+                            self.device_manager.device_interface.get_storage_info()
+                        )
                     if card_info and card_info.total_capacity > 0:
                         used_bytes, capacity_bytes = (
                             card_info.used_space,
@@ -1349,9 +1355,8 @@ class HiDockToolGUI(
         style.theme_use("clam")
         logger.debug("GUI", "_update_treeview_style", "Set ttk theme to 'clam'.")
         try:
-            scrollbar_trough = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkScrollbar"]["fg_color"]
-            )
+            # Fix: Don't use "transparent" trough color - use visible colors instead
+            scrollbar_trough = "#2b2b2b"  # Dark gray instead of transparent
             scrollbar_thumb = self.apply_appearance_mode_theme_color(
                 ctk.ThemeManager.theme["CTkScrollbar"]["button_color"]
             )
@@ -1363,8 +1368,8 @@ class HiDockToolGUI(
                 troughcolor=scrollbar_trough,
                 background=scrollbar_thumb,
                 arrowcolor=scrollbar_arrow,
-                borderwidth=0,
-                relief="flat",
+                borderwidth=1,  # Add border for visibility
+                relief="solid",  # Solid relief instead of flat
             )
             style.map(
                 "Vertical.TScrollbar",
@@ -1784,7 +1789,23 @@ You can dismiss this warning and continue using the application with limited aud
                 hasattr(self, "audio_visualizer_widget")
                 and self.audio_visualizer_widget
             ):
-                self.audio_visualizer_widget.update_position(position)
+                # Only update position if the currently selected file matches the playing file
+                current_track = self.audio_player.get_current_track()
+                if current_track and self.current_playing_filename_for_replay:
+                    # Check if the currently visualized file matches the playing file
+                    selected_iids = self.file_tree.selection()
+                    if selected_iids:
+                        selected_filename = selected_iids[-1]  # Get last selected file
+                        if selected_filename == self.current_playing_filename_for_replay:
+                            # Only update position if visualizing the currently playing file
+                            self.audio_visualizer_widget.update_position(position)
+                        else:
+                            # Different file is selected - don't show position updates
+                            logger.debug(
+                                "MainWindow",
+                                "_on_audio_position_changed",
+                                f"Skipping position update - visualizing {selected_filename} but playing {self.current_playing_filename_for_replay}",
+                            )
 
         except Exception as e:
             logger.error(
@@ -1916,6 +1937,11 @@ You can dismiss this warning and continue using the application with limited aud
 
                 if hasattr(self, "audio_visualizer_widget"):
                     self.audio_visualizer_widget.load_audio(local_filepath)
+                    
+                    # If this file is not currently playing, clear position indicators
+                    if filename != self.current_playing_filename_for_replay:
+                        # Clear position indicators for non-playing files
+                        self.audio_visualizer_widget.clear_position_indicators()
             else:
                 # File not downloaded - hide visualization section
                 if hasattr(self, "visualizer_expanded") and self.visualizer_expanded:
@@ -1932,7 +1958,13 @@ You can dismiss this warning and continue using the application with limited aud
     def _play_local_file(self, local_filepath):
         """Loads and plays a local file, and updates the visualizer."""
         self.audio_player.load_track(local_filepath)
+        
+        # Ensure the visualization is showing the file we're about to play
         self.audio_visualizer_widget.load_audio(local_filepath)
+        
+        # Clear any previous position indicators before starting new playback
+        self.audio_visualizer_widget.clear_position_indicators()
+        
         self.audio_player.play()
 
         # Update UI state to reflect playback
@@ -1945,6 +1977,13 @@ You can dismiss this warning and continue using the application with limited aud
         try:
             self.audio_player.stop()
             self.is_audio_playing = False
+
+            # Clear position indicators in visualization when stopping playback
+            if (
+                hasattr(self, "audio_visualizer_widget")
+                and self.audio_visualizer_widget
+            ):
+                self.audio_visualizer_widget.clear_position_indicators()
 
             # Update the specific file's status in treeview without full refresh
             if self.current_playing_filename_for_replay:

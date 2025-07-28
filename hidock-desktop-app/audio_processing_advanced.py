@@ -17,8 +17,14 @@ import scipy.signal as signal
 import scipy.fft as fft
 from scipy.io import wavfile
 from scipy.ndimage import median_filter
-import librosa
-import soundfile as sf
+try:
+    import librosa
+    import soundfile as sf
+    ADVANCED_AUDIO_AVAILABLE = True
+except ImportError:
+    ADVANCED_AUDIO_AVAILABLE = False
+    librosa = None
+    sf = None
 from typing import Tuple, Optional, Dict, List, Union
 from dataclasses import dataclass
 from enum import Enum

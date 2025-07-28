@@ -17,7 +17,12 @@ import os
 import wave
 from typing import Any, Dict, Literal
 
-import google.generativeai as genai
+try:
+    import google.generativeai as genai
+    TRANSCRIPTION_AVAILABLE = True
+except ImportError:
+    genai = None
+    TRANSCRIPTION_AVAILABLE = False
 from config_and_logger import logger
 
 # --- Constants ---
