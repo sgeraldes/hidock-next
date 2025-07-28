@@ -1,4 +1,0 @@
-pyusb
-customtkinter
-Pillow
-pygame

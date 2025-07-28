@@ -1,191 +1,95 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# ===================================================================
+# Python
+# ===================================================================
 
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-cover/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
-.pdm.toml
-.pdm-python
-.pdm-build/
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
+# Virtual Environments
+.venv/
 venv/
 ENV/
-env.bak/
-venv.bak/
 
-# Spyder project settings
-.spyderproject
-.spyproject
+# Python cache files
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
 
-# Rope project settings
-.ropeproject
+# Test and coverage reports
+.pytest_cache/
+coverage/
+htmlcov/
+.coverage
+.coverage.*
 
-# mkdocs documentation
-/site
+# ===================================================================
+# Project-Specific & User Files
+# ===================================================================
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+# Custom folders that should not be in the repository
+archived/
+reference/
+audio/
+.kiro/
 
-# Pyre type checker
-.pyre/
+# Large media files (covered by the audio/ rule, but good to be explicit)
+*.wav
+*.mp3
+*.mp4
+*.mov
+*.avi
 
-# pytype static type analyzer
-.pytype/
+# Database files and dumps
+*.sql
+*.dump
+*.sqlite3
 
-# Cython debug symbols
-cython_debug/
+# ===================================================================
+# General Development
+# ===================================================================
 
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+# Environment variables & Secrets
+# Keep .env files out of version control. A .env.example should be committed.
+.env
+.env.*
+!.env.example
 
-# Ruff stuff:
-.ruff_cache/
+# Sensitive credential files
+*.pem
+*.key
+credentials.json
+secrets.yaml
 
-# PyPI configuration file
-.pypirc
+# Build & dependency directories (can apply to any language)
+node_modules/
+dist/
+build/
 
-#  These are local resources that should not be included in the repository.
-*.hda
-reference
-# Ignoring 'Icons' directory to exclude asset files from version control
-# icons
-icons/black
-icons/white
-icons/blue
-icons/green
-icons/red
-icons/yellow
-# Ignore the 'themes' directory; ensure it does not contain necessary styling resources
-themes
-# archived is ignored to prevent committing old or unused files
-archived
-audio-insights-extractor
+# Log files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor & IDE directories
+.idea/
+.vscode/
+*.sublime-workspace
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+.gemini/
+AGENT.md
+GEMINI.md
+
+ACCEPTANCE_CRITERIA.md
