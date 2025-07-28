@@ -211,6 +211,54 @@ class AuxiliaryMixin:
         and then configures the combobox *in the SettingsDialog*.
         The parent_window_for_dialogs will be the SettingsDialog instance."""
         try:
+            # If device is connected, use existing device info instead of scanning
+            if self.device_manager.device_interface.is_connected():
+                logger.info(
+                    "GUI",
+                    "scan_usb_devices_for_settings",
+                    "Device already connected, using existing device info instead of scanning...",
+                )
+
+                # Get current device info
+                try:
+                    import asyncio
+
+                    device_info = asyncio.run(
+                        self.device_manager.device_interface.get_device_info()
+                    )
+                    connected_device_desc = f"Currently Connected: {device_info.name} (VID={hex(device_info.vendor_id)}, PID={hex(device_info.product_id)})"
+
+                    # Update combobox with connected device
+                    if (
+                        hasattr(parent_window_for_dialogs, "settings_device_combobox")
+                        and parent_window_for_dialogs.settings_device_combobox.winfo_exists()
+                    ):
+                        parent_window_for_dialogs.settings_device_combobox.configure(
+                            values=[connected_device_desc]
+                        )
+                        parent_window_for_dialogs.settings_device_combobox.set(
+                            connected_device_desc
+                        )
+
+                        # Update the selected VID/PID to match connected device
+                        parent_window_for_dialogs.local_vars["selected_vid_var"].set(
+                            device_info.vendor_id
+                        )
+                        parent_window_for_dialogs.local_vars["selected_pid_var"].set(
+                            device_info.product_id
+                        )
+
+                    if change_callback:
+                        change_callback()
+                    return
+
+                except Exception as e:
+                    logger.warning(
+                        "GUI",
+                        "scan_usb_devices_for_settings",
+                        f"Failed to get connected device info: {e}, falling back to scan",
+                    )
+
             logger.info(
                 "GUI",
                 "scan_usb_devices_for_settings",
@@ -239,7 +287,30 @@ class AuxiliaryMixin:
                     )
                 return
 
-            with self.device_manager.device_interface.jensen_device.get_usb_lock():  # Acquire lock before any PyUSB calls
+            # Try to acquire the USB lock with a timeout to prevent deadlocks during downloads
+            usb_lock = self.device_manager.device_interface.jensen_device.get_usb_lock()
+            lock_acquired = usb_lock.acquire(blocking=False)
+
+            if not lock_acquired:
+                # If we can't get the lock immediately, it means downloads are active
+                logger.info(
+                    "GUI",
+                    "scan_usb_devices_for_settings",
+                    "USB lock is busy (downloads active), skipping device scan",
+                )
+                if (
+                    hasattr(parent_window_for_dialogs, "settings_device_combobox")
+                    and parent_window_for_dialogs.settings_device_combobox.winfo_exists()
+                ):
+                    parent_window_for_dialogs.settings_device_combobox.configure(
+                        values=["Device busy - downloads active"]
+                    )
+                    parent_window_for_dialogs.settings_device_combobox.set(
+                        "Device busy - downloads active"
+                    )
+                return
+
+            try:
                 found_devices = usb.core.find(
                     find_all=True, backend=self.usb_backend_instance
                 )
@@ -260,6 +331,8 @@ class AuxiliaryMixin:
                 for dev in found_devices:
                     desc, vid, pid, is_problem = self._get_device_display_info(dev)
                     processed_devices.append((desc, vid, pid, is_problem))
+            finally:
+                usb_lock.release()
 
             good_devs = sorted(
                 [d for d in processed_devices if not d[3]], key=lambda x: x[0]

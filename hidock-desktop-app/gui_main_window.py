@@ -175,6 +175,7 @@ class HiDockToolGUI(
             "size": "Size (MB)",
             "duration": "Duration",
             "datetime": "Date/Time",
+            "version": "Version",
             "status": "Status",
         }
         self.icons = {}
@@ -556,6 +557,8 @@ class HiDockToolGUI(
             ),
         )
         self.bind_all("<Control-comma>", lambda e: self.open_settings_window())
+        self.bind_all("<Control-s>", lambda e: self.stop_audio_playback_gui())
+        self.bind_all("<space>", lambda e: self.pause_audio_playback_gui())
         self.view_menu = tkinter.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=self.view_menu)
         self.view_menu.add_command(
@@ -599,6 +602,14 @@ class HiDockToolGUI(
             compound="left",
         )
         self.actions_menu.add_command(
+            label="Stop Playback",
+            command=self.stop_audio_playback_gui,
+            state="disabled",
+            accelerator="Ctrl+S",
+            image=self.menu_icons.get("stop"),
+            compound="left",
+        )
+        self.actions_menu.add_command(
             label="Delete Selected",
             command=self.delete_selected_files_gui,
             state="disabled",
@@ -606,6 +617,21 @@ class HiDockToolGUI(
             compound="left",
         )
         self.actions_menu.add_separator()
+        self.actions_menu.add_command(
+            label="Cancel Selected Downloads",
+            command=self.cancel_selected_downloads_gui,
+            state="disabled",
+            accelerator="Esc",
+            image=self.menu_icons.get("cancel"),
+            compound="left",
+        )
+        self.actions_menu.add_command(
+            label="Cancel All Downloads",
+            command=self.cancel_all_downloads_gui,
+            state="disabled",
+            image=self.menu_icons.get("cancel"),
+            compound="left",
+        )
         self.actions_menu.add_command(
             label="Select All",
             command=self.select_all_files_action,
@@ -1072,6 +1098,45 @@ class HiDockToolGUI(
             self.actions_menu.entryconfig(
                 "Clear Selection", state="normal" if has_selection else "disabled"
             )
+
+            # Check if there are active downloads to cancel
+            active_downloads = [
+                op
+                for op in self.file_operations_manager.get_all_active_operations()
+                if op.operation_type.value == "download"
+                and op.status.value in ["pending", "in_progress"]
+            ]
+
+            # Check if selected files have active downloads
+            selected_filenames = (
+                [
+                    self.file_tree.item(iid)["values"][1]
+                    for iid in self.file_tree.selection()
+                ]
+                if has_selection
+                else []
+            )
+
+            selected_active_downloads = [
+                op for op in active_downloads if op.filename in selected_filenames
+            ]
+
+            self.actions_menu.entryconfig(
+                "Cancel Selected Downloads",
+                state="normal" if selected_active_downloads else "disabled",
+            )
+            self.actions_menu.entryconfig(
+                "Cancel All Downloads",
+                state="normal" if active_downloads else "disabled",
+            )
+
+            # Update playback controls based on audio player state
+            is_playing = hasattr(
+                self, "audio_player"
+            ) and self.audio_player.state.value in ["playing", "paused"]
+            self.actions_menu.entryconfig(
+                "Stop Playback", state="normal" if is_playing else "disabled"
+            )
         if hasattr(self, "device_menu"):
             self.device_menu.entryconfig(
                 "Sync Device Time", state="normal" if is_connected else "disabled"
@@ -1174,6 +1239,7 @@ class HiDockToolGUI(
                     ),
                     image=self.icons.get("play"),
                 )
+
         if (
             hasattr(self, "toolbar_delete_button")
             and self.toolbar_delete_button.winfo_exists()
@@ -1416,6 +1482,9 @@ class HiDockToolGUI(
         self._create_audio_visualizer_panel(self.main_content_frame)
         self._update_log_text_area_tag_colors()
 
+        # Check for missing dependencies after GUI is initialized
+        self.after(1000, self._check_dependencies)
+
     def _create_main_panel_layout(self):
         """Creates the main content frame and configures its grid."""
         self.main_content_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -1477,6 +1546,9 @@ class HiDockToolGUI(
         self.file_tree.bind("<Control-A>", lambda event: self.select_all_files_action())
         self.file_tree.bind("<Delete>", self._on_delete_key_press)
         self.file_tree.bind("<Return>", self._on_enter_key_press)
+        self.file_tree.bind(
+            "<Escape>", lambda event: self.cancel_selected_downloads_gui()
+        )
         self.file_tree.bind("<ButtonPress-1>", self._on_file_button1_press)
         self.file_tree.bind("<B1-Motion>", self._on_file_b1_motion)
         self.file_tree.bind("<ButtonRelease-1>", self._on_file_button1_release)
@@ -1526,10 +1598,30 @@ class HiDockToolGUI(
         self.audio_visualizer_frame.grid(
             row=2, column=0, sticky="nsew", padx=0, pady=(0, 5)
         )
+
+        # Add collapse/expand button
+        self.visualizer_header = ctk.CTkFrame(self.audio_visualizer_frame)
+        self.visualizer_header.pack(fill="x", padx=5, pady=5)
+
+        self.visualizer_toggle = ctk.CTkButton(
+            self.visualizer_header,
+            text="🎵 Show Audio Visualization",
+            command=self._toggle_audio_visualizer,
+            width=200,
+            height=30,
+        )
+        self.visualizer_toggle.pack(side="left", padx=5)
+
         self.audio_visualizer_widget = AudioVisualizationWidget(
             self.audio_visualizer_frame
         )
-        self.audio_visualizer_widget.pack(fill="both", expand=True)
+
+        # Initially hide the visualization widget
+        self.visualizer_expanded = False
+        self._update_visualizer_visibility()
+
+        # Setup audio player callbacks for visualization
+        self._setup_audio_visualization_callbacks()
 
     def _set_minimum_window_size(self):
         """Sets the minimum size of the main window to ensure all widgets are visible."""
@@ -1547,20 +1639,388 @@ class HiDockToolGUI(
             pass
         self.minsize(min_w, min_h)
 
+    def _check_dependencies(self):
+        """Check for missing dependencies and show user-friendly warnings."""
+        try:
+            import shutil
+            import subprocess
+            from tkinter import messagebox
+
+            # Check for ffmpeg
+            ffmpeg_available = False
+            try:
+                # Try to find ffmpeg in PATH
+                if shutil.which("ffmpeg"):
+                    ffmpeg_available = True
+                else:
+                    # Try to run ffmpeg to see if it's available
+                    subprocess.run(
+                        ["ffmpeg", "-version"],
+                        capture_output=True,
+                        check=True,
+                        timeout=5,
+                    )
+                    ffmpeg_available = True
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                FileNotFoundError,
+            ):
+                ffmpeg_available = False
+
+            if not ffmpeg_available:
+                logger.warning(
+                    "MainWindow",
+                    "_check_dependencies",
+                    "FFmpeg not found - audio conversion features will be limited",
+                )
+
+                # Show user-friendly warning
+                self._show_ffmpeg_warning()
+
+        except Exception as e:
+            logger.error(
+                "MainWindow", "_check_dependencies", f"Error checking dependencies: {e}"
+            )
+
+    def _show_ffmpeg_warning(self):
+        """Show a user-friendly warning about missing ffmpeg dependency."""
+        try:
+            import platform
+            from tkinter import messagebox
+
+            system = platform.system().lower()
+
+            if system == "windows":
+                install_msg = """To install FFmpeg on Windows:
+1. Download from: https://ffmpeg.org/download.html#build-windows
+2. Extract to a folder (e.g., C:\\ffmpeg)
+3. Add C:\\ffmpeg\\bin to your PATH environment variable
+4. Restart the application
+
+Alternative: Install via Chocolatey: choco install ffmpeg"""
+            elif system == "darwin":  # macOS
+                install_msg = """To install FFmpeg on macOS:
+1. Install Homebrew: https://brew.sh
+2. Run: brew install ffmpeg
+3. Restart the application
+
+Alternative: Download from https://ffmpeg.org/download.html#build-mac"""
+            else:  # Linux
+                install_msg = """To install FFmpeg on Linux:
+Ubuntu/Debian: sudo apt update && sudo apt install ffmpeg
+CentOS/RHEL: sudo yum install ffmpeg
+Fedora: sudo dnf install ffmpeg
+Arch: sudo pacman -S ffmpeg
+
+Alternative: Download from https://ffmpeg.org/download.html#build-linux"""
+
+            message = f"""FFmpeg Not Found
+
+Advanced audio format conversion features are currently unavailable.
+Basic audio playback will still work normally.
+
+{install_msg}
+
+You can dismiss this warning and continue using the application with limited audio conversion capabilities."""
+
+            messagebox.showwarning("Missing Dependency - FFmpeg", message, parent=self)
+
+        except Exception as e:
+            logger.error(
+                "MainWindow",
+                "_show_ffmpeg_warning",
+                f"Error showing ffmpeg warning: {e}",
+            )
+
+    def _setup_audio_visualization_callbacks(self):
+        """Setup callbacks to connect audio player with visualization widget."""
+        try:
+            logger.info(
+                "MainWindow",
+                "_setup_audio_visualization_callbacks",
+                "Setting up audio visualization callbacks...",
+            )
+
+            # Connect position updates to visualization
+            self.audio_player.on_position_changed = self._on_audio_position_changed
+            logger.info(
+                "MainWindow",
+                "_setup_audio_visualization_callbacks",
+                "Position callback connected",
+            )
+
+            # Connect state changes to visualization
+            self.audio_player.on_state_changed = self._on_audio_state_changed
+            logger.info(
+                "MainWindow",
+                "_setup_audio_visualization_callbacks",
+                "State callback connected",
+            )
+
+            logger.info(
+                "MainWindow",
+                "_setup_audio_visualization_callbacks",
+                "Audio visualization callbacks setup successfully",
+            )
+
+        except Exception as e:
+            logger.error(
+                "MainWindow",
+                "_setup_audio_visualization_callbacks",
+                f"Error setting up visualization callbacks: {e}",
+            )
+
+    def _on_audio_position_changed(self, position):
+        """Handle audio position changes and update visualization."""
+        try:
+            logger.debug(
+                "MainWindow",
+                "_on_audio_position_changed",
+                f"Position update: {position.current_time:.1f}s / {position.total_time:.1f}s ({position.percentage:.1f}%)",
+            )
+
+            if (
+                hasattr(self, "audio_visualizer_widget")
+                and self.audio_visualizer_widget
+            ):
+                self.audio_visualizer_widget.update_position(position)
+
+        except Exception as e:
+            logger.error(
+                "MainWindow",
+                "_on_audio_position_changed",
+                f"Error updating visualization position: {e}",
+            )
+
+    def _on_audio_state_changed(self, state):
+        """Handle audio state changes and update visualization accordingly."""
+        try:
+            from audio_player_enhanced import PlaybackState
+
+            if (
+                hasattr(self, "audio_visualizer_widget")
+                and self.audio_visualizer_widget
+            ):
+                if state == PlaybackState.PLAYING:
+                    # Auto-show visualization when audio starts playing
+                    if (
+                        hasattr(self, "visualizer_expanded")
+                        and not self.visualizer_expanded
+                    ):
+                        self.visualizer_expanded = True
+                        self._update_visualizer_visibility()
+
+                    # Start spectrum analysis if available
+                    current_track = self.audio_player.get_current_track()
+                    if current_track:
+                        # Get audio data for spectrum analysis
+                        try:
+                            from audio_player_enhanced import AudioProcessor
+
+                            waveform_data, sample_rate = (
+                                AudioProcessor.extract_waveform_data(
+                                    current_track.filepath, max_points=1024
+                                )
+                            )
+                            if len(waveform_data) > 0:
+                                self.audio_visualizer_widget.start_spectrum_analysis(
+                                    waveform_data, sample_rate
+                                )
+                        except Exception as spectrum_error:
+                            logger.warning(
+                                "MainWindow",
+                                "_on_audio_state_changed",
+                                f"Could not start spectrum analysis: {spectrum_error}",
+                            )
+
+                elif state in [PlaybackState.STOPPED, PlaybackState.PAUSED]:
+                    # Stop spectrum analysis
+                    self.audio_visualizer_widget.stop_spectrum_analysis()
+
+        except Exception as e:
+            logger.error(
+                "MainWindow",
+                "_on_audio_state_changed",
+                f"Error handling audio state change: {e}",
+            )
+
+    def _toggle_audio_visualizer(self):
+        """Toggle the audio visualizer visibility."""
+        try:
+            self.visualizer_expanded = not self.visualizer_expanded
+            self._update_visualizer_visibility()
+        except Exception as e:
+            logger.error(
+                "MainWindow",
+                "_toggle_audio_visualizer",
+                f"Error toggling visualizer: {e}",
+            )
+
+    def _update_visualizer_visibility(self):
+        """Update the visibility of the audio visualizer."""
+        try:
+            if self.visualizer_expanded:
+                self.audio_visualizer_widget.pack(
+                    fill="both", expand=True, padx=5, pady=(0, 5)
+                )
+                self.visualizer_toggle.configure(text="🎵 Hide Audio Visualization")
+            else:
+                self.audio_visualizer_widget.pack_forget()
+                self.visualizer_toggle.configure(text="🎵 Show Audio Visualization")
+        except Exception as e:
+            logger.error(
+                "MainWindow",
+                "_update_visualizer_visibility",
+                f"Error updating visibility: {e}",
+            )
+
+    def _update_waveform_for_selection(self):
+        """Update waveform visualization based on current file selection."""
+        try:
+            selected_iids = self.file_tree.selection()
+
+            if not selected_iids:
+                # No file selected - hide visualization section
+                if hasattr(self, "visualizer_expanded") and self.visualizer_expanded:
+                    self.visualizer_expanded = False
+                    self._update_visualizer_visibility()
+                return
+
+            # Get the last selected file (for multiple selection)
+            last_selected_iid = selected_iids[-1]
+            file_detail = next(
+                (
+                    f
+                    for f in self.displayed_files_details
+                    if f["name"] == last_selected_iid
+                ),
+                None,
+            )
+
+            if not file_detail:
+                return
+
+            filename = file_detail["name"]
+            local_filepath = self._get_local_filepath(filename)
+
+            # Only show visualization section if file is downloaded
+            if os.path.exists(local_filepath):
+                # File is downloaded - show visualization and load waveform
+                if (
+                    hasattr(self, "visualizer_expanded")
+                    and not self.visualizer_expanded
+                ):
+                    self.visualizer_expanded = True
+                    self._update_visualizer_visibility()
+
+                if hasattr(self, "audio_visualizer_widget"):
+                    self.audio_visualizer_widget.load_audio(local_filepath)
+            else:
+                # File not downloaded - hide visualization section
+                if hasattr(self, "visualizer_expanded") and self.visualizer_expanded:
+                    self.visualizer_expanded = False
+                    self._update_visualizer_visibility()
+
+        except Exception as e:
+            logger.error(
+                "MainWindow",
+                "_update_waveform_for_selection",
+                f"Error updating waveform: {e}",
+            )
+
     def _play_local_file(self, local_filepath):
         """Loads and plays a local file, and updates the visualizer."""
         self.audio_player.load_track(local_filepath)
         self.audio_visualizer_widget.load_audio(local_filepath)
         self.audio_player.play()
 
+        # Update UI state to reflect playback
+        self.is_audio_playing = True
+        self.current_playing_filename_for_replay = os.path.basename(local_filepath)
+        self._update_menu_states()
+
+    def stop_audio_playback_gui(self):
+        """Stops audio playback and updates the UI."""
+        try:
+            self.audio_player.stop()
+            self.is_audio_playing = False
+
+            # Update the specific file's status in treeview without full refresh
+            if self.current_playing_filename_for_replay:
+                # Find the file detail to determine the correct status
+                file_detail = next(
+                    (
+                        f
+                        for f in self.displayed_files_details
+                        if f["name"] == self.current_playing_filename_for_replay
+                    ),
+                    None,
+                )
+
+                if file_detail:
+                    # Determine the appropriate status after stopping playback
+                    new_status = (
+                        "Downloaded" if file_detail.get("local_path") else "On Device"
+                    )
+
+                    # Determine appropriate tags (remove "playing" tag)
+                    tags = []
+                    if new_status == "Downloaded":
+                        tags.append("downloaded_ok")
+
+                    # Update only this specific file in the treeview
+                    self._update_file_status_in_treeview(
+                        self.current_playing_filename_for_replay,
+                        new_status,
+                        tuple(tags),
+                    )
+
+            self.current_playing_filename_for_replay = None
+            self.update_status_bar(progress_text="Playback stopped.")
+            self._update_menu_states()
+
+        except Exception as e:
+            logger.error(
+                "GUI", "stop_audio_playback_gui", f"Error stopping playback: {e}"
+            )
+            messagebox.showerror(
+                "Playback Error", f"Error stopping playback: {e}", parent=self
+            )
+
+    def pause_audio_playback_gui(self):
+        """Pauses/resumes audio playback."""
+        try:
+            if self.audio_player.state.value == "playing":
+                self.audio_player.pause()
+                self.update_status_bar(progress_text="Playback paused.")
+            elif self.audio_player.state.value == "paused":
+                self.audio_player.play()
+                self.update_status_bar(progress_text="Playback resumed.")
+
+            self._update_menu_states()
+
+        except Exception as e:
+            logger.error(
+                "GUI",
+                "pause_audio_playback_gui",
+                f"Error pausing/resuming playback: {e}",
+            )
+            messagebox.showerror(
+                "Playback Error", f"Error pausing/resuming playback: {e}", parent=self
+            )
+
+    def _stop_audio_playback(self):
+        """Internal method for stopping audio playback (used by toolbar button)."""
+        self.stop_audio_playback_gui()
+
     def _download_for_playback_and_play(self, filename, local_filepath):
         """
         Downloads a single file and triggers playback upon successful completion.
         """
-        messagebox.showinfo(
-            "Playback Download",
-            f"'{filename}' needs to be downloaded before playback. Starting download now.",
-            parent=self,
+        # Show brief status message instead of interrupting dialog
+        self.update_status_bar(
+            progress_text=f"Downloading '{filename}' for playback..."
         )
 
         def on_playback_download_complete(operation):

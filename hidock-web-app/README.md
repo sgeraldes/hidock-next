@@ -31,8 +31,8 @@ A modern, community-driven web application for HiDock device management and AI-p
 
 - Node.js 18+ and npm
 - Modern web browser with WebUSB support (Chrome, Edge, Opera)
-- HiDock device (H1, H1E, or compatible) - *Optional for demo*
-- Gemini API key (for transcription features) - *Optional for demo*
+- HiDock device (H1, H1E, or compatible) - _Optional for demo_
+- Gemini API key (for transcription features) - _Optional for demo_
 
 ### Installation
 
@@ -114,7 +114,7 @@ npm run preview
 1. Get an API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
 2. Add the key to your `.env.local` file:
 
-   ```
+   ```shell
    VITE_GEMINI_API_KEY=your_api_key_here
    ```
 
@@ -132,7 +132,7 @@ The app automatically detects HiDock devices. If you have connection issues:
 
 ### Project Structure
 
-```
+```folder
 src/
 ├── components/     # Reusable UI components
 ├── pages/         # Main application pages
@@ -213,9 +213,7 @@ MIT License - see [LICENSE](../LICENSE) file for details.
 
 **Note**: This is a community-driven project and is not officially affiliated with HiDock or its parent company.
 
-## 🎯 **P
-
-roduction Ready - Complete Implementation**
+## 🎯 **Production Ready - Complete Implementation**
 
 ### ✅ **Real HiDock Device Integration**
 
@@ -234,7 +232,7 @@ roduction Ready - Complete Implementation**
 ### ✅ **Developer Friendly**
 
 - **Modern Stack**: React + TypeScript + Tailwind CSS
-- **Clean Architecture**: Modular, well-documented codebase  
+- **Clean Architecture**: Modular, well-documented codebase
 - **Easy Deployment**: Ready for Vercel, Netlify, or any static host
 - **Extensible**: Simple to add new features and integrations
 

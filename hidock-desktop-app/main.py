@@ -15,13 +15,15 @@ or encounters a severe runtime issue.
 # main.py
 
 import sys
-import traceback
 import tkinter  # For tkinter.Menu and messagebox
+import traceback
+
 import customtkinter as ctk  # For CTkInputDialog in settings, and CTk itself
+from config_and_logger import logger  # For the top-level exception handler
 
 # Import the main GUI class and the logger
 from gui_main_window import HiDockToolGUI
-from config_and_logger import logger  # For the top-level exception handler
+
 
 def main():
     """Initializes and runs the HiDock Tool application."""
@@ -30,7 +32,9 @@ def main():
     # with a theme before any widgets might be created, even implicitly.
     # These could also be loaded from config here if preferred, but the GUI class handles it.
     ctk.set_appearance_mode("System")  # Modes: "System" (standard), "Dark", "Light"
-    ctk.set_default_color_theme("blue")  # Themes: "blue" (standard), "green", "dark-blue"
+    ctk.set_default_color_theme(
+        "blue"
+    )  # Themes: "blue" (standard), "green", "dark-blue"
 
     app = None  # pylint: disable=invalid-name # Initialize app to None for the except block
     try:
@@ -75,6 +79,7 @@ def main():
             ):
                 temp_root_for_error.destroy()
         sys.exit(1)  # Exit the application after a critical error
+
 
 if __name__ == "__main__":
     main()

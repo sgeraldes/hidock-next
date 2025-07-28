@@ -263,20 +263,8 @@ class DesktopDeviceAdapter(IDeviceInterface):
             if not files_info or "files" not in files_info:
                 return []
 
-            recordings = []
-            for i, file_info in enumerate(files_info["files"]):
-                recording = AudioRecording(
-                    id=file_info.get("name", ""),
-                    filename=file_info.get("name", ""),
-                    size=file_info.get("length", 0),
-                    duration=file_info.get("duration", 0.0),
-                    date_created=file_info.get("time", datetime.now()),
-                    format_version=file_info.get("version", 1),
-                    checksum=file_info.get("signature", ""),
-                )
-                recordings.append(recording)
-
-            return recordings
+            # Return the raw file info dictionaries directly, as the GUI expects this format.
+            return files_info["files"]
 
         except Exception as e:
             logger.error(
@@ -311,10 +299,11 @@ class DesktopDeviceAdapter(IDeviceInterface):
     async def download_recording(
         self,
         recording_id: str,
+        output_path: str,
         progress_callback: Optional[Callable[[OperationProgress], None]] = None,
         file_size: Optional[int] = None,
-    ) -> bytes:
-        """Download an audio recording from the device."""
+    ) -> None:
+        """Download an audio recording from the device directly to a file."""
         if not self.is_connected():
             raise ConnectionError("No device connected")
 
@@ -348,38 +337,42 @@ class DesktopDeviceAdapter(IDeviceInterface):
                     f"download_{recording_id}", progress_callback
                 )
 
-            # Download the file
-            file_data = bytearray()
+            # Open output file for streaming write
+            bytes_written = 0
 
-            def data_callback(chunk: bytes):
-                file_data.extend(chunk)
+            with open(output_path, "wb") as output_file:
 
-            def progress_update(bytes_received: int, total_bytes: int):
-                if progress_callback:
-                    progress = OperationProgress(
-                        operation_id=f"download_{recording_id}",
-                        operation_name=f"Downloading {recording_filename}",
-                        progress=(
-                            bytes_received / total_bytes if total_bytes > 0 else 0.0
-                        ),
-                        status=OperationStatus.IN_PROGRESS,
-                        bytes_processed=bytes_received,
-                        total_bytes=total_bytes,
-                        start_time=datetime.now(),
-                    )
-                    progress_callback(progress)
+                def data_callback(chunk: bytes):
+                    nonlocal bytes_written
+                    output_file.write(chunk)
+                    bytes_written += len(chunk)
 
-            # Use Jensen device to stream the file
-            result = self.jensen_device.stream_file(
-                filename=recording_filename,
-                file_length=recording_size,
-                data_callback=data_callback,
-                progress_callback=progress_update,
-                timeout_s=180,
-            )
+                def progress_update(bytes_received: int, total_bytes: int):
+                    if progress_callback:
+                        progress = OperationProgress(
+                            operation_id=f"download_{recording_id}",
+                            operation_name=f"Downloading {recording_filename}",
+                            progress=(
+                                bytes_received / total_bytes if total_bytes > 0 else 0.0
+                            ),
+                            status=OperationStatus.IN_PROGRESS,
+                            bytes_processed=bytes_received,
+                            total_bytes=total_bytes,
+                            start_time=datetime.now(),
+                        )
+                        progress_callback(progress)
 
-            if result != "OK":
-                raise RuntimeError(f"Download failed: {result}")
+                # Use Jensen device to stream the file directly to disk
+                result = self.jensen_device.stream_file(
+                    filename=recording_filename,
+                    file_length=recording_size,
+                    data_callback=data_callback,
+                    progress_callback=progress_update,
+                    timeout_s=180,
+                )
+
+                if result != "OK":
+                    raise RuntimeError(f"Download failed: {result}")
 
             # Final progress update
             if progress_callback:
@@ -388,12 +381,10 @@ class DesktopDeviceAdapter(IDeviceInterface):
                     operation_name=f"Downloaded {recording_filename}",
                     progress=1.0,
                     status=OperationStatus.COMPLETED,
-                    bytes_processed=len(file_data),
+                    bytes_processed=bytes_written,
                     total_bytes=recording_size,
                 )
                 progress_callback(final_progress)
-
-            return bytes(file_data)
 
         except Exception as e:
             logger.error(
@@ -643,6 +634,23 @@ class DesktopDeviceAdapter(IDeviceInterface):
                 f"Connection test failed: {e}",
             )
             return False
+
+    async def get_device_settings(self) -> Optional[Dict[str, bool]]:
+        """Get device-specific behavior settings."""
+        if not self.is_connected():
+            return None
+
+        try:
+            # Call the Jensen device's get_device_settings method
+            settings = self.jensen_device.get_device_settings()
+            return settings
+        except Exception as e:
+            logger.error(
+                "DesktopDeviceAdapter",
+                "get_device_settings",
+                f"Failed to get device settings: {e}",
+            )
+            return None
 
 
 # Factory function to create desktop device adapter

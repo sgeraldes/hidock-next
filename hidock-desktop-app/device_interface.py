@@ -267,19 +267,18 @@ class IDeviceInterface(ABC):
     async def download_recording(
         self,
         recording_id: str,
+        output_path: str,
         progress_callback: Optional[Callable[[OperationProgress], None]] = None,
         file_size: Optional[int] = None,
-    ) -> bytes:
+    ) -> None:
         """
-        Download an audio recording from the device.
+        Download an audio recording from the device directly to a file.
 
         Args:
             recording_id: ID of the recording to download
+            output_path: Path where the downloaded file should be saved
             progress_callback: Optional callback for progress updates
             file_size: Optional file size from cache to avoid expensive file list operation
-
-        Returns:
-            bytes: Raw audio data
 
         Raises:
             ConnectionError: If no device is connected
@@ -397,6 +396,16 @@ class IDeviceInterface(ABC):
 
         Returns:
             bool: True if connection is healthy, False otherwise
+        """
+        pass
+
+    @abstractmethod
+    async def get_device_settings(self) -> Optional[Dict[str, bool]]:
+        """
+        Get device-specific behavior settings.
+
+        Returns:
+            Optional[Dict[str, bool]]: Dictionary of device settings or None if failed
         """
         pass
 

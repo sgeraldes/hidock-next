@@ -5,7 +5,7 @@
     "selected_vid": 4310,
     "selected_pid": 45069,
     "target_interface": 0,
-    "recording_check_interval_s": 3,
+    "recording_check_interval_s": 60,
     "default_command_timeout_ms": 5000,
     "file_stream_timeout_s": 180,
     "auto_refresh_files": false,

@@ -312,13 +312,19 @@ class EventHandlersMixin:
         if not file_detail:
             return
         status = file_detail.get("gui_status", "On Device")
-        if (
-            self.is_audio_playing
-            and self.current_playing_filename_for_replay == item_iid
-        ):
+        # Stop playback immediately if something is playing (regardless of which file)
+        if self.is_audio_playing:
             self._stop_audio_playback()
-            return
-        elif status in ["Downloaded", "Downloaded OK", "downloaded_ok"]:
+
+            # If it's the same file, just stop and return
+            if self.current_playing_filename_for_replay == item_iid:
+                return
+
+        # Update waveform for the selected file
+        self._update_waveform_for_selection()
+
+        # Handle playback/download based on file status
+        if status in ["Downloaded", "Downloaded OK", "downloaded_ok"]:
             self.play_selected_audio_gui()
         elif status in ["On Device", "Mismatch", "Cancelled"] or "Error" in status:
             if not file_detail.get("is_recording"):
@@ -516,11 +522,12 @@ class EventHandlersMixin:
         if hasattr(self, "file_tree") and self.file_tree.winfo_exists():
             self.file_tree.selection_set([])
 
-    def on_file_selection_change(self, _event=None):  # Identical to original
+    def on_file_selection_change(self, _event=None):  # Enhanced to update waveform
         """Handles changes in file selection in the treeview."""
         try:
             self.update_all_status_info()
             self._update_menu_states()
+            self._update_waveform_for_selection()
         except tkinter.TclError as e:
             logger.error(
                 "GUI",

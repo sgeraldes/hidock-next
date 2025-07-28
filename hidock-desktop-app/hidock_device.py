@@ -1,23 +1,8 @@
-"""
-HiDock Device Communication Module.
-
-This module defines the `HiDockJensen` class, responsible for handling
-low-level USB communication with HiDock devices using a specific protocol
-(referred to as "Jensen"). It includes methods for device connection,
-disconnection, sending commands, receiving responses, and performing
-various device operations such as file listing, file transfer,
-and settings management.
-
-It relies on PyUSB for USB interactions and uses a shared logger instance.
-"""
-
-# hidock_device.py
-
+import threading
 import struct
 
 # For platform detection (e.g., in connect method for kernel driver)
 import sys
-import threading
 import time
 import traceback  # For detailed error logging
 from datetime import datetime  # Needed for set_device_time method's type hint
@@ -842,56 +827,10 @@ class HiDockJensen:
         overall_timeout_sec = timeout_ms / 1000.0
 
         while time.time() - start_time < overall_timeout_sec:
-            try:
-                # Read a larger chunk to reduce number of USB transactions, if wMaxPacketSize is known
-                read_size = (
-                    self.ep_in.wMaxPacketSize * 64
-                    if self.ep_in.wMaxPacketSize
-                    else 4096
-                )  # Increased read size
-                data_chunk = self.device.read(
-                    self.ep_in.bEndpointAddress, read_size, timeout=200
-                )  # Slightly longer individual timeout
-                if data_chunk:
-                    self.receive_buffer.extend(data_chunk)
-                    logger.debug(
-                        "Jensen",
-                        "_receive_response",
-                        f"Rcvd chunk len: {len(data_chunk)}. "
-                        f"Buf len: {len(self.receive_buffer)}. "
-                        f"Data: {bytes(data_chunk).hex()[:32]}...",
-                    )
-            except usb.core.USBTimeoutError:
-                # If we are in a streaming context, a timeout is not necessarily an error,
-                # but rather a signal that the device has no data to send at this moment.
-                # The calling function (e.g., list_files) is responsible for handling
-                # consecutive timeouts as an end-of-stream signal.
-                if streaming_cmd_id is None:
-                    self._increment_error_count("usb_timeout")
-                pass  # This is an expected condition, especially during streaming.
-            except usb.core.USBError as e:
-                logger.error("Jensen", "_receive_response", f"USB read error: {e}")
-                if e.errno == 32:  # LIBUSB_ERROR_PIPE
-                    self._increment_error_count("usb_pipe_error")
-                    try:
-                        self.device.clear_halt(self.ep_in.bEndpointAddress)
-                        logger.info(
-                            "Jensen",
-                            "_receive_response",
-                            "Cleared halt on EP_IN after pipe error.",
-                        )
-                    except usb.core.USBError as ce:  # More specific
-                        logger.error(
-                            "Jensen",
-                            "_receive_response",
-                            f"Failed to clear halt on EP_IN: {ce}",
-                        )
-                else:
-                    self._increment_error_count("protocol_error")
-
-                self._increment_error_count("connection_lost")
-                self.disconnect()  # Assume connection is lost
-                return None
+            # --- BEGIN MODIFICATION ---
+            # Invert the logic: First, try to parse the existing buffer.
+            # Only read from the device if the buffer doesn't contain a full packet.
+            # This prioritizes processing and prevents the buffer from growing uncontrollably.
 
             # Attempt to parse messages from buffer
             while True:  # Loop to parse multiple messages if they are buffered
@@ -902,6 +841,22 @@ class HiDockJensen:
                 if not (
                     self.receive_buffer[0] == 0x12 and self.receive_buffer[1] == 0x34
                 ):
+                    # During streaming, we expect a continuous flow of valid packets.
+                    # A missing sync marker at the start of the buffer is a fatal protocol error.
+                    if streaming_cmd_id is not None:
+                        logger.error(
+                            "Jensen",
+                            "_receive_response",
+                            f"Protocol desync during stream (CMD {streaming_cmd_id}). "
+                            f"Buffer should start with sync marker but doesn't. "
+                            f"Prefix: {self.receive_buffer[:64].hex()}",
+                        )
+                        self._increment_error_count("protocol_error")
+                        self.receive_buffer.clear()  # Clear bad data
+                        # Exit parsing loop, will lead to timeout in stream_file
+                        return None # Make it fail fast
+
+                    # For non-streaming commands, attempt to find the next sync marker.
                     sync_offset = self.receive_buffer.find(b"\x12\x34")
                     if sync_offset != -1:
                         if sync_offset > 0:
@@ -912,10 +867,15 @@ class HiDockJensen:
                                 f"prefix bytes: {self.receive_buffer[:sync_offset].hex()}",
                             )
                         self.receive_buffer = self.receive_buffer[sync_offset:]
-                    else:  # Sync marker not found in current buffer segment
-                        # If streaming, we might expect raw data without headers after the first packet.
-                        # This part needs careful handling based on actual device behavior for streaming.
-                        # For now, assume all responses have headers.
+                    else:
+                        # No sync marker found at all, discard the whole buffer
+                        # as it's unrecoverable garbage.
+                        logger.warning(
+                            "Jensen",
+                            "_receive_response",
+                            f"No sync marker found in buffer. Discarding {len(self.receive_buffer)} bytes.",
+                        )
+                        self.receive_buffer.clear()
                         break
 
                 if len(self.receive_buffer) < 12:
@@ -974,9 +934,60 @@ class HiDockJensen:
                         )
                 else:  # Not enough data for this full message yet
                     break
+            
+            # If we've reached here, it means the buffer didn't contain a full packet.
+            # Now, we can safely read more data from the device.
+            try:
+                # Read a larger chunk to reduce number of USB transactions, if wMaxPacketSize is known
+                read_size = (
+                    self.ep_in.wMaxPacketSize * 64
+                    if self.ep_in.wMaxPacketSize
+                    else 4096
+                )  # Increased read size
+                data_chunk = self.device.read(
+                    self.ep_in.bEndpointAddress, read_size, timeout=200
+                )  # Slightly longer individual timeout
+                if data_chunk:
+                    self.receive_buffer.extend(data_chunk)
+                    logger.debug(
+                        "Jensen",
+                        "_receive_response",
+                        f"Rcvd chunk len: {len(data_chunk)}. "
+                        f"Buf len: {len(self.receive_buffer)}. "
+                        f"Data: {bytes(data_chunk).hex()[:32]}...",
+                    )
+            except usb.core.USBTimeoutError:
+                # If we are in a streaming context, a timeout is not necessarily an error,
+                # but rather a signal that the device has no data to send at this moment.
+                # The calling function (e.g., list_files) is responsible for handling
+                # consecutive timeouts as an end-of-stream signal.
+                if streaming_cmd_id is None:
+                    self._increment_error_count("usb_timeout")
+                pass  # This is an expected condition, especially during streaming.
+            except usb.core.USBError as e:
+                logger.error("Jensen", "_receive_response", f"USB read error: {e}")
+                if e.errno == 32:  # LIBUSB_ERROR_PIPE
+                    self._increment_error_count("usb_pipe_error")
+                    try:
+                        self.device.clear_halt(self.ep_in.bEndpointAddress)
+                        logger.info(
+                            "Jensen",
+                            "_receive_response",
+                            "Cleared halt on EP_IN after pipe error.",
+                        )
+                    except usb.core.USBError as ce:  # More specific
+                        logger.error(
+                            "Jensen",
+                            "_receive_response",
+                            f"Failed to clear halt on EP_IN: {ce}",
+                        )
+                else:
+                    self._increment_error_count("protocol_error")
 
-            if time.time() - start_time >= overall_timeout_sec:  # Check overall timeout
-                break
+                self._increment_error_count("connection_lost")
+                self.disconnect()  # Assume connection is lost
+                return None
+            # --- END MODIFICATION ---
 
         logger.warning(
             "Jensen",
@@ -1224,46 +1235,83 @@ class HiDockJensen:
 
             file_list_aggregate_data = bytearray()
 
-            # We expect a timeout to signal the end of the stream, but a single long
-            # timeout can make the app feel unresponsive. This loop uses shorter
-            # timeouts and breaks after a few consecutive failures, making it more
-            # robust against temporary stalls while still terminating correctly.
+            # Stream file list data until we have enough data to parse all expected files
+            # This is much more efficient than timeout-based detection and scales properly
+            expected_file_count = None
+            parsed_file_count = 0
             consecutive_timeouts = 0
-            MAX_CONSECUTIVE_TIMEOUTS = 3  # End stream after 3x 1.5s timeouts
-
+            max_consecutive_timeouts = 3  # Prevent infinite loops (3 * 2s = 6s max wait)
+            
             while True:
                 response = self._receive_response(
-                    seq_id, timeout_ms=1500, streaming_cmd_id=CMD_GET_FILE_LIST
+                    seq_id, timeout_ms=2000, streaming_cmd_id=CMD_GET_FILE_LIST  # Shorter timeout to fail faster
                 )
 
                 if response and response["id"] == CMD_GET_FILE_LIST:
                     file_list_aggregate_data.extend(response["body"])
                     seq_id = response["sequence"]
-                    consecutive_timeouts = 0  # Reset counter on successful read
-                else:
-                    # This block is reached on timeout (response is None) or unexpected packet
-                    if response is None:  # It was a timeout
-                        consecutive_timeouts += 1
-                        logger.debug(
-                            "Jensen",
-                            "list_files",
-                            f"File list stream timeout #{consecutive_timeouts}. "
-                            f"Assuming end of stream if this continues.",
-                        )
-                        if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+                    consecutive_timeouts = 0  # Reset timeout counter on successful response
+                    
+                    # Check if we can determine expected file count from header
+                    if expected_file_count is None and len(file_list_aggregate_data) >= 6:
+                        # Use a scoped memoryview to avoid preventing bytearray resizing
+                        if file_list_aggregate_data[0] == 0xFF and file_list_aggregate_data[1] == 0xFF:
+                            expected_file_count = struct.unpack(">I", file_list_aggregate_data[2:6])[0]
                             logger.info(
                                 "Jensen",
                                 "list_files",
-                                "File list stream complete after consecutive timeouts.",
+                                f"Expected {expected_file_count} files from device header"
                             )
-                            break  # Exit the loop
-                    else:  # It was an unexpected packet
+                    
+                    # If we know how many files to expect, check if we can parse that many
+                    if expected_file_count is not None:
+                        # Quick parsing check - count how many complete file entries we have
+                        parsed_file_count = self._count_parseable_files(file_list_aggregate_data)
+                        
+                        if parsed_file_count >= expected_file_count:
+                            logger.info(
+                                "Jensen", 
+                                "list_files",
+                                f"Received all {expected_file_count} files, ending stream"
+                            )
+                            break
+                            
+                elif response is None:  # Timeout - only acceptable if we have all expected files
+                    consecutive_timeouts += 1
+                    
+                    if expected_file_count is not None and parsed_file_count >= expected_file_count:
+                        logger.info(
+                            "Jensen",
+                            "list_files", 
+                            f"Stream timeout but have all {expected_file_count} files, completing"
+                        )
+                        break
+                    elif consecutive_timeouts >= max_consecutive_timeouts:
+                        # Too many consecutive timeouts - device may be unresponsive
                         logger.warning(
                             "Jensen",
                             "list_files",
-                            f"Received unexpected response {response['id']} while waiting for file list. Assuming list is complete.",
+                            f"Device stream incomplete after {max_consecutive_timeouts} timeouts. "
+                            f"Got {parsed_file_count}/{expected_file_count or '?'} files. "
+                            f"Proceeding with partial data."
                         )
                         break
+                    else:
+                        # Timeout but still within limits
+                        logger.warning(
+                            "Jensen",
+                            "list_files",
+                            f"Stream timeout {consecutive_timeouts}/{max_consecutive_timeouts} with {parsed_file_count}/{expected_file_count or '?'} files. Retrying..."
+                        )
+                        continue  # Keep trying
+                else:
+                    # Unexpected packet - log and continue
+                    logger.warning(
+                        "Jensen",
+                        "list_files",
+                        f"Received unexpected response {response['id']} while waiting for file list"
+                    )
+                    continue
 
         if not file_list_aggregate_data:
             return {
@@ -1274,44 +1322,43 @@ class HiDockJensen:
             }
         files = []
         offset = 0
-        data_view = memoryview(file_list_aggregate_data)
         total_size_bytes = 0
         total_files_from_header = -1
         if (
-            len(data_view) >= 6
-            and data_view[offset] == 0xFF
-            and data_view[offset + 1] == 0xFF
+            len(file_list_aggregate_data) >= 6
+            and file_list_aggregate_data[offset] == 0xFF
+            and file_list_aggregate_data[offset + 1] == 0xFF
         ):
             total_files_from_header = struct.unpack(
-                ">I", data_view[offset + 2 : offset + 6]
+                ">I", file_list_aggregate_data[offset + 2 : offset + 6]
             )[0]
             offset += 6
         parsed_file_count = 0
-        while offset < len(data_view):
+        while offset < len(file_list_aggregate_data):
             try:
-                if offset + 4 > len(data_view):
+                if offset + 4 > len(file_list_aggregate_data):
                     break
-                file_version = data_view[offset]
+                file_version = file_list_aggregate_data[offset]
                 offset += 1
                 name_len = struct.unpack(
-                    ">I", b"\x00" + data_view[offset : offset + 3]
+                    ">I", b"\x00" + file_list_aggregate_data[offset : offset + 3]
                 )[0]
                 offset += 3
-                if offset + name_len > len(data_view):
+                if offset + name_len > len(file_list_aggregate_data):
                     break
                 filename = "".join(
-                    chr(b) for b in data_view[offset : offset + name_len] if b > 0
+                    chr(b) for b in file_list_aggregate_data[offset : offset + name_len] if b > 0
                 )
                 offset += name_len
                 min_remaining = 4 + 6 + 16
-                if offset + min_remaining > len(data_view):
+                if offset + min_remaining > len(file_list_aggregate_data):
                     break
-                file_length_bytes = struct.unpack(">I", data_view[offset : offset + 4])[
+                file_length_bytes = struct.unpack(">I", file_list_aggregate_data[offset : offset + 4])[
                     0
                 ]
                 offset += 4
                 offset += 6
-                signature_hex = data_view[offset : offset + 16].hex()
+                signature_hex = file_list_aggregate_data[offset : offset + 16].hex()
                 offset += 16
                 create_date_str, create_time_str, time_obj, duration_sec = (
                     "",
@@ -1402,12 +1449,14 @@ class HiDockJensen:
                 duration_sec = self._calculate_file_duration(
                     file_length_bytes, file_version
                 )
+                # Always append the file, even if date parsing fails.
+                # The GUI can handle displaying placeholder data.
                 files.append(
                     {
                         "name": filename,
                         "createDate": create_date_str,
                         "createTime": create_time_str,
-                        "time": time_obj,
+                        "time": time_obj,  # This can be None, and the GUI should handle it
                         "duration": duration_sec,
                         "version": file_version,
                         "length": file_length_bytes,
@@ -1426,27 +1475,72 @@ class HiDockJensen:
                     "Jensen",
                     "list_files_parser",
                     f"Parsing error at offset {offset} "
-                    f"(len {len(data_view)}): {e}. "
-                    f"Data: {data_view[offset-10:offset+20].hex()}",
+                    f"(len {len(file_list_aggregate_data)}): {e}. "
+                    f"Data: {file_list_aggregate_data[offset-10:offset+20].hex()}",
                 )
                 break
-        valid_files = [f for f in files if f.get("time")]
-        if len(files) != len(valid_files):
-            logger.warning(
-                "Jensen",
-                "list_files",
-                f"Filtered out {len(files) - len(valid_files)} files due to missing parsed time.",
-            )
         logger.info(
             "Jensen",
             "list_files",
-            f"Successfully parsed {len(valid_files)} valid files. Total size: {total_size_bytes} bytes.",
+            f"Successfully parsed {len(files)} files. Total size: {total_size_bytes} bytes.",
         )
         return {
-            "files": valid_files,
-            "totalFiles": len(valid_files),
+            "files": files,
+            "totalFiles": len(files),
             "totalSize": total_size_bytes,
         }
+
+    def _count_parseable_files(self, data):
+        """
+        Quickly count how many complete file entries can be parsed from the data.
+        This is used to determine when we have received enough data to parse all expected files.
+        """
+        try:
+            offset = 0
+            
+            # Skip header if present
+            if (
+                len(data) >= 6
+                and data[offset] == 0xFF
+                and data[offset + 1] == 0xFF
+            ):
+                offset += 6
+                
+            count = 0
+            while offset < len(data):
+                try:
+                    # Check if we have enough data for a complete file entry
+                    if offset + 4 > len(data):
+                        break
+                        
+                    # Skip version byte
+                    offset += 1
+                    
+                    # Get filename length and check if we have the full filename
+                    filename_length = data[offset]
+                    offset += 1
+                    if offset + filename_length > len(data):
+                        break
+                        
+                    # Skip filename
+                    offset += filename_length
+                    
+                    # Check if we have the remaining required fields (4+6+16 = 26 bytes minimum)
+                    if offset + 26 > len(data):
+                        break
+                        
+                    # Skip file length (4) + timestamp (6) + signature (16)
+                    offset += 26
+                    
+                    count += 1
+                    
+                except (struct.error, IndexError):
+                    break
+                    
+            return count
+            
+        except Exception:
+            return 0
 
     def stream_file(
         self,
@@ -1998,18 +2092,22 @@ class HiDockJensen:
             and response["id"] == CMD_GET_SETTINGS
             and len(response["body"]) >= 4
         ):
-            body = response["body"]
-            settings = {
-                "autoRecord": bool(body[0]),
-                "autoPlay": bool(body[1]),
-                "bluetoothTone": bool(body[2]),
-                "notificationSound": bool(body[3]),
+
+            def to_bool(val):
+                return val == 1
+
+            self.device_behavior_settings = {
+                "autoRecord": to_bool(response["body"][0]),
+                "autoPlay": to_bool(response["body"][1]),
+                "bluetoothTone": to_bool(response["body"][2]),
+                "notificationSound": to_bool(response["body"][3]),
             }
-            self.device_behavior_settings.update(settings)
             logger.info(
-                "Jensen", "get_device_settings", f"Received device settings: {settings}"
+                "Jensen",
+                "get_device_settings",
+                f"Device settings: {self.device_behavior_settings}",
             )
-            return settings
+            return self.device_behavior_settings
         logger.error(
             "Jensen",
             "get_device_settings",
@@ -2017,33 +2115,44 @@ class HiDockJensen:
         )
         return None
 
-    def set_device_setting(self, setting_name: str, value: bool, timeout_s=5):
+    def set_device_settings(self, settings_dict, timeout_s=5):
         """
-        Sets a specific behavior setting on the device.
+sends a command to the device to update its behavior settings.
 
         Args:
-            setting_name (str): The name of the setting to change (e.g., "autoRecord", "autoPlay").
-            value (bool): The new boolean value for the setting.
+            settings_dict (dict): A dictionary containing the settings to update.
+                                  Keys can include "autoRecord", "autoPlay",
+                                  "bluetoothTone", "notificationSound".
+                                  Values should be boolean.
             timeout_s (int, optional): Timeout in seconds for the operation. Defaults to 5.
 
         Returns:
             dict: A dictionary indicating the "result" ("success" or "failed").
-                  If failed, may include "error" or "device_code".
-                  Returns {"result": "failed", "error": "Unknown setting name"}
-                  if `setting_name` is invalid.
         """
-        setting_map = {
-            "autoRecord": 0,
-            "autoPlay": 1,
-            "bluetoothTone": 2,
-            "notificationSound": 3,
-        }
-        if setting_name not in setting_map:
+        # First, get current settings to ensure we send a complete payload
+        current_settings = self.get_device_settings(timeout_s=timeout_s)
+        if current_settings is None:
             logger.error(
-                "Jensen", "set_device_setting", f"Unknown setting name: {setting_name}"
+                "Jensen",
+                "set_device_settings",
+                "Could not retrieve current settings; aborting set operation.",
             )
-            return {"result": "failed", "error": "Unknown setting name"}
-        payload = bytes([setting_map[setting_name], 1 if value else 0])
+            return {"result": "failed", "error": "Could not get current settings."}
+
+        # Update the current settings with the new values provided
+        updated_settings = current_settings.copy()
+        updated_settings.update(settings_dict)
+
+        # Construct the payload from the updated settings
+        payload = bytes(
+            [
+                1 if updated_settings.get("autoRecord", False) else 0,
+                1 if updated_settings.get("autoPlay", False) else 0,
+                1 if updated_settings.get("bluetoothTone", False) else 0,
+                1 if updated_settings.get("notificationSound", False) else 0,
+            ]
+        )
+
         response = self._send_and_receive(
             CMD_SET_SETTINGS, payload, timeout_ms=int(timeout_s * 1000)
         )
@@ -2054,229 +2163,67 @@ class HiDockJensen:
             and response["body"][0] == 0
         ):
             logger.info(
-                "Jensen",
-                "set_device_setting",
-                f"Successfully set '{setting_name}' to {value}.",
+                "Jensen", "set_device_settings", "Device settings updated successfully."
             )
-            self.device_behavior_settings[setting_name] = value
+            # Update local cache of settings
+            self.device_behavior_settings = updated_settings
             return {"result": "success"}
-        err_code = response["body"][0] if response and response["body"] else -1
         logger.error(
             "Jensen",
-            "set_device_setting",
-            f"Failed to set '{setting_name}' to {value}. Device code: {err_code}. Response: {response}",
+            "set_device_settings",
+            f"Failed to set device settings. Response: {response}",
         )
-        return {
-            "result": "failed",
-            "error": "Device error or invalid response.",
-            "device_code": err_code,
-        }
+        return {"result": "failed"}
 
-    def get_file_block(
-        self,
-        filename: str,
-        block_length: int,
-        data_callback: callable,
-        progress_callback: callable = None,
-        timeout_s: int = 60,  # Timeout for reading a single block
-        cancel_event: threading.Event = None,
-    ):
+    def get_file_block(self, filename, offset, length, timeout_s=5):
         """
-        Retrieves a specific block of a file from the device.
-        This corresponds to command ID 13 (CMD_GET_FILE_BLOCK).
-        The device implicitly determines the starting offset of the block.
+        Retrieves a specific block of data from a file on the device.
 
         Args:
-            filename (str): The name of the file on the device.
-            block_length (int): The length of the block to retrieve in bytes.
-            data_callback (callable): Function called with each received data chunk (bytes).
-            progress_callback (callable, optional): Function called with (bytes_received, block_length).
-            timeout_s (int, optional): Timeout in seconds for the entire block retrieval.
-            cancel_event (threading.Event, optional): Event to signal cancellation.
+            filename (str): The name of the file to read from.
+            offset (int): The starting position (in bytes) to read from.
+            length (int): The number of bytes to read.
+            timeout_s (int, optional): Timeout in seconds for the operation. Defaults to 5.
 
         Returns:
-            str: Status of the operation ("OK", "cancelled", "fail_timeout", etc.).
+            bytes or None: The requested data block as bytes if successful, None otherwise.
         """
         with self._usb_lock:
-            status_to_return = "fail"
+            status_to_return = None
             try:
-                logger.info(
-                    "Jensen",
-                    "get_file_block",
-                    f"Requesting block for '{filename}', length {block_length} bytes.",
+                body = struct.pack(">I", offset) + struct.pack(">I", length)
+                body += filename.encode("ascii", errors="ignore")
+                seq_id = self._send_command(
+                    CMD_GET_FILE_BLOCK, body, timeout_ms=int(timeout_s * 1000)
                 )
-                # Request body: block_length (4B BE) + filename (ASCII)
-                body = struct.pack(">I", block_length) + filename.encode(
-                    "ascii", errors="ignore"
+                response = self._receive_response(
+                    seq_id, int(timeout_s * 1000), streaming_cmd_id=CMD_GET_FILE_BLOCK
                 )
-                initial_seq_id = self._send_command(
-                    CMD_GET_FILE_BLOCK, body, timeout_ms=10000
-                )
-
-                if cancel_event and cancel_event.is_set():
+                if response and response["id"] == CMD_GET_FILE_BLOCK:
                     logger.info(
                         "Jensen",
                         "get_file_block",
-                        f"Block retrieval for '{filename}' cancelled before data transfer.",
+                        f"Received block of size {len(response['body'])} for '{filename}'.",
                     )
-                    return "cancelled"
-
-                bytes_received = 0
-                start_time = time.time()
-
-                while bytes_received < block_length:
-                    if time.time() - start_time > timeout_s:
-                        logger.error(
-                            "Jensen",
-                            "get_file_block",
-                            f"Block retrieval for '{filename}' timed out. Rcvd {bytes_received}/{block_length}.",
-                        )
-                        status_to_return = "fail_timeout"
-                        break
-                    if cancel_event and cancel_event.is_set():
-                        logger.info(
-                            "Jensen",
-                            "get_file_block",
-                            f"Block retrieval for '{filename}' cancelled. Rcvd {bytes_received}/{block_length}.",
-                        )
-                        status_to_return = "cancelled"
-                        break
-
-                    response = self._receive_response(
-                        initial_seq_id, 15000, streaming_cmd_id=CMD_GET_FILE_BLOCK
-                    )
-                    if response and response["id"] == CMD_GET_FILE_BLOCK:
-                        chunk = response["body"]
-                        if not chunk and bytes_received < block_length:
-                            logger.warning(
-                                "Jensen",
-                                "get_file_block",
-                                f"Empty chunk for '{filename}' before completion.",
-                            )
-                            time.sleep(0.1)
-                            continue
-                        bytes_received += len(chunk)
-                        data_callback(chunk)
-                        if progress_callback:
-                            progress_callback(bytes_received, block_length)
-                        if bytes_received >= block_length:
-                            status_to_return = "OK"
-                            break
-                    elif response is None:
-                        logger.error(
-                            "Jensen",
-                            "get_file_block",
-                            f"Timeout/error receiving chunk for '{filename}'.",
-                        )
-                        status_to_return = (
-                            "fail_comms_error"
-                            if self.is_connected()
-                            else "fail_disconnected"
-                        )
-                        break
-                    else:
-                        logger.warning(
-                            "Jensen",
-                            "get_file_block",
-                            f"Unexpected response ID {response['id']} for '{filename}'.",
-                        )
-                        status_to_return = "fail_unexpected_response"
-                        break
-
-                if status_to_return == "fail" and bytes_received < block_length:
-                    logger.error(
-                        "Jensen",
-                        "get_file_block",
-                        f"Block retrieval for '{filename}' incomplete. Rcvd {bytes_received}/{block_length}.",
-                    )
-                    status_to_return = (
-                        "fail_disconnected"
-                        if not self.is_connected()
-                        else status_to_return
-                    )
-            except (
-                usb.core.USBError,
-                ConnectionError,
-                IOError,
-                OSError,
-            ) as e:  # Catch relevant exceptions
-                logger.error(
-                    "Jensen",
-                    "get_file_block",
-                    f"Error during block retrieval of '{filename}': {e}\n{traceback.format_exc()}",
-                )
-                status_to_return = (
-                    "fail_disconnected" if not self.is_connected() else "fail_exception"
-                )
-            finally:
-                self.receive_buffer.clear()  # Always clear buffer after this operation
-                # Optional: Add flush logic similar to stream_file if needed for robustness
-            return status_to_return
-
-    def delete_file(self, filename: str, timeout_s=10):
-        """
-        Deletes a file from the device.
-
-        Args:
-            filename (str): The name of the file to delete from the device.
-            timeout_s (int, optional): Timeout in seconds for the operation. Defaults to 10.
-
-        Returns:
-            dict: A dictionary indicating the "result" ("success" or "failed").
-                  If failed, may include "error" or "device_code".
-        """
-        if not filename:
-            logger.error("Jensen", "delete_file", "Filename cannot be empty")
-            return {"result": "failed", "error": "Filename cannot be empty"}
-
-        # Encode filename as bytes for the command payload
-        filename_bytes = filename.encode("utf-8")
-
-        try:
-            response = self._send_and_receive(
-                CMD_DELETE_FILE, filename_bytes, timeout_ms=int(timeout_s * 1000)
-            )
-
-            if response and response["id"] == CMD_DELETE_FILE:
-                if response["body"] and len(response["body"]) > 0:
-                    result_code = response["body"][0]
-                    if result_code == 0:
-                        logger.info(
-                            "Jensen",
-                            "delete_file",
-                            f"Successfully deleted file: {filename}",
-                        )
-                        return {"result": "success"}
-                    else:
-                        logger.error(
-                            "Jensen",
-                            "delete_file",
-                            f"Device returned error code {result_code} for file deletion: {filename}",
-                        )
-                        return {
-                            "result": "failed",
-                            "error": f"Device error code: {result_code}",
-                            "device_code": result_code,
-                        }
+                    status_to_return = response["body"]
                 else:
                     logger.error(
                         "Jensen",
-                        "delete_file",
-                        f"Empty response body for file deletion: {filename}",
+                        "get_file_block",
+                        f"Failed to get file block for '{filename}'. Response: {response}",
                     )
-                    return {"result": "failed", "error": "Empty response from device"}
-            else:
+            except (usb.core.USBError, ConnectionError) as e:
                 logger.error(
                     "Jensen",
-                    "delete_file",
-                    f"Invalid response for file deletion: {filename}. Response: {response}",
+                    "get_file_block",
+                    f"USB/Connection error during get_file_block for '{filename}': {e}",
                 )
-                return {"result": "failed", "error": "Invalid response from device"}
-
-        except Exception as e:
-            logger.error(
-                "Jensen",
-                "delete_file",
-                f"Exception during file deletion of '{filename}': {e}\n{traceback.format_exc()}",
-            )
-            return {"result": "failed", "error": f"Exception: {str(e)}"}
+            finally:
+                # This is a critical bug. Clearing the buffer here can discard data
+                # from a subsequent, unrelated operation if there's any overlap or
+                # unexpected response from the device.
+                # This should only be done
+                # for non-streaming commands in _send_and_receive.
+                # self.receive_buffer.clear() # DO NOT DO THIS HERE
+                pass
+            return status_to_return

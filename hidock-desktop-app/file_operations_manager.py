@@ -434,26 +434,24 @@ class FileOperationsManager:
                     f"Acquiring device lock for download of {filename}",
                 )
                 with self.device_lock:
-                    file_bytes = asyncio.run(
+                    asyncio.run(
                         self.device_interface.device_interface.download_recording(
                             recording_id=filename,
+                            output_path=local_path,
                             progress_callback=adapter_progress_callback,
                             file_size=file_size,
                         )
                     )
             else:
                 # Fallback if no device lock is provided
-                file_bytes = asyncio.run(
+                asyncio.run(
                     self.device_interface.device_interface.download_recording(
                         recording_id=filename,
+                        output_path=local_path,
                         progress_callback=adapter_progress_callback,
                         file_size=file_size,
                     )
                 )
-
-            # The new adapter returns bytes, so we must write the file here.
-            with open(local_path, "wb") as f:
-                f.write(file_bytes)
 
         except Exception as e:
             # Log the detailed error and re-raise an IOError to fit the existing
