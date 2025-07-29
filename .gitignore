@@ -89,7 +89,6 @@ Desktop.ini
 *.sw?
 
 .gemini/
-AGENT.md
-GEMINI.md
+
 
 ACCEPTANCE_CRITERIA.md

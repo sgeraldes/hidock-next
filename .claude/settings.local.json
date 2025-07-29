@@ -3,7 +3,14 @@
     "allow": [
       "Bash(find:*)",
       "Bash(python -m flake8:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(npm test)",
+      "Bash(npm test:*)",
+      "Bash(npx vitest run:*)",
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(git checkout:*)",
+      "Bash(git commit:*)"
     ],
     "deny": []
   }

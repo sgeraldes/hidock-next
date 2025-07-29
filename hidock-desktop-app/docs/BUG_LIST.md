@@ -38,13 +38,13 @@ This document lists the identified bugs and areas for improvement based on conso
 
 ## High-Priority Issues (Active)
 
-_No high-priority issues remaining._
+_All high-priority issues have been resolved and moved to the Fixed Issues section._
 
 ---
 
 ## Low-Priority Issues (Active)
 
-_No low-priority issues remaining._
+_All low-priority issues have been resolved and moved to the Fixed Issues section._
 
 ---
 
@@ -63,7 +63,7 @@ _No low-priority issues remaining._
   - **Resolution:**
     - Fixed duration calculation in hidock_device.py by implementing proper web-compatible algorithm based on jensen-complete.js reference
     - Duration calculation now uses two-step process: base duration from filename pattern, then adjustment based on recording type (audio format)
-    - Improved position tracking to use actual elapsed time instead of fixed increments  
+    - Improved position tracking to use actual elapsed time instead of fixed increments
     - Updated position thread to use more accurate timing (50ms updates vs 100ms)
     - Enhanced position tracking with proper timing reset on track changes
     - Audio duration is now correctly calculated and displayed in file list matching actual audio length
@@ -121,7 +121,7 @@ _No low-priority issues remaining._
   - **Evidence:** Console logs showing BufferError with memoryview usage, command sequence collisions, and incomplete file retrieval
   - **Files to Blame:** @hidock_device.py, @gui_main_window.py, @gui_actions_device.py, @desktop_device_adapter.py
   - **Resolution:**
-    - Implemented web-style handler approach based on jensen-complete.js reference implementation  
+    - Implemented web-style handler approach based on jensen-complete.js reference implementation
     - Fixed BufferError by removing memoryview usage in favor of direct bytearray access
     - Added comprehensive command collision prevention system across all device operations
     - Implemented streaming-aware collision prevention at desktop adapter level
@@ -1063,6 +1063,7 @@ _No low-priority issues remaining._
   - **Resolution:** Added the `status_raw: int` attribute to the `StorageInfo` dataclass. The `DesktopDeviceAdapter` was passing this value from the low-level device call, but the dataclass was missing the field, causing a `TypeError`. The GUI in `gui_main_window.py` already expected this field to be present for displaying the raw storage status. This fix prevents the status update thread from crashing.
 
 - **Log Flooding with Expected Timeouts:**
+
   - **Status:** `FIXED`
   - **File to Blame:** @hidock_device.py
   - **Resolution:** Modified the `_receive_response` method to no longer increment the error counter for expected timeouts during streaming operations (like file listing). This cleans up the log significantly and prevents false error inflation.
@@ -1074,11 +1075,48 @@ _No low-priority issues remaining._
   - **Evidence:** User report indicating inability to stop downloads in progress
   - **Files to Blame:** @gui_main_window.py, @gui_actions_file.py, @file_operations_manager.py
   - **Resolution:**
-    - Enhanced file_operations_manager.py with pre-execution cancellation checks in _worker_thread()
+    - Enhanced file_operations_manager.py with pre-execution cancellation checks in \_worker_thread()
     - Added proper partial file cleanup in cancel_operation() method
     - Implemented cancellation status checking before and during operation execution
     - Added comprehensive cleanup of partial downloads when operations are cancelled
     - Ensured cancelled operations are properly skipped and don't consume worker resources
+
+- **Audio Visualization Widget Collapsed and Cannot Be Restored:**
+
+  - **Status:** FIXED
+  - **Problem:** The audio visualization widget (waveform/spectrum) was previously visible but got collapsed/hidden when user clicked to collapse insights. Now there is no way to restore or show the visualization widget again, leaving a large empty space below the file list.
+  - **Evidence:** Screenshot shows large empty space below file list where visualization widget should be. User reports the widget was visible before but disappeared after clicking collapse and cannot be restored.
+  - **Files Blamed:** @gui_main_window.py, @audio_visualization.py
+  - **Resolution:**
+    - Implemented proper show/hide toggle mechanism for the audio visualization widget
+    - Added pin functionality to keep waveform visible when browsing files
+    - Enhanced visibility logic to respect pinned state and user preferences
+    - Added clear visual indicators for collapsed/expanded states
+    - Widget state is now properly managed and persisted across sessions
+
+- **Missing AI Insights Button Integration:**
+  - **Status:** FIXED
+  - **Problem:** While the main GUI had menu items for "Get Insights" functionality, there was no prominent button or easy access point for AI insights in the main interface.
+  - **Evidence:** Screenshot shows toolbar with connect, refresh, download, play, delete, and settings buttons, but no AI insights button. Menu system had "Get Insights" option but it was buried in the Actions menu.
+  - **Files Blamed:** @gui_main_window.py
+  - **Resolution:**
+    - Added prominent AI insights button to the main toolbar for easy discovery
+    - Implemented comprehensive multi-provider AI support with 11 different providers
+    - Added background processing with progress tracking and cancellation support
+    - Created dedicated transcription and insights panel in the main UI
+    - Enhanced user experience with immediate access to AI functionality
+
+- **File List Column Headers Missing Sort Indicators:**
+  - **Status:** FIXED
+  - **Problem:** The file list table headers (Name, Date/Time, Size, Duration, Version, Status) didn't show any visual indicators for sorting capability or current sort order.
+  - **Evidence:** Screenshot shows plain column headers without any sort arrows or indicators.
+  - **Files Blamed:** @gui_treeview.py
+  - **Resolution:**
+    - Added visual sort indicators (up/down arrows) to column headers
+    - Implemented clickable column headers for intuitive sorting
+    - Fixed sorting algorithm to handle all data types correctly including datetime
+    - Added proper sort state management and visual feedback
+    - Sorting now works reliably across all columns with clear indicators
 
 - **Player Animation Issues with File Changes:**
 
@@ -1087,10 +1125,10 @@ _No low-priority issues remaining._
   - **Evidence:** User report indicating position indicator continues moving on new files when previous file is still playing
   - **Files to Blame:** @gui_main_window.py, @audio_player_enhanced.py, @audio_visualization.py
   - **Resolution:**
-    - Modified _on_audio_position_changed() in gui_main_window.py to only update visualization when the selected file matches the currently playing file
+    - Modified \_on_audio_position_changed() in gui_main_window.py to only update visualization when the selected file matches the currently playing file
     - Enhanced load_track() method in audio_player_enhanced.py to properly reset position when switching files
     - Added clear_position_indicators() method to audio_visualization.py for proper position indicator cleanup
-    - Updated _update_waveform_for_selection() to clear position indicators for non-playing files
+    - Updated \_update_waveform_for_selection() to clear position indicators for non-playing files
     - Enhanced stop_audio_playback_gui() to clear visualization position indicators when stopping playback
     - Ensured proper synchronization between audio player state and visualization display
 
@@ -1102,9 +1140,38 @@ _No low-priority issues remaining._
   - **Files to Blame:** @gui_treeview.py, @gui_main_window.py
   - **Resolution:**
     - Root cause identified: The existing TTK scrollbar styling used "transparent" trough color from CustomTkinter theme, making the scrollbar invisible
-    - Replaced the problematic theme-based styling with explicit, visible colors in _create_file_tree_frame()
+    - Replaced the problematic theme-based styling with explicit, visible colors in \_create_file_tree_frame()
     - Applied custom "FileTree.Vertical.TScrollbar" style with dark gray trough (#2b2b2b), medium gray thumb (#4a4a4a), and light gray arrows (#cccccc)
     - Added hover effects for better user feedback (lighter colors on active state)
     - Improved grid column configuration to ensure proper scrollbar spacing and sizing
     - Added explicit borderwidth and relief styling to ensure scrollbar visibility across all themes
     - This fix addresses the fundamental styling issue that caused all previous attempts to fail
+
+## Notes for Bug Reporting and Tracking
+
+### Multi-Provider AI Architecture Notes
+- When reporting AI-related bugs, specify the provider being used (Gemini, OpenAI, Anthropic, etc.)
+- Include provider configuration details (model, endpoint for local providers)
+- Check if the issue occurs with mock providers (empty API keys) for development testing
+- Verify API key validity and provider-specific settings before reporting bugs
+
+### Local AI Provider Considerations
+- Ollama and LM Studio bugs may be related to server availability or model loading
+- Check local server endpoints (localhost:11434 for Ollama, localhost:1234/v1 for LM Studio)
+- Verify models are properly downloaded and available in local providers
+- Network connectivity issues may affect local provider communication
+
+### Security and Encryption
+- API key related bugs should never include actual keys in bug reports
+- Encrypted storage issues may require config file reset (backup first)
+- Fernet encryption errors may indicate corrupted configuration data
+
+### Background Processing
+- Progress tracking bugs should include operation type and file size details
+- Cancellation issues should specify at what stage cancellation was attempted
+- Thread safety issues may manifest as UI freezes or data corruption
+
+### Audio Processing
+- HTA conversion bugs should include file size and version information
+- Waveform visualization issues may be related to matplotlib backend
+- Speed control bugs should specify the target speed and audio format

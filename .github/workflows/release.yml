@@ -48,10 +48,11 @@ jobs:
         pip install pyinstaller
 
     - name: Build application
+      working-directory: ./hidock-desktop-app
       run: ${{ matrix.build-command }}
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.artifact-name }}
         path: dist/
@@ -78,7 +79,7 @@ jobs:
       run: npm run build
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: hidock-web-app-dist
         path: hidock-web-app/dist/

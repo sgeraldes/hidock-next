@@ -190,6 +190,7 @@ class HiDockToolGUI(
         self.toolbar_refresh_button = None
         self.toolbar_download_button = None
         self.toolbar_play_button = None
+        self.toolbar_insights_button = None
         self.toolbar_delete_button = None
         self.toolbar_settings_button = None
         self.status_bar_frame = None
@@ -233,6 +234,9 @@ class HiDockToolGUI(
             str: Validated geometry string that ensures window visibility
         """
         try:
+            # Log initial state
+            logger.debug("GUI", "_validate_window_geometry", f"Initial geometry string: {geometry_string}")
+
             # Parse the geometry string
             import re
 
@@ -241,57 +245,47 @@ class HiDockToolGUI(
                 logger.warning(
                     "GUI",
                     "_validate_window_geometry",
-                    f"Invalid geometry format: {geometry_string}",
+                    f"Invalid geometry format: {geometry_string}. Using default.",
                 )
                 return "950x850+100+100"  # Default fallback
 
             width, height, x_str, y_str = match.groups()
             width, height = int(width), int(height)
             x, y = int(x_str), int(y_str)
+            logger.debug("GUI", "_validate_window_geometry", f"Parsed geometry: w={width}, h={height}, x={x}, y={y}")
 
             # Get screen dimensions
             screen_width = self.winfo_screenwidth()
             screen_height = self.winfo_screenheight()
+            logger.debug("GUI", "_validate_window_geometry", f"Screen dimensions: {screen_width}x{screen_height}")
 
             # Validate and correct coordinates
             # Ensure window is not positioned off-screen
             min_visible_pixels = 100  # Minimum pixels that should be visible
 
             if x < -width + min_visible_pixels:
+                logger.info("GUI", "_validate_window_geometry", f"X coordinate {x} is off-screen to the left.")
                 x = 0
-                logger.info(
-                    "GUI",
-                    "_validate_window_geometry",
-                    f"Corrected negative X coordinate from {x_str} to {x}",
-                )
             elif x > screen_width - min_visible_pixels:
+                logger.info("GUI", "_validate_window_geometry", f"X coordinate {x} is off-screen to the right.")
                 x = screen_width - width
-                logger.info(
-                    "GUI",
-                    "_validate_window_geometry",
-                    f"Corrected off-screen X coordinate from {x_str} to {x}",
-                )
 
             if y < 0:
+                logger.info("GUI", "_validate_window_geometry", f"Y coordinate {y} is off-screen to the top.")
                 y = 0
-                logger.info(
-                    "GUI",
-                    "_validate_window_geometry",
-                    f"Corrected negative Y coordinate from {y_str} to {y}",
-                )
             elif y > screen_height - min_visible_pixels:
+                logger.info("GUI", "_validate_window_geometry", f"Y coordinate {y} is off-screen to the bottom.")
                 y = screen_height - height
-                logger.info(
-                    "GUI",
-                    "_validate_window_geometry",
-                    f"Corrected off-screen Y coordinate from {y_str} to {y}",
-                )
+            
+            logger.debug("GUI", "_validate_window_geometry", f"Corrected coordinates: x={x}, y={y}")
 
             # Ensure reasonable window size
             min_width, min_height = 400, 300
             if width < min_width:
+                logger.info("GUI", "_validate_window_geometry", f"Width {width} is too small, setting to {min_width}")
                 width = min_width
             if height < min_height:
+                logger.info("GUI", "_validate_window_geometry", f"Height {height} is too small, setting to {min_height}")
                 height = min_height
 
             validated_geometry = f"{width}x{height}+{x}+{y}"
@@ -299,7 +293,7 @@ class HiDockToolGUI(
                 logger.info(
                     "GUI",
                     "_validate_window_geometry",
-                    f"Corrected geometry from '{geometry_string}' to '{validated_geometry}'",
+                    f"Final corrected geometry: '{validated_geometry}'",
                 )
 
             return validated_geometry
@@ -408,6 +402,57 @@ class HiDockToolGUI(
         self.icon_fallback_color_1 = get_conf("icon_fallback_color_1", "blue")
         self.icon_fallback_color_2 = get_conf("icon_fallback_color_2", "default")
         self.icon_size_str = get_conf("icon_size_str", "32")
+        
+        # AI Transcription settings
+        self.ai_api_provider_var = ctk.StringVar(value=get_conf("ai_api_provider", "gemini"))
+        self.ai_model_var = ctk.StringVar(value=get_conf("ai_model", "gemini-2.5-flash"))
+        self.ai_temperature_var = ctk.DoubleVar(value=get_conf("ai_temperature", 0.3))
+        self.ai_max_tokens_var = ctk.IntVar(value=get_conf("ai_max_tokens", 4000))
+        self.ai_language_var = ctk.StringVar(value=get_conf("ai_language", "auto"))
+        # Provider-specific configuration
+        self.ai_openrouter_base_url_var = ctk.StringVar(value=get_conf("ai_openrouter_base_url", "https://openrouter.ai/api/v1"))
+        self.ai_amazon_region_var = ctk.StringVar(value=get_conf("ai_amazon_region", "us-east-1"))
+        self.ai_qwen_base_url_var = ctk.StringVar(value=get_conf("ai_qwen_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
+        self.ai_deepseek_base_url_var = ctk.StringVar(value=get_conf("ai_deepseek_base_url", "https://api.deepseek.com"))
+        self.ai_ollama_base_url_var = ctk.StringVar(value=get_conf("ai_ollama_base_url", "http://localhost:11434"))
+        self.ai_lmstudio_base_url_var = ctk.StringVar(value=get_conf("ai_lmstudio_base_url", "http://localhost:1234/v1"))
+        # API key is stored encrypted and handled separately
+        
+        # Visualizer pin state
+        self.visualizer_pinned_var = ctk.BooleanVar(value=get_conf("visualizer_pinned", False))
+        self.visualizer_pinned = self.visualizer_pinned_var.get()  # Initialize from config
+
+    def get_decrypted_api_key(self, provider=None):
+        """Get the decrypted API key for the specified provider."""
+        if provider is None:
+            provider = self.ai_api_provider_var.get()
+        
+        encrypted_key = self.config.get(f"ai_api_key_{provider}_encrypted", "")
+        if not encrypted_key:
+            return ""
+        
+        try:
+            # Import encryption here to avoid dependency issues
+            from cryptography.fernet import Fernet
+            import base64
+            
+            # Try to load existing key from config directory
+            config_dir = os.path.dirname(self.config.get('config_file_path', ''))
+            key_file = os.path.join(config_dir, '.hidock_key.dat')
+            
+            if os.path.exists(key_file):
+                with open(key_file, 'rb') as f:
+                    key = f.read()
+                
+                f = Fernet(key)
+                encrypted_bytes = base64.b64decode(encrypted_key.encode())
+                decrypted = f.decrypt(encrypted_bytes)
+                return decrypted.decode()
+            
+        except Exception as e:
+            logger.error("GUI", "get_decrypted_api_key", f"Error decrypting API key: {e}")
+        
+        return ""
 
     def _load_icons(self):
         """
@@ -599,6 +644,13 @@ class HiDockToolGUI(
             command=self.play_selected_audio_gui,
             state="disabled",
             image=self.menu_icons.get("play"),
+            compound="left",
+        )
+        self.actions_menu.add_command(
+            label="Get Insights",
+            command=self.get_insights_selected_file_gui,
+            state="disabled",
+            image=self.menu_icons.get("insights", self.menu_icons.get("play")),
             compound="left",
         )
         self.actions_menu.add_command(
@@ -837,6 +889,16 @@ class HiDockToolGUI(
             image=self.icons.get("play"),
         )
         self.toolbar_play_button.pack(
+            side="left", padx=toolbar_button_padx, pady=toolbar_button_pady
+        )
+        self.toolbar_insights_button = ctk.CTkButton(
+            self.toolbar_frame,
+            text="Get Insights",
+            command=self.get_insights_selected_file_gui,
+            width=toolbar_button_width,
+            image=self.icons.get("insights", self.icons.get("play")),  # Use insights icon or fallback to play
+        )
+        self.toolbar_insights_button.pack(
             side="left", padx=toolbar_button_padx, pady=toolbar_button_pady
         )
         self.toolbar_delete_button = ctk.CTkButton(
@@ -1089,6 +1151,18 @@ class HiDockToolGUI(
                 "Play Selected", state="normal" if can_play_selected else "disabled"
             )
             self.actions_menu.entryconfig(
+                "Get Insights",
+                state=(
+                    "normal"
+                    if is_connected
+                    and has_selection
+                    and num_selected == 1
+                    and not self.is_long_operation_active
+                    and not self.is_audio_playing
+                    else "disabled"
+                ),
+            )
+            self.actions_menu.entryconfig(
                 "Delete Selected",
                 state="normal" if is_connected and has_selection else "disabled",
             )
@@ -1245,7 +1319,35 @@ class HiDockToolGUI(
                     ),
                     image=self.icons.get("play"),
                 )
-
+        if (
+            hasattr(self, "toolbar_insights_button")
+            and self.toolbar_insights_button.winfo_exists()
+        ):
+            if (
+                self.is_long_operation_active
+                and self.active_operation_name == "Transcription"
+            ):
+                self.toolbar_insights_button.configure(
+                    text="Cancel Insights",
+                    command=self.request_cancel_operation,
+                    state="normal",
+                    image=self.icons.get("stop"),
+                )
+            else:
+                self.toolbar_insights_button.configure(
+                    text="Get Insights",
+                    command=self.get_insights_selected_file_gui,
+                    state=(
+                        "normal"
+                        if is_connected
+                        and has_selection
+                        and num_selected == 1
+                        and not self.is_long_operation_active
+                        and not self.is_audio_playing
+                        else "disabled"
+                    ),
+                    image=self.icons.get("insights", self.icons.get("play")),
+                )
         if (
             hasattr(self, "toolbar_delete_button")
             and self.toolbar_delete_button.winfo_exists()
@@ -1483,6 +1585,8 @@ class HiDockToolGUI(
 
         self._create_main_panel_layout()
         self._create_files_panel(self.main_content_frame)
+        self._create_panels_toolbar(self.main_content_frame)
+        self._create_transcription_panel(self.main_content_frame)
         self._create_log_panel(self.main_content_frame)
         self._create_audio_visualizer_panel(self.main_content_frame)
         self._update_log_text_area_tag_colors()
@@ -1494,8 +1598,11 @@ class HiDockToolGUI(
         """Creates the main content frame and configures its grid."""
         self.main_content_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.main_content_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        self.main_content_frame.grid_rowconfigure(0, weight=1)
-        self.main_content_frame.grid_rowconfigure(1, weight=0)
+        self.main_content_frame.grid_rowconfigure(0, weight=1)  # Files panel
+        self.main_content_frame.grid_rowconfigure(1, weight=0)  # Panels toolbar
+        self.main_content_frame.grid_rowconfigure(2, weight=0)  # Transcription panel
+        self.main_content_frame.grid_rowconfigure(3, weight=0)  # Log panel
+        self.main_content_frame.grid_rowconfigure(4, weight=0)  # Audio visualizer panel
         self.main_content_frame.grid_columnconfigure(0, weight=1)
 
     def _create_files_panel(self, _parent_frame):
@@ -1558,6 +1665,590 @@ class HiDockToolGUI(
         self.file_tree.bind("<B1-Motion>", self._on_file_b1_motion)
         self.file_tree.bind("<ButtonRelease-1>", self._on_file_button1_release)
 
+    def _create_transcription_panel(self, parent_frame):
+        """Creates the transcription and insights panel."""
+        self.transcription_frame = ctk.CTkFrame(parent_frame)
+        self.transcription_frame.grid(
+            row=2, column=0, sticky="nsew", padx=0, pady=(0, 5)
+        )
+        
+        # Content container (scrollable) - initially hidden
+        self.transcription_content = ctk.CTkScrollableFrame(self.transcription_frame)
+        # Don't pack initially - will be shown when panel is toggled
+        
+        # Status header with cancel button
+        status_frame = ctk.CTkFrame(self.transcription_content)
+        status_frame.pack(fill="x", padx=10, pady=10)
+        
+        self.transcription_status_label = ctk.CTkLabel(
+            status_frame,
+            text="Select a file and click 'Get Insights' to see transcription and AI analysis.",
+            anchor="w",
+            font=("Arial", 12)
+        )
+        self.transcription_status_label.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        self.cancel_transcription_button = ctk.CTkButton(
+            status_frame,
+            text="Cancel",
+            width=80,
+            height=24,
+            command=self._cancel_transcription,
+            fg_color="red",
+            hover_color="darkred"
+        )
+        # Initially hidden
+        self.cancel_transcription_button.pack_forget()
+        
+        # Progress bar
+        self.transcription_progress = ctk.CTkProgressBar(self.transcription_content)
+        self.transcription_progress.pack(fill="x", padx=10, pady=(0, 10))
+        self.transcription_progress.pack_forget()  # Initially hidden
+        
+        # Transcription section
+        self.transcription_section = ctk.CTkFrame(self.transcription_content)
+        self.transcription_section.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        transcription_label = ctk.CTkLabel(
+            self.transcription_section,
+            text="📝 Transcription",
+            font=("Arial", 14, "bold")
+        )
+        transcription_label.pack(anchor="w", padx=10, pady=(10, 5))
+        
+        self.transcription_textbox = ctk.CTkTextbox(
+            self.transcription_section,
+            height=150,
+            wrap="word",
+            font=("Arial", 11)
+        )
+        self.transcription_textbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        # Insights section
+        self.insights_section = ctk.CTkFrame(self.transcription_content)
+        self.insights_section.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        insights_label = ctk.CTkLabel(
+            self.insights_section,
+            text="🧠 AI Insights",
+            font=("Arial", 14, "bold")
+        )
+        insights_label.pack(anchor="w", padx=10, pady=(10, 5))
+        
+        self.insights_textbox = ctk.CTkTextbox(
+            self.insights_section,
+            height=150,
+            wrap="word",
+            font=("Arial", 11)
+        )
+        self.insights_textbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        # Initially hide the content sections
+        self.transcription_section.pack_forget()
+        self.insights_section.pack_forget()
+        
+        # Track panel state (start both panels hidden)
+        self.transcription_panel_visible = False
+        self.transcription_content_loaded = False
+        self.visualizer_expanded = False
+        
+        # Background processing control
+        self.transcription_cancelled = False
+        self.current_transcription_thread = None
+
+    def _toggle_transcription_panel(self):
+        """Toggle visibility of the transcription panel."""
+        if self.transcription_panel_visible:
+            # Hide the content
+            self.transcription_content.pack_forget()
+            self.transcription_toolbar_toggle.configure(
+                text="Show Transcription & Insights",
+                image=self.icons.get("toggle_down", None)
+            )
+            self.transcription_panel_visible = False
+        else:
+            # Show the content
+            self.transcription_content.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+            # Also ensure the sections within the content are visible
+            self.transcription_section.pack(fill="both", expand=True, padx=5, pady=5)
+            self.insights_section.pack(fill="both", expand=True, padx=5, pady=5)
+            self.transcription_toolbar_toggle.configure(
+                text="Hide Transcription & Insights", 
+                image=self.icons.get("toggle_up", None)
+            )
+            self.transcription_panel_visible = True
+        
+        # Show toolbar if either panel is visible
+        self._update_panels_toolbar_visibility()
+
+    def _toggle_visualizer_pin(self):
+        """Toggle the pinned state of the audio visualizer."""
+        self.visualizer_pinned = not self.visualizer_pinned
+        
+        # Update config variable and save
+        self.visualizer_pinned_var.set(self.visualizer_pinned)
+        self.config["visualizer_pinned"] = self.visualizer_pinned
+        save_config(self.config)
+        
+        # Update pin button appearance
+        if self.visualizer_pinned:
+            self.visualizer_pin_button.configure(
+                text="Unpin",
+                fg_color="green",
+                hover_color="darkgreen"
+            )
+        else:
+            self.visualizer_pin_button.configure(
+                text="Pin",
+                fg_color="gray50",
+                hover_color="gray40"
+            )
+        
+        # Update visibility logic
+        self._update_visualizer_visibility()
+        self._update_panels_toolbar_visibility()
+        
+        logger.info("GUI", "_toggle_visualizer_pin", f"Visualizer pinned: {self.visualizer_pinned}")
+
+    def _show_pinned_placeholder(self):
+        """Show placeholder content when visualizer is pinned but no file is selected."""
+        try:
+            if hasattr(self, 'audio_visualizer_widget'):
+                # Clear current visualization and show placeholder
+                self.audio_visualizer_widget.clear()
+                
+                # Show placeholder message in the waveform visualizer
+                waveform_viz = self.audio_visualizer_widget.waveform_visualizer
+                waveform_viz.ax.clear()
+                waveform_viz.ax.text(
+                    0.5, 0.5,
+                    "📌 Visualizer Pinned\nSelect a file to view waveform",
+                    ha="center", va="center",
+                    color="#666666", fontsize=14,
+                    transform=waveform_viz.ax.transAxes
+                )
+                waveform_viz.ax.set_xlim(0, 1)
+                waveform_viz.ax.set_ylim(-1, 1)
+                waveform_viz.ax.set_facecolor(waveform_viz.background_color)
+                waveform_viz.canvas.draw()
+                
+        except Exception as e:
+            logger.error("GUI", "_show_pinned_placeholder", f"Error showing placeholder: {e}")
+
+    def _create_panels_toolbar(self, parent_frame):
+        """Creates a unified toolbar for controlling transcription and audio visualization panels."""
+        self.panels_toolbar_frame = ctk.CTkFrame(parent_frame)
+        self.panels_toolbar_frame.grid(
+            row=1, column=0, sticky="ew", padx=0, pady=(0, 2)
+        )
+        
+        # Create buttons with icons
+        self._load_panel_icons()
+        
+        # Transcription panel toggle
+        self.transcription_toolbar_toggle = ctk.CTkButton(
+            self.panels_toolbar_frame,
+            text="Show Transcription & Insights",
+            image=self.icons.get("toggle_down", None),
+            compound="left",
+            command=self._toggle_transcription_panel,
+            width=180,
+            height=28,
+        )
+        self.transcription_toolbar_toggle.pack(side="left", padx=5, pady=2)
+        
+        # Audio visualization toggle
+        self.visualizer_toolbar_toggle = ctk.CTkButton(
+            self.panels_toolbar_frame,
+            text="Show Audio Visualization",
+            image=self.icons.get("toggle_down", None),
+            compound="left",
+            command=self._toggle_audio_visualizer,
+            width=150,
+            height=28,
+        )
+        self.visualizer_toolbar_toggle.pack(side="left", padx=5, pady=2)
+        
+        # Audio visualization pin button
+        self.visualizer_pin_button = ctk.CTkButton(
+            self.panels_toolbar_frame,
+            text="Pin",
+            image=self.icons.get("pin", None),
+            compound="left",
+            command=self._toggle_visualizer_pin,
+            width=60,
+            height=28,
+            fg_color="gray50",
+            hover_color="gray40"
+        )
+        self.visualizer_pin_button.pack(side="left", padx=2, pady=2)
+        
+        # Update pin button state based on config
+        if self.visualizer_pinned:
+            self.visualizer_pin_button.configure(
+                text="Unpin",
+                fg_color="green",
+                hover_color="darkgreen"
+            )
+        
+        # Initially hide the toolbar since both panels start hidden
+        self.panels_toolbar_frame.grid_forget()
+
+    def _load_panel_icons(self):
+        """Load icons for panel controls."""
+        try:
+            icon_size = (16, 16)
+            icons_dir = os.path.join(self.icon_base_path, "black", "16")
+            
+            # Info circle icon for transcription
+            info_circle_path = os.path.join(icons_dir, "info-circle.png")
+            if os.path.exists(info_circle_path):
+                info_image = Image.open(info_circle_path)
+                self.icons["info_circle"] = ctk.CTkImage(
+                    light_image=info_image, dark_image=info_image, size=icon_size
+                )
+            
+            # Toggle icons for panels
+            toggle_down_path = os.path.join(icons_dir, "toggle-down.png")
+            if os.path.exists(toggle_down_path):
+                toggle_down_image = Image.open(toggle_down_path)
+                self.icons["toggle_down"] = ctk.CTkImage(
+                    light_image=toggle_down_image, dark_image=toggle_down_image, size=icon_size
+                )
+                
+            toggle_up_path = os.path.join(icons_dir, "toggle-up.png")
+            if os.path.exists(toggle_up_path):
+                toggle_up_image = Image.open(toggle_up_path)
+                self.icons["toggle_up"] = ctk.CTkImage(
+                    light_image=toggle_up_image, dark_image=toggle_up_image, size=icon_size
+                )
+            
+            # Pin icon for pinning visualizer
+            pin_path = os.path.join(icons_dir, "pin.png")
+            if os.path.exists(pin_path):
+                pin_image = Image.open(pin_path)
+                self.icons["pin"] = ctk.CTkImage(
+                    light_image=pin_image, dark_image=pin_image, size=icon_size
+                )
+                
+        except Exception as e:
+            logger.warning(
+                "GUI", "_load_panel_icons", f"Error loading panel icons: {e}"
+            )
+
+    def _update_panels_toolbar_visibility(self):
+        """Show or hide the panels toolbar based on whether any panels are visible."""
+        try:
+            if self.transcription_panel_visible or self.visualizer_expanded or self.visualizer_pinned:
+                # Show the toolbar
+                self.panels_toolbar_frame.grid(
+                    row=1, column=0, sticky="ew", padx=0, pady=(0, 2)
+                )
+            else:
+                # Hide the toolbar
+                self.panels_toolbar_frame.grid_forget()
+        except Exception as e:
+            logger.error(
+                "GUI", "_update_panels_toolbar_visibility", f"Error updating toolbar visibility: {e}"
+            )
+
+    def get_insights_selected_file_gui(self):
+        """Get insights for the selected file and display in the integrated panel."""
+        selected_iids = self.file_tree.selection()
+        if not selected_iids:
+            messagebox.showinfo(
+                "No Selection", "Please select a file to analyze.", parent=self
+            )
+            return
+        
+        if len(selected_iids) > 1:
+            messagebox.showinfo(
+                "Multiple Selection", "Please select only one file for transcription.", parent=self
+            )
+            return
+        
+        # Get the selected file details
+        file_iid = selected_iids[0]
+        file_detail = next(
+            (f for f in self.displayed_files_details if f["name"] == file_iid), None
+        )
+        if not file_detail:
+            messagebox.showerror(
+                "File Error", "Selected file details not found.", parent=self
+            )
+            return
+        
+        # Call the existing transcription method but capture results for UI display
+        self._transcribe_selected_audio_gemini_for_panel(file_iid)
+
+    def _transcribe_selected_audio_gemini_for_panel(self, file_iid):
+        """Transcribe selected audio and display results in the integrated panel."""
+        import os
+        import threading
+        from transcription_module import process_audio_file_for_insights
+        
+        file_detail = next(
+            (f for f in self.displayed_files_details if f["name"] == file_iid), None
+        )
+        if not file_detail:
+            messagebox.showerror(
+                "Transcription Error", "File details not found.", parent=self
+            )
+            return
+            
+        local_filepath = self._get_local_filepath(file_detail["name"])
+        if not os.path.isfile(local_filepath):
+            messagebox.showerror(
+                "File Not Found",
+                f"Local file not found: {local_filepath}\nPlease download the file first.",
+                parent=self,
+            )
+            return
+            
+        # Get API key from encrypted settings
+        gemini_api_key = self.get_decrypted_api_key()
+        if not gemini_api_key:
+            messagebox.showerror(
+                "API Key Missing",
+                "AI API Key not configured. Please set your API key in Settings > AI Transcription.",
+                parent=self,
+            )
+            return
+            
+        # Update UI to show processing state
+        self._show_transcription_processing_state(file_detail["name"])
+        
+        # Show the toolbar since we're about to show transcription content
+        self._update_panels_toolbar_visibility()
+        
+        # Cancel any existing transcription
+        if self.current_transcription_thread and self.current_transcription_thread.is_alive():
+            self._cancel_transcription()
+        
+        # Start transcription in background thread
+        self._set_long_operation_active_state(True, "Transcription")
+        self.update_status_bar(
+            progress_text=f"Transcribing {file_detail['name']} with Gemini..."
+        )
+        
+        # Reset cancellation flag
+        self.transcription_cancelled = False
+        
+        self.current_transcription_thread = threading.Thread(
+            target=self._transcription_worker_for_panel,
+            args=(local_filepath, gemini_api_key, file_detail["name"]),
+            daemon=True,
+        )
+        self.current_transcription_thread.start()
+
+    def _show_transcription_processing_state(self, filename):
+        """Update the transcription panel to show processing state."""
+        # Ensure panel is visible
+        if not self.transcription_panel_visible:
+            self._toggle_transcription_panel()
+        
+        # Show processing status with cancel button
+        self.transcription_status_label.configure(
+            text=f"🔄 Processing '{filename}' with AI transcription and insights..."
+        )
+        self.cancel_transcription_button.pack(side="right", padx=(10, 0))
+        
+        # Show progress bar with indeterminate mode
+        self.transcription_progress.pack(fill="x", padx=10, pady=(0, 10))
+        self.transcription_progress.configure(mode="indeterminate")
+        self.transcription_progress.start()
+        
+        # Clear previous content and show placeholders
+        self.transcription_textbox.delete("1.0", "end")
+        self.transcription_textbox.insert("1.0", "🎵 Transcribing audio... Please wait.")
+        self.transcription_textbox.configure(state="disabled")
+        
+        self.insights_textbox.delete("1.0", "end")
+        self.insights_textbox.insert("1.0", "🧠 Extracting insights... Please wait.")
+        self.insights_textbox.configure(state="disabled")
+        
+        # Show the content sections
+        self.transcription_section.pack(fill="both", expand=True, padx=5, pady=5)
+        self.insights_section.pack(fill="both", expand=True, padx=5, pady=5)
+
+    def _cancel_transcription(self):
+        """Cancel the current transcription process."""
+        self.transcription_cancelled = True
+        if self.current_transcription_thread and self.current_transcription_thread.is_alive():
+            logger.info("GUI", "_cancel_transcription", "Transcription cancellation requested")
+            # Update UI immediately
+            self.after(0, self._on_transcription_cancelled)
+
+    def _on_transcription_cancelled(self):
+        """Handle transcription cancellation in main thread."""
+        self._set_long_operation_active_state(False, "Transcription")
+        self.update_status_bar(ready_text="Transcription cancelled")
+        
+        # Update UI
+        self.transcription_status_label.configure(
+            text="❌ Transcription cancelled by user"
+        )
+        self.cancel_transcription_button.pack_forget()
+        self.transcription_progress.stop()
+        self.transcription_progress.pack_forget()
+        
+        # Reset content
+        self.transcription_textbox.configure(state="normal")
+        self.transcription_textbox.delete("1.0", "end")
+        self.transcription_textbox.insert("1.0", "Transcription was cancelled.")
+        self.transcription_textbox.configure(state="disabled")
+        
+        self.insights_textbox.configure(state="normal")
+        self.insights_textbox.delete("1.0", "end")
+        self.insights_textbox.insert("1.0", "Insights extraction was cancelled.")
+        self.insights_textbox.configure(state="disabled")
+
+    def _transcription_worker_for_panel(self, file_path, api_key, original_filename):
+        """Background worker that processes transcription for the panel display."""
+        try:
+            # Check for cancellation before starting
+            if self.transcription_cancelled:
+                return
+            
+            import asyncio
+            # Get AI provider configuration
+            provider = self.ai_api_provider_var.get()
+            config = {
+                'model': self.ai_model_var.get(),
+                'temperature': self.ai_temperature_var.get(),
+                'max_tokens': self.ai_max_tokens_var.get(),
+                'base_url': getattr(self, f'ai_{provider}_base_url_var', None),
+                'region': getattr(self, f'ai_{provider}_region_var', None)
+            }
+            # Clean up None values
+            config = {k: v.get() if hasattr(v, 'get') else v for k, v in config.items() if v is not None}
+            language = self.ai_language_var.get()
+            
+            # Since process_audio_file_for_insights is async, we need to run it in an event loop
+            results = asyncio.run(process_audio_file_for_insights(
+                file_path, provider, api_key, config, language
+            ))
+            
+            # Check for cancellation before updating UI
+            if self.transcription_cancelled:
+                return
+                
+            self.after(0, self._on_transcription_complete_for_panel, results, original_filename)
+        except Exception as e:
+            if not self.transcription_cancelled:
+                logger.error(
+                    "GUI",
+                    "_transcription_worker_for_panel",
+                    f"Error during transcription: {e}",
+                )
+                self.after(
+                    0, self._on_transcription_complete_for_panel, {"error": str(e)}, original_filename
+                )
+
+    def _on_transcription_complete_for_panel(self, results, original_filename):
+        """Handle completion of transcription and update the panel."""
+        self._set_long_operation_active_state(False, "Transcription")
+        
+        # Hide progress controls
+        self.cancel_transcription_button.pack_forget()
+        self.transcription_progress.stop()
+        self.transcription_progress.pack_forget()
+        
+        if "error" in results:
+            # Show error in panel
+            self.transcription_status_label.configure(
+                text=f"❌ Error transcribing '{original_filename}': {results['error']}"
+            )
+            self.transcription_textbox.configure(state="normal")
+            self.transcription_textbox.delete("1.0", "end")
+            self.transcription_textbox.insert("1.0", f"Error: {results['error']}")
+            self.transcription_textbox.configure(state="disabled")
+            
+            self.insights_textbox.configure(state="normal")
+            self.insights_textbox.delete("1.0", "end")
+            self.insights_textbox.insert("1.0", "Insights unavailable due to transcription error.")
+            self.insights_textbox.configure(state="disabled")
+            
+            self.update_status_bar(
+                progress_text=f"Transcription failed for {original_filename}."
+            )
+        else:
+            # Show successful results
+            transcription_text = results.get("transcription", "No transcription found.")
+            insights = results.get("insights", {})
+            
+            # Update status
+            self.transcription_status_label.configure(
+                text=f"✅ Transcription and insights completed for '{original_filename}'"
+            )
+            
+            # Update transcription text
+            self.transcription_textbox.configure(state="normal")
+            self.transcription_textbox.delete("1.0", "end")
+            self.transcription_textbox.insert("1.0", transcription_text)
+            self.transcription_textbox.configure(state="disabled")
+            
+            # Format and display insights
+            insights_formatted = self._format_insights_for_display(insights)
+            self.insights_textbox.configure(state="normal")
+            self.insights_textbox.delete("1.0", "end")
+            self.insights_textbox.insert("1.0", insights_formatted)
+            self.insights_textbox.configure(state="disabled")
+            
+            self.update_status_bar(
+                progress_text=f"Transcription complete for {original_filename}."
+            )
+            
+            # Mark content as loaded
+            self.transcription_content_loaded = True
+
+    def _format_insights_for_display(self, insights):
+        """Format the insights dictionary for readable display."""
+        if not insights:
+            return "No insights available."
+        
+        formatted = ""
+        
+        # Summary
+        if insights.get("summary", "N/A") != "N/A":
+            formatted += f"📋 SUMMARY:\n{insights.get('summary', 'N/A')}\n\n"
+        
+        # Category
+        if insights.get("category", "N/A") != "N/A":
+            formatted += f"🏷️ CATEGORY: {insights.get('category', 'N/A')}\n\n"
+        
+        # Meeting Details
+        meeting_details = insights.get("meeting_details", {})
+        if meeting_details and any(v != "N/A" and v != 0 for v in meeting_details.values()):
+            formatted += "📅 MEETING DETAILS:\n"
+            if meeting_details.get("date", "N/A") != "N/A":
+                formatted += f"  Date: {meeting_details.get('date', 'N/A')}\n"
+            if meeting_details.get("time", "N/A") != "N/A":
+                formatted += f"  Time: {meeting_details.get('time', 'N/A')}\n"
+            if meeting_details.get("location", "N/A") != "N/A":
+                formatted += f"  Location: {meeting_details.get('location', 'N/A')}\n"
+            if meeting_details.get("duration_minutes", 0) > 0:
+                formatted += f"  Duration: {meeting_details.get('duration_minutes', 0)} minutes\n"
+            formatted += "\n"
+        
+        # Sentiment
+        if insights.get("overall_sentiment_meeting", "N/A") != "N/A":
+            formatted += f"😊 SENTIMENT: {insights.get('overall_sentiment_meeting', 'N/A')}\n\n"
+        
+        # Action Items
+        action_items = insights.get("action_items", [])
+        if action_items:
+            formatted += "✅ ACTION ITEMS:\n"
+            for i, item in enumerate(action_items, 1):
+                formatted += f"  {i}. {item}\n"
+            formatted += "\n"
+        
+        # Project Context
+        if insights.get("project_context", "N/A") != "N/A":
+            formatted += f"🔗 PROJECT CONTEXT:\n{insights.get('project_context', 'N/A')}\n"
+        
+        return formatted if formatted else "No detailed insights available."
+
     def _create_log_panel(self, _parent_frame):
         """Creates the logging panel with controls and text area."""
         self.log_frame = ctk.CTkFrame(self.main_content_frame)
@@ -1601,28 +2292,17 @@ class HiDockToolGUI(
         """Creates the audio visualizer panel."""
         self.audio_visualizer_frame = ctk.CTkFrame(parent_frame)
         self.audio_visualizer_frame.grid(
-            row=2, column=0, sticky="nsew", padx=0, pady=(0, 5)
+            row=4, column=0, sticky="ew", padx=0, pady=(0, 5)
         )
-
-        # Add collapse/expand button
-        self.visualizer_header = ctk.CTkFrame(self.audio_visualizer_frame)
-        self.visualizer_header.pack(fill="x", padx=5, pady=5)
-
-        self.visualizer_toggle = ctk.CTkButton(
-            self.visualizer_header,
-            text="🎵 Show Audio Visualization",
-            command=self._toggle_audio_visualizer,
-            width=200,
-            height=30,
-        )
-        self.visualizer_toggle.pack(side="left", padx=5)
 
         self.audio_visualizer_widget = AudioVisualizationWidget(
-            self.audio_visualizer_frame
+            self.audio_visualizer_frame, height=150
         )
 
+        # Connect audio player to visualization widget for speed controls
+        self.audio_visualizer_widget.set_audio_player(self.audio_player)
+
         # Initially hide the visualization widget
-        self.visualizer_expanded = False
         self._update_visualizer_visibility()
 
         # Setup audio player callbacks for visualization
@@ -1871,6 +2551,7 @@ You can dismiss this warning and continue using the application with limited aud
         try:
             self.visualizer_expanded = not self.visualizer_expanded
             self._update_visualizer_visibility()
+            self._update_panels_toolbar_visibility()
         except Exception as e:
             logger.error(
                 "MainWindow",
@@ -1883,12 +2564,20 @@ You can dismiss this warning and continue using the application with limited aud
         try:
             if self.visualizer_expanded:
                 self.audio_visualizer_widget.pack(
-                    fill="both", expand=True, padx=5, pady=(0, 5)
+                    fill="x", expand=False, padx=5, pady=(0, 5)
                 )
-                self.visualizer_toggle.configure(text="🎵 Hide Audio Visualization")
+                if hasattr(self, 'visualizer_toolbar_toggle'):
+                    self.visualizer_toolbar_toggle.configure(
+                        text="Hide Audio Visualization",
+                        image=self.icons.get("toggle_up", None)
+                    )
             else:
                 self.audio_visualizer_widget.pack_forget()
-                self.visualizer_toggle.configure(text="🎵 Show Audio Visualization")
+                if hasattr(self, 'visualizer_toolbar_toggle'):
+                    self.visualizer_toolbar_toggle.configure(
+                        text="Show Audio Visualization",
+                        image=self.icons.get("toggle_down", None)
+                    )
         except Exception as e:
             logger.error(
                 "MainWindow",
@@ -1902,10 +2591,15 @@ You can dismiss this warning and continue using the application with limited aud
             selected_iids = self.file_tree.selection()
 
             if not selected_iids:
-                # No file selected - hide visualization section
-                if hasattr(self, "visualizer_expanded") and self.visualizer_expanded:
+                # No file selected - hide visualization section unless pinned
+                if hasattr(self, "visualizer_expanded") and self.visualizer_expanded and not self.visualizer_pinned:
                     self.visualizer_expanded = False
                     self._update_visualizer_visibility()
+                elif self.visualizer_pinned and not self.visualizer_expanded:
+                    # Show pinned visualizer with placeholder
+                    self.visualizer_expanded = True
+                    self._update_visualizer_visibility()
+                    self._show_pinned_placeholder()
                 return
 
             # Get the last selected file (for multiple selection)

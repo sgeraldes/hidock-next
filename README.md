@@ -1,241 +1,323 @@
-# **HiDock Next**
+# **HiDock Next** 🎵
 
-HiDock Next gives you direct, local control over your HiDock recordings. Manage, backup, and access your audio files without relying on the cloud or proprietary software.
+**The Ultimate HiDock Management Suite with AI-Powered Transcription**
 
-This open-source project now includes **two powerful applications**:
+HiDock Next provides comprehensive local control over your HiDock recordings with advanced AI transcription capabilities. Manage, analyze, and transcribe your audio files using **11 different AI providers** including cloud services and local models - all while maintaining complete data ownership.
 
-- **🖥️ Desktop App** (Python): Full-featured desktop application with CustomTkinter GUI
-- **🌐 Web App** (React): Modern, community-friendly web application with AI transcription
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![TypeScript](https://img.shields.io/badge/typescript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 
-Both applications provide alternatives to the standard HiNotes software, focusing on robust local file management for your HiDock device. Our goal is to empower users with greater control over their data and offer a foundation for future enhancements driven by community needs.
+## **🌟 Why HiDock Next?**
 
-## **Why HiDock Next?**
+The HiDock hardware is innovative, but users face challenges with official software:
 
-The HiDock hardware is innovative, but users often face challenges with the official HiNotes software, including:
+- **Limited AI Options:** Locked into single transcription service
+- **Privacy Concerns:** Data processed in unknown cloud environments
+- **High Costs:** Expensive API usage with no alternatives
+- **Connectivity Issues:** Unreliable browser-based interface
+- **Vendor Lock-in:** No choice in AI providers or local processing
 
-- **Connectivity & Reliability:** Issues with stable connections and browser-specific limitations.
-- **Workflow Hurdles:** Confusing steps to access and manage recordings.
-- **Data Control Concerns:** Dependence on a cloud service for basic operations.
-- **Vendor Lock-in:** Limited options for how and where your recordings are processed.
+**HiDock Next solves these problems:**
 
-**HiDock Next aims to address these by providing:**
+- **🤖 11 AI Providers:** Choose from Gemini, OpenAI, Anthropic, OpenRouter, Amazon, Qwen, DeepSeek, Ollama, LM Studio
+- **🔒 Privacy First:** Local models support (Ollama, LM Studio) - zero cloud dependency
+- **💰 Cost Control:** BYOK model with competitive pricing options
+- **🏠 Offline Capable:** Full functionality without internet using local AI
+- **⚡ Advanced Features:** Speed control, waveform visualization, background processing
+- **🎯 Professional UI:** Modern CustomTkinter interface with comprehensive settings
 
-- **Direct Local Access:** Manage your HiDock recordings directly on your computer using Python and libusb.
-- **Offline Capability:** Core features work without needing an internet connection or the HiNotes web interface.
-- **Full Data Ownership:** Keep your audio files securely stored on your local machine.
-- **Open Foundation:** A community-driven project with the potential for powerful future features, including flexible transcription options.
+## **🚀 Key Features Overview**
 
-## **Key Features**
+### **🤖 AI-Powered Transcription & Insights**
 
-- **Local Recording Management (Core \- Available Now):**
-  - Access, list, and play recordings stored on your HiDock device.
-  - Download recordings to your computer for backup and local storage.
-  - Delete recordings from the device.
-  - Format the HiDock's internal storage.
-  - _(Works offline, without needing HiNotes or an internet connection for these operations)_
-- **Flexible Transcription Support (Future Goal):**
-  - Planned support for various transcription engines.
-  - Emphasis on a "Bring Your Own Key" (BYOK) model, allowing you to use your preferred services.
-  - Future exploration of locally-run transcription options for maximum privacy and control.
-- **Auto-Download (Planned):**
-  - Automatically detect and download new recordings from your HiDock when connected.
-- **Community-Driven Enhancements (Future):**
-  - The long-term vision includes advanced features shaped by user feedback and contributions.
+- **11 AI Provider Support:** Comprehensive ecosystem from cloud to local
+- **Smart Analysis:** Automatic summary, action items, sentiment analysis
+- **Background Processing:** Non-blocking transcription with progress tracking
+- **HTA File Support:** Native conversion of HiDock's proprietary format
+- **Secure Storage:** Encrypted API key management with Fernet encryption
 
-## **Current Status**
+### **🎵 Advanced Audio Management**
 
-**Two Complete Applications - Production Ready.**
+- **Enhanced Playback:** Variable speed control (0.25x-2.0x) with preset buttons
+- **Visual Analysis:** Real-time waveform and spectrum visualization
+- **Pin Feature:** Keep waveform visible while working
+- **Format Support:** .hda, .wav, .mp3, .flac with automatic conversion
+
+### **🔌 Professional Device Management**
+
+- **Enhanced Detection:** Professional device selector with status indicators
+- **USB Protocol:** Direct communication via Python & libusb
+- **Real-time Sync:** Live device information and storage monitoring
+- **Batch Operations:** Multi-file download, delete, and management
+
+### **⚙️ Comprehensive Configuration**
+
+- **Provider Settings:** Dedicated configuration for each AI service
+- **Local Endpoints:** Custom server configuration for Ollama/LM Studio
+- **Theme Support:** Light/dark modes with professional styling
+- **Persistent State:** All settings and preferences automatically saved
+
+## **🤖 Supported AI Providers**
+
+### **☁️ Cloud Providers (7)**
+
+| Provider           | Models Available                    | Transcription | Analysis | Strengths                  |
+| ------------------ | ----------------------------------- | ------------- | -------- | -------------------------- |
+| **Google Gemini**  | 7 models (2.5-flash, 2.5-pro, etc.) | ✅            | ✅       | Latest models, multimodal  |
+| **OpenAI**         | 6 models (GPT-4o, Whisper, etc.)    | ✅ Whisper    | ✅       | Best transcription quality |
+| **Anthropic**      | 5 models (Claude 3.5 Sonnet, etc.)  | ❌            | ✅       | Superior reasoning         |
+| **OpenRouter**     | 8+ models (Multi-provider access)   | Limited       | ✅       | Access to many models      |
+| **Amazon Bedrock** | 5+ models (AWS integration)         | ❌            | ✅       | Enterprise features        |
+| **Qwen**           | 7 models (Alibaba's multilingual)   | ❌            | ✅       | Multilingual support       |
+| **DeepSeek**       | 5 models (Coding specialist)        | ❌            | ✅       | Code analysis              |
+
+### **🏠 Local Providers (2)**
+
+| Provider      | Default Endpoint    | Models                               | Privacy  | Cost    |
+| ------------- | ------------------- | ------------------------------------ | -------- | ------- |
+| **Ollama**    | `localhost:11434`   | LLaMA 3.2, Mistral, CodeLlama, Phi3+ | 🔒 Local | 💰 Free |
+| **LM Studio** | `localhost:1234/v1` | Custom GGUF models                   | 🔒 Local | 💰 Free |
+
+## **📦 Multi-Application Suite**
 
 ### **🖥️ Desktop Application (Python)**
 
-HiDock Next is a functional desktop application providing local management for HiDock devices. Key aspects include:
+**Full-featured professional desktop application**
+
+- **Framework:** CustomTkinter with Font Awesome icons
+- **AI Integration:** All 11 providers with unified interface
+- **Audio Processing:** Advanced playback and visualization
+- **Device Management:** Complete HiDock device control
+- **Configuration:** Comprehensive settings with encryption
 
 ### **🌐 Web Application (React)**
 
-HiDock Community Web App is a modern, browser-based application with full device integration and AI transcription. Key features include:
+**Modern browser-based interface** _(Separate application)_
 
-- **Modern User Interface:** Built with **CustomTkinter**, featuring **Font Awesome icons** for an intuitive experience.
-- **Modular Codebase:** Organized into distinct Python modules (e.g., `main.py`, `gui_main_window.py`, `settings_window.py`, `hidock_device.py`, `config_and_logger.py`, `constants.py`) for clarity and maintainability.
-- **Core Local Management:** Robust Python/libusb backend for accessing, listing, playing, downloading, deleting recordings, and formatting device storage.
-- **Comprehensive GUI Features:**
-  - Advanced file list management (drag-selection, status indicators, context menus, header controls with live storage/file counts, sorting).
-  - Theming support (light/dark modes, Azure theme).
-  - Detailed settings configuration (download directory, logging levels & colors, UI preferences, device-specific settings) via a dedicated `SettingsDialog`.
-  - Enhanced logging system (colored console, configurable GUI log pane with live color previews and suppression options).
-  - Standard application controls (Menubar, Toolbar, Status Bar) with synchronized states and icons.
-  - Persistent settings saved to `hidock_tool_config.json`.
-    Development is ongoing to add further enhancements and refine existing functionality.
+- **Framework:** React 18 + TypeScript + Vite
+- **State Management:** Zustand store
+- **AI Integration:** Google Gemini API (expandable)
+- **WebUSB:** Direct device communication in browser
 
-## **Development Focus: Implemented Features & Future Plans**
+### **🎯 Audio Insights Extractor (React)**
 
-This section outlines the features already implemented in HiDock Next and the planned enhancements.
+**Standalone audio analysis tool** _(Separate application)_
 
-### **Implemented Features**
+- **Purpose:** Dedicated audio insights extraction
+- **AI Integration:** Google GenAI processing
+- **Framework:** React 19 + TypeScript
 
-**Core Local Device Management:**
-
-- Direct USB communication with HiDock devices (via Python & libusb).
-- List audio recordings stored on the device.
-- Download recordings to the local computer.
-- Play audio recordings directly from the device (after a temporary download if not already local).
-- Delete recordings from the device.
-- Format the device's storage.
-- View device information (model, SN, firmware version).
-- View storage card information (capacity, used space).
-- Synchronize device time with the computer.
-
-**Graphical User Interface (GUI) & User Experience (UX):**
-
-- Modern interface built with CustomTkinter.
-- Theming support (Light/Dark modes, configurable color themes e.g., 'blue', 'dark-blue', 'green').
-- Integrated Font Awesome icons for toolbar, menus, and buttons.
-- **File List:**
-  - Detailed Treeview display of files with columns for name, size, duration, date, time, and status.
-  - Sortable columns.
-  - Real-time status indicators (e.g., "Recording", "Downloaded", "Mismatch", "Playing", "Queued", "Cancelled").
-  - Click-and-drag selection/deselection of multiple files.
-  - "Select All" & "Clear Selection" controls.
-  - Right-click context menu for file-specific actions.
-  - Double-click actions (download or play based on status).
-- **Main Controls:**
-  - Menubar for access to all application functions.
-  - Toolbar for quick access to common actions.
-  - Status bar displaying connection status, device info, storage usage, file counts, and operation progress.
-- **Header Panel:**
-  - Live display of storage usage and file counts (total/selected).
-  - Button to open current download directory (left-click) or select a new one (right-click).
-- **Playback Controls:**
-  - Dedicated playback control bar with play/pause, progress slider, current/total time display, volume control, and loop option.
-- **Logging Pane:**
-  - In-GUI display of application logs.
-  - Configurable log level filtering for the GUI pane.
-  - Option to clear or save GUI logs to a file.
-
-**Configuration & Logging:**
-
-- Persistent application settings saved to `hidock_tool_config.json`.
-- **Settings Dialog:**
-  - Organized into tabs (General, Connection, Operation, Device Specific, Logging).
-  - Configuration for:
-    - Appearance (theme, mode).
-    - Download directory.
-    - USB device selection (VID/PID), target interface.
-    - Autoconnect on startup.
-    - Operation timeouts, auto-refresh intervals.
-    - Device-specific behavior (auto-record, auto-play, tones - if supported by device).
-    - Logging levels (processing level, console/GUI suppression).
-    - Customizable GUI log colors for each level (with live previews).
-- **Logging System:**
-  - Modern theming and styling (light/dark modes, styled Treeview and scrollbars, Font Awesome icons).
-  - Robust logging system (colored console output, configurable GUI log pane with custom colors, suppression options).
-
-**Application Structure & Dependencies:**
-
-- The desktop application is a self-contained Python package located in the `hidock_desktop_app/` directory.
-- The codebase is organized into logical Python files (`main.py`, `gui_main_window.py`, `settings_window.py`, `hidock_device.py`, `config_and_logger.py`, `constants.py`, etc.).
-- Dependencies are managed via `hidock_desktop_app/requirements.txt`.
-- User configuration (`hidock_config.json`) is stored within the `hidock_desktop_app` folder.
-
-### **Planned Enhancements (Developer To-Do List)**
-
-The following features are planned for future development:
-
-- **Auto-Download Functionality:**
-  - Implement logic to automatically detect and download new recordings when the HiDock device is connected.
-- **Transcription Capabilities:**
-  - Develop support for various transcription engines.
-  - Design for a "Bring Your Own Key" (BYOK) model for cloud-based services.
-  - Research and implement options for local, on-device transcription engines.
-- **GUI & UX Refinements:**
-  - Continuously improve the user interface based on personal use and identified areas for enhancement.
-  - Explore additional theming options or UI customizations.
-- **Advanced File Management:**
-  - Consider adding batch renaming capabilities.
-  - Investigate metadata editing (if feasible with device protocol).
-- **Error Handling & Robustness:**
-  - Ongoing enhancements to error reporting and recovery mechanisms.
-- **Developer Documentation:**
-  - Create `CONTRIBUTING.md` for developer guidelines.
-- **Code Polish & Optimization:**
-  - Regularly review and refactor code for clarity, efficiency, and adherence to best practices.
-
-## **Getting Started**
+## **🛠️ Installation & Setup**
 
 ### **Prerequisites**
 
-- **Python:** Version 3.8 or higher recommended.
-- **libusb:** You'll need libusb (or its equivalent like libusb-1.0) installed on your system.
-  - **Linux:** sudo apt-get install libusb-1.0-0-dev (Debian/Ubuntu) or equivalent.
-  - **macOS:** brew install libusb
-  - **Windows:** Decompress libusb-1.0.dll from the libusb x64 distribution. Alternative: requires careful setup (e.g., using [Zadig](https://zadig.akeo.ie/) to install WinUSB driver for the HiDock device). **Be cautious with Zadig.**
-- **HiDock Device:** A HiDock H1, H1E, or compatible variant.
+- **Python:** 3.8+ recommended
+- **libusb:** USB communication library
+  - **Linux:** `sudo apt-get install libusb-1.0-0-dev`
+  - **macOS:** `brew install libusb`
+  - **Windows:** libusb-1.0.dll (included) or Zadig driver setup
+- **HiDock Device:** H1, H1E, P1 variants supported
 
-### **Installation**
-
-1. **Clone the repository:**  
-   git clone <https://github.com/sgeraldes/hidock-next.git>
-
-2. **Navigate to the project and create a virtual environment (recommended):**  
-   cd hidock-next
-   python \-m venv venv  
-   source venv/bin/activate \# On Windows: venv\\Scripts\\activate
-
-3. **Install desktop app dependencies:**  
-   pip install \-r hidock_desktop_app/requirements.txt
-
-## **Usage**
-
-Once dependencies are installed, navigate into the desktop application's directory and run the main script. This ensures that all relative paths for icons and configuration files work correctly.
+### **Quick Start**
 
 ```bash
-cd hidock_desktop_app
+# 1. Clone repository
+git clone https://github.com/sgeraldes/hidock-next.git
+cd hidock-next
+
+# 2. Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# 3. Install desktop app dependencies
+pip install -r hidock-desktop-app/requirements.txt
+
+# 4. Run desktop application
+cd hidock-desktop-app
 python main.py
 ```
 
-**Brief GUI Overview:**
+### **Optional: Local AI Setup**
 
-- **Menubar:** Access all application functions including File (Connect, Settings, Exit), View (Toggle Panes), Actions (Refresh, Download, Play, Delete), and Device (Sync Time, Format).
-- **Toolbar:** Quick access buttons for common actions like Connect/Disconnect, Refresh, Download, Play, Delete, and Settings.
-- **File List:** Displays recordings from your HiDock. Supports selection, sorting, context-menu actions, and shows file status.
-- **Status Bar:** Shows connection status, device info, storage usage, file counts, download progress, and current download directory.
-- **Settings Window:** Configure application behavior, appearance, logging, download directory, and device-specific options.
+```bash
+# Install Ollama (for local models)
+# Visit: https://ollama.ai
+ollama pull llama3.2  # Pull your preferred model
 
-More detailed user guides and feature explanations will be added to the project Wiki
+# Or install LM Studio
+# Visit: https://lmstudio.ai
+# Download and load GGUF models
+```
 
-## **Transcription Setup (Future Feature)**
+## **🎯 Usage Guide**
 
-When transcription features are implemented, HiDock Next will aim to use a "Bring Your Own Key" (BYOK) model for any cloud-based services and explore support for local transcription engines.
+### **Basic Workflow**
 
-- You will be responsible for API keys and any associated costs for cloud services.
-- The application will prioritize secure handling of any user-provided credentials.
-- **Never** share your API keys publicly or commit **them to version control.**
+1. **Connect Device:** USB connection with automatic detection
+2. **Browse Files:** View recordings with status indicators
+3. **Download & Convert:** Automatic HTA to WAV conversion
+4. **AI Processing:** Choose provider and start transcription
+5. **Review Results:** Summary, insights, and action items
+6. **Manage Files:** Batch operations and organization
 
-## **Contributing**
+### **AI Provider Setup**
 
-We welcome contributions! If you're interested in helping, please check out our GitHub Issues to see where you can help or to report new bugs/suggest features.
+1. **Open Settings:** Configure your preferred AI provider
+2. **Select Provider:** Choose from 11 available options
+3. **Configure API:** Add API keys (cloud) or endpoints (local)
+4. **Test Connection:** Validate configuration
+5. **Start Processing:** Transcribe and analyze with chosen provider
 
-For more detailed guidelines on contributing, please see the `CONTRIBUTING.md` file (coming soon).
+### **Local AI Setup**
 
-You can also help by:
+```bash
+# Ollama Example
+ollama serve  # Start Ollama server
+# Set endpoint: http://localhost:11434
 
-- Reporting bugs or suggesting features for the current local management capabilities on our [GitHub Issues](https://github.com/sgeraldes/hidock-next/issues).
-- Indicating interest in future features like transcription support.
+# LM Studio Example
+# Start LM Studio server with your model
+# Set endpoint: http://localhost:1234/v1
+```
 
-## **Support the Project**
+## **🔧 Advanced Features**
 
-If you find HiDock Next useful, please consider supporting its continued development via Patreon\!
+### **Audio Visualization**
 
-Your support helps cover development time and resources.
+- **Waveform Display:** Real-time audio visualization
+- **Spectrum Analysis:** Frequency domain analysis
+- **Playback Position:** Visual progress indicator
+- **Pin Functionality:** Keep visualizations visible
+- **Theme Support:** Dark/light mode compatibility
 
-## **License**
+### **Speed Control**
 
-This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
+- **Variable Speed:** 0.25x to 2.0x playback
+- **Preset Buttons:** Quick access to common speeds
+- **Smooth Control:** Increment/decrement by 0.25x
+- **Reset Function:** Quick return to normal speed
 
-## **Acknowledgements**
+### **Background Processing**
 
-- The developers of libusb for direct USB communication.
-- The open-source community for their invaluable tools and libraries.
+- **Non-blocking:** Continue working during transcription
+- **Progress Tracking:** Real-time processing indicators
+- **Cancellation:** Stop processing at any time
+- **Queue Management:** Handle multiple files
 
-## **Disclaimer**
+### **Enhanced Device Detection**
 
-HiDock Next is an independent, third-party project and is not affiliated with, endorsed by, or sponsored by HiDock or its parent company. Use this software at your own risk. The developers are not responsible for any damage to your device or loss of data. Always back up important recordings.
+- **Status Indicators:** Visual device state representation
+- **Device Information:** Detailed capability display
+- **Multi-device:** Support for multiple HiDock variants
+- **Real-time Updates:** Live device monitoring
+
+## **🔒 Security & Privacy**
+
+### **Data Protection**
+
+- **Local Processing:** Ollama/LM Studio never send data externally
+- **Encrypted Storage:** API keys secured with Fernet encryption
+- **No Telemetry:** Zero tracking or data collection
+- **Offline Capable:** Full functionality without internet
+
+### **API Key Management**
+
+- **Per-Provider Storage:** Separate encrypted keys
+- **Secure Configuration:** Keys never stored in plain text
+- **Easy Management:** Simple key rotation and updates
+- **Validation:** Built-in key testing functionality
+
+## **📊 Performance & Compatibility**
+
+### **Supported File Formats**
+
+- **Native:** .hda (HiDock proprietary) with automatic conversion
+- **Standard:** .wav, .mp3, .flac, .m4a
+- **Output:** WAV conversion for AI processing
+
+### **Device Compatibility**
+
+- **HiDock H1:** Full support
+- **HiDock H1E:** Full support
+- **HiDock P1:** Full support
+- **Future Models:** Extensible architecture
+
+### **Platform Support**
+
+- **Windows:** 10/11 with libusb
+- **macOS:** 10.14+ with Homebrew libusb
+- **Linux:** Ubuntu/Debian with libusb-dev
+
+## **🔮 Roadmap & Future Plans**
+
+### **Near Term**
+
+- **Model Auto-Discovery:** Detect available local models
+- **Custom Prompts:** User-defined analysis templates
+- **Export Formats:** PDF, Word, JSON export options
+- **Batch Processing:** Multi-file transcription queues
+
+### **Long Term**
+
+- **Plugin System:** Extensible AI provider architecture
+- **Custom Models:** Fine-tuned model integration
+- **Advanced Analytics:** Deeper audio insights
+- **Mobile App:** Companion mobile application
+
+## **🤝 Contributing**
+
+We welcome contributions! Areas for development:
+
+- **New AI Providers:** Expand provider ecosystem
+- **UI/UX Improvements:** Enhance user experience
+- **Local Model Support:** Additional local AI integrations
+- **Documentation:** Guides and tutorials
+- **Testing:** Automated test coverage
+
+See `CONTRIBUTING.md` for detailed guidelines.
+
+## **💡 Use Cases**
+
+### **Professional**
+
+- **Meeting Transcription:** Accurate business meeting records
+- **Interview Analysis:** Journalist and researcher workflows
+- **Content Creation:** Podcast and video transcription
+- **Legal Documentation:** Secure, local legal transcription
+
+### **Personal**
+
+- **Voice Notes:** Personal memo transcription
+- **Learning:** Lecture and educational content
+- **Creative Projects:** Audio content analysis
+- **Accessibility:** Hearing-impaired content access
+
+### **Enterprise**
+
+- **Data Privacy:** Local processing for sensitive content
+- **Cost Control:** BYOK model with budget management
+- **Custom Integration:** API-based workflow integration
+- **Compliance:** Local storage for regulatory requirements
+
+## **📄 License**
+
+This project is licensed under the **MIT License** - see [LICENSE](LICENSE) for details.
+
+## **🙏 Acknowledgements**
+
+- **libusb developers** for USB communication foundation
+- **CustomTkinter team** for modern Python GUI framework
+- **AI Provider teams** for API access and documentation
+- **Open source community** for tools and libraries
+- **HiDock users** for feedback and feature requests
+
+## **⚠️ Disclaimer**
+
+HiDock Next is an independent, community-driven project. Not affiliated with HiDock or its parent company. Use at your own risk. Always backup important recordings.
+
+---
+
+**🚀 Ready to transform your HiDock experience? [Get started now!](#installation--setup)**
+
+_For detailed setup guides, visit our [documentation](docs/) folder._

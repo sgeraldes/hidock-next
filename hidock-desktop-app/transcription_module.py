@@ -1,28 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-Handles audio transcription and insight extraction using the Google Gemini API.
+Handles audio transcription and insight extraction using multiple AI providers.
 
 This module provides functionalities to:
-- Transcribe audio files into text.
-- Extract structured insights (summary, action items, etc.) from transcriptions.
-- Process local audio files to produce a complete analysis.
+- Transcribe audio files into text using various AI services
+- Extract structured insights (summary, action items, etc.) from transcriptions
+- Process local audio files to produce a complete analysis
+- Support for Google Gemini, OpenAI, Anthropic, OpenRouter, Amazon, Qwen, and DeepSeek
 
-It is designed to be used asynchronously and requires a Google Gemini API key
-for its core operations. For development without a key, it returns mock responses.
+It is designed to be used asynchronously and supports multiple AI providers
+through a unified interface. Returns mock responses for development without API keys.
 """
 
 import base64
 import json
 import os
+import tempfile
 import wave
-from typing import Any, Dict, Literal
+from typing import Any, Dict, Literal, Optional
 
-try:
-    import google.generativeai as genai
-    TRANSCRIPTION_AVAILABLE = True
-except ImportError:
-    genai = None
-    TRANSCRIPTION_AVAILABLE = False
+from ai_service import ai_service
 from config_and_logger import logger
 
 # --- Constants ---
@@ -88,132 +85,99 @@ def _call_gemini_api(payload: Dict[str, Any], api_key: str = "") -> Dict[str, An
 
 
 async def transcribe_audio(
-    audio_data_base64: str, audio_mime_type: str, api_key: str = ""
+    audio_file_path: str, provider: str = "gemini", api_key: str = "", 
+    config: Dict[str, Any] = None, language: str = "auto"
 ) -> Dict[str, str]:
     """
-    Transcribes audio data using the Gemini API with speaker diarization prompting.
+    Transcribes audio file using the specified AI provider.
 
     Args:
-        audio_data_base64: Base64 encoded string of the audio data.
-        audio_mime_type: The MIME type of the audio (e.g., "audio/wav").
-        api_key: The Google Gemini API key.
+        audio_file_path: Path to the audio file to transcribe.
+        provider: AI provider to use ("gemini", "openai", "anthropic", etc.).
+        api_key: The API key for the selected provider.
+        config: Provider configuration (model, temperature, etc.).
+        language: Language code for transcription ("auto" for auto-detection).
 
     Returns:
-        A dictionary containing the full transcription text.
-        The key 'transcription' holds the result.
+        A dictionary containing the transcription results.
     """
-    logger.info("TranscriptionModule", "transcribe_audio", f"Starting transcription for {audio_mime_type}")
+    logger.info("TranscriptionModule", "transcribe_audio", f"Starting transcription with {provider}")
 
-    prompt = (
-        "Please transcribe the following audio. If there are multiple speakers, "
-        "try to identify and label them (e.g., Speaker A, Speaker B, Unknown Speaker). "
-        "Provide the full transcription as a single block of text."
-    )
+    # Configure the AI service provider
+    if not ai_service.configure_provider(provider, api_key, config):
+        logger.error("TranscriptionModule", "transcribe_audio", f"Failed to configure provider: {provider}")
+        return {"transcription": TRANSCRIPTION_FAILED_DEFAULT_MSG}
 
-    payload = {
-        "contents": [
-            {"parts": [{"text": prompt}, {"inlineData": {"mimeType": audio_mime_type, "data": audio_data_base64}}]}
-        ],
-        "generationConfig": {"temperature": 0.2},  # Lower temperature for factual transcription
-    }
-
-    api_response = _call_gemini_api(payload, api_key)
-
-    transcription_text = TRANSCRIPTION_FAILED_DEFAULT_MSG
-    if api_response and api_response.get("candidates"):
-        try:
-            # Extract text from the first candidate's content parts
-            parsed_text = api_response["candidates"][0]["content"]["parts"][0].get("text")
-            if parsed_text:
-                transcription_text = parsed_text
-                logger.info("TranscriptionModule", "transcribe_audio", "Transcription successful.")
-        except (IndexError, KeyError, TypeError) as e:
-            logger.error("TranscriptionModule", "transcribe_audio", f"Error parsing API response: {e}")
-            transcription_text = f"{TRANSCRIPTION_PARSE_ERROR_MSG_PREFIX} {e}"
+    # Perform transcription
+    result = ai_service.transcribe_audio(provider, audio_file_path, language)
+    
+    if result.get("success"):
+        transcription_text = result.get("transcription", TRANSCRIPTION_FAILED_DEFAULT_MSG)
+        logger.info("TranscriptionModule", "transcribe_audio", f"Transcription successful with {provider}")
+    else:
+        transcription_text = f"Transcription failed: {result.get('error', 'Unknown error')}"
+        logger.error("TranscriptionModule", "transcribe_audio", transcription_text)
 
     # The raw text from Gemini may contain speaker labels like "Speaker A: ..."
     return {"transcription": transcription_text}
 
 
-async def extract_meeting_insights(transcription: str, api_key: str = "") -> Dict[str, Any]:
+async def extract_meeting_insights(
+    transcription: str, provider: str = "gemini", api_key: str = "", 
+    config: Dict[str, Any] = None
+) -> Dict[str, Any]:
     """
-    Extracts structured insights from a transcription using Gemini's JSON mode.
+    Extracts structured insights from a transcription using the specified AI provider.
 
     Args:
-        transcription: The text transcription of the meeting.
-        api_key: The Google Gemini API key.
+        transcription: The text transcription to analyze.
+        provider: AI provider to use ("gemini", "openai", "anthropic", etc.).
+        api_key: The API key for the selected provider.
+        config: Provider configuration (model, temperature, etc.).
 
     Returns:
-        A dictionary containing the extracted insights, conforming to a default structure
-        even in case of failure.
+        A dictionary containing the extracted insights, conforming to a default structure.
     """
-    logger.info("TranscriptionModule", "extract_meeting_insights", "Starting insight extraction.")
-
-    # Defines the expected JSON structure for the Gemini API response.
-    json_schema = {
-        "type": "OBJECT",
-        "properties": {
-            "summary": {"type": "STRING"},
-            "category": {"type": "STRING"},
-            "meeting_details": {
-                "type": "OBJECT",
-                "properties": {
-                    "location": {"type": "STRING"},
-                    "date": {"type": "STRING"},
-                    "time": {"type": "STRING"},
-                    "duration_minutes": {"type": "NUMBER"},
-                },
-            },
-            "overall_sentiment_meeting": {"type": "STRING"},
-            "action_items": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "project_context": {"type": "STRING"},
-        },
-    }
-
-    prompt = (
-        "Analyze the following meeting transcription. Based *only* on the provided text, "
-        "extract the requested information. Format your response as a single JSON object. "
-        "If information is not available, use 'N/A' for strings, [] for arrays, or 0 for numbers.\n\n"
-        f"Transcription:\n{transcription}"
-    )
-
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": json_schema,
-            "temperature": 0.3,
-        },
-    }
+    logger.info("TranscriptionModule", "extract_meeting_insights", f"Starting insight extraction with {provider}")
 
     # Default structure to ensure UI consistency
     insights = {
-        "summary": "N/A", "category": "N/A",
-        "meeting_details": {"location": "N/A", "date": "N/A", "time": "N/A", "duration_minutes": 0},
-        "overall_sentiment_meeting": "N/A", "action_items": [], "project_context": "N/A",
+        "summary": "N/A", 
+        "category": "N/A",
+        "meeting_details": {
+            "location": "N/A", 
+            "date": "N/A", 
+            "time": "N/A", 
+            "duration_minutes": 0
+        },
+        "overall_sentiment_meeting": "N/A", 
+        "action_items": [], 
+        "project_context": "N/A",
     }
 
-    api_response = _call_gemini_api(payload, api_key)
-    if not (api_response and api_response.get("candidates")):
-        logger.error("TranscriptionModule", "extract_meeting_insights", "Invalid or empty API response.")
+    # Configure the AI service provider
+    if not ai_service.configure_provider(provider, api_key, config):
+        logger.error("TranscriptionModule", "extract_meeting_insights", f"Failed to configure provider: {provider}")
         return insights
 
-    try:
-        json_string = api_response["candidates"][0]["content"]["parts"][0].get("text")
-        if not json_string:
-            logger.warning("TranscriptionModule", "extract_meeting_insights", "API returned empty content.")
-            return insights
-
-        parsed_json = json.loads(json_string)
-        # Safely update the default insights dictionary with parsed data
-        insights.update({k: v for k, v in parsed_json.items() if k in insights})
-        if 'meeting_details' in parsed_json:
-            insights['meeting_details'].update(parsed_json['meeting_details'])
-
-        logger.info("TranscriptionModule", "extract_meeting_insights", "Insight extraction successful.")
-
-    except (json.JSONDecodeError, IndexError, KeyError, TypeError) as e:
-        logger.error("TranscriptionModule", "extract_meeting_insights", f"Failed to parse insights: {e}")
+    # Perform text analysis
+    result = ai_service.analyze_text(provider, transcription, "meeting_insights")
+    
+    if result.get("success"):
+        analysis = result.get("analysis", {})
+        
+        # Map the generic analysis format to our specific insights structure
+        insights.update({
+            "summary": analysis.get("summary", "N/A"),
+            "category": "Meeting" if analysis.get("topics") else "N/A",
+            "overall_sentiment_meeting": analysis.get("sentiment", "N/A"),
+            "action_items": analysis.get("action_items", []),
+            "project_context": ", ".join(analysis.get("topics", [])) if analysis.get("topics") else "N/A"
+        })
+        
+        logger.info("TranscriptionModule", "extract_meeting_insights", f"Insight extraction successful with {provider}")
+    else:
+        logger.error("TranscriptionModule", "extract_meeting_insights", f"Analysis failed: {result.get('error', 'Unknown error')}")
 
     return insights
 
@@ -231,47 +195,59 @@ def _get_audio_duration(audio_path: str) -> int:
 
 
 async def process_audio_file_for_insights(
-    audio_file_path: str, api_key: str = ""
+    audio_file_path: str, provider: str = "gemini", api_key: str = "", 
+    config: Dict[str, Any] = None, language: str = "auto"
 ) -> Dict[str, Any]:
     """
     Orchestrates the full audio processing pipeline: read, transcribe, and extract insights.
 
-    IMPORTANT: This function assumes the input file is a standard audio format
-    (e.g., WAV, FLAC). HTA files must be converted to WAV before being passed here.
+    IMPORTANT: This function handles HTA file conversion automatically.
 
     Args:
         audio_file_path: The absolute path to the audio file.
-        api_key: The Google Gemini API key.
+        provider: AI provider to use ("gemini", "openai", "anthropic", etc.).
+        api_key: The API key for the selected provider.
+        config: Provider configuration (model, temperature, etc.).
+        language: Language code for transcription ("auto" for auto-detection).
 
     Returns:
         A dictionary containing the transcription, insights, and any errors.
     """
-    logger.info("TranscriptionModule", "process_audio_file", f"Processing: {audio_file_path}")
+    logger.info("TranscriptionModule", "process_audio_file", f"Processing: {audio_file_path} with {provider}")
 
     if not os.path.exists(audio_file_path):
         logger.error("TranscriptionModule", "process_audio_file", f"File not found: {audio_file_path}")
         return {"error": "Audio file not found."}
 
     try:
-        with open(audio_file_path, "rb") as f_audio:
-            audio_data_base64 = base64.b64encode(f_audio.read()).decode("utf-8")
-
-        # Basic MIME type detection. Can be expanded if more formats are supported.
+        # Check if it's an HTA file and convert it first
         ext = os.path.splitext(audio_file_path)[1].lower()
-        mime_map = {".wav": "audio/wav", ".flac": "audio/flac", ".mp3": "audio/mpeg"}
-        audio_mime_type = mime_map.get(ext, "audio/wav") # Default to WAV
+        original_file_path = audio_file_path
+        temp_wav_file = None
+        
+        if ext == ".hta":
+            # Convert HTA to WAV
+            from hta_converter import convert_hta_to_wav
+            temp_wav_file = convert_hta_to_wav(audio_file_path)
+            if temp_wav_file:
+                audio_file_path = temp_wav_file
+                ext = ".wav"
+                logger.info("TranscriptionModule", "process_audio_file", f"Converted HTA file to {temp_wav_file}")
+            else:
+                logger.error("TranscriptionModule", "process_audio_file", "Failed to convert HTA file")
+                return {"error": "Failed to convert HTA file to WAV format"}
 
     except Exception as e:
-        logger.error("TranscriptionModule", "process_audio_file", f"File read error: {e}")
-        return {"error": f"Error reading audio file: {e}"}
+        logger.error("TranscriptionModule", "process_audio_file", f"File preparation error: {e}")
+        return {"error": f"Error preparing audio file: {e}"}
 
     # --- Step 1: Transcribe Audio ---
-    transcription_result = await transcribe_audio(audio_data_base64, audio_mime_type, api_key)
+    transcription_result = await transcribe_audio(audio_file_path, provider, api_key, config, language)
     full_transcription = transcription_result.get("transcription", "")
 
     # --- Step 2: Extract Insights ---
     if full_transcription and not full_transcription.startswith("Transcription failed"):
-        meeting_insights = await extract_meeting_insights(full_transcription, api_key)
+        meeting_insights = await extract_meeting_insights(full_transcription, provider, api_key, config)
     else:
         logger.warning("TranscriptionModule", "process_audio_file", "Skipping insights due to transcription failure.")
         meeting_insights = {"summary": "N/A - Transcription failed"} # Provide failure context
@@ -280,6 +256,14 @@ async def process_audio_file_for_insights(
     if meeting_insights.get("meeting_details", {}).get("duration_minutes") == 0:
         if ext == ".wav": # Only calculate duration for WAV for now
             meeting_insights.setdefault("meeting_details", {})["duration_minutes"] = _get_audio_duration(audio_file_path)
+
+    # Clean up temporary WAV file if created
+    if temp_wav_file and os.path.exists(temp_wav_file):
+        try:
+            os.remove(temp_wav_file)
+            logger.info("TranscriptionModule", "process_audio_file", f"Cleaned up temporary file: {temp_wav_file}")
+        except Exception as e:
+            logger.warning("TranscriptionModule", "process_audio_file", f"Could not clean up temporary file: {e}")
 
     return {
         "transcription": full_transcription,

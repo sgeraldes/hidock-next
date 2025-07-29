@@ -1,88 +1,144 @@
-# HiDock Community Web App
+# HiDock Web Application 🌐
 
-A modern, community-driven web application for HiDock device management and AI-powered audio transcription. This React-based application combines local device control with cloud-based AI transcription services.
+**Modern Browser-Based HiDock Management with AI Transcription**
 
-## Features
+The HiDock Web Application is a cutting-edge React TypeScript web app that provides browser-based control over HiDock recording devices using the WebUSB API. Built with modern web technologies, it offers real-time device management and AI-powered audio transcription capabilities directly in your browser.
 
-### 🎧 Device Management
+[![React 18](https://img.shields.io/badge/React-18.2.0-blue.svg)](https://reactjs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.2+-blue.svg)](https://www.typescriptlang.org/)
+[![Vite](https://img.shields.io/badge/Vite-7.0+-purple.svg)](https://vitejs.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-- **WebUSB Integration**: Direct browser-based communication with HiDock devices
-- **Local File Management**: Download, organize, and manage your recordings
-- **Real-time Device Status**: Monitor storage, battery, and connection status
-- **Offline Capability**: Core features work without internet connection
+## 🌟 Key Features
+
+### 🌐 Browser-Native Device Communication
+
+- **WebUSB API**: Direct HiDock device communication in supported browsers
+- **Real-time Connection**: Live device detection and status monitoring
+- **HTTPS Required**: Secure connection required for WebUSB functionality
+- **Cross-Platform**: Works on Windows, macOS, and Linux in supported browsers
 
 ### 🤖 AI-Powered Transcription
 
-- **Gemini AI Integration**: High-quality audio transcription
-- **Insight Extraction**: Automatic summary, key points, and action items
-- **BYOK (Bring Your Own Key)**: Use your own API keys for privacy and control
-- **Multiple Language Support**: Transcribe in various languages
+- **Google Gemini Integration**: Advanced AI transcription and analysis
+- **BYOK Model**: Bring Your Own Key for cost control and privacy
+- **Real-time Processing**: Live transcription with progress tracking
+- **Audio Insights**: Automatic summary, action items, and sentiment analysis
 
-### 🌐 Modern Web Experience
+### 🎵 Modern Audio Management
 
-- **Progressive Web App**: Install like a native app
-- **Responsive Design**: Works on desktop, tablet, and mobile
-- **Real-time Updates**: Live status updates and progress tracking
-- **Dark/Light Themes**: Customizable appearance
+- **Web Audio API**: Professional audio playback in the browser
+- **Format Support**: Multiple audio formats with browser-native decoding
+- **Responsive Design**: Mobile-first design with touch-friendly controls
+- **Progressive Web App**: Can be installed as a desktop/mobile app
 
-## Quick Start
+### 📱 Responsive User Experience
+
+- **Mobile-First**: Optimized for smartphones and tablets
+- **Desktop Enhanced**: Rich experience on larger screens
+- **Touch Friendly**: Gesture-based file management
+- **Accessibility**: WCAG compliant interface design
+
+## 🚀 Quick Start
 
 ### Prerequisites
 
+**Browser Requirements:**
+
+- **Chrome/Chromium 61+**: Full WebUSB support
+- **Edge 79+**: WebUSB support
+- **Opera 48+**: WebUSB support
+- **Firefox**: Limited support (requires flags)
+- **Safari**: Not supported (no WebUSB)
+
+**Development Requirements:**
+
 - Node.js 18+ and npm
-- Modern web browser with WebUSB support (Chrome, Edge, Opera)
-- HiDock device (H1, H1E, or compatible) - _Optional for demo_
-- Gemini API key (for transcription features) - _Optional for demo_
+- HTTPS connection (required for WebUSB)
 
 ### Installation
 
-1. **Clone and install dependencies:**
+1. **Navigate to Web App Directory**
 
    ```bash
    cd hidock-web-app
+   ```
+
+2. **Install Dependencies**
+
+   ```bash
    npm install
    ```
 
-2. **Set up environment variables (Optional):**
-
-   ```bash
-   cp .env.example .env.local
-   # Edit .env.local and add your Gemini API key for full functionality
-   ```
-
-3. **Start development server:**
+3. **Start Development Server**
 
    ```bash
    npm run dev
    ```
 
-4. **Open in browser:**
-   Navigate to `http://localhost:3000`
+4. **Access Application**
+   - Local: `https://localhost:5173` (HTTPS required)
+   - Network: Available on local network for testing
 
-### Demo Mode
-
-The app includes mock data and works without a physical device or API key for demonstration purposes. You can:
-
-- Browse the dashboard with sample recordings
-- Test the audio player with mock files
-- Try the transcription interface (requires API key)
-- Explore all UI components and navigation
-
-### Real Device Integration
-
-The app now includes **complete WebUSB protocol implementation** based on the original Python application:
-
-- **Actual HiDock device constants** (Vendor ID: 0x10D6, Product IDs: H1, H1E, P1)
-- **Full protocol implementation** with packet building, command sending, and response parsing
-- **All device operations**: list files, download recordings, delete files, format storage, sync time
-- **Multi-device support**: Automatically detects H1, H1E, and P1 models
-- **Robust error handling** with connection management and recovery
-
-### Building for Production
+### Production Build
 
 ```bash
+# Build for production
 npm run build
+
+# Preview production build
 npm run preview
+
+# Serve with HTTPS (required for WebUSB)
+npx serve -s dist --ssl-cert cert.pem --ssl-key key.pem
+```
+
+## 📁 Project Structure
+
+```
+hidock-web-app/
+├── src/
+│   ├── components/                   # React components
+│   │   ├── AudioPlayer/              # Audio playback component
+│   │   ├── AudioVisualization/       # Waveform visualization
+│   │   ├── FileManager/              # File management interface
+│   │   ├── Layout/                   # App layout components
+│   │   └── ...                       # Other UI components
+│   │
+│   ├── pages/                        # Route pages
+│   │   ├── Dashboard.tsx             # Main dashboard
+│   │   ├── Recordings.tsx            # Recordings management
+│   │   ├── Transcription.tsx         # AI transcription interface
+│   │   └── Settings.tsx              # Application settings
+│   │
+│   ├── services/                     # Business logic
+│   │   ├── deviceService.ts          # HiDock device communication
+│   │   ├── geminiService.ts          # AI transcription service
+│   │   └── audioProcessingService.ts # Audio processing
+│   │
+│   ├── adapters/                     # Device integration
+│   │   └── webDeviceAdapter.ts       # WebUSB device adapter
+│   │
+│   ├── store/                        # State management
+│   │   └── useAppStore.ts            # Zustand store
+│   │
+│   ├── hooks/                        # Custom React hooks
+│   │   └── useDeviceConnection.ts    # Device connection hook
+│   │
+│   ├── utils/                        # Utility functions
+│   │   ├── audioUtils.ts             # Audio processing utilities
+│   │   ├── formatters.ts             # Data formatting
+│   │   └── mockData.ts               # Development mock data
+│   │
+│   └── types/                        # TypeScript type definitions
+│       └── index.ts                  # Shared types
+│
+├── public/                           # Static assets
+├── package.json                      # Dependencies and scripts
+├── vite.config.ts                    # Vite configuration
+├── tailwind.config.js                # Tailwind CSS configuration
+├── tsconfig.json                     # TypeScript configuration
+└── vitest.config.ts                  # Test configuration
 ```
 
 ## Usage
@@ -130,18 +186,7 @@ The app automatically detects HiDock devices. If you have connection issues:
 
 ## Development
 
-### Project Structure
 
-```folder
-src/
-├── components/     # Reusable UI components
-├── pages/         # Main application pages
-├── services/      # API and device communication
-├── store/         # State management (Zustand)
-├── types/         # TypeScript type definitions
-├── utils/         # Helper functions
-└── constants/     # Application constants
-```
 
 ### Key Technologies
 
@@ -167,8 +212,10 @@ src/
 - ✅ Chrome 61+
 - ✅ Edge 79+
 - ✅ Opera 48+
-- ❌ Firefox (WebUSB not supported)
+- ⚠️ Firefox (Limited support, not recommended)*
 - ❌ Safari (WebUSB not supported)
+
+*Firefox support is limited as WebUSB is disabled by default due to security concerns. It can be enabled manually in `about:config` for development purposes, but it is not recommended for general use.
 
 ### WebUSB Requirements
 
@@ -236,4 +283,10 @@ MIT License - see [LICENSE](../LICENSE) file for details.
 - **Easy Deployment**: Ready for Vercel, Netlify, or any static host
 - **Extensible**: Simple to add new features and integrations
 
-**🌟 Your vision of a community-friendly, modern web app for HiDock device management is now complete and ready for the world!**
+
+
+---
+
+**Ready to start?** Run `npm run dev` from this directory to launch the HiDock Web Application!
+
+**Note**: Make sure you're using a WebUSB-compatible browser (Chrome, Edge, or Opera) and have HTTPS enabled for full functionality.
