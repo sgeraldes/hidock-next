@@ -51,7 +51,6 @@ beforeEach(() => {
     mockUSBDevice.transferIn.mockResolvedValue({ status: 'ok', data: new DataView(new ArrayBuffer(0)) });
     mockUSBDevice.transferOut.mockResolvedValue({ status: 'ok', bytesWritten: 12 });
 
-    // Mock transferIn and transferOut to prevent timeouts
     mockUSBDevice.transferIn.mockResolvedValue({ status: 'ok', data: new DataView(new ArrayBuffer(0)) });
     mockUSBDevice.transferOut.mockResolvedValue({ status: 'ok', bytesWritten: 12 });
 });
