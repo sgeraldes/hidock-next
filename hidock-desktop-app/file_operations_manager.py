@@ -673,6 +673,7 @@ class FileOperationsManager:
             ".m4a": "M4A Audio",
             ".ogg": "OGG Audio",
             ".flac": "FLAC Audio",
+            ".hta": "HiDock Audio",
         }
         return audio_types.get(extension, "Unknown")
 

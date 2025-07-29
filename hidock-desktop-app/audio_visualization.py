@@ -30,7 +30,7 @@ from scipy.fft import fftfreq
 class WaveformVisualizer:
     """Waveform visualization component"""
 
-    def __init__(self, parent_frame: ctk.CTkFrame, width: int = 600, height: int = 180):
+    def __init__(self, parent_frame: ctk.CTkFrame, width: int = 800, height: int = 120):
         self.parent = parent_frame
         self.width = width
         self.height = height
@@ -41,11 +41,13 @@ class WaveformVisualizer:
         self.current_position: float = 0.0
         self.total_duration: float = 0.0
 
-        # Matplotlib setup
+        # Matplotlib setup - use more dynamic sizing
         self.figure = Figure(
             figsize=(width / 100, height / 100), dpi=100, facecolor="#2b2b2b"
         )
+        # Adjust subplot to use more space and reduce margins
         self.ax = self.figure.add_subplot(111)
+        self.figure.subplots_adjust(left=0.02, right=0.98, top=0.95, bottom=0.05)
         self.canvas = FigureCanvasTkAgg(self.figure, parent_frame)
 
         # Styling
@@ -58,32 +60,8 @@ class WaveformVisualizer:
         self.zoom_level = 1.0
         self.zoom_center = 0.5  # Center of zoom (0.0 to 1.0)
 
-        # Pack the canvas
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        # Add zoom controls
-        self.zoom_frame = ctk.CTkFrame(parent_frame)
-        self.zoom_frame.pack(fill="x", padx=3, pady=1)
-
-        ctk.CTkLabel(self.zoom_frame, text="Zoom:").pack(side="left", padx=5)
-
-        self.zoom_out_btn = ctk.CTkButton(
-            self.zoom_frame, text="−", width=30, height=25, command=self._zoom_out
-        )
-        self.zoom_out_btn.pack(side="left", padx=2)
-
-        self.zoom_in_btn = ctk.CTkButton(
-            self.zoom_frame, text="+", width=30, height=25, command=self._zoom_in
-        )
-        self.zoom_in_btn.pack(side="left", padx=2)
-
-        self.zoom_reset_btn = ctk.CTkButton(
-            self.zoom_frame, text="Reset", width=50, height=25, command=self._zoom_reset
-        )
-        self.zoom_reset_btn.pack(side="left", padx=5)
-
-        self.zoom_label = ctk.CTkLabel(self.zoom_frame, text="1.0x")
-        self.zoom_label.pack(side="left", padx=10)
+        # Pack the canvas to fill available space
+        self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=2, pady=2)
 
     def _setup_styling(self):
         """Setup matplotlib styling for dark theme"""
@@ -106,24 +84,41 @@ class WaveformVisualizer:
 
     def _initialize_plot(self):
         """Initialize empty waveform plot"""
-        self.ax.clear()
-        self.ax.set_xlim(0, 1)
-        self.ax.set_ylim(-1, 1)
-        self.ax.set_facecolor(self.background_color)
+        try:
+            self.ax.clear()
+            self.ax.set_xlim(0, 1)
+            self.ax.set_ylim(-1, 1)
+            self.ax.set_facecolor(self.background_color)
 
-        # Add placeholder text
-        self.ax.text(
-            0.5,
-            0,
-            "No audio loaded",
-            ha="center",
-            va="center",
-            color="#666666",
-            fontsize=12,
-            transform=self.ax.transAxes,
-        )
+            # Add placeholder text
+            self.ax.text(
+                0.5,
+                0,
+                "No audio loaded",
+                ha="center",
+                va="center",
+                color="#666666",
+                fontsize=12,
+                transform=self.ax.transAxes,
+            )
 
-        self.canvas.draw()
+            # Draw the canvas with error handling
+            try:
+                self.canvas.draw()
+            except RecursionError:
+                # If we get a recursion error, skip the initial draw
+                # The canvas will be drawn when it's actually displayed
+                logger.warning(
+                    "WaveformVisualizer",
+                    "_initialize_plot", 
+                    "Skipping initial canvas draw due to recursion error"
+                )
+        except Exception as e:
+            logger.error(
+                "WaveformVisualizer",
+                "_initialize_plot",
+                f"Error initializing plot: {e}"
+            )
 
     def _apply_theme_colors(self):
         """Apply current theme colors to the matplotlib figure"""
@@ -363,7 +358,7 @@ class WaveformVisualizer:
 class SpectrumAnalyzer:
     """Real-time spectrum analyzer visualization"""
 
-    def __init__(self, parent_frame: ctk.CTkFrame, width: int = 300, height: int = 160):
+    def __init__(self, parent_frame: ctk.CTkFrame, width: int = 800, height: int = 120):
         self.parent = parent_frame
         self.width = width
         self.height = height
@@ -383,7 +378,9 @@ class SpectrumAnalyzer:
         self.figure = Figure(
             figsize=(width / 100, height / 100), dpi=100, facecolor="#2b2b2b"
         )
+        # Adjust subplot to use more space and reduce margins
         self.ax = self.figure.add_subplot(111)
+        self.figure.subplots_adjust(left=0.02, right=0.98, top=0.95, bottom=0.05)
         self.canvas = FigureCanvasTkAgg(self.figure, parent_frame)
 
         # Animation
@@ -396,8 +393,8 @@ class SpectrumAnalyzer:
         # Initialize plot
         self._initialize_plot()
 
-        # Pack canvas
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        # Pack canvas to fill available space
+        self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=2, pady=2)
 
     def _setup_styling(self):
         """Setup matplotlib styling"""
@@ -411,40 +408,60 @@ class SpectrumAnalyzer:
 
     def _initialize_plot(self):
         """Initialize spectrum plot"""
-        self.ax.clear()
-        self.ax.set_facecolor(self.background_color)
+        try:
+            self.ax.clear()
+            self.ax.set_facecolor(self.background_color)
 
-        # Set up frequency axis (logarithmic scale)
-        freqs = np.logspace(1, 4, 100)  # 10 Hz to 10 kHz
-        mags = np.zeros_like(freqs)
+            # Set up frequency axis (logarithmic scale)
+            freqs = np.logspace(1, 4, 100)  # 10 Hz to 10 kHz
+            mags = np.zeros_like(freqs)
 
-        # Plot empty spectrum
-        (self.spectrum_line,) = self.ax.semilogx(
-            freqs, mags, color=self.spectrum_color, linewidth=1.5
-        )
+            # Plot empty spectrum
+            (self.spectrum_line,) = self.ax.semilogx(
+                freqs, mags, color=self.spectrum_color, linewidth=1.5
+            )
 
-        # Styling
-        self.ax.set_xlim(10, 10000)
-        self.ax.set_ylim(-80, 0)
-        self.ax.set_xlabel("Frequency (Hz)", color="#cccccc", fontsize=10)
-        self.ax.set_ylabel("Magnitude (dB)", color="#cccccc", fontsize=10)
+            # Styling
+            self.ax.set_xlim(10, 10000)
+            self.ax.set_ylim(-80, 0)
+            self.ax.set_xlabel("Frequency (Hz)", color="#cccccc", fontsize=10)
+            self.ax.set_ylabel("Magnitude (dB)", color="#cccccc", fontsize=10)
 
-        # Grid
-        self.ax.grid(True, color=self.grid_color, alpha=0.3, linewidth=0.5)
+            # Grid
+            self.ax.grid(True, color=self.grid_color, alpha=0.3, linewidth=0.5)
 
-        # Tick styling
-        self.ax.tick_params(colors="#cccccc", labelsize=8)
+            # Tick styling
+            self.ax.tick_params(colors="#cccccc", labelsize=8)
 
-        # Spine styling
-        for spine in self.ax.spines.values():
-            spine.set_color("#404040")
-            spine.set_linewidth(0.5)
+            # Spine styling
+            for spine in self.ax.spines.values():
+                spine.set_color("#404040")
+                spine.set_linewidth(0.5)
 
-        self.canvas.draw()
+            # Draw the canvas with error handling
+            try:
+                self.canvas.draw()
+            except RecursionError:
+                # If we get a recursion error, skip the initial draw
+                # The canvas will be drawn when it's actually displayed
+                logger.warning(
+                    "SpectrumAnalyzer",
+                    "_initialize_plot", 
+                    "Skipping initial canvas draw due to recursion error"
+                )
+        except Exception as e:
+            logger.error(
+                "SpectrumAnalyzer",
+                "_initialize_plot",
+                f"Error initializing plot: {e}"
+            )
 
     def start_analysis(self, audio_data: np.ndarray, sample_rate: int):
         """Start real-time spectrum analysis"""
         try:
+            # Stop any existing animation first
+            self.stop_analysis()
+            
             self.sample_rate = sample_rate
             self.audio_data = audio_data
 
@@ -456,19 +473,43 @@ class SpectrumAnalyzer:
                 : self.fft_size // 2
             ]
 
-            # Start animation
-            if not self.is_running:
-                self.is_running = True
-                self.animation = animation.FuncAnimation(
-                    self.figure,
-                    self._update_spectrum,
-                    interval=100,  # Update every 100ms
-                    blit=False,
-                    cache_frame_data=False,
+            # Ensure we have valid audio data
+            if len(audio_data) == 0:
+                logger.warning(
+                    "SpectrumAnalyzer", "start_analysis", "No audio data provided"
+                )
+                return
+
+            # Start animation with explicit settings to ensure it runs
+            logger.info(
+                "SpectrumAnalyzer", 
+                "start_analysis", 
+                f"Starting spectrum analysis with {len(audio_data)} samples at {sample_rate} Hz"
+            )
+            
+            self.is_running = True
+            self.animation = animation.FuncAnimation(
+                self.figure,
+                self._update_spectrum,
+                interval=50,  # Faster update - every 50ms for smoother animation
+                blit=False,
+                cache_frame_data=False,
+                repeat=True,  # Keep repeating the animation
+            )
+            
+            # Force initial draw to start the animation
+            try:
+                self.canvas.draw()
+                logger.info(
+                    "SpectrumAnalyzer", "start_analysis", "Initial canvas draw completed"
+                )
+            except Exception as draw_error:
+                logger.warning(
+                    "SpectrumAnalyzer", "start_analysis", f"Initial draw warning: {draw_error}"
                 )
 
             logger.info(
-                "SpectrumAnalyzer", "start_analysis", "Spectrum analysis started"
+                "SpectrumAnalyzer", "start_analysis", "Spectrum analysis started successfully"
             )
 
         except Exception as e:
@@ -559,8 +600,25 @@ class SpectrumAnalyzer:
 
                 freqs = log_freqs
 
-            # Update plot
+            # Update plot data
             self.spectrum_line.set_data(freqs, spectrum)
+            
+            # Force canvas redraw to make sure spectrum is visible
+            try:
+                self.canvas.draw_idle()
+                # Log occasionally to avoid spam, but show that it's working
+                if int(self.current_position * 10) % 20 == 0:  # Log every 2 seconds
+                    logger.info(
+                        "SpectrumAnalyzer",
+                        "_update_spectrum",
+                        f"Updated spectrum at {self.current_position:.1f}s, freq range: {freqs[0]:.1f}-{freqs[-1]:.1f} Hz, max magnitude: {np.max(spectrum):.1f} dB"
+                    )
+            except Exception as draw_error:
+                logger.error(
+                    "SpectrumAnalyzer",
+                    "_update_spectrum",
+                    f"Canvas draw error: {draw_error}"
+                )
 
             return [self.spectrum_line]
 
@@ -574,20 +632,28 @@ class SpectrumAnalyzer:
 class AudioVisualizationWidget(ctk.CTkFrame):
     """Combined audio visualization widget"""
 
-    def __init__(self, parent, **kwargs):
+    def __init__(self, parent, height=180, **kwargs):
         super().__init__(parent, **kwargs)
+        
+        # Set a fixed height for the widget and prevent it from expanding
+        self.configure(height=height)
+        self.pack_propagate(False)  # Prevent child widgets from affecting our size
+        
+        # Audio player reference (will be set by parent)
+        self.audio_player = None
+        self.current_speed = 1.0
 
         # Create notebook for different visualization types
-        self.notebook = ctk.CTkTabview(self)
-        self.notebook.pack(fill="both", expand=True, padx=3, pady=3)
+        self.notebook = ctk.CTkTabview(self, height=height-40)  # Leave room for controls
+        self.notebook.pack(fill="x", expand=False, padx=3, pady=3)
 
         # Waveform tab
         self.waveform_tab = self.notebook.add("Waveform")
-        self.waveform_visualizer = WaveformVisualizer(self.waveform_tab)
+        self.waveform_visualizer = WaveformVisualizer(self.waveform_tab, height=height-80)
 
         # Spectrum tab
         self.spectrum_tab = self.notebook.add("Spectrum")
-        self.spectrum_analyzer = SpectrumAnalyzer(self.spectrum_tab)
+        self.spectrum_analyzer = SpectrumAnalyzer(self.spectrum_tab, height=height-80)
 
         # Set up tab change callback
         self.notebook.configure(command=self._on_tab_changed)
@@ -595,6 +661,9 @@ class AudioVisualizationWidget(ctk.CTkFrame):
         # Control frame for audio controls and theme toggle
         self.control_frame = ctk.CTkFrame(self)
         self.control_frame.pack(fill="x", padx=3, pady=(0, 3))
+
+        # Speed control section
+        self._create_speed_controls()
 
         # Audio controls are handled by the main toolbar - no duplicate controls needed here
 
@@ -635,7 +704,7 @@ class AudioVisualizationWidget(ctk.CTkFrame):
         # Remove redundant checkboxes - tabs already provide this functionality
         # Visualization state is now controlled by the active tab
         self.show_waveform_var = ctk.BooleanVar(value=True)
-        self.show_spectrum_var = ctk.BooleanVar(value=False)
+        self.show_spectrum_var = ctk.BooleanVar(value=True)  # Always enable spectrum analyzer
 
     def _load_theme_icons(self):
         """Load theme toggle icons"""
@@ -706,11 +775,13 @@ class AudioVisualizationWidget(ctk.CTkFrame):
     def update_position(self, position: PlaybackPosition):
         """Update playback position in visualizations"""
         try:
+            # Always update waveform if it's being shown
             if self.show_waveform_var.get():
                 self.waveform_visualizer.update_position(position)
 
-            if self.show_spectrum_var.get():
-                self.spectrum_analyzer.update_position(position.current_time)
+            # Always update spectrum analyzer position regardless of tab visibility
+            # The animation needs position updates to work properly
+            self.spectrum_analyzer.update_position(position.current_time)
 
         except Exception as e:
             logger.error(
@@ -721,8 +792,28 @@ class AudioVisualizationWidget(ctk.CTkFrame):
 
     def start_spectrum_analysis(self, audio_data: np.ndarray, sample_rate: int):
         """Start spectrum analysis"""
-        if self.show_spectrum_var.get():
+        try:
+            # Always start spectrum analysis when audio is playing regardless of current tab
+            # The tab visibility only controls what the user sees, not the functionality
+            logger.info(
+                "AudioVisualizationWidget",
+                "start_spectrum_analysis",
+                f"Starting spectrum analysis for {len(audio_data)} samples at {sample_rate} Hz"
+            )
+            
             self.spectrum_analyzer.start_analysis(audio_data, sample_rate)
+            
+            logger.info(
+                "AudioVisualizationWidget",
+                "start_spectrum_analysis", 
+                "Spectrum analysis started successfully"
+            )
+        except Exception as e:
+            logger.error(
+                "AudioVisualizationWidget",
+                "start_spectrum_analysis",
+                f"Error starting spectrum analysis: {e}"
+            )
 
     def stop_spectrum_analysis(self):
         """Stop spectrum analysis"""
@@ -875,3 +966,159 @@ class AudioVisualizationWidget(ctk.CTkFrame):
         """Clear position indicators from all visualizations"""
         self.waveform_visualizer.clear_position_indicator()
         # Spectrum analyzer position is updated per frame, no persistent indicator to clear
+
+    def set_audio_player(self, audio_player):
+        """Set the audio player reference for speed controls"""
+        self.audio_player = audio_player
+        if audio_player:
+            self.current_speed = audio_player.get_playback_speed()
+            self._update_speed_display()
+
+    def _create_speed_controls(self):
+        """Create audio playback speed control widgets"""
+        try:
+            # Speed control section
+            speed_frame = ctk.CTkFrame(self.control_frame)
+            speed_frame.pack(side="left", padx=(5, 10), pady=3)
+
+            # Speed label
+            ctk.CTkLabel(
+                speed_frame,
+                text="Speed:",
+                font=ctk.CTkFont(size=12, weight="bold")
+            ).pack(side="left", padx=(8, 5))
+
+            # Speed decrease button
+            self.speed_down_btn = ctk.CTkButton(
+                speed_frame,
+                text="−",
+                width=30,
+                height=24,
+                font=ctk.CTkFont(size=16, weight="bold"),
+                command=self._decrease_speed
+            )
+            self.speed_down_btn.pack(side="left", padx=2)
+
+            # Speed display
+            self.speed_label = ctk.CTkLabel(
+                speed_frame,
+                text="1.0x",
+                width=50,
+                font=ctk.CTkFont(size=12, weight="bold")
+            )
+            self.speed_label.pack(side="left", padx=5)
+
+            # Speed increase button
+            self.speed_up_btn = ctk.CTkButton(
+                speed_frame,
+                text="+",
+                width=30,
+                height=24,
+                font=ctk.CTkFont(size=16, weight="bold"),
+                command=self._increase_speed
+            )
+            self.speed_up_btn.pack(side="left", padx=2)
+
+            # Speed reset button
+            self.speed_reset_btn = ctk.CTkButton(
+                speed_frame,
+                text="Reset",
+                width=50,
+                height=24,
+                font=ctk.CTkFont(size=11),
+                command=self._reset_speed
+            )
+            self.speed_reset_btn.pack(side="left", padx=(5, 8))
+
+            # Preset speed buttons
+            preset_frame = ctk.CTkFrame(self.control_frame)
+            preset_frame.pack(side="left", padx=5, pady=3)
+
+            ctk.CTkLabel(
+                preset_frame,
+                text="Presets:",
+                font=ctk.CTkFont(size=10)
+            ).pack(side="left", padx=(5, 3))
+
+            # Create preset buttons for common speeds
+            preset_speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+            for speed in preset_speeds:
+                btn = ctk.CTkButton(
+                    preset_frame,
+                    text=f"{speed}x",
+                    width=35,
+                    height=20,
+                    font=ctk.CTkFont(size=9),
+                    command=lambda s=speed: self._set_speed_preset(s)
+                )
+                btn.pack(side="left", padx=1)
+
+        except Exception as e:
+            logger.error(
+                "AudioVisualizationWidget",
+                "_create_speed_controls",
+                f"Error creating speed controls: {e}"
+            )
+
+    def _decrease_speed(self):
+        """Decrease playback speed"""
+        if self.audio_player:
+            new_speed = self.audio_player.decrease_speed()
+            self.current_speed = new_speed
+            self._update_speed_display()
+
+    def _increase_speed(self):
+        """Increase playback speed"""
+        if self.audio_player:
+            new_speed = self.audio_player.increase_speed()
+            self.current_speed = new_speed
+            self._update_speed_display()
+
+    def _reset_speed(self):
+        """Reset playback speed to normal"""
+        if self.audio_player:
+            new_speed = self.audio_player.reset_speed()
+            self.current_speed = new_speed
+            self._update_speed_display()
+
+    def _set_speed_preset(self, speed):
+        """Set playback speed to preset value"""
+        logger.info(
+            "AudioVisualizationWidget",
+            "_set_speed_preset",
+            f"Setting playback speed to {speed}x"
+        )
+        if self.audio_player:
+            success = self.audio_player.set_playback_speed(speed)
+            if success:
+                self.current_speed = speed
+                self._update_speed_display()
+                logger.info(
+                    "AudioVisualizationWidget",
+                    "_set_speed_preset",
+                    f"Successfully set speed to {speed}x"
+                )
+            else:
+                logger.error(
+                    "AudioVisualizationWidget",
+                    "_set_speed_preset",
+                    f"Failed to set speed to {speed}x"
+                )
+        else:
+            logger.warning(
+                "AudioVisualizationWidget",
+                "_set_speed_preset",
+                "No audio player reference available"
+            )
+
+    def _update_speed_display(self):
+        """Update the speed display label"""
+        try:
+            if hasattr(self, 'speed_label'):
+                self.speed_label.configure(text=f"{self.current_speed:.2f}x")
+        except Exception as e:
+            logger.error(
+                "AudioVisualizationWidget",
+                "_update_speed_display", 
+                f"Error updating speed display: {e}"
+            )

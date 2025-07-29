@@ -12,9 +12,17 @@ import os
 import threading  # For device settings apply thread
 import tkinter
 from tkinter import filedialog, messagebox
+import base64
+import json
 
 import customtkinter as ctk
 import usb.core  # For specific exception handling
+
+try:
+    from cryptography.fernet import Fernet
+    ENCRYPTION_AVAILABLE = True
+except ImportError:
+    ENCRYPTION_AVAILABLE = False
 from config_and_logger import (  # For type hint and logger instance
     Logger,
     logger,
@@ -138,6 +146,17 @@ class SettingsDialog(ctk.CTkToplevel):
             "device_setting_auto_play_var": "BooleanVar",
             "device_setting_bluetooth_tone_var": "BooleanVar",
             "device_setting_notification_sound_var": "BooleanVar",
+            "ai_api_provider_var": "StringVar",
+            "ai_model_var": "StringVar",
+            "ai_temperature_var": "DoubleVar",
+            "ai_max_tokens_var": "IntVar",
+            "ai_language_var": "StringVar",
+            "ai_openrouter_base_url_var": "StringVar",
+            "ai_amazon_region_var": "StringVar",
+            "ai_qwen_base_url_var": "StringVar",
+            "ai_deepseek_base_url_var": "StringVar",
+            "ai_ollama_base_url_var": "StringVar",
+            "ai_lmstudio_base_url_var": "StringVar",
         }
         for var_name, var_type_str in vars_to_clone_map.items():
             if hasattr(self.parent_gui, var_name):
@@ -191,12 +210,14 @@ class SettingsDialog(ctk.CTkToplevel):
         tab_connection = tabview.add(" Connection ")
         tab_operation = tabview.add(" Operation ")
         tab_device_specific = tabview.add(" Device Specific ")
+        tab_ai_transcription = tabview.add(" AI Transcription ")
         tab_logging = tabview.add(" Logging ")
 
         self._populate_general_tab(tab_general)
         self._populate_connection_tab(tab_connection)
         self._populate_operation_tab(tab_operation)
         self._populate_device_specific_tab(tab_device_specific)
+        self._populate_ai_transcription_tab(tab_ai_transcription)
         self._populate_logging_tab(tab_logging)
 
         # --- Buttons Frame ---
@@ -319,44 +340,30 @@ class SettingsDialog(ctk.CTkToplevel):
         scroll_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
         scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
-        ctk.CTkLabel(
-            scroll_frame, text="USB Device Selection:", font=ctk.CTkFont(weight="bold")
-        ).pack(anchor="w", pady=(5, 2), padx=5)
-        device_combo_scan_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
-        device_combo_scan_frame.pack(fill="x", padx=10, pady=(0, 10))
-        self.settings_device_combobox = ctk.CTkComboBox(
-            device_combo_scan_frame,
-            state="readonly",
-            width=350,
-            command=self._on_device_selected_in_settings,
+        # Enhanced device selector
+        from enhanced_device_selector import EnhancedDeviceSelector
+        
+        self.device_selector = EnhancedDeviceSelector(
+            scroll_frame,
+            command=self._on_device_selected_enhanced,
+            scan_callback=self._on_device_scan_complete
         )
-        self.settings_device_combobox.pack(
-            side="left", fill="x", expand=True, padx=(0, 5)
-        )
-        self.scan_button = ctk.CTkButton(
-            device_combo_scan_frame,
-            text="Scan",
-            width=80,
-            command=lambda: self.parent_gui.scan_usb_devices_for_settings(
-                self, change_callback=self._update_button_states_on_change
-            ),
-        )
-        self.scan_button.pack(side="left")
+        self.device_selector.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # Disable device selection controls if device is connected
+        # Disable device selection if device is connected
         if self.dock.is_connected():
-            self.settings_device_combobox.configure(state="disabled")
-            self.scan_button.configure(state="disabled")
+            self.device_selector.configure(state="disabled")
 
             # Add informational label
             ctk.CTkLabel(
                 scroll_frame,
-                text="Device selection is disabled while connected. Disconnect to change device.",
-                text_color=("gray60", "gray40"),
-                font=ctk.CTkFont(size=11, slant="italic"),
-            ).pack(anchor="w", pady=(5, 0), padx=10)
-        # Perform initial USB scan asynchronously to prevent UI freezing during downloads
-        threading.Thread(target=self._initial_usb_scan_thread, daemon=True).start()
+                text="⚠️ Device selection is disabled while connected. Disconnect to change device.",
+                text_color=("orange", "orange"),
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).pack(anchor="w", pady=(10, 0), padx=10)
+        else:
+            # Auto-scan for devices when not connected
+            threading.Thread(target=self._initial_enhanced_scan_thread, daemon=True).start()
 
         ctk.CTkCheckBox(
             scroll_frame,
@@ -542,6 +549,249 @@ class SettingsDialog(ctk.CTkToplevel):
                 ),
             )
             self._update_color_preview_widget(dark_preview_frame, dark_color_var_ref)
+
+    def _populate_ai_transcription_tab(self, tab):
+        """Populates the 'AI Transcription' tab with AI service settings."""
+        scroll_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # API Configuration Section
+        ctk.CTkLabel(
+            scroll_frame,
+            text="API Configuration:",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(anchor="w", pady=(5, 2), padx=5)
+        
+        # API Provider Selection
+        ctk.CTkLabel(scroll_frame, text="AI Service Provider:").pack(
+            anchor="w", pady=(5, 0), padx=10
+        )
+        self.provider_combobox = ctk.CTkComboBox(
+            scroll_frame,
+            variable=self.local_vars["ai_api_provider_var"],
+            values=["gemini", "openai", "anthropic", "openrouter", "amazon", "qwen", "deepseek", "ollama", "lmstudio"],
+            state="readonly",
+            command=self._on_ai_provider_changed
+        )
+        self.provider_combobox.pack(fill="x", pady=2, padx=10)
+        
+        # API Key Entry
+        ctk.CTkLabel(scroll_frame, text="API Key:").pack(
+            anchor="w", pady=(10, 0), padx=10
+        )
+        
+        api_key_frame = ctk.CTkFrame(scroll_frame)
+        api_key_frame.pack(fill="x", pady=2, padx=10)
+        
+        self.api_key_entry = ctk.CTkEntry(
+            api_key_frame,
+            placeholder_text="Enter your API key",
+            show="*",
+            width=300
+        )
+        self.api_key_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        self.validate_key_button = ctk.CTkButton(
+            api_key_frame,
+            text="Validate",
+            width=80,
+            command=self._validate_api_key
+        )
+        self.validate_key_button.pack(side="right")
+        
+        # Key status indicator
+        self.api_key_status_label = ctk.CTkLabel(
+            scroll_frame,
+            text="Status: Not configured",
+            text_color="orange"
+        )
+        self.api_key_status_label.pack(anchor="w", pady=(2, 10), padx=10)
+        
+        # Model Settings Section
+        ctk.CTkLabel(
+            scroll_frame,
+            text="Model Settings:",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(anchor="w", pady=(10, 2), padx=5)
+        
+        # Model Selection
+        ctk.CTkLabel(scroll_frame, text="Model:").pack(
+            anchor="w", pady=(5, 0), padx=10
+        )
+        self.model_combobox = ctk.CTkComboBox(
+            scroll_frame,
+            variable=self.local_vars["ai_model_var"],
+            values=["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-lite", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gpt-4o-mini", "gpt-4o"],
+            state="readonly"
+        )
+        self.model_combobox.pack(fill="x", pady=2, padx=10)
+        
+        # Temperature Setting
+        ctk.CTkLabel(scroll_frame, text="Temperature (0.0 - 1.0):").pack(
+            anchor="w", pady=(10, 0), padx=10
+        )
+        temp_frame = ctk.CTkFrame(scroll_frame)
+        temp_frame.pack(fill="x", pady=2, padx=10)
+        
+        self.temperature_slider = ctk.CTkSlider(
+            temp_frame,
+            from_=0.0,
+            to=1.0,
+            variable=self.local_vars["ai_temperature_var"],
+            number_of_steps=100
+        )
+        self.temperature_slider.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        self.temperature_label = ctk.CTkLabel(temp_frame, text="0.3", width=40)
+        self.temperature_label.pack(side="right")
+        
+        # Update temperature label when slider changes
+        self.local_vars["ai_temperature_var"].trace_add("write", self._update_temperature_label)
+        
+        # Max Tokens Setting
+        ctk.CTkLabel(scroll_frame, text="Max Tokens:").pack(
+            anchor="w", pady=(10, 0), padx=10
+        )
+        ctk.CTkEntry(
+            scroll_frame,
+            textvariable=self.local_vars["ai_max_tokens_var"],
+            placeholder_text="4000"
+        ).pack(fill="x", pady=2, padx=10)
+        
+        # Language Setting
+        ctk.CTkLabel(scroll_frame, text="Language:").pack(
+            anchor="w", pady=(10, 0), padx=10
+        )
+        ctk.CTkComboBox(
+            scroll_frame,
+            variable=self.local_vars["ai_language_var"],
+            values=["auto", "en", "es", "fr", "de", "pt", "zh", "ja", "ko"],
+            state="readonly"
+        ).pack(fill="x", pady=(2, 10), padx=10)
+        
+        # Provider-specific Configuration Section
+        self.provider_config_frame = ctk.CTkFrame(scroll_frame)
+        self.provider_config_frame.pack(fill="x", pady=(5, 10), padx=5)
+        
+        ctk.CTkLabel(
+            self.provider_config_frame,
+            text="Provider Configuration:",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(anchor="w", pady=(5, 2), padx=5)
+        
+        # Create provider-specific config widgets (initially hidden)
+        self._create_provider_config_widgets()
+        
+        # Load current API key status
+        self._load_api_key_status()
+        self._update_model_list()
+        self._update_temperature_label()
+        self._update_provider_config()
+
+    def _create_provider_config_widgets(self):
+        """Create provider-specific configuration widgets"""
+        # OpenRouter Configuration
+        self.openrouter_frame = ctk.CTkFrame(self.provider_config_frame)
+        ctk.CTkLabel(self.openrouter_frame, text="Base URL:").pack(anchor="w", pady=(5, 2), padx=10)
+        ctk.CTkEntry(
+            self.openrouter_frame,
+            textvariable=self.local_vars["ai_openrouter_base_url_var"],
+            placeholder_text="https://openrouter.ai/api/v1"
+        ).pack(fill="x", pady=2, padx=10)
+        
+        # Amazon Bedrock Configuration
+        self.amazon_frame = ctk.CTkFrame(self.provider_config_frame)
+        ctk.CTkLabel(self.amazon_frame, text="AWS Region:").pack(anchor="w", pady=(5, 2), padx=10)
+        ctk.CTkComboBox(
+            self.amazon_frame,
+            variable=self.local_vars["ai_amazon_region_var"],
+            values=["us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1", "ap-northeast-1"],
+            state="readonly"
+        ).pack(fill="x", pady=2, padx=10)
+        
+        # Qwen Configuration
+        self.qwen_frame = ctk.CTkFrame(self.provider_config_frame)
+        ctk.CTkLabel(self.qwen_frame, text="API Base URL:").pack(anchor="w", pady=(5, 2), padx=10)
+        ctk.CTkEntry(
+            self.qwen_frame,
+            textvariable=self.local_vars["ai_qwen_base_url_var"],
+            placeholder_text="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        ).pack(fill="x", pady=2, padx=10)
+        
+        # DeepSeek Configuration
+        self.deepseek_frame = ctk.CTkFrame(self.provider_config_frame)
+        ctk.CTkLabel(self.deepseek_frame, text="API Base URL:").pack(anchor="w", pady=(5, 2), padx=10)
+        ctk.CTkEntry(
+            self.deepseek_frame,
+            textvariable=self.local_vars["ai_deepseek_base_url_var"],
+            placeholder_text="https://api.deepseek.com"
+        ).pack(fill="x", pady=2, padx=10)
+        
+        # Ollama Configuration
+        self.ollama_frame = ctk.CTkFrame(self.provider_config_frame)
+        ctk.CTkLabel(self.ollama_frame, text="🏠 Local Ollama Server:").pack(anchor="w", pady=(5, 2), padx=10)
+        ctk.CTkEntry(
+            self.ollama_frame,
+            textvariable=self.local_vars["ai_ollama_base_url_var"],
+            placeholder_text="http://localhost:11434"
+        ).pack(fill="x", pady=2, padx=10)
+        
+        ollama_info = ctk.CTkLabel(
+            self.ollama_frame,
+            text="💡 Tip: Install Ollama locally and pull models with 'ollama pull llama3.2'",
+            font=ctk.CTkFont(size=10),
+            text_color="gray70"
+        )
+        ollama_info.pack(anchor="w", pady=(2, 5), padx=10)
+        
+        # LM Studio Configuration
+        self.lmstudio_frame = ctk.CTkFrame(self.provider_config_frame)
+        ctk.CTkLabel(self.lmstudio_frame, text="🏠 Local LM Studio Server:").pack(anchor="w", pady=(5, 2), padx=10)
+        ctk.CTkEntry(
+            self.lmstudio_frame,
+            textvariable=self.local_vars["ai_lmstudio_base_url_var"],
+            placeholder_text="http://localhost:1234/v1"
+        ).pack(fill="x", pady=2, padx=10)
+        
+        lmstudio_info = ctk.CTkLabel(
+            self.lmstudio_frame,
+            text="💡 Tip: Download LM Studio and start local server with your preferred model",
+            font=ctk.CTkFont(size=10),
+            text_color="gray70"
+        )
+        lmstudio_info.pack(anchor="w", pady=(2, 5), padx=10)
+        
+        # Initially hide all provider config frames
+        self.openrouter_frame.pack_forget()
+        self.amazon_frame.pack_forget()
+        self.qwen_frame.pack_forget()
+        self.deepseek_frame.pack_forget()
+        self.ollama_frame.pack_forget()
+        self.lmstudio_frame.pack_forget()
+
+    def _update_provider_config(self):
+        """Show/hide provider-specific configuration based on selected provider"""
+        provider = self.local_vars["ai_api_provider_var"].get()
+        
+        # Hide all provider config frames first
+        config_frames = ['openrouter_frame', 'amazon_frame', 'qwen_frame', 'deepseek_frame', 'ollama_frame', 'lmstudio_frame']
+        for frame_name in config_frames:
+            if hasattr(self, frame_name):
+                getattr(self, frame_name).pack_forget()
+        
+        # Show relevant provider config frame
+        frame_mapping = {
+            "openrouter": "openrouter_frame",
+            "amazon": "amazon_frame", 
+            "qwen": "qwen_frame",
+            "deepseek": "deepseek_frame",
+            "ollama": "ollama_frame",
+            "lmstudio": "lmstudio_frame"
+        }
+        
+        frame_name = frame_mapping.get(provider)
+        if frame_name and hasattr(self, frame_name):
+            getattr(self, frame_name).pack(fill="x", pady=2, padx=5)
 
     def _finalize_initialization_and_button_states(self):
         """
@@ -985,6 +1235,19 @@ class SettingsDialog(ctk.CTkToplevel):
                 self.local_vars[f"log_color_{level_lower}_dark_var"].get(),
             ]
 
+        # Handle AI transcription API key encryption and storage
+        if hasattr(self, 'api_key_entry'):
+            api_key = self.api_key_entry.get().strip()
+            provider = self.local_vars["ai_api_provider_var"].get()
+            
+            if api_key:
+                encrypted_key = self._encrypt_api_key(api_key)
+                self.parent_gui.config[f"ai_api_key_{provider}_encrypted"] = encrypted_key
+            else:
+                # Remove key if empty
+                if f"ai_api_key_{provider}_encrypted" in self.parent_gui.config:
+                    del self.parent_gui.config[f"ai_api_key_{provider}_encrypted"]
+
         self.parent_gui.download_directory = self.current_dialog_download_dir[0]
         self.parent_gui.config["download_directory"] = (
             self.parent_gui.download_directory
@@ -1165,3 +1428,273 @@ class SettingsDialog(ctk.CTkToplevel):
                 "SettingsDialog", "cancel_close_action", "Settings changes cancelled."
             )
         self.destroy()
+
+    # AI Transcription Helper Methods
+    
+    def _on_ai_provider_changed(self, *args):
+        """Called when AI provider selection changes."""
+        self._update_model_list()
+        self._load_api_key_status()
+        self._update_provider_config()
+    
+    def _update_model_list(self):
+        """Update the model list based on selected provider."""
+        provider = self.local_vars["ai_api_provider_var"].get()
+        
+        # Define models for each provider
+        provider_models = {
+            "gemini": [
+                "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-lite", 
+                "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"
+            ],
+            "openai": [
+                "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", 
+                "gpt-3.5-turbo", "whisper-1"
+            ],
+            "anthropic": [
+                "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", 
+                "claude-3-opus-20240229", "claude-3-sonnet-20240229", 
+                "claude-3-haiku-20240307"
+            ],
+            "openrouter": [
+                "anthropic/claude-3.5-sonnet", "openai/gpt-4o", 
+                "google/gemini-pro-1.5", "meta-llama/llama-3.1-405b",
+                "mistralai/mistral-large-2407", "qwen/qwen-2.5-72b",
+                "deepseek/deepseek-coder", "perplexity/llama-3.1-sonar-large"
+            ],
+            "amazon": [
+                "anthropic.claude-3-5-sonnet-20241022-v2:0", 
+                "anthropic.claude-3-haiku-20240307-v1:0",
+                "amazon.titan-text-premier-v1:0", 
+                "ai21.jamba-1-5-large-v1:0",
+                "cohere.command-r-plus-v1:0"
+            ],
+            "qwen": [
+                "qwen-plus", "qwen-turbo", "qwen-max", 
+                "qwen2.5-72b-instruct", "qwen2.5-32b-instruct", 
+                "qwen2.5-14b-instruct", "qwen2.5-7b-instruct"
+            ],
+            "deepseek": [
+                "deepseek-chat", "deepseek-coder", "deepseek-reasoner",
+                "deepseek-v2.5", "deepseek-v2"
+            ],
+            "ollama": [
+                "llama3.2:latest", "llama3.1:latest", "llama3:latest", 
+                "mistral:latest", "codellama:latest", "phi3:latest",
+                "gemma2:latest", "qwen2.5:latest", "nomic-embed-text:latest"
+            ],
+            "lmstudio": [
+                "custom-model", "llama-3.2-3b-instruct", "llama-3.1-8b-instruct",
+                "mistral-7b-instruct", "codellama-7b-instruct", "phi-3-mini",
+                "gemma-2-9b-it", "qwen2.5-7b-instruct"
+            ]
+        }
+        
+        models = provider_models.get(provider, ["gemini-1.5-flash"])
+        
+        if hasattr(self, 'model_combobox'):
+            self.model_combobox.configure(values=models)
+            # Reset to first model if current model not in new list
+            current_model = self.local_vars["ai_model_var"].get()
+            if current_model not in models:
+                self.local_vars["ai_model_var"].set(models[0])
+    
+    def _update_temperature_label(self, *args):
+        """Update the temperature display label."""
+        if hasattr(self, 'temperature_label'):
+            temp_value = self.local_vars["ai_temperature_var"].get()
+            self.temperature_label.configure(text=f"{temp_value:.2f}")
+    
+    def _generate_encryption_key(self):
+        """Generate or retrieve encryption key for API key storage."""
+        if not ENCRYPTION_AVAILABLE:
+            return None
+        
+        # Try to load existing key from config directory
+        config_dir = os.path.dirname(self.parent_gui.config.get('config_file_path', ''))
+        key_file = os.path.join(config_dir, '.hidock_key.dat')
+        
+        try:
+            if os.path.exists(key_file):
+                with open(key_file, 'rb') as f:
+                    return f.read()
+            else:
+                # Generate new key
+                key = Fernet.generate_key()
+                with open(key_file, 'wb') as f:
+                    f.write(key)
+                return key
+        except Exception as e:
+            logger.error("SettingsDialog", "_generate_encryption_key", f"Error with encryption key: {e}")
+            return None
+    
+    def _encrypt_api_key(self, api_key):
+        """Encrypt API key for secure storage."""
+        if not ENCRYPTION_AVAILABLE or not api_key:
+            return api_key  # Return plaintext if encryption not available
+        
+        try:
+            key = self._generate_encryption_key()
+            if key:
+                f = Fernet(key)
+                encrypted = f.encrypt(api_key.encode())
+                return base64.b64encode(encrypted).decode()
+            return api_key
+        except Exception as e:
+            logger.error("SettingsDialog", "_encrypt_api_key", f"Error encrypting API key: {e}")
+            return api_key
+    
+    def _decrypt_api_key(self, encrypted_key):
+        """Decrypt API key from storage."""
+        if not ENCRYPTION_AVAILABLE or not encrypted_key:
+            return encrypted_key  # Return as-is if encryption not available
+        
+        try:
+            key = self._generate_encryption_key()
+            if key:
+                f = Fernet(key)
+                encrypted_bytes = base64.b64decode(encrypted_key.encode())
+                decrypted = f.decrypt(encrypted_bytes)
+                return decrypted.decode()
+            return encrypted_key
+        except Exception as e:
+            logger.error("SettingsDialog", "_decrypt_api_key", f"Error decrypting API key: {e}")
+            return ""
+    
+    def _load_api_key_status(self):
+        """Load and display current API key status."""
+        try:
+            provider = self.local_vars["ai_api_provider_var"].get()
+            encrypted_key = self.parent_gui.config.get(f"ai_api_key_{provider}_encrypted", "")
+            
+            if hasattr(self, 'api_key_entry') and hasattr(self, 'api_key_status_label'):
+                if encrypted_key:
+                    decrypted_key = self._decrypt_api_key(encrypted_key)
+                    if decrypted_key:
+                        self.api_key_entry.delete(0, 'end')
+                        self.api_key_entry.insert(0, decrypted_key)
+                        self.api_key_status_label.configure(
+                            text="Status: Configured (click Validate to test)",
+                            text_color="green"
+                        )
+                    else:
+                        self.api_key_status_label.configure(
+                            text="Status: Key found but decryption failed",
+                            text_color="red"
+                        )
+                else:
+                    self.api_key_entry.delete(0, 'end')
+                    self.api_key_status_label.configure(
+                        text="Status: Not configured",
+                        text_color="orange"
+                    )
+        except Exception as e:
+            logger.error("SettingsDialog", "_load_api_key_status", f"Error loading API key status: {e}")
+    
+    def _validate_api_key(self):
+        """Validate the entered API key by making a test API call."""
+        if not hasattr(self, 'api_key_entry') or not hasattr(self, 'api_key_status_label'):
+            return
+        
+        api_key = self.api_key_entry.get().strip()
+        if not api_key:
+            self.api_key_status_label.configure(
+                text="Status: Please enter an API key",
+                text_color="red"
+            )
+            return
+        
+        provider = self.local_vars["ai_api_provider_var"].get()
+        self.api_key_status_label.configure(
+            text="Status: Validating...",
+            text_color="blue"
+        )
+        self.validate_key_button.configure(state="disabled")
+        
+        # Run validation in background thread
+        threading.Thread(
+            target=self._validate_api_key_thread,
+            args=(api_key, provider),
+            daemon=True
+        ).start()
+    
+    def _validate_api_key_thread(self, api_key, provider):
+        """Background thread for API key validation."""
+        try:
+            if provider == "gemini":
+                # Test Gemini API
+                import google.generativeai as genai
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel("gemini-1.5-flash")
+                response = model.generate_content("Test validation message")
+                success = bool(response and response.text)
+            else:
+                # For now, assume other providers are valid if key is provided
+                success = True
+            
+            # Update UI on main thread
+            self.after(0, self._validation_complete, success)
+            
+        except Exception as e:
+            logger.error("SettingsDialog", "_validate_api_key_thread", f"API validation error: {e}")
+            self.after(0, self._validation_complete, False)
+    
+    def _validation_complete(self, success):
+        """Called when API key validation completes."""
+        if hasattr(self, 'api_key_status_label') and hasattr(self, 'validate_key_button'):
+            if success:
+                self.api_key_status_label.configure(
+                    text="Status: Valid API key",
+                    text_color="green"
+                )
+            else:
+                self.api_key_status_label.configure(
+                    text="Status: Invalid API key",
+                    text_color="red"
+                )
+            self.validate_key_button.configure(state="normal")
+
+    # Enhanced Device Selector Methods
+    
+    def _on_device_selected_enhanced(self, device_info):
+        """Handle device selection in enhanced selector."""
+        try:
+            logger.info("SettingsDialog", "_on_device_selected_enhanced", f"Device selected: {device_info.name}")
+            
+            # Update the local variables with selected device
+            self.local_vars["selected_vid_var"].set(str(device_info.vendor_id))
+            self.local_vars["selected_pid_var"].set(str(device_info.product_id))
+            
+            # Mark settings as changed
+            self.settings_changed_tracker[0] = True
+            self._update_button_states_on_change()
+            
+        except Exception as e:
+            logger.error("SettingsDialog", "_on_device_selected_enhanced", f"Error handling device selection: {e}")
+    
+    def _on_device_scan_complete(self, devices):
+        """Handle completion of device scan."""
+        try:
+            hidock_count = sum(1 for d in devices if d.is_hidock)
+            logger.info("SettingsDialog", "_on_device_scan_complete", f"Scan complete: {len(devices)} devices, {hidock_count} HiDock devices")
+            
+            # If there's a HiDock device and no device is currently selected, auto-select it
+            if hidock_count > 0 and not any(d.status == "connected" for d in devices):
+                hidock_device = next(d for d in devices if d.is_hidock)
+                self.device_selector._select_device(hidock_device)
+                
+        except Exception as e:
+            logger.error("SettingsDialog", "_on_device_scan_complete", f"Error handling scan completion: {e}")
+    
+    def _initial_enhanced_scan_thread(self):
+        """Initial device scan thread for enhanced selector."""
+        try:
+            # Small delay to let the UI settle
+            import time
+            time.sleep(0.5)
+            
+            # Trigger device scan on main thread
+            self.after(0, lambda: self.device_selector.refresh_devices())
+            
+        except Exception as e:
+            logger.error("SettingsDialog", "_initial_enhanced_scan_thread", f"Error in initial scan: {e}")
