@@ -18,6 +18,7 @@ afterAll(() => server.close())
 // Mock WebUSB API
 Object.defineProperty(navigator, 'usb', {
     writable: true,
+    configurable: true, // Allow the mock to be deleted in tests
     value: {
         requestDevice: vi.fn(),
         getDevices: vi.fn().mockResolvedValue([]),
