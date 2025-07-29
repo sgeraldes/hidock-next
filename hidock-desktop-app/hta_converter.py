@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-HTA Audio File Converter for HiDock Desktop Application
+HDA/HTA Audio File Converter for HiDock Desktop Application
 
-This module provides functionality to convert proprietary .hta audio files
-from HiDock devices into standard .wav format for transcription and analysis.
+This module provides functionality to convert HiDock audio files (.hda/.hta)
+into standard .wav format for transcription and analysis.
+
+IMPORTANT: Audio format varies by device model:
+- H1E: MPEG Audio Layer 1/2 format (Mono, 16000 Hz, 32 bits per sample, 64 kb/s)
+- P1: Unknown format (likely stereo, different specs)
+- Other models: Format unknown
+
+This converter attempts multiple detection strategies to handle different formats.
 
 Requirements: 4.3
 """
@@ -16,17 +23,23 @@ from typing import Optional, Tuple
 from config_and_logger import logger
 
 class HTAConverter:
-    """Converts proprietary HTA audio files to WAV format."""
+    """
+    Converts HiDock audio files (.hda/.hta) to WAV format.
+    
+    Handles MPEG Audio Layer 1/2 format files from HiDock devices.
+    """
     
     def __init__(self):
         self.temp_dir = tempfile.gettempdir()
     
     def convert_hta_to_wav(self, hta_file_path: str, output_path: Optional[str] = None) -> Optional[str]:
         """
-        Convert HTA file to WAV format.
+        Convert HiDock audio file (.hda/.hta) to WAV format.
+        
+        The input files are MPEG Audio Layer 1/2 format that get converted to standard WAV.
         
         Args:
-            hta_file_path: Path to the input .hta file
+            hta_file_path: Path to the input .hda/.hta file
             output_path: Optional output path for the .wav file
             
         Returns:
@@ -113,50 +126,130 @@ class HTAConverter:
             return None, 0, 0
     
     def _try_hta_format_1(self, data: bytes) -> bool:
-        """Check if data matches HTA format 1 (hypothetical format)."""
-        # This would check for specific HTA header signatures
-        # For now, check for some common patterns
-        if len(data) < 44:  # Minimum size for audio header
+        """
+        Check if data matches MPEG Audio Layer 1/2 format.
+        
+        DEVICE-SPECIFIC: Based on user testing with H1E device:
+        - H1E: MPEG Audio Layer 1/2 (Mono, 16000 Hz, 32 bits/sample, 64 kb/s)
+        - P1: Different format (likely stereo, specs unknown)
+        - Other models: Format unknown
+        
+        This method specifically detects MPEG audio headers.
+        """
+        if len(data) < 4:  # Need at least 4 bytes for MPEG header
             return False
         
-        # Check for potential audio indicators
-        # This is speculative - real implementation would need HTA specification
-        return True  # Placeholder
+        # Check for MPEG audio frame sync (11 bits of 1s at start)
+        # MPEG frame header starts with sync pattern: 0xFFE, 0xFFF, etc.
+        if data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+            # Parse MPEG header to verify it's Layer 1/2
+            header = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]
+            
+            # Extract layer bits (bits 17-18)
+            layer_bits = (header >> 17) & 0x3
+            # Layer 1 = 0b11, Layer 2 = 0b10
+            if layer_bits in (0b10, 0b11):  # Layer 1 or 2
+                logger.info("HTAConverter", "_try_hta_format_1", 
+                           f"Detected MPEG Audio Layer {3 - layer_bits} format")
+                return True
+        
+        # Also check for common MPEG patterns in the first few frames
+        # Look for multiple sync patterns which indicate MPEG stream
+        sync_count = 0
+        for i in range(0, min(len(data) - 3, 1024), 4):
+            if data[i] == 0xFF and (data[i + 1] & 0xE0) == 0xE0:
+                sync_count += 1
+                if sync_count >= 3:  # Multiple sync patterns found
+                    logger.info("HTAConverter", "_try_hta_format_1", 
+                               "Detected MPEG audio stream with multiple sync patterns")
+                    return True
+        
+        return False
     
     def _parse_hta_format_1(self, data: bytes) -> Tuple[Optional[bytes], int, int]:
-        """Parse HTA format 1 (hypothetical)."""
+        """
+        Parse MPEG Audio Layer 1/2 format using pydub.
+        
+        DEVICE-SPECIFIC: H1E confirmed specs - Mono, 16000 Hz, 32 bits/sample, 64 kb/s.
+        WARNING: P1 and other models may have different formats (stereo, different rates).
+        """
         try:
-            # Assume common settings for HiDock devices
-            sample_rate = 16000  # Common for voice recordings
-            channels = 1  # Mono
+            import io
+            from pydub import AudioSegment
             
-            # Skip potential header (first 44 bytes is common for audio headers)
-            header_size = 44
-            if len(data) > header_size:
-                audio_data = data[header_size:]
-            else:
-                audio_data = data
+            # Create a BytesIO object from the data
+            audio_io = io.BytesIO(data)
             
-            return audio_data, sample_rate, channels
+            # Try to load as MPEG audio using pydub
+            # pydub can handle MPEG Layer 1/2 files
+            try:
+                audio_segment = AudioSegment.from_file(audio_io, format="mp3")
+                logger.info("HTAConverter", "_parse_hta_format_1", 
+                           f"Successfully loaded MPEG audio: {audio_segment.frame_rate}Hz, "
+                           f"{audio_segment.channels} channels, {len(audio_segment)}ms")
+            except Exception:
+                # If mp3 format fails, try without specifying format
+                audio_io.seek(0)
+                audio_segment = AudioSegment.from_file(audio_io)
+                logger.info("HTAConverter", "_parse_hta_format_1", 
+                           "Successfully loaded audio with auto-detection")
+            
+            # Convert to raw audio data
+            # Export as WAV to get raw PCM data
+            wav_io = io.BytesIO()
+            audio_segment.export(wav_io, format="wav")
+            wav_data = wav_io.getvalue()
+            
+            # Parse the WAV data to extract raw audio
+            return self._parse_wav_data(wav_data)
             
         except Exception as e:
-            logger.error("HTAConverter", "_parse_hta_format_1", f"Error parsing HTA format 1: {e}")
-            return None, 0, 0
+            logger.error("HTAConverter", "_parse_hta_format_1", f"Error parsing MPEG audio: {e}")
+            # Fallback: try with H1E device settings (may not work for P1/other models)
+            try:
+                logger.warning("HTAConverter", "_parse_hta_format_1", 
+                              "Pydub failed, trying fallback with H1E device settings "
+                              "(WARNING: may not work for P1 or other device models)")
+                sample_rate = 16000  # H1E confirmed specs
+                channels = 1  # H1E is mono (P1 likely stereo!)
+                
+                # For MPEG Layer 1/2, the data is already compressed
+                # We'll return it as-is and let pygame handle it
+                return data, sample_rate, channels
+                
+            except Exception as fallback_error:
+                logger.error("HTAConverter", "_parse_hta_format_1", f"Fallback also failed: {fallback_error}")
+                return None, 0, 0
     
     def _try_raw_pcm_conversion(self, data: bytes) -> Tuple[Optional[bytes], int, int]:
-        """Try to convert raw PCM data with common settings."""
+        """
+        Try to convert raw PCM data with common settings.
+        
+        Attempts multiple configurations since format varies by device:
+        - H1E: Likely mono 16kHz
+        - P1: Likely stereo, possibly different sample rate
+        """
         try:
-            # Try common voice recording settings
-            sample_rate = 16000  # 16kHz is common for voice
-            channels = 1  # Mono
+            # Try H1E settings first (confirmed working)
+            sample_rate = 16000  # H1E confirmed
+            channels = 1  # H1E is mono
             
+            # Check if data length suggests stereo (P1 and other models)
+            total_samples = len(data) // 2  # Assuming 16-bit samples
+            if total_samples % 2 == 0:  # Even number suggests possible stereo
+                logger.info("HTAConverter", "_try_raw_pcm_conversion", 
+                           "Data length suggests possible stereo format (P1/other models)")
+                # Try stereo first for P1-like devices
+                channels = 2
+                
             # Assume 16-bit PCM data
             if len(data) % 2 == 1:
                 # Remove last byte if odd length
                 data = data[:-1]
             
             logger.info("HTAConverter", "_try_raw_pcm_conversion", 
-                       f"Trying raw PCM conversion: {len(data)} bytes, {sample_rate}Hz, {channels} channel(s)")
+                       f"Trying raw PCM conversion: {len(data)} bytes, {sample_rate}Hz, {channels} channel(s) "
+                       f"(device format unknown)")
             
             return data, sample_rate, channels
             

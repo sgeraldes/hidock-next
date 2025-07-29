@@ -81,6 +81,11 @@ class AIProvider(ABC):
     def is_available(self) -> bool:
         """Check if the provider is available"""
         pass
+    
+    @abstractmethod
+    def validate_api_key(self) -> bool:
+        """Validate the API key by making a test request"""
+        pass
 
 
 class GeminiProvider(AIProvider):
@@ -93,6 +98,19 @@ class GeminiProvider(AIProvider):
     
     def is_available(self) -> bool:
         return GEMINI_AVAILABLE and bool(self.api_key)
+    
+    def validate_api_key(self) -> bool:
+        """Validate Gemini API key by making a test request"""
+        if not self.is_available():
+            return False
+        
+        try:
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            response = model.generate_content("Test validation message")
+            return bool(response and response.text)
+        except Exception as e:
+            logger.error("GeminiProvider", "validate_api_key", f"API validation failed: {e}")
+            return False
     
     def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using Gemini"""
@@ -223,6 +241,23 @@ class OpenAIProvider(AIProvider):
     def is_available(self) -> bool:
         return OPENAI_AVAILABLE and bool(self.api_key)
     
+    def validate_api_key(self) -> bool:
+        """Validate OpenAI API key by making a test request"""
+        if not self.is_available():
+            return False
+        
+        try:
+            # Make a simple completion request to test the API key
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": "Test"}],
+                max_tokens=5
+            )
+            return bool(response and response.choices)
+        except Exception as e:
+            logger.error("OpenAIProvider", "validate_api_key", f"API validation failed: {e}")
+            return False
+    
     def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using OpenAI Whisper"""
         if not self.is_available():
@@ -339,6 +374,23 @@ class AnthropicProvider(AIProvider):
     def is_available(self) -> bool:
         return ANTHROPIC_AVAILABLE and bool(self.api_key)
     
+    def validate_api_key(self) -> bool:
+        """Validate Anthropic API key by making a test request"""
+        if not self.is_available():
+            return False
+        
+        try:
+            # Make a simple message request to test the API key
+            response = self.client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=5,
+                messages=[{"role": "user", "content": "Test"}]
+            )
+            return bool(response and response.content)
+        except Exception as e:
+            logger.error("AnthropicProvider", "validate_api_key", f"API validation failed: {e}")
+            return False
+    
     def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using Claude (note: Claude doesn't support audio transcription directly)"""
         logger.warning("AnthropicProvider", "transcribe_audio", "Claude doesn't support direct audio transcription")
@@ -420,6 +472,32 @@ class OpenRouterProvider(AIProvider):
     
     def is_available(self) -> bool:
         return REQUESTS_AVAILABLE and bool(self.api_key)
+    
+    def validate_api_key(self) -> bool:
+        """Validate OpenRouter API key by making a test request"""
+        if not self.is_available():
+            return False
+        
+        try:
+            import requests
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json={
+                    "model": "openai/gpt-3.5-turbo",
+                    "messages": [{"role": "user", "content": "Test"}],
+                    "max_tokens": 5
+                },
+                timeout=10
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error("OpenRouterProvider", "validate_api_key", f"API validation failed: {e}")
+            return False
     
     def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio through OpenRouter (limited audio support)"""
@@ -514,6 +592,20 @@ class OllamaProvider(AIProvider):
     def is_available(self) -> bool:
         return REQUESTS_AVAILABLE
     
+    def validate_api_key(self) -> bool:
+        """Validate Ollama connection by checking if service is running"""
+        if not self.is_available():
+            return False
+        
+        try:
+            import requests
+            # Check if Ollama service is running
+            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            return response.status_code == 200
+        except Exception as e:
+            logger.error("OllamaProvider", "validate_api_key", f"Connection validation failed: {e}")
+            return False
+    
     def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using Ollama (limited audio support)"""
         logger.warning("OllamaProvider", "transcribe_audio", "Ollama has limited audio transcription support")
@@ -599,6 +691,20 @@ class LMStudioProvider(AIProvider):
     
     def is_available(self) -> bool:
         return REQUESTS_AVAILABLE
+    
+    def validate_api_key(self) -> bool:
+        """Validate LM Studio connection by checking if service is running"""
+        if not self.is_available():
+            return False
+        
+        try:
+            import requests
+            # Check if LM Studio service is running
+            response = requests.get(f"{self.base_url}/models", timeout=5)
+            return response.status_code == 200
+        except Exception as e:
+            logger.error("LMStudioProvider", "validate_api_key", f"Connection validation failed: {e}")
+            return False
     
     def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using LM Studio (limited audio support)"""
@@ -717,6 +823,38 @@ class AIServiceManager:
         """Get configured provider"""
         return self.providers.get(provider_name)
     
+    def validate_provider(self, provider_name: str, api_key: str, config: Dict[str, Any] = None) -> bool:
+        """Validate API key for a specific provider"""
+        try:
+            # Create temporary provider instance for validation
+            temp_provider = None
+            
+            if provider_name == "gemini":
+                temp_provider = GeminiProvider(api_key, config)
+            elif provider_name == "openai":
+                temp_provider = OpenAIProvider(api_key, config)
+            elif provider_name == "anthropic":
+                temp_provider = AnthropicProvider(api_key, config)
+            elif provider_name == "openrouter":
+                temp_provider = OpenRouterProvider(api_key, config)
+            elif provider_name == "ollama":
+                temp_provider = OllamaProvider(api_key, config)
+            elif provider_name == "lmstudio":
+                temp_provider = LMStudioProvider(api_key, config)
+            else:
+                # For unknown providers, assume API key is valid if provided
+                logger.warning("AIServiceManager", "validate_provider", f"Unknown provider {provider_name}, skipping validation")
+                return bool(api_key)
+            
+            if temp_provider:
+                return temp_provider.validate_api_key()
+            
+            return False
+            
+        except Exception as e:
+            logger.error("AIServiceManager", "validate_provider", f"Error validating {provider_name}: {e}")
+            return False
+    
     def transcribe_audio(self, provider_name: str, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using specified provider"""
         provider = self.get_provider(provider_name)
@@ -749,6 +887,10 @@ class AIServiceManager:
                 self.name = name
             
             def is_available(self) -> bool:
+                return True
+            
+            def validate_api_key(self) -> bool:
+                """Mock providers always validate successfully"""
                 return True
             
             def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:

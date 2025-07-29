@@ -1621,16 +1621,11 @@ class SettingsDialog(ctk.CTkToplevel):
     def _validate_api_key_thread(self, api_key, provider):
         """Background thread for API key validation."""
         try:
-            if provider == "gemini":
-                # Test Gemini API
-                import google.generativeai as genai
-                genai.configure(api_key=api_key)
-                model = genai.GenerativeModel("gemini-1.5-flash")
-                response = model.generate_content("Test validation message")
-                success = bool(response and response.text)
-            else:
-                # For now, assume other providers are valid if key is provided
-                success = True
+            # Use ai_service for validation to maintain consistency with multi-provider architecture
+            from ai_service import AIServiceManager
+            
+            ai_manager = AIServiceManager()
+            success = ai_manager.validate_provider(provider, api_key)
             
             # Update UI on main thread
             self.after(0, self._validation_complete, success)

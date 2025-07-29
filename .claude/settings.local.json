@@ -7,7 +7,9 @@
       "Bash(npm test)",
       "Bash(npm test:*)",
       "Bash(npx vitest run:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(git checkout:*)"
     ],
     "deny": []
   }
