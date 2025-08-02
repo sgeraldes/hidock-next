@@ -302,9 +302,11 @@ class TestAudioEnhancer:
 
             # Should convert to int16
             expected_data = (mock_audio_data * 32767).astype(np.int16)
-            mock_wavfile_write.assert_called_once_with(
-                "/test/output.wav", mock_sample_rate, expected_data
-            )
+            mock_wavfile_write.assert_called_once()
+            args, kwargs = mock_wavfile_write.call_args
+            assert args[0] == "/test/output.wav"
+            assert args[1] == mock_sample_rate
+            assert np.array_equal(args[2], expected_data)
 
     def test_analyze_audio_success(self):
         """Test _analyze_audio method with valid audio data"""
@@ -346,14 +348,14 @@ class TestAudioEnhancer:
         mock_reduced_audio = np.array([0.05, 0.15, 0.25, 0.35])
 
         with patch("audio_processing_advanced.NOISEREDUCE_AVAILABLE", True), \
-             patch("audio_processing_advanced.nr.reduce_noise") as mock_reduce_noise:
-            mock_reduce_noise.return_value = mock_reduced_audio
+             patch("audio_processing_advanced.nr", create=True) as mock_nr:
+            mock_nr.reduce_noise.return_value = mock_reduced_audio
 
             result_audio, reduction_db = enhancer._reduce_noise(mock_audio_data, 44100, 0.5)
 
             assert np.array_equal(result_audio, mock_reduced_audio)
             assert reduction_db >= 0  # Should calculate some reduction
-            mock_reduce_noise.assert_called_once()
+            mock_nr.reduce_noise.assert_called_once()
 
     def test_reduce_noise_fallback_spectral_subtraction(self):
         """Test _reduce_noise fallback to spectral subtraction"""
@@ -375,21 +377,20 @@ class TestAudioEnhancer:
         # Create longer audio data for proper STFT
         mock_audio_data = np.random.random(4096) * 0.1
 
-        with patch("audio_processing_advanced.signal.stft") as mock_stft, \
-             patch("audio_processing_advanced.signal.istft") as mock_istft:
+        with patch("audio_processing_advanced.signal", create=True) as mock_signal:
             # Mock STFT response
             mock_freqs = np.linspace(0, 22050, 513)
             mock_times = np.linspace(0, 1, 10)
             mock_stft_data = np.random.complex128((513, 10))
-            mock_stft.return_value = (mock_freqs, mock_times, mock_stft_data)
+            mock_signal.stft.return_value = (mock_freqs, mock_times, mock_stft_data)
 
             # Mock ISTFT response
-            mock_istft.return_value = (mock_times, mock_audio_data[:len(mock_audio_data)])
+            mock_signal.istft.return_value = (mock_times, mock_audio_data[:len(mock_audio_data)])
 
             result_audio, reduction_db = enhancer._spectral_subtraction(mock_audio_data, 44100, 0.5)
 
-            mock_stft.assert_called_once()
-            mock_istft.assert_called_once()
+            mock_signal.stft.assert_called_once()
+            mock_signal.istft.assert_called_once()
             assert len(result_audio) == len(mock_audio_data)
             assert reduction_db >= 0
 

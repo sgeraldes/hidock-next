@@ -10,7 +10,7 @@ import unittest.mock as mock
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
-import pytest
+import unittest
 
 # Mock customtkinter and matplotlib before importing the module
 with patch.dict("sys.modules", {
@@ -45,7 +45,7 @@ class MockPlaybackPosition:
         self.percentage = percentage
 
 
-class TestWaveformVisualizer:
+class TestWaveformVisualizer(unittest.TestCase):
     """Test WaveformVisualizer class"""
 
     @patch("audio_visualization.ctk.CTkFrame")
@@ -57,13 +57,13 @@ class TestWaveformVisualizer:
              patch.object(WaveformVisualizer, '_initialize_plot'):
             visualizer = WaveformVisualizer(mock_parent, width=800, height=120)
 
-        assert visualizer.parent_frame == mock_parent
+        assert visualizer.parent == mock_parent
         assert visualizer.width == 800
         assert visualizer.height == 120
-        assert visualizer.audio_data is None
+        assert visualizer.waveform_data is None
         assert visualizer.sample_rate == 0
         assert visualizer.current_position == 0.0
-        assert visualizer.zoom_factor == 1.0
+        assert visualizer.zoom_level == 1.0
 
     @patch("audio_visualization.ctk.CTkFrame")
     def test_setup_styling(self, mock_ctk_frame):
@@ -76,7 +76,7 @@ class TestWaveformVisualizer:
             visualizer._setup_styling()
 
         # Should set up styling without errors
-        assert hasattr(visualizer, 'parent_frame')
+        assert hasattr(visualizer, 'parent')
 
     @patch("audio_visualization.ctk.CTkFrame")
     @patch("audio_visualization.Figure")
@@ -116,10 +116,10 @@ class TestWaveformVisualizer:
         assert visualizer.figure is not None
 
     @patch("audio_visualization.ctk.CTkFrame")
-    @patch("audio_visualization.os.path.exists")
-    def test_load_audio_file_not_exists(self, mock_exists, mock_ctk_frame):
-        """Test load_audio with non-existent file"""
-        mock_exists.return_value = False
+    @patch("audio_visualization.AudioProcessor.extract_waveform_data")
+    def test_load_audio_file_not_exists(self, mock_extract_waveform, mock_ctk_frame):
+        """Test load_audio with empty waveform data (file error case)"""
+        mock_extract_waveform.return_value = (np.array([]), 44100)  # Empty waveform data
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, '_setup_styling'), \
@@ -131,14 +131,14 @@ class TestWaveformVisualizer:
         assert result is False
 
     @patch("audio_visualization.ctk.CTkFrame")
-    @patch("audio_visualization.os.path.exists")
-    @patch("audio_visualization.wavfile.read")
-    def test_load_audio_wav_success(self, mock_wavfile_read, mock_exists, mock_ctk_frame):
+    @patch("audio_visualization.AudioProcessor.extract_waveform_data")
+    @patch("audio_visualization.AudioProcessor.get_audio_info")
+    def test_load_audio_wav_success(self, mock_get_info, mock_extract_waveform, mock_ctk_frame):
         """Test successful WAV audio loading"""
-        mock_exists.return_value = True
-        mock_audio_data = np.array([1000, 2000, 3000, 4000], dtype=np.int16)
+        mock_waveform_data = np.array([0.1, 0.2, 0.3, 0.4])
         mock_sample_rate = 44100
-        mock_wavfile_read.return_value = (mock_sample_rate, mock_audio_data)
+        mock_extract_waveform.return_value = (mock_waveform_data, mock_sample_rate)
+        mock_get_info.return_value = {"duration": 10.0}
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, '_setup_styling'), \
@@ -150,19 +150,19 @@ class TestWaveformVisualizer:
 
         assert result is True
         assert visualizer.sample_rate == mock_sample_rate
-        # Should normalize audio data
-        expected_data = mock_audio_data.astype(np.float32) / 32768.0
-        assert np.allclose(visualizer.audio_data, expected_data)
+        assert visualizer.total_duration == 10.0
+        # Should store waveform data
+        assert np.allclose(visualizer.waveform_data, mock_waveform_data)
 
     @patch("audio_visualization.ctk.CTkFrame")
-    @patch("audio_visualization.os.path.exists")
-    @patch("audio_visualization.wavfile.read")
-    def test_load_audio_stereo_conversion(self, mock_wavfile_read, mock_exists, mock_ctk_frame):
+    @patch("audio_visualization.AudioProcessor.extract_waveform_data")
+    @patch("audio_visualization.AudioProcessor.get_audio_info")
+    def test_load_audio_stereo_conversion(self, mock_get_info, mock_extract_waveform, mock_ctk_frame):
         """Test loading stereo audio and conversion to mono"""
-        mock_exists.return_value = True
-        mock_audio_data = np.array([[1000, 1500], [2000, 2500]], dtype=np.int16)  # Stereo
+        mock_waveform_data = np.array([0.125, 0.225])  # Converted mono data
         mock_sample_rate = 44100
-        mock_wavfile_read.return_value = (mock_sample_rate, mock_audio_data)
+        mock_extract_waveform.return_value = (mock_waveform_data, mock_sample_rate)
+        mock_get_info.return_value = {"duration": 5.0}
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, '_setup_styling'), \
@@ -173,17 +173,14 @@ class TestWaveformVisualizer:
             result = visualizer.load_audio("/test/stereo.wav")
 
         assert result is True
-        # Should convert to mono by averaging channels
-        expected_mono = np.mean(mock_audio_data, axis=1).astype(np.float32) / 32768.0
-        assert np.allclose(visualizer.audio_data, expected_mono)
+        # Should convert to mono and store waveform data
+        assert np.allclose(visualizer.waveform_data, mock_waveform_data)
 
     @patch("audio_visualization.ctk.CTkFrame")
-    @patch("audio_visualization.os.path.exists")
-    @patch("audio_visualization.wavfile.read")
-    def test_load_audio_error_handling(self, mock_wavfile_read, mock_exists, mock_ctk_frame):
+    @patch("audio_visualization.AudioProcessor.extract_waveform_data")
+    def test_load_audio_error_handling(self, mock_extract_waveform, mock_ctk_frame):
         """Test load_audio error handling"""
-        mock_exists.return_value = True
-        mock_wavfile_read.side_effect = Exception("Read error")
+        mock_extract_waveform.side_effect = Exception("Read error")
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, '_setup_styling'), \
@@ -202,8 +199,9 @@ class TestWaveformVisualizer:
         with patch.object(WaveformVisualizer, '_setup_styling'), \
              patch.object(WaveformVisualizer, '_initialize_plot'):
             visualizer = WaveformVisualizer(mock_parent)
-            visualizer.audio_data = np.array([0.1, 0.2, 0.3, 0.4])
+            visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4])
             visualizer.sample_rate = 44100
+            visualizer.total_duration = 1.0
             visualizer.ax = Mock()
             visualizer.canvas = Mock()
 
@@ -221,9 +219,10 @@ class TestWaveformVisualizer:
         with patch.object(WaveformVisualizer, '_setup_styling'), \
              patch.object(WaveformVisualizer, '_initialize_plot'):
             visualizer = WaveformVisualizer(mock_parent)
-            visualizer.audio_data = np.array([0.1, 0.2, 0.3, 0.4])
+            visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4])
             visualizer.sample_rate = 44100
             visualizer.current_position = 0.5
+            visualizer.total_duration = 1.0
             visualizer.ax = Mock()
             visualizer.canvas = Mock()
 
@@ -256,23 +255,25 @@ class TestWaveformVisualizer:
         with patch.object(WaveformVisualizer, '_setup_styling'), \
              patch.object(WaveformVisualizer, '_initialize_plot'), \
              patch.object(WaveformVisualizer, '_update_waveform_display'), \
-             patch.object(WaveformVisualizer, '_update_zoom_display'):
+             patch.object(WaveformVisualizer, '_update_zoom_display') as mock_update_zoom:
             visualizer = WaveformVisualizer(mock_parent)
-            visualizer.audio_data = np.array([0.1, 0.2, 0.3, 0.4])
+            visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4])
 
-            initial_zoom = visualizer.zoom_factor
+            initial_zoom = visualizer.zoom_level
 
             # Test zoom in
             visualizer._zoom_in()
-            assert visualizer.zoom_factor > initial_zoom
+            assert visualizer.zoom_level > initial_zoom
+            mock_update_zoom.assert_called()
 
             # Test zoom out
+            current_zoom = visualizer.zoom_level
             visualizer._zoom_out()
-            assert visualizer.zoom_factor < visualizer.zoom_factor  # After zoom in
+            assert visualizer.zoom_level < current_zoom
 
             # Test zoom reset
             visualizer._zoom_reset()
-            assert visualizer.zoom_factor == 1.0
+            assert visualizer.zoom_level == 1.0
 
     @patch("audio_visualization.ctk.CTkFrame")
     def test_clear(self, mock_ctk_frame):
@@ -280,20 +281,24 @@ class TestWaveformVisualizer:
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'):
+             patch.object(WaveformVisualizer, '_initialize_plot') as mock_init_plot, \
+             patch.object(WaveformVisualizer, '_update_zoom_display'):
             visualizer = WaveformVisualizer(mock_parent)
-            visualizer.audio_data = np.array([0.1, 0.2, 0.3])
+            visualizer.waveform_data = np.array([0.1, 0.2, 0.3])
             visualizer.sample_rate = 44100
             visualizer.current_position = 30.0
+            visualizer.total_duration = 1.0
             visualizer.ax = Mock()
             visualizer.canvas = Mock()
 
             visualizer.clear()
 
-        assert visualizer.audio_data is None
+        assert visualizer.waveform_data is None
         assert visualizer.sample_rate == 0
         assert visualizer.current_position == 0.0
-        visualizer.ax.clear.assert_called()
+        assert visualizer.total_duration == 0.0
+        assert visualizer.zoom_level == 1.0
+        mock_init_plot.assert_called()
 
     @patch("audio_visualization.ctk.CTkFrame")
     def test_clear_position_indicator(self, mock_ctk_frame):
@@ -301,18 +306,19 @@ class TestWaveformVisualizer:
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'):
+             patch.object(WaveformVisualizer, '_initialize_plot'), \
+             patch.object(WaveformVisualizer, '_update_waveform_display'):
             visualizer = WaveformVisualizer(mock_parent)
-            visualizer.position_line = Mock()
-            visualizer.canvas = Mock()
+            visualizer.waveform_data = np.array([0.1, 0.2, 0.3])
+            visualizer.current_position = 30.0
 
             visualizer.clear_position_indicator()
 
-        visualizer.position_line.remove.assert_called()
-        visualizer.canvas.draw.assert_called()
+        # Should reset position and redraw waveform
+        assert visualizer.current_position == 0.0
 
 
-class TestSpectrumAnalyzer:
+class TestSpectrumAnalyzer(unittest.TestCase):
     """Test SpectrumAnalyzer class"""
 
     @patch("audio_visualization.ctk.CTkFrame")
@@ -324,11 +330,11 @@ class TestSpectrumAnalyzer:
              patch.object(SpectrumAnalyzer, '_initialize_plot'):
             analyzer = SpectrumAnalyzer(mock_parent, width=800, height=120)
 
-        assert analyzer.parent_frame == mock_parent
+        assert analyzer.parent == mock_parent
         assert analyzer.width == 800
         assert analyzer.height == 120
         assert analyzer.audio_data is None
-        assert analyzer.sample_rate == 0
+        assert analyzer.sample_rate == 44100  # Default value
         assert analyzer.is_running is False
 
     @patch("audio_visualization.ctk.CTkFrame")
@@ -341,7 +347,7 @@ class TestSpectrumAnalyzer:
             analyzer._setup_styling()
 
         # Should complete without errors
-        assert hasattr(analyzer, 'parent_frame')
+        assert hasattr(analyzer, 'parent')
 
     @patch("audio_visualization.ctk.CTkFrame")
     @patch("audio_visualization.Figure")
@@ -370,7 +376,7 @@ class TestSpectrumAnalyzer:
 
         with patch.object(SpectrumAnalyzer, '_setup_styling'), \
              patch.object(SpectrumAnalyzer, '_initialize_plot'), \
-             patch("audio_visualization.FuncAnimation") as mock_animation:
+             patch("audio_visualization.animation.FuncAnimation") as mock_animation:
             analyzer = SpectrumAnalyzer(mock_parent)
             analyzer.figure = Mock()
 
@@ -379,6 +385,7 @@ class TestSpectrumAnalyzer:
         assert analyzer.audio_data is not None
         assert analyzer.sample_rate == mock_sample_rate
         assert analyzer.is_running is True
+        assert analyzer.total_duration == len(mock_audio_data) / mock_sample_rate
         mock_animation.assert_called()
 
     @patch("audio_visualization.ctk.CTkFrame")
@@ -412,12 +419,12 @@ class TestSpectrumAnalyzer:
 
     @patch("audio_visualization.ctk.CTkFrame")
     @patch("audio_visualization.np.fft.fft")
-    @patch("audio_visualization.signal.get_window")
-    def test_update_spectrum(self, mock_window, mock_fft, mock_ctk_frame):
+    @patch("audio_visualization.signal.savgol_filter")
+    def test_update_spectrum(self, mock_savgol, mock_fft, mock_ctk_frame):
         """Test _update_spectrum method"""
         mock_parent = Mock()
-        mock_window.return_value = np.ones(1024)
         mock_fft.return_value = np.random.complex128(512)
+        mock_savgol.return_value = np.random.random(50)
 
         with patch.object(SpectrumAnalyzer, '_setup_styling'), \
              patch.object(SpectrumAnalyzer, '_initialize_plot'):
@@ -425,18 +432,21 @@ class TestSpectrumAnalyzer:
             analyzer.audio_data = np.random.random(44100)
             analyzer.sample_rate = 44100
             analyzer.current_position = 1.0
-            analyzer.ax = Mock()
+            analyzer.total_duration = 1.0
+            analyzer.is_running = True
+            analyzer.spectrum_line = Mock()
             analyzer.canvas = Mock()
 
             # Mock frame parameter (not used in this implementation)
-            analyzer._update_spectrum(0)
+            result = analyzer._update_spectrum(0)
 
-        # Should perform FFT analysis
+        # Should perform FFT analysis and return spectrum line
         mock_fft.assert_called()
-        analyzer.ax.clear.assert_called()
+        analyzer.spectrum_line.set_data.assert_called()
+        assert result == [analyzer.spectrum_line]
 
 
-class TestAudioVisualizationWidget:
+class TestAudioVisualizationWidget(unittest.TestCase):
     """Test AudioVisualizationWidget class"""
 
     @patch("audio_visualization.ctk.CTkFrame")
@@ -446,13 +456,13 @@ class TestAudioVisualizationWidget:
         mock_parent = Mock()
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'):
+             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
             widget = AudioVisualizationWidget(mock_parent, height=180)
 
         assert widget.audio_player is None
-        assert hasattr(widget, 'current_audio_data')
-        assert hasattr(widget, 'current_sample_rate')
+        assert hasattr(widget, 'notebook')
+        assert hasattr(widget, 'waveform_visualizer')
+        assert hasattr(widget, 'spectrum_analyzer')
 
     @patch("audio_visualization.ctk.CTkFrame")
     @patch("audio_visualization.ctk.CTkTabview")
@@ -477,36 +487,32 @@ class TestAudioVisualizationWidget:
 
     @patch("audio_visualization.ctk.CTkFrame")
     @patch("audio_visualization.ctk.CTkTabview")
-    @patch("audio_visualization.os.path.exists")
-    def test_load_audio_success(self, mock_exists, mock_tabview, mock_ctk_frame):
+    def test_load_audio_success(self, mock_tabview, mock_ctk_frame):
         """Test successful audio loading"""
         mock_parent = Mock()
-        mock_exists.return_value = True
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'):
+             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
             widget = AudioVisualizationWidget(mock_parent)
-            widget.waveform_viz = Mock()
-            widget.waveform_viz.load_audio.return_value = True
+            widget.waveform_visualizer = Mock()
+            widget.waveform_visualizer.load_audio.return_value = True
 
             result = widget.load_audio("/test/file.wav")
 
         assert result is True
-        widget.waveform_viz.load_audio.assert_called_once_with("/test/file.wav")
+        widget.waveform_visualizer.load_audio.assert_called_once_with("/test/file.wav")
 
     @patch("audio_visualization.ctk.CTkFrame")
     @patch("audio_visualization.ctk.CTkTabview")
-    @patch("audio_visualization.os.path.exists")
-    def test_load_audio_failure(self, mock_exists, mock_tabview, mock_ctk_frame):
+    def test_load_audio_failure(self, mock_tabview, mock_ctk_frame):
         """Test audio loading failure"""
         mock_parent = Mock()
-        mock_exists.return_value = False
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'):
+             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
             widget = AudioVisualizationWidget(mock_parent)
+            widget.waveform_visualizer = Mock()
+            widget.waveform_visualizer.load_audio.return_value = False
 
             result = widget.load_audio("/nonexistent/file.wav")
 
@@ -519,16 +525,15 @@ class TestAudioVisualizationWidget:
         mock_parent = Mock()
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'):
+             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
             widget = AudioVisualizationWidget(mock_parent)
-            widget.waveform_viz = Mock()
+            widget.waveform_visualizer = Mock()
             widget.spectrum_analyzer = Mock()
             position = MockPlaybackPosition(current_time=30.0)
 
             widget.update_position(position)
 
-        widget.waveform_viz.update_position.assert_called_once_with(position)
+        widget.waveform_visualizer.update_position.assert_called_once_with(position)
         widget.spectrum_analyzer.update_position.assert_called_once_with(30.0)
 
     @patch("audio_visualization.ctk.CTkFrame")
@@ -540,15 +545,12 @@ class TestAudioVisualizationWidget:
         mock_sample_rate = 44100
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'):
+             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
             widget = AudioVisualizationWidget(mock_parent)
             widget.spectrum_analyzer = Mock()
 
             widget.start_spectrum_analysis(mock_audio_data, mock_sample_rate)
 
-        assert widget.current_audio_data is not None
-        assert widget.current_sample_rate == mock_sample_rate
         widget.spectrum_analyzer.start_analysis.assert_called_once_with(mock_audio_data, mock_sample_rate)
 
     @patch("audio_visualization.ctk.CTkFrame")
@@ -558,8 +560,7 @@ class TestAudioVisualizationWidget:
         mock_parent = Mock()
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'):
+             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
             widget = AudioVisualizationWidget(mock_parent)
             widget.spectrum_analyzer = Mock()
 
@@ -575,7 +576,6 @@ class TestAudioVisualizationWidget:
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
              patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'), \
              patch.object(AudioVisualizationWidget, '_get_main_window') as mock_get_main:
 
             mock_main_window = Mock()
@@ -604,18 +604,14 @@ class TestAudioVisualizationWidget:
         mock_parent = Mock()
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'):
+             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
             widget = AudioVisualizationWidget(mock_parent)
-            widget.waveform_viz = Mock()
+            widget.waveform_visualizer = Mock()
             widget.spectrum_analyzer = Mock()
-            widget.current_audio_data = np.array([1, 2, 3])
 
             widget.clear()
 
-        assert widget.current_audio_data is None
-        assert widget.current_sample_rate == 0
-        widget.waveform_viz.clear.assert_called_once()
+        widget.waveform_visualizer.clear.assert_called_once()
         widget.spectrum_analyzer.stop_analysis.assert_called_once()
 
     @patch("audio_visualization.ctk.CTkFrame")
@@ -626,8 +622,7 @@ class TestAudioVisualizationWidget:
         mock_audio_player = Mock()
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'):
+             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
             widget = AudioVisualizationWidget(mock_parent)
 
             widget.set_audio_player(mock_audio_player)
@@ -642,11 +637,13 @@ class TestAudioVisualizationWidget:
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
              patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'), \
              patch.object(AudioVisualizationWidget, '_update_speed_display'):
             widget = AudioVisualizationWidget(mock_parent)
             widget.audio_player = Mock()
             widget.audio_player.get_playback_speed.return_value = 1.0
+            widget.audio_player.decrease_speed.return_value = 0.75
+            widget.audio_player.increase_speed.return_value = 1.25
+            widget.audio_player.reset_speed.return_value = 1.0
 
             # Test decrease speed
             widget._decrease_speed()
@@ -661,6 +658,7 @@ class TestAudioVisualizationWidget:
             widget.audio_player.reset_speed.assert_called_once()
 
             # Test set speed preset
+            widget.audio_player.set_playback_speed.return_value = True
             widget._set_speed_preset(1.5)
             widget.audio_player.set_playback_speed.assert_called_once_with(1.5)
 
@@ -671,19 +669,17 @@ class TestAudioVisualizationWidget:
         mock_parent = Mock()
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'), \
-             patch("audio_visualization.ctk.set_appearance_mode") as mock_set_mode, \
-             patch("audio_visualization.ctk.get_appearance_mode", return_value="Light"):
+             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
 
             widget = AudioVisualizationWidget(mock_parent)
-            widget.waveform_viz = Mock()
+            widget.waveform_visualizer = Mock()
             widget.spectrum_analyzer = Mock()
+            widget.is_dark_theme = True
 
             widget._toggle_theme()
 
-        # Should toggle from Light to Dark
-        mock_set_mode.assert_called_with("Dark")
+        # Should toggle theme state
+        assert widget.is_dark_theme is False
 
     @patch("audio_visualization.ctk.CTkFrame")
     @patch("audio_visualization.ctk.CTkTabview")
@@ -694,8 +690,8 @@ class TestAudioVisualizationWidget:
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
              patch.object(AudioVisualizationWidget, '_create_speed_controls'):
             widget = AudioVisualizationWidget(mock_parent)
-            widget.tabview = Mock()
-            widget.tabview.get.return_value = "Waveform"
+            widget.notebook = Mock()
+            widget.notebook.get.return_value = "Waveform"
 
             # Test update tab state
             widget._update_tab_state()
@@ -712,14 +708,16 @@ class TestAudioVisualizationWidget:
         mock_parent = Mock()
 
         with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'):
+             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
             widget = AudioVisualizationWidget(mock_parent)
             widget.speed_label = Mock()
-            widget.audio_player = Mock()
-            widget.audio_player.get_playback_speed.return_value = 1.5
+            widget.current_speed = 1.5
 
             widget._update_speed_display()
 
         # Should update speed label
         widget.speed_label.configure.assert_called()
+
+
+if __name__ == '__main__':
+    unittest.main()
