@@ -25,6 +25,7 @@ with patch.dict("sys.modules", {
     with patch.dict("sys.modules", {
         "scipy": Mock(),
         "scipy.signal": Mock(),
+        "scipy.fft": Mock(),
         "scipy.io": Mock(),
         "scipy.io.wavfile": Mock()
     }):

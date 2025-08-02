@@ -182,12 +182,10 @@ class TestAudioPlayerInitialization(unittest.TestCase):
     def test_handle_playback_error(self, mock_messagebox):
         error_message = "Test Pygame Error"
         self.app._handle_playback_stop = MagicMock()
-        
+
         self.app._handle_playback_error(error_message)
-        
-        mock_messagebox.showerror.assert_called_once_with(
-            "Playback Error", error_message, parent=self.app
-        )
+
+        mock_messagebox.showerror.assert_called_once_with("Playback Error", error_message, parent=self.app)
         self.app._handle_playback_stop.assert_called_once()
 
     def test_handle_playback_stop(self):
@@ -217,18 +215,18 @@ class TestAudioPlayerInitialization(unittest.TestCase):
         self.app.audio_player = MagicMock()
         self.app.audio_player.is_playing = True
         self.app.audio_player.stop = MagicMock()
-        
+
         self.app._stop_audio_playback()
-        
+
         self.app.audio_player.stop.assert_called_once()
 
     @patch("audio_player.ctk")
     def test_create_playback_controls_already_exists(self, mock_ctk):
         self.app.playback_controls_frame = MagicMock()
         self.app.playback_controls_frame.winfo_exists.return_value = True
-        
+
         self.app._create_playback_controls()
-        
+
         # Should return early without creating new controls
         mock_ctk.CTkFrame.assert_not_called()
 
@@ -237,7 +235,7 @@ class TestAudioPlayerInitialization(unittest.TestCase):
         self.app.playback_controls_frame = None
         self.app.status_bar_frame = MagicMock()
         self.app.playback_total_duration = 125  # 2 minutes 5 seconds
-        
+
         # Mock the CTk widgets
         mock_frame = MagicMock()
         mock_ctk.CTkFrame.return_value = mock_frame
@@ -247,20 +245,16 @@ class TestAudioPlayerInitialization(unittest.TestCase):
 
         self.app._create_playback_controls()
 
-        mock_ctk.CTkFrame.assert_called_once_with(
-            self.app.status_bar_frame, fg_color="transparent"
-        )
-        mock_frame.pack.assert_called_once_with(
-            side="right", padx=10, pady=2, fill="x"
-        )
+        mock_ctk.CTkFrame.assert_called_once_with(self.app.status_bar_frame, fg_color="transparent")
+        mock_frame.pack.assert_called_once_with(side="right", padx=10, pady=2, fill="x")
 
     def test_destroy_playback_controls_exists(self):
         mock_frame = MagicMock()
         mock_frame.winfo_exists.return_value = True
         self.app.playback_controls_frame = mock_frame
-        
+
         self.app._destroy_playback_controls()
-        
+
         mock_frame.destroy.assert_called_once()
         self.assertIsNone(self.app.playback_controls_frame)
 
@@ -299,32 +293,32 @@ class TestAudioPlayerInitialization(unittest.TestCase):
         self.app._user_is_dragging_slider = True
         self.app.current_time_label = MagicMock()
         self.app.current_time_label.winfo_exists.return_value = True
-        
+
         self.app._on_playback_slider_drag(125.5)
-        
+
         self.app.current_time_label.configure.assert_called_once_with(text="02:05")
 
     def test_on_playback_slider_drag_user_not_dragging(self):
         self.app._user_is_dragging_slider = False
         self.app.current_time_label = MagicMock()
-        
+
         self.app._on_playback_slider_drag(125.5)
-        
+
         self.app.current_time_label.configure.assert_not_called()
 
     def test_on_slider_press(self):
         self.app._user_is_dragging_slider = False
-        
+
         self.app._on_slider_press(None)
-        
+
         self.assertTrue(self.app._user_is_dragging_slider)
 
     def test_on_slider_release_no_player(self):
         self.app._user_is_dragging_slider = True
         self.app.audio_player = None
-        
+
         self.app._on_slider_release(None)
-        
+
         self.assertFalse(self.app._user_is_dragging_slider)
 
     def test_on_slider_release_success(self):
@@ -332,9 +326,9 @@ class TestAudioPlayerInitialization(unittest.TestCase):
         self.app.audio_player = MagicMock()
         self.app.playback_slider = MagicMock()
         self.app.playback_slider.get.return_value = 45.0
-        
+
         self.app._on_slider_release(None)
-        
+
         self.assertFalse(self.app._user_is_dragging_slider)
         self.app.audio_player.seek.assert_called_once_with(45.0)
 
@@ -345,9 +339,9 @@ class TestAudioPlayerInitialization(unittest.TestCase):
 
     def test_on_volume_change_success(self):
         self.app.audio_player = MagicMock()
-        
+
         self.app._on_volume_change(0.7)
-        
+
         self.app.audio_player.set_volume.assert_called_once_with(0.7)
 
 

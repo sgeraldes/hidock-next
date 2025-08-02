@@ -1,6 +1,7 @@
 """
 Tests for transcription functionality.
 """
+
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -70,23 +71,24 @@ class TestTranscriptionModule:
 import os
 import sys
 
+
 @pytest.mark.integration
 class TestTranscriptionIntegration:
     """Integration tests for transcription workflow."""
 
     def _is_ci_environment(self):
         """Check if running in CI environment."""
-        ci_vars = ['CI', 'GITHUB_ACTIONS', 'TRAVIS', 'JENKINS_URL', 'BUILDKITE']
+        ci_vars = ["CI", "GITHUB_ACTIONS", "TRAVIS", "JENKINS_URL", "BUILDKITE"]
         return any(os.getenv(var) for var in ci_vars)
 
     def _is_local_development(self):
         """Check if running in local development environment."""
         local_indicators = [
-            os.path.exists('C:\\'),
-            os.getenv('USERPROFILE'),
-            os.getenv('VSCODE_PID'),
-            os.getenv('TERM_PROGRAM') == 'vscode',
-            'pytest' in sys.modules,
+            os.path.exists("C:\\"),
+            os.getenv("USERPROFILE"),
+            os.getenv("VSCODE_PID"),
+            os.getenv("TERM_PROGRAM") == "vscode",
+            "pytest" in sys.modules,
         ]
         return any(local_indicators) and not self._is_ci_environment()
 
@@ -94,17 +96,17 @@ class TestTranscriptionIntegration:
         """Check if API key is available or assume available locally."""
         if self._is_local_development():
             return True  # Assume API keys might be available locally
-        return bool(os.getenv('GEMINI_API_KEY') or os.getenv('OPENAI_API_KEY'))
+        return bool(os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY"))
 
     @pytest.mark.slow
     def test_full_transcription_workflow(self):
         """Test complete transcription workflow."""
         if self._is_ci_environment():
             pytest.skip("Skipping API test in CI environment")
-        
+
         if not self._has_api_key():
             pytest.skip("No API key available")
-        
+
         # Actual test implementation would go here
         # This is a placeholder for when transcription service is implemented
         pytest.skip("Transcription service not yet implemented")
@@ -114,11 +116,11 @@ class TestTranscriptionIntegration:
         """Test handling of large audio files."""
         if self._is_ci_environment():
             pytest.skip("Skipping large file test in CI environment")
-        
+
         # Check for test files
         test_file_path = "tests/fixtures/large_audio.wav"
         if not os.path.exists(test_file_path):
             pytest.skip("Large test file not available")
-        
+
         # Actual test implementation would go here
         pytest.skip("Large file handling not yet implemented")

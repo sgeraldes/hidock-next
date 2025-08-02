@@ -1,6 +1,7 @@
 """
 Tests for GUI components and functionality.
 """
+
 import tkinter as tk
 from unittest.mock import MagicMock, Mock, patch
 

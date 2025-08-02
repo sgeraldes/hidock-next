@@ -17,6 +17,7 @@ from audio_processing_advanced import (
     NOISEREDUCE_AVAILABLE,
     PYDUB_AVAILABLE,
     AudioEnhancer,
+    AudioFormatConverter,
     AudioProcessingSettings,
     NoiseReductionMethod,
     ProcessingQuality,
@@ -202,7 +203,7 @@ class TestAudioEnhancer:
         result = enhancer.process_audio_file("/nonexistent/input.wav", "/tmp/output.wav")
 
         assert result.success is False
-        assert "does not exist" in result.error_message or "not found" in result.error_message
+        assert "Failed to load audio file" in result.error_message
 
     @patch("os.path.exists")
     def test_process_audio_file_load_error(self, mock_exists):
