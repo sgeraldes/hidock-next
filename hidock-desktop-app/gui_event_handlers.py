@@ -87,21 +87,15 @@ class EventHandlersMixin:
         Args:
             event: The event object (optional, typically from a bind).
         """
-        new_dir = self._prompt_for_directory(
-            initial_dir=self.download_directory, parent_window_for_dialog=self
-        )
+        new_dir = self._prompt_for_directory(initial_dir=self.download_directory, parent_window_for_dialog=self)
         if new_dir and new_dir != self.download_directory:
             self.download_directory = new_dir
 
             self.config["download_directory"] = new_dir
-            self.save_config(self.config)
-            if (
-                hasattr(self, "download_dir_button_header")
-                and self.download_dir_button_header.winfo_exists()
-            ):
-                self.download_dir_button_header.configure(
-                    text=f"Dir: {os.path.basename(self.download_directory)}"
-                )
+            from config_and_logger import save_config
+            save_config(self.config)
+            if hasattr(self, "download_dir_button_header") and self.download_dir_button_header.winfo_exists():
+                self.download_dir_button_header.configure(text=f"Dir: {os.path.basename(self.download_directory)}")
             logger.info(
                 "GUI",
                 "_select_download_dir_from_header_button",
@@ -140,9 +134,7 @@ class EventHandlersMixin:
         self._drag_action_is_deselect = False
         if not item_iid:
             self._is_button1_pressed_on_item = None
-            logger.debug(
-                "GUI", "_on_file_button1_press", "Button 1 pressed on empty space."
-            )
+            logger.debug("GUI", "_on_file_button1_press", "Button 1 pressed on empty space.")
             return
         current_selection = self.file_tree.selection()
         is_currently_selected_before_toggle = item_iid in current_selection
@@ -191,10 +183,7 @@ class EventHandlersMixin:
         Performs drag-selection or drag-deselection of items based on the
         initial state of the anchor item when the drag started.
         """
-        if (
-            not hasattr(self, "_is_button1_pressed_on_item")
-            or not self._is_button1_pressed_on_item
-        ):
+        if not hasattr(self, "_is_button1_pressed_on_item") or not self._is_button1_pressed_on_item:
             return
         item_iid_under_cursor = self.file_tree.identify_row(event.y)
         if item_iid_under_cursor != self._last_dragged_over_iid:
@@ -211,9 +200,7 @@ class EventHandlersMixin:
                             return
                     start_range_idx = min(anchor_index, current_motion_index)
                     end_range_idx = max(anchor_index, current_motion_index)
-                    items_in_current_drag_sweep = all_children[
-                        start_range_idx:end_range_idx + 1
-                    ]
+                    items_in_current_drag_sweep = all_children[start_range_idx : end_range_idx + 1]
                     if self._drag_action_is_deselect:
                         logger.debug(
                             "GUI",
@@ -261,10 +248,7 @@ class EventHandlersMixin:
         Manages the grid layout and row weights to show or hide panes as configured.
         """
 
-        if (
-            not hasattr(self, "main_content_frame")
-            or not self.main_content_frame.winfo_exists()
-        ):
+        if not hasattr(self, "main_content_frame") or not self.main_content_frame.winfo_exists():
             logger.error(
                 "GUI",
                 "_update_optional_panes_visibility",
@@ -272,9 +256,7 @@ class EventHandlersMixin:
             )
             return
         if not hasattr(self, "log_frame") or not self.log_frame.winfo_exists():
-            logger.error(
-                "GUI", "_update_optional_panes_visibility", "log_frame not found."
-            )
+            logger.error("GUI", "_update_optional_panes_visibility", "log_frame not found.")
             return
         logs_are_visible = self.logs_visible_var.get()
         if logs_are_visible:
@@ -282,18 +264,14 @@ class EventHandlersMixin:
                 self.log_frame.grid(row=3, column=0, sticky="nsew", padx=5, pady=(5, 0))
             self.main_content_frame.grid_rowconfigure(0, weight=3)
             self.main_content_frame.grid_rowconfigure(1, weight=0)  # Panels toolbar
-            self.main_content_frame.grid_rowconfigure(
-                2, weight=0
-            )  # Transcription panel
+            self.main_content_frame.grid_rowconfigure(2, weight=0)  # Transcription panel
             self.main_content_frame.grid_rowconfigure(3, weight=1)  # Log panel
         else:
             if self.log_frame.winfo_ismapped():
                 self.log_frame.grid_forget()
             self.main_content_frame.grid_rowconfigure(0, weight=1)
             self.main_content_frame.grid_rowconfigure(1, weight=0)  # Panels toolbar
-            self.main_content_frame.grid_rowconfigure(
-                2, weight=0
-            )  # Transcription panel
+            self.main_content_frame.grid_rowconfigure(2, weight=0)  # Transcription panel
             self.main_content_frame.grid_rowconfigure(3, weight=0)  # Log panel
 
     def toggle_logs(self):  # Identical to original logic
@@ -307,18 +285,13 @@ class EventHandlersMixin:
         self._update_optional_panes_visibility()
 
     def _on_file_double_click(self, event):  # Identical to original
-        if (
-            not self.device_manager.device_interface.jensen_device.is_connected()
-            and not self.is_audio_playing
-        ):
+        if not self.device_manager.device_interface.jensen_device.is_connected() and not self.is_audio_playing:
             return
         item_iid = self.file_tree.identify_row(event.y)
         if not item_iid:
             return
         self.file_tree.selection_set(item_iid)
-        file_detail = next(
-            (f for f in self.displayed_files_details if f["name"] == item_iid), None
-        )
+        file_detail = next((f for f in self.displayed_files_details if f["name"] == item_iid), None)
         if not file_detail:
             return
         status = file_detail.get("gui_status", "On Device")
@@ -344,27 +317,17 @@ class EventHandlersMixin:
         """Creates and styles a tkinter.Menu to match the CTk theme."""
         context_menu = tkinter.Menu(self, tearoff=0)
         try:
-            menu_bg = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkFrame"]["fg_color"]
-            )
-            menu_fg = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkLabel"]["text_color"]
-            )
-            active_menu_bg = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkButton"]["hover_color"]
-            )
-            active_menu_fg_candidate = ctk.ThemeManager.theme["CTkButton"].get(
-                "text_color_hover"
-            )
+            menu_bg = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
+            menu_fg = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
+            active_menu_bg = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkButton"]["hover_color"])
+            active_menu_fg_candidate = ctk.ThemeManager.theme["CTkButton"].get("text_color_hover")
             active_menu_fg = self.apply_appearance_mode_theme_color(
                 active_menu_fg_candidate
                 if active_menu_fg_candidate
                 else ctk.ThemeManager.theme["CTkButton"]["text_color"]
             )
             disabled_fg = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkLabel"].get(
-                    "text_color_disabled", ("gray70", "gray30")
-                )
+                ctk.ThemeManager.theme["CTkLabel"].get("text_color_disabled", ("gray70", "gray30"))
             )
             context_menu.configure(
                 background=menu_bg,
@@ -388,10 +351,7 @@ class EventHandlersMixin:
         status = file_detail.get("gui_status", "On Device")
         is_playable = file_detail["name"].lower().endswith((".wav", ".hda"))
 
-        if (
-            self.is_audio_playing
-            and self.current_playing_filename_for_replay == item_iid
-        ):
+        if self.is_audio_playing and self.current_playing_filename_for_replay == item_iid:
             context_menu.add_command(
                 label="Stop Playback",
                 command=self._stop_audio_playback,
@@ -430,11 +390,7 @@ class EventHandlersMixin:
             command=lambda: self._process_selected_audio(item_iid),
         )
 
-        if (
-            status in ["Downloading", "Queued"]
-            or "Preparing Playback" in status
-            or self.active_operation_name
-        ):
+        if status in ["Downloading", "Queued"] or "Preparing Playback" in status or self.active_operation_name:
             context_menu.add_command(
                 label="Cancel Operation",
                 command=self.request_cancel_operation,
@@ -462,9 +418,7 @@ class EventHandlersMixin:
 
         # Check if any of the selected files are currently recording
         is_any_recording = any(
-            next((f for f in self.displayed_files_details if f["name"] == iid), {}).get(
-                "is_recording"
-            )
+            next((f for f in self.displayed_files_details if f["name"] == iid), {}).get("is_recording")
             for iid in selection
         )
 
@@ -476,9 +430,7 @@ class EventHandlersMixin:
                 compound="left",
             )
 
-    def _on_file_right_click(
-        self, event
-    ):  # Identical to original, uses self._apply_appearance_mode_theme_color
+    def _on_file_right_click(self, event):  # Identical to original, uses self._apply_appearance_mode_theme_color
         clicked_item_iid = self.file_tree.identify_row(event.y)
         current_selection = self.file_tree.selection()
 
@@ -492,13 +444,9 @@ class EventHandlersMixin:
         num_selected = len(current_selection)
         if num_selected == 1:
             item_iid = current_selection[0]
-            file_detail = next(
-                (f for f in self.displayed_files_details if f["name"] == item_iid), None
-            )
+            file_detail = next((f for f in self.displayed_files_details if f["name"] == item_iid), None)
             if file_detail:
-                self._add_single_file_context_menu_items(
-                    context_menu, item_iid, file_detail
-                )
+                self._add_single_file_context_menu_items(context_menu, item_iid, file_detail)
         elif num_selected > 1:
             self._add_multi_file_context_menu_items(context_menu, current_selection)
 
@@ -507,11 +455,7 @@ class EventHandlersMixin:
         context_menu.add_command(
             label="Refresh List",
             command=self.refresh_file_list_gui,
-            state=(
-                "normal"
-                if self.device_manager.device_interface.jensen_device.is_connected()
-                else "disabled"
-            ),
+            state=("normal" if self.device_manager.device_interface.jensen_device.is_connected() else "disabled"),
             image=self.menu_icons.get("refresh"),
             compound="left",
         )
@@ -575,9 +519,7 @@ class EventHandlersMixin:
                 dummy_event.y = bbox[1] + bbox[3] // 2
                 self._on_file_double_click(dummy_event)
         except tkinter.TclError as e:
-            logger.warning(
-                "GUI", "_on_enter_key_press", f"Could not simulate double click: {e}"
-            )
+            logger.warning("GUI", "_on_enter_key_press", f"Could not simulate double click: {e}")
         return "break"
 
     def _on_f5_key_press(self, _event=None):  # Identical to original

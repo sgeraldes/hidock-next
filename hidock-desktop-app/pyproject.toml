@@ -109,7 +109,18 @@ warn_no_return = true
 warn_unreachable = true
 strict_equality = true
 exclude = [
-    "**/*.py"
+    "gui_main_window.py",
+    "gui_event_handlers.py",
+    "gui_auxiliary.py",
+    "gui_treeview.py",
+    "gui_actions_device.py",
+    "gui_actions_file.py",
+    "ctk_custom_widgets.py",
+    "enhanced_gui_integration.py",
+    "settings_window.py",
+    "hta_converter.py",
+    "storage_management.py",
+    "ai_service.py"
 ]
 
 [[tool.mypy.overrides]]
@@ -134,7 +145,7 @@ addopts = [
     "--cov=.",
     "--cov-report=html:htmlcov",
     "--cov-report=term-missing",
-    "--cov-fail-under=20",
+    "--cov-fail-under=80",
 ]
 markers = [
     "unit: Unit tests",

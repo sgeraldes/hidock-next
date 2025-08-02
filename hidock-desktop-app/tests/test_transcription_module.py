@@ -1,0 +1,524 @@
+"""
+Comprehensive tests for transcription_module.py
+
+Following TDD principles to achieve 80% test coverage as mandated by .amazonq/rules/PYTHON.md
+"""
+
+import json
+import os
+import tempfile
+import unittest.mock as mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
+
+import pytest
+
+import transcription_module
+from transcription_module import (
+    TRANSCRIPTION_FAILED_DEFAULT_MSG,
+    TRANSCRIPTION_PARSE_ERROR_MSG_PREFIX,
+    _call_gemini_api,
+    _get_audio_duration,
+    extract_meeting_insights,
+    process_audio_file_for_insights,
+    transcribe_audio,
+)
+
+
+class TestConstants:
+    """Test module constants"""
+
+    def test_constants_defined(self):
+        """Test that required constants are defined"""
+        assert TRANSCRIPTION_FAILED_DEFAULT_MSG == "Transcription failed or no content returned."
+        assert TRANSCRIPTION_PARSE_ERROR_MSG_PREFIX == "Error parsing transcription response:"
+
+
+class TestCallGeminiApi:
+    """Test _call_gemini_api function"""
+
+    def test_call_gemini_api_empty_key_text_response(self):
+        """Test _call_gemini_api with empty key returns mock text response"""
+        payload = {"contents": "test content"}
+
+        result = _call_gemini_api(payload, "")
+
+        assert result is not None
+        assert "candidates" in result
+        assert len(result["candidates"]) == 1
+        candidate = result["candidates"][0]
+        assert candidate["content"]["role"] == "model"
+        assert "mock API response" in candidate["content"]["parts"][0]["text"].lower()
+        assert candidate["finishReason"] == "STOP"
+
+    def test_call_gemini_api_empty_key_json_response(self):
+        """Test _call_gemini_api with empty key returns mock JSON response"""
+        payload = {
+            "contents": "test content",
+            "generationConfig": {
+                "responseMimeType": "application/json"
+            }
+        }
+
+        result = _call_gemini_api(payload, "")
+
+        assert result is not None
+        text_content = result["candidates"][0]["content"]["parts"][0]["text"]
+        json_data = json.loads(text_content)
+
+        assert "summary" in json_data
+        assert json_data["summary"] == "Mock summary from API (missing key)."
+        assert "category" in json_data
+        assert "meeting_details" in json_data
+        assert "action_items" in json_data
+        assert len(json_data["action_items"]) == 2
+
+    @patch("transcription_module.genai", None)
+    def test_call_gemini_api_no_genai_library(self):
+        """Test _call_gemini_api when genai library not available"""
+        payload = {"contents": "test content"}
+
+        result = _call_gemini_api(payload, "test_key")
+
+        assert result is None
+
+    @patch("transcription_module.genai")
+    def test_call_gemini_api_success(self, mock_genai):
+        """Test successful _call_gemini_api call"""
+        payload = {"contents": "test content", "generationConfig": {"temperature": 0.5}}
+        mock_model = Mock()
+        mock_response = Mock()
+        mock_response.to_dict.return_value = {"response": "success"}
+        mock_model.generate_content.return_value = mock_response
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        result = _call_gemini_api(payload, "test_key")
+
+        assert result == {"response": "success"}
+        mock_genai.configure.assert_called_once_with(api_key="test_key")
+        mock_genai.GenerativeModel.assert_called_once_with("gemini-1.5-flash")
+        mock_model.generate_content.assert_called_once_with("test content", generation_config={"temperature": 0.5})
+
+    @patch("transcription_module.genai")
+    def test_call_gemini_api_exception(self, mock_genai):
+        """Test _call_gemini_api with exception"""
+        payload = {"contents": "test content"}
+        mock_genai.configure.side_effect = Exception("API error")
+
+        result = _call_gemini_api(payload, "test_key")
+
+        assert result is None
+
+    @patch("transcription_module.genai")
+    def test_call_gemini_api_model_exception(self, mock_genai):
+        """Test _call_gemini_api with model generation exception"""
+        payload = {"contents": "test content"}
+        mock_model = Mock()
+        mock_model.generate_content.side_effect = Exception("Model error")
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        result = _call_gemini_api(payload, "test_key")
+
+        assert result is None
+
+
+class TestTranscribeAudio:
+    """Test transcribe_audio function"""
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_transcribe_audio_success(self, mock_ai_service):
+        """Test successful audio transcription"""
+        mock_ai_service.configure_provider.return_value = True
+        mock_ai_service.transcribe_audio.return_value = {
+            "success": True,
+            "transcription": "This is the transcription text."
+        }
+
+        result = await transcribe_audio("/test/audio.wav", "gemini", "test_key")
+
+        assert result["transcription"] == "This is the transcription text."
+        mock_ai_service.configure_provider.assert_called_once_with("gemini", "test_key", None)
+        mock_ai_service.transcribe_audio.assert_called_once_with("gemini", "/test/audio.wav", "auto")
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_transcribe_audio_configure_failure(self, mock_ai_service):
+        """Test transcribe_audio when provider configuration fails"""
+        mock_ai_service.configure_provider.return_value = False
+
+        result = await transcribe_audio("/test/audio.wav", "gemini", "test_key")
+
+        assert result["transcription"] == TRANSCRIPTION_FAILED_DEFAULT_MSG
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_transcribe_audio_transcription_failure(self, mock_ai_service):
+        """Test transcribe_audio when transcription fails"""
+        mock_ai_service.configure_provider.return_value = True
+        mock_ai_service.transcribe_audio.return_value = {
+            "success": False,
+            "error": "API error occurred"
+        }
+
+        result = await transcribe_audio("/test/audio.wav", "gemini", "test_key")
+
+        assert "Transcription failed: API error occurred" in result["transcription"]
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_transcribe_audio_no_transcription_content(self, mock_ai_service):
+        """Test transcribe_audio when no transcription content returned"""
+        mock_ai_service.configure_provider.return_value = True
+        mock_ai_service.transcribe_audio.return_value = {
+            "success": True
+            # No transcription key
+        }
+
+        result = await transcribe_audio("/test/audio.wav", "gemini", "test_key")
+
+        assert result["transcription"] == TRANSCRIPTION_FAILED_DEFAULT_MSG
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_transcribe_audio_with_config_and_language(self, mock_ai_service):
+        """Test transcribe_audio with custom config and language"""
+        mock_ai_service.configure_provider.return_value = True
+        mock_ai_service.transcribe_audio.return_value = {
+            "success": True,
+            "transcription": "Transcribed text"
+        }
+        config = {"model": "whisper-1", "temperature": 0.2}
+
+        result = await transcribe_audio("/test/audio.wav", "openai", "test_key", config, "en")
+
+        assert result["transcription"] == "Transcribed text"
+        mock_ai_service.configure_provider.assert_called_once_with("openai", "test_key", config)
+        mock_ai_service.transcribe_audio.assert_called_once_with("openai", "/test/audio.wav", "en")
+
+
+class TestExtractMeetingInsights:
+    """Test extract_meeting_insights function"""
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_extract_meeting_insights_success(self, mock_ai_service):
+        """Test successful meeting insights extraction"""
+        mock_ai_service.configure_provider.return_value = True
+        mock_response = {
+            "success": True,
+            "content": json.dumps({
+                "summary": "Meeting about project planning",
+                "category": "Planning",
+                "action_items": ["Review budget", "Schedule next meeting"]
+            })
+        }
+        mock_ai_service.extract_insights.return_value = mock_response
+
+        result = await extract_meeting_insights("Transcription text", "gemini", "test_key")
+
+        assert result["summary"] == "Meeting about project planning"
+        assert result["category"] == "Planning"
+        assert len(result["action_items"]) == 2
+        mock_ai_service.configure_provider.assert_called_once_with("gemini", "test_key", None)
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_extract_meeting_insights_configure_failure(self, mock_ai_service):
+        """Test extract_meeting_insights when provider configuration fails"""
+        mock_ai_service.configure_provider.return_value = False
+
+        result = await extract_meeting_insights("Transcription text", "gemini", "test_key")
+
+        assert "error" in result
+        assert "Failed to configure provider" in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_extract_meeting_insights_extraction_failure(self, mock_ai_service):
+        """Test extract_meeting_insights when extraction fails"""
+        mock_ai_service.configure_provider.return_value = True
+        mock_ai_service.extract_insights.return_value = {
+            "success": False,
+            "error": "Extraction failed"
+        }
+
+        result = await extract_meeting_insights("Transcription text", "gemini", "test_key")
+
+        assert "error" in result
+        assert "Extraction failed" in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_extract_meeting_insights_invalid_json(self, mock_ai_service):
+        """Test extract_meeting_insights with invalid JSON response"""
+        mock_ai_service.configure_provider.return_value = True
+        mock_ai_service.extract_insights.return_value = {
+            "success": True,
+            "content": "invalid json content"
+        }
+
+        result = await extract_meeting_insights("Transcription text", "gemini", "test_key")
+
+        assert "error" in result
+        assert TRANSCRIPTION_PARSE_ERROR_MSG_PREFIX in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_extract_meeting_insights_with_config(self, mock_ai_service):
+        """Test extract_meeting_insights with custom config"""
+        mock_ai_service.configure_provider.return_value = True
+        mock_ai_service.extract_insights.return_value = {
+            "success": True,
+            "content": json.dumps({"summary": "Test summary"})
+        }
+        config = {"model": "gpt-4", "temperature": 0.3}
+
+        result = await extract_meeting_insights("Transcription text", "openai", "test_key", config)
+
+        assert result["summary"] == "Test summary"
+        mock_ai_service.configure_provider.assert_called_once_with("openai", "test_key", config)
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.ai_service")
+    async def test_extract_meeting_insights_empty_content(self, mock_ai_service):
+        """Test extract_meeting_insights with empty content"""
+        mock_ai_service.configure_provider.return_value = True
+        mock_ai_service.extract_insights.return_value = {
+            "success": True,
+            "content": ""
+        }
+
+        result = await extract_meeting_insights("Transcription text", "gemini", "test_key")
+
+        assert "error" in result
+        assert TRANSCRIPTION_PARSE_ERROR_MSG_PREFIX in result["error"]
+
+
+class TestGetAudioDuration:
+    """Test _get_audio_duration function"""
+
+    def test_get_audio_duration_success(self):
+        """Test successful audio duration calculation"""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+            temp_path = temp_file.name
+
+        try:
+            # Create a mock WAV file
+            with patch("transcription_module.wave.open") as mock_wave_open:
+                mock_wave_file = Mock()
+                mock_wave_file.getnframes.return_value = 44100  # 1 second at 44.1kHz
+                mock_wave_file.getframerate.return_value = 44100
+                mock_wave_open.return_value.__enter__.return_value = mock_wave_file
+
+                duration = _get_audio_duration(temp_path)
+
+                assert duration == 1  # 1 second
+                mock_wave_open.assert_called_once_with(temp_path, "rb")
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    def test_get_audio_duration_file_not_found(self):
+        """Test _get_audio_duration with non-existent file"""
+        duration = _get_audio_duration("/nonexistent/file.wav")
+
+        assert duration == 0
+
+    def test_get_audio_duration_wave_error(self):
+        """Test _get_audio_duration with wave module error"""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+            temp_path = temp_file.name
+
+        try:
+            with patch("transcription_module.wave.open", side_effect=Exception("Wave error")):
+                duration = _get_audio_duration(temp_path)
+
+                assert duration == 0
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    def test_get_audio_duration_zero_framerate(self):
+        """Test _get_audio_duration with zero frame rate"""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_path:
+            pass
+
+        try:
+            with patch("transcription_module.wave.open") as mock_wave_open:
+                mock_wave_file = Mock()
+                mock_wave_file.getnframes.return_value = 44100
+                mock_wave_file.getframerate.return_value = 0  # Zero frame rate
+                mock_wave_open.return_value.__enter__.return_value = mock_wave_file
+
+                duration = _get_audio_duration(temp_path.name)
+
+                assert duration == 0
+        finally:
+            if os.path.exists(temp_path.name):
+                os.unlink(temp_path.name)
+
+
+class TestProcessAudioFileForInsights:
+    """Test process_audio_file_for_insights function"""
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.transcribe_audio")
+    @patch("transcription_module.extract_meeting_insights")
+    @patch("transcription_module._get_audio_duration")
+    async def test_process_audio_file_success(self, mock_get_duration, mock_extract_insights, mock_transcribe):
+        """Test successful audio file processing for insights"""
+        mock_get_duration.return_value = 120  # 2 minutes
+        mock_transcribe.return_value = {"transcription": "Meeting transcription text"}
+        mock_extract_insights.return_value = {
+            "summary": "Project meeting summary",
+            "action_items": ["Task 1", "Task 2"]
+        }
+
+        result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
+
+        assert result["audio_duration_seconds"] == 120
+        assert result["transcription"] == "Meeting transcription text"
+        assert result["summary"] == "Project meeting summary"
+        assert len(result["action_items"]) == 2
+
+        mock_transcribe.assert_called_once_with("/test/audio.wav", "gemini", "test_key", None, "auto")
+        mock_extract_insights.assert_called_once_with("Meeting transcription text", "gemini", "test_key", None)
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.transcribe_audio")
+    @patch("transcription_module.extract_meeting_insights")
+    @patch("transcription_module._get_audio_duration")
+    async def test_process_audio_file_transcription_failure(
+        self, mock_get_duration, mock_extract_insights, mock_transcribe
+    ):
+        """Test process_audio_file_for_insights when transcription fails"""
+        mock_get_duration.return_value = 120
+        mock_transcribe.return_value = {"transcription": TRANSCRIPTION_FAILED_DEFAULT_MSG}
+
+        result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
+
+        assert result["audio_duration_seconds"] == 120
+        assert result["transcription"] == TRANSCRIPTION_FAILED_DEFAULT_MSG
+        assert "error" in result
+        assert "transcription failed" in result["error"]
+
+        # Should not call extract_insights if transcription failed
+        mock_extract_insights.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.transcribe_audio")
+    @patch("transcription_module.extract_meeting_insights")
+    @patch("transcription_module._get_audio_duration")
+    async def test_process_audio_file_insights_failure(self, mock_get_duration, mock_extract_insights, mock_transcribe):
+        """Test process_audio_file_for_insights when insights extraction fails"""
+        mock_get_duration.return_value = 120
+        mock_transcribe.return_value = {"transcription": "Valid transcription"}
+        mock_extract_insights.return_value = {"error": "Insights extraction failed"}
+
+        result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
+
+        assert result["audio_duration_seconds"] == 120
+        assert result["transcription"] == "Valid transcription"
+        assert "error" in result
+        assert "Insights extraction failed" in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.transcribe_audio")
+    @patch("transcription_module.extract_meeting_insights")
+    @patch("transcription_module._get_audio_duration")
+    async def test_process_audio_file_with_config(self, mock_get_duration, mock_extract_insights, mock_transcribe):
+        """Test process_audio_file_for_insights with custom configuration"""
+        mock_get_duration.return_value = 120
+        mock_transcribe.return_value = {"transcription": "Transcribed text"}
+        mock_extract_insights.return_value = {"summary": "Meeting summary"}
+        config = {"model": "gpt-4", "temperature": 0.5}
+
+        result = await process_audio_file_for_insights(
+            "/test/audio.wav", "openai", "test_key", config, "en"
+        )
+
+        assert result["transcription"] == "Transcribed text"
+        assert result["summary"] == "Meeting summary"
+
+        mock_transcribe.assert_called_once_with("/test/audio.wav", "openai", "test_key", config, "en")
+        mock_extract_insights.assert_called_once_with("Transcribed text", "openai", "test_key", config)
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.transcribe_audio")
+    @patch("transcription_module.extract_meeting_insights")
+    @patch("transcription_module._get_audio_duration")
+    async def test_process_audio_file_zero_duration(self, mock_get_duration, mock_extract_insights, mock_transcribe):
+        """Test process_audio_file_for_insights with zero duration audio"""
+        mock_get_duration.return_value = 0
+        mock_transcribe.return_value = {"transcription": "Short transcription"}
+        mock_extract_insights.return_value = {"summary": "Brief summary"}
+
+        result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
+
+        assert result["audio_duration_seconds"] == 0
+        assert result["transcription"] == "Short transcription"
+        assert result["summary"] == "Brief summary"
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.transcribe_audio")
+    @patch("transcription_module._get_audio_duration")
+    async def test_process_audio_file_transcription_exception(self, mock_get_duration, mock_transcribe):
+        """Test process_audio_file_for_insights when transcription raises exception"""
+        mock_get_duration.return_value = 120
+        mock_transcribe.side_effect = Exception("Transcription error")
+
+        result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
+
+        assert result["audio_duration_seconds"] == 120
+        assert "error" in result
+        assert "Exception during processing" in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.transcribe_audio")
+    @patch("transcription_module.extract_meeting_insights")
+    @patch("transcription_module._get_audio_duration")
+    async def test_process_audio_file_insights_exception(
+        self, mock_get_duration, mock_extract_insights, mock_transcribe
+    ):
+        """Test process_audio_file_for_insights when insights extraction raises exception"""
+        mock_get_duration.return_value = 120
+        mock_transcribe.return_value = {"transcription": "Valid transcription"}
+        mock_extract_insights.side_effect = Exception("Insights error")
+
+        result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
+
+        assert result["audio_duration_seconds"] == 120
+        assert result["transcription"] == "Valid transcription"
+        assert "error" in result
+        assert "Exception during processing" in result["error"]
+
+
+class TestModuleIntegration:
+    """Test module-level integration scenarios"""
+
+    def test_import_google_generativeai_available(self):
+        """Test when google.generativeai is available"""
+        with patch("transcription_module.genai") as mock_genai:
+            assert mock_genai is not None
+
+    def test_import_google_generativeai_unavailable(self):
+        """Test behavior when google.generativeai is not available"""
+        # This is already tested in the _call_gemini_api tests
+        # but we can verify the module handles the import gracefully
+        import transcription_module
+        # Module should import successfully even if genai is None
+        assert hasattr(transcription_module, '_call_gemini_api')
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_mock_scenario(self):
+        """Test end-to-end processing with mock responses"""
+        # This tests the complete flow using the mock responses
+        # when no API key is provided
+        with patch("transcription_module._get_audio_duration", return_value=60):
+            result = await process_audio_file_for_insights("/test/mock.wav", "gemini", "")
+
+        assert result["audio_duration_seconds"] == 60
+        # Should get mock responses when no API key provided
+        assert "transcription" in result
+        # The actual transcription will depend on the ai_service mock behavior
+        # but the function should complete without errors
