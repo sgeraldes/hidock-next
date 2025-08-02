@@ -1,15 +1,22 @@
 import { formatDuration } from '@/utils/formatters';
 import {
   Download,
+  FastForward,
+  Maximize2,
+  Minimize2,
   Pause,
   Play,
   Repeat,
+  Rewind,
+  RotateCcw,
+  Settings,
+  Shuffle,
   SkipBack,
   SkipForward,
   Volume2,
   VolumeX
 } from 'lucide-react';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 export interface PlaybackSpeed {
   value: number;
@@ -55,10 +62,10 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
 }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animationRef = useRef<number>();
-  const audioContextRef = useRef<AudioContext>();
-  const analyserRef = useRef<AnalyserNode>();
-  const sourceRef = useRef<MediaElementAudioSourceNode>();
+  const animationRef = useRef<number>(0);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const sourceRef = useRef<MediaElementAudioSourceNode | null>(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -93,7 +100,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({
 
     try {
       if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as AudioContext & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext || AudioContext)();
+        audioContextRef.current = new (window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext || AudioContext)();
       }
 
       if (!sourceRef.current) {

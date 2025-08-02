@@ -129,6 +129,8 @@ class DesktopDeviceAdapter(IDeviceInterface):
                     vid, pid = int(vid_str, 16), int(pid_str, 16)
                 except ValueError:
                     logger.warning(
+                        "DesktopDeviceAdapter",
+                        "connect", 
                         f"Invalid device_id format: {device_id}, using defaults"
                     )
 

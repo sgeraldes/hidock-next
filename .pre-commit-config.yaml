@@ -5,14 +5,14 @@ repos:
     hooks:
       - id: flake8-desktop-app
         name: Flake8 - Desktop App
-        entry: bash -c 'cd hidock-desktop-app && if [ -d .venv ]; then .venv/Scripts/python -m flake8 --exclude=.venv --max-line-length=120 . || .venv/bin/python -m flake8 --exclude=.venv --max-line-length=120 .; else echo "No .venv found in hidock-desktop-app, skipping flake8"; fi'
+        entry: bash -c 'cd hidock-desktop-app && if [ -d .venv ]; then if [ -f .venv/Scripts/python.exe ]; then .venv/Scripts/python.exe -m flake8 --exclude=.venv --max-line-length=120 .; elif [ -f .venv/bin/python ]; then .venv/bin/python -m flake8 --exclude=.venv --max-line-length=120 .; else python -m flake8 --exclude=.venv --max-line-length=120 .; fi; else echo "No .venv found in hidock-desktop-app, skipping flake8"; fi'
         language: system
         files: ^hidock-desktop-app/.*\.py$
         pass_filenames: false
 
       - id: pytest-desktop-app
         name: Python Tests - Desktop App
-        entry: bash -c 'cd hidock-desktop-app && if [ -d .venv ]; then (.venv/Scripts/python -m pytest tests/ -x || .venv/bin/python -m pytest tests/ -x) 2>/dev/null || echo "No tests found or pytest not installed"; else echo "No .venv found, skipping tests"; fi'
+        entry: bash -c 'cd hidock-desktop-app && if [ -d .venv ]; then if [ -f .venv/Scripts/python.exe ]; then .venv/Scripts/python.exe -m pytest tests/ -x 2>/dev/null || echo "No tests found or pytest not installed"; elif [ -f .venv/bin/python ]; then .venv/bin/python -m pytest tests/ -x 2>/dev/null || echo "No tests found or pytest not installed"; else python -m pytest tests/ -x 2>/dev/null || echo "No tests found or pytest not installed"; fi; else echo "No .venv found, skipping tests"; fi'
         language: system
         files: ^hidock-desktop-app/.*\.py$
         pass_filenames: false

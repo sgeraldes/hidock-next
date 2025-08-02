@@ -275,16 +275,27 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
         devices.sort(key=lambda d: (not d.is_hidock, d.name))
         return devices
 
+
     def _is_hidock_device(self, vendor_id: int, product_id: int) -> bool:
         """Check if device is a HiDock device based on VID/PID."""
-        # Common HiDock VID/PID combinations
+        # HiDock device VID/PID combinations
         hidock_devices = [
-            (0x0483, 0x5740),  # Example HiDock VID/PID
-            (0x0483, 0x5741),  # Another example
-            # Add actual HiDock VID/PID combinations here
+            (0x10D6, 0xAF0C),  # H1
+            (0x10D6, 0xAF0D),  # H1E variant
+            (0x10D6, 0xAF0E),  # P1
+            (0x10D6, 0xB00D),  # H1E
         ]
-
         return (vendor_id, product_id) in hidock_devices
+
+    def _get_hidock_model_name(self, product_id: int) -> str:
+        """Get HiDock model name from product ID."""
+        model_map = {
+            0xAF0C: "H1",
+            0xAF0D: "Device",  # H1E variant
+            0xAF0E: "P1", 
+            0xB00D: "H1E",
+        }
+        return model_map.get(product_id, f"Unknown ({hex(product_id)})")
 
     def _on_scan_complete(self, devices: List[DeviceInfo]):
         """Handle successful device scan completion."""

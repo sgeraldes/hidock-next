@@ -177,7 +177,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({
       {/* File Format Info */}
       <div className="mt-4 p-3 bg-slate-800/50 rounded-lg">
         <div className="flex items-start space-x-2">
-          <AlertCircle className="w-4 h-4 text-slate-400 mt-0.5 flex-shrink-0" />
+          <_AlertCircle className="w-4 h-4 text-slate-400 mt-0.5 flex-shrink-0" />
           <div className="text-sm text-slate-400">
             <p className="font-medium mb-1">Tips for best results:</p>
             <ul className="space-y-1 text-xs">

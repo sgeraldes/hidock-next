@@ -204,8 +204,8 @@ async def test_desktop_adapter():
     # Test recordings list
     recordings = await adapter.get_recordings()
     assert len(recordings) == 2
-    assert recordings[0].filename == "test1.wav"
-    assert recordings[0].duration == 30.0
+    assert recordings[0]["name"] == "test1.wav"
+    assert recordings[0]["duration"] == 30.0
 
     # Test capabilities
     capabilities = adapter.get_capabilities()
@@ -295,16 +295,9 @@ async def main():
         await test_capability_detection()
         await test_desktop_adapter()
         await test_device_manager()
-
-        print(
-            "\n🎉 All tests passed! The unified device interface is working correctly."
-        )
-
-    except AssertionError as e:
-        print(f"\n❌ Test failed: {e}")
-        sys.exit(1)
+        print("\n✅ All unified device interface tests passed!")
     except Exception as e:
-        print(f"\n💥 Unexpected error: {e}")
+        print(f"\n❌ Test failed: {e}")
         sys.exit(1)
 
 

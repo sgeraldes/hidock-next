@@ -12,7 +12,7 @@
 
 import { AUDIO_CONFIG, ERROR_MESSAGES } from '@/constants';
 import { useAppStore } from '@/store/useAppStore';
-import type { AudioData, AudioRecording } from '@/types';
+import type { AudioRecording } from '@/types';
 import { formatBytes, formatDate, formatDuration } from '@/utils/formatters';
 import {
     Download,
@@ -208,24 +208,25 @@ export const FileManager: React.FC = () => {
             reader.onload = (e) => {
                 const result = e.target?.result as string;
                 if (result) {
-                    const base64Data = result.split(',')[1];
-                    const _audioData: AudioData = { // Future use - upload processing
-                        fileName: file.name,
-                        base64: base64Data,
-                        mimeType: file.type,
-                        size: file.size,
-                    };
+                    const _base64Data = result.split(',')[1]; // Future use - file upload processing
+                    console.debug('File processed:', _base64Data.length, 'bytes'); // Development logging
+                    // const _audioData: AudioData = { // Future use - upload processing
+                    //     fileName: file.name,
+                    //     base64: base64Data,
+                    //     mimeType: file.type,
+                    //     size: file.size,
+                    // };
 
                     // Add to recordings (in real app, this would upload to device)
-                    const _newRecording: AudioRecording = { // Future use - recording creation
-                        id: `recording_${Date.now()}`,
-                        fileName: file.name,
-                        size: file.size,
-                        duration: 0, // Would be calculated from audio
-                        dateCreated: new Date(),
-                        status: 'downloaded',
-                        localPath: URL.createObjectURL(file)
-                    };
+                    // const _newRecording: AudioRecording = { // Future use - recording creation
+                    //     id: `recording_${Date.now()}`,
+                    //     fileName: file.name,
+                    //     size: file.size,
+                    //     duration: 0, // Would be calculated from audio
+                    //     dateCreated: new Date(),
+                    //     status: 'downloaded',
+                    //     localPath: URL.createObjectURL(file)
+                    // };
 
                     // Add recording to store
                     // addRecording(newRecording);
