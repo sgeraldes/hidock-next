@@ -19,8 +19,10 @@ class MockCTkFrame:
     def __init__(self, *args, **kwargs):
         self.pack = Mock()
         self.grid = Mock()
+        self.place = Mock()
         self.configure = Mock()
         self.pack_propagate = Mock()
+        self.winfo_children = Mock(return_value=[])
 
 
 class MockCTkTabview:
@@ -37,6 +39,7 @@ class MockCTkButton:
         self.pack = Mock()
         self.grid = Mock()
         self.configure = Mock()
+        self.cget = Mock(return_value=1.0)
 
 
 class MockCTkLabel:
@@ -44,11 +47,23 @@ class MockCTkLabel:
         self.pack = Mock()
         self.grid = Mock()
         self.configure = Mock()
+        self.cget = Mock(return_value="1.0x")
 
 
 class MockCTkImage:
     def __init__(self, *args, **kwargs):
         pass
+
+
+class MockBooleanVar:
+    def __init__(self, value=True):
+        self._value = value
+
+    def get(self):
+        return self._value
+
+    def set(self, value):
+        self._value = value
 
 
 # Set up comprehensive mocking for all external dependencies
@@ -58,6 +73,7 @@ mock_ctk.CTkTabview = MockCTkTabview
 mock_ctk.CTkButton = MockCTkButton
 mock_ctk.CTkLabel = MockCTkLabel
 mock_ctk.CTkImage = MockCTkImage
+mock_ctk.BooleanVar = MockBooleanVar
 
 
 # Create comprehensive matplotlib mocks
@@ -118,6 +134,7 @@ with patch.dict(
     sys.modules,
     {
         "customtkinter": mock_ctk,
+        "tkinter": Mock(BooleanVar=MockBooleanVar),
         "matplotlib": mock_matplotlib,
         "matplotlib.figure": Mock(Figure=mock_figure),
         "matplotlib.backends.backend_tkagg": Mock(FigureCanvasTkAgg=mock_canvas),
@@ -661,15 +678,33 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         """Helper to get the already defined mock CTk classes"""
         return MockCTkFrame, MockCTkTabview
 
+    def _mock_load_theme_icons(self, widget_self):
+        """Helper to mock _load_theme_icons with required attributes"""
+        widget_self.moon_icon = None
+        widget_self.sun_icon = None
+        widget_self.play_icon = None
+        widget_self.pause_icon = None
+        widget_self.stop_icon = None
+
+    def _create_widget_with_mocks(self, parent, **kwargs):
+        """Create widget with standard mocks applied"""
+        def mock_load_theme_icons_func(widget_self):
+            widget_self.moon_icon = None
+            widget_self.sun_icon = None
+            widget_self.play_icon = None
+            widget_self.pause_icon = None
+            widget_self.stop_icon = None
+
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons", mock_load_theme_icons_func), \
+             patch.object(AudioVisualizationWidget, "_create_speed_controls"), \
+             patch.object(AudioVisualizationWidget, "_update_tab_state"):
+            return AudioVisualizationWidget(parent, **kwargs)
+
     def test_initialization(self):
         """Test AudioVisualizationWidget initialization"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
-            AudioVisualizationWidget, "_create_speed_controls"
-        ):
-
-            widget = AudioVisualizationWidget(mock_parent, height=180)
+        widget = self._create_widget_with_mocks(mock_parent, height=180)
 
         assert widget.audio_player is None
         assert hasattr(widget, "notebook")
@@ -697,9 +732,13 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         """Test successful audio loading"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+        def mock_load_theme_icons(self):
+            self.moon_icon = None
+            self.sun_icon = None
+
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons", mock_load_theme_icons), patch.object(
             AudioVisualizationWidget, "_create_speed_controls"
-        ):
+        ), patch.object(AudioVisualizationWidget, "_update_tab_state"):
             widget = AudioVisualizationWidget(mock_parent)
             widget.waveform_visualizer = Mock()
             widget.waveform_visualizer.load_audio.return_value = True
