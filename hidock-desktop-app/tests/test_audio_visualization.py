@@ -29,6 +29,7 @@ class MockCTkTabview:
         self.grid = Mock()
         self.add = Mock()
         self.get = Mock(return_value="Waveform")
+        self.configure = Mock()
 
 
 class MockCTkButton:
@@ -296,8 +297,10 @@ class TestWaveformVisualizer(unittest.TestCase):
 
         with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
             WaveformVisualizer, "_initialize_plot"
-        ), patch.object(WaveformVisualizer, "_update_waveform_display"):
+        ), patch.object(WaveformVisualizer, "_update_waveform_display"), patch("os.path.exists", return_value=True):
             visualizer = WaveformVisualizer(mock_parent)
+            visualizer.ax = Mock()
+            visualizer.canvas = Mock()
 
             result = visualizer.load_audio("/test/file.wav")
 
@@ -320,8 +323,10 @@ class TestWaveformVisualizer(unittest.TestCase):
 
         with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
             WaveformVisualizer, "_initialize_plot"
-        ), patch.object(WaveformVisualizer, "_update_waveform_display"):
+        ), patch.object(WaveformVisualizer, "_update_waveform_display"), patch("os.path.exists", return_value=True):
             visualizer = WaveformVisualizer(mock_parent)
+            visualizer.ax = Mock()
+            visualizer.canvas = Mock()
 
             result = visualizer.load_audio("/test/stereo.wav")
 
@@ -363,14 +368,19 @@ class TestWaveformVisualizer(unittest.TestCase):
             visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4])
             visualizer.sample_rate = 44100
             visualizer.total_duration = 1.0
-            visualizer.ax = Mock()
-            visualizer.canvas = Mock()
+            visualizer.zoom_level = 1.0
+            
+            # Create proper mock objects
+            mock_ax_instance = Mock()
+            mock_canvas_instance = Mock()
+            visualizer.ax = mock_ax_instance
+            visualizer.canvas = mock_canvas_instance
 
             visualizer._update_waveform_display()
 
         # Should call plotting methods
-        visualizer.ax.clear.assert_called()
-        visualizer.canvas.draw.assert_called()
+        mock_ax_instance.clear.assert_called()
+        mock_canvas_instance.draw.assert_called()
 
     @patch("audio_visualization.ctk.CTkFrame")
     def test_add_position_indicator(self, mock_ctk_frame):
@@ -546,10 +556,15 @@ class TestSpectrumAnalyzer(unittest.TestCase):
 
         with patch.object(SpectrumAnalyzer, "_setup_styling"):
             analyzer = SpectrumAnalyzer(mock_parent)
+            # Make sure to call _initialize_plot explicitly since it's being tested
+            analyzer.figure = Mock()
+            analyzer.ax = Mock()
+            analyzer.canvas = Mock()
             analyzer._initialize_plot()
 
-        mock_figure.assert_called()
-        mock_canvas.assert_called()
+        # The constructor should have called Figure
+        assert mock_figure.called
+        assert mock_canvas.called
 
     @patch("audio_visualization.ctk.CTkFrame")
     def test_start_analysis(self, mock_ctk_frame):
@@ -563,6 +578,10 @@ class TestSpectrumAnalyzer(unittest.TestCase):
         ), patch("audio_visualization.animation.FuncAnimation") as mock_animation:
             analyzer = SpectrumAnalyzer(mock_parent)
             analyzer.figure = Mock()
+            analyzer.ax = Mock()
+            
+            # Setup proper mock for spectrum line
+            analyzer.ax.plot.return_value = [Mock()]
 
             analyzer.start_analysis(mock_audio_data, mock_sample_rate)
 
@@ -580,12 +599,16 @@ class TestSpectrumAnalyzer(unittest.TestCase):
         with patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(SpectrumAnalyzer, "_initialize_plot"):
             analyzer = SpectrumAnalyzer(mock_parent)
             analyzer.is_running = True
-            analyzer.animation = Mock()
+            
+            # Create a mock animation with event_source
+            mock_animation = Mock()
+            mock_animation.event_source = Mock()
+            analyzer.animation = mock_animation
 
             analyzer.stop_analysis()
 
         assert analyzer.is_running is False
-        analyzer.animation.event_source.stop.assert_called()
+        mock_animation.event_source.stop.assert_called()
 
     @patch("audio_visualization.ctk.CTkFrame")
     def test_update_position(self, mock_ctk_frame):
@@ -616,16 +639,19 @@ class TestSpectrumAnalyzer(unittest.TestCase):
             analyzer.current_position = 1.0
             analyzer.total_duration = 1.0
             analyzer.is_running = True
-            analyzer.spectrum_line = Mock()
+            
+            # Create a proper mock spectrum line
+            mock_spectrum_line = Mock()
+            analyzer.spectrum_line = mock_spectrum_line
             analyzer.canvas = Mock()
 
             # Mock frame parameter (not used in this implementation)
             result = analyzer._update_spectrum(0)
 
         # Should perform FFT analysis and return spectrum line
-        mock_fft.assert_called()
-        analyzer.spectrum_line.set_data.assert_called()
-        assert result == [analyzer.spectrum_line]
+        assert mock_fft.called
+        mock_spectrum_line.set_data.assert_called()
+        assert result == [mock_spectrum_line]
 
 
 class TestAudioVisualizationWidget(unittest.TestCase):
@@ -656,7 +682,7 @@ class TestAudioVisualizationWidget(unittest.TestCase):
 
         with patch.object(AudioVisualizationWidget, "_create_speed_controls"), patch.object(
             AudioVisualizationWidget, "_update_tab_state"
-        ), patch("os.path.exists", return_value=True), patch("audio_visualization.Image.open") as mock_image_open:
+        ), patch("os.path.exists", return_value=True), patch("PIL.Image.open") as mock_image_open:
 
             mock_image = Mock()
             mock_image_open.return_value = mock_image

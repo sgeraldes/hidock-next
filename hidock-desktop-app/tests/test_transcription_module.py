@@ -484,11 +484,11 @@ class TestProcessAudioFileForInsights:
 
     @pytest.mark.asyncio
     @patch("transcription_module.os.path.exists")
-    @patch("transcription_module.hta_converter")
-    async def test_process_audio_file_hta_conversion_success(self, mock_hta_converter, mock_exists):
+    @patch("hta_converter.convert_hta_to_wav")
+    async def test_process_audio_file_hta_conversion_success(self, mock_convert_hta, mock_exists):
         """Test process_audio_file_for_insights with HTA file conversion"""
         mock_exists.return_value = True
-        mock_hta_converter.convert_hta_to_wav.return_value = "/temp/converted.wav"
+        mock_convert_hta.return_value = "/temp/converted.wav"
 
         with patch("transcription_module.transcribe_audio") as mock_transcribe, patch(
             "transcription_module.extract_meeting_insights"
@@ -501,17 +501,17 @@ class TestProcessAudioFileForInsights:
 
             assert result["transcription"] == "HTA transcription"
             assert result["insights"]["summary"] == "HTA summary"
-            mock_hta_converter.convert_hta_to_wav.assert_called_once_with("/test/audio.hta")
+            mock_convert_hta.assert_called_once_with("/test/audio.hta")
             mock_transcribe.assert_called_once_with("/temp/converted.wav", "gemini", "test_key", None, "auto")
             mock_remove.assert_called_once_with("/temp/converted.wav")
 
     @pytest.mark.asyncio
     @patch("transcription_module.os.path.exists")
-    @patch("transcription_module.hta_converter")
-    async def test_process_audio_file_hta_conversion_failure(self, mock_hta_converter, mock_exists):
+    @patch("hta_converter.convert_hta_to_wav")
+    async def test_process_audio_file_hta_conversion_failure(self, mock_convert_hta, mock_exists):
         """Test process_audio_file_for_insights when HTA conversion fails"""
         mock_exists.return_value = True
-        mock_hta_converter.convert_hta_to_wav.return_value = None  # Conversion failed
+        mock_convert_hta.return_value = None  # Conversion failed
 
         result = await process_audio_file_for_insights("/test/audio.hta", "gemini", "test_key")
 
