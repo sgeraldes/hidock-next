@@ -20,7 +20,15 @@ export default defineConfig({
                 '**/*.d.ts',
                 '**/*.config.*',
                 'dist/'
-            ]
+            ],
+            thresholds: {
+                global: {
+                    branches: 20,
+                    functions: 20,
+                    lines: 20,
+                    statements: 20
+                }
+            }
         }
     },
     resolve: {

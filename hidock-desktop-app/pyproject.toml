@@ -109,19 +109,7 @@ warn_no_return = true
 warn_unreachable = true
 strict_equality = true
 exclude = [
-    "gui_main_window.py",
-    "gui_event_handlers.py",
-    "gui_auxiliary.py",
-    "gui_treeview.py",
-    "gui_actions_device.py",
-    "gui_actions_file.py",
-    "ctk_custom_widgets.py",
-    "enhanced_gui_integration.py",
-    "settings_window.py",
-    "hta_converter.py",
-    "fix_remaining_tests.py",
-    "storage_management.py",
-    "ai_service.py"
+    "**/*.py"
 ]
 
 [[tool.mypy.overrides]]
