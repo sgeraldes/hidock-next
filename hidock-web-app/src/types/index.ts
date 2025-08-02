@@ -41,10 +41,12 @@ export type RecordingStatus =
   | 'error';
 
 // Audio Data Types
+export type AudioFormat = 'audio/wav' | 'audio/mp3' | 'audio/m4a' | 'audio/ogg' | 'audio/webm';
+
 export interface AudioData {
   fileName: string;
   base64: string;
-  mimeType: string;
+  mimeType: AudioFormat;
   size: number;
   duration?: number;
 }

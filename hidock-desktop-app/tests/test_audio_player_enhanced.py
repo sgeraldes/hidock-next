@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 
 from audio_player_enhanced import (
-    PYGAME_AVAILABLE,
     PYDUB_AVAILABLE,
+    PYGAME_AVAILABLE,
     AudioPlaylist,
     AudioProcessor,
     AudioTrack,
@@ -133,8 +133,9 @@ class TestAudioProcessor:
         mock_getsize.return_value = 1024000
         mock_splitext.return_value = ("/test/file", ".wav")
 
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), \
-             patch("audio_player_enhanced.AudioSegment.from_file") as mock_from_file:
+        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
+            "audio_player_enhanced.AudioSegment.from_file"
+        ) as mock_from_file:
 
             mock_audio = Mock()
             mock_audio.frame_rate = 44100
@@ -159,9 +160,9 @@ class TestAudioProcessor:
         mock_getsize.return_value = 1024000
         mock_splitext.return_value = ("/test/file", ".wav")
 
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), \
-             patch("audio_player_enhanced.AudioSegment.from_file", side_effect=Exception("Pydub failed")), \
-             patch("audio_player_enhanced.wave.open") as mock_wave_open:
+        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
+            "audio_player_enhanced.AudioSegment.from_file", side_effect=Exception("Pydub failed")
+        ), patch("audio_player_enhanced.wave.open") as mock_wave_open:
 
             mock_wav_file = Mock()
             mock_wav_file.getnframes.return_value = 88200  # 2 seconds at 44.1kHz
@@ -185,8 +186,9 @@ class TestAudioProcessor:
 
     def test_convert_audio_format_success(self):
         """Test successful audio format conversion"""
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), \
-             patch("audio_player_enhanced.AudioSegment.from_file") as mock_from_file:
+        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
+            "audio_player_enhanced.AudioSegment.from_file"
+        ) as mock_from_file:
 
             mock_audio = Mock()
             mock_from_file.return_value = mock_audio
@@ -199,8 +201,9 @@ class TestAudioProcessor:
 
     def test_convert_audio_format_error(self):
         """Test audio format conversion with error"""
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), \
-             patch("audio_player_enhanced.AudioSegment.from_file", side_effect=Exception("Conversion failed")):
+        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
+            "audio_player_enhanced.AudioSegment.from_file", side_effect=Exception("Conversion failed")
+        ):
 
             result = AudioProcessor.convert_audio_format("/input.wav", "/output.mp3", "mp3")
 
@@ -215,8 +218,9 @@ class TestAudioProcessor:
 
     def test_normalize_audio_success(self):
         """Test successful audio normalization"""
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), \
-             patch("audio_player_enhanced.AudioSegment.from_file") as mock_from_file:
+        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
+            "audio_player_enhanced.AudioSegment.from_file"
+        ) as mock_from_file:
 
             mock_audio = Mock()
             mock_normalized = Mock()
@@ -235,8 +239,9 @@ class TestAudioProcessor:
 
     def test_normalize_audio_error(self):
         """Test audio normalization with error"""
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), \
-             patch("audio_player_enhanced.AudioSegment.from_file", side_effect=Exception("Normalization failed")):
+        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
+            "audio_player_enhanced.AudioSegment.from_file", side_effect=Exception("Normalization failed")
+        ):
 
             result = AudioProcessor.normalize_audio("/input.wav", "/output.wav", -20.0)
 
@@ -276,8 +281,9 @@ class TestAudioProcessor:
 
     def test_extract_waveform_data_with_pydub(self):
         """Test extract_waveform_data with pydub for non-WAV files"""
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), \
-             patch("audio_player_enhanced.AudioSegment.from_file") as mock_from_file:
+        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
+            "audio_player_enhanced.AudioSegment.from_file"
+        ) as mock_from_file:
 
             mock_audio = Mock()
             mock_audio.channels = 1
@@ -337,7 +343,7 @@ class TestAudioPlaylist:
         assert playlist.shuffle_enabled is False
         assert playlist._shuffle_history == []
 
-    @patch.object(AudioProcessor, 'get_audio_info')
+    @patch.object(AudioProcessor, "get_audio_info")
     def test_add_track_success(self, mock_get_info):
         """Test successful track addition"""
         playlist = AudioPlaylist()
@@ -360,7 +366,7 @@ class TestAudioPlaylist:
         assert track.title == "file.wav"
         assert track.duration == 120.0
 
-    @patch.object(AudioProcessor, 'get_audio_info')
+    @patch.object(AudioProcessor, "get_audio_info")
     def test_add_track_failure(self, mock_get_info):
         """Test track addition failure"""
         playlist = AudioPlaylist()
@@ -496,7 +502,7 @@ class TestAudioPlaylist:
         playlist.current_index = 0
         playlist.shuffle_enabled = True
 
-        with patch('random.choice', return_value=2):
+        with patch("random.choice", return_value=2):
             next_track = playlist.next_track()
 
         assert next_track == track3
@@ -586,7 +592,7 @@ class TestEnhancedAudioPlayer:
 
     def test_initialization(self):
         """Test EnhancedAudioPlayer initialization"""
-        with patch.object(EnhancedAudioPlayer, '_initialize_audio_backend'):
+        with patch.object(EnhancedAudioPlayer, "_initialize_audio_backend"):
             player = EnhancedAudioPlayer()
 
         assert isinstance(player.playlist, AudioPlaylist)
@@ -600,7 +606,7 @@ class TestEnhancedAudioPlayer:
     def test_initialization_with_parent(self):
         """Test EnhancedAudioPlayer initialization with parent widget"""
         mock_parent = Mock()
-        with patch.object(EnhancedAudioPlayer, '_initialize_audio_backend'):
+        with patch.object(EnhancedAudioPlayer, "_initialize_audio_backend"):
             player = EnhancedAudioPlayer(mock_parent)
 
         assert player.parent == mock_parent
@@ -633,14 +639,14 @@ class TestEnhancedAudioPlayer:
 
             mock_init.assert_not_called()
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
-    @patch.object(AudioPlaylist, 'add_track')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
+    @patch.object(AudioPlaylist, "add_track")
     def test_load_track_success(self, mock_add_track, mock_init_backend):
         """Test successful track loading"""
         player = EnhancedAudioPlayer()
         mock_add_track.return_value = True
 
-        with patch.object(player, 'stop') as mock_stop:
+        with patch.object(player, "stop") as mock_stop:
             result = player.load_track("/test/file.wav")
 
         assert result is True
@@ -648,39 +654,39 @@ class TestEnhancedAudioPlayer:
         mock_add_track.assert_called_once_with("/test/file.wav")
         assert player.current_position == 0.0
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
-    @patch.object(AudioPlaylist, 'add_track')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
+    @patch.object(AudioPlaylist, "add_track")
     def test_load_track_failure(self, mock_add_track, mock_init_backend):
         """Test track loading failure"""
         player = EnhancedAudioPlayer()
         mock_add_track.return_value = False
 
-        with patch.object(player, 'stop'):
+        with patch.object(player, "stop"):
             result = player.load_track("/test/file.wav")
 
         assert result is False
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
-    @patch.object(AudioPlaylist, 'add_track')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
+    @patch.object(AudioPlaylist, "add_track")
     def test_load_playlist_success(self, mock_add_track, mock_init_backend):
         """Test successful playlist loading"""
         player = EnhancedAudioPlayer()
         mock_add_track.side_effect = [True, True, False]  # 2 succeed, 1 fails
 
-        with patch.object(player, 'stop'):
+        with patch.object(player, "stop"):
             result = player.load_playlist(["/file1.wav", "/file2.wav", "/file3.wav"])
 
         assert result == 2
         assert mock_add_track.call_count == 3
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     def test_set_volume(self, mock_init_backend):
         """Test set_volume method"""
         player = EnhancedAudioPlayer()
 
-        with patch("audio_player_enhanced.PYGAME_AVAILABLE", True), \
-             patch("audio_player_enhanced.pygame.mixer.get_init", return_value=(44100, -16, 2)), \
-             patch("audio_player_enhanced.pygame.mixer.music.set_volume") as mock_set_volume:
+        with patch("audio_player_enhanced.PYGAME_AVAILABLE", True), patch(
+            "audio_player_enhanced.pygame.mixer.get_init", return_value=(44100, -16, 2)
+        ), patch("audio_player_enhanced.pygame.mixer.music.set_volume") as mock_set_volume:
 
             result = player.set_volume(0.8)
 
@@ -688,7 +694,7 @@ class TestEnhancedAudioPlayer:
         assert player.volume == 0.8
         mock_set_volume.assert_called_once_with(0.8)
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     def test_set_volume_clamping(self, mock_init_backend):
         """Test set_volume with value clamping"""
         player = EnhancedAudioPlayer()
@@ -703,15 +709,15 @@ class TestEnhancedAudioPlayer:
         assert result2 is True
         assert player.volume == 0.0
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     def test_toggle_mute(self, mock_init_backend):
         """Test toggle_mute method"""
         player = EnhancedAudioPlayer()
         player.volume = 0.7
 
-        with patch("audio_player_enhanced.PYGAME_AVAILABLE", True), \
-             patch("audio_player_enhanced.pygame.mixer.get_init", return_value=(44100, -16, 2)), \
-             patch("audio_player_enhanced.pygame.mixer.music.set_volume") as mock_set_volume:
+        with patch("audio_player_enhanced.PYGAME_AVAILABLE", True), patch(
+            "audio_player_enhanced.pygame.mixer.get_init", return_value=(44100, -16, 2)
+        ), patch("audio_player_enhanced.pygame.mixer.music.set_volume") as mock_set_volume:
 
             # Test muting
             result1 = player.toggle_mute()
@@ -726,7 +732,7 @@ class TestEnhancedAudioPlayer:
             assert player.is_muted is False
             assert player.volume == 0.7
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     def test_set_repeat_mode(self, mock_init_backend):
         """Test set_repeat_mode method"""
         player = EnhancedAudioPlayer()
@@ -735,7 +741,7 @@ class TestEnhancedAudioPlayer:
 
         assert player.playlist.repeat_mode == RepeatMode.ALL
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     def test_set_shuffle(self, mock_init_backend):
         """Test set_shuffle method"""
         player = EnhancedAudioPlayer()
@@ -744,54 +750,56 @@ class TestEnhancedAudioPlayer:
 
         assert player.playlist.shuffle_enabled is True
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     def test_get_current_track(self, mock_init_backend):
         """Test get_current_track method"""
         player = EnhancedAudioPlayer()
         mock_track = AudioTrack("/test/file.wav", "Test Track")
 
-        with patch.object(player.playlist, 'get_current_track', return_value=mock_track):
+        with patch.object(player.playlist, "get_current_track", return_value=mock_track):
             result = player.get_current_track()
 
         assert result == mock_track
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     def test_get_position(self, mock_init_backend):
         """Test get_position method"""
         player = EnhancedAudioPlayer()
         player.current_position = 30.0
         mock_track = AudioTrack("/test/file.wav", "Test Track", duration=120.0)
 
-        with patch.object(player.playlist, 'get_current_track', return_value=mock_track):
+        with patch.object(player.playlist, "get_current_track", return_value=mock_track):
             position = player.get_position()
 
         assert position.current_time == 30.0
         assert position.total_time == 120.0
         assert position.percentage == 25.0
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     def test_get_position_no_track(self, mock_init_backend):
         """Test get_position with no current track"""
         player = EnhancedAudioPlayer()
         player.current_position = 30.0
 
-        with patch.object(player.playlist, 'get_current_track', return_value=None):
+        with patch.object(player.playlist, "get_current_track", return_value=None):
             position = player.get_position()
 
         assert position.current_time == 30.0
         assert position.total_time == 0.0
         assert position.percentage == 0.0
 
-    @patch.object(EnhancedAudioPlayer, '_initialize_audio_backend')
+    @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     def test_cleanup(self, mock_init_backend):
         """Test cleanup method"""
         player = EnhancedAudioPlayer()
 
-        with patch.object(player, 'stop') as mock_stop, \
-             patch.object(player, '_stop_position_thread') as mock_stop_thread, \
-             patch("audio_player_enhanced.PYGAME_AVAILABLE", True), \
-             patch("audio_player_enhanced.pygame.mixer.get_init", return_value=(44100, -16, 2)), \
-             patch("audio_player_enhanced.pygame.mixer.quit") as mock_quit:
+        with patch.object(player, "stop") as mock_stop, patch.object(
+            player, "_stop_position_thread"
+        ) as mock_stop_thread, patch("audio_player_enhanced.PYGAME_AVAILABLE", True), patch(
+            "audio_player_enhanced.pygame.mixer.get_init", return_value=(44100, -16, 2)
+        ), patch(
+            "audio_player_enhanced.pygame.mixer.quit"
+        ) as mock_quit:
 
             player.cleanup()
 

@@ -10,6 +10,7 @@ Requirements: 6.1, 6.2, 6.3
 
 import os
 import threading
+
 # import tkinter  # Commented out - not used, customtkinter is used instead
 from typing import Callable, List, Optional  # Removed Dict - not used
 
@@ -42,9 +43,7 @@ class DeviceInfo:
 
     def get_display_name(self) -> str:
         """Get formatted display name for the device."""
-        status_icon = {"connected": "🟢", "available": "🔵", "error": "🔴"}.get(
-            self.status, "⚪"
-        )
+        status_icon = {"connected": "🟢", "available": "🔵", "error": "🔴"}.get(self.status, "⚪")
 
         hidock_indicator = "🎵" if self.is_hidock else "📱"
 
@@ -110,14 +109,10 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
                 icon_path = os.path.join(icons_dir, filename)
                 if os.path.exists(icon_path):
                     image = Image.open(icon_path)
-                    self.icons[name] = ctk.CTkImage(
-                        light_image=image, dark_image=image, size=(16, 16)
-                    )
+                    self.icons[name] = ctk.CTkImage(light_image=image, dark_image=image, size=(16, 16))
 
         except Exception as e:
-            logger.warning(
-                "EnhancedDeviceSelector", "_load_icons", f"Error loading icons: {e}"
-            )
+            logger.warning("EnhancedDeviceSelector", "_load_icons", f"Error loading icons: {e}")
 
     def _create_widgets(self):
         """Create the device selector interface."""
@@ -213,17 +208,12 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
                 try:
                     # Try to get device name
                     try:
-                        name = (
-                            usb.util.get_string(device, device.iProduct)
-                            or f"USB Device {hex(device.idProduct)}"
-                        )
+                        name = usb.util.get_string(device, device.iProduct) or f"USB Device {hex(device.idProduct)}"
                     except (AttributeError, UnicodeDecodeError, ValueError):
                         name = f"USB Device {hex(device.idProduct)}"
 
                     # Check if it's a HiDock device
-                    is_hidock = self._is_hidock_device(
-                        device.idVendor, device.idProduct
-                    )
+                    is_hidock = self._is_hidock_device(device.idVendor, device.idProduct)
 
                     # Determine status
                     status = "available"
@@ -238,9 +228,7 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
                         ]
                         # Try to get version info if possible
                         try:
-                            version = (
-                                f"{device.bcdDevice >> 8}.{device.bcdDevice & 0xFF}"
-                            )
+                            version = f"{device.bcdDevice >> 8}.{device.bcdDevice & 0xFF}"
                         except (AttributeError, ValueError):
                             pass
 
@@ -275,7 +263,6 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
         devices.sort(key=lambda d: (not d.is_hidock, d.name))
         return devices
 
-
     def _is_hidock_device(self, vendor_id: int, product_id: int) -> bool:
         """Check if device is a HiDock device based on VID/PID."""
         # HiDock device VID/PID combinations
@@ -292,7 +279,7 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
         model_map = {
             0xAF0C: "H1",
             0xAF0D: "Device",  # H1E variant
-            0xAF0E: "P1", 
+            0xAF0E: "P1",
             0xB00D: "H1E",
         }
         return model_map.get(product_id, f"Unknown ({hex(product_id)})")
@@ -313,9 +300,7 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
         # Update status
         hidock_count = sum(1 for d in devices if d.is_hidock)
         total_count = len(devices)
-        self.status_label.configure(
-            text=f"✅ Found {total_count} devices ({hidock_count} HiDock devices)"
-        )
+        self.status_label.configure(text=f"✅ Found {total_count} devices ({hidock_count} HiDock devices)")
 
         # Call scan callback if provided
         if self.scan_callback:
@@ -342,9 +327,7 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
         self._clear_device_list()
 
         if not self.devices:
-            no_devices_label = ctk.CTkLabel(
-                self.device_list_frame, text="No devices found", text_color="gray"
-            )
+            no_devices_label = ctk.CTkLabel(self.device_list_frame, text="No devices found", text_color="gray")
             no_devices_label.pack(pady=20)
             return
 
@@ -427,13 +410,9 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
         self._scan_devices()
 
 
-def create_enhanced_device_selector(
-    parent, command=None, scan_callback=None, **kwargs
-) -> EnhancedDeviceSelector:
+def create_enhanced_device_selector(parent, command=None, scan_callback=None, **kwargs) -> EnhancedDeviceSelector:
     """Factory function to create an enhanced device selector."""
-    return EnhancedDeviceSelector(
-        parent, command=command, scan_callback=scan_callback, **kwargs
-    )
+    return EnhancedDeviceSelector(parent, command=command, scan_callback=scan_callback, **kwargs)
 
 
 if __name__ == "__main__":
@@ -448,9 +427,7 @@ if __name__ == "__main__":
     root.title("Enhanced Device Selector Test")
     root.geometry("600x400")
 
-    selector = EnhancedDeviceSelector(
-        root, command=on_device_selected, scan_callback=on_scan_complete
-    )
+    selector = EnhancedDeviceSelector(root, command=on_device_selected, scan_callback=on_scan_complete)
     selector.pack(fill="both", expand=True, padx=10, pady=10)
 
     root.mainloop()

@@ -13,8 +13,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     HardDrive, CheckCircle, Zap, Settings, RefreshCw, PieChart,
-    AlertTriangle as _AlertTriangle, TrendingUp as _TrendingUp, Trash2 as _Trash2, 
-    Archive as _Archive, Download as _Download, BarChart3 as _BarChart3, 
+    AlertTriangle as _AlertTriangle, TrendingUp as _TrendingUp, Trash2 as _Trash2,
+    Archive as _Archive, Download as _Download, BarChart3 as _BarChart3,
     Clock as _Clock, FileText as _FileText, Folder as _Folder
 } from 'lucide-react'; // Unused icons prefixed with _ for future use in enhanced storage analytics
 import { formatBytes, formatDate } from '@/utils/formatters';
@@ -70,16 +70,16 @@ export const StorageManager: React.FC = () => {
     const [optimizationInProgress, setOptimizationInProgress] = useState<Set<string>>(new Set());
 
     // Mock data - in real app, this would come from API/service
-    const mockStorageInfo: StorageInfo = {
+    const mockStorageInfo = React.useMemo((): StorageInfo => ({
         totalSpace: 500 * 1024 * 1024 * 1024, // 500GB
         usedSpace: 350 * 1024 * 1024 * 1024,  // 350GB
         freeSpace: 150 * 1024 * 1024 * 1024,  // 150GB
         usagePercentage: 70,
         warningLevel: 'warning',
         lastUpdated: new Date()
-    };
+    }), []);
 
-    const mockQuota: StorageQuota = {
+    const mockQuota = React.useMemo((): StorageQuota => ({
         maxTotalSize: 10 * 1024 * 1024 * 1024, // 10GB
         maxFileCount: 10000,
         maxFileSize: 100 * 1024 * 1024, // 100MB
@@ -87,9 +87,9 @@ export const StorageManager: React.FC = () => {
         autoCleanupEnabled: true,
         warningThreshold: 0.8,
         criticalThreshold: 0.9
-    };
+    }), []);
 
-    const mockAnalytics: StorageAnalytics = {
+    const mockAnalytics = React.useMemo((): StorageAnalytics => ({
         totalFiles: 1250,
         totalSize: 8.5 * 1024 * 1024 * 1024, // 8.5GB
         fileTypeDistribution: {
@@ -114,9 +114,9 @@ export const StorageManager: React.FC = () => {
             { key: 'recording_001.wav', paths: ['/path1/recording_001.wav', '/path2/recording_001.wav'] },
             { key: 'meeting_notes.mp3', paths: ['/path1/meeting_notes.mp3', '/path2/meeting_notes.mp3', '/path3/meeting_notes.mp3'] }
         ]
-    };
+    }), []);
 
-    const mockSuggestions: OptimizationSuggestion[] = [
+    const mockSuggestions = React.useMemo((): OptimizationSuggestion[] => [
         {
             id: '1',
             type: 'duplicate_removal',
@@ -147,7 +147,7 @@ export const StorageManager: React.FC = () => {
             estimatedTime: '1-2 minutes',
             filesAffected: []
         }
-    ];
+    ], []);
 
     // Initialize data
     useEffect(() => {
@@ -165,7 +165,7 @@ export const StorageManager: React.FC = () => {
         };
 
         loadData();
-    }, []);
+    }, [mockAnalytics, mockQuota, mockStorageInfo, mockSuggestions]);
 
     // Refresh data
     const refreshData = useCallback(async () => {
@@ -174,7 +174,7 @@ export const StorageManager: React.FC = () => {
         await new Promise(resolve => setTimeout(resolve, 500));
         setStorageInfo({ ...mockStorageInfo, lastUpdated: new Date() });
         setIsLoading(false);
-    }, []);
+    }, [mockStorageInfo]);
 
     // Execute optimization
     const executeOptimization = useCallback(async (suggestion: OptimizationSuggestion) => {
@@ -323,7 +323,7 @@ export const StorageManager: React.FC = () => {
             <div className="flex space-x-1 bg-slate-800 rounded-lg p-1">
                 {[
                     { id: 'overview', label: 'Overview', icon: HardDrive },
-                    { id: 'analytics', label: 'Analytics', icon: BarChart3 },
+                    { id: 'analytics', label: 'Analytics', icon: _BarChart3 },
                     { id: 'optimization', label: 'Optimization', icon: Zap },
                     { id: 'settings', label: 'Settings', icon: Settings }
                 ].map(tab => (

@@ -20,7 +20,7 @@ export const Toast: React.FC = () => {
   return (
     <div className="fixed bottom-4 right-4 z-50">
       <div className="bg-red-600 text-white px-4 py-3 rounded-lg shadow-lg flex items-center space-x-3 max-w-md">
-        <AlertCircle className="w-5 h-5 flex-shrink-0" />
+        <_AlertCircle className="w-5 h-5 flex-shrink-0" />
         <p className="text-sm">{error}</p>
         <button
           onClick={() => setError(null)}

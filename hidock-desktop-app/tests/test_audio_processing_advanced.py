@@ -211,7 +211,7 @@ class TestAudioEnhancer:
         enhancer = AudioEnhancer()
         mock_exists.return_value = True
 
-        with patch.object(enhancer, '_load_audio', side_effect=Exception("Failed to load audio")):
+        with patch.object(enhancer, "_load_audio", side_effect=Exception("Failed to load audio")):
             result = enhancer.process_audio_file("/test/input.wav", "/tmp/output.wav")
 
         assert result.success is False
@@ -225,8 +225,9 @@ class TestAudioEnhancer:
         mock_audio_data = np.array([0.1, 0.2, 0.3, 0.4])
         mock_sample_rate = 44100
 
-        with patch.object(enhancer, '_load_audio', return_value=(mock_audio_data, mock_sample_rate)), \
-             patch.object(enhancer, '_save_audio') as mock_save:
+        with patch.object(enhancer, "_load_audio", return_value=(mock_audio_data, mock_sample_rate)), patch.object(
+            enhancer, "_save_audio"
+        ) as mock_save:
             result = enhancer.process_audio_file("/test/input.wav", "/tmp/output.wav")
 
         assert result.success is True
@@ -258,8 +259,9 @@ class TestAudioEnhancer:
         mock_audio_data = np.array([1000, 2000, 3000, 4000], dtype=np.int16)
         mock_sample_rate = 44100
 
-        with patch("audio_processing_advanced.librosa", None), \
-             patch("audio_processing_advanced.wavfile.read") as mock_wavfile_read:
+        with patch("audio_processing_advanced.librosa", None), patch(
+            "audio_processing_advanced.wavfile.read"
+        ) as mock_wavfile_read:
             mock_wavfile_read.return_value = (mock_sample_rate, mock_audio_data)
 
             audio_data, sample_rate = enhancer._load_audio("/test/input.wav")
@@ -296,8 +298,9 @@ class TestAudioEnhancer:
         mock_audio_data = np.array([0.1, 0.2, 0.3, 0.4])
         mock_sample_rate = 44100
 
-        with patch("audio_processing_advanced.sf", None), \
-             patch("audio_processing_advanced.wavfile.write") as mock_wavfile_write:
+        with patch("audio_processing_advanced.sf", None), patch(
+            "audio_processing_advanced.wavfile.write"
+        ) as mock_wavfile_write:
             enhancer._save_audio(mock_audio_data, mock_sample_rate, "/test/output.wav")
 
             # Should convert to int16
@@ -347,8 +350,9 @@ class TestAudioEnhancer:
         mock_audio_data = np.array([0.1, 0.2, 0.3, 0.4])
         mock_reduced_audio = np.array([0.05, 0.15, 0.25, 0.35])
 
-        with patch("audio_processing_advanced.NOISEREDUCE_AVAILABLE", True), \
-             patch("audio_processing_advanced.nr", create=True) as mock_nr:
+        with patch("audio_processing_advanced.NOISEREDUCE_AVAILABLE", True), patch(
+            "audio_processing_advanced.nr", create=True
+        ) as mock_nr:
             mock_nr.reduce_noise.return_value = mock_reduced_audio
 
             result_audio, reduction_db = enhancer._reduce_noise(mock_audio_data, 44100, 0.5)
@@ -362,8 +366,9 @@ class TestAudioEnhancer:
         enhancer = AudioEnhancer()
         mock_audio_data = np.array([0.1, 0.2, 0.3, 0.4])
 
-        with patch("audio_processing_advanced.NOISEREDUCE_AVAILABLE", False), \
-             patch.object(enhancer, '_spectral_subtraction') as mock_spectral:
+        with patch("audio_processing_advanced.NOISEREDUCE_AVAILABLE", False), patch.object(
+            enhancer, "_spectral_subtraction"
+        ) as mock_spectral:
             mock_spectral.return_value = (mock_audio_data, 3.0)
 
             result_audio, reduction_db = enhancer._reduce_noise(mock_audio_data, 44100, 0.5)
@@ -399,7 +404,7 @@ class TestAudioEnhancer:
         enhancer = AudioEnhancer()
         # Create audio with silence (low values) and speech (higher values)
         silence = np.random.random(1000) * 0.001  # Very quiet
-        speech = np.random.random(1000) * 0.1     # Louder
+        speech = np.random.random(1000) * 0.1  # Louder
         mock_audio_data = np.concatenate([silence, speech, silence])
 
         result_audio, silence_removed = enhancer._remove_silence(mock_audio_data, 44100, -40.0, 0.01)
@@ -413,10 +418,11 @@ class TestAudioEnhancer:
         enhancer = AudioEnhancer()
         mock_audio_data = np.random.random(1000) * 0.1
 
-        with patch("audio_processing_advanced.signal.butter") as mock_butter, \
-             patch("audio_processing_advanced.signal.sosfilt") as mock_sosfilt, \
-             patch.object(enhancer, '_apply_compression') as mock_compression, \
-             patch.object(enhancer, '_apply_deemphasis') as mock_deemphasis:
+        with patch("audio_processing_advanced.signal.butter") as mock_butter, patch(
+            "audio_processing_advanced.signal.sosfilt"
+        ) as mock_sosfilt, patch.object(enhancer, "_apply_compression") as mock_compression, patch.object(
+            enhancer, "_apply_deemphasis"
+        ) as mock_deemphasis:
 
             mock_butter.return_value = np.array([[1, 2, 3, 4, 5, 6]])
             mock_sosfilt.return_value = mock_audio_data
@@ -481,8 +487,9 @@ class TestAudioEnhancer:
         """Test convert_format method with pydub"""
         enhancer = AudioEnhancer()
 
-        with patch("audio_processing_advanced.PYDUB_AVAILABLE", True), \
-             patch("audio_processing_advanced.AudioSegment.from_file") as mock_from_file:
+        with patch("audio_processing_advanced.PYDUB_AVAILABLE", True), patch(
+            "audio_processing_advanced.AudioSegment.from_file"
+        ) as mock_from_file:
 
             mock_audio = Mock()
             mock_audio.frame_rate = 44100
@@ -501,9 +508,9 @@ class TestAudioEnhancer:
         enhancer = AudioEnhancer()
         mock_audio_data = np.array([0.1, 0.2, 0.3])
 
-        with patch("audio_processing_advanced.PYDUB_AVAILABLE", False), \
-             patch.object(enhancer, '_load_audio') as mock_load, \
-             patch.object(enhancer, '_save_audio') as mock_save:
+        with patch("audio_processing_advanced.PYDUB_AVAILABLE", False), patch.object(
+            enhancer, "_load_audio"
+        ) as mock_load, patch.object(enhancer, "_save_audio") as mock_save:
 
             mock_load.return_value = (mock_audio_data, 44100)
 
@@ -518,7 +525,7 @@ class TestAudioEnhancer:
         enhancer = AudioEnhancer()
         input_files = ["/file1.wav", "/file2.wav"]
 
-        with patch.object(enhancer, 'process_audio_file') as mock_process:
+        with patch.object(enhancer, "process_audio_file") as mock_process:
             mock_result1 = ProcessingResult(success=True, output_path="/out1.wav")
             mock_result2 = ProcessingResult(success=True, output_path="/out2.wav")
             mock_process.side_effect = [mock_result1, mock_result2]
@@ -545,8 +552,9 @@ class TestAudioFormatConverter:
         """Test convert method with pydub for MP3 high quality"""
         converter = AudioFormatConverter()
 
-        with patch("audio_processing_advanced.PYDUB_AVAILABLE", True), \
-             patch("audio_processing_advanced.AudioSegment.from_file") as mock_from_file:
+        with patch("audio_processing_advanced.PYDUB_AVAILABLE", True), patch(
+            "audio_processing_advanced.AudioSegment.from_file"
+        ) as mock_from_file:
 
             mock_audio = Mock()
             mock_from_file.return_value = mock_audio
@@ -607,8 +615,7 @@ class TestAudioFormatConverter:
         converter = AudioFormatConverter()
         converter.temp_files = ["/tmp/test1.wav", "/tmp/test2.wav"]
 
-        with patch("os.path.exists") as mock_exists, \
-             patch("os.remove") as mock_remove:
+        with patch("os.path.exists") as mock_exists, patch("os.remove") as mock_remove:
             mock_exists.return_value = True
 
             converter.cleanup_temp_files()
@@ -632,9 +639,7 @@ class TestUtilityFunctions:
 
         assert result == mock_result
         mock_enhancer_class.assert_called_once()
-        mock_enhancer.process_audio_file.assert_called_once_with(
-            "/test/input.wav", "/test/output.wav", None
-        )
+        mock_enhancer.process_audio_file.assert_called_once_with("/test/input.wav", "/test/output.wav", None)
 
     @pytest.mark.skipif(not PYDUB_AVAILABLE, reason="pydub not available")
     @patch("audio_processing_advanced.AudioSegment.from_file")
@@ -679,7 +684,7 @@ class TestUtilityFunctions:
                 "channels": 1,
                 "peak_level_db": -6.0,
                 "rms_level_db": -12.0,
-                "dynamic_range_db": 6.0
+                "dynamic_range_db": 6.0,
             }
             mock_enhancer_class.return_value = mock_enhancer
 

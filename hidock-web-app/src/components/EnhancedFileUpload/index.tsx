@@ -13,7 +13,7 @@
  */
 
 import { AUDIO_CONFIG, ERROR_MESSAGES } from '@/constants';
-import type { AudioData } from '@/types';
+import type { AudioData, AudioFormat } from '@/types';
 import { formatBytes, formatDuration } from '@/utils/formatters';
 import {
     AlertCircle,
@@ -91,7 +91,7 @@ export const EnhancedFileUpload: React.FC<EnhancedFileUploadProps> = ({
             return ERROR_MESSAGES.FILE_TOO_LARGE;
         }
 
-        if (!AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type)) {
+        if (!AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as any)) {
             return ERROR_MESSAGES.UNSUPPORTED_FORMAT;
         }
 
@@ -172,7 +172,7 @@ export const EnhancedFileUpload: React.FC<EnhancedFileUploadProps> = ({
                     resolve({
                         fileName: file.name,
                         base64: base64Data,
-                        mimeType: file.type,
+                        mimeType: file.type as AudioFormat,
                         size: file.size,
                     });
                 };
@@ -316,7 +316,7 @@ export const EnhancedFileUpload: React.FC<EnhancedFileUploadProps> = ({
 
         const files = Array.from(e.dataTransfer.files);
         const audioFiles = files.filter(file =>
-            AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type)
+            AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as any)
         );
 
         if (audioFiles.length === 0 && files.length > 0) {

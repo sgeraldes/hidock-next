@@ -55,19 +55,19 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<number | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const audioContextRef = useRef<AudioContext>();
-  const _analyserRef = useRef<AnalyserNode>();
-  const animationRef = useRef<number>();
+  // const canvasRef = useRef<HTMLCanvasElement>(null); // Future use - visualization canvas
+  const audioContextRef = useRef<AudioContext | null>(null);
+  // const _analyserRef = useRef<AnalyserNode | null>(null); // Future use - audio analysis
+  const animationRef = useRef<number>(0);
 
-  const _qualityPresets: RecordingQuality[] = [ // Future use - quality selection dropdown
-    { sampleRate: 8000, bitRate: 32000, channels: 1, label: 'Phone Quality' },
-    { sampleRate: 22050, bitRate: 64000, channels: 1, label: 'Voice' },
-    { sampleRate: 44100, bitRate: 128000, channels: 2, label: 'High Quality' },
-    { sampleRate: 48000, bitRate: 192000, channels: 2, label: 'Studio Quality' }
-  ];
+  // const _qualityPresets: RecordingQuality[] = [ // Future use - quality selection dropdown
+  //   { sampleRate: 8000, bitRate: 32000, channels: 1, label: 'Phone Quality' },
+  //   { sampleRate: 22050, bitRate: 64000, channels: 1, label: 'Voice' },
+  //   { sampleRate: 44100, bitRate: 128000, channels: 2, label: 'High Quality' },
+  //   { sampleRate: 48000, bitRate: 192000, channels: 2, label: 'Studio Quality' }
+  // ];
 
   // Cleanup function
 
@@ -86,31 +86,25 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setInputLevel(0);
   }, []);
 
-  // Visualization
-  const _drawVisualization = useCallback((dataArray: Uint8Array) => {
-    if (!canvasRef.current) return;
-
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.fillStyle = '#1a1a1a';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    const barWidth = (canvas.width / dataArray.length) * 2.5;
-    let barHeight;
-    let x = 0;
-
-    for (let i = 0; i < dataArray.length; i++) {
-      barHeight = (dataArray[i] / 255) * canvas.height * 0.8;
-
-      const hue = (i / dataArray.length) * 360;
-      ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
-      ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
-
-      x += barWidth + 1;
-    }
-  }, []);
+  // Visualization (Future use - recording visualization)
+  // const _drawVisualization = useCallback((dataArray: Uint8Array) => {
+  //   if (!canvasRef.current) return;
+  //   const canvas = canvasRef.current;
+  //   const ctx = canvas.getContext('2d');
+  //   if (!ctx) return;
+  //   ctx.fillStyle = '#1a1a1a';
+  //   ctx.fillRect(0, 0, canvas.width, canvas.height);
+  //   const barWidth = (canvas.width / dataArray.length) * 2.5;
+  //   let barHeight;
+  //   let x = 0;
+  //   for (let i = 0; i < dataArray.length; i++) {
+  //     barHeight = (dataArray[i] / 255) * canvas.height * 0.8;
+  //     const hue = (i / dataArray.length) * 360;
+  //     ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
+  //     ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+  //     x += barWidth + 1;
+  //   }
+  // }, []);
 
   const cleanup = useCallback(() => {
     if (timerRef.current) {

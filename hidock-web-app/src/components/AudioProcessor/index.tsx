@@ -52,7 +52,7 @@ export const AudioProcessor: React.FC<AudioProcessorProps> = ({
     );
 
     const audioRef = useRef<HTMLAudioElement>(null);
-    const processingServiceRef = useRef<AudioProcessingService>();
+    const processingServiceRef = useRef<AudioProcessingService | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {

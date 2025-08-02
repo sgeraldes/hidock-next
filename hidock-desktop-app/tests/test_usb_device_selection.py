@@ -168,25 +168,24 @@ class TestEnhancedDeviceSelector:
         """Test scan completion callback."""
         scan_callback = Mock()
 
-        # Create a selector instance with minimal mocking
-        selector = EnhancedDeviceSelector.__new__(EnhancedDeviceSelector)
-        selector.scan_callback = scan_callback
-        selector.devices = []
-        selector.is_scanning = True
+        # Create a proper mock parent
+        mock_parent = Mock()
+        mock_parent._last_child_ids = {}
+        mock_parent.winfo_children.return_value = []
 
-        # Mock the UI components that _on_scan_complete tries to access
-        selector.scan_button = Mock()
-        selector.progress_bar = Mock()
-        selector.status_label = Mock()
+        with patch("customtkinter.CTkFrame.__init__", return_value=None):
+            with patch.object(EnhancedDeviceSelector, "_load_icons"):
+                with patch.object(EnhancedDeviceSelector, "_create_widgets"):
+                    selector = EnhancedDeviceSelector.__new__(EnhancedDeviceSelector)
+                    selector.scan_callback = scan_callback
+                    selector.devices = []
+                    selector.is_scanning = True
 
         # Create mock devices
         devices = [
             DeviceInfo("HiDock H1E", 0x10D6, 0xB00D, is_hidock=True),
             DeviceInfo("Other Device", 0x1234, 0x5678, is_hidock=False),
         ]
-
-        # Mock the _populate_device_list method
-        selector._populate_device_list = Mock()
 
         # Simulate scan completion
         selector._on_scan_complete(devices)

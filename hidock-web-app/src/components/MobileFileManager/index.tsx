@@ -28,13 +28,13 @@ import {
 } from 'lucide-react';
 import React, { useCallback, useState } from 'react';
 
-interface _SwipeAction { // Future use - swipe gesture actions
-    id: string;
-    label: string;
-    icon: React.ReactNode;
-    color: string;
-    action: () => void;
-}
+// interface _SwipeAction { // Future use - swipe gesture actions
+//     id: string;
+//     label: string;
+//     icon: React.ReactNode;
+//     color: string;
+//     action: () => void;
+// }
 
 interface TouchPosition {
     x: number;
@@ -47,7 +47,7 @@ export const MobileFileManager: React.FC = () => {
         selectedRecordings,
         setSelectedRecordings,
         toggleRecordingSelection,
-        _updateRecording, // Future use - mobile recording updates
+        // _updateRecording, // Future use - mobile recording updates
         removeRecording
     } = useAppStore();
 

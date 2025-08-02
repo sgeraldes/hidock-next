@@ -40,7 +40,7 @@ export const GEMINI_MODELS = {
 
 // Audio Constants
 export const AUDIO_CONFIG = {
-  SUPPORTED_FORMATS: ['audio/wav', 'audio/mp3', 'audio/m4a', 'audio/ogg'],
+  SUPPORTED_FORMATS: ['audio/wav', 'audio/mp3', 'audio/m4a', 'audio/ogg'] as const,
   MAX_FILE_SIZE: 25 * 1024 * 1024, // 25MB
   SAMPLE_RATE: 44100,
   CHANNELS: 2,

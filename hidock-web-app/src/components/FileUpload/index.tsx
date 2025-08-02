@@ -2,7 +2,7 @@ import React, { useCallback, useState } from 'react';
 import { Upload, File, AlertCircle as _AlertCircle } from 'lucide-react'; // _AlertCircle: Future use - error state icons
 import { AUDIO_CONFIG, ERROR_MESSAGES } from '@/constants';
 import { formatBytes } from '@/utils/formatters';
-import type { AudioData } from '@/types';
+import type { AudioData, AudioFormat } from '@/types';
 
 interface FileUploadProps {
   onFileSelect: (audioData: AudioData) => void;
@@ -27,7 +27,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({
     }
 
     // Check file type
-    if (!AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type)) {
+    if (!AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as any)) {
       return ERROR_MESSAGES.UNSUPPORTED_FORMAT;
     }
 
@@ -59,7 +59,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({
         const audioData: AudioData = {
           fileName: file.name,
           base64: base64Data,
-          mimeType: file.type,
+          mimeType: file.type as AudioFormat,
           size: file.size,
         };
 
@@ -107,7 +107,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({
 
     const files = Array.from(e.dataTransfer.files);
     const audioFile = files.find(file =>
-      AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type)
+      AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as any)
     );
 
     if (audioFile) {

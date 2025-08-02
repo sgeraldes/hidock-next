@@ -25,7 +25,7 @@ export const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
     audioData,
     currentTime = 0,
     duration = 0,
-    _isPlaying = false, // Future use - animation sync with playback state
+    // _isPlaying = false, // Future use - animation sync with playback state
     onSeek,
     className = '',
     height = 100,
@@ -34,7 +34,7 @@ export const WaveformVisualizer: React.FC<WaveformVisualizerProps> = ({
     showProgress = true
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const _animationRef = useRef<number>(); // Future use - animation frame management
+    // const _animationRef = useRef<number>(0); // Future use - animation frame management
 
     const drawWaveform = useCallback(() => {
         const canvas = canvasRef.current;
@@ -134,17 +134,17 @@ export interface SpectrumAnalyzerProps {
 }
 
 export const SpectrumAnalyzer: React.FC<SpectrumAnalyzerProps> = ({
-    _audioContext, // Future use - audio processing integration
+    audioContext: _audioContext, // Future use - audio processing integration
     analyser,
     isActive = false,
     className = '',
     height = 150,
     barCount = 64,
-    _color = '#00ff88', // Future use - customizable visualization colors
-    _backgroundColor = '#1a1a1a' // Future use - customizable background styling
+    // _color = '#00ff88', // Future use - customizable visualization colors
+    backgroundColor = '#1a1a1a' // Future use - customizable background styling
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const animationRef = useRef<number>();
+    const animationRef = useRef<number>(0);
 
     const drawSpectrum = useCallback(() => {
         if (!isActive || !analyser) return;
@@ -415,8 +415,6 @@ export const AudioVisualization: React.FC<AudioVisualizationProps> = ({
                         analyser={analyser}
                         isActive={isPlaying}
                         height={isExpanded ? 320 : 160}
-                        color={settings.spectrumColor}
-                        backgroundColor={settings.backgroundColor}
                         className="rounded-lg"
                     />
                 )}

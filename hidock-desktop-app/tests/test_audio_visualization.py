@@ -5,21 +5,94 @@ Following TDD principles to achieve 80% test coverage as mandated by .amazonq/ru
 """
 
 import os
+import sys
 import tempfile
+import unittest
 import unittest.mock as mock
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
-import unittest
 
-import sys
+
+# Create comprehensive mock objects for external dependencies
+class MockCTkFrame:
+    def __init__(self, *args, **kwargs):
+        self.pack = Mock()
+        self.grid = Mock()
+        self.configure = Mock()
+        self.pack_propagate = Mock()
+
+
+class MockCTkTabview:
+    def __init__(self, *args, **kwargs):
+        self.pack = Mock()
+        self.grid = Mock()
+        self.add = Mock()
+        self.get = Mock(return_value="Waveform")
+
+
+class MockCTkButton:
+    def __init__(self, *args, **kwargs):
+        self.pack = Mock()
+        self.grid = Mock()
+        self.configure = Mock()
+
+
+class MockCTkLabel:
+    def __init__(self, *args, **kwargs):
+        self.pack = Mock()
+        self.grid = Mock()
+        self.configure = Mock()
+
+
+class MockCTkImage:
+    def __init__(self, *args, **kwargs):
+        pass
+
 
 # Set up comprehensive mocking for all external dependencies
 mock_ctk = Mock()
-mock_ctk.CTkFrame = Mock
+mock_ctk.CTkFrame = MockCTkFrame
+mock_ctk.CTkTabview = MockCTkTabview
+mock_ctk.CTkButton = MockCTkButton
+mock_ctk.CTkLabel = MockCTkLabel
+mock_ctk.CTkImage = MockCTkImage
+
+
+# Create comprehensive matplotlib mocks
+class MockFigure:
+    def __init__(self, *args, **kwargs):
+        self.patch = Mock()
+        self.subplots_adjust = Mock()
+
+    def add_subplot(self, *args, **kwargs):
+        mock_ax = Mock()
+        mock_ax.spines = {"top": Mock(), "bottom": Mock(), "left": Mock(), "right": Mock()}
+        mock_ax.clear = Mock()
+        mock_ax.set_xlim = Mock()
+        mock_ax.set_ylim = Mock()
+        mock_ax.set_facecolor = Mock()
+        mock_ax.set_xticks = Mock()
+        mock_ax.set_yticks = Mock()
+        mock_ax.plot = Mock()
+        mock_ax.axvline = Mock()
+        mock_ax.text = Mock()
+        return mock_ax
+
+
+class MockCanvas:
+    def __init__(self, *args, **kwargs):
+        self.draw = Mock()
+
+    def get_tk_widget(self):
+        mock_widget = Mock()
+        mock_widget.pack = Mock()
+        return mock_widget
+
+
 mock_matplotlib = Mock()
-mock_figure = Mock()
-mock_canvas = Mock()
+mock_figure = MockFigure
+mock_canvas = MockCanvas
 mock_animation = Mock()
 mock_scipy = Mock()
 mock_signal = Mock()
@@ -31,19 +104,32 @@ mock_logger.info = Mock()
 mock_logger.warning = Mock()
 mock_logger.error = Mock()
 
+
+# Mock PIL Image
+class MockImage:
+    @staticmethod
+    def open(*args, **kwargs):
+        return Mock()
+
+
 # Mock modules that need to be available during import
-with patch.dict(sys.modules, {
-    'customtkinter': mock_ctk,
-    'matplotlib': mock_matplotlib,
-    'matplotlib.figure': mock_matplotlib,
-    'matplotlib.backends.backend_tkagg': mock_matplotlib,
-    'matplotlib.animation': mock_animation,
-    'scipy': mock_scipy,
-    'scipy.signal': mock_signal,
-    'scipy.fft': mock_fft,
-    'audio_player_enhanced': Mock(),
-    'config_and_logger': Mock(logger=mock_logger)
-}):
+with patch.dict(
+    sys.modules,
+    {
+        "customtkinter": mock_ctk,
+        "matplotlib": mock_matplotlib,
+        "matplotlib.figure": Mock(Figure=mock_figure),
+        "matplotlib.backends.backend_tkagg": Mock(FigureCanvasTkAgg=mock_canvas),
+        "matplotlib.animation": mock_animation,
+        "scipy": mock_scipy,
+        "scipy.signal": mock_signal,
+        "scipy.fft": mock_fft,
+        "audio_player_enhanced": Mock(),
+        "config_and_logger": Mock(logger=mock_logger),
+        "PIL": Mock(Image=MockImage),
+        "PIL.Image": MockImage,
+    },
+):
     # Import after mocking
     import audio_visualization
     from audio_visualization import (
@@ -68,17 +154,18 @@ class TestWaveformVisualizer(unittest.TestCase):
         """Test WaveformVisualizer initialization"""
         mock_parent = Mock()
 
-        with patch('audio_visualization.Figure') as mock_figure, \
-             patch('audio_visualization.FigureCanvasTkAgg') as mock_canvas, \
-             patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'):
-            
+        with patch("audio_visualization.Figure") as mock_figure, patch(
+            "audio_visualization.FigureCanvasTkAgg"
+        ) as mock_canvas, patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
+            WaveformVisualizer, "_initialize_plot"
+        ):
+
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
             mock_fig.add_subplot.return_value = mock_ax
             mock_figure.return_value = mock_fig
-            
+
             visualizer = WaveformVisualizer(mock_parent, width=800, height=120)
 
         assert visualizer.parent == mock_parent
@@ -93,47 +180,47 @@ class TestWaveformVisualizer(unittest.TestCase):
         """Test _setup_styling method"""
         mock_parent = Mock()
 
-        with patch('audio_visualization.Figure') as mock_figure, \
-             patch('audio_visualization.FigureCanvasTkAgg') as mock_canvas, \
-             patch.object(WaveformVisualizer, '_initialize_plot'):
-            
+        with patch("audio_visualization.Figure") as mock_figure, patch(
+            "audio_visualization.FigureCanvasTkAgg"
+        ) as mock_canvas, patch.object(WaveformVisualizer, "_initialize_plot"):
+
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
             # Mock spines as a dictionary
-            mock_ax.spines = {'top': Mock(), 'bottom': Mock(), 'left': Mock(), 'right': Mock()}
+            mock_ax.spines = {"top": Mock(), "bottom": Mock(), "left": Mock(), "right": Mock()}
             mock_fig.add_subplot.return_value = mock_ax
             mock_figure.return_value = mock_fig
-            
+
             visualizer = WaveformVisualizer(mock_parent)
             # Manually call _setup_styling to test it
             visualizer._setup_styling()
 
         # Should set up styling without errors
-        assert hasattr(visualizer, 'parent')
-        assert hasattr(visualizer, 'waveform_color')
-        assert hasattr(visualizer, 'position_color')
-        assert hasattr(visualizer, 'background_color')
+        assert hasattr(visualizer, "parent")
+        assert hasattr(visualizer, "waveform_color")
+        assert hasattr(visualizer, "position_color")
+        assert hasattr(visualizer, "background_color")
 
     def test_initialize_plot(self):
         """Test _initialize_plot method"""
         mock_parent = Mock()
 
-        with patch('audio_visualization.Figure') as mock_figure, \
-             patch('audio_visualization.FigureCanvasTkAgg') as mock_canvas, \
-             patch.object(WaveformVisualizer, '_setup_styling'):
-            
+        with patch("audio_visualization.Figure") as mock_figure, patch(
+            "audio_visualization.FigureCanvasTkAgg"
+        ) as mock_canvas, patch.object(WaveformVisualizer, "_setup_styling"):
+
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
             mock_fig.add_subplot.return_value = mock_ax
             mock_figure.return_value = mock_fig
-            
+
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.ax = mock_ax
             visualizer.canvas = Mock()
             visualizer.background_color = "#1a1a1a"
-            
+
             # Manually call _initialize_plot to test it
             visualizer._initialize_plot()
 
@@ -146,19 +233,20 @@ class TestWaveformVisualizer(unittest.TestCase):
         """Test _apply_theme_colors method"""
         mock_parent = Mock()
 
-        with patch('audio_visualization.Figure') as mock_figure, \
-             patch('audio_visualization.FigureCanvasTkAgg') as mock_canvas, \
-             patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'):
-            
+        with patch("audio_visualization.Figure") as mock_figure, patch(
+            "audio_visualization.FigureCanvasTkAgg"
+        ) as mock_canvas, patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
+            WaveformVisualizer, "_initialize_plot"
+        ):
+
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
             # Mock spines as a dictionary
-            mock_ax.spines = {'top': Mock(), 'bottom': Mock(), 'left': Mock(), 'right': Mock()}
+            mock_ax.spines = {"top": Mock(), "bottom": Mock(), "left": Mock(), "right": Mock()}
             mock_fig.add_subplot.return_value = mock_ax
             mock_figure.return_value = mock_fig
-            
+
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.figure = Mock()
             visualizer.ax = mock_ax
@@ -177,17 +265,18 @@ class TestWaveformVisualizer(unittest.TestCase):
         mock_extract_waveform.return_value = (np.array([]), 44100)  # Empty waveform data
         mock_parent = Mock()
 
-        with patch('audio_visualization.Figure') as mock_figure, \
-             patch('audio_visualization.FigureCanvasTkAgg') as mock_canvas, \
-             patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'):
-            
+        with patch("audio_visualization.Figure") as mock_figure, patch(
+            "audio_visualization.FigureCanvasTkAgg"
+        ) as mock_canvas, patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
+            WaveformVisualizer, "_initialize_plot"
+        ):
+
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
             mock_fig.add_subplot.return_value = mock_ax
             mock_figure.return_value = mock_fig
-            
+
             visualizer = WaveformVisualizer(mock_parent)
 
             result = visualizer.load_audio("/nonexistent/file.wav")
@@ -205,9 +294,9 @@ class TestWaveformVisualizer(unittest.TestCase):
         mock_get_info.return_value = {"duration": 10.0}
         mock_parent = Mock()
 
-        with patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'), \
-             patch.object(WaveformVisualizer, '_update_waveform_display'):
+        with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
+            WaveformVisualizer, "_initialize_plot"
+        ), patch.object(WaveformVisualizer, "_update_waveform_display"):
             visualizer = WaveformVisualizer(mock_parent)
 
             result = visualizer.load_audio("/test/file.wav")
@@ -229,9 +318,9 @@ class TestWaveformVisualizer(unittest.TestCase):
         mock_get_info.return_value = {"duration": 5.0}
         mock_parent = Mock()
 
-        with patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'), \
-             patch.object(WaveformVisualizer, '_update_waveform_display'):
+        with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
+            WaveformVisualizer, "_initialize_plot"
+        ), patch.object(WaveformVisualizer, "_update_waveform_display"):
             visualizer = WaveformVisualizer(mock_parent)
 
             result = visualizer.load_audio("/test/stereo.wav")
@@ -247,8 +336,7 @@ class TestWaveformVisualizer(unittest.TestCase):
         mock_extract_waveform.side_effect = Exception("Read error")
         mock_parent = Mock()
 
-        with patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'):
+        with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(WaveformVisualizer, "_initialize_plot"):
             visualizer = WaveformVisualizer(mock_parent)
 
             result = visualizer.load_audio("/test/file.wav")
@@ -259,17 +347,18 @@ class TestWaveformVisualizer(unittest.TestCase):
         """Test _update_waveform_display method"""
         mock_parent = Mock()
 
-        with patch('audio_visualization.Figure') as mock_figure, \
-             patch('audio_visualization.FigureCanvasTkAgg') as mock_canvas, \
-             patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'):
-            
+        with patch("audio_visualization.Figure") as mock_figure, patch(
+            "audio_visualization.FigureCanvasTkAgg"
+        ) as mock_canvas, patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
+            WaveformVisualizer, "_initialize_plot"
+        ):
+
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
             mock_fig.add_subplot.return_value = mock_ax
             mock_figure.return_value = mock_fig
-            
+
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4])
             visualizer.sample_rate = 44100
@@ -288,8 +377,7 @@ class TestWaveformVisualizer(unittest.TestCase):
         """Test _add_position_indicator method"""
         mock_parent = Mock()
 
-        with patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'):
+        with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(WaveformVisualizer, "_initialize_plot"):
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4])
             visualizer.sample_rate = 44100
@@ -305,25 +393,27 @@ class TestWaveformVisualizer(unittest.TestCase):
         visualizer.ax.axvline.assert_called()
         # axvline should be called with position parameters
         call_args = visualizer.ax.axvline.call_args
-        assert call_args[1]['x'] == 0.5  # current_position
-        assert call_args[1]['color'] == "#ff4444"  # position_color
+        assert call_args[1]["x"] == 0.5  # current_position
+        assert call_args[1]["color"] == "#ff4444"  # position_color
 
     def test_update_position(self):
         """Test update_position method"""
         mock_parent = Mock()
 
-        with patch('audio_visualization.Figure') as mock_figure, \
-             patch('audio_visualization.FigureCanvasTkAgg') as mock_canvas, \
-             patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'), \
-             patch.object(WaveformVisualizer, '_add_position_indicator'):
-            
+        with patch("audio_visualization.Figure") as mock_figure, patch(
+            "audio_visualization.FigureCanvasTkAgg"
+        ) as mock_canvas, patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
+            WaveformVisualizer, "_initialize_plot"
+        ), patch.object(
+            WaveformVisualizer, "_add_position_indicator"
+        ):
+
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
             mock_fig.add_subplot.return_value = mock_ax
             mock_figure.return_value = mock_fig
-            
+
             visualizer = WaveformVisualizer(mock_parent)
             position = MockPlaybackPosition(current_time=30.0, total_time=120.0)
 
@@ -336,10 +426,11 @@ class TestWaveformVisualizer(unittest.TestCase):
         """Test zoom in, out, and reset methods"""
         mock_parent = Mock()
 
-        with patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'), \
-             patch.object(WaveformVisualizer, '_update_waveform_display'), \
-             patch.object(WaveformVisualizer, '_update_zoom_display') as mock_update_zoom:
+        with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
+            WaveformVisualizer, "_initialize_plot"
+        ), patch.object(WaveformVisualizer, "_update_waveform_display"), patch.object(
+            WaveformVisualizer, "_update_zoom_display"
+        ) as mock_update_zoom:
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4])
 
@@ -364,9 +455,9 @@ class TestWaveformVisualizer(unittest.TestCase):
         """Test clear method"""
         mock_parent = Mock()
 
-        with patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot') as mock_init_plot, \
-             patch.object(WaveformVisualizer, '_update_zoom_display'):
+        with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
+            WaveformVisualizer, "_initialize_plot"
+        ) as mock_init_plot, patch.object(WaveformVisualizer, "_update_zoom_display"):
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.waveform_data = np.array([0.1, 0.2, 0.3])
             visualizer.sample_rate = 44100
@@ -389,9 +480,9 @@ class TestWaveformVisualizer(unittest.TestCase):
         """Test clear_position_indicator method"""
         mock_parent = Mock()
 
-        with patch.object(WaveformVisualizer, '_setup_styling'), \
-             patch.object(WaveformVisualizer, '_initialize_plot'), \
-             patch.object(WaveformVisualizer, '_update_waveform_display'):
+        with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
+            WaveformVisualizer, "_initialize_plot"
+        ), patch.object(WaveformVisualizer, "_update_waveform_display"):
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.waveform_data = np.array([0.1, 0.2, 0.3])
             visualizer.current_position = 30.0
@@ -409,17 +500,18 @@ class TestSpectrumAnalyzer(unittest.TestCase):
         """Test SpectrumAnalyzer initialization"""
         mock_parent = Mock()
 
-        with patch('audio_visualization.Figure') as mock_figure, \
-             patch('audio_visualization.FigureCanvasTkAgg') as mock_canvas, \
-             patch.object(SpectrumAnalyzer, '_setup_styling'), \
-             patch.object(SpectrumAnalyzer, '_initialize_plot'):
-            
+        with patch("audio_visualization.Figure") as mock_figure, patch(
+            "audio_visualization.FigureCanvasTkAgg"
+        ) as mock_canvas, patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(
+            SpectrumAnalyzer, "_initialize_plot"
+        ):
+
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
             mock_fig.add_subplot.return_value = mock_ax
             mock_figure.return_value = mock_fig
-            
+
             analyzer = SpectrumAnalyzer(mock_parent, width=800, height=120)
 
         assert analyzer.parent == mock_parent
@@ -434,12 +526,12 @@ class TestSpectrumAnalyzer(unittest.TestCase):
         """Test SpectrumAnalyzer _setup_styling method"""
         mock_parent = Mock()
 
-        with patch.object(SpectrumAnalyzer, '_initialize_plot'):
+        with patch.object(SpectrumAnalyzer, "_initialize_plot"):
             analyzer = SpectrumAnalyzer(mock_parent)
             analyzer._setup_styling()
 
         # Should complete without errors
-        assert hasattr(analyzer, 'parent')
+        assert hasattr(analyzer, "parent")
 
     @patch("audio_visualization.ctk.CTkFrame")
     @patch("audio_visualization.Figure")
@@ -452,7 +544,7 @@ class TestSpectrumAnalyzer(unittest.TestCase):
         mock_fig.add_subplot.return_value = mock_ax
         mock_figure.return_value = mock_fig
 
-        with patch.object(SpectrumAnalyzer, '_setup_styling'):
+        with patch.object(SpectrumAnalyzer, "_setup_styling"):
             analyzer = SpectrumAnalyzer(mock_parent)
             analyzer._initialize_plot()
 
@@ -466,9 +558,9 @@ class TestSpectrumAnalyzer(unittest.TestCase):
         mock_audio_data = np.random.random(44100)  # 1 second of audio
         mock_sample_rate = 44100
 
-        with patch.object(SpectrumAnalyzer, '_setup_styling'), \
-             patch.object(SpectrumAnalyzer, '_initialize_plot'), \
-             patch("audio_visualization.animation.FuncAnimation") as mock_animation:
+        with patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(
+            SpectrumAnalyzer, "_initialize_plot"
+        ), patch("audio_visualization.animation.FuncAnimation") as mock_animation:
             analyzer = SpectrumAnalyzer(mock_parent)
             analyzer.figure = Mock()
 
@@ -485,8 +577,7 @@ class TestSpectrumAnalyzer(unittest.TestCase):
         """Test stop_analysis method"""
         mock_parent = Mock()
 
-        with patch.object(SpectrumAnalyzer, '_setup_styling'), \
-             patch.object(SpectrumAnalyzer, '_initialize_plot'):
+        with patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(SpectrumAnalyzer, "_initialize_plot"):
             analyzer = SpectrumAnalyzer(mock_parent)
             analyzer.is_running = True
             analyzer.animation = Mock()
@@ -501,8 +592,7 @@ class TestSpectrumAnalyzer(unittest.TestCase):
         """Test update_position method"""
         mock_parent = Mock()
 
-        with patch.object(SpectrumAnalyzer, '_setup_styling'), \
-             patch.object(SpectrumAnalyzer, '_initialize_plot'):
+        with patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(SpectrumAnalyzer, "_initialize_plot"):
             analyzer = SpectrumAnalyzer(mock_parent)
 
             analyzer.update_position(30.0)
@@ -516,11 +606,10 @@ class TestSpectrumAnalyzer(unittest.TestCase):
         """Test _update_spectrum method"""
         mock_parent = Mock()
         # Fix numpy data type - use complex128 function properly
-        mock_fft.return_value = np.array([1+1j, 2+2j, 3+3j] * 171, dtype=np.complex128)  # 513 elements
+        mock_fft.return_value = np.array([1 + 1j, 2 + 2j, 3 + 3j] * 171, dtype=np.complex128)  # 513 elements
         mock_savgol.return_value = np.random.random(50)
 
-        with patch.object(SpectrumAnalyzer, '_setup_styling'), \
-             patch.object(SpectrumAnalyzer, '_initialize_plot'):
+        with patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(SpectrumAnalyzer, "_initialize_plot"):
             analyzer = SpectrumAnalyzer(mock_parent)
             analyzer.audio_data = np.random.random(44100)
             analyzer.sample_rate = 44100
@@ -541,63 +630,33 @@ class TestSpectrumAnalyzer(unittest.TestCase):
 
 class TestAudioVisualizationWidget(unittest.TestCase):
     """Test AudioVisualizationWidget class"""
-    
+
     def _get_mock_ctk_classes(self):
-        """Helper to create mock CTk classes"""
-        class MockCTkFrame:
-            def __init__(self, *args, **kwargs):
-                self.pack = Mock()
-                self.grid = Mock()
-                
-        class MockCTkTabview:
-            def __init__(self, *args, **kwargs):
-                self.pack = Mock()
-                self.grid = Mock()
-                self.add = Mock()
-                self.get = Mock(return_value="Waveform")
-                
+        """Helper to get the already defined mock CTk classes"""
         return MockCTkFrame, MockCTkTabview
 
     def test_initialization(self):
         """Test AudioVisualizationWidget initialization"""
         mock_parent = Mock()
-        MockCTkFrame, MockCTkTabview = self._get_mock_ctk_classes()
 
-        with patch('audio_visualization.ctk') as mock_ctk, \
-             patch('audio_visualization.Figure') as mock_figure, \
-             patch('audio_visualization.FigureCanvasTkAgg') as mock_canvas, \
-             patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
-            
-            # Setup mock CTk components
-            mock_ctk.CTkFrame = MockCTkFrame
-            mock_ctk.CTkTabview = MockCTkTabview
-            
-            # Setup mock figure and canvas
-            mock_fig = Mock()
-            mock_ax = Mock()
-            mock_fig.add_subplot.return_value = mock_ax
-            mock_figure.return_value = mock_fig
-            
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
+
             widget = AudioVisualizationWidget(mock_parent, height=180)
 
         assert widget.audio_player is None
-        assert hasattr(widget, 'notebook')
-        assert hasattr(widget, 'waveform_visualizer')
-        assert hasattr(widget, 'spectrum_analyzer')
+        assert hasattr(widget, "notebook")
+        assert hasattr(widget, "waveform_visualizer")
+        assert hasattr(widget, "spectrum_analyzer")
 
     def test_load_theme_icons(self):
         """Test _load_theme_icons method"""
         mock_parent = Mock()
-        MockCTkFrame, MockCTkTabview = self._get_mock_ctk_classes()
 
-        with patch('audio_visualization.ctk.CTkFrame', MockCTkFrame), \
-             patch('audio_visualization.ctk.CTkTabview', MockCTkTabview), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_tab_state'), \
-             patch("os.path.exists", return_value=True), \
-             patch("audio_visualization.Image.open") as mock_image_open, \
-             patch("audio_visualization.ctk.CTkImage") as mock_ctk_image:
+        with patch.object(AudioVisualizationWidget, "_create_speed_controls"), patch.object(
+            AudioVisualizationWidget, "_update_tab_state"
+        ), patch("os.path.exists", return_value=True), patch("audio_visualization.Image.open") as mock_image_open:
 
             mock_image = Mock()
             mock_image_open.return_value = mock_image
@@ -606,17 +665,15 @@ class TestAudioVisualizationWidget(unittest.TestCase):
             widget._load_theme_icons()
 
         # Should attempt to load icons
-        assert hasattr(widget, 'play_icon') or True  # Icons may not be set if files don't exist
+        assert hasattr(widget, "play_icon") or True  # Icons may not be set if files don't exist
 
     def test_load_audio_success(self):
         """Test successful audio loading"""
         mock_parent = Mock()
-        MockCTkFrame, MockCTkTabview = self._get_mock_ctk_classes()
 
-        with patch('audio_visualization.ctk.CTkFrame', MockCTkFrame), \
-             patch('audio_visualization.ctk.CTkTabview', MockCTkTabview), \
-             patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
             widget = AudioVisualizationWidget(mock_parent)
             widget.waveform_visualizer = Mock()
             widget.waveform_visualizer.load_audio.return_value = True
@@ -629,12 +686,10 @@ class TestAudioVisualizationWidget(unittest.TestCase):
     def test_load_audio_failure(self):
         """Test audio loading failure"""
         mock_parent = Mock()
-        MockCTkFrame, MockCTkTabview = self._get_mock_ctk_classes()
 
-        with patch('audio_visualization.ctk.CTkFrame', MockCTkFrame), \
-             patch('audio_visualization.ctk.CTkTabview', MockCTkTabview), \
-             patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
             widget = AudioVisualizationWidget(mock_parent)
             widget.waveform_visualizer = Mock()
             widget.waveform_visualizer.load_audio.return_value = False
@@ -646,12 +701,10 @@ class TestAudioVisualizationWidget(unittest.TestCase):
     def test_update_position(self):
         """Test update_position method"""
         mock_parent = Mock()
-        MockCTkFrame, MockCTkTabview = self._get_mock_ctk_classes()
 
-        with patch('audio_visualization.ctk.CTkFrame', MockCTkFrame), \
-             patch('audio_visualization.ctk.CTkTabview', MockCTkTabview), \
-             patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
             widget = AudioVisualizationWidget(mock_parent)
             widget.waveform_visualizer = Mock()
             widget.spectrum_analyzer = Mock()
@@ -665,14 +718,12 @@ class TestAudioVisualizationWidget(unittest.TestCase):
     def test_start_spectrum_analysis(self):
         """Test start_spectrum_analysis method"""
         mock_parent = Mock()
-        MockCTkFrame, MockCTkTabview = self._get_mock_ctk_classes()
         mock_audio_data = np.random.random(1000)
         mock_sample_rate = 44100
 
-        with patch('audio_visualization.ctk.CTkFrame', MockCTkFrame), \
-             patch('audio_visualization.ctk.CTkTabview', MockCTkTabview), \
-             patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
             widget = AudioVisualizationWidget(mock_parent)
             widget.spectrum_analyzer = Mock()
 
@@ -683,12 +734,10 @@ class TestAudioVisualizationWidget(unittest.TestCase):
     def test_stop_spectrum_analysis(self):
         """Test stop_spectrum_analysis method"""
         mock_parent = Mock()
-        MockCTkFrame, MockCTkTabview = self._get_mock_ctk_classes()
 
-        with patch('audio_visualization.ctk.CTkFrame', MockCTkFrame), \
-             patch('audio_visualization.ctk.CTkTabview', MockCTkTabview), \
-             patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
             widget = AudioVisualizationWidget(mock_parent)
             widget.spectrum_analyzer = Mock()
 
@@ -702,9 +751,9 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         """Test audio control methods (play, pause, stop)"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_get_main_window') as mock_get_main:
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ), patch.object(AudioVisualizationWidget, "_get_main_window") as mock_get_main:
 
             mock_main_window = Mock()
             mock_audio_player = Mock()
@@ -731,8 +780,9 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         """Test clear method"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
             widget = AudioVisualizationWidget(mock_parent)
             widget.waveform_visualizer = Mock()
             widget.spectrum_analyzer = Mock()
@@ -749,8 +799,9 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         mock_parent = Mock()
         mock_audio_player = Mock()
 
-        with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
             widget = AudioVisualizationWidget(mock_parent)
 
             widget.set_audio_player(mock_audio_player)
@@ -763,9 +814,9 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         """Test speed control methods"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'), \
-             patch.object(AudioVisualizationWidget, '_update_speed_display'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ), patch.object(AudioVisualizationWidget, "_update_speed_display"):
             widget = AudioVisualizationWidget(mock_parent)
             widget.audio_player = Mock()
             widget.audio_player.get_playback_speed.return_value = 1.0
@@ -796,8 +847,9 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         """Test _toggle_theme method"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
 
             widget = AudioVisualizationWidget(mock_parent)
             widget.waveform_visualizer = Mock()
@@ -815,8 +867,9 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         """Test tab state update and change methods"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
             widget = AudioVisualizationWidget(mock_parent)
             widget.notebook = Mock()
             widget.notebook.get.return_value = "Waveform"
@@ -835,8 +888,9 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         """Test _update_speed_display method"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, '_load_theme_icons'), \
-             patch.object(AudioVisualizationWidget, '_create_speed_controls'):
+        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
+            AudioVisualizationWidget, "_create_speed_controls"
+        ):
             widget = AudioVisualizationWidget(mock_parent)
             widget.speed_label = Mock()
             widget.current_speed = 1.5
@@ -847,5 +901,5 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         widget.speed_label.configure.assert_called()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
