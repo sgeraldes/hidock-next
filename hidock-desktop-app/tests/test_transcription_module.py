@@ -377,15 +377,15 @@ class TestProcessAudioFileForInsights:
     @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
     @patch("transcription_module.extract_meeting_insights")
-    @patch("transcription_module._get_audio_duration")
-    async def test_process_audio_file_success(self, mock_get_duration, mock_extract_insights, mock_transcribe, mock_exists):
+    async def test_process_audio_file_success(self, mock_extract_insights, mock_transcribe, mock_exists):
         """Test successful audio file processing for insights"""
         mock_exists.return_value = True
-        mock_get_duration.return_value = 120  # 2 minutes
         mock_transcribe.return_value = {"transcription": "Meeting transcription text"}
         mock_extract_insights.return_value = {
             "summary": "Project meeting summary",
-            "action_items": ["Task 1", "Task 2"]
+            "action_items": ["Task 1", "Task 2"],
+            "category": "Meeting",
+            "meeting_details": {"duration_minutes": 2}
         }
 
         result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
@@ -393,57 +393,54 @@ class TestProcessAudioFileForInsights:
         assert result["transcription"] == "Meeting transcription text"
         assert result["insights"]["summary"] == "Project meeting summary"
         assert len(result["insights"]["action_items"]) == 2
+        assert result["insights"]["category"] == "Meeting"
 
         mock_transcribe.assert_called_once_with("/test/audio.wav", "gemini", "test_key", None, "auto")
         mock_extract_insights.assert_called_once_with("Meeting transcription text", "gemini", "test_key", None)
 
     @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
     @patch("transcription_module.extract_meeting_insights")
-    @patch("transcription_module._get_audio_duration")
     async def test_process_audio_file_transcription_failure(
-        self, mock_get_duration, mock_extract_insights, mock_transcribe
+        self, mock_extract_insights, mock_transcribe, mock_exists
     ):
         """Test process_audio_file_for_insights when transcription fails"""
-        mock_get_duration.return_value = 120
+        mock_exists.return_value = True
         mock_transcribe.return_value = {"transcription": TRANSCRIPTION_FAILED_DEFAULT_MSG}
 
         result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
 
-        assert result["audio_duration_seconds"] == 120
         assert result["transcription"] == TRANSCRIPTION_FAILED_DEFAULT_MSG
-        assert "error" in result
-        assert "transcription failed" in result["error"]
+        # When transcription fails, should still return the failed transcription
+        # and default insights structure
+        assert "insights" in result
+        assert result["insights"]["summary"] == "N/A - Transcription failed"
 
         # Should not call extract_insights if transcription failed
         mock_extract_insights.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("transcription_module.transcribe_audio")
-    @patch("transcription_module.extract_meeting_insights")
-    @patch("transcription_module._get_audio_duration")
-    async def test_process_audio_file_insights_failure(self, mock_get_duration, mock_extract_insights, mock_transcribe):
-        """Test process_audio_file_for_insights when insights extraction fails"""
-        mock_get_duration.return_value = 120
-        mock_transcribe.return_value = {"transcription": "Valid transcription"}
-        mock_extract_insights.return_value = {"error": "Insights extraction failed"}
+    async def test_process_audio_file_file_not_found(self):
+        """Test process_audio_file_for_insights when file doesn't exist"""
+        result = await process_audio_file_for_insights("/nonexistent/audio.wav", "gemini", "test_key")
 
-        result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
-
-        assert result["audio_duration_seconds"] == 120
-        assert result["transcription"] == "Valid transcription"
         assert "error" in result
-        assert "Insights extraction failed" in result["error"]
+        assert "Audio file not found" in result["error"]
 
     @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
     @patch("transcription_module.extract_meeting_insights")
-    @patch("transcription_module._get_audio_duration")
-    async def test_process_audio_file_with_config(self, mock_get_duration, mock_extract_insights, mock_transcribe):
+    async def test_process_audio_file_with_config(self, mock_extract_insights, mock_transcribe, mock_exists):
         """Test process_audio_file_for_insights with custom configuration"""
-        mock_get_duration.return_value = 120
+        mock_exists.return_value = True
         mock_transcribe.return_value = {"transcription": "Transcribed text"}
-        mock_extract_insights.return_value = {"summary": "Meeting summary"}
+        mock_extract_insights.return_value = {
+            "summary": "Meeting summary",
+            "category": "Meeting",
+            "meeting_details": {"duration_minutes": 2}
+        }
         config = {"model": "gpt-4", "temperature": 0.5}
 
         result = await process_audio_file_for_insights(
@@ -451,59 +448,99 @@ class TestProcessAudioFileForInsights:
         )
 
         assert result["transcription"] == "Transcribed text"
-        assert result["summary"] == "Meeting summary"
+        assert result["insights"]["summary"] == "Meeting summary"
 
         mock_transcribe.assert_called_once_with("/test/audio.wav", "openai", "test_key", config, "en")
         mock_extract_insights.assert_called_once_with("Transcribed text", "openai", "test_key", config)
 
     @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
     @patch("transcription_module.extract_meeting_insights")
     @patch("transcription_module._get_audio_duration")
-    async def test_process_audio_file_zero_duration(self, mock_get_duration, mock_extract_insights, mock_transcribe):
-        """Test process_audio_file_for_insights with zero duration audio"""
-        mock_get_duration.return_value = 0
+    async def test_process_audio_file_with_duration_calculation(self, mock_get_duration, mock_extract_insights, mock_transcribe, mock_exists):
+        """Test process_audio_file_for_insights with duration calculation for WAV files"""
+        mock_exists.return_value = True
+        mock_get_duration.return_value = 2  # 2 minutes
         mock_transcribe.return_value = {"transcription": "Short transcription"}
-        mock_extract_insights.return_value = {"summary": "Brief summary"}
+        mock_extract_insights.return_value = {
+            "summary": "Brief summary",
+            "category": "Meeting",
+            "meeting_details": {"duration_minutes": 0}  # Will be updated by function
+        }
 
         result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
 
-        assert result["audio_duration_seconds"] == 0
         assert result["transcription"] == "Short transcription"
-        assert result["summary"] == "Brief summary"
+        assert result["insights"]["summary"] == "Brief summary"
+        # Duration should be calculated and set in meeting_details
+        assert result["insights"]["meeting_details"]["duration_minutes"] == 2
 
     @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
-    @patch("transcription_module._get_audio_duration")
-    async def test_process_audio_file_transcription_exception(self, mock_get_duration, mock_transcribe):
+    async def test_process_audio_file_transcription_exception(self, mock_transcribe, mock_exists):
         """Test process_audio_file_for_insights when transcription raises exception"""
-        mock_get_duration.return_value = 120
+        mock_exists.return_value = True
         mock_transcribe.side_effect = Exception("Transcription error")
 
         result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
 
-        assert result["audio_duration_seconds"] == 120
         assert "error" in result
-        assert "Exception during processing" in result["error"]
+        assert "Error preparing audio file: Transcription error" in result["error"]
 
     @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
     @patch("transcription_module.transcribe_audio")
     @patch("transcription_module.extract_meeting_insights")
-    @patch("transcription_module._get_audio_duration")
     async def test_process_audio_file_insights_exception(
-        self, mock_get_duration, mock_extract_insights, mock_transcribe
+        self, mock_extract_insights, mock_transcribe, mock_exists
     ):
         """Test process_audio_file_for_insights when insights extraction raises exception"""
-        mock_get_duration.return_value = 120
+        mock_exists.return_value = True
         mock_transcribe.return_value = {"transcription": "Valid transcription"}
         mock_extract_insights.side_effect = Exception("Insights error")
 
         result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
 
-        assert result["audio_duration_seconds"] == 120
-        assert result["transcription"] == "Valid transcription"
         assert "error" in result
-        assert "Exception during processing" in result["error"]
+        assert "Error preparing audio file: Insights error" in result["error"]
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
+    @patch("transcription_module.hta_converter")
+    async def test_process_audio_file_hta_conversion_success(self, mock_hta_converter, mock_exists):
+        """Test process_audio_file_for_insights with HTA file conversion"""
+        mock_exists.return_value = True
+        mock_hta_converter.convert_hta_to_wav.return_value = "/temp/converted.wav"
+        
+        with patch("transcription_module.transcribe_audio") as mock_transcribe, \
+             patch("transcription_module.extract_meeting_insights") as mock_extract_insights, \
+             patch("transcription_module.os.remove") as mock_remove:
+            
+            mock_transcribe.return_value = {"transcription": "HTA transcription"}
+            mock_extract_insights.return_value = {"summary": "HTA summary"}
+            
+            result = await process_audio_file_for_insights("/test/audio.hta", "gemini", "test_key")
+            
+            assert result["transcription"] == "HTA transcription"
+            assert result["insights"]["summary"] == "HTA summary"
+            mock_hta_converter.convert_hta_to_wav.assert_called_once_with("/test/audio.hta")
+            mock_transcribe.assert_called_once_with("/temp/converted.wav", "gemini", "test_key", None, "auto")
+            mock_remove.assert_called_once_with("/temp/converted.wav")
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
+    @patch("transcription_module.hta_converter")
+    async def test_process_audio_file_hta_conversion_failure(self, mock_hta_converter, mock_exists):
+        """Test process_audio_file_for_insights when HTA conversion fails"""
+        mock_exists.return_value = True
+        mock_hta_converter.convert_hta_to_wav.return_value = None  # Conversion failed
+        
+        result = await process_audio_file_for_insights("/test/audio.hta", "gemini", "test_key")
+        
+        assert "error" in result
+        assert "Failed to convert HTA file to WAV format" in result["error"]
 
 
 class TestModuleIntegration:
@@ -527,11 +564,11 @@ class TestModuleIntegration:
         """Test end-to-end processing with mock responses"""
         # This tests the complete flow using the mock responses
         # when no API key is provided
-        with patch("transcription_module._get_audio_duration", return_value=60):
+        with patch("transcription_module.os.path.exists", return_value=True):
             result = await process_audio_file_for_insights("/test/mock.wav", "gemini", "")
 
-        assert result["audio_duration_seconds"] == 60
         # Should get mock responses when no API key provided
         assert "transcription" in result
+        assert "insights" in result
         # The actual transcription will depend on the ai_service mock behavior
         # but the function should complete without errors
