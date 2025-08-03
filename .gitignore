@@ -20,6 +20,7 @@ coverage/
 htmlcov/
 .coverage
 .coverage.*
+.coveragerc
 
 # ===================================================================
 # Project-Specific & User Files
@@ -30,6 +31,11 @@ archived/
 reference/
 audio/
 .kiro/
+.claude/
+
+# AI Assistant project intelligence (keep rules but not project-specific data)
+.amazonq/project-intelligence/
+.amazonq/prompts/
 
 # Large media files (covered by the audio/ rule, but good to be explicit)
 *.wav
@@ -56,6 +62,7 @@ audio/
 # Sensitive credential files
 *.pem
 *.key
+*.dat
 credentials.json
 secrets.yaml
 
@@ -63,6 +70,8 @@ secrets.yaml
 node_modules/
 dist/
 build/
+*.egg-info/
+*.egg
 
 # Log files
 logs/
@@ -88,10 +97,15 @@ Desktop.ini
 *.sln
 *.sw?
 
-.gemini/
+# Temporary development files
+get-pip.py
+*.tmp
+*.temp
+build_output.txt
 
-
-ACCEPTANCE_CRITERIA.md
+# Development documentation (keep main docs)
+DOCUMENTATION_SUMMARY.md
+DOCUMENTATION_UPDATE_SUMMARY.md
 
 # Pre-commit secrets detection
 .secrets.baseline

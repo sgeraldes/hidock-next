@@ -37,11 +37,13 @@ All applications communicate with HiDock devices using USB protocols (pyusb/WebU
 
 ### Technology Stack
 
-- **Python 3.12+** (minimum 3.8)
-- **CustomTkinter** - Modern GUI framework
-- **PyUSB** - USB device communication
-- **Pygame** - Audio playback
-- **Pillow** - Image processing
+- **Python 3.12+** (minimum 3.8, configured in pyproject.toml)
+- **CustomTkinter** - Modern GUI framework with dark/light themes
+- **PyUSB** - USB device communication with libusb backend
+- **Pygame** - Audio playback and processing
+- **Pillow** - Image processing for GUI components
+- **Google Generative AI** - AI transcription services
+- **Cryptography** - Secure API key storage with Fernet encryption
 
 ### Key Components
 
@@ -49,39 +51,52 @@ All applications communicate with HiDock devices using USB protocols (pyusb/WebU
 
 ```python
 class HiDockJensen:
-    """Main class for HiDock device communication."""
+    """Enhanced HiDock device communication with error handling and retry logic."""
 
     def connect(self, target_interface_number, vid, pid):
-        """Connect to HiDock device."""
+        """Connect to HiDock device with retry mechanism."""
 
     def get_recordings(self):
-        """Get list of recordings from device."""
+        """Get list of recordings from device with caching."""
 
     def download_recording(self, filename, timeout_s):
-        """Download recording from device."""
+        """Download recording with progress tracking."""
+        
+    def get_connection_stats(self):
+        """Get connection statistics and health metrics."""
+        
+    def perform_health_check(self):
+        """Perform device health check with error recovery."""
 ```
 
-#### GUI Components (`gui_main_window.py`)
+#### GUI Components (`gui_main_window.py`, `settings_window.py`)
 
-- Main window with file list
-- Status bar with device information
-- Audio playback controls
-- Settings dialog
+- **Main window** with enhanced file list and TreeView
+- **Status bar** with real-time device information and caching
+- **Audio playback controls** with variable speed (0.25x-2.0x)
+- **Settings dialog** with comprehensive AI provider configuration
+- **Enhanced device selector** with proper enable/disable functionality
+- **Waveform visualization** with background loading and cancellation
+- **Multi-file selection** with toggle between single/multi modes
 
 #### Configuration (`config_and_logger.py`)
 
-- JSON-based configuration storage
-- Logging system with colored output
-- Settings validation and migration
+- **JSON-based configuration** with validation and error handling
+- **Advanced logging system** with colored output and GUI integration
+- **Settings validation** with comprehensive numeric range checking
+- **Encrypted storage** for API keys using Fernet encryption
+- **Configuration migration** and backward compatibility
+- **Performance monitoring** with intelligent caching (30s device info, 60s storage)
 
 ### Development Workflow
 
-1. **Setup environment:**
+1. **Setup environment (recommended):**
 
    ```bash
+   cd hidock-desktop-app
    python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
+   source .venv/bin/activate  # Windows: .venv\Scripts\activate
+   pip install -e ".[dev]"  # Installs project + dev dependencies
    ```
 
 2. **Run application:**
@@ -90,28 +105,47 @@ class HiDockJensen:
    python main.py
    ```
 
-3. **Run tests:**
+3. **Run tests (581 tests total):**
 
    ```bash
-   pytest tests/ -v
+   # Run all tests with coverage
+   pytest
+   
+   # Run specific test categories
+   pytest -m unit          # Unit tests only
+   pytest -m integration   # Integration tests
+   pytest -m device        # Device tests (requires hardware)
+   
+   # Run specific test files
+   pytest tests/test_settings_window.py -v
    ```
 
-4. **Code formatting:**
+4. **Code quality (configured in pyproject.toml):**
 
    ```bash
-   black . --line-length=120
-   flake8 . --max-line-length=120
+   # Format code (120-char line length)
+   black .
    isort .
+   
+   # Lint code
+   flake8 .
+   pylint .
+   
+   # Type checking (with exclusions for GUI modules)
+   mypy .
    ```
 
 5. **Pre-commit hooks** (automatically installed with developer setup):
 
    ```bash
+   # Install hooks
+   pre-commit install
+   
    # Run manually on all files
    pre-commit run --all-files
 
    # Check specific hook
-   pre-commit run flake8-desktop-app
+   pre-commit run black-desktop-app
    ```
 
 ## Code Quality Standards
@@ -133,10 +167,15 @@ class HiDockJensen:
 
 ### Testing Strategy
 
-- **Unit tests** for individual functions
-- **Integration tests** for component interactions
-- **Mock USB devices** for automated testing
-- **Hardware tests** for device validation
+- **581 comprehensive tests** across all components
+- **Unit tests** for individual functions (400+ tests)
+- **Integration tests** for component interactions (150+ tests)
+- **Performance tests** for background processing, caching, and UI responsiveness (20+ tests)
+- **Device tests** for hardware validation (30+ tests, require actual hardware)
+- **Settings tests** with comprehensive coverage of dialog functionality
+- **Mock-first approach** with sophisticated mocking of USB devices and AI services
+- **TDD workflow** with Red-Green-Refactor cycle
+- **80% minimum coverage** requirement enforced by pytest configuration
 
 ## Web Application Development
 
@@ -354,10 +393,16 @@ export default defineConfig({
 
 ### Desktop Application
 
-- **Threading** for USB operations
-- **Caching** for device information
-- **Memory management** for large files
-- **Progress tracking** for long operations
+- **Threading** for USB operations and background audio processing
+- **Intelligent Caching** for device information (30s) and storage data (60s) with staleness detection
+- **Deferred Updates** with 150ms debouncing for file selection to prevent excessive device communication
+- **Background Processing** for waveform loading with smart cancellation on selection changes
+- **Audio Optimization** with downsampling to ~2000 points for visualization performance
+- **Memory management** for large files with efficient buffer handling
+- **Progress tracking** for long operations with non-blocking UI
+- **Settings optimization** with validation caching and change detection
+- **Device selector performance** with proper component state management
+- **Error recovery** with retry mechanisms and connection health monitoring
 
 ### Web Application
 
@@ -389,14 +434,27 @@ export default defineConfig({
 #### Desktop Application
 
 1. **USB Permission Issues**
-   - Windows: Use Zadig for driver installation
-   - Linux: Add user to dialout group
-   - macOS: No special setup required
+   - Windows: Use Zadig for driver installation or ensure libusb-1.0.dll is present
+   - Linux: Add user to dialout group (`sudo usermod -a -G dialout $USER`)
+   - macOS: Install libusb via Homebrew (`brew install libusb`)
 
 2. **GUI Rendering Issues**
-   - Check CustomTkinter version
-   - Verify theme files are present
-   - Test with different appearance modes
+   - Check CustomTkinter version compatibility
+   - Verify theme files are present in themes/ directory
+   - Test with different appearance modes (Light/Dark/System)
+   - Ensure Font Awesome icons are properly loaded
+
+3. **Settings Dialog Issues**
+   - Verify all GUI variables are properly initialized
+   - Check that device selector uses `set_enabled()` method, not `configure(state=...)`
+   - Ensure encryption dependencies are available for API key storage
+   - Validate numeric settings are within proper ranges (temperature: 0.0-2.0, tokens: 1-32000)
+
+4. **Test Failures**
+   - Install dev dependencies: `pip install -e ".[dev]"`
+   - Check that mocks are properly configured for GUI components
+   - Ensure async tests use proper pytest-asyncio configuration
+   - Verify coverage requirements are met (80% minimum)
 
 #### Web Application
 
@@ -421,9 +479,19 @@ export default defineConfig({
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for detailed contribution guidelines.
 
+### Recent Improvements
+
+- **Comprehensive Settings Testing**: 24+ tests covering settings dialog functionality
+- **Device Selector Bug Fix**: Proper enable/disable functionality implemented
+- **Enhanced Error Handling**: Improved validation and error recovery
+- **Performance Optimizations**: Background processing and intelligent caching
+- **Test-Driven Development**: TDD approach with 581 comprehensive tests
+- **Code Quality**: Strict linting, formatting, and type checking with pyproject.toml configuration
+
 ## Additional Resources
 
-- [API Documentation](./API.md)
-- [Testing Guide](./TESTING.md)
-- [Deployment Guide](./DEPLOYMENT.md)
-- [Troubleshooting Guide](./TROUBLESHOOTING.md)
+- [Testing Guide](./TESTING.md) - Comprehensive testing documentation with 581 tests
+- [Technical Specification](./TECHNICAL_SPECIFICATION.md) - Detailed architecture and protocol documentation
+- [Deployment Guide](./DEPLOYMENT.md) - Production deployment instructions
+- [Project Configuration](../hidock-desktop-app/pyproject.toml) - Complete project configuration
+- [Pre-commit Configuration](../.pre-commit-config.yaml) - Code quality automation

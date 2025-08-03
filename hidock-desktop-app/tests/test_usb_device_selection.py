@@ -180,6 +180,12 @@ class TestEnhancedDeviceSelector:
                     selector.scan_callback = scan_callback
                     selector.devices = []
                     selector.is_scanning = True
+                    # Mock the UI elements that _on_scan_complete expects
+                    selector.scan_button = Mock()
+                    selector.progress_bar = Mock()
+                    selector.status_label = Mock()
+                    # Mock the _populate_device_list method instead of individual components
+                    selector._populate_device_list = Mock()
 
         # Create mock devices
         devices = [

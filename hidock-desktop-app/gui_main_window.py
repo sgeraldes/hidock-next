@@ -14,24 +14,30 @@ and optional log pane.
 """
 
 import asyncio
+
 # import json  # Commented out - not used in current implementation
 import os
 import subprocess
 import sys
+
 # import tempfile  # Commented out - not used in current implementation
 import threading
-# import time  # Commented out - not used in current implementation
+import time
 import tkinter
 import traceback
+
 # from datetime import datetime  # Currently unused - may be needed for future timestamp features
 from tkinter import messagebox, ttk  # Removed filedialog - not used
 
 import customtkinter as ctk
+import numpy as np
+
 # import usb.core  # Commented out - not used in current implementation
 from PIL import Image, ImageTk, UnidentifiedImageError
 
 from audio_player_enhanced import EnhancedAudioPlayer
-from audio_processing_advanced import AudioEnhancer
+
+# from audio_processing_advanced import AudioEnhancer  # Future: audio enhancement
 from audio_visualization import AudioVisualizationWidget
 
 # Import Logger class for type hints if any
@@ -39,6 +45,7 @@ from config_and_logger import Logger, load_config, logger, save_config
 
 # Import from our other modules
 from constants import DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID
+
 # from ctk_custom_widgets import CTkBanner  # Commented out - not used
 from desktop_device_adapter import DesktopDeviceAdapter
 from device_interface import DeviceManager
@@ -48,8 +55,9 @@ from gui_actions_file import FileActionsMixin
 from gui_auxiliary import AuxiliaryMixin
 from gui_event_handlers import EventHandlersMixin
 from gui_treeview import TreeViewMixin
+
 # from settings_window import SettingsDialog  # Commented out - not used directly
-from storage_management import StorageMonitor, StorageOptimizer
+# from storage_management import StorageMonitor, StorageOptimizer  # Future: storage features
 from transcription_module import process_audio_file_for_insights
 
 
@@ -116,9 +124,7 @@ class HiDockToolGUI(
                 )
         except Exception as e_backend_startup:
             self.backend_initialized_successfully = False
-            self.backend_init_error_message = (
-                f"Unexpected Python error during USB backend init: {e_backend_startup}"
-            )
+            self.backend_init_error_message = f"Unexpected Python error during USB backend init: {e_backend_startup}"
             logger.error(
                 "GUI",
                 "__init__",
@@ -139,6 +145,14 @@ class HiDockToolGUI(
             os.path.join(os.path.expanduser("~"), ".hidock", "cache"),
             device_lock=self.device_lock,
         )
+        
+        # Initialize offline mode manager
+        from offline_mode_manager import OfflineModeManager
+        self.offline_mode_manager = OfflineModeManager(
+            self.file_operations_manager,
+            self.download_directory
+        )
+        
         self.audio_player = EnhancedAudioPlayer(self)
 
         self.available_usb_devices = []
@@ -216,12 +230,25 @@ class HiDockToolGUI(
         self.log_frame = None
         self.download_logs_button = None
         self.log_text_area = None
+        self._selection_update_timer = None
+        self._last_loaded_waveform_file = None
+        self._waveform_loading = False
+        self._cached_device_info = None
+        self._device_info_cache_time = 0
+        self._cached_storage_info = None
+        self._storage_info_cache_time = 0
+        self._cached_storage_text = None
 
         self._menu_image_references = []
         self._load_icons()
         self.create_widgets()
         self._set_minimum_window_size()
         self.apply_theme_and_color()
+        
+        # Show cached files immediately if available (offline mode)
+        self.after(50, self._show_cached_files_on_startup)
+        # Update menu states to show correct initial button states (orange Connect button when disconnected)
+        self.after(75, self._update_menu_states)
         self.after(100, self.attempt_autoconnect_on_startup())
 
     def _validate_window_geometry(self, geometry_string):
@@ -360,47 +387,21 @@ class HiDockToolGUI(
 
         self.autoconnect_var = ctk.BooleanVar(value=get_conf("autoconnect", False))
         self.download_directory = get_conf("download_directory", os.getcwd())
-        self.logger_processing_level_var = ctk.StringVar(
-            value=get_conf("log_level", "INFO")
-        )
-        self.selected_vid_var = ctk.IntVar(
-            value=get_conf("selected_vid", DEFAULT_VENDOR_ID)
-        )
-        self.selected_pid_var = ctk.IntVar(
-            value=get_conf("selected_pid", DEFAULT_PRODUCT_ID)
-        )
+        self.logger_processing_level_var = ctk.StringVar(value=get_conf("log_level", "INFO"))
+        self.selected_vid_var = ctk.IntVar(value=get_conf("selected_vid", DEFAULT_VENDOR_ID))
+        self.selected_pid_var = ctk.IntVar(value=get_conf("selected_pid", DEFAULT_PRODUCT_ID))
         self.target_interface_var = ctk.IntVar(value=get_conf("target_interface", 0))
-        self.recording_check_interval_var = ctk.IntVar(
-            value=get_conf("recording_check_interval_s", 3)
-        )
-        self.default_command_timeout_ms_var = ctk.IntVar(
-            value=get_conf("default_command_timeout_ms", 5000)
-        )
-        self.file_stream_timeout_s_var = ctk.IntVar(
-            value=get_conf("file_stream_timeout_s", 180)
-        )
-        self.auto_refresh_files_var = ctk.BooleanVar(
-            value=get_conf("auto_refresh_files", False)
-        )
-        self.auto_refresh_interval_s_var = ctk.IntVar(
-            value=get_conf("auto_refresh_interval_s", 30)
-        )
-        self.quit_without_prompt_var = ctk.BooleanVar(
-            value=get_conf("quit_without_prompt_if_connected", False)
-        )
-        self.appearance_mode_var = ctk.StringVar(
-            value=get_conf("appearance_mode", "System")
-        )
+        self.recording_check_interval_var = ctk.IntVar(value=get_conf("recording_check_interval_s", 3))
+        self.default_command_timeout_ms_var = ctk.IntVar(value=get_conf("default_command_timeout_ms", 5000))
+        self.file_stream_timeout_s_var = ctk.IntVar(value=get_conf("file_stream_timeout_s", 180))
+        self.auto_refresh_files_var = ctk.BooleanVar(value=get_conf("auto_refresh_files", False))
+        self.auto_refresh_interval_s_var = ctk.IntVar(value=get_conf("auto_refresh_interval_s", 30))
+        self.quit_without_prompt_var = ctk.BooleanVar(value=get_conf("quit_without_prompt_if_connected", False))
+        self.appearance_mode_var = ctk.StringVar(value=get_conf("appearance_mode", "System"))
         self.color_theme_var = ctk.StringVar(value=get_conf("color_theme", "blue"))
-        self.suppress_console_output_var = ctk.BooleanVar(
-            value=get_conf("suppress_console_output", False)
-        )
-        self.suppress_gui_log_output_var = ctk.BooleanVar(
-            value=get_conf("suppress_gui_log_output", False)
-        )
-        self.gui_log_filter_level_var = ctk.StringVar(
-            value=get_conf("gui_log_filter_level", "DEBUG")
-        )
+        self.suppress_console_output_var = ctk.BooleanVar(value=get_conf("suppress_console_output", False))
+        self.suppress_gui_log_output_var = ctk.BooleanVar(value=get_conf("suppress_gui_log_output", False))
+        self.gui_log_filter_level_var = ctk.StringVar(value=get_conf("gui_log_filter_level", "DEBUG"))
         self.device_setting_auto_record_var = ctk.BooleanVar()
         self.device_setting_auto_play_var = ctk.BooleanVar()
         self.device_setting_bluetooth_tone_var = ctk.BooleanVar()
@@ -409,9 +410,7 @@ class HiDockToolGUI(
             "treeview_columns_display_order",
             "num,name,datetime,size,duration,status",
         )
-        self.logs_visible_var = ctk.BooleanVar(
-            value=get_conf("logs_pane_visible", False)
-        )
+        self.logs_visible_var = ctk.BooleanVar(value=get_conf("logs_pane_visible", False))
         self.loop_playback_var = ctk.BooleanVar(value=get_conf("loop_playback", False))
         self.volume_var = ctk.DoubleVar(value=get_conf("playback_volume", 0.5))
         self.saved_treeview_sort_column = get_conf("treeview_sort_col_id", "datetime")
@@ -425,9 +424,7 @@ class HiDockToolGUI(
         }
         loaded_log_colors = get_conf("log_colors", default_log_colors_fallback)
         for level in Logger.LEVELS:
-            colors = loaded_log_colors.get(
-                level, default_log_colors_fallback.get(level, ["#000000", "#FFFFFF"])
-            )
+            colors = loaded_log_colors.get(level, default_log_colors_fallback.get(level, ["#000000", "#FFFFFF"]))
             setattr(
                 self,
                 f"log_color_{level.lower()}_light_var",
@@ -445,12 +442,8 @@ class HiDockToolGUI(
         self.icon_size_str = get_conf("icon_size_str", "32")
 
         # AI Transcription settings
-        self.ai_api_provider_var = ctk.StringVar(
-            value=get_conf("ai_api_provider", "gemini")
-        )
-        self.ai_model_var = ctk.StringVar(
-            value=get_conf("ai_model", "gemini-2.5-flash")
-        )
+        self.ai_api_provider_var = ctk.StringVar(value=get_conf("ai_api_provider", "gemini"))
+        self.ai_model_var = ctk.StringVar(value=get_conf("ai_model", "gemini-2.5-flash"))
         self.ai_temperature_var = ctk.DoubleVar(value=get_conf("ai_temperature", 0.3))
         self.ai_max_tokens_var = ctk.IntVar(value=get_conf("ai_max_tokens", 4000))
         self.ai_language_var = ctk.StringVar(value=get_conf("ai_language", "auto"))
@@ -458,32 +451,25 @@ class HiDockToolGUI(
         self.ai_openrouter_base_url_var = ctk.StringVar(
             value=get_conf("ai_openrouter_base_url", "https://openrouter.ai/api/v1")
         )
-        self.ai_amazon_region_var = ctk.StringVar(
-            value=get_conf("ai_amazon_region", "us-east-1")
-        )
+        self.ai_amazon_region_var = ctk.StringVar(value=get_conf("ai_amazon_region", "us-east-1"))
         self.ai_qwen_base_url_var = ctk.StringVar(
-            value=get_conf(
-                "ai_qwen_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            )
+            value=get_conf("ai_qwen_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         )
         self.ai_deepseek_base_url_var = ctk.StringVar(
             value=get_conf("ai_deepseek_base_url", "https://api.deepseek.com")
         )
-        self.ai_ollama_base_url_var = ctk.StringVar(
-            value=get_conf("ai_ollama_base_url", "http://localhost:11434")
-        )
+        self.ai_ollama_base_url_var = ctk.StringVar(value=get_conf("ai_ollama_base_url", "http://localhost:11434"))
         self.ai_lmstudio_base_url_var = ctk.StringVar(
             value=get_conf("ai_lmstudio_base_url", "http://localhost:1234/v1")
         )
         # API key is stored encrypted and handled separately
 
         # Visualizer pin state
-        self.visualizer_pinned_var = ctk.BooleanVar(
-            value=get_conf("visualizer_pinned", False)
-        )
-        self.visualizer_pinned = (
-            self.visualizer_pinned_var.get()
-        )  # Initialize from config
+        self.visualizer_pinned_var = ctk.BooleanVar(value=get_conf("visualizer_pinned", False))
+        self.visualizer_pinned = self.visualizer_pinned_var.get()  # Initialize from config
+
+        # Selection mode (default to single selection)
+        self.single_selection_mode_var = ctk.BooleanVar(value=get_conf("single_selection_mode", True))
 
     def get_decrypted_api_key(self, provider=None):
         """Get the decrypted API key for the specified provider."""
@@ -514,9 +500,7 @@ class HiDockToolGUI(
                 return decrypted.decode()
 
         except Exception as e:
-            logger.error(
-                "GUI", "get_decrypted_api_key", f"Error decrypting API key: {e}"
-            )
+            logger.error("GUI", "get_decrypted_api_key", f"Error decrypting API key: {e}")
 
         return ""
 
@@ -550,11 +534,7 @@ class HiDockToolGUI(
             "volume_off": "volume-off.png",
         }
         current_mode_is_dark = ctk.get_appearance_mode() == "Dark"
-        theme_specific_color = (
-            self.icon_pref_dark_color
-            if current_mode_is_dark
-            else self.icon_pref_light_color
-        )
+        theme_specific_color = self.icon_pref_dark_color if current_mode_is_dark else self.icon_pref_light_color
 
         for name, filename in icon_definitions.items():
             pil_image = None
@@ -598,9 +578,7 @@ class HiDockToolGUI(
                     dark_image=pil_image,
                     size=self.icon_display_size,
                 )
-                tk_photo_image = ImageTk.PhotoImage(
-                    pil_image.resize(self.icon_display_size)
-                )
+                tk_photo_image = ImageTk.PhotoImage(pil_image.resize(self.icon_display_size))
                 self.menu_icons[name] = tk_photo_image
                 self._menu_image_references.append(tk_photo_image)
             else:
@@ -654,22 +632,22 @@ class HiDockToolGUI(
         self.bind_all(
             "<Control-o>",
             lambda e: (
-                self.connect_device()
-                if self.file_menu.entrycget("Connect to HiDock", "state") == "normal"
-                else None
+                self.connect_device() if self.file_menu.entrycget("Connect to HiDock", "state") == "normal" else None
             ),
         )
         self.bind_all(
             "<Control-d>",
             lambda e: (
-                self.disconnect_device()
-                if self.file_menu.entrycget("Disconnect", "state") == "normal"
-                else None
+                self.disconnect_device() if self.file_menu.entrycget("Disconnect", "state") == "normal" else None
             ),
         )
         self.bind_all("<Control-comma>", lambda e: self.open_settings_window())
         self.bind_all("<Control-s>", lambda e: self.stop_audio_playback_gui())
         self.bind_all("<space>", lambda e: self.pause_audio_playback_gui())
+        
+        # Window geometry auto-save
+        self.bind("<Configure>", self._on_window_configure)
+        self._geometry_save_timer = None
         self.view_menu = tkinter.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="View", menu=self.view_menu)
         self.view_menu.add_command(
@@ -800,27 +778,17 @@ class HiDockToolGUI(
         if not (hasattr(self, "file_menu") and self.file_menu):
             return
         try:
-            menu_bg = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkFrame"]["fg_color"]
-            )
-            menu_fg = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkLabel"]["text_color"]
-            )
-            active_menu_bg = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkButton"]["hover_color"]
-            )
-            active_menu_fg_candidate = ctk.ThemeManager.theme["CTkButton"].get(
-                "text_color_hover"
-            )
+            menu_bg = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
+            menu_fg = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
+            active_menu_bg = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkButton"]["hover_color"])
+            active_menu_fg_candidate = ctk.ThemeManager.theme["CTkButton"].get("text_color_hover")
             active_menu_fg = self.apply_appearance_mode_theme_color(
                 active_menu_fg_candidate
                 if active_menu_fg_candidate
                 else ctk.ThemeManager.theme["CTkButton"]["text_color"]
             )
             disabled_fg = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkLabel"].get(
-                    "text_color_disabled", ("gray70", "gray30")
-                )
+                ctk.ThemeManager.theme["CTkLabel"].get("text_color_disabled", ("gray70", "gray30"))
             )
             for menu_widget in [
                 self.file_menu,
@@ -838,13 +806,9 @@ class HiDockToolGUI(
                         relief="flat",
                         borderwidth=0,
                     )
-            logger.debug(
-                "GUI", "_update_menubar_style", "Attempted to apply theme to menubar."
-            )
+            logger.debug("GUI", "_update_menubar_style", "Attempted to apply theme to menubar.")
         except KeyError as e:
-            logger.error(
-                "GUI", "_update_menubar_style", f"Theme key missing for menubar: {e}."
-            )
+            logger.error("GUI", "_update_menubar_style", f"Theme key missing for menubar: {e}.")
         except tkinter.TclError as e:
             logger.error("GUI", "_update_menubar_style", f"Error styling menubar: {e}")
 
@@ -892,9 +856,7 @@ class HiDockToolGUI(
                 for label, icon_name in commands.items():
                     try:
                         if icon_name:
-                            menu_widget.entryconfigure(
-                                label, image=self.menu_icons.get(icon_name)
-                            )
+                            menu_widget.entryconfigure(label, image=self.menu_icons.get(icon_name))
                     except tkinter.TclError as e:
                         logger.warning(
                             "GUI",
@@ -924,9 +886,7 @@ class HiDockToolGUI(
             width=toolbar_button_width,
             image=self.icons.get("connect"),
         )
-        self.toolbar_connect_button.pack(
-            side="left", padx=toolbar_button_padx, pady=toolbar_button_pady
-        )
+        self.toolbar_connect_button.pack(side="left", padx=toolbar_button_padx, pady=toolbar_button_pady)
         self.toolbar_refresh_button = ctk.CTkButton(
             self.toolbar_frame,
             text="Refresh",
@@ -934,9 +894,7 @@ class HiDockToolGUI(
             width=toolbar_button_width,
             image=self.icons.get("refresh"),
         )
-        self.toolbar_refresh_button.pack(
-            side="left", padx=toolbar_button_padx, pady=toolbar_button_pady
-        )
+        self.toolbar_refresh_button.pack(side="left", padx=toolbar_button_padx, pady=toolbar_button_pady)
         self.toolbar_download_button = ctk.CTkButton(
             self.toolbar_frame,
             text="Download",
@@ -944,9 +902,7 @@ class HiDockToolGUI(
             width=toolbar_button_width,
             image=self.icons.get("download"),
         )
-        self.toolbar_download_button.pack(
-            side="left", padx=toolbar_button_padx, pady=toolbar_button_pady
-        )
+        self.toolbar_download_button.pack(side="left", padx=toolbar_button_padx, pady=toolbar_button_pady)
         self.toolbar_play_button = ctk.CTkButton(
             self.toolbar_frame,
             text="Play",
@@ -954,21 +910,15 @@ class HiDockToolGUI(
             width=toolbar_button_width,
             image=self.icons.get("play"),
         )
-        self.toolbar_play_button.pack(
-            side="left", padx=toolbar_button_padx, pady=toolbar_button_pady
-        )
+        self.toolbar_play_button.pack(side="left", padx=toolbar_button_padx, pady=toolbar_button_pady)
         self.toolbar_insights_button = ctk.CTkButton(
             self.toolbar_frame,
             text="Get Insights",
             command=self.get_insights_selected_file_gui,
             width=toolbar_button_width,
-            image=self.icons.get(
-                "insights", self.icons.get("play")
-            ),  # Use insights icon or fallback to play
+            image=self.icons.get("insights", self.icons.get("play")),  # Use insights icon or fallback to play
         )
-        self.toolbar_insights_button.pack(
-            side="left", padx=toolbar_button_padx, pady=toolbar_button_pady
-        )
+        self.toolbar_insights_button.pack(side="left", padx=toolbar_button_padx, pady=toolbar_button_pady)
         self.toolbar_delete_button = ctk.CTkButton(
             self.toolbar_frame,
             text="Delete",
@@ -976,9 +926,7 @@ class HiDockToolGUI(
             width=toolbar_button_width,
             image=self.icons.get("delete"),
         )
-        self.toolbar_delete_button.pack(
-            side="left", padx=toolbar_button_padx, pady=toolbar_button_pady
-        )
+        self.toolbar_delete_button.pack(side="left", padx=toolbar_button_padx, pady=toolbar_button_pady)
         self.toolbar_settings_button = ctk.CTkButton(
             self.toolbar_frame,
             text="Settings",
@@ -986,9 +934,7 @@ class HiDockToolGUI(
             width=toolbar_button_width,
             image=self.icons.get("settings"),
         )
-        self.toolbar_settings_button.pack(
-            side="right", padx=(2, 5), pady=toolbar_button_pady
-        )
+        self.toolbar_settings_button.pack(side="right", padx=(2, 5), pady=toolbar_button_pady)
 
     def _create_status_bar(self):
         """
@@ -996,24 +942,14 @@ class HiDockToolGUI(
         """
         self.status_bar_frame = ctk.CTkFrame(self, height=30, corner_radius=0)
         self.status_bar_frame.pack(side="bottom", fill="x", padx=0, pady=(1, 0))
-        self.status_connection_label = ctk.CTkLabel(
-            self.status_bar_frame, text="Status: Disconnected", anchor="w"
-        )
+        self.status_connection_label = ctk.CTkLabel(self.status_bar_frame, text="Status: Disconnected", anchor="w")
         self.status_connection_label.pack(side="left", padx=10, pady=2)
-        self.status_progress_text_label = ctk.CTkLabel(
-            self.status_bar_frame, text="", anchor="w"
-        )
-        self.status_progress_text_label.pack(
-            side="left", padx=10, pady=2, fill="x", expand=True
-        )
-        self.status_file_progress_bar = ctk.CTkProgressBar(
-            self.status_bar_frame, width=160, height=18
-        )
+        self.status_progress_text_label = ctk.CTkLabel(self.status_bar_frame, text="", anchor="w")
+        self.status_progress_text_label.pack(side="left", padx=10, pady=2, fill="x", expand=True)
+        self.status_file_progress_bar = ctk.CTkProgressBar(self.status_bar_frame, width=160, height=18)
         self.status_file_progress_bar.set(0)
         progress_bar_pady = (
-            ((self.status_bar_frame.cget("height") - 18) // 2)
-            if self.status_bar_frame.cget("height") > 18
-            else 2
+            ((self.status_bar_frame.cget("height") - 18) // 2) if self.status_bar_frame.cget("height") > 18 else 2
         )
         self.status_file_progress_bar.pack(side="left", padx=10, pady=progress_bar_pady)
 
@@ -1021,16 +957,10 @@ class HiDockToolGUI(
         """
         Updates specific labels in the status bar.
         """
-        if (
-            hasattr(self, "status_connection_label")
-            and self.status_connection_label.winfo_exists()
-        ):
+        if hasattr(self, "status_connection_label") and self.status_connection_label.winfo_exists():
             if connection_status is not None:
                 self.status_connection_label.configure(text=connection_status)
-        if (
-            hasattr(self, "status_progress_text_label")
-            and self.status_progress_text_label.winfo_exists()
-        ):
+        if hasattr(self, "status_progress_text_label") and self.status_progress_text_label.winfo_exists():
             if progress_text is not None:
                 self.status_progress_text_label.configure(text=progress_text)
 
@@ -1042,9 +972,7 @@ class HiDockToolGUI(
         if self._status_update_in_progress:
             return
         self._status_update_in_progress = True
-        threading.Thread(
-            target=self._update_all_status_info_thread, daemon=True
-        ).start()
+        threading.Thread(target=self._update_all_status_info_thread, daemon=True).start()
 
     def _update_all_status_info_thread(self):
         """
@@ -1057,15 +985,24 @@ class HiDockToolGUI(
             is_connected = self.device_manager.device_interface.is_connected()
             if is_connected:
                 with self.device_lock:
-                    device_info = asyncio.run(
-                        self.device_manager.device_interface.get_device_info()
-                    )
+                    # Use cached device info if available and recent
+                    current_time = time.time()
+                    if (
+                        hasattr(self, "_cached_device_info")
+                        and hasattr(self, "_device_info_cache_time")
+                        and current_time - self._device_info_cache_time < 30.0
+                    ):  # 30 second cache
+                        device_info = self._cached_device_info
+                    else:
+                        device_info = asyncio.run(self.device_manager.device_interface.get_device_info())
+                        self._cached_device_info = device_info
+                        self._device_info_cache_time = current_time
+
                     if device_info:
-                        conn_status_text = (
-                            f"Status: Connected ({device_info.model.value or 'HiDock'})"
-                        )
+                        conn_status_text = f"Status: Connected ({device_info.model.value or 'HiDock'})"
                         if device_info.serial_number != "N/A":
                             conn_status_text += f" SN: {device_info.serial_number}"
+
                     # Avoid getting storage info during file list streaming to prevent command conflicts
                     if (
                         hasattr(self.device_manager.device_interface, "jensen_device")
@@ -1075,42 +1012,50 @@ class HiDockToolGUI(
                         )
                         and self.device_manager.device_interface.jensen_device.is_file_list_streaming()
                     ):
-                        card_info = None  # Skip during streaming
-                    else:
-                        card_info = asyncio.run(
-                            self.device_manager.device_interface.get_storage_info()
-                        )
-                    if card_info and card_info.total_capacity > 0:
-                        used_bytes, capacity_bytes = (
-                            card_info.used_space,
-                            card_info.total_capacity,
-                        )
-                        # Define constants for clarity
-                        BYTES_PER_MB = 1024 * 1024
-                        BYTES_PER_GB = BYTES_PER_MB * 1024
-
-                        # Display in GB if capacity is over ~0.9 GB
-                        if capacity_bytes > BYTES_PER_GB * 0.9:
-                            used_gb = used_bytes / BYTES_PER_GB
-                            capacity_gb = capacity_bytes / BYTES_PER_GB
-                            storage_text = (
-                                f"Storage: {used_gb:.2f}/{capacity_gb:.2f} GB"
-                            )
+                        # Use cached storage info if available
+                        if hasattr(self, "_cached_storage_text"):
+                            storage_text = self._cached_storage_text
                         else:
-                            # Otherwise, display in MB
-                            used_mb = used_bytes / BYTES_PER_MB
-                            capacity_mb = capacity_bytes / BYTES_PER_MB
-                            storage_text = (
-                                f"Storage: {used_mb:.0f}/{capacity_mb:.0f} MB"
-                            )
-                        storage_text += f" (Status: {hex(card_info.status_raw)})"
+                            storage_text = "Storage: Fetching..."
                     else:
-                        storage_text = "Storage: Fetching..."
+                        # Use cached storage info if recent
+                        if (
+                            hasattr(self, "_cached_storage_info")
+                            and hasattr(self, "_storage_info_cache_time")
+                            and current_time - self._storage_info_cache_time < 60.0
+                        ):  # 60 second cache
+                            card_info = self._cached_storage_info
+                        else:
+                            card_info = asyncio.run(self.device_manager.device_interface.get_storage_info())
+                            self._cached_storage_info = card_info
+                            self._storage_info_cache_time = current_time
+
+                        if card_info and card_info.total_capacity > 0:
+                            used_bytes, capacity_bytes = (
+                                card_info.used_space,
+                                card_info.total_capacity,
+                            )
+                            # Define constants for clarity
+                            BYTES_PER_MB = 1024 * 1024
+                            BYTES_PER_GB = BYTES_PER_MB * 1024
+
+                            # Display in GB if capacity is over ~0.9 GB
+                            if capacity_bytes > BYTES_PER_GB * 0.9:
+                                used_gb = used_bytes / BYTES_PER_GB
+                                capacity_gb = capacity_bytes / BYTES_PER_GB
+                                storage_text = f"Storage: {used_gb:.2f}/{capacity_gb:.2f} GB"
+                            else:
+                                # Otherwise, display in MB
+                                used_mb = used_bytes / BYTES_PER_MB
+                                capacity_mb = capacity_bytes / BYTES_PER_MB
+                                storage_text = f"Storage: {used_mb:.0f}/{capacity_mb:.0f} MB"
+                            storage_text += f" (Status: {hex(card_info.status_raw)})"
+                            self._cached_storage_text = storage_text
+                        else:
+                            storage_text = "Storage: Fetching..."
             elif not self.backend_initialized_successfully:
                 conn_status_text = "Status: USB Backend FAILED!"
-            self.after(
-                0, self._update_gui_with_status_info, conn_status_text, storage_text
-            )
+            self.after(0, self._update_gui_with_status_info, conn_status_text, storage_text)
         finally:
             self._status_update_in_progress = False
 
@@ -1126,51 +1071,39 @@ class HiDockToolGUI(
                 else 0
             )
             selected_items_count = (
-                len(self.file_tree.selection())
-                if hasattr(self, "file_tree") and self.file_tree.winfo_exists()
-                else 0
+                len(self.file_tree.selection()) if hasattr(self, "file_tree") and self.file_tree.winfo_exists() else 0
             )
             size_selected_bytes = 0
-            if (
-                selected_items_count > 0
-                and hasattr(self, "file_tree")
-                and self.file_tree.winfo_exists()
-            ):
+            if selected_items_count > 0 and hasattr(self, "file_tree") and self.file_tree.winfo_exists():
                 for item_iid in self.file_tree.selection():
                     file_detail = next(
-                        (
-                            f
-                            for f in self.displayed_files_details
-                            if f["name"] == item_iid
-                        ),
+                        (f for f in self.displayed_files_details if f["name"] == item_iid),
                         None,
                     )
                     if file_detail:
                         size_selected_bytes += file_detail.get("length", 0)
             file_counts_text = (
                 f"Files: {total_items} total / {selected_items_count} "
-                f"sel. ({size_selected_bytes / (1024*1024):.2f} MB)"
+                f"sel. ({size_selected_bytes / (1024 * 1024):.2f} MB)"
             )
         except (AttributeError, tkinter.TclError):
             file_counts_text = "Files: N/A"
 
-        if (
-            hasattr(self, "status_storage_label_header")
-            and self.status_storage_label_header.winfo_exists()
-        ):
+        if hasattr(self, "status_storage_label_header") and self.status_storage_label_header.winfo_exists():
             self.status_storage_label_header.configure(text=storage_text)
-        if (
-            hasattr(self, "status_file_counts_label_header")
-            and self.status_file_counts_label_header.winfo_exists()
-        ):
+        if hasattr(self, "status_file_counts_label_header") and self.status_file_counts_label_header.winfo_exists():
             self.status_file_counts_label_header.configure(text=file_counts_text)
-        if (
-            hasattr(self, "download_dir_button_header")
-            and self.download_dir_button_header.winfo_exists()
-        ):
-            self.download_dir_button_header.configure(
-                text=f"Dir: {os.path.basename(self.download_directory)}"
-            )
+        if hasattr(self, "download_dir_button_header") and self.download_dir_button_header.winfo_exists():
+            self.download_dir_button_header.configure(text=f"Dir: {os.path.basename(self.download_directory)}")
+        
+        # Show/hide disconnected indicator
+        is_connected = self.device_manager.device_interface.is_connected()
+        if hasattr(self, "disconnected_indicator") and self.disconnected_indicator.winfo_exists():
+            if not is_connected:
+                self.disconnected_indicator.pack(side="left", padx=10, pady=2)
+            else:
+                self.disconnected_indicator.pack_forget()
+        
         self.update_status_bar(connection_status=conn_status_text)
 
     def _update_menu_states(self):
@@ -1179,61 +1112,56 @@ class HiDockToolGUI(
         """
         is_connected = self.device_manager.device_interface.is_connected()
         has_selection = bool(
-            hasattr(self, "file_tree")
-            and self.file_tree.winfo_exists()
-            and self.file_tree.selection()
+            hasattr(self, "file_tree") and self.file_tree.winfo_exists() and self.file_tree.selection()
         )
         num_selected = len(self.file_tree.selection()) if has_selection else 0
         if hasattr(self, "file_menu"):
             self.file_menu.entryconfig(
                 "Connect to HiDock",
-                state=(
-                    "normal"
-                    if not is_connected and self.backend_initialized_successfully
-                    else "disabled"
-                ),
+                state=("normal" if not is_connected and self.backend_initialized_successfully else "disabled"),
             )
-            self.file_menu.entryconfig(
-                "Disconnect", state="normal" if is_connected else "disabled"
-            )
+            self.file_menu.entryconfig("Disconnect", state="normal" if is_connected else "disabled")
         if hasattr(self, "view_menu"):
-            self.view_menu.entryconfig(
-                "Refresh File List", state="normal" if is_connected else "disabled"
-            )
-        can_play_selected = is_connected and num_selected == 1
+            self.view_menu.entryconfig("Refresh File List", state="normal" if is_connected else "disabled")
+        can_play_selected = num_selected == 1
         if can_play_selected:
             file_iid = self.file_tree.selection()[0]
             file_detail = next(
                 (f for f in self.displayed_files_details if f["name"] == file_iid),
                 None,
             )
-            if not (
-                file_detail
-                and (
-                    file_detail["name"].lower().endswith(".wav")
-                    or file_detail["name"].lower().endswith(".hda")
-                )
-            ):
+            if file_detail:
+                is_audio_file = (file_detail["name"].lower().endswith(".wav") or 
+                               file_detail["name"].lower().endswith(".hda"))
+                if not is_connected:
+                    # When not connected, can only play downloaded files
+                    local_path = self._get_local_filepath(file_detail["name"])
+                    can_play_selected = is_audio_file and os.path.exists(local_path)
+                else:
+                    # When connected, can play any audio file (will download if needed)
+                    can_play_selected = is_audio_file
+            else:
                 can_play_selected = False
         if hasattr(self, "actions_menu"):
+            # Download only available when connected
             self.actions_menu.entryconfig(
                 "Download Selected",
                 state="normal" if is_connected and has_selection else "disabled",
             )
-            self.actions_menu.entryconfig(
-                "Play Selected", state="normal" if can_play_selected else "disabled"
-            )
+            # Play available in both connected and offline modes (if file is downloaded)
+            self.actions_menu.entryconfig("Play Selected", state="normal" if can_play_selected else "disabled")
+            # Get Insights should work offline for downloaded files
+            can_get_insights = (has_selection and num_selected == 1 and 
+                              not self.is_long_operation_active and not self.is_audio_playing)
+            if can_get_insights and not is_connected:
+                # When not connected, only allow insights for downloaded files
+                file_iid = self.file_tree.selection()[0]
+                local_path = self._get_local_filepath(file_iid)
+                can_get_insights = os.path.exists(local_path)
+            
             self.actions_menu.entryconfig(
                 "Get Insights",
-                state=(
-                    "normal"
-                    if is_connected
-                    and has_selection
-                    and num_selected == 1
-                    and not self.is_long_operation_active
-                    and not self.is_audio_playing
-                    else "disabled"
-                ),
+                state="normal" if can_get_insights else "disabled",
             )
             self.actions_menu.entryconfig(
                 "Delete Selected",
@@ -1245,34 +1173,22 @@ class HiDockToolGUI(
                 and len(self.file_tree.get_children()) > 0
                 and num_selected < len(self.file_tree.get_children())
             )
-            self.actions_menu.entryconfig(
-                "Select All", state="normal" if can_select_all else "disabled"
-            )
-            self.actions_menu.entryconfig(
-                "Clear Selection", state="normal" if has_selection else "disabled"
-            )
+            self.actions_menu.entryconfig("Select All", state="normal" if can_select_all else "disabled")
+            self.actions_menu.entryconfig("Clear Selection", state="normal" if has_selection else "disabled")
 
             # Check if there are active downloads to cancel
             active_downloads = [
                 op
                 for op in self.file_operations_manager.get_all_active_operations()
-                if op.operation_type.value == "download"
-                and op.status.value in ["pending", "in_progress"]
+                if op.operation_type.value == "download" and op.status.value in ["pending", "in_progress"]
             ]
 
             # Check if selected files have active downloads
             selected_filenames = (
-                [
-                    self.file_tree.item(iid)["values"][1]
-                    for iid in self.file_tree.selection()
-                ]
-                if has_selection
-                else []
+                [self.file_tree.item(iid)["values"][1] for iid in self.file_tree.selection()] if has_selection else []
             )
 
-            selected_active_downloads = [
-                op for op in active_downloads if op.filename in selected_filenames
-            ]
+            selected_active_downloads = [op for op in active_downloads if op.filename in selected_filenames]
 
             self.actions_menu.entryconfig(
                 "Cancel Selected Downloads",
@@ -1284,62 +1200,47 @@ class HiDockToolGUI(
             )
 
             # Update playback controls based on audio player state
-            is_playing = hasattr(
-                self, "audio_player"
-            ) and self.audio_player.state.value in ["playing", "paused"]
-            self.actions_menu.entryconfig(
-                "Stop Playback", state="normal" if is_playing else "disabled"
-            )
+            is_playing = hasattr(self, "audio_player") and self.audio_player.state.value in ["playing", "paused"]
+            self.actions_menu.entryconfig("Stop Playback", state="normal" if is_playing else "disabled")
         if hasattr(self, "device_menu"):
-            self.device_menu.entryconfig(
-                "Sync Device Time", state="normal" if is_connected else "disabled"
-            )
-            self.device_menu.entryconfig(
-                "Format Storage", state="normal" if is_connected else "disabled"
-            )
-        if (
-            hasattr(self, "toolbar_connect_button")
-            and self.toolbar_connect_button.winfo_exists()
-        ):
+            self.device_menu.entryconfig("Sync Device Time", state="normal" if is_connected else "disabled")
+            self.device_menu.entryconfig("Format Storage", state="normal" if is_connected else "disabled")
+        if hasattr(self, "toolbar_connect_button") and self.toolbar_connect_button.winfo_exists():
             if is_connected:
                 self.toolbar_connect_button.configure(
                     text="Disconnect",
                     command=self.disconnect_device,
                     state="normal",
                     image=self.icons.get("disconnect"),
+                    fg_color=None,  # Default color
                 )
             else:
                 self.toolbar_connect_button.configure(
                     text="Connect",
                     command=self.connect_device,
+                    state=("normal" if self.backend_initialized_successfully else "disabled"),
+                    image=self.icons.get("connect"),
+                    fg_color="orange",  # Orange to indicate disconnected
+                )
+        if hasattr(self, "toolbar_refresh_button") and self.toolbar_refresh_button.winfo_exists():
+            if is_connected:
+                self.toolbar_refresh_button.configure(
+                    text="Refresh",
                     state=(
                         "normal"
-                        if self.backend_initialized_successfully
+                        if not self._is_ui_refresh_in_progress and not self.is_long_operation_active
                         else "disabled"
                     ),
-                    image=self.icons.get("connect"),
+                    fg_color=None,  # Default color
                 )
-        if (
-            hasattr(self, "toolbar_refresh_button")
-            and self.toolbar_refresh_button.winfo_exists()
-        ):
-            self.toolbar_refresh_button.configure(
-                state=(
-                    "normal"
-                    if is_connected
-                    and not self._is_ui_refresh_in_progress
-                    and not self.is_long_operation_active
-                    else "disabled"
+            else:
+                self.toolbar_refresh_button.configure(
+                    text="Offline",
+                    state="disabled",
+                    fg_color="gray",  # Gray to indicate offline
                 )
-            )
-        if (
-            hasattr(self, "toolbar_download_button")
-            and self.toolbar_download_button.winfo_exists()
-        ):
-            if (
-                self.is_long_operation_active
-                and self.active_operation_name == "Download Queue"
-            ):
+        if hasattr(self, "toolbar_download_button") and self.toolbar_download_button.winfo_exists():
+            if self.is_long_operation_active and self.active_operation_name == "Download Queue":
                 self.toolbar_download_button.configure(
                     text="Cancel DL",
                     command=self.request_cancel_operation,
@@ -1347,23 +1248,29 @@ class HiDockToolGUI(
                     image=self.icons.get("stop"),
                 )
             else:
-                self.toolbar_download_button.configure(
-                    text="Download",
-                    command=self.download_selected_files_gui,
-                    state=(
-                        "normal"
-                        if is_connected
-                        and has_selection
-                        and not self.is_long_operation_active
-                        and not self.is_audio_playing
-                        else "disabled"
-                    ),
-                    image=self.icons.get("download"),
-                )
-        if (
-            hasattr(self, "toolbar_play_button")
-            and self.toolbar_play_button.winfo_exists()
-        ):
+                if is_connected:
+                    self.toolbar_download_button.configure(
+                        text="Download",
+                        command=self.download_selected_files_gui,
+                        state=(
+                            "normal"
+                            if has_selection
+                            and not self.is_long_operation_active
+                            and not self.is_audio_playing
+                            else "disabled"
+                        ),
+                        image=self.icons.get("download"),
+                        fg_color=None,  # Default color
+                    )
+                else:
+                    self.toolbar_download_button.configure(
+                        text="Offline",
+                        command=None,
+                        state="disabled",
+                        image=self.icons.get("download"),
+                        fg_color="gray",  # Gray to indicate offline
+                    )
+        if hasattr(self, "toolbar_play_button") and self.toolbar_play_button.winfo_exists():
             if self.is_audio_playing:
                 self.toolbar_play_button.configure(
                     text="Stop",
@@ -1371,10 +1278,7 @@ class HiDockToolGUI(
                     state="normal",
                     image=self.icons.get("stop"),
                 )
-            elif (
-                self.is_long_operation_active
-                and self.active_operation_name == "Playback Preparation"
-            ):
+            elif self.is_long_operation_active and self.active_operation_name == "Playback Preparation":
                 self.toolbar_play_button.configure(
                     text="Cancel Prep",
                     command=self.request_cancel_operation,
@@ -1385,21 +1289,11 @@ class HiDockToolGUI(
                 self.toolbar_play_button.configure(
                     text="Play",
                     command=self.play_selected_audio_gui,
-                    state=(
-                        "normal"
-                        if can_play_selected and not self.is_long_operation_active
-                        else "disabled"
-                    ),
+                    state=("normal" if can_play_selected and not self.is_long_operation_active else "disabled"),
                     image=self.icons.get("play"),
                 )
-        if (
-            hasattr(self, "toolbar_insights_button")
-            and self.toolbar_insights_button.winfo_exists()
-        ):
-            if (
-                self.is_long_operation_active
-                and self.active_operation_name == "Transcription"
-            ):
+        if hasattr(self, "toolbar_insights_button") and self.toolbar_insights_button.winfo_exists():
+            if self.is_long_operation_active and self.active_operation_name == "Transcription":
                 self.toolbar_insights_button.configure(
                     text="Cancel Insights",
                     command=self.request_cancel_operation,
@@ -1407,28 +1301,26 @@ class HiDockToolGUI(
                     image=self.icons.get("stop"),
                 )
             else:
+                # Insights require downloaded files, so check if file is playable (downloaded)
+                can_get_insights = (has_selection and num_selected == 1 and 
+                                  not self.is_long_operation_active and not self.is_audio_playing)
+                if can_get_insights and not is_connected:
+                    # When not connected, only allow insights for downloaded files
+                    file_iid = self.file_tree.selection()[0]
+                    local_path = self._get_local_filepath(file_iid)
+                    can_get_insights = os.path.exists(local_path)
+                elif can_get_insights:
+                    # When connected, allow insights for any selected file
+                    can_get_insights = True
+                
                 self.toolbar_insights_button.configure(
                     text="Get Insights",
                     command=self.get_insights_selected_file_gui,
-                    state=(
-                        "normal"
-                        if is_connected
-                        and has_selection
-                        and num_selected == 1
-                        and not self.is_long_operation_active
-                        and not self.is_audio_playing
-                        else "disabled"
-                    ),
+                    state="normal" if can_get_insights else "disabled",
                     image=self.icons.get("insights", self.icons.get("play")),
                 )
-        if (
-            hasattr(self, "toolbar_delete_button")
-            and self.toolbar_delete_button.winfo_exists()
-        ):
-            if (
-                self.is_long_operation_active
-                and self.active_operation_name == "Deletion"
-            ):
+        if hasattr(self, "toolbar_delete_button") and self.toolbar_delete_button.winfo_exists():
+            if self.is_long_operation_active and self.active_operation_name == "Deletion":
                 self.toolbar_delete_button.configure(
                     text="Cancel Del.",
                     command=self.request_cancel_operation,
@@ -1436,23 +1328,29 @@ class HiDockToolGUI(
                     image=self.icons.get("stop"),
                 )
             else:
-                self.toolbar_delete_button.configure(
-                    text="Delete",
-                    command=self.delete_selected_files_gui,
-                    state=(
-                        "normal"
-                        if is_connected
-                        and has_selection
-                        and not self.is_long_operation_active
-                        and not self.is_audio_playing
-                        else "disabled"
-                    ),
-                    image=self.icons.get("delete"),
-                )
-        if (
-            hasattr(self, "toolbar_settings_button")
-            and self.toolbar_settings_button.winfo_exists()
-        ):
+                if is_connected:
+                    self.toolbar_delete_button.configure(
+                        text="Delete",
+                        command=self.delete_selected_files_gui,
+                        state=(
+                            "normal"
+                            if has_selection
+                            and not self.is_long_operation_active
+                            and not self.is_audio_playing
+                            else "disabled"
+                        ),
+                        image=self.icons.get("delete"),
+                        fg_color=None,  # Default color
+                    )
+                else:
+                    self.toolbar_delete_button.configure(
+                        text="Offline",
+                        command=None,
+                        state="disabled",
+                        image=self.icons.get("delete"),
+                        fg_color="gray",  # Gray to indicate offline
+                    )
+        if hasattr(self, "toolbar_settings_button") and self.toolbar_settings_button.winfo_exists():
             self.toolbar_settings_button.configure(state="normal")
 
     def _update_treeview_style(self):
@@ -1460,41 +1358,25 @@ class HiDockToolGUI(
         Applies styling to the `ttk.Treeview` widget to match the CustomTkinter theme.
         """
         if not (hasattr(self, "file_tree") and self.file_tree.winfo_exists()):
-            logger.debug(
-                "GUI", "_update_treeview_style", "file_tree not found, skipping."
-            )
+            logger.debug("GUI", "_update_treeview_style", "file_tree not found, skipping.")
             return
         style = ttk.Style()
         if not ctk.ThemeManager.theme:
-            logger.warning(
-                "GUI", "_update_treeview_style", "CTk ThemeManager.theme not populated."
-            )
+            logger.warning("GUI", "_update_treeview_style", "CTk ThemeManager.theme not populated.")
             return
         default_ctk_font = ctk.CTkFont()
-        font_family, base_size = default_ctk_font.cget("family"), default_ctk_font.cget(
-            "size"
-        )
+        font_family, base_size = default_ctk_font.cget("family"), default_ctk_font.cget("size")
         tree_font_size = max(10, base_size - 1)
         tree_font = (font_family, tree_font_size)
         heading_font_size = base_size
         heading_font = (font_family, heading_font_size, "bold")
         current_mode = ctk.get_appearance_mode()
         try:
-            frame_bg = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkFrame"]["fg_color"]
-            )
-            label_text_color = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkLabel"]["text_color"]
-            )
-            button_fg = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkButton"]["fg_color"]
-            )
-            button_hover = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkButton"]["hover_color"]
-            )
-            button_text = self.apply_appearance_mode_theme_color(
-                ctk.ThemeManager.theme["CTkButton"]["text_color"]
-            )
+            frame_bg = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
+            label_text_color = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
+            button_fg = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkButton"]["fg_color"])
+            button_hover = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkButton"]["hover_color"])
+            button_text = self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkButton"]["text_color"])
             heading_bg_candidate_1 = self.apply_appearance_mode_theme_color(
                 ctk.ThemeManager.theme["CTkFrame"].get("top_fg_color", frame_bg)
             )
@@ -1502,9 +1384,7 @@ class HiDockToolGUI(
                 ctk.ThemeManager.theme["CTkFrame"].get("border_color", frame_bg)
             )
             default_heading_bg = (
-                heading_bg_candidate_1
-                if heading_bg_candidate_1 != frame_bg
-                else heading_bg_candidate_2
+                heading_bg_candidate_1 if heading_bg_candidate_1 != frame_bg else heading_bg_candidate_2
             )
             tree_body_bg_color, tree_body_text_color = frame_bg, label_text_color
             tree_selected_bg_color, tree_selected_text_color = button_fg, button_text
@@ -1559,9 +1439,7 @@ class HiDockToolGUI(
                 arrowcolor=[
                     (
                         "active",
-                        self.apply_appearance_mode_theme_color(
-                            ctk.ThemeManager.theme["CTkLabel"]["text_color"]
-                        ),
+                        self.apply_appearance_mode_theme_color(ctk.ThemeManager.theme["CTkLabel"]["text_color"]),
                     )
                 ],
             )
@@ -1635,17 +1513,70 @@ class HiDockToolGUI(
         self.after(60, self._update_default_progressbar_colors)
         self.after(65, self._update_log_text_area_tag_colors)
 
+    def _show_cached_files_on_startup(self):
+        """Show cached files immediately on startup for better user experience."""
+        try:
+            cached_files = self.file_operations_manager.metadata_cache.get_all_metadata()
+            if cached_files:
+                logger.info(
+                    "GUI",
+                    "_show_cached_files_on_startup",
+                    f"Showing {len(cached_files)} cached files on startup",
+                )
+                
+                # Convert cached files to GUI format
+                files_dict = self._convert_cached_files_to_gui_format(cached_files)
+                
+                # Sort and display
+                sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
+                self._populate_treeview_from_data(sorted_files)
+                
+                # Update status to show cached mode
+                downloaded_count = len([f for f in files_dict if f.get("local_path") and os.path.exists(f["local_path"])])
+                self.update_status_bar(
+                    connection_status="Status: Disconnected",
+                    progress_text=f"Showing {len(cached_files)} cached files ({downloaded_count} playable)",
+                )
+                
+        except Exception as e:
+            logger.warning(
+                "GUI",
+                "_show_cached_files_on_startup",
+                f"Error showing cached files: {e}",
+            )
+    
+    def _convert_cached_files_to_gui_format(self, cached_files):
+        """Convert cached FileMetadata objects to GUI display format."""
+        files_dict = []
+        for i, f_info in enumerate(cached_files):
+            # Determine status: Downloaded if local file exists, On Device if cached but not downloaded
+            if f_info.local_path and os.path.exists(f_info.local_path):
+                gui_status = "Downloaded"
+            else:
+                gui_status = "On Device"
+            
+            files_dict.append({
+                "name": f_info.filename,
+                "length": f_info.size,
+                "duration": f_info.duration,
+                "createDate": (f_info.date_created.strftime("%Y/%m/%d") if f_info.date_created else "---"),
+                "createTime": (f_info.date_created.strftime("%H:%M:%S") if f_info.date_created else "---"),
+                "time": f_info.date_created,
+                "version": "0",  # Version 0 for cached files when not connected
+                "original_index": i + 1,
+                "gui_status": gui_status,
+                "local_path": f_info.local_path,
+                "checksum": f_info.checksum,
+            })
+        return files_dict
+
     def apply_appearance_mode_theme_color(self, color_tuple_or_str):
         """
         Helper to get the correct color from a (light_mode_color, dark_mode_color) tuple
         or string based on the current CustomTkinter appearance mode.
         """
         if isinstance(color_tuple_or_str, (list, tuple)):
-            return (
-                color_tuple_or_str[1]
-                if ctk.get_appearance_mode() == "Dark"
-                else color_tuple_or_str[0]
-            )
+            return color_tuple_or_str[1] if ctk.get_appearance_mode() == "Dark" else color_tuple_or_str[0]
         return color_tuple_or_str
 
     def create_widgets(self):
@@ -1687,13 +1618,20 @@ class HiDockToolGUI(
         files_frame.grid_rowconfigure(1, weight=1)
         files_header_frame = ctk.CTkFrame(files_frame, fg_color="transparent")
         files_header_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 2))
-        self.status_storage_label_header = ctk.CTkLabel(
-            files_header_frame, text="Storage: ---", anchor="w"
-        )
+        self.status_storage_label_header = ctk.CTkLabel(files_header_frame, text="Storage: ---", anchor="w")
         self.status_storage_label_header.pack(side="left", padx=10, pady=2)
-        self.status_file_counts_label_header = ctk.CTkLabel(
-            files_header_frame, text="Files: 0 / 0", anchor="w"
+        
+        # Add disconnected indicator
+        self.disconnected_indicator = ctk.CTkLabel(
+            files_header_frame, 
+            text="🔌 DISCONNECTED", 
+            anchor="w",
+            text_color="orange",
+            font=("Arial", 12, "bold")
         )
+        # Initially hidden, will be shown when disconnected
+        # self.disconnected_indicator.pack(side="left", padx=10, pady=2)
+        self.status_file_counts_label_header = ctk.CTkLabel(files_header_frame, text="Files: 0 / 0", anchor="w")
         self.status_file_counts_label_header.pack(side="left", padx=10, pady=2)
         self.download_dir_button_header = ctk.CTkButton(
             files_header_frame,
@@ -1705,9 +1643,7 @@ class HiDockToolGUI(
             height=24,
             command=self._open_download_dir_in_explorer,
         )
-        self.download_dir_button_header.bind(
-            "<Button-3>", self._select_download_dir_from_header_button
-        )
+        self.download_dir_button_header.bind("<Button-3>", self._select_download_dir_from_header_button)
         self.download_dir_button_header.pack(side="right", padx=(10, 0), pady=2)
         self.clear_selection_button_header = ctk.CTkButton(
             files_header_frame,
@@ -1717,7 +1653,7 @@ class HiDockToolGUI(
             height=24,
             command=self.clear_selection_action,
         )
-        self.clear_selection_button_header.pack(side="right", padx=(2, 5), pady=2)
+        self.clear_selection_button_header.pack(side="right", padx=(2, 2), pady=2)
         self.select_all_button_header = ctk.CTkButton(
             files_header_frame,
             text="",
@@ -1727,23 +1663,54 @@ class HiDockToolGUI(
             command=self.select_all_files_action,
         )
         self.select_all_button_header.pack(side="right", padx=(2, 2), pady=2)
+
+        # Selection mode toggle button
+        self.selection_mode_toggle_button = ctk.CTkButton(
+            files_header_frame,
+            text="Single" if self.single_selection_mode_var.get() else "Multi",
+            width=50,
+            height=24,
+            command=self._toggle_selection_mode,
+            fg_color="green" if self.single_selection_mode_var.get() else "blue",
+        )
+        self.selection_mode_toggle_button.pack(side="right", padx=(2, 2), pady=2)
         self._create_file_tree_frame(files_frame)
+        # Apply initial selection mode and button visibility
+        self._update_selection_buttons_visibility()
         self.file_tree.bind("<Control-A>", lambda event: self.select_all_files_action())
         self.file_tree.bind("<Delete>", self._on_delete_key_press)
         self.file_tree.bind("<Return>", self._on_enter_key_press)
-        self.file_tree.bind(
-            "<Escape>", lambda event: self.cancel_selected_downloads_gui()
-        )
+        self.file_tree.bind("<Escape>", lambda event: self.cancel_selected_downloads_gui())
         self.file_tree.bind("<ButtonPress-1>", self._on_file_button1_press)
         self.file_tree.bind("<B1-Motion>", self._on_file_b1_motion)
         self.file_tree.bind("<ButtonRelease-1>", self._on_file_button1_release)
 
+    def _toggle_selection_mode(self):
+        """Toggle between single and multi selection modes."""
+        current_mode = self.single_selection_mode_var.get()
+        new_mode = not current_mode
+        self.single_selection_mode_var.set(new_mode)
+
+        # Update treeview selectmode
+        self._update_treeview_selectmode()
+
+        # Update toggle button appearance
+        if hasattr(self, "selection_mode_toggle_button") and self.selection_mode_toggle_button.winfo_exists():
+            self.selection_mode_toggle_button.configure(
+                text="Single" if new_mode else "Multi", fg_color="green" if new_mode else "blue"
+            )
+
+        # Auto-save selection mode preference
+        from config_and_logger import update_config_settings
+        update_config_settings({"single_selection_mode": new_mode})
+        
+        # Update menu states
+        self._update_menu_states()
+
     def _create_transcription_panel(self, parent_frame):
         """Creates the transcription and insights panel."""
         self.transcription_frame = ctk.CTkFrame(parent_frame)
-        self.transcription_frame.grid(
-            row=2, column=0, sticky="nsew", padx=0, pady=(0, 5)
-        )
+        # Don't grid initially - will be shown when panel is toggled
 
         # Content container (scrollable) - initially hidden
         self.transcription_content = ctk.CTkScrollableFrame(self.transcription_frame)
@@ -1759,9 +1726,7 @@ class HiDockToolGUI(
             anchor="w",
             font=("Arial", 12),
         )
-        self.transcription_status_label.pack(
-            side="left", fill="x", expand=True, padx=(0, 10)
-        )
+        self.transcription_status_label.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
         self.cancel_transcription_button = ctk.CTkButton(
             status_frame,
@@ -1800,14 +1765,10 @@ class HiDockToolGUI(
         self.insights_section = ctk.CTkFrame(self.transcription_content)
         self.insights_section.pack(fill="both", expand=True, padx=5, pady=5)
 
-        insights_label = ctk.CTkLabel(
-            self.insights_section, text="🧠 AI Insights", font=("Arial", 14, "bold")
-        )
+        insights_label = ctk.CTkLabel(self.insights_section, text="🧠 AI Insights", font=("Arial", 14, "bold"))
         insights_label.pack(anchor="w", padx=10, pady=(10, 5))
 
-        self.insights_textbox = ctk.CTkTextbox(
-            self.insights_section, height=150, wrap="word", font=("Arial", 11)
-        )
+        self.insights_textbox = ctk.CTkTextbox(self.insights_section, height=150, wrap="word", font=("Arial", 11))
         self.insights_textbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         # Initially hide the content sections
@@ -1826,48 +1787,44 @@ class HiDockToolGUI(
     def _toggle_transcription_panel(self):
         """Toggle visibility of the transcription panel."""
         if self.transcription_panel_visible:
-            # Hide the content
-            self.transcription_content.pack_forget()
+            # Hide the entire frame
+            self.transcription_frame.grid_forget()
             self.transcription_toolbar_toggle.configure(
                 text="Show Transcription & Insights",
                 image=self.icons.get("toggle_down", None),
             )
             self.transcription_panel_visible = False
         else:
-            # Show the content
-            self.transcription_content.pack(
-                fill="both", expand=True, padx=5, pady=(0, 5)
-            )
-            # Also ensure the sections within the content are visible
-            self.transcription_section.pack(fill="both", expand=True, padx=5, pady=5)
-            self.insights_section.pack(fill="both", expand=True, padx=5, pady=5)
+            # Show the frame and content
+            self.transcription_frame.grid(row=2, column=0, sticky="nsew", padx=0, pady=(0, 5))
+            self.transcription_content.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+            # Also ensure the sections within the content are visible if content is loaded
+            if self.transcription_content_loaded:
+                self.transcription_section.pack(fill="both", expand=True, padx=5, pady=5)
+                self.insights_section.pack(fill="both", expand=True, padx=5, pady=5)
             self.transcription_toolbar_toggle.configure(
                 text="Hide Transcription & Insights",
                 image=self.icons.get("toggle_up", None),
             )
             self.transcription_panel_visible = True
 
-        # Show toolbar if either panel is visible
+        # Update toolbar visibility
         self._update_panels_toolbar_visibility()
 
     def _toggle_visualizer_pin(self):
         """Toggle the pinned state of the audio visualizer."""
         self.visualizer_pinned = not self.visualizer_pinned
 
-        # Update config variable and save
+        # Update config variable and save efficiently
         self.visualizer_pinned_var.set(self.visualizer_pinned)
-        self.config["visualizer_pinned"] = self.visualizer_pinned
-        save_config(self.config)
+        from config_and_logger import update_config_settings
+        update_config_settings({"visualizer_pinned": self.visualizer_pinned})
 
         # Update pin button appearance
         if self.visualizer_pinned:
-            self.visualizer_pin_button.configure(
-                text="Unpin", fg_color="green", hover_color="darkgreen"
-            )
+            self.visualizer_pin_button.configure(text="Unpin", fg_color="green", hover_color="darkgreen")
         else:
-            self.visualizer_pin_button.configure(
-                text="Pin", fg_color="gray50", hover_color="gray40"
-            )
+            self.visualizer_pin_button.configure(text="Pin", fg_color="gray50", hover_color="gray40")
 
         # Update visibility logic
         self._update_visualizer_visibility()
@@ -1905,16 +1862,12 @@ class HiDockToolGUI(
                 waveform_viz.canvas.draw()
 
         except Exception as e:
-            logger.error(
-                "GUI", "_show_pinned_placeholder", f"Error showing placeholder: {e}"
-            )
+            logger.error("GUI", "_show_pinned_placeholder", f"Error showing placeholder: {e}")
 
     def _create_panels_toolbar(self, parent_frame):
         """Creates a unified toolbar for controlling transcription and audio visualization panels."""
         self.panels_toolbar_frame = ctk.CTkFrame(parent_frame)
-        self.panels_toolbar_frame.grid(
-            row=1, column=0, sticky="ew", padx=0, pady=(0, 2)
-        )
+        self.panels_toolbar_frame.grid(row=1, column=0, sticky="ew", padx=0, pady=(0, 2))
 
         # Create buttons with icons
         self._load_panel_icons()
@@ -1959,12 +1912,11 @@ class HiDockToolGUI(
 
         # Update pin button state based on config
         if self.visualizer_pinned:
-            self.visualizer_pin_button.configure(
-                text="Unpin", fg_color="green", hover_color="darkgreen"
-            )
+            self.visualizer_pin_button.configure(text="Unpin", fg_color="green", hover_color="darkgreen")
 
-        # Initially hide the toolbar since both panels start hidden
-        self.panels_toolbar_frame.grid_forget()
+        # Show the toolbar initially so users can access toggle buttons
+        # The toolbar will be hidden only if both panels are hidden AND visualizer is not pinned
+        self._update_panels_toolbar_visibility()
 
     def _load_panel_icons(self):
         """Load icons for panel controls."""
@@ -1976,9 +1928,7 @@ class HiDockToolGUI(
             info_circle_path = os.path.join(icons_dir, "info-circle.png")
             if os.path.exists(info_circle_path):
                 info_image = Image.open(info_circle_path)
-                self.icons["info_circle"] = ctk.CTkImage(
-                    light_image=info_image, dark_image=info_image, size=icon_size
-                )
+                self.icons["info_circle"] = ctk.CTkImage(light_image=info_image, dark_image=info_image, size=icon_size)
 
             # Toggle icons for panels
             toggle_down_path = os.path.join(icons_dir, "toggle-down.png")
@@ -2003,30 +1953,17 @@ class HiDockToolGUI(
             pin_path = os.path.join(icons_dir, "pin.png")
             if os.path.exists(pin_path):
                 pin_image = Image.open(pin_path)
-                self.icons["pin"] = ctk.CTkImage(
-                    light_image=pin_image, dark_image=pin_image, size=icon_size
-                )
+                self.icons["pin"] = ctk.CTkImage(light_image=pin_image, dark_image=pin_image, size=icon_size)
 
         except Exception as e:
-            logger.warning(
-                "GUI", "_load_panel_icons", f"Error loading panel icons: {e}"
-            )
+            logger.warning("GUI", "_load_panel_icons", f"Error loading panel icons: {e}")
 
     def _update_panels_toolbar_visibility(self):
         """Show or hide the panels toolbar based on whether any panels are visible."""
         try:
-            if (
-                self.transcription_panel_visible
-                or self.visualizer_expanded
-                or self.visualizer_pinned
-            ):
-                # Show the toolbar
-                self.panels_toolbar_frame.grid(
-                    row=1, column=0, sticky="ew", padx=0, pady=(0, 2)
-                )
-            else:
-                # Hide the toolbar
-                self.panels_toolbar_frame.grid_forget()
+            # Always show the toolbar so users can access toggle buttons
+            # Only hide if explicitly requested (which we don't do currently)
+            self.panels_toolbar_frame.grid(row=1, column=0, sticky="ew", padx=0, pady=(0, 2))
         except Exception as e:
             logger.error(
                 "GUI",
@@ -2038,9 +1975,7 @@ class HiDockToolGUI(
         """Get insights for the selected file and display in the integrated panel."""
         selected_iids = self.file_tree.selection()
         if not selected_iids:
-            messagebox.showinfo(
-                "No Selection", "Please select a file to analyze.", parent=self
-            )
+            messagebox.showinfo("No Selection", "Please select a file to analyze.", parent=self)
             return
 
         if len(selected_iids) > 1:
@@ -2053,13 +1988,9 @@ class HiDockToolGUI(
 
         # Get the selected file details
         file_iid = selected_iids[0]
-        file_detail = next(
-            (f for f in self.displayed_files_details if f["name"] == file_iid), None
-        )
+        file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
         if not file_detail:
-            messagebox.showerror(
-                "File Error", "Selected file details not found.", parent=self
-            )
+            messagebox.showerror("File Error", "Selected file details not found.", parent=self)
             return
 
         # Call the existing transcription method but capture results for UI display
@@ -2072,13 +2003,9 @@ class HiDockToolGUI(
 
         # from transcription_module import process_audio_file_for_insights  # Future: for audio insights feature
 
-        file_detail = next(
-            (f for f in self.displayed_files_details if f["name"] == file_iid), None
-        )
+        file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
         if not file_detail:
-            messagebox.showerror(
-                "Transcription Error", "File details not found.", parent=self
-            )
+            messagebox.showerror("Transcription Error", "File details not found.", parent=self)
             return
 
         local_filepath = self._get_local_filepath(file_detail["name"])
@@ -2107,17 +2034,12 @@ class HiDockToolGUI(
         self._update_panels_toolbar_visibility()
 
         # Cancel any existing transcription
-        if (
-            self.current_transcription_thread
-            and self.current_transcription_thread.is_alive()
-        ):
+        if self.current_transcription_thread and self.current_transcription_thread.is_alive():
             self._cancel_transcription()
 
         # Start transcription in background thread
         self._set_long_operation_active_state(True, "Transcription")
-        self.update_status_bar(
-            progress_text=f"Transcribing {file_detail['name']} with Gemini..."
-        )
+        self.update_status_bar(progress_text=f"Transcribing {file_detail['name']} with Gemini...")
 
         # Reset cancellation flag
         self.transcription_cancelled = False
@@ -2162,13 +2084,8 @@ class HiDockToolGUI(
     def _cancel_transcription(self):
         """Cancel the current transcription process."""
         self.transcription_cancelled = True
-        if (
-            self.current_transcription_thread
-            and self.current_transcription_thread.is_alive()
-        ):
-            logger.info(
-                "GUI", "_cancel_transcription", "Transcription cancellation requested"
-            )
+        if self.current_transcription_thread and self.current_transcription_thread.is_alive():
+            logger.info("GUI", "_cancel_transcription", "Transcription cancellation requested")
             # Update UI immediately
             self.after(0, self._on_transcription_cancelled)
 
@@ -2178,9 +2095,7 @@ class HiDockToolGUI(
         self.update_status_bar(ready_text="Transcription cancelled")
 
         # Update UI
-        self.transcription_status_label.configure(
-            text="❌ Transcription cancelled by user"
-        )
+        self.transcription_status_label.configure(text="❌ Transcription cancelled by user")
         self.cancel_transcription_button.pack_forget()
         self.transcription_progress.stop()
         self.transcription_progress.pack_forget()
@@ -2215,27 +2130,17 @@ class HiDockToolGUI(
                 "region": getattr(self, f"ai_{provider}_region_var", None),
             }
             # Clean up None values
-            config = {
-                k: v.get() if hasattr(v, "get") else v
-                for k, v in config.items()
-                if v is not None
-            }
+            config = {k: v.get() if hasattr(v, "get") else v for k, v in config.items() if v is not None}
             language = self.ai_language_var.get()
 
             # Since process_audio_file_for_insights is async, we need to run it in an event loop
-            results = asyncio.run(
-                process_audio_file_for_insights(
-                    file_path, provider, api_key, config, language
-                )
-            )
+            results = asyncio.run(process_audio_file_for_insights(file_path, provider, api_key, config, language))
 
             # Check for cancellation before updating UI
             if self.transcription_cancelled:
                 return
 
-            self.after(
-                0, self._on_transcription_complete_for_panel, results, original_filename
-            )
+            self.after(0, self._on_transcription_complete_for_panel, results, original_filename)
         except Exception as e:
             if not self.transcription_cancelled:
                 logger.error(
@@ -2271,14 +2176,10 @@ class HiDockToolGUI(
 
             self.insights_textbox.configure(state="normal")
             self.insights_textbox.delete("1.0", "end")
-            self.insights_textbox.insert(
-                "1.0", "Insights unavailable due to transcription error."
-            )
+            self.insights_textbox.insert("1.0", "Insights unavailable due to transcription error.")
             self.insights_textbox.configure(state="disabled")
 
-            self.update_status_bar(
-                progress_text=f"Transcription failed for {original_filename}."
-            )
+            self.update_status_bar(progress_text=f"Transcription failed for {original_filename}.")
         else:
             # Show successful results
             transcription_text = results.get("transcription", "No transcription found.")
@@ -2302,9 +2203,7 @@ class HiDockToolGUI(
             self.insights_textbox.insert("1.0", insights_formatted)
             self.insights_textbox.configure(state="disabled")
 
-            self.update_status_bar(
-                progress_text=f"Transcription complete for {original_filename}."
-            )
+            self.update_status_bar(progress_text=f"Transcription complete for {original_filename}.")
 
             # Mark content as loaded
             self.transcription_content_loaded = True
@@ -2326,9 +2225,7 @@ class HiDockToolGUI(
 
         # Meeting Details
         meeting_details = insights.get("meeting_details", {})
-        if meeting_details and any(
-            v != "N/A" and v != 0 for v in meeting_details.values()
-        ):
+        if meeting_details and any(v != "N/A" and v != 0 for v in meeting_details.values()):
             formatted += "📅 MEETING DETAILS:\n"
             if meeting_details.get("date", "N/A") != "N/A":
                 formatted += f"  Date: {meeting_details.get('date', 'N/A')}\n"
@@ -2342,9 +2239,7 @@ class HiDockToolGUI(
 
         # Sentiment
         if insights.get("overall_sentiment_meeting", "N/A") != "N/A":
-            formatted += (
-                f"😊 SENTIMENT: {insights.get('overall_sentiment_meeting', 'N/A')}\n\n"
-            )
+            formatted += f"😊 SENTIMENT: {insights.get('overall_sentiment_meeting', 'N/A')}\n\n"
 
         # Action Items
         action_items = insights.get("action_items", [])
@@ -2356,9 +2251,7 @@ class HiDockToolGUI(
 
         # Project Context
         if insights.get("project_context", "N/A") != "N/A":
-            formatted += (
-                f"🔗 PROJECT CONTEXT:\n{insights.get('project_context', 'N/A')}\n"
-            )
+            formatted += f"🔗 PROJECT CONTEXT:\n{insights.get('project_context', 'N/A')}\n"
 
         return formatted if formatted else "No detailed insights available."
 
@@ -2375,9 +2268,7 @@ class HiDockToolGUI(
             width=90,
         )
         self.clear_log_button.pack(side="left", padx=(0, 10))
-        ctk.CTkLabel(log_controls_sub_frame, text="Level:").pack(
-            side="left", padx=(0, 5)
-        )
+        ctk.CTkLabel(log_controls_sub_frame, text="Level:").pack(side="left", padx=(0, 5))
         self.log_section_level_combo = ctk.CTkComboBox(
             log_controls_sub_frame,
             variable=self.gui_log_filter_level_var,
@@ -2395,22 +2286,16 @@ class HiDockToolGUI(
             width=110,
         )
         self.download_logs_button.pack(side="left", padx=(0, 0))
-        self.log_text_area = ctk.CTkTextbox(
-            self.log_frame, height=100, state="disabled", wrap="word", border_spacing=3
-        )
+        self.log_text_area = ctk.CTkTextbox(self.log_frame, height=100, state="disabled", wrap="word", border_spacing=3)
         self.log_text_area.pack(fill="both", expand=True, padx=5, pady=(0, 5))
         self._update_log_text_area_tag_colors()
 
     def _create_audio_visualizer_panel(self, parent_frame):
         """Creates the audio visualizer panel."""
         self.audio_visualizer_frame = ctk.CTkFrame(parent_frame)
-        self.audio_visualizer_frame.grid(
-            row=4, column=0, sticky="ew", padx=0, pady=(0, 5)
-        )
+        # Don't grid initially - will be shown when panel is toggled
 
-        self.audio_visualizer_widget = AudioVisualizationWidget(
-            self.audio_visualizer_frame, height=150
-        )
+        self.audio_visualizer_widget = AudioVisualizationWidget(self.audio_visualizer_frame, height=150)
 
         # Connect audio player to visualization widget for speed controls
         self.audio_visualizer_widget.set_audio_player(self.audio_player)
@@ -2428,11 +2313,7 @@ class HiDockToolGUI(
         min_h = 600
         try:
             min_w = self.toolbar_frame.winfo_reqwidth() + 100
-            min_h = (
-                self.toolbar_frame.winfo_reqheight()
-                + self.status_bar_frame.winfo_reqheight()
-                + 200
-            )
+            min_h = self.toolbar_frame.winfo_reqheight() + self.status_bar_frame.winfo_reqheight() + 200
         except (AttributeError, tkinter.TclError):
             pass
         self.minsize(min_w, min_h)
@@ -2441,9 +2322,9 @@ class HiDockToolGUI(
         """Check for missing dependencies and show user-friendly warnings."""
         try:
             import shutil
+
             # subprocess already imported at module level - no need to import again
             # from tkinter import messagebox  # Already imported at module level
-
             # Check for ffmpeg
             ffmpeg_available = False
             try:
@@ -2477,9 +2358,7 @@ class HiDockToolGUI(
                 self._show_ffmpeg_warning()
 
         except Exception as e:
-            logger.error(
-                "MainWindow", "_check_dependencies", f"Error checking dependencies: {e}"
-            )
+            logger.error("MainWindow", "_check_dependencies", f"Error checking dependencies: {e}")
 
     def _show_ffmpeg_warning(self):
         """Show a user-friendly warning about missing ffmpeg dependency."""
@@ -2579,10 +2458,7 @@ You can dismiss this warning and continue using the application with limited aud
                 f"{position.total_time:.1f}s ({position.percentage:.1f}%)",
             )
 
-            if (
-                hasattr(self, "audio_visualizer_widget")
-                and self.audio_visualizer_widget
-            ):
+            if hasattr(self, "audio_visualizer_widget") and self.audio_visualizer_widget:
                 # Only update position if the currently selected file matches the playing file
                 current_track = self.audio_player.get_current_track()
                 if current_track and self.current_playing_filename_for_replay:
@@ -2590,10 +2466,7 @@ You can dismiss this warning and continue using the application with limited aud
                     selected_iids = self.file_tree.selection()
                     if selected_iids:
                         selected_filename = selected_iids[-1]  # Get last selected file
-                        if (
-                            selected_filename
-                            == self.current_playing_filename_for_replay
-                        ):
+                        if selected_filename == self.current_playing_filename_for_replay:
                             # Only update position if visualizing the currently playing file
                             self.audio_visualizer_widget.update_position(position)
                         else:
@@ -2617,16 +2490,10 @@ You can dismiss this warning and continue using the application with limited aud
         try:
             from audio_player_enhanced import PlaybackState
 
-            if (
-                hasattr(self, "audio_visualizer_widget")
-                and self.audio_visualizer_widget
-            ):
+            if hasattr(self, "audio_visualizer_widget") and self.audio_visualizer_widget:
                 if state == PlaybackState.PLAYING:
                     # Auto-show visualization when audio starts playing
-                    if (
-                        hasattr(self, "visualizer_expanded")
-                        and not self.visualizer_expanded
-                    ):
+                    if hasattr(self, "visualizer_expanded") and not self.visualizer_expanded:
                         self.visualizer_expanded = True
                         self._update_visualizer_visibility()
 
@@ -2640,13 +2507,9 @@ You can dismiss this warning and continue using the application with limited aud
                             (
                                 waveform_data,
                                 sample_rate,
-                            ) = AudioProcessor.extract_waveform_data(
-                                current_track.filepath, max_points=1024
-                            )
+                            ) = AudioProcessor.extract_waveform_data(current_track.filepath, max_points=1024)
                             if len(waveform_data) > 0:
-                                self.audio_visualizer_widget.start_spectrum_analysis(
-                                    waveform_data, sample_rate
-                                )
+                                self.audio_visualizer_widget.start_spectrum_analysis(waveform_data, sample_rate)
                         except Exception as spectrum_error:
                             logger.warning(
                                 "MainWindow",
@@ -2681,17 +2544,18 @@ You can dismiss this warning and continue using the application with limited aud
     def _update_visualizer_visibility(self):
         """Update the visibility of the audio visualizer."""
         try:
-            if self.visualizer_expanded:
-                self.audio_visualizer_widget.pack(
-                    fill="x", expand=False, padx=5, pady=(0, 5)
-                )
+            if self.visualizer_expanded or self.visualizer_pinned:
+                # Show the frame and widget
+                self.audio_visualizer_frame.grid(row=4, column=0, sticky="ew", padx=0, pady=(0, 5))
+                self.audio_visualizer_widget.pack(fill="x", expand=False, padx=5, pady=(0, 5))
                 if hasattr(self, "visualizer_toolbar_toggle"):
                     self.visualizer_toolbar_toggle.configure(
                         text="Hide Audio Visualization",
                         image=self.icons.get("toggle_up", None),
                     )
             else:
-                self.audio_visualizer_widget.pack_forget()
+                # Hide the entire frame
+                self.audio_visualizer_frame.grid_forget()
                 if hasattr(self, "visualizer_toolbar_toggle"):
                     self.visualizer_toolbar_toggle.configure(
                         text="Show Audio Visualization",
@@ -2711,11 +2575,7 @@ You can dismiss this warning and continue using the application with limited aud
 
             if not selected_iids:
                 # No file selected - hide visualization section unless pinned
-                if (
-                    hasattr(self, "visualizer_expanded")
-                    and self.visualizer_expanded
-                    and not self.visualizer_pinned
-                ):
+                if hasattr(self, "visualizer_expanded") and self.visualizer_expanded and not self.visualizer_pinned:
                     self.visualizer_expanded = False
                     self._update_visualizer_visibility()
                 elif self.visualizer_pinned and not self.visualizer_expanded:
@@ -2725,14 +2585,14 @@ You can dismiss this warning and continue using the application with limited aud
                     self._show_pinned_placeholder()
                 return
 
-            # Get the last selected file (for multiple selection)
-            last_selected_iid = selected_iids[-1]
+            # Only process single selection to avoid loading multiple waveforms
+            if len(selected_iids) != 1:
+                return
+
+            # Get the selected file
+            selected_iid = selected_iids[0]
             file_detail = next(
-                (
-                    f
-                    for f in self.displayed_files_details
-                    if f["name"] == last_selected_iid
-                ),
+                (f for f in self.displayed_files_details if f["name"] == selected_iid),
                 None,
             )
 
@@ -2744,26 +2604,38 @@ You can dismiss this warning and continue using the application with limited aud
 
             # Only show visualization section if file is downloaded
             if os.path.exists(local_filepath):
-                # File is downloaded - show visualization and load waveform
-                if (
-                    hasattr(self, "visualizer_expanded")
-                    and not self.visualizer_expanded
-                ):
+                # File is downloaded - show visualization and load waveform if not pinned
+                if hasattr(self, "visualizer_expanded") and not self.visualizer_expanded and not self.visualizer_pinned:
                     self.visualizer_expanded = True
                     self._update_visualizer_visibility()
 
                 if hasattr(self, "audio_visualizer_widget"):
-                    self.audio_visualizer_widget.load_audio(local_filepath)
+                    # Only load if it's a different file to avoid redundant loading
+                    if not hasattr(self, "_last_loaded_waveform_file") or self._last_loaded_waveform_file != filename:
+                        # Show immediate loading feedback
+                        self._show_waveform_loading_state(filename)
+
+                        # Load waveform in background thread for better performance
+                        import threading
+
+                        threading.Thread(
+                            target=self._load_waveform_background, args=(local_filepath, filename), daemon=True
+                        ).start()
+
+                        self._last_loaded_waveform_file = filename
 
                     # If this file is not currently playing, clear position indicators
                     if filename != self.current_playing_filename_for_replay:
                         # Clear position indicators for non-playing files
                         self.audio_visualizer_widget.clear_position_indicators()
             else:
-                # File not downloaded - hide visualization section
-                if hasattr(self, "visualizer_expanded") and self.visualizer_expanded:
+                # File not downloaded - hide visualization section unless pinned
+                if hasattr(self, "visualizer_expanded") and self.visualizer_expanded and not self.visualizer_pinned:
                     self.visualizer_expanded = False
                     self._update_visualizer_visibility()
+                elif self.visualizer_pinned:
+                    # Show pinned placeholder
+                    self._show_pinned_placeholder()
 
         except Exception as e:
             logger.error(
@@ -2771,6 +2643,122 @@ You can dismiss this warning and continue using the application with limited aud
                 "_update_waveform_for_selection",
                 f"Error updating waveform: {e}",
             )
+
+    def _show_waveform_loading_state(self, filename):
+        """Show immediate loading feedback in the waveform visualizer."""
+        try:
+            if hasattr(self, "audio_visualizer_widget") and hasattr(
+                self.audio_visualizer_widget, "waveform_visualizer"
+            ):
+                # Show loading message in the waveform visualizer
+                waveform_viz = self.audio_visualizer_widget.waveform_visualizer
+                waveform_viz.ax.clear()
+                waveform_viz.ax.text(
+                    0.5,
+                    0.5,
+                    f"Loading waveform...\n{os.path.basename(filename)}",
+                    ha="center",
+                    va="center",
+                    color="#4A90E2",
+                    fontsize=12,
+                    transform=waveform_viz.ax.transAxes,
+                )
+                waveform_viz.ax.set_xlim(0, 1)
+                waveform_viz.ax.set_ylim(-1, 1)
+                waveform_viz.ax.set_facecolor(waveform_viz.background_color)
+                waveform_viz.canvas.draw()
+                logger.debug("WaveformLoader", "_show_waveform_loading_state", f"Loading message shown for {filename}")
+        except Exception as e:
+            logger.error("MainWindow", "_show_waveform_loading_state", f"Error showing loading state: {e}")
+
+    def _load_waveform_background(self, filepath, filename):
+        """Load waveform in background thread and update UI when complete."""
+        try:
+            # This runs in background thread - don't touch GUI directly
+            logger.info("WaveformLoader", "_load_waveform_background", f"Loading waveform for {filename}")
+
+            # Use the fixed AudioProcessor method instead of librosa directly
+            from audio_player_enhanced import AudioProcessor
+
+            # Load audio data in background (this is the slow part)
+            try:
+                y, sr = AudioProcessor.extract_waveform_data(filepath, max_points=2000)
+
+                if len(y) == 0:
+                    raise Exception("No waveform data extracted")
+
+                # Schedule GUI update on main thread with pre-processed data
+                self.after(0, self._update_waveform_with_data, y, sr, filename)
+
+            except Exception as load_error:
+                logger.error("WaveformLoader", "_load_waveform_background", f"Error loading audio: {load_error}")
+                self.after(0, self._handle_waveform_load_error, filename, str(load_error))
+
+        except Exception as e:
+            logger.error("MainWindow", "_load_waveform_background", f"Error in background loading: {e}")
+            # Schedule error handling on main thread
+            self.after(0, self._handle_waveform_load_error, filename, str(e))
+
+    def _update_waveform_with_data(self, audio_data, sample_rate, filename):
+        """Update waveform visualization with pre-loaded data (called on main thread)."""
+        try:
+            if hasattr(self, "audio_visualizer_widget") and hasattr(
+                self.audio_visualizer_widget, "waveform_visualizer"
+            ):
+                # Check if this is still the selected file
+                current_selection = self.file_tree.selection()
+                if len(current_selection) == 1 and current_selection[0] == filename:
+                    # Update visualization with pre-processed data
+                    waveform_viz = self.audio_visualizer_widget.waveform_visualizer
+                    waveform_viz.ax.clear()
+
+                    # Create time axis
+                    time_axis = np.linspace(0, len(audio_data) / sample_rate, len(audio_data))
+
+                    # Plot waveform
+                    waveform_viz.ax.plot(time_axis, audio_data, color="#4A90E2", linewidth=0.5)
+                    waveform_viz.ax.set_xlim(0, time_axis[-1])
+                    waveform_viz.ax.set_ylim(-1, 1)
+                    waveform_viz.ax.set_xlabel("Time (s)")
+                    waveform_viz.ax.set_ylabel("Amplitude")
+                    waveform_viz.ax.set_facecolor(waveform_viz.background_color)
+                    waveform_viz.canvas.draw()
+
+                    logger.info("WaveformLoader", "_update_waveform_with_data", f"Waveform updated for {filename}")
+                else:
+                    logger.debug(
+                        "WaveformLoader",
+                        "_update_waveform_with_data",
+                        f"Skipping update - selection changed from {filename}",
+                    )
+        except Exception as e:
+            logger.error("MainWindow", "_update_waveform_with_data", f"Error updating waveform: {e}")
+            self._handle_waveform_load_error(filename, str(e))
+
+    def _handle_waveform_load_error(self, filename, error_msg):
+        """Handle waveform loading errors."""
+        try:
+            if hasattr(self, "audio_visualizer_widget") and hasattr(
+                self.audio_visualizer_widget, "waveform_visualizer"
+            ):
+                waveform_viz = self.audio_visualizer_widget.waveform_visualizer
+                waveform_viz.ax.clear()
+                waveform_viz.ax.text(
+                    0.5,
+                    0.5,
+                    f"Error loading waveform\n{os.path.basename(filename)}\n{error_msg[:50]}...",
+                    ha="center",
+                    va="center",
+                    color="#E74C3C",
+                    fontsize=10,
+                    transform=waveform_viz.ax.transAxes,
+                )
+                waveform_viz.ax.set_xlim(0, 1)
+                waveform_viz.ax.set_ylim(-1, 1)
+                waveform_viz.ax.set_facecolor(waveform_viz.background_color)
+                waveform_viz.canvas.draw()
+        except Exception as e:
+            logger.error("MainWindow", "_handle_waveform_load_error", f"Error handling waveform error: {e}")
 
     def _play_local_file(self, local_filepath):
         """Loads and plays a local file, and updates the visualizer."""
@@ -2796,29 +2784,20 @@ You can dismiss this warning and continue using the application with limited aud
             self.is_audio_playing = False
 
             # Clear position indicators in visualization when stopping playback
-            if (
-                hasattr(self, "audio_visualizer_widget")
-                and self.audio_visualizer_widget
-            ):
+            if hasattr(self, "audio_visualizer_widget") and self.audio_visualizer_widget:
                 self.audio_visualizer_widget.clear_position_indicators()
 
             # Update the specific file's status in treeview without full refresh
             if self.current_playing_filename_for_replay:
                 # Find the file detail to determine the correct status
                 file_detail = next(
-                    (
-                        f
-                        for f in self.displayed_files_details
-                        if f["name"] == self.current_playing_filename_for_replay
-                    ),
+                    (f for f in self.displayed_files_details if f["name"] == self.current_playing_filename_for_replay),
                     None,
                 )
 
                 if file_detail:
                     # Determine the appropriate status after stopping playback
-                    new_status = (
-                        "Downloaded" if file_detail.get("local_path") else "On Device"
-                    )
+                    new_status = "Downloaded" if file_detail.get("local_path") else "On Device"
 
                     # Determine appropriate tags (remove "playing" tag)
                     tags = []
@@ -2837,12 +2816,8 @@ You can dismiss this warning and continue using the application with limited aud
             self._update_menu_states()
 
         except Exception as e:
-            logger.error(
-                "GUI", "stop_audio_playback_gui", f"Error stopping playback: {e}"
-            )
-            messagebox.showerror(
-                "Playback Error", f"Error stopping playback: {e}", parent=self
-            )
+            logger.error("GUI", "stop_audio_playback_gui", f"Error stopping playback: {e}")
+            messagebox.showerror("Playback Error", f"Error stopping playback: {e}", parent=self)
 
     def pause_audio_playback_gui(self):
         """Pauses/resumes audio playback."""
@@ -2862,9 +2837,7 @@ You can dismiss this warning and continue using the application with limited aud
                 "pause_audio_playback_gui",
                 f"Error pausing/resuming playback: {e}",
             )
-            messagebox.showerror(
-                "Playback Error", f"Error pausing/resuming playback: {e}", parent=self
-            )
+            messagebox.showerror("Playback Error", f"Error pausing/resuming playback: {e}", parent=self)
 
     def _stop_audio_playback(self):
         """Internal method for stopping audio playback (used by toolbar button)."""
@@ -2875,9 +2848,7 @@ You can dismiss this warning and continue using the application with limited aud
         Downloads a single file and triggers playback upon successful completion.
         """
         # Show brief status message instead of interrupting dialog
-        self.update_status_bar(
-            progress_text=f"Downloading '{filename}' for playback..."
-        )
+        self.update_status_bar(progress_text=f"Downloading '{filename}' for playback...")
 
         def on_playback_download_complete(operation):
             """Callback for the file operation manager."""
@@ -2902,22 +2873,16 @@ You can dismiss this warning and continue using the application with limited aud
                     ),
                 )
 
-        self.file_operations_manager.queue_batch_download(
-            [filename], on_playback_download_complete
-        )
+        self.file_operations_manager.queue_batch_download([filename], on_playback_download_complete)
 
     def play_selected_audio_gui(self):
         selected_iids = self.file_tree.selection()
         if len(selected_iids) != 1:
-            messagebox.showinfo(
-                "Playback", "Please select a single audio file to play.", parent=self
-            )
+            messagebox.showinfo("Playback", "Please select a single audio file to play.", parent=self)
             return
 
         file_iid = selected_iids[0]
-        file_detail = next(
-            (f for f in self.displayed_files_details if f["name"] == file_iid), None
-        )
+        file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
         if not file_detail:
             return
 
@@ -2926,7 +2891,17 @@ You can dismiss this warning and continue using the application with limited aud
         if os.path.exists(local_filepath):
             self._play_local_file(local_filepath)
         else:
-            self._download_for_playback_and_play(filename, local_filepath)
+            # Check if device is connected for download
+            is_connected = self.device_manager.device_interface.is_connected()
+            if is_connected:
+                self._download_for_playback_and_play(filename, local_filepath)
+            else:
+                messagebox.showinfo(
+                    "File Not Available", 
+                    f"'{filename}' is not downloaded and device is disconnected.\n\n"
+                    "Please connect the device to download the file, or select a downloaded file.",
+                    parent=self
+                )
 
     def on_closing(self):
         """
@@ -2951,31 +2926,23 @@ You can dismiss this warning and continue using the application with limited aud
         self.config["selected_vid"] = self.selected_vid_var.get()
         self.config["selected_pid"] = self.selected_pid_var.get()
         self.config["target_interface"] = self.target_interface_var.get()
-        self.config[
-            "recording_check_interval_s"
-        ] = self.recording_check_interval_var.get()
-        self.config[
-            "default_command_timeout_ms"
-        ] = self.default_command_timeout_ms_var.get()
+        self.config["recording_check_interval_s"] = self.recording_check_interval_var.get()
+        self.config["default_command_timeout_ms"] = self.default_command_timeout_ms_var.get()
         self.config["file_stream_timeout_s"] = self.file_stream_timeout_s_var.get()
         self.config["auto_refresh_files"] = self.auto_refresh_files_var.get()
         self.config["auto_refresh_interval_s"] = self.auto_refresh_interval_s_var.get()
-        self.config[
-            "quit_without_prompt_if_connected"
-        ] = self.quit_without_prompt_var.get()
+        self.config["quit_without_prompt_if_connected"] = self.quit_without_prompt_var.get()
         self.config["appearance_mode"] = self.appearance_mode_var.get()
         self.config["color_theme"] = self.color_theme_var.get()
         self.config["suppress_console_output"] = self.suppress_console_output_var.get()
         self.config["suppress_gui_log_output"] = self.suppress_gui_log_output_var.get()
         self.config["gui_log_filter_level"] = self.gui_log_filter_level_var.get()
-        self.config["treeview_columns_display_order"] = ",".join(
-            self.file_tree["displaycolumns"]
-        )
+        self.config["treeview_columns_display_order"] = ",".join(self.file_tree["displaycolumns"])
         self.config["logs_pane_visible"] = self.logs_visible_var.get()
         self.config["loop_playback"] = self.loop_playback_var.get()
         self.config["playback_volume"] = self.volume_var.get()
-        self.config["treeview_sort_col_id"] = self.saved_treeview_sort_column
-        self.config["treeview_sort_descending"] = self.saved_treeview_sort_reverse
+        self.config["treeview_sort_col_id"] = self.treeview_sort_column or self.saved_treeview_sort_column
+        self.config["treeview_sort_descending"] = self.treeview_sort_reverse
         log_colors_to_save = {}
         for level in Logger.LEVELS:
             light_var = getattr(self, f"log_color_{level.lower()}_light_var", None)
@@ -2988,12 +2955,18 @@ You can dismiss this warning and continue using the application with limited aud
         self.config["icon_fallback_color_1"] = self.icon_fallback_color_1
         self.config["icon_fallback_color_2"] = self.icon_fallback_color_2
         self.config["icon_size_str"] = self.icon_size_str
-        save_config(self.config)
+        self.config["single_selection_mode"] = self.single_selection_mode_var.get()
+        # Only save session-specific settings on shutdown
+        # User preferences should already be saved when changed
+        from config_and_logger import update_config_settings
+        update_config_settings({
+            "treeview_columns_display_order": ",".join(self.file_tree["displaycolumns"]) if hasattr(self, "file_tree") and self.file_tree.winfo_exists() else self.config.get("treeview_columns_display_order", "name,size,duration,date,time,status"),
+            "treeview_sort_col_id": self.treeview_sort_column or self.saved_treeview_sort_column,
+            "treeview_sort_descending": self.treeview_sort_reverse
+        })
         if self.device_manager.device_interface.is_connected():
             self.device_manager.device_interface.disconnect()
-        if self.current_playing_temp_file and os.path.exists(
-            self.current_playing_temp_file
-        ):
+        if self.current_playing_temp_file and os.path.exists(self.current_playing_temp_file):
             try:
                 os.remove(self.current_playing_temp_file)
             except OSError as e:
@@ -3005,15 +2978,23 @@ You can dismiss this warning and continue using the application with limited aud
         self.destroy()
         logger.info("GUI", "on_closing", "Application shutdown complete.")
         sys.exit(0)
+    
+    def _on_window_configure(self, event):
+        """Handle window resize/move events with debouncing."""
+        if event.widget == self:  # Only for main window
+            if self._geometry_save_timer:
+                self.after_cancel(self._geometry_save_timer)
+            self._geometry_save_timer = self.after(1000, self._save_window_geometry)
+    
+    def _save_window_geometry(self):
+        """Save current window geometry."""
+        from config_and_logger import update_config_settings
+        update_config_settings({"window_geometry": self.geometry()})
 
     def _process_selected_audio(self, file_iid):
-        file_detail = next(
-            (f for f in self.displayed_files_details if f["name"] == file_iid), None
-        )
+        file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
         if not file_detail:
-            messagebox.showerror(
-                "Audio Processing Error", "File details not found.", parent=self
-            )
+            messagebox.showerror("Audio Processing Error", "File details not found.", parent=self)
             return
 
         local_filepath = self._get_local_filepath(file_detail["name"])
@@ -3037,7 +3018,8 @@ You can dismiss this warning and continue using the application with limited aud
             # ...
 
             # Run the audio enhancer
-            _enhancer = AudioEnhancer()  # Future: implement audio enhancement features
+            # Future: implement audio enhancement features
+            # _enhancer = AudioEnhancer()
             # ... (call enhancer methods)
 
             dialog.destroy()
@@ -3050,8 +3032,10 @@ You can dismiss this warning and continue using the application with limited aud
         dialog.title("System Health")
         dialog.geometry("400x300")
 
-        storage_monitor = StorageMonitor([self.download_directory])
-        _storage_info = storage_monitor.get_storage_info()  # Future: display in health dialog
+        # Future: display storage info in health dialog
+        # storage_monitor = StorageMonitor([self.download_directory])
+        # Future: display in health dialog
+        # _storage_info = storage_monitor.get_storage_info()
 
         # Display storage info in the dialog
         # ... (This will be implemented in a future step)
@@ -3061,8 +3045,10 @@ You can dismiss this warning and continue using the application with limited aud
         dialog.title("Storage Optimizer")
         dialog.geometry("600x400")
 
-        storage_optimizer = StorageOptimizer([self.download_directory])
-        _optimization_suggestions = storage_optimizer.analyze_storage()  # Future: display suggestions
+        # Future: display optimization suggestions
+        # storage_optimizer = StorageOptimizer([self.download_directory])
+        # Future: display suggestions
+        # _optimization_suggestions = storage_optimizer.analyze_storage()
 
         # Display optimization suggestions in the dialog
         # ... (This will be implemented in a future step)

@@ -8,8 +8,10 @@ for handling GUI events such as button clicks, key presses, and selection change
 import os
 import subprocess
 import sys
+import time
 import tkinter
 import traceback
+from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -89,18 +91,29 @@ class EventHandlersMixin:
         """
         new_dir = self._prompt_for_directory(initial_dir=self.download_directory, parent_window_for_dialog=self)
         if new_dir and new_dir != self.download_directory:
+            old_dir = self.download_directory
             self.download_directory = new_dir
 
             self.config["download_directory"] = new_dir
-            from config_and_logger import save_config
-            save_config(self.config)
+            from config_and_logger import update_config_settings
+            update_config_settings({"download_directory": new_dir})
             if hasattr(self, "download_dir_button_header") and self.download_dir_button_header.winfo_exists():
                 self.download_dir_button_header.configure(text=f"Dir: {os.path.basename(self.download_directory)}")
             logger.info(
                 "GUI",
                 "_select_download_dir_from_header_button",
-                f"Download directory changed to: {new_dir}",
+                f"Download directory changed from '{old_dir}' to '{new_dir}'",
             )
+
+            # Update file operations manager with new download directory
+            if hasattr(self, "file_operations_manager"):
+                self.file_operations_manager.download_dir = Path(new_dir)
+                self.file_operations_manager.download_dir.mkdir(parents=True, exist_ok=True)
+
+            # Refresh file status to reflect availability in new directory
+            if hasattr(self, "refresh_file_status_after_directory_change"):
+                self.refresh_file_status_after_directory_change()
+
             self.update_all_status_info()
 
     def _prompt_for_directory(self, initial_dir, parent_window_for_dialog):
@@ -128,6 +141,10 @@ class EventHandlersMixin:
         Manages item selection, deselection, and sets up for potential drag-selection.
         Handles Ctrl and Shift modifiers for selection behavior.
         """
+        # Skip custom logic in single selection mode
+        if self.single_selection_mode_var.get():
+            return
+
         item_iid = self.file_tree.identify_row(event.y)
         self._is_button1_pressed_on_item = item_iid
         self._last_dragged_over_iid = item_iid
@@ -183,6 +200,10 @@ class EventHandlersMixin:
         Performs drag-selection or drag-deselection of items based on the
         initial state of the anchor item when the drag started.
         """
+        # Skip custom logic in single selection mode
+        if self.single_selection_mode_var.get():
+            return
+
         if not hasattr(self, "_is_button1_pressed_on_item") or not self._is_button1_pressed_on_item:
             return
         item_iid_under_cursor = self.file_tree.identify_row(event.y)
@@ -200,7 +221,7 @@ class EventHandlersMixin:
                             return
                     start_range_idx = min(anchor_index, current_motion_index)
                     end_range_idx = max(anchor_index, current_motion_index)
-                    items_in_current_drag_sweep = all_children[start_range_idx : end_range_idx + 1]
+                    items_in_current_drag_sweep = all_children[start_range_idx: end_range_idx + 1]
                     if self._drag_action_is_deselect:
                         logger.debug(
                             "GUI",
@@ -283,6 +304,10 @@ class EventHandlersMixin:
         """
         # self.logs_visible = self.logs_visible_var.get() # This line was redundant in original
         self._update_optional_panes_visibility()
+        
+        # Save logs panel visibility preference
+        from config_and_logger import update_config_settings
+        update_config_settings({"logs_pane_visible": self.logs_visible_var.get()})
 
     def _on_file_double_click(self, event):  # Identical to original
         if not self.device_manager.device_interface.jensen_device.is_connected() and not self.is_audio_playing:
@@ -479,15 +504,76 @@ class EventHandlersMixin:
     def on_file_selection_change(self, _event=None):  # Enhanced to update waveform
         """Handles changes in file selection in the treeview."""
         try:
-            self.update_all_status_info()
+            # Only update menu states immediately - defer expensive operations
             self._update_menu_states()
-            self._update_waveform_for_selection()
+
+            # Cancel any pending updates
+            if hasattr(self, "_selection_update_timer") and self._selection_update_timer:
+                self.after_cancel(self._selection_update_timer)
+
+            # Schedule deferred updates to avoid excessive calls during drag operations
+            self._selection_update_timer = self.after(150, self._deferred_selection_update)
         except tkinter.TclError as e:
             logger.error(
                 "GUI",
                 "on_file_selection_change",
                 f"Unhandled: {e}\n{traceback.format_exc()}",
             )
+
+    def _deferred_selection_update(self):
+        """Performs expensive updates after selection has stabilized."""
+        try:
+            # Only update waveform for single selection to avoid loading multiple files
+            selection = self.file_tree.selection()
+            if len(selection) == 1:
+                self._update_waveform_for_selection()
+
+            # Skip status updates for simple selections - only update if cache is stale
+            current_time = time.time()
+            should_update_status = not self._status_update_in_progress and (
+                not hasattr(self, "_device_info_cache_time") or current_time - self._device_info_cache_time > 25.0
+            )  # Only update if cache is getting stale
+
+            if should_update_status:
+                self.update_all_status_info()
+            else:
+                # Just update the GUI elements without device communication
+                self._update_gui_file_counts_only()
+
+            self._selection_update_timer = None
+        except Exception as e:
+            logger.error("GUI", "_deferred_selection_update", f"Error in deferred update: {e}")
+            self._selection_update_timer = None
+
+    def _update_gui_file_counts_only(self):
+        """Updates only file count information without device communication."""
+        try:
+            total_items = (
+                len(self.file_tree.get_children())
+                if hasattr(self, "file_tree") and self.file_tree.winfo_exists()
+                else 0
+            )
+            selected_items_count = (
+                len(self.file_tree.selection()) if hasattr(self, "file_tree") and self.file_tree.winfo_exists() else 0
+            )
+            size_selected_bytes = 0
+            if selected_items_count > 0 and hasattr(self, "file_tree") and self.file_tree.winfo_exists():
+                for item_iid in self.file_tree.selection():
+                    file_detail = next(
+                        (f for f in self.displayed_files_details if f["name"] == item_iid),
+                        None,
+                    )
+                    if file_detail:
+                        size_selected_bytes += file_detail.get("length", 0)
+            file_counts_text = (
+                f"Files: {total_items} total / {selected_items_count} "
+                f"sel. ({size_selected_bytes / (1024 * 1024):.2f} MB)"
+            )
+
+            if hasattr(self, "status_file_counts_label_header") and self.status_file_counts_label_header.winfo_exists():
+                self.status_file_counts_label_header.configure(text=file_counts_text)
+        except Exception as e:
+            logger.error("GUI", "_update_gui_file_counts_only", f"Error updating file counts: {e}")
 
     def _on_delete_key_press(self, _event):  # Identical to original
         """Handles the delete key press event in the file treeview."""

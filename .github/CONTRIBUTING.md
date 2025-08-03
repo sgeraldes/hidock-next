@@ -1,6 +1,8 @@
 # Contributing to HiDock Community Platform
 
-Thank you for your interest in contributing to the HiDock Community Platform! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to the HiDock Community
+Platform! This document provides guidelines and information for
+contributors.
 
 ## Table of Contents
 
@@ -16,7 +18,8 @@ Thank you for your interest in contributing to the HiDock Community Platform! Th
 
 ## Code of Conduct
 
-This project adheres to a code of conduct that promotes a welcoming and inclusive environment. Please read and follow our community guidelines.
+This project adheres to a code of conduct that promotes a welcoming and
+inclusive environment. Please read and follow our community guidelines.
 
 ## Getting Started
 
@@ -40,6 +43,7 @@ python scripts/setup-dev.py
 ```
 
 This automated setup will:
+
 - ✅ Create proper Python virtual environments
 - ✅ Install all dependencies (Python + Node.js)
 - ✅ Run tests to verify everything works

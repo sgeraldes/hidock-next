@@ -33,9 +33,7 @@ def main():
     # with a theme before any widgets might be created, even implicitly.
     # These could also be loaded from config here if preferred, but the GUI class handles it.
     ctk.set_appearance_mode("System")  # Modes: "System" (standard), "Dark", "Light"
-    ctk.set_default_color_theme(
-        "blue"
-    )  # Themes: "blue" (standard), "green", "dark-blue"
+    ctk.set_default_color_theme("blue")  # Themes: "blue" (standard), "green", "dark-blue"
 
     app = None  # pylint: disable=invalid-name # Initialize app to None for the except block
     try:
@@ -69,9 +67,7 @@ def main():
         except Exception as e_diag:  # pylint: disable=broad-except
             # If even basic tkinter fails, print to console
             print(f"Could not display Tkinter error dialog: {e_diag}")
-            print(
-                f"Original critical error was: {e}"
-            )  # Ensure original error is still printed
+            print(f"Original critical error was: {e}")  # Ensure original error is still printed
         finally:
             if (
                 temp_root_for_error

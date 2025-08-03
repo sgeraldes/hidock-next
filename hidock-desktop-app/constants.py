@@ -8,6 +8,7 @@ endpoint addresses, and the name of the configuration file.
 Centralizing these constants helps in maintaining consistency and
 ease of modification.
 """
+
 # constants.py
 
 # --- USB Device Constants ---

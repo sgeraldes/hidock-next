@@ -181,9 +181,7 @@ class HiDockJensen:
             return True  # Avoid recursion if already checking
 
         current_time = time.time()
-        if (
-            current_time - self._last_health_check
-        ) < self._connection_health_check_interval:
+        if (current_time - self._last_health_check) < self._connection_health_check_interval:
             return True  # Skip check if too recent
 
         self._last_health_check = current_time
@@ -197,9 +195,7 @@ class HiDockJensen:
                 # Perform a lightweight operation to test connection
                 device_info = self.get_device_info(timeout_s=2)
                 if device_info:
-                    logger.debug(
-                        "Jensen", "_perform_health_check", "Health check passed"
-                    )
+                    logger.debug("Jensen", "_perform_health_check", "Health check passed")
                     return True
                 else:
                     logger.warning(
@@ -209,13 +205,53 @@ class HiDockJensen:
                     )
                     return False
             except Exception as e:
-                logger.warning(
-                    "Jensen", "_perform_health_check", f"Health check failed: {e}"
-                )
+                logger.warning("Jensen", "_perform_health_check", f"Health check failed: {e}")
                 self._increment_error_count("connection_lost")
                 return False
         finally:
             self._is_in_health_check = False
+
+    def reset_device_state(self):
+        """
+        Resets the device to a clean state by clearing buffers and resetting USB endpoints.
+        This is useful when the device is in an inconsistent state after a communication error.
+        """
+        logger.info("Jensen", "reset_device_state", "Resetting device state")
+        
+        with self._usb_lock:
+            # Clear receive buffer to remove any stale data
+            self.receive_buffer.clear()
+            
+            # Reset sequence ID to avoid conflicts
+            self.sequence_id = 0
+            
+            # Clear error counts
+            self.reset_error_counts()
+            
+            # If device is connected, try to clear endpoint halts
+            if self.device and self.ep_in and self.ep_out:
+                try:
+                    # Clear any halt conditions on endpoints
+                    self.device.clear_halt(self.ep_in.bEndpointAddress)
+                    self.device.clear_halt(self.ep_out.bEndpointAddress)
+                    logger.debug("Jensen", "reset_device_state", "Cleared endpoint halts")
+                except usb.core.USBError as e:
+                    logger.debug("Jensen", "reset_device_state", f"Could not clear halts: {e}")
+                
+                # Try to flush any pending data from IN endpoint
+                try:
+                    for _ in range(10):  # Limited attempts to avoid infinite loop
+                        data = self.device.read(self.ep_in.bEndpointAddress, 64, timeout=50)
+                        if not data:
+                            break
+                        logger.debug("Jensen", "reset_device_state", f"Flushed {len(data)} bytes")
+                except usb.core.USBTimeoutError:
+                    # Timeout is expected when no data is available
+                    pass
+                except usb.core.USBError as e:
+                    logger.debug("Jensen", "reset_device_state", f"Flush error: {e}")
+            
+            logger.info("Jensen", "reset_device_state", "Device state reset complete")
 
     def is_connected(self) -> bool:
         """
@@ -224,12 +260,7 @@ class HiDockJensen:
         Returns:
             bool: True if the device is considered connected, False otherwise.
         """
-        return (
-            self.device is not None
-            and self.ep_in is not None
-            and self.ep_out is not None
-            and self.is_connected_flag
-        )
+        return self.device is not None and self.ep_in is not None and self.ep_out is not None and self.is_connected_flag
 
     def _find_device(self, vid_to_find: int, pid_to_find: int):
         """
@@ -258,9 +289,7 @@ class HiDockJensen:
             "_find_device",
             f"Looking for VID={hex(vid_to_find)}, PID={hex(pid_to_find)}",
         )
-        device = usb.core.find(
-            idVendor=vid_to_find, idProduct=pid_to_find, backend=self.usb_backend
-        )
+        device = usb.core.find(idVendor=vid_to_find, idProduct=pid_to_find, backend=self.usb_backend)
         if device is None:
             logger.info(  # Changed from error to info, as this is an expected scenario
                 "Jensen",
@@ -297,9 +326,7 @@ class HiDockJensen:
                     f"Unexpected ValueError while reading string descriptors "
                     f"for VID={hex(vid_to_find)}, PID={hex(pid_to_find)}: {e_val}",
                 )
-        except (
-            usb.core.USBError
-        ) as e_usb:  # Catch other USB errors during descriptor access
+        except usb.core.USBError as e_usb:  # Catch other USB errors during descriptor access
             logger.warning(
                 "Jensen",
                 "_find_device",
@@ -315,6 +342,7 @@ class HiDockJensen:
         vid: int = DEFAULT_VENDOR_ID,
         pid: int = DEFAULT_PRODUCT_ID,
         auto_retry: bool = True,
+        force_reset: bool = False,
     ) -> tuple[bool, str | None]:
         """
         Connects to the HiDock device with automatic retry mechanisms.
@@ -328,6 +356,7 @@ class HiDockJensen:
             vid (int, optional): The Vendor ID of the device. Defaults to DEFAULT_VENDOR_ID.
             pid (int, optional): The Product ID of the device. Defaults to DEFAULT_PRODUCT_ID.
             auto_retry (bool, optional): Whether to automatically retry on failure. Defaults to True.
+            force_reset (bool, optional): Whether to force a device state reset before connecting. Defaults to False.
 
         Returns:
             tuple[bool, str | None]: (True, None) if successful,
@@ -342,6 +371,10 @@ class HiDockJensen:
                 )
                 self.disconnect()
 
+            # Force reset if requested (useful for recovering from inconsistent states)
+            if force_reset:
+                self.reset_device_state()
+
             self.is_connected_flag = False
             self.detached_kernel_driver_on_interface = -1
             self.claimed_interface_number = -1
@@ -352,20 +385,29 @@ class HiDockJensen:
 
             # Attempt connection with retry logic
             while True:
-                success, error_msg = self._attempt_connection(
-                    target_interface_number, vid, pid
-                )
+                success, error_msg = self._attempt_connection(target_interface_number, vid, pid)
 
                 if success:
                     self._connection_retry_count = 0
                     self._operation_stats["connection_time"] = time.time()
-                    logger.info(
-                        "Jensen", "connect", f"Successfully connected to {self.model}"
-                    )
+                    logger.info("Jensen", "connect", f"Successfully connected to {self.model}")
                     return True, None
 
                 self._last_error = error_msg
                 self._connection_retry_count += 1
+
+                # If we're getting timeout errors on the first retry, try a device reset
+                if (
+                    self._connection_retry_count == 1
+                    and "timeout" in str(error_msg).lower()
+                    and not force_reset
+                ):
+                    logger.info(
+                        "Jensen",
+                        "connect",
+                        "Timeout detected on first retry, attempting device reset",
+                    )
+                    self.reset_device_state()
 
                 if not auto_retry or not self._should_retry_connection():
                     logger.error(
@@ -383,9 +425,7 @@ class HiDockJensen:
                 )
                 time.sleep(self._retry_delay)
 
-    def _attempt_connection(
-        self, target_interface_number: int, vid: int, pid: int
-    ) -> tuple[bool, str | None]:
+    def _attempt_connection(self, target_interface_number: int, vid: int, pid: int) -> tuple[bool, str | None]:
         """
         Attempts a single connection to the device.
 
@@ -403,16 +443,12 @@ class HiDockJensen:
             if self.device is None:
                 # _find_device now returns None if not found, and logs it.
                 error_msg = f"Device VID={hex(vid)}, PID={hex(pid)} not found."
-                logger.warning(
-                    "Jensen", "_attempt_connection", f"Failed to connect: {error_msg}"
-                )
+                logger.warning("Jensen", "_attempt_connection", f"Failed to connect: {error_msg}")
                 # No need to call self.disconnect() here as nothing was partially connected.
                 return False, error_msg
 
             # Detach kernel driver if active (typically for non-Windows OS)
-            if (
-                sys.platform != "win32"
-            ):  # Kernel driver interaction is usually problematic/unnecessary on Windows
+            if sys.platform != "win32":  # Kernel driver interaction is usually problematic/unnecessary on Windows
                 if self.device.is_kernel_driver_active(target_interface_number):
                     logger.info(
                         "Jensen",
@@ -429,9 +465,7 @@ class HiDockJensen:
 
             try:
                 self.device.set_configuration()
-                logger.info(
-                    "Jensen", "_attempt_connection", "Device configuration set."
-                )
+                logger.info("Jensen", "_attempt_connection", "Device configuration set.")
             except usb.core.USBError as e_cfg:
                 # If errno is 16 (Resource busy) or 13 (Access denied),
                 # it implies the device is likely configured and used by another process.
@@ -464,13 +498,9 @@ class HiDockJensen:
                     raise  # Re-raise other configuration errors
 
             cfg = self.device.get_active_configuration()
-            intf = usb.util.find_descriptor(
-                cfg, bInterfaceNumber=target_interface_number
-            )
+            intf = usb.util.find_descriptor(cfg, bInterfaceNumber=target_interface_number)
             if intf is None:
-                raise usb.core.USBError(
-                    f"Interface {target_interface_number} not found in active configuration."
-                )
+                raise usb.core.USBError(f"Interface {target_interface_number} not found in active configuration.")
             logger.info(
                 "Jensen",
                 "_attempt_connection",
@@ -503,14 +533,12 @@ class HiDockJensen:
 
             self.ep_out = usb.util.find_descriptor(
                 intf,
-                custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
-                == usb.util.ENDPOINT_OUT
+                custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
                 and (e.bEndpointAddress & 0x0F) == (EP_OUT_ADDR & 0x0F),
             )
             self.ep_in = usb.util.find_descriptor(
                 intf,
-                custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
-                == usb.util.ENDPOINT_IN
+                custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN
                 and (e.bEndpointAddress & 0x0F) == (EP_IN_ADDR & 0x7F),
             )
 
@@ -550,13 +578,10 @@ class HiDockJensen:
             if isinstance(e, usb.core.USBError):
                 if e.errno == 13:  # Access Denied
                     specific_error_message = (
-                        "Access denied to device. It might be in use "
-                        "by another app or require admin rights."
+                        "Access denied to device. It might be in use " "by another app or require admin rights."
                     )
                 elif e.errno == 16:  # Resource Busy
-                    specific_error_message = (
-                        "Device is busy, likely used by another app."
-                    )
+                    specific_error_message = "Device is busy, likely used by another app."
                 else:  # General USBError
                     specific_error_message = f"USB Error: {e}"
             elif isinstance(e, ConnectionError):
@@ -601,9 +626,7 @@ class HiDockJensen:
         """
         with self._usb_lock:
             if not self.is_connected_flag and not self.device:
-                logger.info(
-                    "Jensen", "disconnect", "Already disconnected or no device object."
-                )
+                logger.info("Jensen", "disconnect", "Already disconnected or no device object.")
                 self._reset_connection_state()  # Ensure state is clean
                 return
 
@@ -611,23 +634,16 @@ class HiDockJensen:
             if self.device:
                 try:
                     if self.claimed_interface_number != -1:
-                        usb.util.release_interface(
-                            self.device, self.claimed_interface_number
-                        )
+                        usb.util.release_interface(self.device, self.claimed_interface_number)
                         logger.info(
                             "Jensen",
                             "disconnect",
                             f"Released Interface {self.claimed_interface_number}.",
                         )
 
-                    if (
-                        self.detached_kernel_driver_on_interface != -1
-                        and sys.platform != "win32"
-                    ):
+                    if self.detached_kernel_driver_on_interface != -1 and sys.platform != "win32":
                         try:
-                            self.device.attach_kernel_driver(
-                                self.detached_kernel_driver_on_interface
-                            )
+                            self.device.attach_kernel_driver(self.detached_kernel_driver_on_interface)
                             logger.info(
                                 "Jensen",
                                 "disconnect",
@@ -650,9 +666,7 @@ class HiDockJensen:
                     )
                 finally:  # Ensure dispose_resources is called even if release/attach fails
                     usb.util.dispose_resources(self.device)
-                    logger.debug(
-                        "Jensen", "disconnect", "USB resources disposed."
-                    )  # Changed to debug as it's a detail
+                    logger.debug("Jensen", "disconnect", "USB resources disposed.")  # Changed to debug as it's a detail
 
             self._reset_connection_state()
             logger.info("Jensen", "disconnect", "Disconnected successfully.")
@@ -692,9 +706,7 @@ class HiDockJensen:
         Returns:
             bytes: The fully constructed command packet.
         """
-        self.sequence_id = (
-            self.sequence_id + 1
-        ) & 0xFFFFFFFF  # Ensure sequence ID wraps around if it gets too large
+        self.sequence_id = (self.sequence_id + 1) & 0xFFFFFFFF  # Ensure sequence ID wraps around if it gets too large
         header = bytearray([0x12, 0x34])  # Sync bytes
         header.extend(struct.pack(">H", command_id))  # Command ID (2 bytes)
         # Sequence ID (4 bytes)
@@ -721,9 +733,7 @@ class HiDockJensen:
             usb.core.USBError: If a USB write error occurs (after attempting to clear halt).
         """
         if not self.is_connected():  # Check before attempting to use endpoints
-            logger.error(
-                "Jensen", "_send_command", "Not connected. Cannot send command."
-            )
+            logger.error("Jensen", "_send_command", "Not connected. Cannot send command.")
             raise ConnectionError("Device not connected.")
 
         # Perform health check if needed
@@ -769,9 +779,7 @@ class HiDockJensen:
             )
             raise
         except usb.core.USBError as e:
-            logger.error(
-                "Jensen", "_send_command", f"USB write error for CMD {command_id}: {e}"
-            )
+            logger.error("Jensen", "_send_command", f"USB write error for CMD {command_id}: {e}")
             if e.errno == 32:  # LIBUSB_ERROR_PIPE (stall)
                 self._increment_error_count("usb_pipe_error")
                 try:
@@ -795,9 +803,7 @@ class HiDockJensen:
             raise  # Re-raise to be caught by caller
         return self.sequence_id
 
-    def _receive_response(
-        self, expected_seq_id, timeout_ms=5000, streaming_cmd_id=None
-    ):
+    def _receive_response(self, expected_seq_id, timeout_ms=5000, streaming_cmd_id=None):
         """
         Receives and parses a response packet from the device's IN endpoint.
 
@@ -819,9 +825,7 @@ class HiDockJensen:
                           None if a timeout occurs or a critical USB error happens.
         """
         if not self.is_connected():  # Check before attempting to use endpoints
-            logger.error(
-                "Jensen", "_receive_response", "Not connected. Cannot receive response."
-            )
+            logger.error("Jensen", "_receive_response", "Not connected. Cannot receive response.")
             raise ConnectionError("Device not connected.")
 
         start_time = time.time()
@@ -839,9 +843,7 @@ class HiDockJensen:
                     break  # Not enough for sync marker
 
                 # Re-sync if necessary
-                if not (
-                    self.receive_buffer[0] == 0x12 and self.receive_buffer[1] == 0x34
-                ):
+                if not (self.receive_buffer[0] == 0x12 and self.receive_buffer[1] == 0x34):
                     # During streaming, we expect a continuous flow of valid packets.
                     # A missing sync marker at the start of the buffer is a fatal protocol error.
                     if streaming_cmd_id is not None:
@@ -883,9 +885,7 @@ class HiDockJensen:
                     break  # Not enough for full header
 
                 header_prefix = self.receive_buffer[:12]
-                response_cmd_id, response_seq_id, body_len_from_header = struct.unpack(
-                    ">HII", header_prefix[2:]
-                )
+                response_cmd_id, response_seq_id, body_len_from_header = struct.unpack(">HII", header_prefix[2:])
 
                 checksum_len = (
                     body_len_from_header >> 24
@@ -895,14 +895,11 @@ class HiDockJensen:
 
                 if len(self.receive_buffer) >= total_msg_len:
                     msg_bytes_full = self.receive_buffer[:total_msg_len]
-                    self.receive_buffer = self.receive_buffer[
-                        total_msg_len:
-                    ]  # Consume the message from buffer
+                    self.receive_buffer = self.receive_buffer[total_msg_len:]  # Consume the message from buffer
 
                     # Check if this is the response we're waiting for OR a streaming packet
                     if response_seq_id == expected_seq_id or (
-                        streaming_cmd_id is not None
-                        and response_cmd_id == streaming_cmd_id
+                        streaming_cmd_id is not None and response_cmd_id == streaming_cmd_id
                     ):
                         logger.debug(
                             "Jensen",
@@ -910,19 +907,17 @@ class HiDockJensen:
                             f"RECV RSP CMD: {response_cmd_id}, "
                             f"Seq: {response_seq_id}, "
                             f"BodyLen: {body_len}, "
-                            f"Body: {msg_bytes_full[12:12+body_len].hex()[:64]}...",
+                            f"Body: {msg_bytes_full[12:12 + body_len].hex()[:64]}...",
                         )
 
                         # Update performance statistics
                         self._operation_stats["responses_received"] += 1
-                        self._operation_stats["bytes_transferred"] += len(
-                            msg_bytes_full
-                        )
+                        self._operation_stats["bytes_transferred"] += len(msg_bytes_full)
 
                         return {
                             "id": response_cmd_id,
                             "sequence": response_seq_id,
-                            "body": msg_bytes_full[12:12 + body_len],
+                            "body": msg_bytes_full[12: 12 + body_len],
                         }
                     else:
                         logger.warning(
@@ -940,11 +935,7 @@ class HiDockJensen:
             # Now, we can safely read more data from the device.
             try:
                 # Read a larger chunk to reduce number of USB transactions, if wMaxPacketSize is known
-                read_size = (
-                    self.ep_in.wMaxPacketSize * 64
-                    if self.ep_in.wMaxPacketSize
-                    else 4096
-                )  # Increased read size
+                read_size = self.ep_in.wMaxPacketSize * 64 if self.ep_in.wMaxPacketSize else 4096  # Increased read size
                 data_chunk = self.device.read(
                     self.ep_in.bEndpointAddress, read_size, timeout=200
                 )  # Slightly longer individual timeout
@@ -1039,17 +1030,13 @@ class HiDockJensen:
                 return self._receive_response(
                     seq_id,
                     int(timeout_ms),
-                    streaming_cmd_id=(
-                        CMD_TRANSFER_FILE if command_id == CMD_TRANSFER_FILE else None
-                    ),
+                    streaming_cmd_id=(CMD_TRANSFER_FILE if command_id == CMD_TRANSFER_FILE else None),
                 )
             except (
                 usb.core.USBError,
                 ConnectionError,
             ) as e:  # Catch errors from send or receive
-                logger.error(
-                    "Jensen", "_send_and_receive", f"Error during CMD {command_id}: {e}"
-                )
+                logger.error("Jensen", "_send_and_receive", f"Error during CMD {command_id}: {e}")
                 # self.disconnect() was already called in _send_command or _receive_response if critical
                 raise  # Re-raise to be handled by the calling method in GUI
 
@@ -1065,9 +1052,7 @@ class HiDockJensen:
             dict or None: A dictionary containing "versionCode", "versionNumber", and "sn"
                           if successful, None otherwise.
         """
-        response = self._send_and_receive(
-            CMD_GET_DEVICE_INFO, timeout_ms=int(timeout_s * 1000)
-        )
+        response = self._send_and_receive(CMD_GET_DEVICE_INFO, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_GET_DEVICE_INFO:
             body = response["body"]
             if len(body) >= 4:
@@ -1078,15 +1063,11 @@ class HiDockJensen:
                 if len(body) > 4:
                     serial_number_bytes = body[4:20]
                     try:
-                        printable_sn_bytes = bytearray(
-                            b for b in serial_number_bytes if 32 <= b <= 126 or b == 0
-                        )
+                        printable_sn_bytes = bytearray(b for b in serial_number_bytes if 32 <= b <= 126 or b == 0)
                         null_idx = printable_sn_bytes.find(0)
                         if null_idx != -1:
                             printable_sn_bytes = printable_sn_bytes[:null_idx]
-                        serial_number_str = printable_sn_bytes.decode(
-                            "ascii", errors="ignore"
-                        ).strip()
+                        serial_number_str = printable_sn_bytes.decode("ascii", errors="ignore").strip()
                         if not serial_number_str:
                             serial_number_str = serial_number_bytes.hex()
                     except UnicodeDecodeError:
@@ -1129,14 +1110,10 @@ class HiDockJensen:
         """
         # Avoid command conflicts during file list streaming
         if self.is_file_list_streaming():
-            logger.debug(
-                "Jensen", "get_file_count", "Skipping during file list streaming"
-            )
+            logger.debug("Jensen", "get_file_count", "Skipping during file list streaming")
             return None
 
-        response = self._send_and_receive(
-            CMD_GET_FILE_COUNT, timeout_ms=int(timeout_s * 1000)
-        )
+        response = self._send_and_receive(CMD_GET_FILE_COUNT, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_GET_FILE_COUNT:
             body = response["body"]
             if not body:
@@ -1145,9 +1122,7 @@ class HiDockJensen:
                 count = struct.unpack(">I", body[:4])[0]
                 logger.info("Jensen", "get_file_count", f"File count: {count}")
                 return {"count": count}
-        logger.error(
-            "Jensen", "get_file_count", "Failed to get file count or invalid response."
-        )
+        logger.error("Jensen", "get_file_count", "Failed to get file count or invalid response.")
         return None
 
     def _calculate_file_duration(self, file_size_bytes, file_version):
@@ -1166,7 +1141,8 @@ class HiDockJensen:
             float: Duration in seconds
         """
         # Audio format constants based on device specifications
-        _ACTUAL_BITRATE_BPS = 64000  # 64kbps - Future: use for precise duration calculation
+        # Future: use for precise duration calculation
+        # _ACTUAL_BITRATE_BPS = 64000  # 64kbps
         SAMPLE_RATE_48K = 48000
         SAMPLE_RATE_24K = 24000
         SAMPLE_RATE_16K = 16000
@@ -1181,17 +1157,13 @@ class HiDockJensen:
         elif file_version == 2:
             # Version 2: 48kHz WAV format
             if file_size_bytes > WAV_HEADER_SIZE:
-                raw_duration = (file_size_bytes - WAV_HEADER_SIZE) / (
-                    SAMPLE_RATE_48K * CHANNELS * BYTES_PER_SAMPLE
-                )
+                raw_duration = (file_size_bytes - WAV_HEADER_SIZE) / (SAMPLE_RATE_48K * CHANNELS * BYTES_PER_SAMPLE)
                 return raw_duration * 4  # Apply the 4x correction directly
             return 0
         elif file_version == 3:
             # Version 3: 24kHz WAV format
             if file_size_bytes > WAV_HEADER_SIZE:
-                raw_duration = (file_size_bytes - WAV_HEADER_SIZE) / (
-                    SAMPLE_RATE_24K * CHANNELS * BYTES_PER_SAMPLE
-                )
+                raw_duration = (file_size_bytes - WAV_HEADER_SIZE) / (SAMPLE_RATE_24K * CHANNELS * BYTES_PER_SAMPLE)
                 return raw_duration * 4  # Apply the 4x correction directly
             return 0
         elif file_version == 5:
@@ -1200,9 +1172,7 @@ class HiDockJensen:
             return raw_duration * 4  # Apply the 4x correction directly
         else:
             # Default: 16kHz format
-            raw_duration = file_size_bytes / (
-                SAMPLE_RATE_16K * CHANNELS * BYTES_PER_SAMPLE
-            )
+            raw_duration = file_size_bytes / (SAMPLE_RATE_16K * CHANNELS * BYTES_PER_SAMPLE)
             return raw_duration * 4  # Apply the 4x correction directly
 
     def list_files(self, timeout_s=20):
@@ -1253,9 +1223,7 @@ class HiDockJensen:
             with self._usb_lock:
                 try:
                     self.receive_buffer.clear()
-                    seq_id = self._send_command(
-                        CMD_GET_FILE_LIST, timeout_ms=int(timeout_s * 1000)
-                    )
+                    seq_id = self._send_command(CMD_GET_FILE_LIST, timeout_ms=int(timeout_s * 1000))
                 except (usb.core.USBError, ConnectionError) as e:
                     logger.error(
                         "Jensen",
@@ -1284,11 +1252,7 @@ class HiDockJensen:
                             "list_files",
                             "Empty response received, completing file list",
                         )
-                        return (
-                            self._parse_file_list_chunks(file_list_chunks)
-                            if file_list_chunks
-                            else []
-                        )
+                        return self._parse_file_list_chunks(file_list_chunks) if file_list_chunks else []
 
                     # Accumulate this chunk
                     file_list_chunks.append(response_data)
@@ -1304,14 +1268,8 @@ class HiDockJensen:
                     # Get expected count from first chunk header if available
                     if expected_file_count is None and file_list_chunks:
                         first_chunk = file_list_chunks[0]
-                        if (
-                            len(first_chunk) >= 6
-                            and first_chunk[0] == 0xFF
-                            and first_chunk[1] == 0xFF
-                        ):
-                            expected_file_count = struct.unpack(">I", first_chunk[2:6])[
-                                0
-                            ]
+                        if len(first_chunk) >= 6 and first_chunk[0] == 0xFF and first_chunk[1] == 0xFF:
+                            expected_file_count = struct.unpack(">I", first_chunk[2:6])[0]
                             logger.info(
                                 "Jensen",
                                 "list_files",
@@ -1327,10 +1285,7 @@ class HiDockJensen:
                     )
 
                     # Check if we have all expected files
-                    if (
-                        expected_file_count is not None
-                        and files_parsed >= expected_file_count
-                    ):
+                    if expected_file_count is not None and files_parsed >= expected_file_count:
                         logger.info(
                             "Jensen",
                             "list_files",
@@ -1386,9 +1341,7 @@ class HiDockJensen:
                                 f"Max timeouts reached, completing with {len(file_list_chunks)} chunks",
                             )
                             # Give the handler a chance to process final data
-                            final_files = file_list_handler(
-                                b""
-                            )  # Empty data signals completion
+                            final_files = file_list_handler(b"")  # Empty data signals completion
                             break
                     else:
                         # Unexpected response - log and continue
@@ -1409,9 +1362,7 @@ class HiDockJensen:
                     }
 
                 # Calculate total size from final files
-                total_size_bytes = sum(
-                    file_info.get("length", 0) for file_info in final_files
-                )
+                total_size_bytes = sum(file_info.get("length", 0) for file_info in final_files)
 
                 return {
                     "files": final_files,
@@ -1454,9 +1405,7 @@ class HiDockJensen:
             and file_list_aggregate_data[offset] == 0xFF
             and file_list_aggregate_data[offset + 1] == 0xFF
         ):
-            total_files_from_header = struct.unpack(
-                ">I", file_list_aggregate_data[offset + 2:offset + 6]
-            )[0]
+            total_files_from_header = struct.unpack(">I", file_list_aggregate_data[offset + 2: offset + 6])[0]
             offset += 6
 
         parsed_file_count = 0
@@ -1468,31 +1417,23 @@ class HiDockJensen:
                 file_version = file_list_aggregate_data[offset]
                 offset += 1
 
-                name_len = struct.unpack(
-                    ">I", b"\x00" + file_list_aggregate_data[offset:offset + 3]
-                )[0]
+                name_len = struct.unpack(">I", b"\x00" + file_list_aggregate_data[offset: offset + 3])[0]
                 offset += 3
 
                 if offset + name_len > len(file_list_aggregate_data):
                     break
 
-                filename = "".join(
-                    chr(b)
-                    for b in file_list_aggregate_data[offset:offset + name_len]
-                    if b > 0
-                )
+                filename = "".join(chr(b) for b in file_list_aggregate_data[offset: offset + name_len] if b > 0)
                 offset += name_len
 
                 min_remaining = 4 + 6 + 16
                 if offset + min_remaining > len(file_list_aggregate_data):
                     break
 
-                file_length_bytes = struct.unpack(
-                    ">I", file_list_aggregate_data[offset:offset + 4]
-                )[0]
+                file_length_bytes = struct.unpack(">I", file_list_aggregate_data[offset: offset + 4])[0]
                 offset += 4
                 offset += 6  # Skip 6 bytes
-                signature_hex = file_list_aggregate_data[offset:offset + 16].hex()
+                signature_hex = file_list_aggregate_data[offset: offset + 16].hex()
                 offset += 16
 
                 # Parse date/time from filename
@@ -1502,9 +1443,7 @@ class HiDockJensen:
                     time_obj,
                 ) = self._parse_filename_datetime(filename)
 
-                duration_sec = self._calculate_file_duration(
-                    file_length_bytes, file_version
-                )
+                duration_sec = self._calculate_file_duration(file_length_bytes, file_version)
 
                 files.append(
                     {
@@ -1520,10 +1459,7 @@ class HiDockJensen:
                 )
 
                 parsed_file_count += 1
-                if (
-                    total_files_from_header != -1
-                    and parsed_file_count >= total_files_from_header
-                ):
+                if total_files_from_header != -1 and parsed_file_count >= total_files_from_header:
                     break
 
             except (struct.error, IndexError) as e:
@@ -1560,19 +1496,13 @@ class HiDockJensen:
                     year_str, month_str_abbr, day_str = "", "", ""
 
                     if len(date_str_part) >= 7:
-                        if (
-                            date_str_part[:-5].isdigit()
-                            and len(date_str_part[:-5]) == 4
-                        ):
+                        if date_str_part[:-5].isdigit() and len(date_str_part[:-5]) == 4:
                             year_str, month_str_abbr, day_str = (
                                 date_str_part[:4],
                                 date_str_part[4:7],
                                 date_str_part[7:],
                             )
-                        elif (
-                            date_str_part[:-5].isdigit()
-                            and len(date_str_part[:-5]) == 2
-                        ):
+                        elif date_str_part[:-5].isdigit() and len(date_str_part[:-5]) == 2:
                             year_str, month_str_abbr, day_str = (
                                 "20" + date_str_part[:2],
                                 date_str_part[2:5],
@@ -1617,9 +1547,7 @@ class HiDockJensen:
             )
 
         if time_obj:
-            create_date_str, create_time_str = time_obj.strftime(
-                "%Y/%m/%d"
-            ), time_obj.strftime("%H:%M:%S")
+            create_date_str, create_time_str = time_obj.strftime("%Y/%m/%d"), time_obj.strftime("%H:%M:%S")
         else:
             logger.warning(
                 "Jensen",
@@ -1751,9 +1679,7 @@ class HiDockJensen:
 
                     # Use a shorter, rolling timeout for each read operation.
                     # This prevents timeouts on large files that are actively transferring.
-                    response = self._receive_response(
-                        initial_seq_id, 15000, streaming_cmd_id=CMD_TRANSFER_FILE
-                    )
+                    response = self._receive_response(initial_seq_id, 15000, streaming_cmd_id=CMD_TRANSFER_FILE)
 
                     if response and response["id"] == CMD_TRANSFER_FILE:
                         chunk = response["body"]
@@ -1790,11 +1716,7 @@ class HiDockJensen:
                             "stream_file",
                             f"Timeout or USB error for '{filename}'. Rcvd {bytes_received}/{file_length} bytes.",
                         )
-                        status_to_return = (
-                            "fail_comms_error"
-                            if self.is_connected()
-                            else "fail_disconnected"
-                        )
+                        status_to_return = "fail_comms_error" if self.is_connected() else "fail_disconnected"
                         break
                     else:
                         logger.warning(
@@ -1810,11 +1732,7 @@ class HiDockJensen:
                         "stream_file",
                         f"Stream for '{filename}' incomplete. Rcvd {bytes_received}/{file_length} bytes.",
                     )
-                    status_to_return = (
-                        "fail_disconnected"
-                        if not self.is_connected()
-                        else status_to_return
-                    )
+                    status_to_return = "fail_disconnected" if not self.is_connected() else status_to_return
             # Corrected order: More specific exceptions (or those Pylint considers potentially
             # more specific in this context due to OSError's broadness) should come first.
             except (
@@ -1826,11 +1744,7 @@ class HiDockJensen:
                     "stream_file",
                     f"USB/Connection error during stream of '{filename}': {e_usb_conn}\n{traceback.format_exc()}",
                 )
-                status_to_return = (
-                    "fail_disconnected"
-                    if not self.is_connected()
-                    else "fail_comms_error"
-                )
+                status_to_return = "fail_disconnected" if not self.is_connected() else "fail_comms_error"
             except (
                 IOError,
                 OSError,
@@ -1845,9 +1759,7 @@ class HiDockJensen:
                 status_to_return = "fail_file_io"  # Assuming most non-connection OS errors here are file related
             except (KeyboardInterrupt, SystemExit):  # pylint: disable=try-except-raise
                 raise  # Do not swallow system-exiting exceptions.
-            except (
-                Exception
-            ) as e_gen:  # pylint: disable=broad-except # Fallback for truly unexpected errors
+            except Exception as e_gen:  # pylint: disable=broad-except # Fallback for truly unexpected errors
                 # Catching general Exception here is a fallback for unexpected errors,
                 # especially from callbacks or unforeseen issues in the operation.
                 logger.error(
@@ -1859,9 +1771,7 @@ class HiDockJensen:
             finally:
                 # The receive buffer should not be cleared here, as it may contain data for the next response.
                 if (  # Flush logic should only run on failure to try and recover the connection
-                    status_to_return not in ["OK", "cancelled"]
-                    and self.device
-                    and self.ep_in
+                    status_to_return not in ["OK", "cancelled"] and self.device and self.ep_in
                 ):
                     logger.debug(
                         "Jensen",
@@ -1945,13 +1855,9 @@ class HiDockJensen:
         """
         # Avoid command conflicts during file list streaming
         if self.is_file_list_streaming():
-            logger.debug(
-                "Jensen", "get_card_info", "Skipping during file list streaming"
-            )
+            logger.debug("Jensen", "get_card_info", "Skipping during file list streaming")
             return None
-        response = self._send_and_receive(
-            CMD_GET_CARD_INFO, timeout_ms=int(timeout_s * 1000)
-        )
+        response = self._send_and_receive(CMD_GET_CARD_INFO, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_GET_CARD_INFO:
             body = response["body"]
             if len(body) >= 12:
@@ -1978,9 +1884,7 @@ class HiDockJensen:
                 "get_card_info",
                 f"Received unexpected response for card info. Body: {body}. Likely a file list.",
             )
-        logger.error(
-            "Jensen", "get_card_info", f"Failed to get card info. Response: {response}"
-        )
+        logger.error("Jensen", "get_card_info", f"Failed to get card info. Response: {response}")
         return None
 
     def format_card(self, timeout_s=60):
@@ -2039,14 +1943,10 @@ class HiDockJensen:
         """
         # Avoid command conflicts during file list streaming
         if self.is_file_list_streaming():
-            logger.debug(
-                "Jensen", "get_recording_file", "Skipping during file list streaming"
-            )
+            logger.debug("Jensen", "get_recording_file", "Skipping during file list streaming")
             return None
 
-        response = self._send_and_receive(
-            CMD_GET_RECORDING_FILE, timeout_ms=int(timeout_s * 1000)
-        )
+        response = self._send_and_receive(CMD_GET_RECORDING_FILE, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_GET_RECORDING_FILE:
             if not response["body"]:
                 logger.debug(
@@ -2057,9 +1957,7 @@ class HiDockJensen:
                 return None
             filename_bytes = response["body"]
             try:
-                printable_bytes = bytearray(
-                    b for b in filename_bytes if 32 <= b <= 126 or b == 0
-                )
+                printable_bytes = bytearray(b for b in filename_bytes if 32 <= b <= 126 or b == 0)
                 null_idx = printable_bytes.find(0)
                 if null_idx != -1:
                     printable_bytes = printable_bytes[:null_idx]
@@ -2133,15 +2031,8 @@ class HiDockJensen:
                 self._to_bcd(dt_object.second),
             ]
         )
-        response = self._send_and_receive(
-            CMD_SET_DEVICE_TIME, payload, timeout_ms=int(timeout_s * 1000)
-        )
-        if (
-            response
-            and response["id"] == CMD_SET_DEVICE_TIME
-            and response["body"]
-            and response["body"][0] == 0
-        ):
+        response = self._send_and_receive(CMD_SET_DEVICE_TIME, payload, timeout_ms=int(timeout_s * 1000))
+        if response and response["id"] == CMD_SET_DEVICE_TIME and response["body"] and response["body"][0] == 0:
             logger.info("Jensen", "set_device_time", "Device time set successfully.")
             return {"result": "success"}
         err_code = response["body"][0] if response and response["body"] else -1
@@ -2169,9 +2060,7 @@ class HiDockJensen:
                  or "unknown" if the time is invalid or cannot be parsed.
         """
         if len(body_bytes) < 7:
-            logger.error(
-                "Jensen", "_parse_bcd_time_response", "Time response body too short."
-            )
+            logger.error("Jensen", "_parse_bcd_time_response", "Time response body too short.")
             return "unknown"
 
         bcd_str = ""
@@ -2206,15 +2095,11 @@ class HiDockJensen:
             dict or None: A dictionary like {"time": "YYYY-MM-DD HH:MM:SS"} or {"time": "unknown"}
                           if successful, None on communication failure.
         """
-        response = self._send_and_receive(
-            CMD_GET_DEVICE_TIME, timeout_ms=int(timeout_s * 1000)
-        )
+        response = self._send_and_receive(CMD_GET_DEVICE_TIME, timeout_ms=int(timeout_s * 1000))
         if response and response["id"] == CMD_GET_DEVICE_TIME:
             if response["body"]:
                 parsed_time_str = self._parse_bcd_time_response(response["body"])
-                logger.info(
-                    "Jensen", "get_device_time", f"Device time: {parsed_time_str}"
-                )
+                logger.info("Jensen", "get_device_time", f"Device time: {parsed_time_str}")
                 return {"time": parsed_time_str}
             else:
                 logger.error(
@@ -2242,14 +2127,8 @@ class HiDockJensen:
         Returns:
             dict or None: A dictionary of settings if successful, None otherwise.
         """
-        response = self._send_and_receive(
-            CMD_GET_SETTINGS, timeout_ms=int(timeout_s * 1000)
-        )
-        if (
-            response
-            and response["id"] == CMD_GET_SETTINGS
-            and len(response["body"]) >= 4
-        ):
+        response = self._send_and_receive(CMD_GET_SETTINGS, timeout_ms=int(timeout_s * 1000))
+        if response and response["id"] == CMD_GET_SETTINGS and len(response["body"]) >= 4:
 
             def to_bool(val):
                 return val == 1
@@ -2311,18 +2190,9 @@ class HiDockJensen:
             ]
         )
 
-        response = self._send_and_receive(
-            CMD_SET_SETTINGS, payload, timeout_ms=int(timeout_s * 1000)
-        )
-        if (
-            response
-            and response["id"] == CMD_SET_SETTINGS
-            and response["body"]
-            and response["body"][0] == 0
-        ):
-            logger.info(
-                "Jensen", "set_device_settings", "Device settings updated successfully."
-            )
+        response = self._send_and_receive(CMD_SET_SETTINGS, payload, timeout_ms=int(timeout_s * 1000))
+        if response and response["id"] == CMD_SET_SETTINGS and response["body"] and response["body"][0] == 0:
+            logger.info("Jensen", "set_device_settings", "Device settings updated successfully.")
             # Update local cache of settings
             self.device_behavior_settings = updated_settings
             return {"result": "success"}
@@ -2351,12 +2221,8 @@ class HiDockJensen:
             try:
                 body = struct.pack(">I", offset) + struct.pack(">I", length)
                 body += filename.encode("ascii", errors="ignore")
-                seq_id = self._send_command(
-                    CMD_GET_FILE_BLOCK, body, timeout_ms=int(timeout_s * 1000)
-                )
-                response = self._receive_response(
-                    seq_id, int(timeout_s * 1000), streaming_cmd_id=CMD_GET_FILE_BLOCK
-                )
+                seq_id = self._send_command(CMD_GET_FILE_BLOCK, body, timeout_ms=int(timeout_s * 1000))
+                response = self._receive_response(seq_id, int(timeout_s * 1000), streaming_cmd_id=CMD_GET_FILE_BLOCK)
                 if response and response["id"] == CMD_GET_FILE_BLOCK:
                     logger.info(
                         "Jensen",

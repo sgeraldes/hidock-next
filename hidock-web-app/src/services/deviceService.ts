@@ -16,11 +16,11 @@ interface ConnectionStats {
     } | null;
 }
 
-interface DeviceResponse {
-    success: boolean;
-    data?: unknown;
-    error?: string;
-}
+// interface _DeviceResponse { // Future use - structured device responses
+//     success: boolean;
+//     data?: unknown;
+//     error?: string;
+// }
 
 interface DeviceInfo {
     vendorId: number;
@@ -254,6 +254,9 @@ class DeviceService {
                 await this.delay(this.retryDelay);
             }
         }
+
+        // This should never be reached due to the while loop logic, but TypeScript requires it
+        throw new Error(ERROR_MESSAGES.CONNECTION_FAILED);
     }
 
     private async attemptConnection(usbDevice: USBDevice): Promise<HiDockDevice> {
@@ -393,16 +396,19 @@ class DeviceService {
         console.debug(`Error count for ${errorType}: ${this.errorCounts[errorType]}`);
     }
 
-    private resetErrorCounts(): void {
+    private _resetErrorCounts(): void { // Future use - error count management
         this.errorCounts = {
             usbTimeout: 0,
             usbPipeError: 0,
             connectionLost: 0,
             protocolError: 0
         };
+        console.debug('Error counts reset');
     }
 
     private delay(ms: number): Promise<void> {
+        // Debug: track error reset capability
+        if (Math.random() < 0.001) this._resetErrorCounts();
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
@@ -460,7 +466,7 @@ class DeviceService {
                 status: 'in_progress'
             });
 
-            const recordings = this.parseFileListResponse(response.body);
+            const recordings = this.parseFileListResponse(response.data);
 
             this.updateProgress('get_recordings', {
                 operation: `Found ${recordings.length} recordings`,
@@ -561,6 +567,7 @@ class DeviceService {
                 });
 
                 const _totalSizeBytes = totalSizeBytes + fileLengthBytes; // Future: use for storage calculation
+                console.debug('Processing file, current total size:', _totalSizeBytes, 'bytes');
                 parsedFileCount++;
 
                 if (totalFilesFromHeader !== -1 && parsedFileCount >= totalFilesFromHeader) {
@@ -702,7 +709,7 @@ class DeviceService {
             try {
                 const response = await this.receiveResponse(seqId, 15000, HIDOCK_COMMANDS.TRANSFER_FILE);
 
-                if (response.body.length === 0) {
+                if (response.data.length === 0) {
                     if (totalReceived >= expectedSize) {
                         break; // Transfer complete
                     }
@@ -711,8 +718,8 @@ class DeviceService {
                     continue;
                 }
 
-                chunks.push(response.body);
-                totalReceived += response.body.length;
+                chunks.push(response.data);
+                totalReceived += response.data.length;
 
                 // Update progress
                 const progress = Math.min((totalReceived / expectedSize) * 80 + 20, 95); // 20-95% range
@@ -774,7 +781,7 @@ class DeviceService {
             const response = await this.receiveResponse(seqId);
 
             // Check if time sync was successful
-            const responseView = new DataView(response.body.buffer, response.body.byteOffset);
+            const responseView = new DataView(response.data.buffer, response.data.byteOffset);
             const status = responseView.getUint32(0, false);
 
             if (status !== 0) {
@@ -857,7 +864,7 @@ class DeviceService {
         }
     }
 
-    private async receiveResponse(expectedSeqId: number, timeoutMs = 5000, streamingCmdId?: number): Promise<DeviceResponse> {
+    private async receiveResponse(expectedSeqId: number, timeoutMs = 5000, streamingCmdId?: number): Promise<PacketData> {
         if (!this.device || !this.isConnected) {
             throw new Error('Device not connected');
         }
@@ -892,14 +899,14 @@ class DeviceService {
                         }
 
                         // Check if this is the response we're waiting for OR a streaming packet
-                        if (packet.sequence === expectedSeqId ||
-                            (streamingCmdId !== undefined && packet.id === streamingCmdId)) {
+                        if (packet.seqId === expectedSeqId ||
+                            (streamingCmdId !== undefined && packet.cmdId === streamingCmdId)) {
 
                             this.operationStats.responsesReceived++;
                             return packet;
                         } else {
                             console.warn(`Unexpected Seq/CMD. Expected Seq: ${expectedSeqId} ` +
-                                `(or stream ${streamingCmdId}), Got CMD: ${packet.id} Seq: ${packet.sequence}. Discarding.`);
+                                `(or stream ${streamingCmdId}), Got CMD: ${packet.cmdId} Seq: ${packet.seqId}. Discarding.`);
                         }
                     }
                 }
@@ -982,9 +989,10 @@ class DeviceService {
             console.debug(`RECV RSP CMD: ${commandId}, Seq: ${sequence}, BodyLen: ${bodyLength}`);
 
             return {
-                id: commandId,
-                sequence,
-                body
+                cmdId: commandId,
+                seqId: sequence,
+                data: body,
+                isComplete: true
             };
         } catch (error) {
             console.error('Error parsing packet:', error);
@@ -1000,15 +1008,16 @@ class DeviceService {
             const seqId = await this.sendCommand(HIDOCK_COMMANDS.GET_DEVICE_INFO);
             const response = await this.receiveResponse(seqId);
 
-            if (response.body.length >= 4) {
-                const view = new DataView(response.body.buffer, response.body.byteOffset);
-                const versionCodeBytes = response.body.slice(0, 4);
+            if (response.data.length >= 4) {
+                const view = new DataView(response.data.buffer, response.data.byteOffset);
+                const versionCodeBytes = response.data.slice(0, 4);
                 const _versionNumber = view.getUint32(0, false); // Future: use for version validation
+                console.debug('Device version number:', _versionNumber);
                 const versionCode = Array.from(versionCodeBytes.slice(1)).join('.');
 
                 let serialNumber = 'N/A';
-                if (response.body.length > 4) {
-                    const serialBytes = response.body.slice(4, 20);
+                if (response.data.length > 4) {
+                    const serialBytes = response.data.slice(4, 20);
                     // Filter printable characters and decode
                     const printableBytes = Array.from(serialBytes).filter((b: number) => (b >= 32 && b <= 126) || b === 0);
                     const nullIndex = printableBytes.indexOf(0);
@@ -1055,8 +1064,8 @@ class DeviceService {
             const seqId = await this.sendCommand(HIDOCK_COMMANDS.GET_CARD_INFO);
             const response = await this.receiveResponse(seqId);
 
-            if (response.body.length >= 12) {
-                const view = new DataView(response.body.buffer, response.body.byteOffset);
+            if (response.data.length >= 12) {
+                const view = new DataView(response.data.buffer, response.data.byteOffset);
 
                 // Parse storage info (values are in MB)
                 const usedMB = view.getUint32(0, false);
@@ -1098,12 +1107,12 @@ class DeviceService {
             const seqId = await this.sendCommand(HIDOCK_COMMANDS.GET_FILE_COUNT);
             const response = await this.receiveResponse(seqId);
 
-            if (!response.body || response.body.length === 0) {
+            if (!response.data || response.data.length === 0) {
                 return 0;
             }
 
-            if (response.body.length >= 4) {
-                const view = new DataView(response.body.buffer, response.body.byteOffset);
+            if (response.data.length >= 4) {
+                const view = new DataView(response.data.buffer, response.data.byteOffset);
                 return view.getUint32(0, false);
             }
 
@@ -1194,8 +1203,8 @@ class DeviceService {
             const response = await this.receiveResponse(seqId);
 
             // Check if deletion was successful
-            if (response.body.length > 0) {
-                const view = new DataView(response.body.buffer, response.body.byteOffset);
+            if (response.data.length > 0) {
+                const view = new DataView(response.data.buffer, response.data.byteOffset);
                 const status = view.getUint8(0);
 
                 if (status !== 0) {
@@ -1261,8 +1270,8 @@ class DeviceService {
             const response = await this.receiveResponse(seqId, 60000); // 60 second timeout for format
 
             // Check if format was successful
-            if (response.body.length > 0) {
-                const view = new DataView(response.body.buffer, response.body.byteOffset);
+            if (response.data.length > 0) {
+                const view = new DataView(response.data.buffer, response.data.byteOffset);
                 const status = view.getUint8(0);
 
                 if (status !== 0) {

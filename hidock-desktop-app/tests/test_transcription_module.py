@@ -19,6 +19,7 @@ from transcription_module import (
     _call_gemini_api,
     _get_audio_duration,
     extract_meeting_insights,
+    main_test,
     process_audio_file_for_insights,
     transcribe_audio,
 )
@@ -549,3 +550,167 @@ class TestModuleIntegration:
         assert "insights" in result
         # The actual transcription will depend on the ai_service mock behavior
         # but the function should complete without errors
+
+
+class TestImportErrorHandling:
+    """Test import error handling scenarios"""
+
+    def test_genai_import_error_handling(self):
+        """Test that module handles genai import error gracefully"""
+        # Simulate the import error condition by testing with genai = None
+        with patch("transcription_module.genai", None):
+            # The _call_gemini_api function should handle genai being None
+            result = _call_gemini_api({"test": "payload"}, "test_key")
+            assert result is None  # Should return None when genai is not available
+
+
+class TestExceptionHandling:
+    """Test exception handling paths in the module"""
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
+    @patch("transcription_module.transcribe_audio")
+    async def test_process_audio_file_exception_during_file_prep(self, mock_transcribe, mock_exists):
+        """Test process_audio_file_for_insights when file preparation raises exception"""
+        # Make os.path.exists raise an exception
+        mock_exists.side_effect = Exception("File system error")
+
+        with patch("transcription_module.logger") as mock_logger:
+            result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
+
+            # Should return error result
+            assert "error" in result
+            assert "Error preparing audio file" in result["error"]
+
+            # Should log the error
+            mock_logger.error.assert_called()
+            error_call = mock_logger.error.call_args
+            assert "File preparation error" in error_call[0][2]
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
+    @patch("transcription_module.os.path.splitext", return_value=("/test/audio", ".hta"))
+    @patch("transcription_module.transcribe_audio")
+    @patch("transcription_module.extract_meeting_insights")
+    @patch("transcription_module.os.remove")
+    async def test_temp_file_cleanup_exception(
+        self, mock_remove, mock_insights, mock_transcribe, mock_splitext, mock_exists
+    ):
+        """Test temporary file cleanup exception handling"""
+        # Setup file existence checks
+        mock_exists.return_value = True
+
+        # Setup successful transcription and insights
+        mock_transcribe.return_value = {"transcription": "Test transcription"}
+        mock_insights.return_value = {"summary": "Test summary"}
+
+        # Make os.remove raise an exception during cleanup
+        mock_remove.side_effect = Exception("Permission denied")
+
+        with patch("transcription_module.logger") as mock_logger, patch(
+            "hta_converter.convert_hta_to_wav", return_value="/temp/test_speed_adjusted.wav"
+        ):
+            result = await process_audio_file_for_insights("/test/audio.hta", "gemini", "test_key")
+
+            # Should still return successful result despite cleanup failure
+            assert "transcription" in result
+            assert result["transcription"] == "Test transcription"
+
+            # Should log warning about cleanup failure
+            mock_logger.warning.assert_called()
+            warning_call = mock_logger.warning.call_args
+            assert "Could not clean up temporary file" in warning_call[0][2]
+
+
+class TestMainTestFunction:
+    """Test the main_test function for command-line usage"""
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
+    @patch("transcription_module.os.environ.get")
+    @patch("transcription_module.process_audio_file_for_insights")
+    @patch("builtins.print")
+    async def test_main_test_file_not_found(self, mock_print, mock_process, mock_env_get, mock_exists):
+        """Test main_test when test audio file doesn't exist"""
+        mock_exists.return_value = False
+        mock_env_get.return_value = "test_key"
+
+        with patch("transcription_module.logger") as mock_logger:
+            await main_test()
+
+            # Should log error about file not found
+            mock_logger.error.assert_called()
+            error_call = mock_logger.error.call_args
+            assert "Test audio file not found" in error_call[0][2]
+
+            # Should print error message
+            mock_print.assert_called()
+            print_call_args = [str(call) for call in mock_print.call_args_list]
+            assert any("Test audio file not found" in call for call in print_call_args)
+
+            # Should not call process function
+            mock_process.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
+    @patch("transcription_module.os.environ.get")
+    @patch("transcription_module.process_audio_file_for_insights")
+    @patch("builtins.print")
+    async def test_main_test_no_api_key(self, mock_print, mock_process, mock_env_get, mock_exists):
+        """Test main_test when no API key is provided"""
+        mock_exists.return_value = True
+        mock_env_get.return_value = ""  # No API key
+        mock_process.return_value = {"transcription": "test", "insights": {"summary": "test"}}
+
+        with patch("transcription_module.logger") as mock_logger:
+            await main_test()
+
+            # Should log warning about missing API key
+            mock_logger.warning.assert_called()
+            warning_call = mock_logger.warning.call_args
+            assert "GEMINI_API_KEY env var not set" in warning_call[0][2]
+
+            # Should print warning message
+            mock_print.assert_called()
+            print_call_args = [str(call) for call in mock_print.call_args_list]
+            assert any("GEMINI_API_KEY env var not set" in call for call in print_call_args)
+
+            # Should still call process function
+            mock_process.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("transcription_module.os.path.exists")
+    @patch("transcription_module.os.environ.get")
+    @patch("transcription_module.process_audio_file_for_insights")
+    @patch("builtins.print")
+    @patch("transcription_module.json.dumps")
+    async def test_main_test_success(self, mock_json_dumps, mock_print, mock_process, mock_env_get, mock_exists):
+        """Test successful main_test execution"""
+        mock_exists.return_value = True
+        mock_env_get.return_value = "test_api_key"
+        mock_results = {"transcription": "Test transcription", "insights": {"summary": "Test summary"}}
+        mock_process.return_value = mock_results
+        mock_json_dumps.return_value = '{"formatted": "json"}'
+
+        with patch("transcription_module.logger") as mock_logger:
+            await main_test()
+
+            # Should log start message
+            mock_logger.info.assert_called()
+            info_call = mock_logger.info.call_args
+            assert "Starting module test" in info_call[0][2]
+
+            # Should call process function with correct params
+            mock_process.assert_called_once()
+            call_args = mock_process.call_args[0]
+            assert "path_to_your_test_audio.wav" in call_args[0]
+            assert call_args[1] == "test_api_key"
+
+            # Should print results
+            mock_print.assert_called()
+            print_call_args = [str(call) for call in mock_print.call_args_list]
+            assert any("Transcription and Insights Results" in call for call in print_call_args)
+            assert any("End of Test" in call for call in print_call_args)
+
+            # Should format JSON output
+            mock_json_dumps.assert_called_once_with(mock_results, indent=2)

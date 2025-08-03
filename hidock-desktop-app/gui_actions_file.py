@@ -8,6 +8,7 @@ for handling file operations such as downloading, deleting, and transcribing.
 import json
 import os
 import threading
+
 # import time  # Commented out - not used in current implementation
 # import tkinter  # Commented out - not used directly, only tkinter.messagebox is used
 import traceback
@@ -28,47 +29,32 @@ class FileActionsMixin:
         Returns:
             str: A safe local file path.
         """
-        safe_filename = (
-            device_filename.replace(":", "-")
-            .replace(" ", "_")
-            .replace("\\", "_")
-            .replace("/", "_")
-        )
+        safe_filename = device_filename.replace(":", "-").replace(" ", "_").replace("\\", "_").replace("/", "_")
         return os.path.join(self.download_directory, safe_filename)
 
     def download_selected_files_gui(self):
         """Handles the download of selected files in the GUI by setting up a queue."""
         selected_iids = self.file_tree.selection()
         if not selected_iids:
-            messagebox.showinfo(
-                "No Selection", "Please select files to download.", parent=self
-            )
+            messagebox.showinfo("No Selection", "Please select files to download.", parent=self)
             return
         if not self.download_directory or not os.path.isdir(self.download_directory):
             messagebox.showerror("Error", "Invalid download directory.", parent=self)
             return
         if self.is_long_operation_active:
-            messagebox.showwarning(
-                "Busy", "Another operation in progress.", parent=self
-            )
+            messagebox.showwarning("Busy", "Another operation in progress.", parent=self)
             return
 
-        filenames_to_download = [
-            self.file_tree.item(iid)["values"][1] for iid in selected_iids
-        ]
+        filenames_to_download = [self.file_tree.item(iid)["values"][1] for iid in selected_iids]
 
         # Immediately update status to "Queued" for selected files
         for iid in selected_iids:
             filename = self.file_tree.item(iid)["values"][1]
             # Check if file is already being downloaded
-            if not self.file_operations_manager.is_file_operation_active(
-                filename, FileOperationType.DOWNLOAD
-            ):
+            if not self.file_operations_manager.is_file_operation_active(filename, FileOperationType.DOWNLOAD):
                 self._update_file_status_in_treeview(filename, "Queued", ("queued",))
 
-        self.file_operations_manager.queue_batch_download(
-            filenames_to_download, self._update_operation_progress
-        )
+        self.file_operations_manager.queue_batch_download(filenames_to_download, self._update_operation_progress)
 
         # No need to refresh file list - downloads work with existing metadata
         # and status updates are handled by the progress callback
@@ -77,9 +63,7 @@ class FileActionsMixin:
         """Handles the deletion of selected files in the GUI."""
         selected_iids = self.file_tree.selection()
         if not selected_iids:
-            messagebox.showinfo(
-                "No Selection", "Please select files to delete.", parent=self
-            )
+            messagebox.showinfo("No Selection", "Please select files to delete.", parent=self)
             return
 
         if not messagebox.askyesno(
@@ -89,24 +73,16 @@ class FileActionsMixin:
         ):
             return
 
-        filenames_to_delete = [
-            self.file_tree.item(iid)["values"][1] for iid in selected_iids
-        ]
+        filenames_to_delete = [self.file_tree.item(iid)["values"][1] for iid in selected_iids]
 
         # Immediately update status to "Queued" for selected files to be deleted
         for iid in selected_iids:
             filename = self.file_tree.item(iid)["values"][1]
             # Check if file is already being deleted
-            if not self.file_operations_manager.is_file_operation_active(
-                filename, FileOperationType.DELETE
-            ):
-                self._update_file_status_in_treeview(
-                    filename, "Delete Queued", ("queued",)
-                )
+            if not self.file_operations_manager.is_file_operation_active(filename, FileOperationType.DELETE):
+                self._update_file_status_in_treeview(filename, "Delete Queued", ("queued",))
 
-        self.file_operations_manager.queue_batch_delete(
-            filenames_to_delete, self._update_operation_progress
-        )
+        self.file_operations_manager.queue_batch_delete(filenames_to_delete, self._update_operation_progress)
 
     def _update_operation_progress(self, operation):
         """
@@ -120,8 +96,9 @@ class FileActionsMixin:
     def _perform_gui_update_for_operation(self, operation):
         """Performs the actual GUI update on the main thread."""
         if operation.status == FileOperationStatus.IN_PROGRESS:
-            status_text = (f"{operation.operation_type.value.capitalize()} "
-                          f"{operation.filename}: {operation.progress:.0f}%")
+            status_text = (
+                f"{operation.operation_type.value.capitalize()} " f"{operation.filename}: {operation.progress:.0f}%"
+            )
             self.update_status_bar(progress_text=status_text)
             self._update_file_status_in_treeview(
                 operation.filename,
@@ -133,39 +110,27 @@ class FileActionsMixin:
             self.update_status_bar(progress_text=status_text)
             # For downloads, show "Downloaded" status instead of "Completed"
             if operation.operation_type.value == "download":
-                self._update_file_status_in_treeview(
-                    operation.filename, "Downloaded", ("downloaded_ok",)
-                )
+                self._update_file_status_in_treeview(operation.filename, "Downloaded", ("downloaded_ok",))
             elif operation.operation_type.value == "delete":
                 # For deletions, remove the file from the treeview and refresh the file list
                 self._remove_file_from_treeview(operation.filename)
                 # Refresh the file list to ensure consistency with device state
                 self.refresh_file_list_gui()
             else:
-                self._update_file_status_in_treeview(
-                    operation.filename, "Completed", ("completed",)
-                )
+                self._update_file_status_in_treeview(operation.filename, "Completed", ("completed",))
         elif operation.status == FileOperationStatus.FAILED:
             status_text = f"Failed to {operation.operation_type.value} {operation.filename}: {operation.error_message}"
             self.update_status_bar(progress_text=status_text)
-            self._update_file_status_in_treeview(
-                operation.filename, "Failed", ("failed",)
-            )
+            self._update_file_status_in_treeview(operation.filename, "Failed", ("failed",))
         elif operation.status == FileOperationStatus.CANCELLED:
             status_text = f"{operation.operation_type.value.capitalize()} {operation.filename} cancelled."
             self.update_status_bar(progress_text=status_text)
-            self._update_file_status_in_treeview(
-                operation.filename, "Cancelled", ("cancelled",)
-            )
+            self._update_file_status_in_treeview(operation.filename, "Cancelled", ("cancelled",))
 
     def _transcribe_selected_audio_gemini(self, file_iid):
-        file_detail = next(
-            (f for f in self.displayed_files_details if f["name"] == file_iid), None
-        )
+        file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
         if not file_detail:
-            messagebox.showerror(
-                "Transcription Error", "File details not found.", parent=self
-            )
+            messagebox.showerror("Transcription Error", "File details not found.", parent=self)
             return
 
         local_filepath = self._get_local_filepath(file_detail["name"])
@@ -188,9 +153,7 @@ class FileActionsMixin:
             return
 
         self._set_long_operation_active_state(True, "Transcription")
-        self.update_status_bar(
-            progress_text=f"Transcribing {file_detail['name']} with Gemini..."
-        )
+        self.update_status_bar(progress_text=f"Transcribing {file_detail['name']} with Gemini...")
 
         threading.Thread(
             target=self._transcription_worker,
@@ -211,9 +174,7 @@ class FileActionsMixin:
                 "_transcription_worker",
                 f"Error during transcription: {e}\n{traceback.format_exc()}",
             )
-            self.after(
-                0, self._on_transcription_complete, {"error": str(e)}, original_filename
-            )
+            self.after(0, self._on_transcription_complete, {"error": str(e)}, original_filename)
 
     def _on_transcription_complete(self, results, original_filename):
         self._set_long_operation_active_state(False, "Transcription")
@@ -223,9 +184,7 @@ class FileActionsMixin:
                 f"Failed to transcribe {original_filename}: {results['error']}",
                 parent=self,
             )
-            self.update_status_bar(
-                progress_text=f"Transcription failed for {original_filename}."
-            )
+            self.update_status_bar(progress_text=f"Transcription failed for {original_filename}.")
         else:
             transcription_text = results.get("transcription", "No transcription found.")
             insights = results.get("insights", {})
@@ -252,9 +211,7 @@ class FileActionsMixin:
             insights_textbox.configure(state="disabled")
             insights_textbox.pack(fill="both", expand=True, padx=5, pady=5)
 
-            self.update_status_bar(
-                progress_text=f"Transcription complete for {original_filename}."
-            )
+            self.update_status_bar(progress_text=f"Transcription complete for {original_filename}.")
 
     def cancel_all_downloads_gui(self):
         """Cancels all active download operations."""
@@ -263,14 +220,11 @@ class FileActionsMixin:
             op
             for op in active_operations
             if op.operation_type == FileOperationType.DOWNLOAD
-            and op.status
-            in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
+            and op.status in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
         ]
 
         if not download_operations:
-            messagebox.showinfo(
-                "No Downloads", "No active downloads to cancel.", parent=self
-            )
+            messagebox.showinfo("No Downloads", "No active downloads to cancel.", parent=self)
             return
 
         if messagebox.askyesno(
@@ -280,18 +234,12 @@ class FileActionsMixin:
         ):
             cancelled_count = 0
             for operation in download_operations:
-                if self.file_operations_manager.cancel_operation(
-                    operation.operation_id
-                ):
+                if self.file_operations_manager.cancel_operation(operation.operation_id):
                     cancelled_count += 1
                     # Update the file status in the treeview
-                    self._update_file_status_in_treeview(
-                        operation.filename, "Cancelled", ("cancelled",)
-                    )
+                    self._update_file_status_in_treeview(operation.filename, "Cancelled", ("cancelled",))
 
-            self.update_status_bar(
-                progress_text=f"Cancelled {cancelled_count} download(s)."
-            )
+            self.update_status_bar(progress_text=f"Cancelled {cancelled_count} download(s).")
 
             # Refresh the file list to ensure consistent state
             self.refresh_file_list_gui()
@@ -308,9 +256,7 @@ class FileActionsMixin:
             return
 
         # Get filenames from selected items
-        selected_filenames = [
-            self.file_tree.item(iid)["values"][1] for iid in selected_iids
-        ]
+        selected_filenames = [self.file_tree.item(iid)["values"][1] for iid in selected_iids]
 
         # Find active download operations for selected files
         active_operations = self.file_operations_manager.get_all_active_operations()
@@ -320,8 +266,7 @@ class FileActionsMixin:
             if (
                 op.operation_type == FileOperationType.DOWNLOAD
                 and op.filename in selected_filenames
-                and op.status
-                in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
+                and op.status in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
             )
         ]
 
@@ -340,18 +285,12 @@ class FileActionsMixin:
         ):
             cancelled_count = 0
             for operation in download_operations_to_cancel:
-                if self.file_operations_manager.cancel_operation(
-                    operation.operation_id
-                ):
+                if self.file_operations_manager.cancel_operation(operation.operation_id):
                     cancelled_count += 1
                     # Update the file status in the treeview
-                    self._update_file_status_in_treeview(
-                        operation.filename, "Cancelled", ("cancelled",)
-                    )
+                    self._update_file_status_in_treeview(operation.filename, "Cancelled", ("cancelled",))
 
-            self.update_status_bar(
-                progress_text=f"Cancelled {cancelled_count} download(s) for selected files."
-            )
+            self.update_status_bar(progress_text=f"Cancelled {cancelled_count} download(s) for selected files.")
 
             # Refresh the file list to ensure consistent state
             self.refresh_file_list_gui()

@@ -71,16 +71,12 @@ class AIProvider(ABC):
         self.config = config or {}
 
     @abstractmethod
-    def transcribe_audio(
-        self, audio_file_path: str, language: str = "auto"
-    ) -> Dict[str, Any]:
+    def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio file to text"""
         pass
 
     @abstractmethod
-    def analyze_text(
-        self, text: str, analysis_type: str = "insights"
-    ) -> Dict[str, Any]:
+    def analyze_text(self, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
         """Analyze text and extract insights"""
         pass
 
@@ -116,14 +112,10 @@ class GeminiProvider(AIProvider):
             response = model.generate_content("Test validation message")
             return bool(response and response.text)
         except Exception as e:
-            logger.error(
-                "GeminiProvider", "validate_api_key", f"API validation failed: {e}"
-            )
+            logger.error("GeminiProvider", "validate_api_key", f"API validation failed: {e}")
             return False
 
-    def transcribe_audio(
-        self, audio_file_path: str, language: str = "auto"
-    ) -> Dict[str, Any]:
+    def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using Gemini"""
         if not self.is_available():
             return self._mock_response("transcription")
@@ -171,9 +163,7 @@ class GeminiProvider(AIProvider):
             logger.error("GeminiProvider", "transcribe_audio", f"Error: {e}")
             return {"success": False, "error": str(e), "provider": "gemini"}
 
-    def analyze_text(
-        self, text: str, analysis_type: str = "insights"
-    ) -> Dict[str, Any]:
+    def analyze_text(self, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
         """Analyze text using Gemini"""
         if not self.is_available():
             return self._mock_response("analysis")
@@ -256,14 +246,10 @@ class OpenAIProvider(AIProvider):
             )
             return bool(response and response.choices)
         except Exception as e:
-            logger.error(
-                "OpenAIProvider", "validate_api_key", f"API validation failed: {e}"
-            )
+            logger.error("OpenAIProvider", "validate_api_key", f"API validation failed: {e}")
             return False
 
-    def transcribe_audio(
-        self, audio_file_path: str, language: str = "auto"
-    ) -> Dict[str, Any]:
+    def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using OpenAI Whisper"""
         if not self.is_available():
             return self._mock_response("transcription")
@@ -288,9 +274,7 @@ class OpenAIProvider(AIProvider):
             logger.error("OpenAIProvider", "transcribe_audio", f"Error: {e}")
             return {"success": False, "error": str(e), "provider": "openai"}
 
-    def analyze_text(
-        self, text: str, analysis_type: str = "insights"
-    ) -> Dict[str, Any]:
+    def analyze_text(self, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
         """Analyze text using OpenAI GPT"""
         if not self.is_available():
             return self._mock_response("analysis")
@@ -301,8 +285,10 @@ class OpenAIProvider(AIProvider):
                 messages=[
                     {
                         "role": "system",
-                        "content": ("You are an AI assistant that analyzes text and provides "
-                                    "structured insights in JSON format."),
+                        "content": (
+                            "You are an AI assistant that analyzes text and provides "
+                            "structured insights in JSON format."
+                        ),
                     },
                     {
                         "role": "user",
@@ -384,14 +370,10 @@ class AnthropicProvider(AIProvider):
             )
             return bool(response and response.content)
         except Exception as e:
-            logger.error(
-                "AnthropicProvider", "validate_api_key", f"API validation failed: {e}"
-            )
+            logger.error("AnthropicProvider", "validate_api_key", f"API validation failed: {e}")
             return False
 
-    def transcribe_audio(
-        self, audio_file_path: str, language: str = "auto"
-    ) -> Dict[str, Any]:
+    def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using Claude (note: Claude doesn't support audio transcription directly)"""
         logger.warning(
             "AnthropicProvider",
@@ -400,14 +382,13 @@ class AnthropicProvider(AIProvider):
         )
         return {
             "success": False,
-            "error": ("Claude doesn't support direct audio transcription. "
-                      "Please use another provider for transcription."),
+            "error": (
+                "Claude doesn't support direct audio transcription. " "Please use another provider for transcription."
+            ),
             "provider": "anthropic",
         }
 
-    def analyze_text(
-        self, text: str, analysis_type: str = "insights"
-    ) -> Dict[str, Any]:
+    def analyze_text(self, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
         """Analyze text using Claude"""
         if not self.is_available():
             return self._mock_response("analysis")
@@ -468,9 +449,7 @@ class OpenRouterProvider(AIProvider):
     def __init__(self, api_key: str, config: Dict[str, Any] = None):
         super().__init__(api_key, config)
         self.base_url = (
-            config.get("base_url", "https://openrouter.ai/api/v1")
-            if config
-            else "https://openrouter.ai/api/v1"
+            config.get("base_url", "https://openrouter.ai/api/v1") if config else "https://openrouter.ai/api/v1"
         )
 
     def is_available(self) -> bool:
@@ -500,14 +479,10 @@ class OpenRouterProvider(AIProvider):
             )
             return response.status_code == 200
         except Exception as e:
-            logger.error(
-                "OpenRouterProvider", "validate_api_key", f"API validation failed: {e}"
-            )
+            logger.error("OpenRouterProvider", "validate_api_key", f"API validation failed: {e}")
             return False
 
-    def transcribe_audio(
-        self, audio_file_path: str, language: str = "auto"
-    ) -> Dict[str, Any]:
+    def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio through OpenRouter (limited audio support)"""
         logger.warning(
             "OpenRouterProvider",
@@ -516,14 +491,13 @@ class OpenRouterProvider(AIProvider):
         )
         return {
             "success": False,
-            "error": ("OpenRouter has limited audio transcription support. "
-                      "Please use OpenAI or Gemini for transcription."),
+            "error": (
+                "OpenRouter has limited audio transcription support. " "Please use OpenAI or Gemini for transcription."
+            ),
             "provider": "openrouter",
         }
 
-    def analyze_text(
-        self, text: str, analysis_type: str = "insights"
-    ) -> Dict[str, Any]:
+    def analyze_text(self, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
         """Analyze text using OpenRouter"""
         if not self.is_available():
             return self._mock_response("analysis")
@@ -558,9 +532,7 @@ class OpenRouterProvider(AIProvider):
                 "max_tokens": self.config.get("max_tokens", 4000),
             }
 
-            response = requests.post(
-                f"{self.base_url}/chat/completions", headers=headers, json=data
-            )
+            response = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=data)
             response.raise_for_status()
 
             result = response.json()
@@ -599,11 +571,7 @@ class OllamaProvider(AIProvider):
 
     def __init__(self, api_key: str, config: Dict[str, Any] = None):
         super().__init__(api_key, config)
-        self.base_url = (
-            config.get("base_url", "http://localhost:11434")
-            if config
-            else "http://localhost:11434"
-        )
+        self.base_url = config.get("base_url", "http://localhost:11434") if config else "http://localhost:11434"
 
     def is_available(self) -> bool:
         return REQUESTS_AVAILABLE
@@ -627,9 +595,7 @@ class OllamaProvider(AIProvider):
             )
             return False
 
-    def transcribe_audio(
-        self, audio_file_path: str, language: str = "auto"
-    ) -> Dict[str, Any]:
+    def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using Ollama (limited audio support)"""
         logger.warning(
             "OllamaProvider",
@@ -638,14 +604,14 @@ class OllamaProvider(AIProvider):
         )
         return {
             "success": False,
-            "error": ("Ollama doesn't support direct audio transcription. "
-                      "Please use OpenAI Whisper or Gemini for transcription."),
+            "error": (
+                "Ollama doesn't support direct audio transcription. "
+                "Please use OpenAI Whisper or Gemini for transcription."
+            ),
             "provider": "ollama",
         }
 
-    def analyze_text(
-        self, text: str, analysis_type: str = "insights"
-    ) -> Dict[str, Any]:
+    def analyze_text(self, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
         """Analyze text using Ollama"""
         if not self.is_available():
             return self._mock_response("analysis")
@@ -675,9 +641,7 @@ class OllamaProvider(AIProvider):
                 },
             }
 
-            response = requests.post(
-                f"{self.base_url}/api/generate", headers=headers, json=data
-            )
+            response = requests.post(f"{self.base_url}/api/generate", headers=headers, json=data)
             response.raise_for_status()
 
             result = response.json()
@@ -713,11 +677,7 @@ class LMStudioProvider(AIProvider):
 
     def __init__(self, api_key: str, config: Dict[str, Any] = None):
         super().__init__(api_key, config)
-        self.base_url = (
-            config.get("base_url", "http://localhost:1234/v1")
-            if config
-            else "http://localhost:1234/v1"
-        )
+        self.base_url = config.get("base_url", "http://localhost:1234/v1") if config else "http://localhost:1234/v1"
 
     def is_available(self) -> bool:
         return REQUESTS_AVAILABLE
@@ -741,9 +701,7 @@ class LMStudioProvider(AIProvider):
             )
             return False
 
-    def transcribe_audio(
-        self, audio_file_path: str, language: str = "auto"
-    ) -> Dict[str, Any]:
+    def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using LM Studio (limited audio support)"""
         logger.warning(
             "LMStudioProvider",
@@ -752,14 +710,14 @@ class LMStudioProvider(AIProvider):
         )
         return {
             "success": False,
-            "error": ("LM Studio doesn't support direct audio transcription. "
-                      "Please use OpenAI Whisper or Gemini for transcription."),
+            "error": (
+                "LM Studio doesn't support direct audio transcription. "
+                "Please use OpenAI Whisper or Gemini for transcription."
+            ),
             "provider": "lmstudio",
         }
 
-    def analyze_text(
-        self, text: str, analysis_type: str = "insights"
-    ) -> Dict[str, Any]:
+    def analyze_text(self, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
         """Analyze text using LM Studio"""
         if not self.is_available():
             return self._mock_response("analysis")
@@ -791,9 +749,7 @@ class LMStudioProvider(AIProvider):
                 "max_tokens": self.config.get("max_tokens", 4000),
             }
 
-            response = requests.post(
-                f"{self.base_url}/chat/completions", headers=headers, json=data
-            )
+            response = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=data)
             response.raise_for_status()
 
             result = response.json()
@@ -830,9 +786,7 @@ class AIServiceManager:
     def __init__(self):
         self.providers = {}
 
-    def configure_provider(
-        self, provider_name: str, api_key: str, config: Dict[str, Any] = None
-    ) -> bool:
+    def configure_provider(self, provider_name: str, api_key: str, config: Dict[str, Any] = None) -> bool:
         """Configure an AI provider"""
         try:
             if provider_name == "gemini":
@@ -854,9 +808,7 @@ class AIServiceManager:
                     "configure_provider",
                     f"{provider_name} provider configured with mock responses",
                 )
-                self.providers[provider_name] = self._create_mock_provider(
-                    provider_name, api_key, config
-                )
+                self.providers[provider_name] = self._create_mock_provider(provider_name, api_key, config)
             else:
                 logger.error(
                     "AIServiceManager",
@@ -879,9 +831,7 @@ class AIServiceManager:
         """Get configured provider"""
         return self.providers.get(provider_name)
 
-    def validate_provider(
-        self, provider_name: str, api_key: str, config: Dict[str, Any] = None
-    ) -> bool:
+    def validate_provider(self, provider_name: str, api_key: str, config: Dict[str, Any] = None) -> bool:
         """Validate API key for a specific provider"""
         try:
             # Create temporary provider instance for validation
@@ -921,9 +871,7 @@ class AIServiceManager:
             )
             return False
 
-    def transcribe_audio(
-        self, provider_name: str, audio_file_path: str, language: str = "auto"
-    ) -> Dict[str, Any]:
+    def transcribe_audio(self, provider_name: str, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using specified provider"""
         provider = self.get_provider(provider_name)
         if not provider:
@@ -935,9 +883,7 @@ class AIServiceManager:
 
         return provider.transcribe_audio(audio_file_path, language)
 
-    def analyze_text(
-        self, provider_name: str, text: str, analysis_type: str = "insights"
-    ) -> Dict[str, Any]:
+    def analyze_text(self, provider_name: str, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
         """Analyze text using specified provider"""
         provider = self.get_provider(provider_name)
         if not provider:
@@ -949,9 +895,7 @@ class AIServiceManager:
 
         return provider.analyze_text(text, analysis_type)
 
-    def _create_mock_provider(
-        self, provider_name: str, api_key: str, config: Dict[str, Any] = None
-    ) -> AIProvider:
+    def _create_mock_provider(self, provider_name: str, api_key: str, config: Dict[str, Any] = None) -> AIProvider:
         """Create a mock provider for providers not yet fully implemented"""
 
         class MockProvider(AIProvider):
@@ -966,9 +910,7 @@ class AIServiceManager:
                 """Mock providers always validate successfully"""
                 return True
 
-            def transcribe_audio(
-                self, audio_file_path: str, language: str = "auto"
-            ) -> Dict[str, Any]:
+            def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
                 return {
                     "success": True,
                     "transcription": f"[Mock {self.name.title()}] This is a sample transcription for testing purposes.",
@@ -977,9 +919,7 @@ class AIServiceManager:
                     "provider": self.name,
                 }
 
-            def analyze_text(
-                self, text: str, analysis_type: str = "insights"
-            ) -> Dict[str, Any]:
+            def analyze_text(self, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
                 return {
                     "success": True,
                     "analysis": {

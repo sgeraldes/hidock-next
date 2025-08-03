@@ -22,13 +22,11 @@ class TreeViewMixin:
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
         columns = ("num", "name", "datetime", "size", "duration", "version", "status")
-        self.file_tree = ttk.Treeview(
-            tree_frame, columns=columns, show="headings", selectmode="extended"
-        )
+        # Set initial selectmode based on configuration
+        initial_selectmode = "browse" if self.single_selection_mode_var.get() else "extended"
+        self.file_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode=initial_selectmode)
         self.file_tree.tag_configure("downloaded", foreground="blue")
-        self.file_tree.tag_configure(
-            "recording", foreground="red", font=("Arial", 10, "bold")
-        )
+        self.file_tree.tag_configure("recording", foreground="red", font=("Arial", 10, "bold"))
         self.file_tree.tag_configure("size_mismatch", foreground="orange")
         self.file_tree.tag_configure("downloaded_ok", foreground="green")
         self.file_tree.tag_configure("downloading", foreground="dark orange")
@@ -38,9 +36,7 @@ class TreeViewMixin:
         if self.treeview_columns_display_order_str:
             loaded_column_order = self.treeview_columns_display_order_str.split(",")
             valid_loaded_order = [c for c in loaded_column_order if c in columns]
-            if len(valid_loaded_order) == len(columns) and set(
-                valid_loaded_order
-            ) == set(columns):
+            if len(valid_loaded_order) == len(columns) and set(valid_loaded_order) == set(columns):
                 try:
                     self.file_tree["displaycolumns"] = valid_loaded_order
                 except tkinter.TclError as e:
@@ -76,9 +72,7 @@ class TreeViewMixin:
         self.file_tree.grid(row=0, column=0, sticky="nsew")
 
         # Create and configure scrollbar - simplest possible approach
-        self.tree_scrollbar = ttk.Scrollbar(
-            tree_frame, orient="vertical", command=self.file_tree.yview
-        )
+        self.tree_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.file_tree.yview)
         self.tree_scrollbar.grid(row=0, column=1, sticky="ns")
         self.file_tree.configure(yscrollcommand=self.tree_scrollbar.set)
 
@@ -103,9 +97,7 @@ class TreeViewMixin:
 
         # Only clear if there are no real files displayed (just show loading for empty state)
         existing_children = self.file_tree.get_children()
-        has_real_files = any(
-            not child.startswith("loading_") for child in existing_children
-        )
+        has_real_files = any(not child.startswith("loading_") for child in existing_children)
 
         if not has_real_files:
             # No real files shown yet, display loading indicators
@@ -127,9 +119,7 @@ class TreeViewMixin:
                 )
 
             # Configure loading tag with distinctive styling
-            self.file_tree.tag_configure(
-                "loading", foreground="blue", font=("Arial", 10, "italic")
-            )
+            self.file_tree.tag_configure("loading", foreground="blue", font=("Arial", 10, "italic"))
         else:
             # Files are already displayed - just update status bar, don't clear tree
             pass
@@ -148,24 +138,13 @@ class TreeViewMixin:
         scroll_pos = self.file_tree.yview()
 
         # Remove any loading indicators, but preserve real files if doing an update
-        children_to_remove = [
-            child
-            for child in self.file_tree.get_children()
-            if child.startswith("loading_")
-        ]
+        children_to_remove = [child for child in self.file_tree.get_children() if child.startswith("loading_")]
         for child in children_to_remove:
             self.file_tree.delete(child)
 
         # Only clear all if we're doing a full refresh (not an update)
-        if (
-            not hasattr(self, "_is_incremental_update")
-            or not self._is_incremental_update
-        ):
-            remaining_children = [
-                child
-                for child in self.file_tree.get_children()
-                if not child.startswith("loading_")
-            ]
+        if not hasattr(self, "_is_incremental_update") or not self._is_incremental_update:
+            remaining_children = [child for child in self.file_tree.get_children() if not child.startswith("loading_")]
             for child in remaining_children:
                 self.file_tree.delete(child)
 
@@ -184,10 +163,7 @@ class TreeViewMixin:
                 tags.append("cancelled")
             elif "Error" in status_text:
                 tags.append("size_mismatch")
-            if (
-                self.is_audio_playing
-                and self.current_playing_filename_for_replay == file_info["name"]
-            ):
+            if self.is_audio_playing and self.current_playing_filename_for_replay == file_info["name"]:
                 tags.append("playing")
                 status_text = "Playing"
             elif (
@@ -201,7 +177,7 @@ class TreeViewMixin:
             # Format size in MB
             size_bytes = file_info.get("length", 0)
             size_mb_str = (
-                f"{size_bytes / (1024*1024):.2f}"
+                f"{size_bytes / (1024 * 1024):.2f}"
                 if isinstance(size_bytes, (int, float)) and size_bytes > 0
                 else "0.00"
             )
@@ -230,9 +206,7 @@ class TreeViewMixin:
                 version_str,
                 status_text,
             )
-            self.file_tree.insert(
-                "", "end", iid=file_info["name"], values=values, tags=tags
-            )
+            self.file_tree.insert("", "end", iid=file_info["name"], values=values, tags=tags)
         if selected_iids:
             new_selection = [iid for iid in selected_iids if self.file_tree.exists(iid)]
             if new_selection:
@@ -250,17 +224,11 @@ class TreeViewMixin:
             status_text (str): The new status text to display.
             tags_to_add (tuple): A tuple of tags to add to the item.
         """
-        if not (
-            hasattr(self, "file_tree")
-            and self.file_tree.winfo_exists()
-            and self.file_tree.exists(file_iid)
-        ):
+        if not (hasattr(self, "file_tree") and self.file_tree.winfo_exists() and self.file_tree.exists(file_iid)):
             return
 
         # Update the file detail in displayed_files_details first
-        file_detail = next(
-            (f for f in self.displayed_files_details if f["name"] == file_iid), None
-        )
+        file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
         if file_detail:
             file_detail["gui_status"] = status_text
 
@@ -285,10 +253,7 @@ class TreeViewMixin:
             )
 
             # Only repopulate if the order actually changed to avoid unnecessary updates
-            current_order = [
-                self.file_tree.item(child)["values"][1]
-                for child in self.file_tree.get_children()
-            ]
+            current_order = [self.file_tree.item(child)["values"][1] for child in self.file_tree.get_children()]
             new_order = [f["name"] for f in sorted_files]
 
             if current_order != new_order:
@@ -301,9 +266,7 @@ class TreeViewMixin:
 
                 # Restore selection and scroll position
                 if selected_iids:
-                    new_selection = [
-                        iid for iid in selected_iids if self.file_tree.exists(iid)
-                    ]
+                    new_selection = [iid for iid in selected_iids if self.file_tree.exists(iid)]
                     if new_selection:
                         self.file_tree.selection_set(new_selection)
                 self.file_tree.yview_moveto(scroll_pos[0])
@@ -315,20 +278,14 @@ class TreeViewMixin:
         Args:
             file_iid (str): The IID (item ID) of the file to remove from the Treeview.
         """
-        if not (
-            hasattr(self, "file_tree")
-            and self.file_tree.winfo_exists()
-            and self.file_tree.exists(file_iid)
-        ):
+        if not (hasattr(self, "file_tree") and self.file_tree.winfo_exists() and self.file_tree.exists(file_iid)):
             return
 
         # Remove from treeview
         self.file_tree.delete(file_iid)
 
         # Remove from displayed_files_details list
-        self.displayed_files_details = [
-            f for f in self.displayed_files_details if f["name"] != file_iid
-        ]
+        self.displayed_files_details = [f for f in self.displayed_files_details if f["name"] != file_iid]
 
         # Update status info to reflect the change
         self.update_all_status_info()
@@ -368,9 +325,7 @@ class TreeViewMixin:
                     try:
                         datetime_str = f"{item.get('createDate', '')} {item.get('createTime', '')}".strip()
                         if datetime_str and datetime_str != "---":
-                            item["time"] = datetime.strptime(
-                                datetime_str, "%Y-%m-%d %H:%M:%S"
-                            )
+                            item["time"] = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
                         else:
                             item["time"] = datetime.min
                     except (ValueError, TypeError):
@@ -409,9 +364,7 @@ class TreeViewMixin:
             self.treeview_sort_reverse = False
 
         # Sort the data
-        sorted_files = self._sort_files_data(
-            self.displayed_files_details, col, self.treeview_sort_reverse
-        )
+        sorted_files = self._sort_files_data(self.displayed_files_details, col, self.treeview_sort_reverse)
 
         # Repopulate the treeview with sorted data
         self._populate_treeview_from_data(sorted_files)
@@ -422,6 +375,13 @@ class TreeViewMixin:
         # Save sort state for persistence
         self.saved_treeview_sort_column = col
         self.saved_treeview_sort_reverse = self.treeview_sort_reverse
+        
+        # Auto-save sort preferences
+        from config_and_logger import update_config_settings
+        update_config_settings({
+            "treeview_sort_col_id": col,
+            "treeview_sort_descending": self.treeview_sort_reverse
+        })
 
         # Restore selection and scroll position
         if selected_iids:
@@ -476,6 +436,10 @@ class TreeViewMixin:
             list: The sorted list of file dictionaries.
         """
         if self.saved_treeview_sort_column:
+            # Update current sort state to match saved state
+            self.treeview_sort_column = self.saved_treeview_sort_column
+            self.treeview_sort_reverse = self.saved_treeview_sort_reverse
+
             sorted_files = self._sort_files_data(
                 files_data,
                 self.saved_treeview_sort_column,
@@ -489,3 +453,31 @@ class TreeViewMixin:
             )
             return sorted_files
         return files_data
+
+    def _update_treeview_selectmode(self):
+        """Updates the treeview selectmode based on current selection mode setting."""
+        if not (hasattr(self, "file_tree") and self.file_tree.winfo_exists()):
+            return
+
+        is_single_mode = self.single_selection_mode_var.get()
+        new_selectmode = "browse" if is_single_mode else "extended"
+
+        self.file_tree.selection_set([])
+        self.file_tree.configure(selectmode=new_selectmode)
+        self._update_selection_buttons_visibility()
+
+    def _update_selection_buttons_visibility(self):
+        """Updates visibility of select all/clear buttons based on selection mode."""
+        is_single_mode = self.single_selection_mode_var.get()
+
+        if hasattr(self, "select_all_button_header") and self.select_all_button_header.winfo_exists():
+            if is_single_mode:
+                self.select_all_button_header.pack_forget()
+            else:
+                self.select_all_button_header.pack(side="right", padx=(2, 2), pady=2)
+
+        if hasattr(self, "clear_selection_button_header") and self.clear_selection_button_header.winfo_exists():
+            if is_single_mode:
+                self.clear_selection_button_header.pack_forget()
+            else:
+                self.clear_selection_button_header.pack(side="right", padx=(2, 5), pady=2)

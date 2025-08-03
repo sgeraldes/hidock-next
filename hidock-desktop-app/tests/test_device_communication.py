@@ -2,7 +2,9 @@
 Tests for device communication functionality.
 """
 
+import os
 import struct
+import sys
 
 # import threading  # Future: threaded device communication tests
 import time
@@ -560,10 +562,6 @@ class TestPerformanceMonitoring:
         assert "operation_stats" in connection_stats
         assert connection_stats["operation_stats"]["commands_sent"] == 0
         assert connection_stats["operation_stats"]["responses_received"] == 0
-
-
-import os
-import sys
 
 
 @pytest.mark.integration

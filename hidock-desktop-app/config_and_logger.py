@@ -32,7 +32,7 @@ _CONFIG_FILE_PATH = os.path.join(_SCRIPT_DIR, CONFIG_FILE_NAME)
 
 
 # --- Configuration Management ---
-def get_default_config():
+def get_default_config() -> dict:
     """Returns the default configuration dictionary."""
     return {
         "autoconnect": False,
@@ -57,7 +57,7 @@ def get_default_config():
         "gui_log_filter_level": "DEBUG",
         "loop_playback": False,
         "playback_volume": 0.5,
-        "treeview_sort_col_id": "time",
+        "treeview_sort_col_id": "datetime",
         "treeview_sort_descending": True,
         "log_colors": {
             "ERROR": ["#FF6347", "#FF4747"],
@@ -74,30 +74,129 @@ def get_default_config():
     }
 
 
+def _validate_and_merge_config(defaults, loaded_config):
+    """
+    Validates loaded configuration values against expected types and merges with defaults.
+
+    Args:
+        defaults (dict): Default configuration with correct types
+        loaded_config (dict): Configuration loaded from file
+
+    Returns:
+        dict: Validated and merged configuration
+    """
+    result = defaults.copy()
+
+    # Define expected types for validation
+    type_validators = {
+        "autoconnect": bool,
+        "auto_refresh_files": bool,
+        "quit_without_prompt_if_connected": bool,
+        "suppress_console_output": bool,
+        "suppress_gui_log_output": bool,
+        "logs_pane_visible": bool,
+        "loop_playback": bool,
+        "selected_vid": int,
+        "selected_pid": int,
+        "target_interface": int,
+        "recording_check_interval_s": int,
+        "default_command_timeout_ms": int,
+        "file_stream_timeout_s": int,
+        "auto_refresh_interval_s": int,
+        "playback_volume": (int, float),
+        "treeview_sort_descending": bool,
+        "log_level": lambda x: x in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        "appearance_mode": lambda x: x in ["Light", "Dark", "System"],
+    }
+
+    for key, value in loaded_config.items():
+        if key in result:  # Only process known keys
+            expected_type = type_validators.get(key)
+
+            if expected_type is None:
+                # No validation defined, use as-is
+                result[key] = value
+            elif callable(expected_type) and not isinstance(expected_type, type):
+                # Custom validator function
+                if expected_type(value):
+                    result[key] = value
+                else:
+                    print(
+                        f"[WARNING] ConfigManager::_validate_and_merge_config - "
+                        f"Invalid value for {key}: {value}, using default: {result[key]}"
+                    )
+            elif isinstance(expected_type, tuple):
+                # Multiple allowed types
+                if isinstance(value, expected_type):
+                    result[key] = value
+                else:
+                    print(
+                        f"[WARNING] ConfigManager::_validate_and_merge_config - "
+                        f"Invalid type for {key}: {type(value).__name__}, expected {expected_type}, "
+                        f"using default: {result[key]}"
+                    )
+            elif expected_type == bool:
+                # Special handling for boolean values
+                if isinstance(value, bool):
+                    result[key] = value
+                elif isinstance(value, str):
+                    # Try to convert string to boolean
+                    if value.lower() in ["true", "1", "yes", "on"]:
+                        result[key] = True
+                    elif value.lower() in ["false", "0", "no", "off"]:
+                        result[key] = False
+                    else:
+                        print(
+                            f"[WARNING] ConfigManager::_validate_and_merge_config - "
+                            f"Invalid boolean value for {key}: {value}, using default: {result[key]}"
+                        )
+                else:
+                    print(
+                        f"[WARNING] ConfigManager::_validate_and_merge_config - "
+                        f"Invalid type for {key}: {type(value).__name__}, expected bool, "
+                        f"using default: {result[key]}"
+                    )
+            elif isinstance(value, expected_type):
+                result[key] = value
+            else:
+                print(
+                    f"[WARNING] ConfigManager::_validate_and_merge_config - "
+                    f"Invalid type for {key}: {type(value).__name__}, expected {expected_type.__name__}, "
+                    f"using default: {result[key]}"
+                )
+        else:
+            # Unknown key, add it anyway (for extensibility)
+            result[key] = value
+
+    return result
+
+
 def load_config():
     """
     Loads application configuration from a JSON file.
 
     Tries to read the configuration from `CONFIG_FILE_NAME`. If the file
     is not found or if there's an error decoding the JSON, it falls
-    back to a predefined default configuration.
+    back to a predefined default configuration. Always merges with defaults
+    to ensure all required keys are present and validates data types.
 
     Returns:
         dict: A dictionary containing the application configuration.
     """
+    defaults = get_default_config()
+
     try:
         with open(_CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            loaded_config = json.load(f)
+            # Merge loaded config with defaults, but validate data types
+            validated_config = _validate_and_merge_config(defaults, loaded_config)
+            return validated_config
     except FileNotFoundError:
-        print(
-            f"[INFO] ConfigManager::load_config - {_CONFIG_FILE_PATH} not found, using defaults."
-        )
-        return get_default_config()
+        print(f"[INFO] ConfigManager::load_config - {_CONFIG_FILE_PATH} not found, using defaults.")
+        return defaults
     except json.JSONDecodeError:
-        print(
-            f"[ERROR] ConfigManager::load_config - Error decoding {_CONFIG_FILE_PATH} Using defaults"
-        )
-        return get_default_config()
+        print(f"[ERROR] ConfigManager::load_config - Error decoding {_CONFIG_FILE_PATH} Using defaults")
+        return defaults
 
 
 # Logger class definition (identical to the one in the original script)
@@ -249,14 +348,18 @@ _initial_app_config = load_config()  # pylint: disable=invalid-name
 logger = Logger(initial_config=_initial_app_config)  # pylint: disable=invalid-name
 
 
-# --- Save Configuration Function ---
-# This function will be called by the GUI or other parts to save the config.
-# It should take the *current* application config dictionary as an argument.
+# --- Save Configuration Functions ---
+# save_config: Saves configuration data, merging with existing settings to preserve others
+# update_config_settings: Alias for save_config (both now preserve existing settings)
 
 
 def save_config(config_data_to_save):
     """
     Saves the provided configuration data to a JSON file.
+
+    This function now merges the provided config with existing settings
+    to prevent overwriting other settings that weren't included in the
+    config_data_to_save parameter.
 
     Uses `CONFIG_FILE_NAME` for the output file. Logs success or errors
     using the global `logger` instance.
@@ -265,19 +368,42 @@ def save_config(config_data_to_save):
         config_data_to_save (dict): The configuration dictionary to save.
     """
     try:
+        # Load existing config to preserve all settings
+        try:
+            with open(_CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
+                existing_config = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            # If file doesn't exist or is corrupted, start with defaults
+            existing_config = get_default_config()
+
+        # Merge new settings with existing ones (new settings take precedence)
+        merged_config = existing_config.copy()
+        merged_config.update(config_data_to_save)
+
+        # Save the merged configuration
         with open(_CONFIG_FILE_PATH, "w", encoding="utf-8") as f:
-            json.dump(config_data_to_save, f, indent=4)
+            json.dump(merged_config, f, indent=4)
+
         # Use the global logger instance to log this action
         logger.info(
             "ConfigManager",
             "save_config",
-            f"Configuration saved to {_CONFIG_FILE_PATH}",
+            f"Configuration saved to {_CONFIG_FILE_PATH} (merged {len(merged_config)} settings)",
         )
     except IOError:
-        logger.error(
-            "ConfigManager", "save_config", f"Error writing to {_CONFIG_FILE_PATH}."
-        )
+        logger.error("ConfigManager", "save_config", f"Error writing to {_CONFIG_FILE_PATH}.")
     except Exception as e:  # pylint: disable=broad-except
-        logger.error(
-            "ConfigManager", "save_config", f"Unexpected error saving config: {e}"
-        )
+        logger.error("ConfigManager", "save_config", f"Unexpected error saving config: {e}")
+
+
+def update_config_settings(settings_to_update):
+    """
+    Updates specific settings in the configuration file without overwriting other settings.
+
+    This function is now just an alias for save_config since save_config now
+    handles merging automatically.
+
+    Args:
+        settings_to_update (dict): Dictionary containing only the settings to update.
+    """
+    save_config(settings_to_update)

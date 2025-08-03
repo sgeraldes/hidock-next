@@ -4,7 +4,7 @@
 
 ### 1. Device Detection
 - **Automatic Discovery**: The system should automatically detect all USB devices, with special recognition for HiDock devices
-- **HiDock Device Identification**: 
+- **HiDock Device Identification**:
   - Vendor ID (VID): `0x10D6` (Actions Semiconductor)
   - Product IDs (PIDs):
     - `0xB00D` - HiDock H1E (default)

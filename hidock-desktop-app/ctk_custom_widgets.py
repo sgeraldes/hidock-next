@@ -47,9 +47,7 @@ LINK_BTN = {
 
 
 # --- Helper Functions ---
-def calculate_toplevel_position(
-    root, frame_width, frame_height, horizontal, vertical, padx=10, pady=10
-):
+def calculate_toplevel_position(root, frame_width, frame_height, horizontal, vertical, padx=10, pady=10):
     """
     Calculates x, y coordinates for placing a Toplevel window relative
     to its root/master window based on horizontal and vertical alignment.
@@ -121,9 +119,7 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
         # Estimate width based on title length, or set a default.
         if width is None:
             estimated_title_width = len(title) * 7  # Approx 7 pixels per character
-            self.banner_width = max(
-                300, min(600, estimated_title_width + 60)
-            )  # Adjusted for no action buttons
+            self.banner_width = max(300, min(600, estimated_title_width + 60))  # Adjusted for no action buttons
         else:
             self.banner_width = width
 
@@ -138,9 +134,7 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
         if sys.platform.startswith("win"):
             # For Windows, fg_color of the Toplevel itself can be made transparent.
             # The content_frame will provide the visible background.
-            self.transparent_color_for_toplevel = self._apply_appearance_mode(
-                self.cget("fg_color")
-            )
+            self.transparent_color_for_toplevel = self._apply_appearance_mode(self.cget("fg_color"))
             self.attributes("-transparentcolor", self.transparent_color_for_toplevel)
         elif sys.platform.startswith("darwin"):  # macOS
             self.attributes("-transparent", True)
@@ -149,9 +143,7 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
         # For simplicity, we might not get perfect rounded corners on all Linux setups.
 
         # Content Frame: This frame will hold all visible elements and have the rounded corners.
-        self.content_frame_bg = self._apply_appearance_mode(
-            ctk.ThemeManager.theme["CTkFrame"]["fg_color"]
-        )
+        self.content_frame_bg = self._apply_appearance_mode(ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
         self.content_frame = ctk.CTkFrame(
             self,
             width=self.banner_width,
@@ -164,15 +156,9 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
 
         self.content_frame.grid_propagate(False)
         self.content_frame.grid_columnconfigure(0, weight=1)  # Title label column
-        self.content_frame.grid_columnconfigure(
-            1, weight=0
-        )  # Close button column (fixed width)
-        self.content_frame.grid_rowconfigure(
-            0, weight=1
-        )  # Title row (takes most space)
-        self.content_frame.grid_rowconfigure(
-            1, weight=0
-        )  # Progress bar row (fixed height)
+        self.content_frame.grid_columnconfigure(1, weight=0)  # Close button column (fixed width)
+        self.content_frame.grid_rowconfigure(0, weight=1)  # Title row (takes most space)
+        self.content_frame.grid_rowconfigure(1, weight=0)  # Progress bar row (fixed height)
 
         # self.event = None # Not used with only a close button
         self._auto_dismiss_timer = None
@@ -191,9 +177,7 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
             single_part = parts[0].lower()  # Normalize to lowercase
             if single_part in ["top", "bottom"]:
                 self.vertical = single_part
-                self.horizontal = (
-                    "center"  # Default horizontal if only vertical is given
-                )
+                self.horizontal = "center"  # Default horizontal if only vertical is given
             elif single_part in ["left", "right"]:
                 self.vertical = "center"  # Default vertical if only horizontal is given
                 self.horizontal = single_part
@@ -219,24 +203,14 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
 
         icon_file = ICON_PATH.get(state.lower())
         if isinstance(icon_file, tuple):  # For icons with light/dark variants
-            self.icon = ctk.CTkImage(
-                Image.open(icon_file[0]), Image.open(icon_file[1]), (24, 24)
-            )
+            self.icon = ctk.CTkImage(Image.open(icon_file[0]), Image.open(icon_file[1]), (24, 24))
         elif icon_file and os.path.exists(icon_file):
-            self.icon = ctk.CTkImage(
-                Image.open(icon_file), Image.open(icon_file), (24, 24)
-            )
+            self.icon = ctk.CTkImage(Image.open(icon_file), Image.open(icon_file), (24, 24))
         else:  # Fallback icon
-            self.icon = ctk.CTkImage(
-                Image.open(ICON_PATH["info"]), Image.open(ICON_PATH["info"]), (24, 24)
-            )
+            self.icon = ctk.CTkImage(Image.open(ICON_PATH["info"]), Image.open(ICON_PATH["info"]), (24, 24))
 
         close_icon_paths = ICON_PATH.get("close")
-        if (
-            close_icon_paths
-            and os.path.exists(close_icon_paths[0])
-            and os.path.exists(close_icon_paths[1])
-        ):
+        if close_icon_paths and os.path.exists(close_icon_paths[0]) and os.path.exists(close_icon_paths[1]):
             self.close_icon = ctk.CTkImage(
                 Image.open(close_icon_paths[0]),
                 Image.open(close_icon_paths[1]),
@@ -290,9 +264,7 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
             self.content_frame, height=self.progress_bar_height, corner_radius=0
         )  # Flat bar
         self.progress_bar.set(0)  # Start empty
-        self.progress_bar.grid(
-            row=1, column=0, columnspan=2, sticky="sew", padx=5, pady=(0, 5)
-        )
+        self.progress_bar.grid(row=1, column=0, columnspan=2, sticky="sew", padx=5, pady=(0, 5))
 
         self.update_position()  # Initial positioning
         self.bind_configure()  # Call to store the binding ID
@@ -323,9 +295,7 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
             # Calculate absolute screen coordinates for the banner
             absolute_x = master_x + relative_x
             absolute_y = master_y + relative_y
-            self.geometry(
-                f"{self.banner_width}x{self.banner_height}+{absolute_x}+{absolute_y}"
-            )
+            self.geometry(f"{self.banner_width}x{self.banner_height}+{absolute_x}+{absolute_y}")
             self.update_idletasks()
 
     def _initiate_dismissal(self):
@@ -415,9 +385,7 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
 
         if self.winfo_exists():
             _step_fade()
-        elif (
-            on_complete
-        ):  # If window destroyed before animation, still call on_complete
+        elif on_complete:  # If window destroyed before animation, still call on_complete
             on_complete()
 
     def _update_auto_dismiss_progress(self, current_time_ms=0):
@@ -428,11 +396,7 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
         current_time_ms (int): The elapsed time in milliseconds since the
         auto-dismiss timer started.
         """
-        if (
-            not self.winfo_exists()
-            or not self.auto_dismiss_after_ms
-            or self.auto_dismiss_after_ms <= 0
-        ):
+        if not self.winfo_exists() or not self.auto_dismiss_after_ms or self.auto_dismiss_after_ms <= 0:
             if hasattr(self, "progress_bar") and self.progress_bar.winfo_exists():
                 self.progress_bar.set(0)
             return
@@ -444,13 +408,9 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
         if current_time_ms < self.auto_dismiss_after_ms:
             self._progress_bar_timer = self.after(
                 self.PROGRESS_BAR_UPDATE_INTERVAL_MS,
-                lambda: self._update_auto_dismiss_progress(
-                    current_time_ms + self.PROGRESS_BAR_UPDATE_INTERVAL_MS
-                ),
+                lambda: self._update_auto_dismiss_progress(current_time_ms + self.PROGRESS_BAR_UPDATE_INTERVAL_MS),
             )
-        elif (
-            hasattr(self, "progress_bar") and self.progress_bar.winfo_exists()
-        ):  # Progress complete
+        elif hasattr(self, "progress_bar") and self.progress_bar.winfo_exists():  # Progress complete
             self.progress_bar.set(1.0)
 
     def show(self):
@@ -469,9 +429,7 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
                 self.after_cancel(self._auto_dismiss_timer)
             if self._progress_bar_timer:
                 self.after_cancel(self._progress_bar_timer)
-            self._auto_dismiss_timer = self.after(
-                self.auto_dismiss_after_ms, self._initiate_dismissal
-            )
+            self._auto_dismiss_timer = self.after(self.auto_dismiss_after_ms, self._initiate_dismissal)
             self._update_auto_dismiss_progress()  # Start progress bar animation
 
     def bind_configure(self):
@@ -481,6 +439,4 @@ class CTkBanner(ctk.CTkToplevel):  # MODIFIED: Inherit from CTkToplevel
         when the master window's size or position changes. The stored ID is used
         to unbind the event later, preventing potential issues when the banner is destroyed.
         """
-        self._configure_binding_id = self.master_window.bind(
-            "<Configure>", self.update_position, add="+"
-        )
+        self._configure_binding_id = self.master_window.bind("<Configure>", self.update_position, add="+")

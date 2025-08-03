@@ -194,46 +194,7 @@ _All medium-priority features have been completed and moved to the Completed Fea
 
 ## Low-Priority Features (Active)
 
-1. **Advanced Audio Visualization Enhancements:**
-
-- **Status:** REQUESTED
-- **Description:** Enhance the audio visualization capabilities with real-time spectrum analysis, improved waveform display, and additional visualization modes during playback.
-- **User Story:** As a user, I want to see rich, real-time audio visualizations during playback that help me understand the audio content and provide an engaging visual experience.
-- **Justification:** Current audio visualization is basic and doesn't provide real-time feedback during playback. Enhanced visualizations would improve the user experience and provide valuable audio analysis information.
-- **Files to Modify:** @audio_visualization.py, @enhanced_gui_integration.py, @audio_player_enhanced.py
-- **Implementation Notes:**
-  - Implement real-time spectrum analysis during playback
-  - Add waveform progress indicator showing current playback position
-  - Consider additional visualization modes (spectrogram, VU meters, etc.)
-  - Optimize performance for real-time updates
-  - Add user controls for visualization settings
-- **Acceptance Criteria:**
-  - Real-time visualizations update smoothly during audio playback
-  - Waveform shows current playback position
-  - Spectrum analysis displays frequency content accurately
-  - Visualizations don't impact audio playback performance
-  - User can customize visualization settings
-
-2. **Batch File Operations Enhancement:**
-
-- **Status:** REQUESTED
-- **Description:** Improve batch file operations with better progress tracking, operation queuing, and the ability to pause/resume batch operations.
-- **User Story:** As a user, I want to perform batch operations on multiple files with clear progress tracking and the ability to control the operation flow.
-- **Justification:** Current batch operations lack detailed progress information and user control, making it difficult to manage large file operations effectively.
-- **Files to Modify:** @file_operations_manager.py, @gui_actions_file.py, @gui_main_window.py
-- **Implementation Notes:**
-  - Add detailed progress tracking for batch operations
-  - Implement pause/resume functionality for batch operations
-  - Add operation queuing with priority management
-  - Provide better error handling and recovery for failed operations
-  - Add estimated time remaining for batch operations
-- **Acceptance Criteria:**
-  - Users can see detailed progress for each file in batch operations
-  - Batch operations can be paused and resumed
-  - Failed operations are handled gracefully with retry options
-  - Progress information is accurate and helpful
-
-3. **Advanced File Filtering and Search:**
+1. **Advanced File Filtering and Search:**
 
 - **Status:** REQUESTED
 - **Description:** Add advanced filtering and search capabilities to help users find specific files based on various criteria such as date range, file size, duration, and content.
@@ -466,6 +427,46 @@ _All medium-priority features have been completed and moved to the Completed Fea
   ✅ Custom endpoint configuration
   ✅ Offline processing without internet dependency
   ✅ Model selection and configuration management
+
+10. **File Selection Performance Optimization**
+
+- **Title:** Single/Multi Selection Toggle with Performance Optimization
+- **Status:** COMPLETED
+- **Description:** Added toggle between single and multi-selection modes with intelligent caching and deferred updates to optimize performance.
+- **User Story:** As a user, I want to choose between single and multi-selection modes and have the interface respond quickly without lag during file browsing.
+- **Files Modified:** `gui_main_window.py`, `gui_treeview.py`, `gui_event_handlers.py`
+- **Implementation Summary:**
+  - Added single/multi selection mode toggle with persistent state
+  - Implemented deferred selection updates with 150ms debouncing
+  - Added intelligent device info caching (30s) and storage info caching (60s)
+  - Optimized file selection to prevent excessive device communication
+  - Created comprehensive integration tests for performance validation
+- **Acceptance Criteria Met:**
+  ✅ Toggle between single and multi-selection modes
+  ✅ Selection mode persists between application sessions
+  ✅ File selection responds in under 10ms with deferred updates
+  ✅ Device communication reduced through intelligent caching
+  ✅ Comprehensive test coverage for performance optimizations
+
+11. **Background Waveform Loading with Smart Cancellation**
+
+- **Title:** Performance-Optimized Waveform Visualization
+- **Status:** COMPLETED
+- **Description:** Implemented background waveform loading with immediate visual feedback and smart cancellation when selection changes.
+- **User Story:** As a user, I want waveform visualizations to load quickly without blocking the interface, and automatically cancel when I select different files.
+- **Files Modified:** `gui_main_window.py`, `audio_visualization.py`
+- **Implementation Summary:**
+  - Implemented background threading for waveform processing
+  - Added immediate visual feedback with loading indicators
+  - Created smart cancellation logic for selection changes
+  - Optimized audio downsampling to ~2000 points for performance
+  - Added comprehensive integration tests for background processing
+- **Acceptance Criteria Met:**
+  ✅ Immediate visual feedback during waveform loading
+  ✅ Background processing doesn't block UI interaction
+  ✅ Smart cancellation when selection changes
+  ✅ Audio data downsampled for optimal visualization performance
+  ✅ Integration tests validate background processing behavior
 
 ---
 

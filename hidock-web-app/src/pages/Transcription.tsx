@@ -1,6 +1,6 @@
 import { AudioRecorder } from '@/components/AudioRecorder';
 import { FileUpload } from '@/components/FileUpload';
-import { geminiService } from '@/services/geminiService';
+import { geminiService, TranscriptionProgress, CancellationToken } from '@/services/geminiService';
 import { useAppStore } from '@/store/useAppStore';
 import type { AudioData, InsightData, TranscriptionResult } from '@/types';
 import {
@@ -10,9 +10,10 @@ import {
   FileAudio,
   Lightbulb,
   MessageSquare,
-  Mic
+  Mic,
+  X
 } from 'lucide-react';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 
 type TranscriptionStep = 'upload' | 'transcribing' | 'transcribed' | 'analyzing' | 'complete';
 

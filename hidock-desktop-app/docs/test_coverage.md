@@ -12,6 +12,28 @@ The current test coverage is unknown. The first step is to measure the current t
 
 The scope of this plan is to improve the test coverage of the following modules. Each module has a detailed checklist of tests to be implemented.
 
+### Performance Optimization Integration Tests
+
+**Recent additions for performance optimization validation:**
+
+- **Selection Mode Integration:**
+  - [ ] Test single/multi selection mode toggle with persistent state
+  - [ ] Test deferred selection updates with 150ms debouncing
+  - [ ] Test device communication reduction through intelligent caching
+  - [ ] Test file selection responsiveness under 10ms
+
+- **Background Waveform Loading:**
+  - [ ] Test immediate visual feedback during waveform loading
+  - [ ] Test background processing doesn't block UI interaction
+  - [ ] Test smart cancellation when selection changes
+  - [ ] Test audio downsampling to ~2000 points for performance
+
+- **Intelligent Caching:**
+  - [ ] Test device info caching for 30 seconds with staleness detection
+  - [ ] Test storage info caching for 60 seconds with staleness detection
+  - [ ] Test cache invalidation and refresh logic
+  - [ ] Test performance improvement from reduced device communication
+
 ### `audio_player.py`
 
 **Note on Testability:** This module, in its current form as a `Mixin`, is tightly coupled with the main GUI window, making it difficult to unit test. To enable effective testing, it is highly recommended to refactor it first. The core audio playback logic (interacting with `pygame`) should be extracted into a separate, UI-agnostic class (`AudioPlayer`). This new class would use callbacks to communicate state changes (e.g., `on_progress`, `on_stop`) to the GUI layer. The tests below are designed for such a refactored, testable architecture.
@@ -142,6 +164,11 @@ This mixin orchestrates the UI based on user actions and callbacks from the `Aud
 - [ ] Test that button click events call the correct backend logic (e.g., `play_button` calls `audio_player.play_audio`).
 - [ ] Test UI state changes in response to application events (e.g., a "recording" label appears when recording starts).
 - [ ] Test the file selection dialog logic (mock `filedialog`).
+- [ ] Test single/multi selection mode toggle functionality and persistence.
+- [ ] Test deferred selection updates with debouncing logic.
+- [ ] Test background waveform loading with immediate visual feedback.
+- [ ] Test intelligent caching for device and storage information.
+- [ ] Test performance optimization variables and their impact on UI responsiveness.
 
 ### `hidock_device.py`
 

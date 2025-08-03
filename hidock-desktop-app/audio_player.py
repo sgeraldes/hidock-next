@@ -146,15 +146,11 @@ class AudioPlayerMixin:
 
         selected_iids = self.file_tree.selection()
         if len(selected_iids) != 1:
-            messagebox.showinfo(
-                "Playback", "Please select a single audio file to play.", parent=self
-            )
+            messagebox.showinfo("Playback", "Please select a single audio file to play.", parent=self)
             return
 
         file_iid = selected_iids[0]
-        file_detail = next(
-            (f for f in self.displayed_files_details if f["name"] == file_iid), None
-        )
+        file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
         if not file_detail:
             return
 
@@ -166,12 +162,8 @@ class AudioPlayerMixin:
             self.audio_player.play(local_filepath)
         else:
             self._set_long_operation_active_state(True, "Playback Preparation")
-            self.update_status_bar(
-                progress_text=f"Downloading {file_detail['name']} for playback..."
-            )
-            self._update_file_status_in_treeview(
-                file_iid, "Preparing Playback", ("downloading",)
-            )
+            self.update_status_bar(progress_text=f"Downloading {file_detail['name']} for playback...")
+            self._update_file_status_in_treeview(file_iid, "Preparing Playback", ("downloading",))
             threading.Thread(
                 target=self._download_for_playback_thread,
                 args=(file_detail, local_filepath),
@@ -193,9 +185,7 @@ class AudioPlayerMixin:
                     file_info["name"],
                     file_info["length"],
                     f.write,
-                    lambda r, t: self.after(
-                        0, self.update_file_progress, r, t, "Downloading for playback"
-                    ),
+                    lambda r, t: self.after(0, self.update_file_progress, r, t, "Downloading for playback"),
                     timeout_s=self.file_stream_timeout_s_var.get(),
                     cancel_event=self.cancel_operation_event,
                 )
@@ -234,9 +224,7 @@ class AudioPlayerMixin:
 
         # Update the file status to show "Playing" and refresh the treeview
         if self.current_playing_file_detail:
-            self._update_file_status_in_treeview(
-                self.current_playing_file_detail["name"], "Playing", ("playing",)
-            )
+            self._update_file_status_in_treeview(self.current_playing_file_detail["name"], "Playing", ("playing",))
             # Force a treeview refresh to ensure the "Playing" status is visible
             self.refresh_file_list_gui()
 
@@ -265,13 +253,9 @@ class AudioPlayerMixin:
         """Creates and displays the audio playback controls (slider, labels, etc.)."""
         if self.playback_controls_frame and self.playback_controls_frame.winfo_exists():
             return
-        self.playback_controls_frame = ctk.CTkFrame(
-            self.status_bar_frame, fg_color="transparent"
-        )
+        self.playback_controls_frame = ctk.CTkFrame(self.status_bar_frame, fg_color="transparent")
         self.playback_controls_frame.pack(side="right", padx=10, pady=2, fill="x")
-        self.current_time_label = ctk.CTkLabel(
-            self.playback_controls_frame, text="00:00", width=40
-        )
+        self.current_time_label = ctk.CTkLabel(self.playback_controls_frame, text="00:00", width=40)
         self.current_time_label.pack(side="left", padx=(0, 5))
         self.playback_slider = ctk.CTkSlider(
             self.playback_controls_frame,
@@ -331,20 +315,14 @@ class AudioPlayerMixin:
         if not self._user_is_dragging_slider:
             current_pos_ms = self.audio_player.get_pos_ms()
             current_pos_s = current_pos_ms / 1000.0
-            if (
-                hasattr(self, "playback_slider")
-                and self.playback_slider
-                and self.playback_slider.winfo_exists()
-            ):
+            if hasattr(self, "playback_slider") and self.playback_slider and self.playback_slider.winfo_exists():
                 self.playback_slider.set(current_pos_s)
             if (
                 hasattr(self, "current_time_label")
                 and self.current_time_label
                 and self.current_time_label.winfo_exists()
             ):
-                self.current_time_label.configure(
-                    text=f"{int(current_pos_s // 60):02d}:{int(current_pos_s % 60):02d}"
-                )
+                self.current_time_label.configure(text=f"{int(current_pos_s // 60):02d}:{int(current_pos_s % 60):02d}")
         self.playback_update_timer_id = self.after(250, self._update_playback_progress)
 
     def _on_playback_slider_drag(self, value):
@@ -355,9 +333,7 @@ class AudioPlayerMixin:
                 and self.current_time_label
                 and self.current_time_label.winfo_exists()
             ):
-                self.current_time_label.configure(
-                    text=f"{int(float(value) // 60):02d}:{int(float(value) % 60):02d}"
-                )
+                self.current_time_label.configure(text=f"{int(float(value) // 60):02d}:{int(float(value) % 60):02d}")
 
     def _on_slider_press(self, _event):
         """Flags that the user is currently interacting with the playback slider."""
@@ -375,8 +351,16 @@ class AudioPlayerMixin:
         """Handles changes to the volume slider."""
         if self.audio_player:
             self.audio_player.set_volume(float(value))
+        
+        # Auto-save volume preference
+        from config_and_logger import update_config_settings
+        update_config_settings({"playback_volume": float(value)})
 
     def _on_loop_toggle(self):
         """Handles toggling the loop checkbox."""
         if self.audio_player:
             self.audio_player.set_loop(self.loop_playback_var.get())
+        
+        # Auto-save loop preference
+        from config_and_logger import update_config_settings
+        update_config_settings({"loop_playback": self.loop_playback_var.get()})

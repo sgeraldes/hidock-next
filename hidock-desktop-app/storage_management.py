@@ -127,9 +127,7 @@ class StorageMonitor:
             return
 
         self.stop_event.clear()
-        self.monitoring_thread = threading.Thread(
-            target=self._monitoring_loop, daemon=True
-        )
+        self.monitoring_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
         self.monitoring_thread.start()
         logger.info("StorageMonitor", "start_monitoring", "Storage monitoring started")
 
@@ -152,11 +150,7 @@ class StorageMonitor:
                     old_info_for_path = old_info.get(path_str)
                     if (
                         not old_info_for_path
-                        or abs(
-                            new_info.usage_percentage
-                            - old_info_for_path.usage_percentage
-                        )
-                        > 1.0
+                        or abs(new_info.usage_percentage - old_info_for_path.usage_percentage) > 1.0
                         or new_info.warning_level != old_info_for_path.warning_level
                     ):
                         # Notify callbacks
@@ -171,9 +165,7 @@ class StorageMonitor:
                                 )
 
             except Exception as e:
-                logger.error(
-                    "StorageMonitor", "_monitoring_loop", f"Monitoring error: {e}"
-                )
+                logger.error("StorageMonitor", "_monitoring_loop", f"Monitoring error: {e}")
 
     def _update_storage_info(self):
         """Update storage information for all monitored paths."""
@@ -215,9 +207,7 @@ class StorageMonitor:
     def get_storage_info(self, path: str = None) -> Dict[str, StorageInfo]:
         """Get current storage information."""
         if path:
-            return (
-                {path: self.storage_info.get(path)} if path in self.storage_info else {}
-            )
+            return {path: self.storage_info.get(path)} if path in self.storage_info else {}
         return self.storage_info.copy()
 
     def get_warning_level(self, path: str) -> StorageWarningLevel:
@@ -231,9 +221,7 @@ class StorageOptimizer:
 
     def __init__(self, base_paths: List[str], cache_dir: str = None):
         self.base_paths = [Path(p) for p in base_paths]
-        self.cache_dir = (
-            Path(cache_dir) if cache_dir else Path.home() / ".hidock" / "cache"
-        )
+        self.cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".hidock" / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Database for tracking file information
@@ -313,8 +301,7 @@ class StorageOptimizer:
                     file_type_distribution[extension]["count"] += 1
                     file_type_distribution[extension]["total_size"] += file_size
                     file_type_distribution[extension]["avg_size"] = (
-                        file_type_distribution[extension]["total_size"]
-                        / file_type_distribution[extension]["count"]
+                        file_type_distribution[extension]["total_size"] / file_type_distribution[extension]["count"]
                     )
 
                     # Size distribution
@@ -353,9 +340,7 @@ class StorageOptimizer:
                     )
 
         # Find duplicates
-        duplicate_files = [
-            (key, paths) for key, paths in file_hashes.items() if len(paths) > 1
-        ]
+        duplicate_files = [(key, paths) for key, paths in file_hashes.items() if len(paths) > 1]
 
         # Calculate growth trend (simplified)
         growth_trend = {"daily": 0.0, "weekly": 0.0, "monthly": 0.0}
@@ -381,23 +366,19 @@ class StorageOptimizer:
         logger.info(
             "StorageOptimizer",
             "analyze_storage",
-            f"Analysis complete: {total_files} files, {total_size / (1024*1024):.1f} MB",
+            f"Analysis complete: {total_files} files, {total_size / (1024 * 1024):.1f} MB",
         )
 
         return analytics
 
-    def generate_optimization_suggestions(
-        self, analytics: StorageAnalytics
-    ) -> List[OptimizationSuggestion]:
+    def generate_optimization_suggestions(self, analytics: StorageAnalytics) -> List[OptimizationSuggestion]:
         """Generate storage optimization suggestions based on analysis."""
         suggestions = []
 
         # Duplicate file removal
         if analytics.duplicate_files:
             duplicate_savings = (
-                sum(len(paths) - 1 for _, paths in analytics.duplicate_files)
-                * 1024
-                * 1024
+                sum(len(paths) - 1 for _, paths in analytics.duplicate_files) * 1024 * 1024
             )  # Rough estimate
 
             suggestions.append(
@@ -408,11 +389,7 @@ class StorageOptimizer:
                     priority=4,
                     action_required=True,
                     estimated_time="5-10 minutes",
-                    files_affected=[
-                        path
-                        for _, paths in analytics.duplicate_files
-                        for path in paths[1:]
-                    ],
+                    files_affected=[path for _, paths in analytics.duplicate_files for path in paths[1:]],
                 )
             )
 
@@ -449,9 +426,7 @@ class StorageOptimizer:
             )
 
         # Large file compression
-        large_files_count = analytics.size_distribution.get(
-            "large", 0
-        ) + analytics.size_distribution.get("huge", 0)
+        large_files_count = analytics.size_distribution.get("large", 0) + analytics.size_distribution.get("huge", 0)
         if large_files_count > 10:
             compression_savings = large_files_count * 5 * 1024 * 1024  # Rough estimate
 
@@ -498,9 +473,7 @@ class StorageOptimizer:
 
         return cache_size
 
-    def execute_optimization(
-        self, suggestion: OptimizationSuggestion, dry_run: bool = False
-    ) -> Dict[str, Any]:
+    def execute_optimization(self, suggestion: OptimizationSuggestion, dry_run: bool = False) -> Dict[str, Any]:
         """Execute a storage optimization suggestion."""
         start_time = time.time()
         result = {
@@ -521,9 +494,7 @@ class StorageOptimizer:
             elif suggestion.type == OptimizationType.TEMP_FILE_CLEANUP:
                 result = self._cleanup_temp_files(dry_run)
             else:
-                result["errors"].append(
-                    f"Optimization type {suggestion.type} not implemented"
-                )
+                result["errors"].append(f"Optimization type {suggestion.type} not implemented")
 
             execution_time = time.time() - start_time
 
@@ -551,20 +522,16 @@ class StorageOptimizer:
                 "execute_optimization",
                 f"Optimization {suggestion.type.value} completed: "
                 f"{result['files_processed']} files, "
-                f"{result['space_saved'] / (1024*1024):.1f} MB saved",
+                f"{result['space_saved'] / (1024 * 1024):.1f} MB saved",
             )
 
         except Exception as e:
             result["errors"].append(str(e))
-            logger.error(
-                "StorageOptimizer", "execute_optimization", f"Optimization failed: {e}"
-            )
+            logger.error("StorageOptimizer", "execute_optimization", f"Optimization failed: {e}")
 
         return result
 
-    def _remove_duplicates(
-        self, duplicate_files: List[str], dry_run: bool
-    ) -> Dict[str, Any]:
+    def _remove_duplicates(self, duplicate_files: List[str], dry_run: bool) -> Dict[str, Any]:
         """Remove duplicate files."""
         result = {"success": True, "files_processed": 0, "space_saved": 0, "errors": []}
 
@@ -634,9 +601,7 @@ class StorageOptimizer:
                         result["space_saved"] += file_size
 
                     except Exception as e:
-                        result["errors"].append(
-                            f"Failed to remove cache file {file_path}: {e}"
-                        )
+                        result["errors"].append(f"Failed to remove cache file {file_path}: {e}")
 
         return result
 
@@ -665,9 +630,7 @@ class StorageOptimizer:
                             result["space_saved"] += file_size
 
                         except Exception as e:
-                            result["errors"].append(
-                                f"Failed to remove temp file {file_path}: {e}"
-                            )
+                            result["errors"].append(f"Failed to remove temp file {file_path}: {e}")
 
         return result
 
@@ -747,7 +710,7 @@ class StorageQuotaManager:
             violations.append(
                 {
                     "type": "low_free_space",
-                    "message": f"Low free space: {storage_info.free_space / (1024*1024*1024):.1f} GB remaining",
+                    "message": f"Low free space: {storage_info.free_space / (1024 * 1024 * 1024):.1f} GB remaining",
                     "severity": "critical",
                 }
             )
@@ -764,17 +727,15 @@ class StorageQuotaManager:
                         f"Warning callback error: {e}",
                     )
 
-    def check_file_quota(
-        self, file_size: int, file_count: int = 1
-    ) -> Tuple[bool, List[str]]:
+    def check_file_quota(self, file_size: int, file_count: int = 1) -> Tuple[bool, List[str]]:
         """Check if adding files would violate quotas."""
         violations = []
 
         # Check file size limit
         if file_size > self.quota_config.max_file_size:
             violations.append(
-                f"File size {file_size / (1024*1024):.1f} MB exceeds limit of "
-                f"{self.quota_config.max_file_size / (1024*1024):.1f} MB"
+                f"File size {file_size / (1024 * 1024):.1f} MB exceeds limit of "
+                f"{self.quota_config.max_file_size / (1024 * 1024):.1f} MB"
             )
 
         # Check total size limit (simplified - would need actual usage data)
@@ -807,9 +768,7 @@ class StorageQuotaManager:
             "recommendations": self._get_quota_recommendations(info),
         }
 
-    def _get_current_violations(
-        self, storage_info: StorageInfo
-    ) -> List[Dict[str, str]]:
+    def _get_current_violations(self, storage_info: StorageInfo) -> List[Dict[str, str]]:
         """Get current quota violations."""
         violations = []
 
@@ -847,18 +806,14 @@ class StorageQuotaManager:
             recommendations.append("Move files to external storage or cloud backup")
 
         if not self.quota_config.auto_cleanup_enabled:
-            recommendations.append(
-                "Enable automatic cleanup to maintain storage health"
-            )
+            recommendations.append("Enable automatic cleanup to maintain storage health")
 
         return recommendations
 
     def update_quota_config(self, new_config: StorageQuota):
         """Update quota configuration."""
         self.quota_config = new_config
-        logger.info(
-            "StorageQuotaManager", "update_quota_config", "Quota configuration updated"
-        )
+        logger.info("StorageQuotaManager", "update_quota_config", "Quota configuration updated")
 
     def enable_auto_cleanup(self, enabled: bool = True):
         """Enable or disable automatic cleanup."""
@@ -893,8 +848,6 @@ def create_storage_management_system(
     storage_optimizer = StorageOptimizer(base_paths)
     quota_manager = StorageQuotaManager(quota_config, storage_monitor)
 
-    logger.info(
-        "StorageManagement", "create_system", "Storage management system created"
-    )
+    logger.info("StorageManagement", "create_system", "Storage management system created")
 
     return storage_monitor, storage_optimizer, quota_manager

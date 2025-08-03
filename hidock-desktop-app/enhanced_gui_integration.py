@@ -53,27 +53,19 @@ class EnhancedPlaybackControlsFrame(ctk.CTkFrame):
         controls_frame.pack(fill="x", padx=5, pady=5)
 
         # Previous track button
-        self.prev_button = ctk.CTkButton(
-            controls_frame, text="⏮", width=40, command=self._previous_track
-        )
+        self.prev_button = ctk.CTkButton(controls_frame, text="⏮", width=40, command=self._previous_track)
         self.prev_button.pack(side="left", padx=2)
 
         # Play/Pause button
-        self.play_button = ctk.CTkButton(
-            controls_frame, text="▶", width=60, command=self._toggle_playback
-        )
+        self.play_button = ctk.CTkButton(controls_frame, text="▶", width=60, command=self._toggle_playback)
         self.play_button.pack(side="left", padx=2)
 
         # Stop button
-        self.stop_button = ctk.CTkButton(
-            controls_frame, text="⏹", width=40, command=self._stop_playback
-        )
+        self.stop_button = ctk.CTkButton(controls_frame, text="⏹", width=40, command=self._stop_playback)
         self.stop_button.pack(side="left", padx=2)
 
         # Next track button
-        self.next_button = ctk.CTkButton(
-            controls_frame, text="⏭", width=40, command=self._next_track
-        )
+        self.next_button = ctk.CTkButton(controls_frame, text="⏭", width=40, command=self._next_track)
         self.next_button.pack(side="left", padx=2)
 
         # Time display
@@ -81,9 +73,7 @@ class EnhancedPlaybackControlsFrame(ctk.CTkFrame):
         self.time_label.pack(side="left", padx=10)
 
         # Progress slider
-        self.progress_slider = ctk.CTkSlider(
-            controls_frame, from_=0, to=100, command=self._on_progress_change
-        )
+        self.progress_slider = ctk.CTkSlider(controls_frame, from_=0, to=100, command=self._on_progress_change)
         self.progress_slider.pack(side="left", fill="x", expand=True, padx=10)
         self.progress_slider.bind("<Button-1>", self._on_seek_start)
         self.progress_slider.bind("<ButtonRelease-1>", self._on_seek_end)
@@ -96,16 +86,12 @@ class EnhancedPlaybackControlsFrame(ctk.CTkFrame):
         ctk.CTkLabel(volume_frame, text="Volume:").pack(side="left", padx=5)
 
         # Volume slider
-        self.volume_slider = ctk.CTkSlider(
-            volume_frame, from_=0, to=1, command=self._on_volume_change, width=100
-        )
+        self.volume_slider = ctk.CTkSlider(volume_frame, from_=0, to=1, command=self._on_volume_change, width=100)
         self.volume_slider.set(0.7)
         self.volume_slider.pack(side="left", padx=5)
 
         # Mute button
-        self.mute_button = ctk.CTkButton(
-            volume_frame, text="🔊", width=40, command=self._toggle_mute
-        )
+        self.mute_button = ctk.CTkButton(volume_frame, text="🔊", width=40, command=self._toggle_mute)
         self.mute_button.pack(side="left", padx=2)
 
         # Speed control
@@ -147,9 +133,7 @@ class EnhancedPlaybackControlsFrame(ctk.CTkFrame):
         self.shuffle_checkbox.pack(side="left", padx=10)
 
         # Format conversion button
-        self.convert_button = ctk.CTkButton(
-            advanced_frame, text="Convert Audio", command=self._show_conversion_dialog
-        )
+        self.convert_button = ctk.CTkButton(advanced_frame, text="Convert Audio", command=self._show_conversion_dialog)
         self.convert_button.pack(side="right", padx=5)
 
         # Visualization toggle
@@ -307,9 +291,7 @@ class EnhancedPlaybackControlsFrame(ctk.CTkFrame):
         try:
             current_track = self.audio_player.get_current_track()
             if not current_track:
-                messagebox.showwarning(
-                    "No Track", "No audio track loaded for conversion."
-                )
+                messagebox.showwarning("No Track", "No audio track loaded for conversion.")
                 return
 
             dialog = AudioConversionDialog(self, current_track.filepath)
@@ -346,9 +328,7 @@ class EnhancedPlaybackControlsFrame(ctk.CTkFrame):
 
             # Update time display
             current_time = f"{int(position.current_time // 60):02d}:{int(position.current_time % 60):02d}"
-            total_time = (
-                f"{int(position.total_time // 60):02d}:{int(position.total_time % 60):02d}"
-            )
+            total_time = f"{int(position.total_time // 60):02d}:{int(position.total_time % 60):02d}"
             self.time_label.configure(text=f"{current_time} / {total_time}")
 
         except RuntimeError as e:
@@ -447,19 +427,13 @@ class PlaylistWidget(ctk.CTkFrame):
         header_frame = ctk.CTkFrame(self)
         header_frame.pack(fill="x", padx=5, pady=5)
 
-        ctk.CTkLabel(header_frame, text="Playlist", font=("Arial", 16, "bold")).pack(
-            side="left", padx=5
-        )
+        ctk.CTkLabel(header_frame, text="Playlist", font=("Arial", 16, "bold")).pack(side="left", padx=5)
 
         # Playlist controls
-        self.add_button = ctk.CTkButton(
-            header_frame, text="Add Files", command=self._add_files, width=80
-        )
+        self.add_button = ctk.CTkButton(header_frame, text="Add Files", command=self._add_files, width=80)
         self.add_button.pack(side="right", padx=2)
 
-        self.clear_button = ctk.CTkButton(
-            header_frame, text="Clear", command=self._clear_playlist, width=60
-        )
+        self.clear_button = ctk.CTkButton(header_frame, text="Clear", command=self._clear_playlist, width=60)
         self.clear_button.pack(side="right", padx=2)
 
         # Playlist display
@@ -477,16 +451,12 @@ class PlaylistWidget(ctk.CTkFrame):
                 ("All files", "*.*"),
             ]
 
-            filenames = filedialog.askopenfilenames(
-                title="Select Audio Files", filetypes=filetypes
-            )
+            filenames = filedialog.askopenfilenames(title="Select Audio Files", filetypes=filetypes)
 
             if filenames:
                 loaded_count = self.audio_player.load_playlist(list(filenames))
                 if loaded_count > 0:
-                    messagebox.showinfo(
-                        "Success", f"Loaded {loaded_count} audio files."
-                    )
+                    messagebox.showinfo("Success", f"Loaded {loaded_count} audio files.")
                 else:
                     messagebox.showerror("Error", "Failed to load audio files.")
 
@@ -497,17 +467,13 @@ class PlaylistWidget(ctk.CTkFrame):
     def _clear_playlist(self):
         """Clear the playlist"""
         try:
-            if messagebox.askyesno(
-                "Clear Playlist", "Are you sure you want to clear the playlist?"
-            ):
+            if messagebox.askyesno("Clear Playlist", "Are you sure you want to clear the playlist?"):
                 self.audio_player.stop()
                 self.audio_player.playlist.clear()
                 self._update_playlist_display()
 
         except RuntimeError as e:
-            logger.error(
-                "PlaylistWidget", "_clear_playlist", f"Error clearing playlist: {e}"
-            )
+            logger.error("PlaylistWidget", "_clear_playlist", f"Error clearing playlist: {e}")
 
     def _on_playlist_changed(self):
         """Handle playlist change"""
@@ -565,7 +531,7 @@ class PlaylistWidget(ctk.CTkFrame):
         duration_str = f"{int(track.duration // 60):02d}:{int(track.duration % 60):02d}"
         size_str = "Unknown size"
         if track.size > 0:
-            size_str = f"{track.size / (1024*1024):.1f} MB"
+            size_str = f"{track.size / (1024 * 1024):.1f} MB"
         details_text = f"{duration_str} • {size_str} • {track.format.upper()}"
 
         details_label = ctk.CTkLabel(
@@ -623,9 +589,7 @@ class PlaylistWidget(ctk.CTkFrame):
                 self.audio_player.play()
 
         except RuntimeError as e:
-            logger.error(
-                "PlaylistWidget", "_play_track", f"Error playing track {index}: {e}"
-            )
+            logger.error("PlaylistWidget", "_play_track", f"Error playing track {index}: {e}")
 
     def _remove_track(self, index: int):
         """Remove track from playlist"""
@@ -634,9 +598,7 @@ class PlaylistWidget(ctk.CTkFrame):
                 self._update_playlist_display()
 
         except RuntimeError as e:
-            logger.error(
-                "PlaylistWidget", "_remove_track", f"Error removing track {index}: {e}"
-            )
+            logger.error("PlaylistWidget", "_remove_track", f"Error removing track {index}: {e}")
 
 
 class AudioConversionDialog(ctk.CTkToplevel):
@@ -660,12 +622,8 @@ class AudioConversionDialog(ctk.CTkToplevel):
         input_frame = ctk.CTkFrame(self)
         input_frame.pack(fill="x", padx=20, pady=10)
 
-        ctk.CTkLabel(input_frame, text="Input File:", font=("Arial", 12, "bold")).pack(
-            anchor="w", padx=10, pady=5
-        )
-        ctk.CTkLabel(input_frame, text=os.path.basename(self.input_filepath)).pack(
-            anchor="w", padx=20
-        )
+        ctk.CTkLabel(input_frame, text="Input File:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=5)
+        ctk.CTkLabel(input_frame, text=os.path.basename(self.input_filepath)).pack(anchor="w", padx=20)
 
         # Get input file info
         audio_info = AudioProcessor.get_audio_info(self.input_filepath)
@@ -674,41 +632,37 @@ class AudioConversionDialog(ctk.CTkToplevel):
             info_text += f"Duration: {audio_info.get('duration', 0):.1f} seconds\n"
             info_text += f"Sample Rate: {audio_info.get('sample_rate', 0)} Hz\n"
             info_text += f"Channels: {audio_info.get('channels', 0)}\n"
-            info_text += f"Size: {audio_info.get('size', 0) / (1024*1024):.1f} MB"
+            info_text += f"Size: {audio_info.get('size', 0) / (1024 * 1024):.1f} MB"
 
-            ctk.CTkLabel(input_frame, text=info_text, justify="left").pack(
-                anchor="w", padx=20, pady=5
-            )
+            ctk.CTkLabel(input_frame, text=info_text, justify="left").pack(anchor="w", padx=20, pady=5)
 
         # Output format selection
         format_frame = ctk.CTkFrame(self)
         format_frame.pack(fill="x", padx=20, pady=10)
 
-        ctk.CTkLabel(
-            format_frame, text="Output Format:", font=("Arial", 12, "bold")
-        ).pack(anchor="w", padx=10, pady=5)
+        ctk.CTkLabel(format_frame, text="Output Format:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=5)
 
         self.format_var = ctk.StringVar(value="wav")
         format_options = ["wav", "mp3", "ogg", "flac", "m4a"]
 
         for fmt in format_options:
-            ctk.CTkRadioButton(
-                format_frame, text=fmt.upper(), variable=self.format_var, value=fmt
-            ).pack(anchor="w", padx=20, pady=2)
+            ctk.CTkRadioButton(format_frame, text=fmt.upper(), variable=self.format_var, value=fmt).pack(
+                anchor="w", padx=20, pady=2
+            )
 
         # Quality settings
         quality_frame = ctk.CTkFrame(self)
         quality_frame.pack(fill="x", padx=20, pady=10)
 
-        ctk.CTkLabel(
-            quality_frame, text="Quality Settings:", font=("Arial", 12, "bold")
-        ).pack(anchor="w", padx=10, pady=5)
+        ctk.CTkLabel(quality_frame, text="Quality Settings:", font=("Arial", 12, "bold")).pack(
+            anchor="w", padx=10, pady=5
+        )
 
         # Normalize audio
         self.normalize_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            quality_frame, text="Normalize audio levels", variable=self.normalize_var
-        ).pack(anchor="w", padx=20, pady=2)
+        ctk.CTkCheckBox(quality_frame, text="Normalize audio levels", variable=self.normalize_var).pack(
+            anchor="w", padx=20, pady=2
+        )
 
         # Target dBFS for normalization
         dbfs_frame = ctk.CTkFrame(quality_frame, fg_color="transparent")
@@ -724,9 +678,7 @@ class AudioConversionDialog(ctk.CTkToplevel):
         output_frame = ctk.CTkFrame(self)
         output_frame.pack(fill="x", padx=20, pady=10)
 
-        ctk.CTkLabel(
-            output_frame, text="Output File:", font=("Arial", 12, "bold")
-        ).pack(anchor="w", padx=10, pady=5)
+        ctk.CTkLabel(output_frame, text="Output File:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=5)
 
         file_frame = ctk.CTkFrame(output_frame, fg_color="transparent")
         file_frame.pack(fill="x", padx=10, pady=5)
@@ -739,9 +691,7 @@ class AudioConversionDialog(ctk.CTkToplevel):
         )
         self.output_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
-        ctk.CTkButton(
-            file_frame, text="Browse", command=self._browse_output_file, width=80
-        ).pack(side="right")
+        ctk.CTkButton(file_frame, text="Browse", command=self._browse_output_file, width=80).pack(side="right")
 
         # Progress bar
         self.progress_var = ctk.DoubleVar()
@@ -757,13 +707,9 @@ class AudioConversionDialog(ctk.CTkToplevel):
         button_frame = ctk.CTkFrame(self, fg_color="transparent")
         button_frame.pack(fill="x", padx=20, pady=10)
 
-        ctk.CTkButton(
-            button_frame, text="Cancel", command=self.destroy, width=100
-        ).pack(side="right", padx=5)
+        ctk.CTkButton(button_frame, text="Cancel", command=self.destroy, width=100).pack(side="right", padx=5)
 
-        self.convert_button = ctk.CTkButton(
-            button_frame, text="Convert", command=self._start_conversion, width=100
-        )
+        self.convert_button = ctk.CTkButton(button_frame, text="Convert", command=self._start_conversion, width=100)
         self.convert_button.pack(side="right", padx=5)
 
     def _browse_output_file(self):
@@ -803,9 +749,7 @@ class AudioConversionDialog(ctk.CTkToplevel):
             self.progress_bar.set(0.1)
 
             # Perform conversion in a separate thread
-            conversion_thread = threading.Thread(
-                target=self._perform_conversion, args=(output_path,)
-            )
+            conversion_thread = threading.Thread(target=self._perform_conversion, args=(output_path,))
             conversion_thread.daemon = True
             conversion_thread.start()
 
@@ -825,9 +769,7 @@ class AudioConversionDialog(ctk.CTkToplevel):
 
             # Convert format
             target_format = self.format_var.get()
-            success = AudioProcessor.convert_audio_format(
-                self.input_filepath, output_path, target_format
-            )
+            success = AudioProcessor.convert_audio_format(self.input_filepath, output_path, target_format)
 
             if not success:
                 raise RuntimeError("Format conversion failed")
@@ -844,9 +786,7 @@ class AudioConversionDialog(ctk.CTkToplevel):
                     os.rename(output_path, temp_path)
 
                     # Normalize
-                    normalize_success = AudioProcessor.normalize_audio(
-                        temp_path, output_path, target_dbfs
-                    )
+                    normalize_success = AudioProcessor.normalize_audio(temp_path, output_path, target_dbfs)
 
                     # Clean up temp file
                     if os.path.exists(temp_path):
@@ -869,9 +809,7 @@ class AudioConversionDialog(ctk.CTkToplevel):
             self.progress_bar.set(1.0)
 
             # Update UI on main thread
-            self.after(
-                0, self._conversion_complete, True, "Conversion completed successfully!"
-            )
+            self.after(0, self._conversion_complete, True, "Conversion completed successfully!")
 
         except (OSError, ValueError, RuntimeError) as e:
             logger.error(
@@ -983,9 +921,7 @@ class EnhancedAudioGUI:
             self.enhanced_frame = ctk.CTkFrame(self.main_gui)
 
             # Playback controls
-            self.playback_controls = EnhancedPlaybackControlsFrame(
-                self.enhanced_frame, self.enhanced_player
-            )
+            self.playback_controls = EnhancedPlaybackControlsFrame(self.enhanced_frame, self.enhanced_player)
             self.playback_controls.pack(fill="x", padx=5, pady=5)
 
             # Create tabview for playlist and visualization
@@ -1004,9 +940,7 @@ class EnhancedAudioGUI:
 
             # Set up visualization callbacks
             self.enhanced_player.on_track_changed = self._on_enhanced_track_changed
-            self.enhanced_player.on_position_changed = (
-                self._on_enhanced_position_changed
-            )
+            self.enhanced_player.on_position_changed = self._on_enhanced_position_changed
 
         except RuntimeError as e:
             logger.error(
@@ -1019,21 +953,14 @@ class EnhancedAudioGUI:
         """Integrate enhanced controls with main GUI"""
         try:
             # Hide original playback controls if they exist
-            if (
-                hasattr(self.main_gui, "playback_controls_frame")
-                and self.main_gui.playback_controls_frame
-            ):
+            if hasattr(self.main_gui, "playback_controls_frame") and self.main_gui.playback_controls_frame:
                 self.main_gui.playback_controls_frame.pack_forget()
 
             # Insert enhanced frame before status bar
-            self.enhanced_frame.pack(
-                fill="both", expand=True, before=self.main_gui.status_bar_frame
-            )
+            self.enhanced_frame.pack(fill="both", expand=True, before=self.main_gui.status_bar_frame)
 
             # Override the play_selected_audio_gui method
-            self.main_gui.original_play_selected_audio_gui = (
-                self.main_gui.play_selected_audio_gui
-            )
+            self.main_gui.original_play_selected_audio_gui = self.main_gui.play_selected_audio_gui
             self.main_gui.play_selected_audio_gui = self._enhanced_play_selected_audio
 
         except RuntimeError as e:
@@ -1052,15 +979,10 @@ class EnhancedAudioGUI:
 
             # Restore original method
             if hasattr(self.main_gui, "original_play_selected_audio_gui"):
-                self.main_gui.play_selected_audio_gui = (
-                    self.main_gui.original_play_selected_audio_gui
-                )
+                self.main_gui.play_selected_audio_gui = self.main_gui.original_play_selected_audio_gui
 
             # Show original playback controls
-            if (
-                hasattr(self.main_gui, "playback_controls_frame")
-                and self.main_gui.playback_controls_frame
-            ):
+            if hasattr(self.main_gui, "playback_controls_frame") and self.main_gui.playback_controls_frame:
                 self.main_gui.playback_controls_frame.pack(
                     fill="x",
                     side="bottom",
@@ -1096,11 +1018,7 @@ class EnhancedAudioGUI:
                 return
 
             # Check if file is downloaded
-            local_filepath = (
-                self.main_gui._get_local_filepath(  # pylint: disable=protected-access
-                    file_detail["name"]
-                )
-            )
+            local_filepath = self.main_gui._get_local_filepath(file_detail["name"])  # pylint: disable=protected-access
             if not os.path.exists(local_filepath):
                 # File not downloaded, use original method to download first
                 self.main_gui.original_play_selected_audio_gui()

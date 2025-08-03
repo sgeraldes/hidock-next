@@ -16,6 +16,7 @@ Requirements: 4.3
 """
 
 import os
+
 # import struct  # Future: for binary data parsing if needed
 import tempfile
 import wave
@@ -34,9 +35,7 @@ class HTAConverter:
     def __init__(self):
         self.temp_dir = tempfile.gettempdir()
 
-    def convert_hta_to_wav(
-        self, hta_file_path: str, output_path: Optional[str] = None
-    ) -> Optional[str]:
+    def convert_hta_to_wav(self, hta_file_path: str, output_path: Optional[str] = None) -> Optional[str]:
         """
         Convert HiDock audio file (.hda/.hta) to WAV format.
 
@@ -94,9 +93,7 @@ class HTAConverter:
             return output_path
 
         except Exception as e:
-            logger.error(
-                "HTAConverter", "convert_hta_to_wav", f"Error converting HTA file: {e}"
-            )
+            logger.error("HTAConverter", "convert_hta_to_wav", f"Error converting HTA file: {e}")
             return None
 
     def _parse_hta_file(self, hta_file_path: str) -> Tuple[Optional[bytes], int, int]:
@@ -133,9 +130,7 @@ class HTAConverter:
             return self._try_raw_pcm_conversion(file_data)
 
         except Exception as e:
-            logger.error(
-                "HTAConverter", "_parse_hta_file", f"Error parsing HTA file: {e}"
-            )
+            logger.error("HTAConverter", "_parse_hta_file", f"Error parsing HTA file: {e}")
             return None, 0, 0
 
     def _parse_wav_data(self, data: bytes) -> Tuple[Optional[bytes], int, int]:
@@ -151,9 +146,7 @@ class HTAConverter:
                 audio_data = wav_file.readframes(wav_file.getnframes())
                 return audio_data, sample_rate, channels
         except Exception as e:
-            logger.error(
-                "HTAConverter", "_parse_wav_data", f"Error parsing WAV data: {e}"
-            )
+            logger.error("HTAConverter", "_parse_wav_data", f"Error parsing WAV data: {e}")
             return None, 0, 0
 
     def _try_hta_format_1(self, data: bytes) -> bool:
@@ -248,9 +241,7 @@ class HTAConverter:
             return self._parse_wav_data(wav_data)
 
         except Exception as e:
-            logger.error(
-                "HTAConverter", "_parse_hta_format_1", f"Error parsing MPEG audio: {e}"
-            )
+            logger.error("HTAConverter", "_parse_hta_format_1", f"Error parsing MPEG audio: {e}")
             # Fallback: try with H1E device settings (may not work for P1/other models)
             try:
                 logger.warning(
@@ -320,9 +311,7 @@ class HTAConverter:
             )
             return None, 0, 0
 
-    def _create_wav_file(
-        self, output_path: str, audio_data: bytes, sample_rate: int, channels: int
-    ):
+    def _create_wav_file(self, output_path: str, audio_data: bytes, sample_rate: int, channels: int):
         """Create WAV file from audio data."""
         try:
             with wave.open(output_path, "wb") as wav_file:
@@ -332,9 +321,7 @@ class HTAConverter:
                 wav_file.writeframes(audio_data)
 
         except Exception as e:
-            logger.error(
-                "HTAConverter", "_create_wav_file", f"Error creating WAV file: {e}"
-            )
+            logger.error("HTAConverter", "_create_wav_file", f"Error creating WAV file: {e}")
             raise
 
     def get_converted_file_path(self, hta_file_path: str) -> str:
@@ -372,9 +359,7 @@ def get_hta_converter() -> HTAConverter:
     return _hta_converter
 
 
-def convert_hta_to_wav(
-    hta_file_path: str, output_path: Optional[str] = None
-) -> Optional[str]:
+def convert_hta_to_wav(hta_file_path: str, output_path: Optional[str] = None) -> Optional[str]:
     """
     Convenience function to convert HTA file to WAV.
 

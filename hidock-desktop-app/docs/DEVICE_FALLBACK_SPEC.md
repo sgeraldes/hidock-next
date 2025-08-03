@@ -22,7 +22,7 @@ def connect_device_smart(self):
     # First try configured device
     configured_vid = self.selected_vid_var.get()
     configured_pid = self.selected_pid_var.get()
-    
+
     try:
         # Try configured device first
         device_info = connect(configured_vid, configured_pid)
@@ -30,20 +30,20 @@ def connect_device_smart(self):
     except ConnectionError:
         # Configured device not found, try discovery
         available_devices = discover_devices()
-        
+
         if available_devices:
             # Use first available HiDock device
             first_device = available_devices[0]
-            
+
             # Update UI to show what we're doing
             self.update_status_bar(
                 f"Configured device not found, connecting to {first_device.name}..."
             )
-            
+
             # Update selected VID/PID for this session
             self.selected_vid_var.set(first_device.vendor_id)
             self.selected_pid_var.set(first_device.product_id)
-            
+
             # Connect to available device
             return connect(first_device.vendor_id, first_device.product_id)
         else:

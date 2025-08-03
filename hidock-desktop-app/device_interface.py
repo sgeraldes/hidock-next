@@ -171,9 +171,7 @@ class IDeviceInterface(ABC):
         pass
 
     @abstractmethod
-    async def connect(
-        self, device_id: Optional[str] = None, auto_retry: bool = True
-    ) -> DeviceInfo:
+    async def connect(self, device_id: Optional[str] = None, auto_retry: bool = True) -> DeviceInfo:
         """
         Connect to a HiDock device.
 
@@ -306,9 +304,7 @@ class IDeviceInterface(ABC):
         pass
 
     @abstractmethod
-    async def format_storage(
-        self, progress_callback: Optional[Callable[[OperationProgress], None]] = None
-    ) -> None:
+    async def format_storage(self, progress_callback: Optional[Callable[[OperationProgress], None]] = None) -> None:
         """
         Format the device storage.
 
@@ -367,9 +363,7 @@ class IDeviceInterface(ABC):
         pass
 
     @abstractmethod
-    def add_progress_listener(
-        self, operation_id: str, callback: Callable[[OperationProgress], None]
-    ) -> None:
+    def add_progress_listener(self, operation_id: str, callback: Callable[[OperationProgress], None]) -> None:
         """
         Add a progress listener for device operations.
 
@@ -435,9 +429,7 @@ class DeviceManager:
         """Initialize the device manager."""
         pass
 
-    async def connect_to_device(
-        self, device_id: Optional[str] = None, auto_retry: bool = True
-    ) -> DeviceInfo:
+    async def connect_to_device(self, device_id: Optional[str] = None, auto_retry: bool = True) -> DeviceInfo:
         """
         Connect to a device with automatic model detection.
 
@@ -492,12 +484,8 @@ class DeviceManager:
         model_info = {
             "model": self._current_device.model.value,
             "capabilities": [cap.value for cap in self._capabilities],
-            "specifications": self._get_model_specifications(
-                self._current_device.model
-            ),
-            "recommended_settings": self._get_recommended_settings(
-                self._current_device.model
-            ),
+            "specifications": self._get_model_specifications(self._current_device.model),
+            "recommended_settings": self._get_recommended_settings(self._current_device.model),
         }
 
         return model_info
@@ -569,9 +557,7 @@ class DeviceManager:
             return
 
         self._health_monitor_active = True
-        self._health_monitor_thread = threading.Thread(
-            target=self._health_monitor_loop, daemon=True
-        )
+        self._health_monitor_thread = threading.Thread(target=self._health_monitor_loop, daemon=True)
         self._health_monitor_thread.start()
 
     async def _stop_health_monitoring(self) -> None:
@@ -629,9 +615,7 @@ class DeviceManager:
         }
 
         if DeviceCapability.HEALTH_MONITORING in self._capabilities:
-            diagnostics[
-                "health_status"
-            ] = await self.device_interface.get_device_health()
+            diagnostics["health_status"] = await self.device_interface.get_device_health()
 
         return diagnostics
 
@@ -651,21 +635,15 @@ class DeviceManager:
         if usage_percent > 90:
             recommendations.append("Storage is critically full. Delete old recordings.")
         elif usage_percent > 75:
-            recommendations.append(
-                "Storage is getting full. Consider backing up recordings."
-            )
+            recommendations.append("Storage is getting full. Consider backing up recordings.")
         elif usage_percent > 50:
             recommendations.append("Storage is half full. Regular cleanup recommended.")
 
         if storage_info.file_count > 1000:
-            recommendations.append(
-                "Large number of files detected. Consider organizing recordings."
-            )
+            recommendations.append("Large number of files detected. Consider organizing recordings.")
 
         if storage_info.health_status != "good":
-            recommendations.append(
-                f"Storage health issue detected: {storage_info.health_status}"
-            )
+            recommendations.append(f"Storage health issue detected: {storage_info.health_status}")
 
         return recommendations
 

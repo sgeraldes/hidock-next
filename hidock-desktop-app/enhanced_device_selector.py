@@ -197,23 +197,33 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
     def _enumerate_usb_devices(self) -> List[DeviceInfo]:
         """Enumerate USB devices and identify HiDock devices."""
         devices = []
+        processed_count = 0
+        hidock_count = 0
 
         try:
             import usb.core
+            import usb.util
 
             # Find all USB devices
             usb_devices = usb.core.find(find_all=True)
 
             for device in usb_devices:
                 try:
-                    # Try to get device name
+                    processed_count += 1
+
+                    # Check if it's a HiDock device first (most efficient)
+                    is_hidock = self._is_hidock_device(device.idVendor, device.idProduct)
+
+                    # Try to get device name (this is where most access errors occur)
                     try:
                         name = usb.util.get_string(device, device.iProduct) or f"USB Device {hex(device.idProduct)}"
-                    except (AttributeError, UnicodeDecodeError, ValueError):
-                        name = f"USB Device {hex(device.idProduct)}"
-
-                    # Check if it's a HiDock device
-                    is_hidock = self._is_hidock_device(device.idVendor, device.idProduct)
+                    except (AttributeError, UnicodeDecodeError, ValueError, usb.core.USBError):
+                        # For non-HiDock devices, use a generic name and continue
+                        if is_hidock:
+                            name = f"HiDock Device {hex(device.idProduct)}"
+                        else:
+                            # Skip non-HiDock devices that we can't access
+                            continue
 
                     # Determine status
                     status = "available"
@@ -221,6 +231,7 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
                     version = ""
 
                     if is_hidock:
+                        hidock_count += 1
                         capabilities = [
                             "Audio Recording",
                             "File Transfer",
@@ -245,11 +256,21 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
                     devices.append(device_info)
 
                 except Exception as e:
-                    logger.warning(
-                        "EnhancedDeviceSelector",
-                        "_enumerate_usb_devices",
-                        f"Error processing device: {e}",
-                    )
+                    # Only log if it's a HiDock device or if we're in debug mode
+                    if hasattr(device, "idVendor") and hasattr(device, "idProduct"):
+                        if self._is_hidock_device(device.idVendor, device.idProduct):
+                            logger.warning(
+                                "EnhancedDeviceSelector",
+                                "_enumerate_usb_devices",
+                                f"Error accessing HiDock device "
+                                f"{hex(device.idVendor)}:{hex(device.idProduct)}: {e}",
+                            )
+                        else:
+                            logger.debug(
+                                "EnhancedDeviceSelector",
+                                "_enumerate_usb_devices",
+                                f"Skipping inaccessible device: {e}",
+                            )
                     continue
 
         except Exception as e:
@@ -258,6 +279,13 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
                 "_enumerate_usb_devices",
                 f"Error enumerating USB devices: {e}",
             )
+
+        logger.info(
+            "EnhancedDeviceSelector",
+            "_enumerate_usb_devices",
+            f"Processed {processed_count} USB devices, found {hidock_count} HiDock devices, "
+            f"returning {len(devices)} accessible devices",
+        )
 
         # Sort devices: HiDock devices first, then by name
         devices.sort(key=lambda d: (not d.is_hidock, d.name))
@@ -408,6 +436,25 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
     def refresh_devices(self):
         """Refresh the device list."""
         self._scan_devices()
+
+    def set_enabled(self, enabled: bool):
+        """Enable or disable the device selector."""
+        state = "normal" if enabled else "disabled"
+
+        # Disable/enable scan button
+        if hasattr(self, "scan_button"):
+            self.scan_button.configure(state=state)
+
+        # Disable/enable device selection buttons
+        for item_frame in self.device_list_frame.winfo_children():
+            if hasattr(item_frame, "_device_button"):
+                item_frame._device_button.configure(state=state)
+
+        # Update status message
+        if not enabled and hasattr(self, "status_label"):
+            self.status_label.configure(text="⚠️ Device selection disabled while connected")
+
+        logger.debug("EnhancedDeviceSelector", "set_enabled", f"Device selector {'enabled' if enabled else 'disabled'}")
 
 
 def create_enhanced_device_selector(parent, command=None, scan_callback=None, **kwargs) -> EnhancedDeviceSelector:

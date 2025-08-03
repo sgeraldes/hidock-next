@@ -111,10 +111,7 @@ class AudioProcessor:
                             "duration": len(audio) / 1000.0,  # Convert ms to seconds
                             "sample_rate": audio.frame_rate,
                             "channels": audio.channels,
-                            "bitrate": audio.frame_rate
-                            * audio.sample_width
-                            * 8
-                            * audio.channels,
+                            "bitrate": audio.frame_rate * audio.sample_width * 8 * audio.channels,
                         }
                     )
                 except Exception as e:
@@ -135,10 +132,7 @@ class AudioProcessor:
                                 "duration": frames / sample_rate,
                                 "sample_rate": sample_rate,
                                 "channels": wav_file.getnchannels(),
-                                "bitrate": sample_rate
-                                * wav_file.getsampwidth()
-                                * 8
-                                * wav_file.getnchannels(),
+                                "bitrate": sample_rate * wav_file.getsampwidth() * 8 * wav_file.getnchannels(),
                             }
                         )
                 except Exception as e:
@@ -159,9 +153,7 @@ class AudioProcessor:
             return {}
 
     @staticmethod
-    def convert_audio_format(
-        input_path: str, output_path: str, target_format: str = "wav"
-    ) -> bool:
+    def convert_audio_format(input_path: str, output_path: str, target_format: str = "wav") -> bool:
         """Convert audio file to target format"""
         if not PYDUB_AVAILABLE:
             logger.error(
@@ -181,15 +173,11 @@ class AudioProcessor:
             )
             return True
         except Exception as e:
-            logger.error(
-                "AudioProcessor", "convert_audio_format", f"Conversion failed: {e}"
-            )
+            logger.error("AudioProcessor", "convert_audio_format", f"Conversion failed: {e}")
             return False
 
     @staticmethod
-    def normalize_audio(
-        input_path: str, output_path: str, target_dBFS: float = -20.0
-    ) -> bool:
+    def normalize_audio(input_path: str, output_path: str, target_dBFS: float = -20.0) -> bool:
         """Normalize audio to target dBFS level"""
         if not PYDUB_AVAILABLE:
             logger.error(
@@ -215,36 +203,67 @@ class AudioProcessor:
             )
             return True
         except Exception as e:
-            logger.error(
-                "AudioProcessor", "normalize_audio", f"Normalization failed: {e}"
-            )
+            logger.error("AudioProcessor", "normalize_audio", f"Normalization failed: {e}")
             return False
 
     @staticmethod
-    def extract_waveform_data(
-        filepath: str, max_points: int = 1000
-    ) -> Tuple[np.ndarray, int]:
+    def extract_waveform_data(filepath: str, max_points: int = 1000) -> Tuple[np.ndarray, int]:
         """Extract waveform data for visualization"""
         try:
             if filepath.lower().endswith(".wav"):
-                sample_rate, data = wavfile.read(filepath)
+                try:
+                    # Use wave module first (more reliable)
+                    with wave.open(filepath, "rb") as wav_file:
+                        frames = wav_file.readframes(-1)
+                        sample_rate = wav_file.getframerate()
+                        channels = wav_file.getnchannels()
+                        sample_width = wav_file.getsampwidth()
 
-                # Convert to mono if stereo
-                if len(data.shape) > 1:
-                    data = np.mean(data, axis=1)
+                        # Convert bytes to numpy array
+                        if sample_width == 1:
+                            data = np.frombuffer(frames, dtype=np.uint8).astype(np.float32)
+                            data = (data - 128) / 128.0
+                        elif sample_width == 2:
+                            data = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
+                            data = data / 32768.0
+                        elif sample_width == 4:
+                            data = np.frombuffer(frames, dtype=np.int32).astype(np.float32)
+                            data = data / 2147483648.0
+                        else:
+                            data = np.frombuffer(frames, dtype=np.float32)
 
-                # Downsample for visualization if needed
-                if len(data) > max_points:
-                    step = len(data) // max_points
-                    data = data[::step]
+                        # Convert to mono if stereo
+                        if channels > 1:
+                            data = data.reshape(-1, channels)
+                            data = np.mean(data, axis=1)
 
-                # Normalize to [-1, 1]
-                if data.dtype == np.int16:
-                    data = data.astype(np.float32) / 32768.0
-                elif data.dtype == np.int32:
-                    data = data.astype(np.float32) / 2147483648.0
+                        # Downsample for visualization if needed
+                        if len(data) > max_points:
+                            step = len(data) // max_points
+                            data = data[::step]
 
-                return data, sample_rate
+                        return data, sample_rate
+
+                except Exception:
+                    # Fallback to scipy if wave module fails
+                    sample_rate, data = wavfile.read(filepath)
+
+                    # Convert to mono if stereo
+                    if len(data.shape) > 1:
+                        data = np.mean(data, axis=1)
+
+                    # Downsample for visualization if needed
+                    if len(data) > max_points:
+                        step = len(data) // max_points
+                        data = data[::step]
+
+                    # Normalize to [-1, 1]
+                    if data.dtype == np.int16:
+                        data = data.astype(np.float32) / 32768.0
+                    elif data.dtype == np.int32:
+                        data = data.astype(np.float32) / 2147483648.0
+
+                    return data, sample_rate
 
             elif PYDUB_AVAILABLE:
                 audio = AudioSegment.from_file(filepath)
@@ -318,9 +337,7 @@ class AudioPlaylist:
             return True
 
         except Exception as e:
-            logger.error(
-                "AudioPlaylist", "add_track", f"Error adding track {filepath}: {e}"
-            )
+            logger.error("AudioPlaylist", "add_track", f"Error adding track {filepath}: {e}")
             return False
 
     def remove_track(self, index: int) -> bool:
@@ -335,9 +352,7 @@ class AudioPlaylist:
                 elif index == self.current_index:
                     self.current_index = -1
 
-                logger.info(
-                    "AudioPlaylist", "remove_track", f"Removed track: {track.title}"
-                )
+                logger.info("AudioPlaylist", "remove_track", f"Removed track: {track.title}")
                 return True
             return False
         except Exception as e:
@@ -527,9 +542,7 @@ class EnhancedAudioPlayer:
             return loaded_count
 
         except Exception as e:
-            logger.error(
-                "EnhancedAudioPlayer", "load_playlist", f"Error loading playlist: {e}"
-            )
+            logger.error("EnhancedAudioPlayer", "load_playlist", f"Error loading playlist: {e}")
             return 0
 
     def play(self) -> bool:
@@ -562,9 +575,7 @@ class EnhancedAudioPlayer:
                         "play",
                         f"Attempting to create speed-adjusted file at {self.playback_speed}x",
                     )
-                    if self._create_speed_adjusted_audio(
-                        current_track.filepath, self.playback_speed
-                    ):
+                    if self._create_speed_adjusted_audio(current_track.filepath, self.playback_speed):
                         file_to_load = self._get_temp_speed_file()
                         logger.info(
                             "EnhancedAudioPlayer",
@@ -639,9 +650,7 @@ class EnhancedAudioPlayer:
                 # Load appropriate file (speed-adjusted or original)
                 file_to_load = current_track.filepath
                 if self.playback_speed != 1.0:
-                    if self._create_speed_adjusted_audio(
-                        current_track.filepath, self.playback_speed
-                    ):
+                    if self._create_speed_adjusted_audio(current_track.filepath, self.playback_speed):
                         file_to_load = self._get_temp_speed_file()
 
                 pygame.mixer.music.load(file_to_load)
@@ -717,9 +726,7 @@ class EnhancedAudioPlayer:
 
             return True
         except Exception as e:
-            logger.error(
-                "EnhancedAudioPlayer", "set_volume", f"Error setting volume: {e}"
-            )
+            logger.error("EnhancedAudioPlayer", "set_volume", f"Error setting volume: {e}")
             return False
 
     def toggle_mute(self) -> bool:
@@ -736,9 +743,7 @@ class EnhancedAudioPlayer:
 
             return True
         except Exception as e:
-            logger.error(
-                "EnhancedAudioPlayer", "toggle_mute", f"Error toggling mute: {e}"
-            )
+            logger.error("EnhancedAudioPlayer", "toggle_mute", f"Error toggling mute: {e}")
             return False
 
     def set_repeat_mode(self, mode: RepeatMode):
@@ -780,9 +785,7 @@ class EnhancedAudioPlayer:
                 if current_track:
                     file_to_load = current_track.filepath
                     if speed != 1.0:
-                        if self._create_speed_adjusted_audio(
-                            current_track.filepath, speed
-                        ):
+                        if self._create_speed_adjusted_audio(current_track.filepath, speed):
                             file_to_load = self._get_temp_speed_file()
                             logger.info(
                                 "EnhancedAudioPlayer",
@@ -799,9 +802,7 @@ class EnhancedAudioPlayer:
                     # Load and play with new speed
                     pygame.mixer.music.load(file_to_load)
                     pygame.mixer.music.play(start=current_position)
-                    pygame.mixer.music.set_volume(
-                        self.volume if not self.is_muted else 0.0
-                    )
+                    pygame.mixer.music.set_volume(self.volume if not self.is_muted else 0.0)
 
             return True
         except Exception as e:
@@ -841,9 +842,7 @@ class EnhancedAudioPlayer:
         """Get current playback position"""
         current_track = self.playlist.get_current_track()
         total_time = current_track.duration if current_track else 0.0
-        percentage = (
-            (self.current_position / total_time * 100) if total_time > 0 else 0.0
-        )
+        percentage = (self.current_position / total_time * 100) if total_time > 0 else 0.0
 
         return PlaybackPosition(
             current_time=self.current_position,
@@ -855,9 +854,7 @@ class EnhancedAudioPlayer:
         """Start the position update thread"""
         self._stop_position_thread()
         self.stop_position_thread.clear()
-        self.position_update_thread = threading.Thread(
-            target=self._position_update_worker
-        )
+        self.position_update_thread = threading.Thread(target=self._position_update_worker)
         self.position_update_thread.daemon = True
         self.position_update_thread.start()
 
@@ -865,7 +862,9 @@ class EnhancedAudioPlayer:
         """Stop the position update thread"""
         self.stop_position_thread.set()
         if self.position_update_thread and self.position_update_thread.is_alive():
-            self.position_update_thread.join(timeout=1.0)
+            # Don't join if we're on the same thread to avoid deadlock
+            if self.position_update_thread != threading.current_thread():
+                self.position_update_thread.join(timeout=1.0)
 
     def _position_update_worker(self):
         """Worker thread for updating playback position"""
@@ -922,9 +921,7 @@ class EnhancedAudioPlayer:
                     else:
                         # Music stopped playing - check if we've reached the end
                         current_track = self.playlist.get_current_track()
-                        if current_track and self.current_position >= (
-                            current_track.duration - 0.5
-                        ):  # 0.5s tolerance
+                        if current_track and self.current_position >= (current_track.duration - 0.5):  # 0.5s tolerance
                             # Track ended naturally
                             logger.info(
                                 "EnhancedAudioPlayer",
@@ -991,9 +988,7 @@ class EnhancedAudioPlayer:
 
                 # Create new audio segment with modified frame rate
                 # This actually changes the playback speed
-                speed_adjusted_audio = audio._spawn(
-                    audio.raw_data, overrides={"frame_rate": new_sample_rate}
-                )
+                speed_adjusted_audio = audio._spawn(audio.raw_data, overrides={"frame_rate": new_sample_rate})
 
                 # Convert back to standard sample rate for pygame compatibility
                 speed_adjusted_audio = speed_adjusted_audio.set_frame_rate(44100)
@@ -1052,9 +1047,7 @@ class EnhancedAudioPlayer:
         """Get the path for temporary speed-adjusted audio file"""
         import tempfile
 
-        return os.path.join(
-            tempfile.gettempdir(), f"hidock_speed_adjusted_{self.playback_speed}x.wav"
-        )
+        return os.path.join(tempfile.gettempdir(), f"hidock_speed_adjusted_{self.playback_speed}x.wav")
 
         logger.debug(
             "EnhancedAudioPlayer",

@@ -2,6 +2,8 @@
 Tests for transcription functionality.
 """
 
+import os
+import sys
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -66,10 +68,6 @@ class TestTranscriptionModule:
         """Test transcription result formatting."""
         # This would test result formatting
         pass
-
-
-import os
-import sys
 
 
 @pytest.mark.integration

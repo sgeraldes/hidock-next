@@ -4,6 +4,8 @@ Pytest configuration and fixtures for HiDock Next testing.
 
 import os
 import tempfile
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
@@ -85,6 +87,26 @@ def setup_test_environment(monkeypatch):
     """Set up test environment variables."""
     monkeypatch.setenv("TESTING", "1")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+
+
+# Global lock for device test isolation
+_DEVICE_TEST_LOCK = threading.RLock()
+
+
+@pytest.fixture(scope="function")
+def device_test_isolation(request):
+    """Fixture to ensure device tests don't interfere with each other."""
+    # Only apply to tests marked with @pytest.mark.device
+    if request.node.get_closest_marker("device"):
+        with _DEVICE_TEST_LOCK:
+            test_name = request.node.name
+            print(f"[DeviceTestIsolation] Starting: {test_name}")
+            yield
+            print(f"[DeviceTestIsolation] Completed: {test_name}")
+            # Add small delay between device tests
+            time.sleep(0.2)
+    else:
+        yield
 
 
 @pytest.fixture

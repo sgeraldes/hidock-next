@@ -65,16 +65,9 @@ class AuxiliaryMixin:
         This is used to restore the progress bar's appearance after it has been
         changed to indicate an error or warning state.
         """
-        if (
-            hasattr(self, "status_file_progress_bar")
-            and self.status_file_progress_bar.winfo_exists()
-        ):
-            self.default_progressbar_fg_color = (
-                self.status_file_progress_bar.cget("fg_color"),
-            )
-            self.default_progressbar_progress_color = (
-                self.status_file_progress_bar.cget("progress_color"),
-            )
+        if hasattr(self, "status_file_progress_bar") and self.status_file_progress_bar.winfo_exists():
+            self.default_progressbar_fg_color = (self.status_file_progress_bar.cget("fg_color"),)
+            self.default_progressbar_progress_color = (self.status_file_progress_bar.cget("progress_color"),)
 
     def update_log_colors_gui(self):
         """Updates the log text area to reflect the new filter level."""
@@ -127,18 +120,9 @@ class AuxiliaryMixin:
         """
         is_problem = False
         try:
-            mfg = (
-                usb.util.get_string(dev, dev.iManufacturer, 1000)
-                if dev.iManufacturer
-                else "N/A"
-            )
-            prod = (
-                usb.util.get_string(dev, dev.iProduct, 1000) if dev.iProduct else "N/A"
-            )
-            desc = (
-                f"{mfg} - {prod} (VID: {hex(dev.idVendor)}, "
-                f"PID: {hex(dev.idProduct)})"
-            )
+            mfg = usb.util.get_string(dev, dev.iManufacturer, 1000) if dev.iManufacturer else "N/A"
+            prod = usb.util.get_string(dev, dev.iProduct, 1000) if dev.iProduct else "N/A"
+            desc = f"{mfg} - {prod} (VID: {hex(dev.idVendor)}, " f"PID: {hex(dev.idProduct)})"
         except (usb.core.USBError, NotImplementedError, ValueError) as e_str_fetch:
             is_problem = True
             logger.warning(
@@ -148,37 +132,25 @@ class AuxiliaryMixin:
                 f"({type(e_str_fetch).__name__}): {e_str_fetch}",
             )
             error_type_name = type(e_str_fetch).__name__
-            desc = (
-                f"[Error Reading Info ({error_type_name})] "
-                f"(VID={hex(dev.idVendor)}, PID={hex(dev.idProduct)})"
-            )
+            desc = f"[Error Reading Info ({error_type_name})] " f"(VID={hex(dev.idVendor)}, PID={hex(dev.idProduct)})"
         return desc, dev.idVendor, dev.idProduct, is_problem
 
-    def _update_settings_device_combobox(
-        self, devices, parent_window, initial_load, change_callback
-    ):
+    def _update_settings_device_combobox(self, devices, parent_window, initial_load, change_callback):
         """Updates the device selection combobox in the settings dialog."""
         if not (
-            hasattr(parent_window, "settings_device_combobox")
-            and parent_window.settings_device_combobox.winfo_exists()
+            hasattr(parent_window, "settings_device_combobox") and parent_window.settings_device_combobox.winfo_exists()
         ):
             return
 
         combobox = parent_window.settings_device_combobox
         combo_list = [d[0] for d in devices]
-        combobox.configure(
-            values=combo_list if combo_list else ["No devices accessible"]
-        )
+        combobox.configure(values=combo_list if combo_list else ["No devices accessible"])
 
         settings_vid_var = parent_window.local_vars["selected_vid_var"]
         settings_pid_var = parent_window.local_vars["selected_pid_var"]
 
         current_sel_str = next(
-            (
-                d
-                for d, v, p, _ in devices
-                if v == settings_vid_var.get() and p == settings_pid_var.get()
-            ),
+            (d for d, v, p, _ in devices if v == settings_vid_var.get() and p == settings_pid_var.get()),
             None,
         )
 
@@ -224,32 +196,24 @@ class AuxiliaryMixin:
                 try:
                     import asyncio
 
-                    device_info = asyncio.run(
-                        self.device_manager.device_interface.get_device_info()
+                    device_info = asyncio.run(self.device_manager.device_interface.get_device_info())
+                    connected_device_desc = (
+                        f"Currently Connected: {device_info.name} "
+                        f"(VID={hex(device_info.vendor_id)}, "
+                        f"PID={hex(device_info.product_id)})"
                     )
-                    connected_device_desc = (f"Currently Connected: {device_info.name} "
-                                            f"(VID={hex(device_info.vendor_id)}, "
-                                            f"PID={hex(device_info.product_id)})")
 
                     # Update combobox with connected device
                     if (
                         hasattr(parent_window_for_dialogs, "settings_device_combobox")
                         and parent_window_for_dialogs.settings_device_combobox.winfo_exists()
                     ):
-                        parent_window_for_dialogs.settings_device_combobox.configure(
-                            values=[connected_device_desc]
-                        )
-                        parent_window_for_dialogs.settings_device_combobox.set(
-                            connected_device_desc
-                        )
+                        parent_window_for_dialogs.settings_device_combobox.configure(values=[connected_device_desc])
+                        parent_window_for_dialogs.settings_device_combobox.set(connected_device_desc)
 
                         # Update the selected VID/PID to match connected device
-                        parent_window_for_dialogs.local_vars["selected_vid_var"].set(
-                            device_info.vendor_id
-                        )
-                        parent_window_for_dialogs.local_vars["selected_pid_var"].set(
-                            device_info.product_id
-                        )
+                        parent_window_for_dialogs.local_vars["selected_vid_var"].set(device_info.vendor_id)
+                        parent_window_for_dialogs.local_vars["selected_pid_var"].set(device_info.product_id)
 
                     if change_callback:
                         change_callback()
@@ -269,10 +233,7 @@ class AuxiliaryMixin:
             )
             self.available_usb_devices.clear()
             if not self.backend_initialized_successfully:
-                if (
-                    parent_window_for_dialogs
-                    and parent_window_for_dialogs.winfo_exists()
-                ):
+                if parent_window_for_dialogs and parent_window_for_dialogs.winfo_exists():
                     messagebox.showerror(
                         "USB Error",
                         "Libusb backend not initialized.",
@@ -285,9 +246,7 @@ class AuxiliaryMixin:
                     parent_window_for_dialogs.settings_device_combobox.configure(
                         values=["USB Backend Error"]
                     )  # type: ignore
-                    parent_window_for_dialogs.settings_device_combobox.set(
-                        "USB Backend Error"
-                    )
+                    parent_window_for_dialogs.settings_device_combobox.set("USB Backend Error")
                 return
 
             # Try to acquire the USB lock with a timeout to prevent deadlocks during downloads
@@ -308,15 +267,11 @@ class AuxiliaryMixin:
                     parent_window_for_dialogs.settings_device_combobox.configure(
                         values=["Device busy - downloads active"]
                     )
-                    parent_window_for_dialogs.settings_device_combobox.set(
-                        "Device busy - downloads active"
-                    )
+                    parent_window_for_dialogs.settings_device_combobox.set("Device busy - downloads active")
                 return
 
             try:
-                found_devices = usb.core.find(
-                    find_all=True, backend=self.usb_backend_instance
-                )
+                found_devices = usb.core.find(find_all=True, backend=self.usb_backend_instance)
                 if not found_devices:
                     if (
                         hasattr(parent_window_for_dialogs, "settings_device_combobox")
@@ -325,9 +280,7 @@ class AuxiliaryMixin:
                         parent_window_for_dialogs.settings_device_combobox.configure(
                             values=["No devices found"]
                         )  # type: ignore
-                        parent_window_for_dialogs.settings_device_combobox.set(
-                            "No devices found"
-                        )
+                        parent_window_for_dialogs.settings_device_combobox.set("No devices found")
                     return
 
                 processed_devices = []
@@ -337,26 +290,19 @@ class AuxiliaryMixin:
             finally:
                 usb_lock.release()
 
-            good_devs = sorted(
-                [d for d in processed_devices if not d[3]], key=lambda x: x[0]
-            )
-            problem_devs = sorted(
-                [d for d in processed_devices if d[3]], key=lambda x: x[0]
-            )
+            good_devs = sorted([d for d in processed_devices if not d[3]], key=lambda x: x[0])
+            problem_devs = sorted([d for d in processed_devices if d[3]], key=lambda x: x[0])
 
             # If a device is currently connected, move it to the top of the 'good' list
             if self.device_manager.device_interface.is_connected():
                 for i, (desc, vid, pid, _) in enumerate(good_devs):
                     if (
-                        vid
-                        == self.device_manager.device_interface.jensen_device.device.idVendor
-                        and pid
-                        == self.device_manager.device_interface.jensen_device.device.idProduct
+                        vid == self.device_manager.device_interface.jensen_device.device.idVendor
+                        and pid == self.device_manager.device_interface.jensen_device.device.idProduct
                     ):
                         name_disp = (
                             self.device_manager.device_interface.jensen_device.model
-                            if self.device_manager.device_interface.jensen_device.model
-                            != "unknown"
+                            if self.device_manager.device_interface.jensen_device.model != "unknown"
                             else "HiDock Device"
                         )
                         active_desc = f"Currently Connected: {name_disp} (VID={hex(vid)}, PID={hex(pid)})"
@@ -375,9 +321,7 @@ class AuxiliaryMixin:
             all_devices_for_combo = list(good_devs)
             if problem_devs:
                 if all_devices_for_combo:
-                    all_devices_for_combo.append(
-                        ("--- Devices with Issues ---", 0, 0, True)
-                    )
+                    all_devices_for_combo.append(("--- Devices with Issues ---", 0, 0, True))
                 all_devices_for_combo.extend(problem_devs)
 
             self._update_settings_device_combobox(
@@ -405,9 +349,7 @@ class AuxiliaryMixin:
                     parent=parent_window_for_dialogs,
                 )
 
-    def _apply_device_settings_thread(
-        self, settings_to_apply
-    ):  # This is called by SettingsDialog
+    def _apply_device_settings_thread(self, settings_to_apply):  # This is called by SettingsDialog
         if not settings_to_apply:
             logger.info(
                 "GUI",
@@ -417,11 +359,7 @@ class AuxiliaryMixin:
             return
         all_successful = True
         for name, value in settings_to_apply.items():
-            result = (
-                self.device_manager.device_interface.jensen_device.set_device_setting(
-                    name, value
-                )
-            )
+            result = self.device_manager.device_interface.jensen_device.set_device_settings({name: value})
             if not result or result.get("result") != "success":
                 all_successful = False
                 logger.error(
@@ -460,13 +398,9 @@ class AuxiliaryMixin:
         """
 
         def _update_log_task(msg, lvl):
-            if not (
-                hasattr(self, "log_text_area") and self.log_text_area.winfo_exists()
-            ):
+            if not (hasattr(self, "log_text_area") and self.log_text_area.winfo_exists()):
                 return
-            gui_filter_val = Logger.LEVELS.get(
-                self.gui_log_filter_level_var.get().upper(), Logger.LEVELS["DEBUG"]
-            )
+            gui_filter_val = Logger.LEVELS.get(self.gui_log_filter_level_var.get().upper(), Logger.LEVELS["DEBUG"])
             msg_level_val = Logger.LEVELS.get(lvl.upper(), 0)
             if msg_level_val < gui_filter_val:
                 return
@@ -519,6 +453,4 @@ class AuxiliaryMixin:
                 messagebox.showinfo("Download Logs", f"Logs saved to:\n{filepath}", parent=self)  # type: ignore
             except (IOError, OSError, tkinter.TclError) as e:
                 logger.error("GUI", "download_gui_logs", f"Error saving logs: {e}")
-                messagebox.showerror(
-                    "Download Logs Error", f"Failed to save logs: {e}", parent=self
-                )
+                messagebox.showerror("Download Logs Error", f"Failed to save logs: {e}", parent=self)

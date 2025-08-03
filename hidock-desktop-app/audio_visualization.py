@@ -17,6 +17,7 @@ from typing import Optional  # Removed List, Tuple - not used
 
 import customtkinter as ctk
 import matplotlib.animation as animation
+
 # import matplotlib.pyplot as plt  # Commented out - not used, using Figure directly
 import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -43,9 +44,7 @@ class WaveformVisualizer:
         self.total_duration: float = 0.0
 
         # Matplotlib setup - use more dynamic sizing
-        self.figure = Figure(
-            figsize=(width / 100, height / 100), dpi=100, facecolor="#2b2b2b"
-        )
+        self.figure = Figure(figsize=(width / 100, height / 100), dpi=100, facecolor="#2b2b2b")
         # Adjust subplot to use more space and reduce margins
         self.ax = self.figure.add_subplot(111)
         self.figure.subplots_adjust(left=0.02, right=0.98, top=0.95, bottom=0.05)
@@ -143,14 +142,10 @@ class WaveformVisualizer:
     def load_audio(self, filepath: str) -> bool:
         """Load audio file and extract waveform data"""
         try:
-            logger.info(
-                "WaveformVisualizer", "load_audio", f"Loading waveform for {filepath}"
-            )
+            logger.info("WaveformVisualizer", "load_audio", f"Loading waveform for {filepath}")
 
             # Extract waveform data
-            waveform_data, sample_rate = AudioProcessor.extract_waveform_data(
-                filepath, max_points=2000
-            )
+            waveform_data, sample_rate = AudioProcessor.extract_waveform_data(filepath, max_points=2000)
 
             if len(waveform_data) == 0:
                 logger.warning(
@@ -170,15 +165,11 @@ class WaveformVisualizer:
             # Update visualization
             self._update_waveform_display()
 
-            logger.info(
-                "WaveformVisualizer", "load_audio", "Waveform loaded successfully"
-            )
+            logger.info("WaveformVisualizer", "load_audio", "Waveform loaded successfully")
             return True
 
         except Exception as e:
-            logger.error(
-                "WaveformVisualizer", "load_audio", f"Error loading waveform: {e}"
-            )
+            logger.error("WaveformVisualizer", "load_audio", f"Error loading waveform: {e}")
             return False
 
     def _update_waveform_display(self):
@@ -203,9 +194,7 @@ class WaveformVisualizer:
                 waveform_display = waveform_display / max_amplitude * 0.9
 
                 # Apply slight compression to make quiet parts more visible
-                waveform_display = np.sign(waveform_display) * np.power(
-                    np.abs(waveform_display), 0.7
-                )
+                waveform_display = np.sign(waveform_display) * np.power(np.abs(waveform_display), 0.7)
 
             # Plot waveform with thicker line for better visibility
             self.ax.plot(
@@ -217,17 +206,13 @@ class WaveformVisualizer:
             )
 
             # Fill under the curve for better visual effect
-            self.ax.fill_between(
-                time_axis, waveform_display, alpha=0.4, color=self.waveform_color
-            )
+            self.ax.fill_between(time_axis, waveform_display, alpha=0.4, color=self.waveform_color)
 
             # Apply zoom to time axis
             if self.zoom_level > 1.0:
                 # Calculate zoom window
                 zoom_duration = self.total_duration / self.zoom_level
-                zoom_start = max(
-                    0, self.zoom_center * self.total_duration - zoom_duration / 2
-                )
+                zoom_start = max(0, self.zoom_center * self.total_duration - zoom_duration / 2)
                 zoom_end = min(self.total_duration, zoom_start + zoom_duration)
 
                 # Adjust if we're at the edges
@@ -280,7 +265,7 @@ class WaveformVisualizer:
             )
 
             # Add time text
-            time_text = f"{int(self.current_position//60):02d}:{int(self.current_position % 60):02d}"
+            time_text = f"{int(self.current_position // 60):02d}:{int(self.current_position % 60):02d}"
             self.ax.text(
                 self.current_position,
                 0.9,
@@ -311,9 +296,7 @@ class WaveformVisualizer:
                 self._update_waveform_display()
 
         except Exception as e:
-            logger.error(
-                "WaveformVisualizer", "update_position", f"Error updating position: {e}"
-            )
+            logger.error("WaveformVisualizer", "update_position", f"Error updating position: {e}")
 
     def _zoom_in(self):
         """Zoom in on the waveform"""
@@ -376,9 +359,7 @@ class SpectrumAnalyzer:
         self.total_duration = 0.0
 
         # Matplotlib setup
-        self.figure = Figure(
-            figsize=(width / 100, height / 100), dpi=100, facecolor="#2b2b2b"
-        )
+        self.figure = Figure(figsize=(width / 100, height / 100), dpi=100, facecolor="#2b2b2b")
         # Adjust subplot to use more space and reduce margins
         self.ax = self.figure.add_subplot(111)
         self.figure.subplots_adjust(left=0.02, right=0.98, top=0.95, bottom=0.05)
@@ -418,9 +399,7 @@ class SpectrumAnalyzer:
             mags = np.zeros_like(freqs)
 
             # Plot empty spectrum
-            (self.spectrum_line,) = self.ax.semilogx(
-                freqs, mags, color=self.spectrum_color, linewidth=1.5
-            )
+            (self.spectrum_line,) = self.ax.semilogx(freqs, mags, color=self.spectrum_color, linewidth=1.5)
 
             # Styling
             self.ax.set_xlim(10, 10000)
@@ -451,9 +430,7 @@ class SpectrumAnalyzer:
                     "Skipping initial canvas draw due to recursion error",
                 )
         except Exception as e:
-            logger.error(
-                "SpectrumAnalyzer", "_initialize_plot", f"Error initializing plot: {e}"
-            )
+            logger.error("SpectrumAnalyzer", "_initialize_plot", f"Error initializing plot: {e}")
 
     def start_analysis(self, audio_data: np.ndarray, sample_rate: int):
         """Start real-time spectrum analysis"""
@@ -468,15 +445,11 @@ class SpectrumAnalyzer:
             self.total_duration = len(audio_data) / sample_rate
 
             # Prepare frequency bins
-            self.frequency_bins = fftfreq(self.fft_size, 1 / sample_rate)[
-                : self.fft_size // 2
-            ]
+            self.frequency_bins = fftfreq(self.fft_size, 1 / sample_rate)[: self.fft_size // 2]
 
             # Ensure we have valid audio data
             if len(audio_data) == 0:
-                logger.warning(
-                    "SpectrumAnalyzer", "start_analysis", "No audio data provided"
-                )
+                logger.warning("SpectrumAnalyzer", "start_analysis", "No audio data provided")
                 return
 
             # Start animation with explicit settings to ensure it runs
@@ -518,9 +491,7 @@ class SpectrumAnalyzer:
             )
 
         except Exception as e:
-            logger.error(
-                "SpectrumAnalyzer", "start_analysis", f"Error starting analysis: {e}"
-            )
+            logger.error("SpectrumAnalyzer", "start_analysis", f"Error starting analysis: {e}")
 
     def stop_analysis(self):
         """Stop spectrum analysis"""
@@ -530,14 +501,10 @@ class SpectrumAnalyzer:
                 self.animation.event_source.stop()
                 self.animation = None
 
-            logger.info(
-                "SpectrumAnalyzer", "stop_analysis", "Spectrum analysis stopped"
-            )
+            logger.info("SpectrumAnalyzer", "stop_analysis", "Spectrum analysis stopped")
 
         except Exception as e:
-            logger.error(
-                "SpectrumAnalyzer", "stop_analysis", f"Error stopping analysis: {e}"
-            )
+            logger.error("SpectrumAnalyzer", "stop_analysis", f"Error stopping analysis: {e}")
 
     def update_position(self, position: float):
         """Update current playback position for spectrum analysis"""
@@ -567,9 +534,7 @@ class SpectrumAnalyzer:
                 # Get audio chunk and pad if necessary
                 audio_chunk = self.audio_data[chunk_start:chunk_end]
                 if len(audio_chunk) < self.fft_size:
-                    audio_chunk = np.pad(
-                        audio_chunk, (0, self.fft_size - len(audio_chunk))
-                    )
+                    audio_chunk = np.pad(audio_chunk, (0, self.fft_size - len(audio_chunk)))
 
                 # Apply window function to reduce spectral leakage
                 windowed_chunk = audio_chunk * np.hanning(len(audio_chunk))
@@ -583,15 +548,11 @@ class SpectrumAnalyzer:
                 spectrum_db = 20 * np.log10(fft_magnitude)
 
                 # Create frequency bins
-                freqs = np.fft.fftfreq(self.fft_size, 1 / self.sample_rate)[
-                    : self.fft_size // 2
-                ]
+                freqs = np.fft.fftfreq(self.fft_size, 1 / self.sample_rate)[: self.fft_size // 2]
 
                 # Resample to logarithmic frequency scale for better visualization
                 log_freqs = np.logspace(1, np.log10(self.sample_rate / 2), 50)
-                spectrum = np.interp(
-                    log_freqs, freqs[1:], spectrum_db[1:]
-                )  # Skip DC component
+                spectrum = np.interp(log_freqs, freqs[1:], spectrum_db[1:])  # Skip DC component
 
                 # Normalize and smooth
                 spectrum = spectrum - np.max(spectrum)  # Normalize to 0 dB max
@@ -599,9 +560,7 @@ class SpectrumAnalyzer:
 
                 # Apply smoothing
                 if len(spectrum) > 5:
-                    spectrum = signal.savgol_filter(
-                        spectrum, min(5, len(spectrum) // 2 * 2 + 1), 2
-                    )
+                    spectrum = signal.savgol_filter(spectrum, min(5, len(spectrum) // 2 * 2 + 1), 2)
 
                 freqs = log_freqs
 
@@ -630,9 +589,7 @@ class SpectrumAnalyzer:
             return [self.spectrum_line]
 
         except Exception as e:
-            logger.error(
-                "SpectrumAnalyzer", "_update_spectrum", f"Error updating spectrum: {e}"
-            )
+            logger.error("SpectrumAnalyzer", "_update_spectrum", f"Error updating spectrum: {e}")
             return []
 
 
@@ -651,16 +608,12 @@ class AudioVisualizationWidget(ctk.CTkFrame):
         self.current_speed = 1.0
 
         # Create notebook for different visualization types
-        self.notebook = ctk.CTkTabview(
-            self, height=height - 40
-        )  # Leave room for controls
+        self.notebook = ctk.CTkTabview(self, height=height - 40)  # Leave room for controls
         self.notebook.pack(fill="x", expand=False, padx=3, pady=3)
 
         # Waveform tab
         self.waveform_tab = self.notebook.add("Waveform")
-        self.waveform_visualizer = WaveformVisualizer(
-            self.waveform_tab, height=height - 80
-        )
+        self.waveform_visualizer = WaveformVisualizer(self.waveform_tab, height=height - 80)
 
         # Spectrum tab
         self.spectrum_tab = self.notebook.add("Spectrum")
@@ -715,14 +668,13 @@ class AudioVisualizationWidget(ctk.CTkFrame):
         # Remove redundant checkboxes - tabs already provide this functionality
         # Visualization state is now controlled by the active tab
         self.show_waveform_var = ctk.BooleanVar(value=True)
-        self.show_spectrum_var = ctk.BooleanVar(
-            value=True
-        )  # Always enable spectrum analyzer
+        self.show_spectrum_var = ctk.BooleanVar(value=True)  # Always enable spectrum analyzer
 
     def _load_theme_icons(self):
         """Load theme toggle icons"""
         try:
             import os  # Import moved here from top-level to avoid unused import
+
             from PIL import Image
 
             # Get the script directory and construct icon paths
@@ -735,9 +687,7 @@ class AudioVisualizationWidget(ctk.CTkFrame):
             # Load and create CTkImage objects
             if os.path.exists(moon_path):
                 moon_image = Image.open(moon_path)
-                self.moon_icon = ctk.CTkImage(
-                    light_image=moon_image, dark_image=moon_image, size=(16, 16)
-                )
+                self.moon_icon = ctk.CTkImage(light_image=moon_image, dark_image=moon_image, size=(16, 16))
             else:
                 self.moon_icon = None
                 logger.warning(
@@ -748,9 +698,7 @@ class AudioVisualizationWidget(ctk.CTkFrame):
 
             if os.path.exists(sun_path):
                 sun_image = Image.open(sun_path)
-                self.sun_icon = ctk.CTkImage(
-                    light_image=sun_image, dark_image=sun_image, size=(16, 16)
-                )
+                self.sun_icon = ctk.CTkImage(light_image=sun_image, dark_image=sun_image, size=(16, 16))
             else:
                 self.sun_icon = None
                 logger.warning(
@@ -779,9 +727,7 @@ class AudioVisualizationWidget(ctk.CTkFrame):
             return success
 
         except Exception as e:
-            logger.error(
-                "AudioVisualizationWidget", "load_audio", f"Error loading audio: {e}"
-            )
+            logger.error("AudioVisualizationWidget", "load_audio", f"Error loading audio: {e}")
             return False
 
     def update_position(self, position: PlaybackPosition):
@@ -839,9 +785,7 @@ class AudioVisualizationWidget(ctk.CTkFrame):
             if main_window and hasattr(main_window, "audio_player"):
                 main_window.audio_player.play()
         except Exception as e:
-            logger.error(
-                "AudioVisualizationWidget", "_play_audio", f"Error playing audio: {e}"
-            )
+            logger.error("AudioVisualizationWidget", "_play_audio", f"Error playing audio: {e}")
 
     def _pause_audio(self):
         """Pause audio - delegate to parent GUI"""
@@ -850,9 +794,7 @@ class AudioVisualizationWidget(ctk.CTkFrame):
             if main_window and hasattr(main_window, "audio_player"):
                 main_window.audio_player.pause()
         except Exception as e:
-            logger.error(
-                "AudioVisualizationWidget", "_pause_audio", f"Error pausing audio: {e}"
-            )
+            logger.error("AudioVisualizationWidget", "_pause_audio", f"Error pausing audio: {e}")
 
     def _stop_audio(self):
         """Stop audio - delegate to parent GUI"""
@@ -861,9 +803,7 @@ class AudioVisualizationWidget(ctk.CTkFrame):
             if main_window and hasattr(main_window, "audio_player"):
                 main_window.audio_player.stop()
         except Exception as e:
-            logger.error(
-                "AudioVisualizationWidget", "_stop_audio", f"Error stopping audio: {e}"
-            )
+            logger.error("AudioVisualizationWidget", "_stop_audio", f"Error stopping audio: {e}")
 
     def _get_main_window(self):
         """Get reference to main window through parent chain"""
@@ -952,9 +892,7 @@ class AudioVisualizationWidget(ctk.CTkFrame):
                             (
                                 waveform_data,
                                 sample_rate,
-                            ) = AudioProcessor.extract_waveform_data(
-                                current_track.filepath, max_points=1024
-                            )
+                            ) = AudioProcessor.extract_waveform_data(current_track.filepath, max_points=1024)
                             if len(waveform_data) > 0:
                                 self.start_spectrum_analysis(waveform_data, sample_rate)
                         except Exception:
@@ -995,9 +933,9 @@ class AudioVisualizationWidget(ctk.CTkFrame):
             speed_frame.pack(side="left", padx=(5, 10), pady=3)
 
             # Speed label
-            ctk.CTkLabel(
-                speed_frame, text="Speed:", font=ctk.CTkFont(size=12, weight="bold")
-            ).pack(side="left", padx=(8, 5))
+            ctk.CTkLabel(speed_frame, text="Speed:", font=ctk.CTkFont(size=12, weight="bold")).pack(
+                side="left", padx=(8, 5)
+            )
 
             # Speed decrease button
             self.speed_down_btn = ctk.CTkButton(
@@ -1045,9 +983,7 @@ class AudioVisualizationWidget(ctk.CTkFrame):
             preset_frame = ctk.CTkFrame(self.control_frame)
             preset_frame.pack(side="left", padx=5, pady=3)
 
-            ctk.CTkLabel(preset_frame, text="Presets:", font=ctk.CTkFont(size=10)).pack(
-                side="left", padx=(5, 3)
-            )
+            ctk.CTkLabel(preset_frame, text="Presets:", font=ctk.CTkFont(size=10)).pack(side="left", padx=(5, 3))
 
             # Create preset buttons for common speeds
             preset_speeds = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]

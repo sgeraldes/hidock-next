@@ -6,14 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "hidock-next"
 description = "Community-driven HiDock device management and AI transcription platform"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "HiDock Community", email = "community@hidock-next.org"},
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
@@ -30,6 +29,11 @@ dependencies = [
     "Pillow",
     "pygame",
     "google-generativeai",
+    "matplotlib",
+    "numpy",
+    "scipy",
+    "cryptography",
+    "pydub",
 ]
 dynamic = ["version"]
 
@@ -57,6 +61,35 @@ hidock-next = "main:main"
 
 [tool.setuptools_scm]
 write_to = "_version.py"
+
+[tool.setuptools]
+py-modules = [
+    "main",
+    "ai_service",
+    "audio_player",
+    "audio_player_enhanced",
+    "audio_processing_advanced",
+    "audio_visualization",
+    "config_and_logger",
+    "constants",
+    "ctk_custom_widgets",
+    "desktop_device_adapter",
+    "device_interface",
+    "enhanced_device_selector",
+    "enhanced_gui_integration",
+    "file_operations_manager",
+    "gui_actions_device",
+    "gui_actions_file",
+    "gui_auxiliary",
+    "gui_event_handlers",
+    "gui_main_window",
+    "gui_treeview",
+    "hidock_device",
+    "hta_converter",
+    "settings_window",
+    "storage_management",
+    "transcription_module"
+]
 
 [tool.black]
 line-length = 120

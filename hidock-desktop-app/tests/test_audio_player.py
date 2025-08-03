@@ -4,8 +4,8 @@ import tkinter
 import unittest
 from unittest.mock import MagicMock, call, patch
 
-# Import the AudioPlayerMixin at the top level
-from audio_player import AudioPlayerMixin
+# Import the AudioPlayerMixin and AudioPlayer at the top level
+from audio_player import AudioPlayer, AudioPlayerMixin
 
 
 class TestAudioPlayerInitialization(unittest.TestCase):
@@ -343,6 +343,116 @@ class TestAudioPlayerInitialization(unittest.TestCase):
         self.app._on_volume_change(0.7)
 
         self.app.audio_player.set_volume.assert_called_once_with(0.7)
+
+
+class TestAudioPlayer(unittest.TestCase):
+    """Test the AudioPlayer class specifically"""
+
+    def test_pygame_import_error_handling(self):
+        """Test AudioPlayer behavior when pygame is not available"""
+        # Test the import error handling by patching pygame to None
+        with patch("audio_player.pygame", None):
+            player = AudioPlayer()
+
+            # is_playing property should handle pygame being None
+            result = player.is_playing
+            self.assertFalse(result)
+
+            # play() should call error callback when pygame is None
+            error_callback = MagicMock()
+            player = AudioPlayer(on_error=error_callback)
+            player.play("test.mp3")
+            error_callback.assert_called_once_with("Pygame mixer not initialized.")
+
+    @patch("audio_player.pygame")
+    def test_audio_player_initialization_pygame_not_initialized(self, mock_pygame):
+        """Test AudioPlayer when pygame mixer is not initialized"""
+        mock_pygame.mixer.get_init.return_value = None
+
+        player = AudioPlayer()
+
+        # Should handle uninitialized mixer gracefully
+        result = player.is_playing
+        self.assertFalse(result)
+
+    @patch("audio_player.pygame")
+    def test_audio_player_is_playing_with_pygame(self, mock_pygame):
+        """Test is_playing property when pygame is available"""
+        mock_pygame.mixer.get_init.return_value = True
+        mock_pygame.mixer.music.get_busy.return_value = True
+
+        player = AudioPlayer()
+        result = player.is_playing
+
+        self.assertTrue(result)
+        self.assertTrue(player._is_playing)
+
+    @patch("audio_player.pygame")
+    def test_audio_player_play_success(self, mock_pygame):
+        """Test successful audio playback"""
+        mock_pygame.mixer.get_init.return_value = True
+        start_callback = MagicMock()
+
+        player = AudioPlayer(on_start=start_callback)
+        player.play("test.mp3")
+
+        mock_pygame.mixer.music.load.assert_called_once_with("test.mp3")
+        mock_pygame.mixer.music.play.assert_called_once()
+        start_callback.assert_called_once_with("test.mp3")
+        self.assertTrue(player._is_playing)
+        self.assertEqual(player._current_filepath, "test.mp3")
+
+    @patch("audio_player.pygame")
+    def test_audio_player_play_no_pygame(self, mock_pygame):
+        """Test play() when pygame is not available"""
+        mock_pygame = None
+        error_callback = MagicMock()
+
+        with patch("audio_player.pygame", None):
+            player = AudioPlayer(on_error=error_callback)
+            player.play("test.mp3")
+
+            error_callback.assert_called_once_with("Pygame mixer not initialized.")
+
+    @patch("audio_player.pygame")
+    def test_audio_player_play_pygame_error(self, mock_pygame):
+        """Test play() when pygame raises an error"""
+        mock_pygame.mixer.get_init.return_value = True
+        mock_pygame.mixer.music.load.side_effect = Exception("Load error")
+        mock_pygame.error = Exception  # Mock pygame.error
+
+        error_callback = MagicMock()
+        player = AudioPlayer(on_error=error_callback)
+
+        player.play("test.mp3")
+
+        self.assertFalse(player._is_playing)
+        error_callback.assert_called_once_with("Could not play file: Load error")
+
+    @patch("audio_player.pygame")
+    def test_audio_player_stop_no_pygame(self, mock_pygame):
+        """Test stop() when pygame is not available"""
+        with patch("audio_player.pygame", None):
+            player = AudioPlayer()
+            # Should not raise error when pygame is None
+            player.stop()
+
+    @patch("audio_player.pygame")
+    def test_audio_player_stop_success(self, mock_pygame):
+        """Test successful stop"""
+        mock_pygame.mixer.get_init.return_value = True
+        stop_callback = MagicMock()
+
+        player = AudioPlayer(on_stop=stop_callback)
+        player._is_playing = True
+        player.stop()
+
+        mock_pygame.mixer.music.stop.assert_called_once()
+        stop_callback.assert_called_once()
+        self.assertFalse(player._is_playing)
+
+    # Note: AudioPlayer class doesn't have pause, resume, set_volume, get_position, or set_position methods
+    # These are likely implemented in AudioPlayerMixin or other classes
 
 
 if __name__ == "__main__":

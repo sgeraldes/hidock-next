@@ -350,7 +350,16 @@ export class DeviceManager {
                 connectivity: 'USB-C',
                 features: ['Auto-record', 'Bluetooth', 'Noise cancellation']
             },
-            [DeviceModel.UNKNOWN]: {}
+            [DeviceModel.UNKNOWN]: {
+                maxStorage: 'Unknown',
+                audioFormat: 'Unknown',
+                sampleRate: 'Unknown',
+                bitDepth: 'Unknown',
+                channels: 'Unknown',
+                batteryLife: 'Unknown',
+                connectivity: 'Unknown',
+                features: []
+            }
         };
 
         return specs[model] || {
@@ -384,7 +393,14 @@ export class DeviceManager {
                 bluetoothEnabled: true,
                 powerSaving: false
             },
-            [DeviceModel.UNKNOWN]: {}
+            [DeviceModel.UNKNOWN]: {
+                autoRecord: false,
+                bluetoothEnabled: false,
+                powerSaving: false,
+                noiseCancellation: false,
+                audioQuality: 'medium',
+                recordingQuality: 'medium'
+            }
         };
 
         return settings[model] || {};
@@ -487,7 +503,7 @@ export class DeviceManager {
 /**
  * Utility functions for device model detection
  */
-export function detectDeviceModel(vendorId: number, productId: number): DeviceModel {
+export function detectDeviceModel(_vendorId: number, productId: number): DeviceModel {
     const modelMap: Record<number, DeviceModel> = {
         0xAF0C: DeviceModel.H1,
         0xAF0D: DeviceModel.H1E,

@@ -9,11 +9,14 @@ operation timeouts, device-specific behaviors, and logging options.
 """
 
 import base64
+
 # import json  # Future: for advanced configuration import/export
 import os
 import threading  # For device settings apply thread
 import tkinter
 from tkinter import filedialog, messagebox
+import asyncio
+from pathlib import Path
 
 import customtkinter as ctk
 import usb.core  # For specific exception handling
@@ -24,11 +27,9 @@ try:
     ENCRYPTION_AVAILABLE = True
 except ImportError:
     ENCRYPTION_AVAILABLE = False
-from config_and_logger import (  # For type hint and logger instance
-    Logger,
-    logger,
-    save_config,
-)
+    Fernet = None  # Define Fernet as None when not available
+
+from config_and_logger import Logger, logger, save_config  # For type hint and logger instance
 
 
 class SettingsDialog(ctk.CTkToplevel):
@@ -55,9 +56,7 @@ class SettingsDialog(ctk.CTkToplevel):
         """
         super().__init__(parent_gui, *args, **kwargs)
         self.parent_gui = parent_gui  # Reference to the main HiDockToolGUI instance
-        self.initial_config_snapshot = (
-            initial_config  # A snapshot of config at dialog open
-        )
+        self.initial_config_snapshot = initial_config  # A snapshot of config at dialog open
         self.dock = hidock_instance  # HiDockJensen instance
 
         self.title("Application Settings")
@@ -70,13 +69,15 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Store current values of relevant CTk Variables from parent_gui for local use and reset
         self.local_vars = {}
-        self._clone_parent_vars()
+        try:
+            self._clone_parent_vars()
+        except Exception as e:
+            logger.warning("SettingsDialog", "__init__", f"Error cloning parent vars: {e}")
+            self.local_vars = {}  # Ensure it's always initialized
 
         # Store the initial download directory separately for comparison
         self.initial_download_directory = self.parent_gui.download_directory
-        self.current_dialog_download_dir = [
-            self.parent_gui.download_directory
-        ]  # Mutable for dialog changes
+        self.current_dialog_download_dir = [self.parent_gui.download_directory]  # Mutable for dialog changes
 
         # Initialize attributes that will hold widget instances later
         self.current_dl_dir_label_settings = None
@@ -92,21 +93,12 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # If device is connected, load its specific settings
         if self.dock.is_connected():
-            threading.Thread(
-                target=self._load_device_settings_for_dialog_thread, daemon=True
-            ).start()
+            threading.Thread(target=self._load_device_settings_for_dialog_thread, daemon=True).start()
         else:
             self._finalize_initialization_and_button_states()  # No async load needed
 
-        self.bind(
-            "<Return>",
-            lambda event: (
-                self.ok_button.invoke()
-                if self.ok_button.cget("state") == "normal"
-                else None
-            ),
-        )
-        self.bind("<Escape>", lambda event: self.cancel_close_button.invoke())
+        # Bind keys after widgets are created
+        self.after(100, self._setup_key_bindings)
 
         self.after(10, self._adjust_window_size_and_fade_in)
 
@@ -162,9 +154,7 @@ class SettingsDialog(ctk.CTkToplevel):
         for var_name, var_type_str in vars_to_clone_map.items():
             if hasattr(self.parent_gui, var_name):
                 parent_var = getattr(self.parent_gui, var_name)
-                var_class = getattr(
-                    ctk, var_type_str
-                )  # Get ctk.StringVar, ctk.BooleanVar etc.
+                var_class = getattr(ctk, var_type_str)  # Get ctk.StringVar, ctk.BooleanVar etc.
 
                 # Convert integer values to strings for StringVar variables that were previously IntVar
                 parent_value = parent_var.get()
@@ -180,9 +170,7 @@ class SettingsDialog(ctk.CTkToplevel):
                     parent_value = str(parent_value)
 
                 self.local_vars[var_name] = var_class(value=parent_value)
-                self.local_vars[var_name].trace_add(
-                    "write", self._update_button_states_on_change
-                )
+                self.local_vars[var_name].trace_add("write", self._on_setting_change)
 
         # Clone log color variables
         for level_key in Logger.LEVELS:  # Iterate directly over dictionary keys
@@ -192,9 +180,7 @@ class SettingsDialog(ctk.CTkToplevel):
                 if hasattr(self.parent_gui, var_name):
                     parent_var = getattr(self.parent_gui, var_name)
                     self.local_vars[var_name] = ctk.StringVar(value=parent_var.get())
-                    self.local_vars[var_name].trace_add(
-                        "write", self._update_button_states_on_change
-                    )
+                    self.local_vars[var_name].trace_add("write", self._on_setting_change)
 
     def _create_settings_widgets(self):
         """
@@ -223,56 +209,31 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # --- Buttons Frame ---
         buttons_frame = ctk.CTkFrame(main_content_frame, fg_color="transparent")
-        buttons_frame.pack(
-            fill="x", side="bottom", pady=(10, 0)
-        )  # padx handled by subframe or main_content_frame
+        buttons_frame.pack(fill="x", side="bottom", pady=(10, 0))
 
         action_buttons_subframe = ctk.CTkFrame(buttons_frame, fg_color="transparent")
-        action_buttons_subframe.pack(side="right")  # Align buttons to the right
+        action_buttons_subframe.pack(side="right")
 
-        # Define colors for buttons (could be moved to constants or theme if widely used)
-        self.color_ok_blue = self.parent_gui.apply_appearance_mode_theme_color(
-            ctk.ThemeManager.theme["CTkButton"]["fg_color"]
-        )
-        self.color_cancel_red = self.parent_gui.apply_appearance_mode_theme_color(
-            ("#D32F2F", "#E57373")
-        )  # Darker red for light, lighter for dark
-        self.color_apply_grey = self.parent_gui.apply_appearance_mode_theme_color(
-            ctk.ThemeManager.theme["CTkButton"].get(
-                "border_color", ("gray60", "gray40")
-            )
-        )  # Use border or a neutral color
-        self.color_close_grey = self.color_apply_grey
-
-        self.ok_button = ctk.CTkButton(
+        # Only Close button and Reset to Defaults
+        self.reset_button = ctk.CTkButton(
             action_buttons_subframe,
-            text="OK",
-            state="disabled",
-            fg_color=self.color_ok_blue,
-            command=self._ok_action,
+            text="Reset to Defaults",
+            fg_color="orange",
+            hover_color="darkorange",
+            command=self._reset_to_defaults,
         )
-        self.apply_button = ctk.CTkButton(
-            action_buttons_subframe,
-            text="Apply",
-            fg_color=self.color_apply_grey,
-            state="disabled",
-            command=self._apply_action_ui_handler,
-        )
-        self.cancel_close_button = ctk.CTkButton(
+        self.reset_button.pack(side="left", padx=(0, 10))
+        
+        self.close_button = ctk.CTkButton(
             action_buttons_subframe,
             text="Close",
-            fg_color=self.color_close_grey,
-            command=self._cancel_close_action,
+            command=self.destroy,
         )
-
-        self.cancel_close_button.pack(
-            side="left", padx=(0, 0)
-        )  # Initially only "Close" is visible and packed
+        self.close_button.pack(side="left")
 
         ctk.CTkLabel(
             main_content_frame,
-            text="Note: Appearance/Theme changes apply immediately."
-            " Other settings update on Apply/OK.",
+            text="All changes are saved immediately. No need to apply.",
             font=ctk.CTkFont(size=10, slant="italic"),
         ).pack(side="bottom", fill="x", pady=(5, 0))
 
@@ -281,40 +242,40 @@ class SettingsDialog(ctk.CTkToplevel):
         scroll_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
         scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
-        ctk.CTkLabel(
-            scroll_frame, text="Application Theme:", font=ctk.CTkFont(weight="bold")
-        ).pack(anchor="w", pady=(5, 2), padx=5)
-        ctk.CTkLabel(scroll_frame, text="Appearance Mode:").pack(
-            anchor="w", pady=(5, 0), padx=10
+        ctk.CTkLabel(scroll_frame, text="Application Theme:", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", pady=(5, 2), padx=5
         )
-        ctk.CTkComboBox(
+        ctk.CTkLabel(scroll_frame, text="Appearance Mode:").pack(anchor="w", pady=(5, 0), padx=10)
+        appearance_combo = ctk.CTkComboBox(
             scroll_frame,
             variable=self.local_vars["appearance_mode_var"],
             values=["Light", "Dark", "System"],
             state="readonly",
-        ).pack(fill="x", pady=2, padx=10)
-        ctk.CTkLabel(scroll_frame, text="Color Theme:").pack(
-            anchor="w", pady=(5, 0), padx=10
+            command=self._on_appearance_change,
         )
-        ctk.CTkComboBox(
+        appearance_combo.pack(fill="x", pady=2, padx=10)
+        ctk.CTkLabel(scroll_frame, text="Color Theme:").pack(anchor="w", pady=(5, 0), padx=10)
+        theme_combo = ctk.CTkComboBox(
             scroll_frame,
             variable=self.local_vars["color_theme_var"],
             values=["blue", "dark-blue", "green"],
             state="readonly",
-        ).pack(fill="x", pady=(2, 10), padx=10)
+            command=self._on_theme_change,
+        )
+        theme_combo.pack(fill="x", pady=(2, 10), padx=10)
 
-        ctk.CTkLabel(
-            scroll_frame, text="Application Exit:", font=ctk.CTkFont(weight="bold")
-        ).pack(anchor="w", pady=(10, 2), padx=5)
+        ctk.CTkLabel(scroll_frame, text="Application Exit:", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", pady=(10, 2), padx=5
+        )
         ctk.CTkCheckBox(
             scroll_frame,
             text="Quit without confirmation if device is connected",
             variable=self.local_vars["quit_without_prompt_var"],
         ).pack(anchor="w", pady=(5, 10), padx=10)
 
-        ctk.CTkLabel(
-            scroll_frame, text="Download Settings:", font=ctk.CTkFont(weight="bold")
-        ).pack(anchor="w", pady=(10, 2), padx=5)
+        ctk.CTkLabel(scroll_frame, text="Download Settings:", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", pady=(10, 2), padx=5
+        )
         self.current_dl_dir_label_settings = ctk.CTkLabel(
             scroll_frame,
             text=self.current_dialog_download_dir[0],
@@ -353,7 +314,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Disable device selection if device is connected
         if self.dock.is_connected():
-            self.device_selector.configure(state="disabled")
+            self.device_selector.set_enabled(False)
 
             # Add informational label
             ctk.CTkLabel(
@@ -364,21 +325,17 @@ class SettingsDialog(ctk.CTkToplevel):
             ).pack(anchor="w", pady=(10, 0), padx=10)
         else:
             # Auto-scan for devices when not connected
-            threading.Thread(
-                target=self._initial_enhanced_scan_thread, daemon=True
-            ).start()
+            threading.Thread(target=self._initial_enhanced_scan_thread, daemon=True).start()
 
         ctk.CTkCheckBox(
             scroll_frame,
             text="Autoconnect on startup",
             variable=self.local_vars["autoconnect_var"],
         ).pack(pady=10, padx=10, anchor="w")
-        ctk.CTkLabel(scroll_frame, text="Target USB Interface Number:").pack(
-            anchor="w", pady=(5, 0), padx=10
+        ctk.CTkLabel(scroll_frame, text="Target USB Interface Number:").pack(anchor="w", pady=(5, 0), padx=10)
+        ctk.CTkEntry(scroll_frame, textvariable=self.local_vars["target_interface_var"], width=60).pack(
+            anchor="w", pady=2, padx=10
         )
-        ctk.CTkEntry(
-            scroll_frame, textvariable=self.local_vars["target_interface_var"], width=60
-        ).pack(anchor="w", pady=2, padx=10)
 
     def _populate_operation_tab(self, tab):
         """Populates the 'Operation' tab with relevant settings widgets."""
@@ -389,25 +346,21 @@ class SettingsDialog(ctk.CTkToplevel):
             text="Timings & Auto-Refresh:",
             font=ctk.CTkFont(weight="bold"),
         ).pack(anchor="w", pady=(5, 2), padx=5)
-        ctk.CTkLabel(
-            scroll_frame, text="Recording Status Check Interval (seconds):"
-        ).pack(anchor="w", pady=(5, 0), padx=10)
+        ctk.CTkLabel(scroll_frame, text="Recording Status Check Interval (seconds):").pack(
+            anchor="w", pady=(5, 0), padx=10
+        )
         ctk.CTkEntry(
             scroll_frame,
             textvariable=self.local_vars["recording_check_interval_var"],
             width=60,
         ).pack(anchor="w", pady=2, padx=10)
-        ctk.CTkLabel(scroll_frame, text="Default Command Timeout (ms):").pack(
-            anchor="w", pady=(5, 0), padx=10
-        )
+        ctk.CTkLabel(scroll_frame, text="Default Command Timeout (ms):").pack(anchor="w", pady=(5, 0), padx=10)
         ctk.CTkEntry(
             scroll_frame,
             textvariable=self.local_vars["default_command_timeout_ms_var"],
             width=100,
         ).pack(anchor="w", pady=2, padx=10)
-        ctk.CTkLabel(scroll_frame, text="File Streaming Timeout (seconds):").pack(
-            anchor="w", pady=(5, 0), padx=10
-        )
+        ctk.CTkLabel(scroll_frame, text="File Streaming Timeout (seconds):").pack(anchor="w", pady=(5, 0), padx=10)
         ctk.CTkEntry(
             scroll_frame,
             textvariable=self.local_vars["file_stream_timeout_s_var"],
@@ -418,9 +371,7 @@ class SettingsDialog(ctk.CTkToplevel):
             text="Automatically refresh file list when connected",
             variable=self.local_vars["auto_refresh_files_var"],
         ).pack(anchor="w", pady=(10, 0), padx=10)
-        ctk.CTkLabel(scroll_frame, text="Auto Refresh Interval (seconds):").pack(
-            anchor="w", pady=(0, 0), padx=10
-        )
+        ctk.CTkLabel(scroll_frame, text="Auto Refresh Interval (seconds):").pack(anchor="w", pady=(0, 0), padx=10)
         ctk.CTkEntry(
             scroll_frame,
             textvariable=self.local_vars["auto_refresh_interval_s_var"],
@@ -474,9 +425,7 @@ class SettingsDialog(ctk.CTkToplevel):
             text="General Logging Settings:",
             font=ctk.CTkFont(weight="bold"),
         ).pack(anchor="w", pady=(5, 2), padx=5)
-        ctk.CTkLabel(scroll_frame, text="Logger Processing Level:").pack(
-            anchor="w", pady=(5, 0), padx=10
-        )
+        ctk.CTkLabel(scroll_frame, text="Logger Processing Level:").pack(anchor="w", pady=(5, 0), padx=10)
         ctk.CTkComboBox(
             scroll_frame,
             variable=self.local_vars["logger_processing_level_var"],
@@ -503,53 +452,35 @@ class SettingsDialog(ctk.CTkToplevel):
             level_name_lower = level_name_upper.lower()
             level_frame = ctk.CTkFrame(scroll_frame)
             level_frame.pack(fill="x", pady=3, padx=5)
-            ctk.CTkLabel(
-                level_frame, text=f"{level_name_upper}:", width=80, anchor="w"
-            ).pack(side="left", padx=(0, 10))
-            ctk.CTkLabel(level_frame, text="Light:", width=40).pack(
-                side="left", padx=(0, 2)
-            )
+            ctk.CTkLabel(level_frame, text=f"{level_name_upper}:", width=80, anchor="w").pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(level_frame, text="Light:", width=40).pack(side="left", padx=(0, 2))
             light_entry = ctk.CTkEntry(
                 level_frame,
                 textvariable=self.local_vars[f"log_color_{level_name_lower}_light_var"],
                 width=90,
             )
             light_entry.pack(side="left", padx=(0, 2))
-            light_color_var_ref = self.local_vars[
-                f"log_color_{level_name_lower}_light_var"
-            ]
-            light_preview_frame = ctk.CTkFrame(
-                level_frame, width=20, height=20, corner_radius=3, border_width=1
-            )
+            light_color_var_ref = self.local_vars[f"log_color_{level_name_lower}_light_var"]
+            light_preview_frame = ctk.CTkFrame(level_frame, width=20, height=20, corner_radius=3, border_width=1)
             light_preview_frame.pack(side="left", padx=(0, 10))
             light_color_var_ref.trace_add(
                 "write",
-                lambda *args, f=light_preview_frame, v=light_color_var_ref: self._update_color_preview_widget(
-                    f, v
-                ),
+                lambda *args, f=light_preview_frame, v=light_color_var_ref: self._update_color_preview_widget(f, v),
             )
             self._update_color_preview_widget(light_preview_frame, light_color_var_ref)
-            ctk.CTkLabel(level_frame, text="Dark:", width=40).pack(
-                side="left", padx=(0, 2)
-            )
+            ctk.CTkLabel(level_frame, text="Dark:", width=40).pack(side="left", padx=(0, 2))
             dark_entry = ctk.CTkEntry(
                 level_frame,
                 textvariable=self.local_vars[f"log_color_{level_name_lower}_dark_var"],
                 width=90,
             )
             dark_entry.pack(side="left", padx=(0, 2))
-            dark_color_var_ref = self.local_vars[
-                f"log_color_{level_name_lower}_dark_var"
-            ]
-            dark_preview_frame = ctk.CTkFrame(
-                level_frame, width=20, height=20, corner_radius=3, border_width=1
-            )
+            dark_color_var_ref = self.local_vars[f"log_color_{level_name_lower}_dark_var"]
+            dark_preview_frame = ctk.CTkFrame(level_frame, width=20, height=20, corner_radius=3, border_width=1)
             dark_preview_frame.pack(side="left", padx=(3, 5))
             dark_color_var_ref.trace_add(
                 "write",
-                lambda *args, f=dark_preview_frame, v=dark_color_var_ref: self._update_color_preview_widget(
-                    f, v
-                ),
+                lambda *args, f=dark_preview_frame, v=dark_color_var_ref: self._update_color_preview_widget(f, v),
             )
             self._update_color_preview_widget(dark_preview_frame, dark_color_var_ref)
 
@@ -566,9 +497,7 @@ class SettingsDialog(ctk.CTkToplevel):
         ).pack(anchor="w", pady=(5, 2), padx=5)
 
         # API Provider Selection
-        ctk.CTkLabel(scroll_frame, text="AI Service Provider:").pack(
-            anchor="w", pady=(5, 0), padx=10
-        )
+        ctk.CTkLabel(scroll_frame, text="AI Service Provider:").pack(anchor="w", pady=(5, 0), padx=10)
         self.provider_combobox = ctk.CTkComboBox(
             scroll_frame,
             variable=self.local_vars["ai_api_provider_var"],
@@ -589,16 +518,12 @@ class SettingsDialog(ctk.CTkToplevel):
         self.provider_combobox.pack(fill="x", pady=2, padx=10)
 
         # API Key Entry
-        ctk.CTkLabel(scroll_frame, text="API Key:").pack(
-            anchor="w", pady=(10, 0), padx=10
-        )
+        ctk.CTkLabel(scroll_frame, text="API Key:").pack(anchor="w", pady=(10, 0), padx=10)
 
         api_key_frame = ctk.CTkFrame(scroll_frame)
         api_key_frame.pack(fill="x", pady=2, padx=10)
 
-        self.api_key_entry = ctk.CTkEntry(
-            api_key_frame, placeholder_text="Enter your API key", show="*", width=300
-        )
+        self.api_key_entry = ctk.CTkEntry(api_key_frame, placeholder_text="Enter your API key", show="*", width=300)
         self.api_key_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
         self.validate_key_button = ctk.CTkButton(
@@ -607,9 +532,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.validate_key_button.pack(side="right")
 
         # Key status indicator
-        self.api_key_status_label = ctk.CTkLabel(
-            scroll_frame, text="Status: Not configured", text_color="orange"
-        )
+        self.api_key_status_label = ctk.CTkLabel(scroll_frame, text="Status: Not configured", text_color="orange")
         self.api_key_status_label.pack(anchor="w", pady=(2, 10), padx=10)
 
         # Model Settings Section
@@ -639,18 +562,16 @@ class SettingsDialog(ctk.CTkToplevel):
         self.model_combobox.pack(fill="x", pady=2, padx=10)
 
         # Temperature Setting
-        ctk.CTkLabel(scroll_frame, text="Temperature (0.0 - 1.0):").pack(
-            anchor="w", pady=(10, 0), padx=10
-        )
+        ctk.CTkLabel(scroll_frame, text="Temperature (0.0 - 2.0):").pack(anchor="w", pady=(10, 0), padx=10)
         temp_frame = ctk.CTkFrame(scroll_frame)
         temp_frame.pack(fill="x", pady=2, padx=10)
 
         self.temperature_slider = ctk.CTkSlider(
             temp_frame,
             from_=0.0,
-            to=1.0,
+            to=2.0,
             variable=self.local_vars["ai_temperature_var"],
-            number_of_steps=100,
+            number_of_steps=200,
         )
         self.temperature_slider.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
@@ -658,14 +579,10 @@ class SettingsDialog(ctk.CTkToplevel):
         self.temperature_label.pack(side="right")
 
         # Update temperature label when slider changes
-        self.local_vars["ai_temperature_var"].trace_add(
-            "write", self._update_temperature_label
-        )
+        self.local_vars["ai_temperature_var"].trace_add("write", self._update_temperature_label)
 
         # Max Tokens Setting
-        ctk.CTkLabel(scroll_frame, text="Max Tokens:").pack(
-            anchor="w", pady=(10, 0), padx=10
-        )
+        ctk.CTkLabel(scroll_frame, text="Max Tokens:").pack(anchor="w", pady=(10, 0), padx=10)
         ctk.CTkEntry(
             scroll_frame,
             textvariable=self.local_vars["ai_max_tokens_var"],
@@ -673,9 +590,7 @@ class SettingsDialog(ctk.CTkToplevel):
         ).pack(fill="x", pady=2, padx=10)
 
         # Language Setting
-        ctk.CTkLabel(scroll_frame, text="Language:").pack(
-            anchor="w", pady=(10, 0), padx=10
-        )
+        ctk.CTkLabel(scroll_frame, text="Language:").pack(anchor="w", pady=(10, 0), padx=10)
         ctk.CTkComboBox(
             scroll_frame,
             variable=self.local_vars["ai_language_var"],
@@ -706,9 +621,7 @@ class SettingsDialog(ctk.CTkToplevel):
         """Create provider-specific configuration widgets"""
         # OpenRouter Configuration
         self.openrouter_frame = ctk.CTkFrame(self.provider_config_frame)
-        ctk.CTkLabel(self.openrouter_frame, text="Base URL:").pack(
-            anchor="w", pady=(5, 2), padx=10
-        )
+        ctk.CTkLabel(self.openrouter_frame, text="Base URL:").pack(anchor="w", pady=(5, 2), padx=10)
         ctk.CTkEntry(
             self.openrouter_frame,
             textvariable=self.local_vars["ai_openrouter_base_url_var"],
@@ -717,9 +630,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Amazon Bedrock Configuration
         self.amazon_frame = ctk.CTkFrame(self.provider_config_frame)
-        ctk.CTkLabel(self.amazon_frame, text="AWS Region:").pack(
-            anchor="w", pady=(5, 2), padx=10
-        )
+        ctk.CTkLabel(self.amazon_frame, text="AWS Region:").pack(anchor="w", pady=(5, 2), padx=10)
         ctk.CTkComboBox(
             self.amazon_frame,
             variable=self.local_vars["ai_amazon_region_var"],
@@ -735,9 +646,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Qwen Configuration
         self.qwen_frame = ctk.CTkFrame(self.provider_config_frame)
-        ctk.CTkLabel(self.qwen_frame, text="API Base URL:").pack(
-            anchor="w", pady=(5, 2), padx=10
-        )
+        ctk.CTkLabel(self.qwen_frame, text="API Base URL:").pack(anchor="w", pady=(5, 2), padx=10)
         ctk.CTkEntry(
             self.qwen_frame,
             textvariable=self.local_vars["ai_qwen_base_url_var"],
@@ -746,9 +655,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # DeepSeek Configuration
         self.deepseek_frame = ctk.CTkFrame(self.provider_config_frame)
-        ctk.CTkLabel(self.deepseek_frame, text="API Base URL:").pack(
-            anchor="w", pady=(5, 2), padx=10
-        )
+        ctk.CTkLabel(self.deepseek_frame, text="API Base URL:").pack(anchor="w", pady=(5, 2), padx=10)
         ctk.CTkEntry(
             self.deepseek_frame,
             textvariable=self.local_vars["ai_deepseek_base_url_var"],
@@ -757,9 +664,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Ollama Configuration
         self.ollama_frame = ctk.CTkFrame(self.provider_config_frame)
-        ctk.CTkLabel(self.ollama_frame, text="🏠 Local Ollama Server:").pack(
-            anchor="w", pady=(5, 2), padx=10
-        )
+        ctk.CTkLabel(self.ollama_frame, text="🏠 Local Ollama Server:").pack(anchor="w", pady=(5, 2), padx=10)
         ctk.CTkEntry(
             self.ollama_frame,
             textvariable=self.local_vars["ai_ollama_base_url_var"],
@@ -776,9 +681,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # LM Studio Configuration
         self.lmstudio_frame = ctk.CTkFrame(self.provider_config_frame)
-        ctk.CTkLabel(self.lmstudio_frame, text="🏠 Local LM Studio Server:").pack(
-            anchor="w", pady=(5, 2), padx=10
-        )
+        ctk.CTkLabel(self.lmstudio_frame, text="🏠 Local LM Studio Server:").pack(anchor="w", pady=(5, 2), padx=10)
         ctk.CTkEntry(
             self.lmstudio_frame,
             textvariable=self.local_vars["ai_lmstudio_base_url_var"],
@@ -832,6 +735,15 @@ class SettingsDialog(ctk.CTkToplevel):
         if frame_name and hasattr(self, frame_name):
             getattr(self, frame_name).pack(fill="x", pady=2, padx=5)
 
+    def _setup_key_bindings(self):
+        """Setup key bindings after widgets are created."""
+        try:
+            if hasattr(self, 'close_button') and self.close_button.winfo_exists():
+                self.bind("<Return>", lambda event: self.close_button.invoke())
+                self.bind("<Escape>", lambda event: self.close_button.invoke())
+        except Exception as e:
+            logger.debug("SettingsDialog", "_setup_key_bindings", f"Key binding setup: {e}")
+    
     def _finalize_initialization_and_button_states(self):
         """
         Finalizes the dialog initialization and sets the initial button states.
@@ -849,20 +761,6 @@ class SettingsDialog(ctk.CTkToplevel):
                 "_core_final_setup",
                 "Initialization complete. Change tracking active.",
             )
-            if self.ok_button.winfo_exists():
-                if self.ok_button.winfo_ismapped():
-                    self.ok_button.pack_forget()
-                self.ok_button.configure(state="disabled")
-            if self.apply_button.winfo_exists():
-                if self.apply_button.winfo_ismapped():
-                    self.apply_button.pack_forget()
-                self.apply_button.configure(state="disabled")
-            if self.cancel_close_button.winfo_exists():
-                self.cancel_close_button.configure(
-                    text="Close", fg_color=self.color_close_grey, state="normal"
-                )
-                if not self.cancel_close_button.winfo_ismapped():
-                    self.cancel_close_button.pack(side="left", padx=(0, 0))
 
         if self.winfo_exists():
             self.after(50, _core_final_setup)
@@ -888,21 +786,14 @@ class SettingsDialog(ctk.CTkToplevel):
                 self.ok_button.pack_forget()
             if self.apply_button.winfo_exists() and self.apply_button.winfo_ismapped():
                 self.apply_button.pack_forget()
-            if (
-                self.cancel_close_button.winfo_exists()
-                and self.cancel_close_button.winfo_ismapped()
-            ):
+            if self.cancel_close_button.winfo_exists() and self.cancel_close_button.winfo_ismapped():
                 self.cancel_close_button.pack_forget()
             self.ok_button.pack(side="left", padx=(0, 5))
             self.apply_button.pack(side="left", padx=5)
             self.cancel_close_button.pack(side="left", padx=(5, 0))
-            self.ok_button.configure(
-                state="normal", fg_color=self.color_ok_blue
-            )  # Ensure OK button color is set
+            self.ok_button.configure(state="normal", fg_color=self.color_ok_blue)  # Ensure OK button color is set
             self.apply_button.configure(state="normal")
-            self.cancel_close_button.configure(
-                text="Cancel", fg_color=self.color_cancel_red
-            )
+            self.cancel_close_button.configure(text="Cancel", fg_color=self.color_cancel_red)
         elif self.apply_button.winfo_exists() and self.apply_button.winfo_ismapped():
             self.apply_button.configure(state="normal")
 
@@ -915,51 +806,32 @@ class SettingsDialog(ctk.CTkToplevel):
         )
         if selected_dir and selected_dir != self.current_dialog_download_dir[0]:
             self.current_dialog_download_dir[0] = selected_dir
-            if (
-                hasattr(self, "current_dl_dir_label_settings")
-                and self.current_dl_dir_label_settings.winfo_exists()
-            ):
-                self.current_dl_dir_label_settings.configure(
-                    text=self.current_dialog_download_dir[0]
-                )
-            self._update_button_states_on_change()  # Manually trigger change detection
+            if hasattr(self, "current_dl_dir_label_settings") and self.current_dl_dir_label_settings.winfo_exists():
+                self.current_dl_dir_label_settings.configure(text=self.current_dialog_download_dir[0])
+            self._auto_save_settings()  # Auto-save immediately
 
     def _reset_download_dir_action(self):
         """Resets the download directory to the application's current working directory."""
         default_dir = os.getcwd()
         if default_dir != self.current_dialog_download_dir[0]:
             self.current_dialog_download_dir[0] = default_dir
-            if (
-                hasattr(self, "current_dl_dir_label_settings")
-                and self.current_dl_dir_label_settings.winfo_exists()
-            ):
-                self.current_dl_dir_label_settings.configure(
-                    text=self.current_dialog_download_dir[0]
-                )
-            self._update_button_states_on_change()
+            if hasattr(self, "current_dl_dir_label_settings") and self.current_dl_dir_label_settings.winfo_exists():
+                self.current_dl_dir_label_settings.configure(text=self.current_dialog_download_dir[0])
+            self._auto_save_settings()  # Auto-save immediately
 
-    def _on_device_selected_in_settings(
-        self, _choice
-    ):  # CTkComboBox passes choice, mark as unused
+    def _on_device_selected_in_settings(self, _choice):  # CTkComboBox passes choice, mark as unused
         """
         Handles the selection change in the device combobox.
 
         Updates the selected VID/PID variables based on the user's selection.
         """
-        if (
-            not self.settings_device_combobox
-            or not self.settings_device_combobox.winfo_exists()
-        ):
+        if not self.settings_device_combobox or not self.settings_device_combobox.winfo_exists():
             return
         selection = self.settings_device_combobox.get()  # Get current value
         if not selection or selection == "--- Devices with Issues ---":
             return
         selected_device_info = next(
-            (
-                dev
-                for dev in self.parent_gui.available_usb_devices
-                if dev[0] == selection
-            ),
+            (dev for dev in self.parent_gui.available_usb_devices if dev[0] == selection),
             None,
         )
         if selected_device_info:
@@ -994,33 +866,21 @@ class SettingsDialog(ctk.CTkToplevel):
             return
         color_hex = color_string_var.get()
         try:
-            if color_hex.startswith("#") and (
-                len(color_hex) == 7 or len(color_hex) == 9
-            ):
+            if color_hex.startswith("#") and (len(color_hex) == 7 or len(color_hex) == 9):
                 frame_widget.configure(fg_color=color_hex)
             else:
                 frame_widget.configure(
-                    fg_color=self.parent_gui.apply_appearance_mode_theme_color(
-                        ("#e0e0e0", "#404040")
-                    )
+                    fg_color=self.parent_gui.apply_appearance_mode_theme_color(("#e0e0e0", "#404040"))
                 )
         except tkinter.TclError:
-            frame_widget.configure(
-                fg_color=self.parent_gui.apply_appearance_mode_theme_color(
-                    ("#e0e0e0", "#404040")
-                )
-            )
+            frame_widget.configure(fg_color=self.parent_gui.apply_appearance_mode_theme_color(("#e0e0e0", "#404040")))
         except (ValueError, TypeError) as e:  # More specific for color string issues
             logger.error(
                 "SettingsDialog",
                 "_update_color_preview",
                 f"Error for '{color_hex}': {e}",
             )
-            frame_widget.configure(
-                fg_color=self.parent_gui.apply_appearance_mode_theme_color(
-                    ("#e0e0e0", "#404040")
-                )
-            )
+            frame_widget.configure(fg_color=self.parent_gui.apply_appearance_mode_theme_color(("#e0e0e0", "#404040")))
 
     def _load_device_settings_for_dialog_thread(self):
         """
@@ -1041,14 +901,10 @@ class SettingsDialog(ctk.CTkToplevel):
             if settings:
                 self._fetched_device_settings_for_dialog = settings.copy()
                 safe_update(
-                    lambda: self.local_vars["device_setting_auto_record_var"].set(
-                        settings.get("autoRecord", False)
-                    )
+                    lambda: self.local_vars["device_setting_auto_record_var"].set(settings.get("autoRecord", False))
                 )
                 safe_update(
-                    lambda: self.local_vars["device_setting_auto_play_var"].set(
-                        settings.get("autoPlay", False)
-                    )
+                    lambda: self.local_vars["device_setting_auto_play_var"].set(settings.get("autoPlay", False))
                 )
                 safe_update(
                     lambda: self.local_vars["device_setting_bluetooth_tone_var"].set(
@@ -1056,9 +912,9 @@ class SettingsDialog(ctk.CTkToplevel):
                     )
                 )
                 safe_update(
-                    lambda: self.local_vars[
-                        "device_setting_notification_sound_var"
-                    ].set(settings.get("notificationSound", False))
+                    lambda: self.local_vars["device_setting_notification_sound_var"].set(
+                        settings.get("notificationSound", False)
+                    )
                 )
                 for cb in [
                     self.auto_record_checkbox,
@@ -1087,14 +943,10 @@ class SettingsDialog(ctk.CTkToplevel):
                     parent=self,
                 )
         except tkinter.TclError as e_tk:
-            logger.error(
-                "SettingsDialog", "_load_device_settings", f"Tkinter Error: {e_tk}"
-            )
+            logger.error("SettingsDialog", "_load_device_settings", f"Tkinter Error: {e_tk}")
             # May not be able to show messagebox if tkinter itself is the issue here, but try
             if self.winfo_exists():  # pragma: no cover
-                messagebox.showerror(
-                    "GUI Error", f"Error updating settings UI: {e_tk}", parent=self
-                )
+                messagebox.showerror("GUI Error", f"Error updating settings UI: {e_tk}", parent=self)
         except (
             AttributeError,
             KeyError,
@@ -1148,11 +1000,8 @@ class SettingsDialog(ctk.CTkToplevel):
                 self.after(
                     0,
                     lambda: (
-                        self.settings_device_combobox.configure(
-                            values=["Scan failed - click Scan button to retry"]
-                        )
-                        if hasattr(self, "settings_device_combobox")
-                        and self.settings_device_combobox.winfo_exists()
+                        self.settings_device_combobox.configure(values=["Scan failed - click Scan button to retry"])
+                        if hasattr(self, "settings_device_combobox") and self.settings_device_combobox.winfo_exists()
                         else None
                     ),
                 )
@@ -1205,6 +1054,27 @@ class SettingsDialog(ctk.CTkToplevel):
                     )
                     return False
 
+        # Validate AI settings
+        if "ai_temperature_var" in self.local_vars:
+            temp_value = self.local_vars["ai_temperature_var"].get()
+            if not (0.0 <= temp_value <= 2.0):
+                messagebox.showerror(
+                    "Invalid Setting",
+                    f"Temperature must be between 0.0 and 2.0. Got: {temp_value}",
+                    parent=self,
+                )
+                return False
+
+        if "ai_max_tokens_var" in self.local_vars:
+            tokens_value = self.local_vars["ai_max_tokens_var"].get()
+            if not (1 <= tokens_value <= 32000):
+                messagebox.showerror(
+                    "Invalid Setting",
+                    f"Max Tokens must be between 1 and 32000. Got: {tokens_value}",
+                    parent=self,
+                )
+                return False
+
         return True
 
     def _perform_apply_settings_logic(self, update_dialog_baseline=False):
@@ -1244,7 +1114,11 @@ class SettingsDialog(ctk.CTkToplevel):
                 config_key = var_name.replace("_var", "")
 
                 # Special mappings for config keys that don't follow the simple pattern
-                if config_key == "recording_check_interval":
+                if config_key == "logger_processing_level":
+                    config_key = "log_level"
+                elif config_key == "quit_without_prompt":
+                    config_key = "quit_without_prompt_if_connected"
+                elif config_key == "recording_check_interval":
                     config_key = "recording_check_interval_s"
                 elif config_key == "default_command_timeout_ms":
                     config_key = "default_command_timeout_ms"  # Already correct
@@ -1253,13 +1127,9 @@ class SettingsDialog(ctk.CTkToplevel):
                 elif config_key == "auto_refresh_interval_s":
                     config_key = "auto_refresh_interval_s"  # Already correct
 
-                if config_key.startswith("log_color_") and config_key.endswith(
-                    ("_light", "_dark")
-                ):
+                if config_key.startswith("log_color_") and config_key.endswith(("_light", "_dark")):
                     pass  # Log colors handled separately
-                elif config_key.startswith(
-                    "device_setting_"
-                ):  # These are not directly in config
+                elif config_key.startswith("device_setting_"):  # These are not directly in config
                     pass
                 else:
                     self.parent_gui.config[config_key] = value
@@ -1269,10 +1139,13 @@ class SettingsDialog(ctk.CTkToplevel):
             self.parent_gui.config["log_colors"] = {}
         for level_key in Logger.LEVELS:  # Iterate directly over dictionary keys
             level_lower = level_key.lower()
-            self.parent_gui.config["log_colors"][level_key] = [
-                self.local_vars[f"log_color_{level_lower}_light_var"].get(),
-                self.local_vars[f"log_color_{level_lower}_dark_var"].get(),
-            ]
+            light_var_name = f"log_color_{level_lower}_light_var"
+            dark_var_name = f"log_color_{level_lower}_dark_var"
+            if light_var_name in self.local_vars and dark_var_name in self.local_vars:
+                self.parent_gui.config["log_colors"][level_key] = [
+                    self.local_vars[light_var_name].get(),
+                    self.local_vars[dark_var_name].get(),
+                ]
 
         # Handle AI transcription API key encryption and storage
         if hasattr(self, "api_key_entry"):
@@ -1281,24 +1154,38 @@ class SettingsDialog(ctk.CTkToplevel):
 
             if api_key:
                 encrypted_key = self._encrypt_api_key(api_key)
-                self.parent_gui.config[
-                    f"ai_api_key_{provider}_encrypted"
-                ] = encrypted_key
+                self.parent_gui.config[f"ai_api_key_{provider}_encrypted"] = encrypted_key
             else:
                 # Remove key if empty
                 if f"ai_api_key_{provider}_encrypted" in self.parent_gui.config:
                     del self.parent_gui.config[f"ai_api_key_{provider}_encrypted"]
 
+        # Check if download directory actually changed
+        old_download_directory = self.parent_gui.download_directory
         self.parent_gui.download_directory = self.current_dialog_download_dir[0]
-        self.parent_gui.config[
-            "download_directory"
-        ] = self.parent_gui.download_directory
+        self.parent_gui.config["download_directory"] = self.parent_gui.download_directory
+
+        # If download directory changed, refresh file status
+        if old_download_directory != self.parent_gui.download_directory:
+            logger.info(
+                "SettingsDialog",
+                "_perform_apply_settings_logic",
+                f"Download directory changed from '{old_download_directory}' to '{self.parent_gui.download_directory}'",
+            )
+            # Update file operations manager with new download directory
+            if hasattr(self.parent_gui, "file_operations_manager"):
+                from pathlib import Path
+
+                self.parent_gui.file_operations_manager.download_dir = Path(self.parent_gui.download_directory)
+                self.parent_gui.file_operations_manager.download_dir.mkdir(parents=True, exist_ok=True)
+
+            # Refresh file status to reflect availability in new directory
+            if hasattr(self.parent_gui, "refresh_file_status_after_directory_change"):
+                self.parent_gui.refresh_file_status_after_directory_change()
 
         # Trigger updates in parent GUI
         self.parent_gui.apply_theme_and_color()  # Applies appearance dependent styles
-        logger.set_level(
-            self.parent_gui.logger_processing_level_var.get()
-        )  # Update global logger
+        logger.set_level(self.parent_gui.logger_processing_level_var.get())  # Update global logger
         logger.update_config(
             {
                 "suppress_console_output": self.parent_gui.suppress_console_output_var.get(),
@@ -1322,24 +1209,79 @@ class SettingsDialog(ctk.CTkToplevel):
                 local_var_name,
             ) in conceptual_device_setting_keys.items():
                 current_val = self.local_vars[local_var_name].get()
-                fetched_val = self._fetched_device_settings_for_dialog.get(
-                    conceptual_key
-                )
+                fetched_val = self._fetched_device_settings_for_dialog.get(conceptual_key)
                 if (
                     current_val != fetched_val and fetched_val is not None
                 ):  # Only if fetched_val was successfully loaded
                     changed_device_settings[conceptual_key] = current_val
             if changed_device_settings:
-                self.parent_gui.apply_device_settings_from_dialog(
-                    changed_device_settings
-                )  # Call parent's method
+                self.parent_gui.apply_device_settings_from_dialog(changed_device_settings)  # Call parent's method
 
-        save_config(self.parent_gui.config)  # Save the updated main config
+        # Save only the changed settings instead of entire config
+        from config_and_logger import update_config_settings
+        
+        # Build dictionary of only the settings that changed
+        settings_to_save = {}
+        
+        # Add all the settings that were modified
+        for var_name, local_tk_var in self.local_vars.items():
+            if hasattr(self.parent_gui, var_name):
+                config_key = var_name.replace("_var", "")
+                
+                # Special mappings for config keys
+                if config_key == "logger_processing_level":
+                    config_key = "log_level"
+                elif config_key == "quit_without_prompt":
+                    config_key = "quit_without_prompt_if_connected"
+                elif config_key == "recording_check_interval":
+                    config_key = "recording_check_interval_s"
+                
+                # Skip device settings and log colors (handled separately)
+                if not (config_key.startswith("log_color_") or config_key.startswith("device_setting_")):
+                    value = local_tk_var.get()
+                    # Convert string values back to integers for numeric variables
+                    if var_name in [
+                        "selected_vid_var", "selected_pid_var", "target_interface_var",
+                        "recording_check_interval_var", "default_command_timeout_ms_var",
+                        "file_stream_timeout_s_var", "auto_refresh_interval_s_var"
+                    ]:
+                        value = int(value.strip())
+                    settings_to_save[config_key] = value
+        
+        # Add log colors
+        log_colors = {}
+        for level_key in Logger.LEVELS:
+            level_lower = level_key.lower()
+            light_var_name = f"log_color_{level_lower}_light_var"
+            dark_var_name = f"log_color_{level_lower}_dark_var"
+            if light_var_name in self.local_vars and dark_var_name in self.local_vars:
+                log_colors[level_key] = [
+                    self.local_vars[light_var_name].get(),
+                    self.local_vars[dark_var_name].get(),
+                ]
+        if log_colors:
+            settings_to_save["log_colors"] = log_colors
+        
+        # Add download directory if changed
+        if old_download_directory != self.parent_gui.download_directory:
+            settings_to_save["download_directory"] = self.parent_gui.download_directory
+        
+        # Add AI API key if present
+        if hasattr(self, "api_key_entry"):
+            api_key = self.api_key_entry.get().strip()
+            provider = self.local_vars["ai_api_provider_var"].get()
+            if api_key:
+                encrypted_key = self._encrypt_api_key(api_key)
+                settings_to_save[f"ai_api_key_{provider}_encrypted"] = encrypted_key
+            elif f"ai_api_key_{provider}_encrypted" in self.parent_gui.config:
+                # Remove key if empty - need to handle this separately
+                del self.parent_gui.config[f"ai_api_key_{provider}_encrypted"]
+        
+        # Save only the changed settings
+        update_config_settings(settings_to_save)
         logger.info("SettingsDialog", "apply_settings", "Settings applied and saved.")
 
-        if (
-            update_dialog_baseline
-        ):  # If "Apply" was clicked, update the baseline for this dialog
+        if update_dialog_baseline:  # If "Apply" was clicked, update the baseline for this dialog
             self.initial_config_snapshot = self.parent_gui.config.copy()  # Re-snapshot
             self._clone_parent_vars()  # Re-clone vars to update local_vars to current parent state
             self.initial_download_directory = self.parent_gui.download_directory
@@ -1347,18 +1289,18 @@ class SettingsDialog(ctk.CTkToplevel):
             # Re-fetch device settings for baseline if needed,
             # or use current local_vars as new baseline
             if self.dock.is_connected():
-                self._fetched_device_settings_for_dialog[
-                    "autoRecord"
-                ] = self.local_vars["device_setting_auto_record_var"].get()
+                self._fetched_device_settings_for_dialog["autoRecord"] = self.local_vars[
+                    "device_setting_auto_record_var"
+                ].get()
                 self._fetched_device_settings_for_dialog["autoPlay"] = self.local_vars[
                     "device_setting_auto_play_var"
                 ].get()
-                self._fetched_device_settings_for_dialog[
-                    "bluetoothTone"
-                ] = self.local_vars["device_setting_bluetooth_tone_var"].get()
-                self._fetched_device_settings_for_dialog[
-                    "notificationSound"
-                ] = self.local_vars["device_setting_notification_sound_var"].get()
+                self._fetched_device_settings_for_dialog["bluetoothTone"] = self.local_vars[
+                    "device_setting_bluetooth_tone_var"
+                ].get()
+                self._fetched_device_settings_for_dialog["notificationSound"] = self.local_vars[
+                    "device_setting_notification_sound_var"
+                ].get()
 
     def _ok_action(self):
         """
@@ -1385,9 +1327,7 @@ class SettingsDialog(ctk.CTkToplevel):
                         self.apply_button.configure(state="disabled")
                         self.apply_button.pack_forget()
                     if self.cancel_close_button.winfo_exists():
-                        self.cancel_close_button.configure(
-                            text="Close", fg_color=self.color_close_grey
-                        )
+                        self.cancel_close_button.configure(text="Close", fg_color=self.color_close_grey)
                     self.focus_set()
 
             if self.winfo_exists():
@@ -1447,27 +1387,17 @@ class SettingsDialog(ctk.CTkToplevel):
                 "device_setting_notification_sound_var",
             ]
             for ds_var_name in device_setting_vars_to_reset:
-                if (
-                    hasattr(self.parent_gui, ds_var_name)
-                    and ds_var_name in self.local_vars
-                ):
+                if hasattr(self.parent_gui, ds_var_name) and ds_var_name in self.local_vars:
                     parent_var = getattr(self.parent_gui, ds_var_name)
                     if self.local_vars[ds_var_name].get() != parent_var.get():
                         self.local_vars[ds_var_name].set(parent_var.get())
 
             # Reset download directory specifically
             self.current_dialog_download_dir[0] = self.initial_download_directory
-            if (
-                hasattr(self, "current_dl_dir_label_settings")
-                and self.current_dl_dir_label_settings.winfo_exists()
-            ):
-                self.current_dl_dir_label_settings.configure(
-                    text=self.current_dialog_download_dir[0]
-                )
+            if hasattr(self, "current_dl_dir_label_settings") and self.current_dl_dir_label_settings.winfo_exists():
+                self.current_dl_dir_label_settings.configure(text=self.current_dialog_download_dir[0])
 
-            logger.info(
-                "SettingsDialog", "cancel_close_action", "Settings changes cancelled."
-            )
+            logger.info("SettingsDialog", "cancel_close_action", "Settings changes cancelled.")
         self.destroy()
 
     # AI Transcription Helper Methods
@@ -1619,9 +1549,7 @@ class SettingsDialog(ctk.CTkToplevel):
                 return base64.b64encode(encrypted).decode()
             return api_key
         except Exception as e:
-            logger.error(
-                "SettingsDialog", "_encrypt_api_key", f"Error encrypting API key: {e}"
-            )
+            logger.error("SettingsDialog", "_encrypt_api_key", f"Error encrypting API key: {e}")
             return api_key
 
     def _decrypt_api_key(self, encrypted_key):
@@ -1638,18 +1566,14 @@ class SettingsDialog(ctk.CTkToplevel):
                 return decrypted.decode()
             return encrypted_key
         except Exception as e:
-            logger.error(
-                "SettingsDialog", "_decrypt_api_key", f"Error decrypting API key: {e}"
-            )
+            logger.error("SettingsDialog", "_decrypt_api_key", f"Error decrypting API key: {e}")
             return ""
 
     def _load_api_key_status(self):
         """Load and display current API key status."""
         try:
             provider = self.local_vars["ai_api_provider_var"].get()
-            encrypted_key = self.parent_gui.config.get(
-                f"ai_api_key_{provider}_encrypted", ""
-            )
+            encrypted_key = self.parent_gui.config.get(f"ai_api_key_{provider}_encrypted", "")
 
             if hasattr(self, "api_key_entry") and hasattr(self, "api_key_status_label"):
                 if encrypted_key:
@@ -1668,9 +1592,7 @@ class SettingsDialog(ctk.CTkToplevel):
                         )
                 else:
                     self.api_key_entry.delete(0, "end")
-                    self.api_key_status_label.configure(
-                        text="Status: Not configured", text_color="orange"
-                    )
+                    self.api_key_status_label.configure(text="Status: Not configured", text_color="orange")
         except Exception as e:
             logger.error(
                 "SettingsDialog",
@@ -1680,28 +1602,20 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _validate_api_key(self):
         """Validate the entered API key by making a test API call."""
-        if not hasattr(self, "api_key_entry") or not hasattr(
-            self, "api_key_status_label"
-        ):
+        if not hasattr(self, "api_key_entry") or not hasattr(self, "api_key_status_label"):
             return
 
         api_key = self.api_key_entry.get().strip()
         if not api_key:
-            self.api_key_status_label.configure(
-                text="Status: Please enter an API key", text_color="red"
-            )
+            self.api_key_status_label.configure(text="Status: Please enter an API key", text_color="red")
             return
 
         provider = self.local_vars["ai_api_provider_var"].get()
-        self.api_key_status_label.configure(
-            text="Status: Validating...", text_color="blue"
-        )
+        self.api_key_status_label.configure(text="Status: Validating...", text_color="blue")
         self.validate_key_button.configure(state="disabled")
 
         # Run validation in background thread
-        threading.Thread(
-            target=self._validate_api_key_thread, args=(api_key, provider), daemon=True
-        ).start()
+        threading.Thread(target=self._validate_api_key_thread, args=(api_key, provider), daemon=True).start()
 
     def _validate_api_key_thread(self, api_key, provider):
         """Background thread for API key validation."""
@@ -1725,17 +1639,11 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _validation_complete(self, success):
         """Called when API key validation completes."""
-        if hasattr(self, "api_key_status_label") and hasattr(
-            self, "validate_key_button"
-        ):
+        if hasattr(self, "api_key_status_label") and hasattr(self, "validate_key_button"):
             if success:
-                self.api_key_status_label.configure(
-                    text="Status: Valid API key", text_color="green"
-                )
+                self.api_key_status_label.configure(text="Status: Valid API key", text_color="green")
             else:
-                self.api_key_status_label.configure(
-                    text="Status: Invalid API key", text_color="red"
-                )
+                self.api_key_status_label.configure(text="Status: Invalid API key", text_color="red")
             self.validate_key_button.configure(state="normal")
 
     # Enhanced Device Selector Methods
@@ -1753,9 +1661,8 @@ class SettingsDialog(ctk.CTkToplevel):
             self.local_vars["selected_vid_var"].set(str(device_info.vendor_id))
             self.local_vars["selected_pid_var"].set(str(device_info.product_id))
 
-            # Mark settings as changed
-            self.settings_changed_tracker[0] = True
-            self._update_button_states_on_change()
+            # Auto-save device selection immediately
+            self._auto_save_settings()
 
         except Exception as e:
             logger.error(
@@ -1777,13 +1684,14 @@ class SettingsDialog(ctk.CTkToplevel):
             # If there's a HiDock device and no device is currently selected, auto-select it
             if hidock_count > 0 and not any(d.status == "connected" for d in devices):
                 hidock_device = next(d for d in devices if d.is_hidock)
-                self.device_selector._select_device(hidock_device)
+                if hasattr(self, "device_selector") and hasattr(self.device_selector, "_select_device"):
+                    self.device_selector._select_device(hidock_device)
 
         except Exception as e:
-            logger.error(
+            logger.debug(
                 "SettingsDialog",
                 "_on_device_scan_complete",
-                f"Error handling scan completion: {e}",
+                f"Device scan completion handled gracefully: {e}",
             )
 
     def _initial_enhanced_scan_thread(self):
@@ -1803,3 +1711,141 @@ class SettingsDialog(ctk.CTkToplevel):
                 "_initial_enhanced_scan_thread",
                 f"Error in initial scan: {e}",
             )
+    
+    def _on_appearance_change(self, value):
+        """Handle appearance mode change with immediate save and apply."""
+        from config_and_logger import update_config_settings
+        update_config_settings({"appearance_mode": value})
+        self.parent_gui.appearance_mode_var.set(value)
+        self.parent_gui.apply_theme_and_color()
+    
+    def _on_theme_change(self, value):
+        """Handle color theme change with immediate save and apply."""
+        from config_and_logger import update_config_settings
+        update_config_settings({"color_theme": value})
+        self.parent_gui.color_theme_var.set(value)
+        self.parent_gui.apply_theme_and_color()
+    
+    def _reset_to_defaults(self):
+        """Reset all settings to default values."""
+        if not messagebox.askyesno(
+            "Reset to Defaults",
+            "This will reset ALL settings to their default values.\n\nThis action cannot be undone. Continue?",
+            parent=self
+        ):
+            return
+        
+        try:
+            from config_and_logger import DEFAULT_CONFIG, update_config_settings
+            
+            # Save default config (this wipes existing config)
+            update_config_settings(DEFAULT_CONFIG.copy())
+            
+            # Update parent GUI with defaults
+            self.parent_gui.config = DEFAULT_CONFIG.copy()
+            
+            # Reload parent GUI variables from defaults
+            self.parent_gui._initialize_vars_from_config()
+            
+            # Apply theme changes
+            self.parent_gui.apply_theme_and_color()
+            
+            messagebox.showinfo(
+                "Reset Complete",
+                "All settings have been reset to defaults.\n\nPlease restart the application for all changes to take effect.",
+                parent=self
+            )
+            
+            # Close settings dialog
+            self.destroy()
+            
+        except Exception as e:
+            logger.error("SettingsDialog", "_reset_to_defaults", f"Error resetting to defaults: {e}")
+            messagebox.showerror(
+                "Reset Failed",
+                f"Failed to reset settings: {e}",
+                parent=self
+            )
+    
+    def _on_setting_change(self, var_name=None, index=None, mode=None):
+        """Handle any setting change with immediate save."""
+        if self._settings_dialog_initializing:
+            return
+        
+        # Auto-save the changed setting immediately
+        self._auto_save_settings()
+    
+    def _auto_save_settings(self):
+        """Auto-save all current settings immediately."""
+        try:
+            from config_and_logger import update_config_settings
+            
+            settings_to_save = {}
+            
+            # Check if local_vars exists and is populated
+            if not hasattr(self, 'local_vars') or not self.local_vars:
+                logger.debug("SettingsDialog", "_auto_save_settings", "No local vars to save")
+                return
+            
+            # Save all current settings
+            for var_name, local_tk_var in self.local_vars.items():
+                if hasattr(self.parent_gui, var_name):
+                    parent_var = getattr(self.parent_gui, var_name)
+                    
+                    value = local_tk_var.get()
+                    # Convert string values back to integers for numeric variables
+                    if var_name in [
+                        "selected_vid_var", "selected_pid_var", "target_interface_var",
+                        "recording_check_interval_var", "default_command_timeout_ms_var",
+                        "file_stream_timeout_s_var", "auto_refresh_interval_s_var"
+                    ]:
+                        try:
+                            value = int(str(value).strip())
+                        except (ValueError, AttributeError):
+                            continue  # Skip invalid values
+                    
+                    # Update parent variable
+                    parent_var.set(value)
+                    
+                    # Map to config key
+                    config_key = var_name.replace("_var", "")
+                    if config_key == "logger_processing_level":
+                        config_key = "log_level"
+                    elif config_key == "quit_without_prompt":
+                        config_key = "quit_without_prompt_if_connected"
+                    elif config_key == "recording_check_interval":
+                        config_key = "recording_check_interval_s"
+                    
+                    # Skip device settings and log colors (handled separately)
+                    if not (config_key.startswith("log_color_") or config_key.startswith("device_setting_")):
+                        settings_to_save[config_key] = value
+            
+            # Handle log colors
+            log_colors = {}
+            for level_key in Logger.LEVELS:
+                level_lower = level_key.lower()
+                light_var_name = f"log_color_{level_lower}_light_var"
+                dark_var_name = f"log_color_{level_lower}_dark_var"
+                if light_var_name in self.local_vars and dark_var_name in self.local_vars:
+                    log_colors[level_key] = [
+                        self.local_vars[light_var_name].get(),
+                        self.local_vars[dark_var_name].get(),
+                    ]
+            if log_colors:
+                settings_to_save["log_colors"] = log_colors
+            
+            # Handle download directory
+            if self.current_dialog_download_dir[0] != self.parent_gui.download_directory:
+                self.parent_gui.download_directory = self.current_dialog_download_dir[0]
+                settings_to_save["download_directory"] = self.current_dialog_download_dir[0]
+            
+            # Save settings
+            if settings_to_save:
+                update_config_settings(settings_to_save)
+                
+                # Apply changes to parent GUI
+                self.parent_gui.apply_theme_and_color()
+                logger.set_level(self.parent_gui.logger_processing_level_var.get())
+                
+        except Exception as e:
+            logger.error("SettingsDialog", "_auto_save_settings", f"Error auto-saving settings: {e}")

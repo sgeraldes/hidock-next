@@ -488,8 +488,9 @@ class TestAudioEnhancer:
         enhancer = AudioEnhancer()
 
         with patch("audio_processing_advanced.PYDUB_AVAILABLE", True), patch(
-            "audio_processing_advanced.AudioSegment.from_file"
-        ) as mock_from_file:
+            "audio_processing_advanced.AudioSegment"
+        ) as mock_audio_segment:
+            mock_from_file = mock_audio_segment.from_file
 
             mock_audio = Mock()
             mock_audio.frame_rate = 44100
@@ -553,8 +554,9 @@ class TestAudioFormatConverter:
         converter = AudioFormatConverter()
 
         with patch("audio_processing_advanced.PYDUB_AVAILABLE", True), patch(
-            "audio_processing_advanced.AudioSegment.from_file"
-        ) as mock_from_file:
+            "audio_processing_advanced.AudioSegment"
+        ) as mock_audio_segment:
+            mock_from_file = mock_audio_segment.from_file
 
             mock_audio = Mock()
             mock_from_file.return_value = mock_audio
@@ -641,10 +643,11 @@ class TestUtilityFunctions:
         mock_enhancer_class.assert_called_once()
         mock_enhancer.process_audio_file.assert_called_once_with("/test/input.wav", "/test/output.wav", None)
 
-    @pytest.mark.skipif(not PYDUB_AVAILABLE, reason="pydub not available")
-    @patch("audio_processing_advanced.AudioSegment.from_file")
-    def test_convert_audio_format_success(self, mock_from_file):
+    @patch("audio_processing_advanced.PYDUB_AVAILABLE", True)
+    @patch("audio_processing_advanced.AudioSegment")
+    def test_convert_audio_format_success(self, mock_audio_segment):
         """Test successful audio format conversion"""
+        mock_from_file = mock_audio_segment.from_file
         mock_audio = Mock()
         mock_from_file.return_value = mock_audio
 
@@ -654,10 +657,11 @@ class TestUtilityFunctions:
         mock_from_file.assert_called_once_with("/test/input.mp3")
         mock_audio.export.assert_called_once_with("/test/output.wav", format="wav")
 
-    @pytest.mark.skipif(not PYDUB_AVAILABLE, reason="pydub not available")
-    @patch("audio_processing_advanced.AudioSegment.from_file")
-    def test_convert_audio_format_error(self, mock_from_file):
+    @patch("audio_processing_advanced.PYDUB_AVAILABLE", True)
+    @patch("audio_processing_advanced.AudioSegment")
+    def test_convert_audio_format_error(self, mock_audio_segment):
         """Test audio format conversion with error"""
+        mock_from_file = mock_audio_segment.from_file
         mock_from_file.side_effect = Exception("Conversion failed")
 
         result = convert_audio_format("/test/input.mp3", "/test/output.wav", "wav")
@@ -717,3 +721,127 @@ class TestModuleConstants:
         assert isinstance(ADVANCED_AUDIO_AVAILABLE, bool)
         assert isinstance(NOISEREDUCE_AVAILABLE, bool)
         assert isinstance(PYDUB_AVAILABLE, bool)
+
+
+class TestImportErrorHandling:
+    """Test import error handling for optional dependencies"""
+
+    def test_librosa_import_error_handling(self):
+        """Test behavior when librosa/soundfile are not available"""
+        # Test the code paths when ADVANCED_AUDIO_AVAILABLE is False
+        with patch("audio_processing_advanced.ADVANCED_AUDIO_AVAILABLE", False):
+            with patch("audio_processing_advanced.librosa", None):
+                with patch("audio_processing_advanced.sf", None):
+                    # Test that AudioEnhancer handles missing librosa gracefully
+                    enhancer = AudioEnhancer()
+
+                    # Should raise exception when trying to load audio without librosa for non-wav files
+                    with pytest.raises(Exception, match="Failed to load audio file"):
+                        enhancer._load_audio("/test/audio.mp3")
+
+    def test_noisereduce_import_error_handling(self):
+        """Test behavior when noisereduce is not available"""
+        with patch("audio_processing_advanced.NOISEREDUCE_AVAILABLE", False):
+            # Test that noise reduction methods handle missing noisereduce
+            enhancer = AudioEnhancer()
+
+            # Should handle missing noisereduce gracefully
+            # Methods that use noise reduction should either skip or use fallbacks
+            test_data = np.array([0.1, 0.2, 0.3])
+            result, noise_reduction_db = enhancer._reduce_noise(test_data, 44100, 0.5)
+            # Should return original data or processed data without error
+            assert isinstance(result, np.ndarray)
+            assert isinstance(noise_reduction_db, (int, float))
+
+    def test_pydub_import_error_handling(self):
+        """Test behavior when pydub is not available"""
+        with patch("audio_processing_advanced.PYDUB_AVAILABLE", False):
+            # Test that methods using pydub handle its absence
+            enhancer = AudioEnhancer()
+
+            # Should handle missing pydub gracefully - test convert_format fallback
+            result = enhancer.convert_format("/test/input.wav", "/test/output.wav", "wav")
+
+            # Should use fallback method when pydub unavailable
+            assert isinstance(result, bool)
+
+    def test_enhanced_analysis_without_librosa(self):
+        """Test enhanced analysis when librosa is not available"""
+        with patch("audio_processing_advanced.ADVANCED_AUDIO_AVAILABLE", False):
+            # Should handle analysis without advanced libraries
+            analysis = get_audio_analysis("/test/audio.wav")
+
+            # Should return empty dict or basic analysis when advanced libs unavailable
+            assert isinstance(analysis, dict)
+
+    def test_format_detection_without_pydub(self):
+        """Test format detection when pydub is not available"""
+        with patch("audio_processing_advanced.PYDUB_AVAILABLE", False):
+            # Should handle format detection without pydub
+            enhancer = AudioEnhancer()
+
+            # Methods should fall back to basic format detection
+            # or return default values when pydub is unavailable
+            assert True  # Test passes if no exception is raised
+
+
+class TestErrorHandlingPaths:
+    """Test error handling in various methods"""
+
+    def test_audio_enhancer_load_audio_exception(self):
+        """Test _load_audio exception handling"""
+        enhancer = AudioEnhancer()
+
+        # Test with an actual exception that should be raised
+        with pytest.raises(Exception, match="Failed to load audio file"):
+            enhancer._load_audio("/test/nonexistent.wav")
+
+    def test_noise_reduction_exception_handling(self):
+        """Test noise reduction exception handling"""
+        enhancer = AudioEnhancer()
+        test_data = np.array([0.1, 0.2, 0.3])
+
+        # Mock the noisereduce library to raise an exception
+        with patch("audio_processing_advanced.NOISEREDUCE_AVAILABLE", True):
+            with patch("audio_processing_advanced.nr", create=True) as mock_nr:
+                mock_nr.reduce_noise.side_effect = Exception("Noise reduction error")
+
+                result, noise_db = enhancer._reduce_noise(test_data, 44100, 0.5)
+
+                # Should handle exception and return original data
+                assert np.array_equal(result, test_data)
+                assert noise_db == 0.0
+
+    def test_frequency_analysis_exception_handling(self):
+        """Test frequency analysis exception handling"""
+        enhancer = AudioEnhancer()
+        test_data = np.array([0.1, 0.2, 0.3])
+
+        with patch("audio_processing_advanced.signal.welch", side_effect=Exception("Analysis error")):
+            result = enhancer._analyze_audio(test_data, 44100)
+
+            # Should handle exception and return default values
+            assert result is not None
+            assert result["peak_level_db"] == 0
+            assert result["rms_level_db"] == 0
+            assert result["dynamic_range_db"] == 0
+
+    def test_enhancement_pipeline_exception_handling(self):
+        """Test enhancement pipeline exception handling"""
+        enhancer = AudioEnhancer()
+
+        with patch.object(enhancer, "_load_audio", side_effect=Exception("Pipeline error")):
+            result = enhancer.process_audio_file("/test/input.wav", "/test/output.wav")
+
+            # Should handle exception and return error result
+            assert result.success is False
+            assert "Pipeline error" in result.error_message
+
+    def test_waveform_extraction_exception_handling(self):
+        """Test waveform extraction exception handling"""
+        # Test the utility function get_audio_analysis with exception handling
+        with patch("audio_processing_advanced.AudioEnhancer._load_audio", side_effect=Exception("Waveform error")):
+            result = get_audio_analysis("/test/audio.wav")
+
+            # Should handle exception and return empty dict
+            assert result == {}

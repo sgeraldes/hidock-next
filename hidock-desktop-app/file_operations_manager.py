@@ -107,10 +107,7 @@ class FileSearchFilter:
 
     def matches(self, file_metadata: FileMetadata) -> bool:
         """Check if file metadata matches the filter criteria."""
-        if (
-            self.filename_pattern
-            and self.filename_pattern.lower() not in file_metadata.filename.lower()
-        ):
+        if self.filename_pattern and self.filename_pattern.lower() not in file_metadata.filename.lower():
             return False
 
         if self.size_min is not None and file_metadata.size < self.size_min:
@@ -132,8 +129,7 @@ class FileSearchFilter:
             return False
 
         if self.file_types and not any(
-            file_metadata.filename.lower().endswith(f".{ft.lower()}")
-            for ft in self.file_types
+            file_metadata.filename.lower().endswith(f".{ft.lower()}") for ft in self.file_types
         ):
             return False
 
@@ -189,9 +185,7 @@ class FileMetadataCache:
     def get_metadata(self, filename: str) -> Optional[FileMetadata]:
         """Retrieve cached metadata for a file."""
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "SELECT * FROM file_metadata WHERE filename = ?", (filename,)
-            )
+            cursor = conn.execute("SELECT * FROM file_metadata WHERE filename = ?", (filename,))
             row = cursor.fetchone()
 
             if row:
@@ -232,11 +226,7 @@ class FileMetadataCache:
                     metadata.checksum,
                     metadata.file_type,
                     metadata.transcription_status,
-                    (
-                        metadata.last_accessed.isoformat()
-                        if metadata.last_accessed
-                        else None
-                    ),
+                    (metadata.last_accessed.isoformat() if metadata.last_accessed else None),
                     metadata.download_count,
                     json.dumps(metadata.tags),
                     datetime.now().isoformat(),
@@ -267,9 +257,7 @@ class FileMetadataCache:
                         checksum=row[6],
                         file_type=row[7],
                         transcription_status=row[8],
-                        last_accessed=(
-                            datetime.fromisoformat(row[9]) if row[9] else None
-                        ),
+                        last_accessed=(datetime.fromisoformat(row[9]) if row[9] else None),
                         download_count=row[10],
                         tags=json.loads(row[11]) if row[11] else [],
                     )
@@ -296,9 +284,7 @@ class FileOperationsManager:
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize metadata cache
-        cache_dir = cache_dir or os.path.join(
-            os.path.expanduser("~"), ".hidock", "cache"
-        )
+        cache_dir = cache_dir or os.path.join(os.path.expanduser("~"), ".hidock", "cache")
         self.metadata_cache = FileMetadataCache(cache_dir)
 
         # Operation tracking
@@ -332,9 +318,7 @@ class FileOperationsManager:
     def _start_worker_threads(self):
         """Start worker threads for processing file operations."""
         for i in range(self.max_concurrent_operations):
-            thread = threading.Thread(
-                target=self._worker_thread, name=f"FileOpsWorker-{i}", daemon=True
-            )
+            thread = threading.Thread(target=self._worker_thread, name=f"FileOpsWorker-{i}", daemon=True)
             thread.start()
             self.worker_threads.append(thread)
 
@@ -362,9 +346,7 @@ class FileOperationsManager:
             except queue.Empty:
                 continue
             except RuntimeError as e:
-                logger.error(
-                    "FileOpsManager", "_worker_thread", f"Worker thread error: {e}"
-                )
+                logger.error("FileOpsManager", "_worker_thread", f"Worker thread error: {e}")
 
     def _execute_operation(self, operation: FileOperation):
         """Execute a single file operation."""
@@ -544,9 +526,7 @@ class FileOperationsManager:
             self.metadata_cache.remove_metadata(filename)
             self.operation_stats["total_deletions"] += 1
 
-            logger.info(
-                "FileOpsManager", "_execute_delete", f"Successfully deleted {filename}"
-            )
+            logger.info("FileOpsManager", "_execute_delete", f"Successfully deleted {filename}")
 
         except Exception as e:
             # Log the detailed error and re-raise an IOError to fit the existing
@@ -707,8 +687,7 @@ class FileOperationsManager:
             if (
                 operation.filename == filename
                 and operation.operation_type == FileOperationType.DOWNLOAD
-                and operation.status
-                in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
+                and operation.status in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
             ):
                 logger.warning(
                     "FileOpsManager",
@@ -739,9 +718,7 @@ class FileOperationsManager:
             self.progress_callbacks[operation_id] = progress_callback
 
         self.operation_queue.put(operation)
-        logger.info(
-            "FileOpsManager", "queue_download", f"Queued download for {filename}"
-        )
+        logger.info("FileOpsManager", "queue_download", f"Queued download for {filename}")
         return operation_id
 
     def queue_delete(self, filename: str, progress_callback: Callable = None) -> str:
@@ -762,9 +739,7 @@ class FileOperationsManager:
         logger.info("FileOpsManager", "queue_delete", f"Queued deletion for {filename}")
         return operation_id
 
-    def queue_batch_download(
-        self, filenames: List[str], progress_callback: Callable = None
-    ) -> List[str]:
+    def queue_batch_download(self, filenames: List[str], progress_callback: Callable = None) -> List[str]:
         """Queue multiple files for download."""
         operation_ids = []
         for filename in filenames:
@@ -778,9 +753,7 @@ class FileOperationsManager:
         )
         return operation_ids
 
-    def queue_batch_delete(
-        self, filenames: List[str], progress_callback: Callable = None
-    ) -> List[str]:
+    def queue_batch_delete(self, filenames: List[str], progress_callback: Callable = None) -> List[str]:
         """Queue multiple files for deletion."""
         operation_ids = []
         for filename in filenames:
@@ -830,9 +803,7 @@ class FileOperationsManager:
         """Cancel all active operations."""
         for operation_id in list(self.active_operations.keys()):
             self.cancel_operation(operation_id)
-        logger.info(
-            "FileOpsManager", "cancel_all_operations", "Cancelled all operations"
-        )
+        logger.info("FileOpsManager", "cancel_all_operations", "Cancelled all operations")
 
     def get_operation_status(self, operation_id: str) -> Optional[FileOperation]:
         """Get the status of a specific operation."""
@@ -842,9 +813,7 @@ class FileOperationsManager:
         """Get all currently active operations."""
         return list(self.active_operations.values())
 
-    def is_file_operation_active(
-        self, filename: str, operation_type: FileOperationType = None
-    ) -> bool:
+    def is_file_operation_active(self, filename: str, operation_type: FileOperationType = None) -> bool:
         """Check if a file has an active operation (queued or in progress)."""
         for operation in self.active_operations.values():
             if operation.filename == filename and operation.status in [
@@ -858,13 +827,9 @@ class FileOperationsManager:
     def search_files(self, search_filter: FileSearchFilter) -> List[FileMetadata]:
         """Search files using advanced filtering."""
         all_metadata = self.metadata_cache.get_all_metadata()
-        return [
-            metadata for metadata in all_metadata if search_filter.matches(metadata)
-        ]
+        return [metadata for metadata in all_metadata if search_filter.matches(metadata)]
 
-    def sort_files(
-        self, files: List[FileMetadata], sort_by: str, reverse: bool = False
-    ) -> List[FileMetadata]:
+    def sort_files(self, files: List[FileMetadata], sort_by: str, reverse: bool = False) -> List[FileMetadata]:
         """Sort files by specified criteria."""
         sort_key_map = {
             "name": lambda f: f.filename.lower(),
@@ -887,16 +852,10 @@ class FileOperationsManager:
         stats.update(
             {
                 "total_files_cached": len(all_metadata),
-                "total_downloaded_files": len(
-                    [m for m in all_metadata if m.local_path]
-                ),
+                "total_downloaded_files": len([m for m in all_metadata if m.local_path]),
                 "active_operations": len(self.active_operations),
                 "completed_operations": len(self.operation_history),
-                "average_file_size": (
-                    sum(m.size for m in all_metadata) / len(all_metadata)
-                    if all_metadata
-                    else 0
-                ),
+                "average_file_size": (sum(m.size for m in all_metadata) / len(all_metadata) if all_metadata else 0),
                 "total_storage_used": sum(m.size for m in all_metadata),
                 "cache_hit_rate": self._calculate_cache_hit_rate(),
             }
@@ -929,9 +888,7 @@ class FileOperationsManager:
 
     def shutdown(self):
         """Shutdown the file operations manager."""
-        logger.info(
-            "FileOpsManager", "shutdown", "Shutting down file operations manager"
-        )
+        logger.info("FileOpsManager", "shutdown", "Shutting down file operations manager")
 
         # Cancel all operations
         self.cancel_all_operations()
@@ -947,6 +904,4 @@ class FileOperationsManager:
         for thread in self.worker_threads:
             thread.join(timeout=5.0)
 
-        logger.info(
-            "FileOpsManager", "shutdown", "File operations manager shutdown complete"
-        )
+        logger.info("FileOpsManager", "shutdown", "File operations manager shutdown complete")

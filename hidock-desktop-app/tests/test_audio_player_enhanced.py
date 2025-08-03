@@ -134,8 +134,9 @@ class TestAudioProcessor:
         mock_splitext.return_value = ("/test/file", ".wav")
 
         with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment.from_file"
-        ) as mock_from_file:
+            "audio_player_enhanced.AudioSegment"
+        ) as mock_audio_segment:
+            mock_from_file = mock_audio_segment.from_file
 
             mock_audio = Mock()
             mock_audio.frame_rate = 44100
@@ -161,8 +162,10 @@ class TestAudioProcessor:
         mock_splitext.return_value = ("/test/file", ".wav")
 
         with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment.from_file", side_effect=Exception("Pydub failed")
-        ), patch("audio_player_enhanced.wave.open") as mock_wave_open:
+            "audio_player_enhanced.AudioSegment"
+        ) as mock_audio_segment, patch("audio_player_enhanced.wave.open") as mock_wave_open:
+            
+            mock_audio_segment.from_file.side_effect = Exception("Pydub failed")
 
             mock_wav_file = Mock()
             mock_wav_file.getnframes.return_value = 88200  # 2 seconds at 44.1kHz
@@ -187,8 +190,9 @@ class TestAudioProcessor:
     def test_convert_audio_format_success(self):
         """Test successful audio format conversion"""
         with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment.from_file"
-        ) as mock_from_file:
+            "audio_player_enhanced.AudioSegment"
+        ) as mock_audio_segment:
+            mock_from_file = mock_audio_segment.from_file
 
             mock_audio = Mock()
             mock_from_file.return_value = mock_audio
@@ -202,8 +206,9 @@ class TestAudioProcessor:
     def test_convert_audio_format_error(self):
         """Test audio format conversion with error"""
         with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment.from_file", side_effect=Exception("Conversion failed")
-        ):
+            "audio_player_enhanced.AudioSegment"
+        ) as mock_audio_segment:
+            mock_audio_segment.from_file.side_effect = Exception("Conversion failed")
 
             result = AudioProcessor.convert_audio_format("/input.wav", "/output.mp3", "mp3")
 
@@ -219,8 +224,9 @@ class TestAudioProcessor:
     def test_normalize_audio_success(self):
         """Test successful audio normalization"""
         with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment.from_file"
-        ) as mock_from_file:
+            "audio_player_enhanced.AudioSegment"
+        ) as mock_audio_segment:
+            mock_from_file = mock_audio_segment.from_file
 
             mock_audio = Mock()
             mock_normalized = Mock()
@@ -240,8 +246,9 @@ class TestAudioProcessor:
     def test_normalize_audio_error(self):
         """Test audio normalization with error"""
         with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment.from_file", side_effect=Exception("Normalization failed")
-        ):
+            "audio_player_enhanced.AudioSegment"
+        ) as mock_audio_segment:
+            mock_audio_segment.from_file.side_effect = Exception("Normalization failed")
 
             result = AudioProcessor.normalize_audio("/input.wav", "/output.wav", -20.0)
 
@@ -282,8 +289,9 @@ class TestAudioProcessor:
     def test_extract_waveform_data_with_pydub(self):
         """Test extract_waveform_data with pydub for non-WAV files"""
         with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment.from_file"
-        ) as mock_from_file:
+            "audio_player_enhanced.AudioSegment"
+        ) as mock_audio_segment:
+            mock_from_file = mock_audio_segment.from_file
 
             mock_audio = Mock()
             mock_audio.channels = 1
@@ -314,6 +322,29 @@ class TestAudioProcessor:
 
         assert len(waveform) == 0
         assert sample_rate == 0
+
+    def test_extract_waveform_data_wave_module_fallback(self):
+        """Test extract_waveform_data using wave module when scipy fails with numba circular import"""
+        # Simulate numba circular import error from scipy
+        numba_error = Exception("cannot import name 'ComplexModel' from partially initialized module 'numba.core.datamodel.models'")
+        
+        with patch("audio_player_enhanced.wave.open") as mock_wave_open:
+            mock_wav_file = Mock()
+            mock_wav_file.readframes.return_value = b'\x00\x10\x00\x20\x00\x30\x00\x40'  # 4 int16 samples
+            mock_wav_file.getframerate.return_value = 44100
+            mock_wav_file.getnchannels.return_value = 1
+            mock_wav_file.getsampwidth.return_value = 2
+            mock_wave_open.return_value.__enter__.return_value = mock_wav_file
+            
+            # Make scipy.io.wavfile.read fail with numba error, forcing wave module fallback
+            with patch("audio_player_enhanced.wavfile.read", side_effect=numba_error):
+                waveform, sample_rate = AudioProcessor.extract_waveform_data("/test/file.wav", 1000)
+        
+        assert sample_rate == 44100
+        assert len(waveform) == 4
+        # Should be normalized int16 values
+        expected = np.array([0x1000, 0x2000, 0x3000, 0x4000], dtype=np.float32) / 32768.0
+        assert np.allclose(waveform, expected)
 
     def test_extract_waveform_data_downsampling(self):
         """Test extract_waveform_data with downsampling for large files"""
@@ -618,26 +649,24 @@ class TestEnhancedAudioPlayer:
         # Should complete without error even when pygame not available
 
     @patch("audio_player_enhanced.PYGAME_AVAILABLE", True)
-    @patch("audio_player_enhanced.pygame.mixer.get_init")
-    @patch("audio_player_enhanced.pygame.mixer.init")
-    def test_initialize_audio_backend_success(self, mock_init, mock_get_init):
+    @patch("audio_player_enhanced.pygame")
+    def test_initialize_audio_backend_success(self, mock_pygame):
         """Test successful _initialize_audio_backend"""
-        mock_get_init.return_value = None  # Not initialized
+        mock_pygame.mixer.get_init.return_value = None  # Not initialized
 
         player = EnhancedAudioPlayer()
 
-        mock_init.assert_called_once_with(frequency=44100, size=-16, channels=2, buffer=1024)
+        mock_pygame.mixer.init.assert_called_once_with(frequency=44100, size=-16, channels=2, buffer=1024)
 
     @patch("audio_player_enhanced.PYGAME_AVAILABLE", True)
-    @patch("audio_player_enhanced.pygame.mixer.get_init")
-    def test_initialize_audio_backend_already_initialized(self, mock_get_init):
+    @patch("audio_player_enhanced.pygame")
+    def test_initialize_audio_backend_already_initialized(self, mock_pygame):
         """Test _initialize_audio_backend when already initialized"""
-        mock_get_init.return_value = (44100, -16, 2)  # Already initialized
+        mock_pygame.mixer.get_init.return_value = (44100, -16, 2)  # Already initialized
 
-        with patch("audio_player_enhanced.pygame.mixer.init") as mock_init:
-            player = EnhancedAudioPlayer()
+        player = EnhancedAudioPlayer()
 
-            mock_init.assert_not_called()
+        mock_pygame.mixer.init.assert_not_called()
 
     @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     @patch.object(AudioPlaylist, "add_track")
@@ -685,14 +714,15 @@ class TestEnhancedAudioPlayer:
         player = EnhancedAudioPlayer()
 
         with patch("audio_player_enhanced.PYGAME_AVAILABLE", True), patch(
-            "audio_player_enhanced.pygame.mixer.get_init", return_value=(44100, -16, 2)
-        ), patch("audio_player_enhanced.pygame.mixer.music.set_volume") as mock_set_volume:
+            "audio_player_enhanced.pygame"
+        ) as mock_pygame:
+            mock_pygame.mixer.get_init.return_value = (44100, -16, 2)
 
             result = player.set_volume(0.8)
 
         assert result is True
         assert player.volume == 0.8
-        mock_set_volume.assert_called_once_with(0.8)
+        mock_pygame.mixer.music.set_volume.assert_called_once_with(0.8)
 
     @patch.object(EnhancedAudioPlayer, "_initialize_audio_backend")
     def test_set_volume_clamping(self, mock_init_backend):
@@ -716,15 +746,16 @@ class TestEnhancedAudioPlayer:
         player.volume = 0.7
 
         with patch("audio_player_enhanced.PYGAME_AVAILABLE", True), patch(
-            "audio_player_enhanced.pygame.mixer.get_init", return_value=(44100, -16, 2)
-        ), patch("audio_player_enhanced.pygame.mixer.music.set_volume") as mock_set_volume:
+            "audio_player_enhanced.pygame"
+        ) as mock_pygame:
+            mock_pygame.mixer.get_init.return_value = (44100, -16, 2)
 
             # Test muting
             result1 = player.toggle_mute()
             assert result1 is True
             assert player.is_muted is True
             assert player.previous_volume == 0.7
-            mock_set_volume.assert_called_with(0.0)
+            mock_pygame.mixer.music.set_volume.assert_called_with(0.0)
 
             # Test unmuting
             result2 = player.toggle_mute()
@@ -796,13 +827,182 @@ class TestEnhancedAudioPlayer:
         with patch.object(player, "stop") as mock_stop, patch.object(
             player, "_stop_position_thread"
         ) as mock_stop_thread, patch("audio_player_enhanced.PYGAME_AVAILABLE", True), patch(
-            "audio_player_enhanced.pygame.mixer.get_init", return_value=(44100, -16, 2)
-        ), patch(
-            "audio_player_enhanced.pygame.mixer.quit"
-        ) as mock_quit:
+            "audio_player_enhanced.pygame"
+        ) as mock_pygame:
+            mock_pygame.mixer.get_init.return_value = (44100, -16, 2)
 
             player.cleanup()
 
         mock_stop.assert_called_once()
         mock_stop_thread.assert_called_once()
-        mock_quit.assert_called_once()
+        mock_pygame.mixer.quit.assert_called_once()
+
+
+class TestImportErrorHandling:
+    """Test import error handling for optional dependencies"""
+
+    def test_pygame_import_error_handling(self):
+        """Test behavior when pygame is not available"""
+        # Test the code paths when PYGAME_AVAILABLE is False
+        with patch("audio_player_enhanced.PYGAME_AVAILABLE", False):
+            with patch("audio_player_enhanced.pygame", None):
+                # Test that EnhancedAudioPlayer handles missing pygame gracefully
+                player = EnhancedAudioPlayer()
+
+                # Test that initialization still works but audio backend fails
+                # The player should handle missing pygame gracefully
+                assert player.state == PlaybackState.STOPPED
+
+    def test_pydub_import_error_handling(self):
+        """Test behavior when pydub is not available"""
+        with patch("audio_player_enhanced.PYDUB_AVAILABLE", False):
+            with patch("audio_player_enhanced.pydub", None):
+                # Test that AudioProcessor handles missing pydub gracefully
+                processor = AudioProcessor()
+
+                # Should handle missing pydub gracefully
+                # Methods using format conversion should use fallbacks
+                result = processor.convert_audio_format("/test/input.wav", "/test/output.mp3", "mp3")
+                # Should return False when pydub is unavailable
+                assert result is False
+
+    def test_availability_flags_are_boolean(self):
+        """Test that availability flags are boolean values"""
+        assert isinstance(PYGAME_AVAILABLE, bool)
+        assert isinstance(PYDUB_AVAILABLE, bool)
+
+
+class TestErrorHandlingPaths:
+    """Test error handling in various methods"""
+
+    def test_enhanced_audio_player_load_audio_exception(self):
+        """Test EnhancedAudioPlayer load_audio exception handling"""
+        player = EnhancedAudioPlayer()
+
+        # Test loading track with non-existent file
+        result = player.load_track("/nonexistent/file.wav")
+
+        # Should return False for non-existent file
+        assert result is False
+
+    def test_enhanced_audio_player_initialize_without_pygame(self):
+        """Test audio system initialization without pygame"""
+        with patch("audio_player_enhanced.PYGAME_AVAILABLE", False):
+            player = EnhancedAudioPlayer()
+
+            # Test that player handles missing pygame gracefully
+            # The player should still initialize but audio backend won't work
+            assert player.state == PlaybackState.STOPPED
+
+    def test_audio_processor_extract_waveform_exception(self):
+        """Test AudioProcessor waveform extraction exception handling"""
+        processor = AudioProcessor()
+
+        # Test with invalid file path
+        result = processor.extract_waveform_data("/invalid/path.wav")
+
+        # Should return empty array and default sample rate on error
+        assert len(result[0]) == 0
+        assert result[1] in [44100, 0]  # May return 0 or default
+
+    def test_audio_processor_convert_format_exception(self):
+        """Test AudioProcessor format conversion exception handling"""
+        processor = AudioProcessor()
+
+        # Test with invalid paths
+        result = processor.convert_audio_format("/invalid/input.wav", "/invalid/output.mp3", "mp3")
+
+        # Should return False on error
+        assert result is False
+
+    def test_audio_track_duration_calculation_exception(self):
+        """Test AudioTrack duration calculation with invalid file"""
+        # Test with non-existent file path
+        track = AudioTrack(filepath="/nonexistent/file.wav", title="Test Track")
+
+        # Duration should default to 0.0 for invalid files
+        assert track.duration == 0.0
+
+    def test_audio_playlist_error_handling(self):
+        """Test AudioPlaylist error handling scenarios"""
+        playlist = AudioPlaylist()
+
+        # Test removing track that doesn't exist
+        result = playlist.remove_track(999)  # Invalid index
+        assert result is False
+
+        # Test setting current track with invalid index
+        result = playlist.set_current_track(-1)  # Invalid index
+        assert result is None
+
+        # Test next/previous on empty playlist
+        next_track = playlist.next_track()
+        assert next_track is None
+
+        prev_track = playlist.previous_track()
+        assert prev_track is None
+
+
+class TestEnhancedAudioPlayerAdditionalCoverage:
+    """Additional tests to improve coverage for EnhancedAudioPlayer"""
+
+    def test_playback_controls_without_loaded_audio(self):
+        """Test playback controls when no audio is loaded"""
+        player = EnhancedAudioPlayer()
+
+        # Test play without loaded audio
+        result = player.play()
+        assert result is False
+
+        # Test pause without loaded audio
+        result = player.pause()
+        assert result is False
+
+        # Test stop without loaded audio
+        result = player.stop()
+        assert result is True  # Stop should always succeed
+
+        # Test seek without loaded audio
+        result = player.seek(10.0)
+        assert result is False
+
+    def test_volume_and_speed_edge_cases(self):
+        """Test volume and speed controls with edge cases"""
+        player = EnhancedAudioPlayer()
+
+        # Test volume with extreme values
+        player.set_volume(-0.5)  # Negative volume
+        assert player.volume >= 0.0
+
+        player.set_volume(2.0)  # Volume > 1.0
+        assert player.volume <= 1.0
+
+        # Test speed reset functionality
+        old_speed = player.playback_speed
+        player.reset_speed()
+        # Speed should be reset to default (1.0)
+        assert player.playback_speed == 1.0
+
+    def test_position_tracking_edge_cases(self):
+        """Test position tracking edge cases"""
+        player = EnhancedAudioPlayer()
+
+        # Test position when no audio is loaded
+        position = player.get_position()
+        assert position.current_time == 0.0
+        assert position.total_time == 0.0
+        assert position.percentage == 0.0
+
+    def test_audio_system_reinitialization(self):
+        """Test audio system reinitialization scenarios"""
+        with patch("audio_player_enhanced.PYGAME_AVAILABLE", True):
+            with patch("audio_player_enhanced.pygame") as mock_pygame:
+                # Test successful initialization
+                mock_pygame.mixer.init.return_value = None
+                mock_pygame.mixer.get_init.return_value = (44100, -16, 2)
+
+                player = EnhancedAudioPlayer()
+                # Player should initialize successfully with mocked pygame
+                assert player.state == PlaybackState.STOPPED
+                # Backend initialization should be called
+                mock_pygame.mixer.get_init.assert_called()

@@ -76,6 +76,10 @@ export class WebDeviceAdapter implements IDeviceInterface {
                 hidockDevice = await deviceService.requestDevice();
             }
 
+            if (!hidockDevice) {
+                throw new Error('Failed to connect to device: device is null');
+            }
+
             // Convert to unified DeviceInfo format
             const model = detectDeviceModel(HIDOCK_DEVICE_CONFIG.VENDOR_ID, hidockDevice.storageInfo ? 0xAF0D : 0xAF0C);
 

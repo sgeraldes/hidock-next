@@ -3,11 +3,11 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-# Add the project root to the Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 import main
 from main import main as main_func
+
+# Add the project root to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
 class TestMain(unittest.TestCase):
@@ -81,6 +81,59 @@ class TestMain(unittest.TestCase):
 
         source = inspect.getsource(main)
         self.assertIn('if __name__ == "__main__":', source)
+
+    @patch("main.HiDockToolGUI")
+    @patch("main.logger.error")
+    @patch("main.tkinter.messagebox.showerror")
+    @patch("main.tkinter.Tk")
+    @patch("main.sys.exit")
+    def test_main_exception_with_app_withdraw_called(
+        self, mock_exit, mock_tk, mock_showerror, mock_logger_error, mock_main_window
+    ):
+        """Test main exception handling when app.withdraw() is called."""
+        # Create a mock app that can be withdrawn
+        mock_app = MagicMock()
+        mock_app.winfo_exists.return_value = True
+
+        # Set up HiDockToolGUI to return the app then raise exception on mainloop
+        mock_main_window.return_value = mock_app
+        mock_app.mainloop.side_effect = Exception("Test Exception")
+
+        mock_temp_root = MagicMock()
+        mock_temp_root.winfo_exists.return_value = True
+        mock_tk.return_value = mock_temp_root
+
+        # Act
+        main_func()
+
+        # Assert - app.withdraw should have been called
+        mock_app.withdraw.assert_called_once()
+        mock_exit.assert_called_with(1)
+
+    @patch("main.HiDockToolGUI")
+    @patch("main.logger.error")
+    @patch("main.tkinter.messagebox.showerror", side_effect=Exception("Tkinter dialog failed"))
+    @patch("main.tkinter.Tk")
+    @patch("main.sys.exit")
+    @patch("builtins.print")
+    def test_main_exception_dialog_fails(
+        self, mock_print, mock_exit, mock_tk, mock_showerror, mock_logger_error, mock_main_window
+    ):
+        """Test main exception handling when even the error dialog fails."""
+        # Arrange
+        mock_main_window.side_effect = Exception("Original error")
+
+        mock_temp_root = MagicMock()
+        mock_temp_root.winfo_exists.return_value = True
+        mock_tk.return_value = mock_temp_root
+
+        # Act
+        main_func()
+
+        # Assert - should print to console when dialog fails
+        mock_print.assert_any_call("Could not display Tkinter error dialog: Tkinter dialog failed")
+        mock_print.assert_any_call("Original critical error was: Original error")
+        mock_exit.assert_called_with(1)
 
 
 if __name__ == "__main__":

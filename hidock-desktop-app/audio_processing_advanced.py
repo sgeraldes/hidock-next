@@ -11,12 +11,16 @@ Requirements: 9.3, 3.1, 3.2
 """
 
 import os
-# import sys  # Future: system-level audio processing
 
 import numpy as np
+
 # import scipy.fft as fft  # Future: frequency domain analysis
 import scipy.signal as signal
 from scipy.io import wavfile
+
+# import sys  # Future: system-level audio processing
+
+
 # from scipy.ndimage import median_filter  # Future: noise reduction
 
 try:
@@ -34,6 +38,7 @@ except ImportError:
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
+
 # from typing import Union  # Future: union type annotations
 
 try:
@@ -46,6 +51,7 @@ except ImportError:
 try:
     # import pydub  # Future: audio format conversion
     from pydub import AudioSegment
+
     # from pydub.effects import compress_dynamic_range, normalize  # Future: audio effects
 
     PYDUB_AVAILABLE = True
@@ -128,9 +134,7 @@ class AudioEnhancer:
                 )
         self.temp_files.clear()
 
-    def process_audio_file(
-        self, input_path: str, output_path: str, progress_callback=None
-    ) -> ProcessingResult:
+    def process_audio_file(self, input_path: str, output_path: str, progress_callback=None) -> ProcessingResult:
         """
         Process audio file with all enhancement features
 
@@ -143,9 +147,7 @@ class AudioEnhancer:
             ProcessingResult with operation details
         """
         try:
-            logger.info(
-                "AudioEnhancer", "process_audio_file", f"Processing {input_path}"
-            )
+            logger.info("AudioEnhancer", "process_audio_file", f"Processing {input_path}")
 
             if progress_callback:
                 progress_callback(0, "Loading audio file...")
@@ -158,7 +160,8 @@ class AudioEnhancer:
                 progress_callback(10, "Analyzing audio...")
 
             # Analyze audio characteristics
-            _analysis = self._analyze_audio(audio_data, sample_rate)  # Future: use for adaptive processing
+            # Future: use for adaptive processing
+            # _analysis = self._analyze_audio(audio_data, sample_rate)
 
             if progress_callback:
                 progress_callback(20, "Applying noise reduction...")
@@ -193,9 +196,7 @@ class AudioEnhancer:
 
             # Normalize audio
             if self.settings.normalize_audio:
-                audio_data = self._normalize_audio(
-                    audio_data, self.settings.target_lufs
-                )
+                audio_data = self._normalize_audio(audio_data, self.settings.target_lufs)
 
             if progress_callback:
                 progress_callback(90, "Saving processed audio...")
@@ -231,9 +232,7 @@ class AudioEnhancer:
             return result
 
         except Exception as e:
-            logger.error(
-                "AudioEnhancer", "process_audio_file", f"Processing failed: {e}"
-            )
+            logger.error("AudioEnhancer", "process_audio_file", f"Processing failed: {e}")
             return ProcessingResult(success=False, error_message=str(e))
 
     def _load_audio(self, file_path: str) -> Tuple[np.ndarray, int]:
@@ -302,9 +301,7 @@ class AudioEnhancer:
             percentile_95 = sorted_samples[int(0.95 * len(sorted_samples))]
             percentile_10 = sorted_samples[int(0.10 * len(sorted_samples))]
 
-            dynamic_range_db = (
-                20 * np.log10(percentile_95 / percentile_10) if percentile_10 > 0 else 0
-            )
+            dynamic_range_db = 20 * np.log10(percentile_95 / percentile_10) if percentile_10 > 0 else 0
 
             # Spectral analysis
             freqs, psd = signal.welch(audio_data, sample_rate, nperseg=1024)
@@ -328,9 +325,7 @@ class AudioEnhancer:
                 "duration": 0,
             }
 
-    def _reduce_noise(
-        self, audio_data: np.ndarray, sample_rate: int, strength: float
-    ) -> Tuple[np.ndarray, float]:
+    def _reduce_noise(self, audio_data: np.ndarray, sample_rate: int, strength: float) -> Tuple[np.ndarray, float]:
         """Apply noise reduction to audio"""
         try:
             if NOISEREDUCE_AVAILABLE and strength > 0:
@@ -343,16 +338,10 @@ class AudioEnhancer:
                 )
 
                 # Calculate noise reduction amount
-                original_noise = np.std(
-                    audio_data[: int(0.1 * len(audio_data))]
-                )  # First 10%
+                original_noise = np.std(audio_data[: int(0.1 * len(audio_data))])  # First 10%
                 reduced_noise = np.std(reduced_audio[: int(0.1 * len(reduced_audio))])
 
-                noise_reduction_db = (
-                    20 * np.log10(original_noise / reduced_noise)
-                    if reduced_noise > 0
-                    else 0
-                )
+                noise_reduction_db = 20 * np.log10(original_noise / reduced_noise) if reduced_noise > 0 else 0
 
                 return reduced_audio, noise_reduction_db
 
@@ -361,9 +350,7 @@ class AudioEnhancer:
                 return self._spectral_subtraction(audio_data, sample_rate, strength)
 
         except Exception as e:
-            logger.warning(
-                "AudioEnhancer", "_reduce_noise", f"Noise reduction failed: {e}"
-            )
+            logger.warning("AudioEnhancer", "_reduce_noise", f"Noise reduction failed: {e}")
             return audio_data, 0.0
 
     def _spectral_subtraction(
@@ -388,9 +375,7 @@ class AudioEnhancer:
             )
 
             # Estimate noise spectrum (average of first frames)
-            noise_spectrum = np.mean(
-                np.abs(stft_data[:, :noise_frames]), axis=1, keepdims=True
-            )
+            noise_spectrum = np.mean(np.abs(stft_data[:, :noise_frames]), axis=1, keepdims=True)
 
             # Apply spectral subtraction
             magnitude = np.abs(stft_data)
@@ -413,9 +398,7 @@ class AudioEnhancer:
             )
 
             # Calculate noise reduction
-            noise_reduction_db = 20 * np.log10(
-                np.mean(noise_spectrum) / np.mean(enhanced_magnitude[:, :noise_frames])
-            )
+            noise_reduction_db = 20 * np.log10(np.mean(noise_spectrum) / np.mean(enhanced_magnitude[:, :noise_frames]))
 
             return enhanced_audio[: len(audio_data)], noise_reduction_db
 
@@ -445,7 +428,7 @@ class AudioEnhancer:
 
             frames = []
             for i in range(0, len(audio_data) - frame_size, hop_size):
-                frame = audio_data[i:i + frame_size]
+                frame = audio_data[i: i + frame_size]
                 energy = np.sqrt(np.mean(frame**2))
                 frames.append((i, energy > threshold_linear))
 
@@ -490,14 +473,10 @@ class AudioEnhancer:
                 return audio_data, 0.0
 
         except Exception as e:
-            logger.error(
-                "AudioEnhancer", "_remove_silence", f"Silence removal failed: {e}"
-            )
+            logger.error("AudioEnhancer", "_remove_silence", f"Silence removal failed: {e}")
             return audio_data, 0.0
 
-    def _enhance_audio_quality(
-        self, audio_data: np.ndarray, sample_rate: int
-    ) -> np.ndarray:
+    def _enhance_audio_quality(self, audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
         """Apply audio quality enhancement"""
         try:
             enhanced_audio = audio_data.copy()
@@ -507,9 +486,7 @@ class AudioEnhancer:
                 nyquist = sample_rate / 2
                 high_cutoff = min(80, nyquist * 0.01)  # 80 Hz or 1% of Nyquist
 
-                sos = signal.butter(
-                    2, high_cutoff / nyquist, btype="high", output="sos"
-                )
+                sos = signal.butter(2, high_cutoff / nyquist, btype="high", output="sos")
                 enhanced_audio = signal.sosfilt(sos, enhanced_audio)
 
             # Apply gentle low-pass filter for anti-aliasing
@@ -521,9 +498,7 @@ class AudioEnhancer:
                 enhanced_audio = signal.sosfilt(sos, enhanced_audio)
 
             # Apply gentle compression to even out dynamics
-            enhanced_audio = self._apply_compression(
-                enhanced_audio, ratio=2.0, threshold=-20.0
-            )
+            enhanced_audio = self._apply_compression(enhanced_audio, ratio=2.0, threshold=-20.0)
 
             # Apply de-emphasis if needed (reverse pre-emphasis)
             if self.settings.quality == ProcessingQuality.HIGH_QUALITY:
@@ -532,14 +507,10 @@ class AudioEnhancer:
             return enhanced_audio
 
         except Exception as e:
-            logger.error(
-                "AudioEnhancer", "_enhance_audio_quality", f"Enhancement failed: {e}"
-            )
+            logger.error("AudioEnhancer", "_enhance_audio_quality", f"Enhancement failed: {e}")
             return audio_data
 
-    def _apply_compression(
-        self, audio_data: np.ndarray, ratio: float = 2.0, threshold: float = -20.0
-    ) -> np.ndarray:
+    def _apply_compression(self, audio_data: np.ndarray, ratio: float = 2.0, threshold: float = -20.0) -> np.ndarray:
         """Apply dynamic range compression"""
         try:
             # Convert threshold to linear scale
@@ -563,9 +534,7 @@ class AudioEnhancer:
             return compressed_audio
 
         except Exception as e:
-            logger.error(
-                "AudioEnhancer", "_apply_compression", f"Compression failed: {e}"
-            )
+            logger.error("AudioEnhancer", "_apply_compression", f"Compression failed: {e}")
             return audio_data
 
     def _apply_deemphasis(self, audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -580,21 +549,15 @@ class AudioEnhancer:
             deemphasized[0] = audio_data[0]
 
             for i in range(1, len(audio_data)):
-                deemphasized[i] = (
-                    alpha * deemphasized[i - 1] + (1 - alpha) * audio_data[i]
-                )
+                deemphasized[i] = alpha * deemphasized[i - 1] + (1 - alpha) * audio_data[i]
 
             return deemphasized
 
         except Exception as e:
-            logger.error(
-                "AudioEnhancer", "_apply_deemphasis", f"De-emphasis failed: {e}"
-            )
+            logger.error("AudioEnhancer", "_apply_deemphasis", f"De-emphasis failed: {e}")
             return audio_data
 
-    def _normalize_audio(
-        self, audio_data: np.ndarray, target_lufs: float = -23.0
-    ) -> np.ndarray:
+    def _normalize_audio(self, audio_data: np.ndarray, target_lufs: float = -23.0) -> np.ndarray:
         """Normalize audio to target LUFS level"""
         try:
             # Simple RMS-based normalization (approximation of LUFS)
@@ -620,9 +583,7 @@ class AudioEnhancer:
                 return audio_data
 
         except Exception as e:
-            logger.error(
-                "AudioEnhancer", "_normalize_audio", f"Normalization failed: {e}"
-            )
+            logger.error("AudioEnhancer", "_normalize_audio", f"Normalization failed: {e}")
             return audio_data
 
     def convert_format(
@@ -679,14 +640,10 @@ class AudioEnhancer:
                 return True
 
         except Exception as e:
-            logger.error(
-                "AudioEnhancer", "convert_format", f"Format conversion failed: {e}"
-            )
+            logger.error("AudioEnhancer", "convert_format", f"Format conversion failed: {e}")
             return False
 
-    def batch_process(
-        self, input_files: List[str], output_dir: str, progress_callback=None
-    ) -> List[ProcessingResult]:
+    def batch_process(self, input_files: List[str], output_dir: str, progress_callback=None) -> List[ProcessingResult]:
         """Process multiple audio files"""
         results = []
         total_files = len(input_files)
@@ -749,9 +706,7 @@ class AudioFormatConverter:
                 raise ValueError(f"Unsupported format: {target_format}")
 
             if PYDUB_AVAILABLE:
-                return self._convert_with_pydub(
-                    input_path, output_path, target_format, quality
-                )
+                return self._convert_with_pydub(input_path, output_path, target_format, quality)
             else:
                 return self._convert_basic(input_path, output_path, target_format)
 
@@ -759,9 +714,7 @@ class AudioFormatConverter:
             logger.error("AudioFormatConverter", "convert", f"Conversion failed: {e}")
             return False
 
-    def _convert_with_pydub(
-        self, input_path: str, output_path: str, target_format: str, quality: str
-    ) -> bool:
+    def _convert_with_pydub(self, input_path: str, output_path: str, target_format: str, quality: str) -> bool:
         """Convert using pydub"""
         try:
             audio = AudioSegment.from_file(input_path)
@@ -796,9 +749,7 @@ class AudioFormatConverter:
             )
             return False
 
-    def _convert_basic(
-        self, input_path: str, output_path: str, target_format: str
-    ) -> bool:
+    def _convert_basic(self, input_path: str, output_path: str, target_format: str) -> bool:
         """Basic conversion for WAV files"""
         try:
             if target_format != "wav":
@@ -866,9 +817,7 @@ def enhance_audio_file(
         enhancer.cleanup_temp_files()
 
 
-def convert_audio_format(
-    input_path: str, output_path: str, target_format: str, quality: str = "high"
-) -> bool:
+def convert_audio_format(input_path: str, output_path: str, target_format: str, quality: str = "high") -> bool:
     """
     Convenience function to convert audio format
 

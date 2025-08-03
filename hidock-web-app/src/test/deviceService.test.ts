@@ -48,7 +48,7 @@ beforeEach(() => {
     vi.clearAllMocks();
 
     // Mock navigator.usb
-    Object.defineProperty(global.navigator, 'usb', {
+    Object.defineProperty(window.navigator, 'usb', {
         value: mockNavigatorUSB,
         writable: true,
     });
@@ -71,7 +71,7 @@ describe('DeviceService WebUSB Implementation', () => {
     describe('Device Discovery and Connection', () => {
         it('should check WebUSB support', async () => {
             // Remove WebUSB support
-            delete (global.navigator as Navigator & { usb?: unknown }).usb;
+            delete (navigator as any).usb;
 
             await expect(deviceService.requestDevice()).rejects.toThrow(
                 'HiDock device not found. Please connect your device and try again.'
@@ -114,7 +114,7 @@ describe('DeviceService WebUSB Implementation', () => {
             const device = await deviceService.requestDevice();
 
             expect(mockUSBDevice.open).toHaveBeenCalledTimes(2);
-            expect(device.connected).toBe(true);
+            expect(device?.connected).toBe(true);
         });
 
         it('should disconnect properly', async () => {

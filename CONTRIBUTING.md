@@ -57,20 +57,32 @@ git checkout -b bugfix/issue-description
 
 #### **Step 3: Make Changes**
 - Follow our [Code Quality Standards](#-code-quality-standards)
-- Write tests for new functionality
+- **Use TDD approach**: Write failing tests first, then implement
+- Write comprehensive tests for new functionality (maintain 80% coverage)
 - Update documentation as needed
-- Ensure pre-commit hooks pass
+- Ensure pre-commit hooks pass (automatically installed with developer setup)
+- **For settings-related changes**: Add tests to appropriate `test_settings_*.py` files
+- **For device communication**: Include both unit and integration tests
+- **For GUI components**: Mock CustomTkinter components properly
 
 #### **Step 4: Test Your Changes**
 ```bash
-# Test desktop app
-cd hidock-desktop-app && python -m pytest tests/ -v
+# Test desktop app (581 comprehensive tests)
+cd hidock-desktop-app && python -m pytest  # Runs all tests with coverage
+
+# Run specific test categories
+pytest -m unit          # Unit tests only (~400 tests)
+pytest -m integration   # Integration tests (~150 tests)
+pytest -m device        # Device tests (~30 tests, requires hardware)
 
 # Test web app
 cd hidock-web-app && npm test
 
-# Test pre-commit hooks
+# Test pre-commit hooks (code quality)
 pre-commit run --all-files
+
+# Check coverage (must be 80%+)
+pytest --cov=. --cov-report=html
 ```
 
 #### **Step 5: Commit and Push**
@@ -92,22 +104,27 @@ git push origin feature/your-feature-name
 - **120 characters** for all code (Python, TypeScript, JavaScript)
 - Pre-commit hooks enforce this automatically
 
-### **Python Code**
+### **Python Code (Desktop App)**
 - **Black** formatting with 120-char line length
 - **Flake8** linting (E203 slice whitespace exceptions allowed)
 - **isort** import sorting with Black profile
-- **Type hints** preferred for new code
+- **pylint** for additional code quality checks
+- **mypy** type checking with strict configuration (GUI modules excluded)
+- **Type hints** required for new code
 
 ### **TypeScript/JavaScript Code**
 - **ESLint** with React hooks rules
 - **TypeScript** strict mode
 - **Consistent naming** (camelCase for variables, PascalCase for components)
 
-### **Testing**
-- **Unit tests** for all new functions
+### **Testing Requirements**
+- **80% minimum coverage** (enforced by pytest configuration)
+- **TDD approach**: Write failing tests first (Red-Green-Refactor)
+- **Unit tests** for all new functions with proper mocking
 - **Integration tests** for component interactions
-- **Mock data** for external dependencies
-- **Test files** have relaxed linting rules
+- **Mock-first strategy** for external dependencies
+- **Test categories**: Use pytest markers (unit, integration, device, slow)
+- **Comprehensive coverage**: Currently 581 tests in desktop app
 
 ## 📁 Project Structure
 
@@ -172,13 +189,22 @@ We recognize significant contributors in our:
 - Release notes
 - Community discussions
 
+### **Recent Contributors & Achievements**
+- **Comprehensive Settings Testing**: 24+ tests covering settings dialog functionality
+- **Device Selector Bug Fix**: Proper enable/disable functionality implemented
+- **Enhanced Error Handling**: Improved validation and error recovery
+- **Performance Optimizations**: Background processing and intelligent caching
+- **Test-Driven Development**: 581 comprehensive tests with 80% coverage requirement
+
 ### **Contribution Types We Value:**
 - 🏆 Major features and architectural improvements
-- 🔧 Bug fixes and stability improvements
+- 🔧 Bug fixes and stability improvements (like device selector fix)
 - 📚 Documentation and tutorial creation
-- 🧪 Test coverage and quality improvements
-- 🎨 UI/UX enhancements
+- 🧪 Test coverage and quality improvements (help us exceed 80%)
+- 🎨 UI/UX enhancements (CustomTkinter components)
 - 🌐 Accessibility and internationalization
+- 🤖 New AI provider integrations (expand beyond current 11)
+- ⚡ Performance optimizations (caching, background processing)
 
 ## 📞 Getting Help
 
@@ -188,13 +214,23 @@ We recognize significant contributors in our:
 3. **Ask questions**: Use GitHub Discussions
 
 ### **During Development:**
-1. **Pre-commit hook issues**: See [docs/PRE-COMMIT.md](docs/PRE-COMMIT.md)
-2. **Setup problems**: See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
-3. **AI development**: Use [AGENT.md](AGENT.md) for Claude Code assistance
+1. **Test failures**: Check [docs/TESTING.md](docs/TESTING.md) troubleshooting section
+2. **Settings dialog issues**: Review `test_settings_*.py` files for examples
+3. **Device communication**: Check device selector bug fix implementation
+4. **Pre-commit hook issues**: Ensure `pip install -e ".[dev]"` was used
+5. **Coverage issues**: Use `pytest --cov=. --cov-report=html` to identify gaps
+
+### **Common Development Issues:**
+- **Import errors**: Ensure virtual environment and dev dependencies installed
+- **Test failures**: Check that CustomTkinter components are properly mocked
+- **Coverage below 80%**: Add tests for uncovered code paths
+- **Settings validation**: Follow temperature (0.0-2.0) and token (1-32000) ranges
+- **Device selector**: Use `set_enabled()` method, not `configure(state=...)`
 
 ### **Need Help?**
 - 💬 **Questions**: [GitHub Discussions](https://github.com/sgeraldes/hidock-next/discussions)
 - 🐛 **Bug Reports**: [GitHub Issues](https://github.com/sgeraldes/hidock-next/issues)
+- 🧪 **Test Help**: Check existing test files for patterns and examples
 - 📧 **Direct Contact**: Create an issue and we'll respond
 
 ## 📜 Code of Conduct
@@ -221,12 +257,21 @@ By contributing to HiDock Next, you agree that your contributions will be licens
 
 1. **⭐ Star** this repository
 2. **🍴 Fork** the project
-3. **📋 Pick** an issue or feature
-4. **💻 Code** your contribution
-5. **🔄 Submit** a pull request
+3. **📋 Pick** an issue or feature (check our 581-test suite for inspiration)
+4. **🧪 Write tests first** (TDD approach - Red-Green-Refactor)
+5. **💻 Code** your contribution (maintain 80% coverage)
+6. **✅ Validate** with comprehensive testing and code quality checks
+7. **🔄 Submit** a pull request with detailed test coverage
+
+**Recent achievements to build upon:**
+- ✅ 581 comprehensive tests implemented
+- ✅ Settings dialog thoroughly tested (24+ tests)
+- ✅ Device selector bug fixed with proper testing
+- ✅ 80% coverage requirement established
+- ✅ TDD workflow implemented
 
 **Thank you for making HiDock Next better! 🎉**
 
 ---
 
-*For detailed technical information, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)*
+*For detailed technical information, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and [docs/TESTING.md](docs/TESTING.md)*

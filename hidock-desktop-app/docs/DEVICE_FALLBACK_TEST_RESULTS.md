@@ -23,7 +23,7 @@ The smart connection fallback logic has been successfully implemented in `gui_ac
        discovered_devices = asyncio.run(
            self.device_manager.device_interface.discover_devices()
        )
-       
+
        if discovered_devices:
            # Use first available device
            first_device = discovered_devices[0]
@@ -52,7 +52,7 @@ When user clicks "Connect" with P1 configured but H1E connected:
 1. **Step 1**: Attempts connection to P1 (0x10D6:0xAF0E)
 2. **Step 2**: Connection fails (device not found)
 3. **Step 3**: Discovers available devices
-4. **Step 4**: Finds H1E (0x10D6:0xB00D) 
+4. **Step 4**: Finds H1E (0x10D6:0xB00D)
 5. **Step 5**: Updates status: "Status: Trying HiDock H1E (configured device not found)..."
 6. **Step 6**: Connects to H1E successfully
 7. **Step 7**: Updates status: "Status: Connected to HiDock H1E"
@@ -99,7 +99,7 @@ def get_default_config():
 The device fallback functionality is **fully implemented and ready for use**:
 
 1. ✅ Smart connection fallback when configured device unavailable
-2. ✅ Clear status messages showing fallback behavior  
+2. ✅ Clear status messages showing fallback behavior
 3. ✅ Session-level device switching without permanent config changes
 4. ✅ Universal default configuration supporting all HiDock models
 5. ✅ Graceful error handling for device conflicts

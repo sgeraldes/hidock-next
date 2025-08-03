@@ -16,12 +16,14 @@ import json
 import os
 import wave
 from typing import Any, Dict
+
+from ai_service import ai_service
+from config_and_logger import logger
+
 # import base64  # Future: base64 encoding for audio data
 # import tempfile  # Future: temporary file operations
 # from typing import Literal, Optional  # Future: enhanced type annotations
 
-from ai_service import ai_service
-from config_and_logger import logger
 
 try:
     import google.generativeai as genai
@@ -33,9 +35,7 @@ TRANSCRIPTION_FAILED_DEFAULT_MSG = "Transcription failed or no content returned.
 TRANSCRIPTION_PARSE_ERROR_MSG_PREFIX = "Error parsing transcription response:"
 
 
-def _call_gemini_api(
-    payload: Dict[str, Any], api_key: str = ""
-) -> Dict[str, Any] | None:
+def _call_gemini_api(payload: Dict[str, Any], api_key: str = "") -> Dict[str, Any] | None:
     """
     Helper function to make a synchronous call to the Gemini API.
 
@@ -48,19 +48,13 @@ def _call_gemini_api(
         Returns a mock response if the API key is not provided.
     """
     if not api_key:
-        logger.warning(
-            "GeminiAPI", "_call_gemini_api", "API key is empty. Using mock response."
-        )
+        logger.warning("GeminiAPI", "_call_gemini_api", "API key is empty. Using mock response.")
         # This mock response simulates the real API structure for offline testing.
         mock_response = {
             "candidates": [
                 {
                     "content": {
-                        "parts": [
-                            {
-                                "text": "This is a mock API response due to a missing API key."
-                            }
-                        ],
+                        "parts": [{"text": "This is a mock API response due to a missing API key."}],
                         "role": "model",
                     },
                     "finishReason": "STOP",
@@ -68,10 +62,7 @@ def _call_gemini_api(
             ],
         }
         # Simulate JSON output if requested by the payload
-        if (
-            payload.get("generationConfig", {}).get("responseMimeType")
-            == "application/json"
-        ):
+        if payload.get("generationConfig", {}).get("responseMimeType") == "application/json":
             mock_json_output = {
                 "summary": "Mock summary from API (missing key).",
                 "category": "Mock Category",
@@ -85,28 +76,23 @@ def _call_gemini_api(
                 "action_items": ["Mock action item 1", "Mock action item 2"],
                 "project_context": "Mock project context.",
             }
-            mock_response["candidates"][0]["content"]["parts"][0]["text"] = json.dumps(
-                mock_json_output
-            )
+            mock_response["candidates"][0]["content"]["parts"][0]["text"] = json.dumps(mock_json_output)
         return mock_response
 
     if genai is None:
         logger.error(
-            "GeminiAPI", "_call_gemini_api",
-            "google.generativeai not available. Install with: pip install google-generativeai"
+            "GeminiAPI",
+            "_call_gemini_api",
+            "google.generativeai not available. Install with: pip install google-generativeai",
         )
         return None
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-1.5-flash")
-        response = model.generate_content(
-            payload.get("contents"), generation_config=payload.get("generationConfig")
-        )
+        response = model.generate_content(payload.get("contents"), generation_config=payload.get("generationConfig"))
         return response.to_dict()
     except Exception as e:
-        logger.error(
-            "GeminiAPI", "_call_gemini_api", f"Exception during Gemini API call: {e}"
-        )
+        logger.error("GeminiAPI", "_call_gemini_api", f"Exception during Gemini API call: {e}")
         return None
 
 
@@ -149,18 +135,14 @@ async def transcribe_audio(
     result = ai_service.transcribe_audio(provider, audio_file_path, language)
 
     if result.get("success"):
-        transcription_text = result.get(
-            "transcription", TRANSCRIPTION_FAILED_DEFAULT_MSG
-        )
+        transcription_text = result.get("transcription", TRANSCRIPTION_FAILED_DEFAULT_MSG)
         logger.info(
             "TranscriptionModule",
             "transcribe_audio",
             f"Transcription successful with {provider}",
         )
     else:
-        transcription_text = (
-            f"Transcription failed: {result.get('error', 'Unknown error')}"
-        )
+        transcription_text = f"Transcription failed: {result.get('error', 'Unknown error')}"
         logger.error("TranscriptionModule", "transcribe_audio", transcription_text)
 
     # The raw text from Gemini may contain speaker labels like "Speaker A: ..."
@@ -228,9 +210,7 @@ async def extract_meeting_insights(
                 "category": "Meeting" if analysis.get("topics") else "N/A",
                 "overall_sentiment_meeting": analysis.get("sentiment", "N/A"),
                 "action_items": analysis.get("action_items", []),
-                "project_context": ", ".join(analysis.get("topics", []))
-                if analysis.get("topics")
-                else "N/A",
+                "project_context": ", ".join(analysis.get("topics", [])) if analysis.get("topics") else "N/A",
             }
         )
 
@@ -258,9 +238,7 @@ def _get_audio_duration(audio_path: str) -> int:
             duration_seconds = frames / float(rate) if rate else 0
             return round(duration_seconds / 60)
     except Exception as e:
-        logger.warning(
-            "TranscriptionModule", "_get_audio_duration", f"Could not get duration: {e}"
-        )
+        logger.warning("TranscriptionModule", "_get_audio_duration", f"Could not get duration: {e}")
         return 0
 
 
@@ -292,13 +270,17 @@ async def process_audio_file_for_insights(
         f"Processing: {audio_file_path} with {provider}",
     )
 
-    if not os.path.exists(audio_file_path):
-        logger.error(
-            "TranscriptionModule",
-            "process_audio_file",
-            f"File not found: {audio_file_path}",
-        )
-        return {"error": "Audio file not found."}
+    try:
+        if not os.path.exists(audio_file_path):
+            logger.error(
+                "TranscriptionModule",
+                "process_audio_file",
+                f"File not found: {audio_file_path}",
+            )
+            return {"error": "Audio file not found."}
+    except Exception as e:
+        logger.error("TranscriptionModule", "process_audio_file", f"File preparation error: {e}")
+        return {"error": f"Error preparing audio file: {e}"}
 
     try:
         # Check if it's an HTA file and convert it first
@@ -328,38 +310,34 @@ async def process_audio_file_for_insights(
                 return {"error": "Failed to convert HTA file to WAV format"}
 
     except Exception as e:
-        logger.error(
-            "TranscriptionModule", "process_audio_file", f"File preparation error: {e}"
-        )
+        logger.error("TranscriptionModule", "process_audio_file", f"File preparation error: {e}")
         return {"error": f"Error preparing audio file: {e}"}
 
-    # --- Step 1: Transcribe Audio ---
-    transcription_result = await transcribe_audio(
-        audio_file_path, provider, api_key, config, language
-    )
-    full_transcription = transcription_result.get("transcription", "")
+    try:
+        # --- Step 1: Transcribe Audio ---
+        transcription_result = await transcribe_audio(audio_file_path, provider, api_key, config, language)
+        full_transcription = transcription_result.get("transcription", "")
 
-    # --- Step 2: Extract Insights ---
-    if full_transcription and not full_transcription.startswith("Transcription failed"):
-        meeting_insights = await extract_meeting_insights(
-            full_transcription, provider, api_key, config
-        )
-    else:
-        logger.warning(
-            "TranscriptionModule",
-            "process_audio_file",
-            "Skipping insights due to transcription failure.",
-        )
-        meeting_insights = {
-            "summary": "N/A - Transcription failed"
-        }  # Provide failure context
+        # --- Step 2: Extract Insights ---
+        if full_transcription and not full_transcription.startswith("Transcription failed"):
+            meeting_insights = await extract_meeting_insights(full_transcription, provider, api_key, config)
+        else:
+            logger.warning(
+                "TranscriptionModule",
+                "process_audio_file",
+                "Skipping insights due to transcription failure.",
+            )
+            meeting_insights = {"summary": "N/A - Transcription failed"}  # Provide failure context
+    except Exception as e:
+        logger.error("TranscriptionModule", "process_audio_file", f"Error during processing: {e}")
+        return {"error": f"Error preparing audio file: {e}"}
 
     # --- Step 3: Enrich with local data ---
     if meeting_insights.get("meeting_details", {}).get("duration_minutes") == 0:
         if ext == ".wav":  # Only calculate duration for WAV for now
-            meeting_insights.setdefault("meeting_details", {})[
-                "duration_minutes"
-            ] = _get_audio_duration(audio_file_path)
+            meeting_insights.setdefault("meeting_details", {})["duration_minutes"] = _get_audio_duration(
+                audio_file_path
+            )
 
     # Clean up temporary WAV file if created
     if temp_wav_file and os.path.exists(temp_wav_file):

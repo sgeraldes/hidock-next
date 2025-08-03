@@ -68,7 +68,7 @@ export interface AudioAnalysis {
 
 export class AudioProcessingService {
     private audioContext: AudioContext;
-    private workletLoaded = false;
+    private _workletLoaded = false; // Future use - worklet management
 
     constructor() {
         this.audioContext = new (window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext)();
@@ -80,7 +80,8 @@ export class AudioProcessingService {
             // Load audio worklets for real-time processing
             await this.audioContext.audioWorklet.addModule('/audio-worklets/noise-reduction-processor.js');
             await this.audioContext.audioWorklet.addModule('/audio-worklets/compressor-processor.js');
-            this.workletLoaded = true;
+            this._workletLoaded = true;
+            console.debug('Audio worklets loaded successfully:', this._workletLoaded);
         } catch (error) {
             console.warn('Audio worklets not available, falling back to offline processing:', error);
         }
