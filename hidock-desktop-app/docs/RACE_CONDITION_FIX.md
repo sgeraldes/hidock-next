@@ -36,11 +36,11 @@ Created a comprehensive device test manager that provides:
 class DeviceTestManager:
     def __init__(self):
         self._async_lock = asyncio.Lock()
-    
+
     @contextmanager
     def exclusive_device_access(self, test_name: str):
         """Synchronous exclusive access"""
-        
+
     @asynccontextmanager
     async def exclusive_async_device_access(self, test_name: str):
         """Asynchronous exclusive access"""
@@ -62,7 +62,7 @@ def ensure_device_disconnected(device_instance):
             device_instance.disconnect()
         except Exception as e:
             print(f"Warning during disconnect: {e}")
-    
+
     if device_instance and hasattr(device_instance, 'reset_device_state'):
         try:
             device_instance.reset_device_state()

@@ -10,7 +10,7 @@ device state management.
 import asyncio
 import threading
 import time
-from contextlib import contextmanager, asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
 
 import pytest
@@ -22,12 +22,12 @@ _DEVICE_CLEANUP_DELAY = 0.5  # Seconds to wait between tests
 
 class DeviceTestManager:
     """Manages device test execution to prevent race conditions."""
-    
+
     def __init__(self):
         self._current_test = None
         self._device_instance = None
         self._async_lock = asyncio.Lock()
-        
+
     @contextmanager
     def exclusive_device_access(self, test_name: str):
         """Context manager for exclusive device access during tests."""
@@ -41,7 +41,7 @@ class DeviceTestManager:
                 self._current_test = None
                 # Add delay to ensure device state is fully reset
                 time.sleep(_DEVICE_CLEANUP_DELAY)
-    
+
     @asynccontextmanager
     async def exclusive_async_device_access(self, test_name: str):
         """Async context manager for exclusive device access during async tests."""
@@ -71,13 +71,13 @@ def exclusive_device_access(request):
 
 def ensure_device_disconnected(device_instance):
     """Ensure device is properly disconnected and cleaned up."""
-    if device_instance and hasattr(device_instance, 'disconnect'):
+    if device_instance and hasattr(device_instance, "disconnect"):
         try:
             device_instance.disconnect()
         except Exception as e:
             print(f"[DeviceTestManager] Warning during disconnect: {e}")
-    
-    if device_instance and hasattr(device_instance, 'reset_device_state'):
+
+    if device_instance and hasattr(device_instance, "reset_device_state"):
         try:
             device_instance.reset_device_state()
         except Exception as e:
@@ -107,6 +107,7 @@ async def safe_async_device_operation(operation_func, *args, **kwargs):
 
 def create_isolated_device_test(test_func):
     """Decorator to create isolated device tests that prevent race conditions."""
+
     def wrapper(*args, **kwargs):
         test_name = test_func.__name__
         with device_test_manager.exclusive_device_access(test_name):
@@ -115,6 +116,7 @@ def create_isolated_device_test(test_func):
             except Exception as e:
                 print(f"[DeviceTestManager] Test {test_name} failed: {e}")
                 raise
+
     return wrapper
 
 
@@ -149,13 +151,13 @@ def device_test_isolation(request):
 def device_cleanup():
     """Fixture to ensure proper device cleanup after tests."""
     devices_to_cleanup = []
-    
+
     def register_device(device):
         devices_to_cleanup.append(device)
         return device
-    
+
     yield register_device
-    
+
     # Cleanup all registered devices
     for device in devices_to_cleanup:
         ensure_device_disconnected(device)

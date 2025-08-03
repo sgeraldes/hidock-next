@@ -423,7 +423,6 @@ class TestAudioEnhancer:
         ) as mock_sosfilt, patch.object(enhancer, "_apply_compression") as mock_compression, patch.object(
             enhancer, "_apply_deemphasis"
         ) as mock_deemphasis:
-
             mock_butter.return_value = np.array([[1, 2, 3, 4, 5, 6]])
             mock_sosfilt.return_value = mock_audio_data
             mock_compression.return_value = mock_audio_data
@@ -512,7 +511,6 @@ class TestAudioEnhancer:
         with patch("audio_processing_advanced.PYDUB_AVAILABLE", False), patch.object(
             enhancer, "_load_audio"
         ) as mock_load, patch.object(enhancer, "_save_audio") as mock_save:
-
             mock_load.return_value = (mock_audio_data, 44100)
 
             result = enhancer.convert_format("/input.wav", "/output.wav", "wav")

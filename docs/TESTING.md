@@ -116,7 +116,7 @@ class TestSettingsDialog:
         # Test implementation with proper mocking
         mock_parent = Mock()
         mock_config = {"temperature": 0.7, "max_tokens": 4000}
-        
+
         dialog = SettingsDialog(mock_parent, mock_config, Mock())
         result = dialog._validate_numeric_settings()
         assert result is True
@@ -127,7 +127,7 @@ class TestSettingsDialog:
         # Test that temperature must be between 0.0 and 2.0
         dialog = self._create_test_dialog()
         dialog.local_vars["ai_temperature_var"].set(2.5)  # Invalid
-        
+
         result = dialog._validate_numeric_settings()
         assert result is False
 ```
@@ -141,14 +141,14 @@ def test_settings_dialog_complete_workflow(mock_parent_gui):
     # Test full settings dialog lifecycle
     initial_config = {"ai_temperature": 0.7, "ai_max_tokens": 4000}
     dialog = SettingsDialog(mock_parent_gui, initial_config, Mock())
-    
+
     # Change settings
     dialog.local_vars["ai_temperature_var"].set(1.0)
     dialog.local_vars["ai_max_tokens_var"].set(8000)
-    
+
     # Apply settings
     dialog._perform_apply_settings_logic()
-    
+
     # Verify changes were applied
     assert mock_parent_gui.config["ai_temperature"] == 1.0
     assert mock_parent_gui.config["ai_max_tokens"] == 8000
@@ -157,13 +157,13 @@ def test_settings_dialog_complete_workflow(mock_parent_gui):
 def test_device_selector_bug_fix():
     """Test that device selector properly handles enable/disable."""
     from enhanced_device_selector import EnhancedDeviceSelector
-    
+
     selector = EnhancedDeviceSelector(Mock())
-    
+
     # Test the bug fix - should not raise AttributeError
     selector.set_enabled(False)
     assert selector._scan_button.cget("state") == "disabled"
-    
+
     selector.set_enabled(True)
     assert selector._scan_button.cget("state") == "normal"
 ```
@@ -558,24 +558,24 @@ def test_large_file_processing(benchmark):
 def test_settings_dialog_responsiveness():
     """Test settings dialog responds quickly to changes."""
     dialog = create_test_settings_dialog()
-    
+
     start_time = time.time()
     # Simulate rapid setting changes
     for i in range(10):
         dialog.local_vars["ai_temperature_var"].set(i * 0.1)
     response_time = time.time() - start_time
-    
+
     assert response_time < 0.1  # Should respond in under 100ms
 
 @pytest.mark.performance
 def test_device_info_caching():
     """Test intelligent caching reduces device communication."""
     device = mock_device()
-    
+
     # First call should hit device
     info1 = device.get_device_info()
     assert device.communication_count == 1
-    
+
     # Second call within 30s should use cache
     info2 = device.get_device_info()
     assert device.communication_count == 1
@@ -585,11 +585,11 @@ def test_device_info_caching():
 def test_waveform_background_loading():
     """Test background waveform loading with cancellation."""
     mock_window = Mock()
-    
+
     # Start waveform loading
     mock_window.load_waveform_background("test1.wav")
     assert mock_window.waveform_loading_active
-    
+
     # Change selection should cancel previous loading
     mock_window.load_waveform_background("test2.wav")
     assert mock_window.previous_waveform_cancelled
@@ -657,7 +657,7 @@ pytest -m "not slow and not device"
 
 ### Common Issues
 
-1. **Import errors:** 
+1. **Import errors:**
    - Check virtual environment: `source .venv/bin/activate`
    - Install with dev dependencies: `pip install -e ".[dev]"`
    - Verify PYTHONPATH includes project root
@@ -667,12 +667,12 @@ pytest -m "not slow and not device"
    - Check that all required GUI variables are initialized
    - Verify encryption dependencies are available
 
-3. **Async timeouts:** 
+3. **Async timeouts:**
    - Increase timeout for device communication tests
    - Use `pytest-asyncio` for proper async test handling
    - Mock slow operations in unit tests
 
-4. **Mock conflicts:** 
+4. **Mock conflicts:**
    - Clear mocks between tests using `pytest.fixture(autouse=True)`
    - Use `mocker.resetall()` in teardown
    - Isolate tests with proper fixture scoping
@@ -700,7 +700,7 @@ pytest -m "not slow and not device"
 ### Test Development Workflow
 
 1. **Write failing test first** (Red)
-2. **Implement minimal code to pass** (Green) 
+2. **Implement minimal code to pass** (Green)
 3. **Refactor and improve** (Refactor)
 4. **Run full test suite** to ensure no regressions
 5. **Check coverage** and add tests for uncovered code

@@ -428,7 +428,7 @@ class AudioEnhancer:
 
             frames = []
             for i in range(0, len(audio_data) - frame_size, hop_size):
-                frame = audio_data[i: i + frame_size]
+                frame = audio_data[i : i + frame_size]
                 energy = np.sqrt(np.mean(frame**2))
                 frames.append((i, energy > threshold_linear))
 

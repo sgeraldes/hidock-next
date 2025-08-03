@@ -103,7 +103,9 @@ class DesktopDeviceAdapter(IDeviceInterface):
             )
             return []
 
-    async def connect(self, device_id: Optional[str] = None, auto_retry: bool = True, force_reset: bool = False) -> DeviceInfo:
+    async def connect(
+        self, device_id: Optional[str] = None, auto_retry: bool = True, force_reset: bool = False
+    ) -> DeviceInfo:
         """
         Connect to a HiDock device.
 
@@ -145,7 +147,7 @@ class DesktopDeviceAdapter(IDeviceInterface):
                     success, error_msg = self.jensen_device.connect(
                         target_interface_number=0, vid=vid, pid=pid, auto_retry=False, force_reset=True
                     )
-                
+
                 if not success:
                     raise ConnectionError(error_msg or "Connection failed")
 
@@ -646,29 +648,31 @@ class DesktopDeviceAdapter(IDeviceInterface):
         """Attempt to recover from communication errors by resetting device state and reconnecting."""
         try:
             logger.info("DesktopDeviceAdapter", "recover_from_error", "Attempting error recovery")
-            
+
             # First try to reset device state
             self.reset_device_state()
-            
+
             # If still connected, test the connection
             if self.is_connected():
                 if await self.test_connection():
-                    logger.info("DesktopDeviceAdapter", "recover_from_error", "Recovery successful - connection restored")
+                    logger.info(
+                        "DesktopDeviceAdapter", "recover_from_error", "Recovery successful - connection restored"
+                    )
                     return True
-            
+
             # If not connected or test failed, try to reconnect with force reset
             try:
                 await self.disconnect()
             except Exception:
                 pass  # Ignore disconnect errors during recovery
-            
+
             device_info = await self.connect(force_reset=True)
             if device_info:
                 logger.info("DesktopDeviceAdapter", "recover_from_error", "Recovery successful - reconnected")
                 return True
-            
+
             return False
-            
+
         except Exception as e:
             logger.error("DesktopDeviceAdapter", "recover_from_error", f"Recovery failed: {e}")
             return False

@@ -20,23 +20,23 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Color theme selection
   - Exit confirmation settings
   - Download directory selection and reset
-  
+
 - **Connection Tab**
   - Enhanced device selector integration
   - Autoconnect checkbox
   - USB interface configuration
   - Device selection when connected vs disconnected
-  
+
 - **Operation Tab**
   - Timing settings (recording check interval, timeouts)
   - Auto-refresh settings
   - Numeric validation for all fields
-  
+
 - **Device Specific Tab**
   - Device settings checkboxes (auto record, auto play, bluetooth tone, notification sound)
   - Enable/disable based on connection status
   - Loading device settings from connected device
-  
+
 - **AI Transcription Tab**
   - Provider selection (11 providers)
   - Model selection based on provider
@@ -45,7 +45,7 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Max tokens setting
   - Language selection
   - Provider-specific configuration frames
-  
+
 - **Logging Tab**
   - Log level selection
   - Console/GUI output suppression
@@ -57,12 +57,12 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Apply settings and close dialog
   - Validation before applying
   - Error handling for invalid settings
-  
+
 - **Apply Button**
   - Apply settings without closing
   - Update dialog baseline after apply
   - Button state changes after apply
-  
+
 - **Cancel/Close Button**
   - Close without applying changes
   - Reset local variables to initial state
@@ -74,7 +74,7 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Non-numeric values
   - Out-of-range values
   - Edge cases (min/max values)
-  
+
 - **API Key Validation**
   - Empty keys
   - Invalid keys
@@ -87,7 +87,7 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Model list updates based on provider
   - Provider-specific configuration frames
   - API key loading for each provider
-  
+
 - **Provider-Specific Frames**
   - OpenRouter configuration
   - Amazon Bedrock region selection
@@ -102,7 +102,7 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Enable device-specific checkboxes
   - Apply device settings changes
   - Handle device communication errors
-  
+
 - **Disconnected Device**
   - Disable device selection
   - Show informational messages
@@ -121,12 +121,12 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Initial state (only Close button visible)
   - Changed state (OK, Apply, Cancel buttons visible)
   - After Apply state (back to Close only)
-  
+
 - **Change Tracking**
   - Detect when settings change
   - Update button states accordingly
   - Handle multiple rapid changes
-  
+
 - **Window Management**
   - Fade-in animation
   - Window sizing and positioning
@@ -138,7 +138,7 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Color preview updates
   - Invalid color handling
   - Theme-based color application
-  
+
 - **Theme Integration**
   - Appearance mode changes
   - Color theme changes
@@ -156,7 +156,7 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Handle device selection events
   - Update VID/PID variables
   - Mark settings as changed
-  
+
 - **Device Scanning**
   - Initial scan on dialog open
   - Scan completion handling
@@ -181,12 +181,12 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Connection failures
   - Communication timeouts
   - Device not found
-  
+
 - **Configuration Errors**
   - Invalid configuration values
   - File I/O errors
   - JSON parsing errors
-  
+
 - **UI Errors**
   - Widget destruction during operations
   - Tkinter errors
@@ -198,7 +198,7 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Configuration updates
   - Theme application
   - Logger updates
-  
+
 - **Config System Integration**
   - Load initial configuration
   - Save configuration changes
@@ -209,7 +209,7 @@ This document outlines the comprehensive test plan for `settings_window.py` to a
   - Proper cleanup on close
   - Handle premature destruction
   - Memory leak prevention
-  
+
 - **Concurrent Operations**
   - Multiple background threads
   - Rapid UI changes

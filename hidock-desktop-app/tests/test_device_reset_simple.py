@@ -3,6 +3,7 @@
 
 import os
 import sys
+
 import pytest
 import usb.backend.libusb1
 
@@ -10,9 +11,9 @@ import usb.backend.libusb1
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from .test_ci_skip import device_test_ci_skip
-
 from hidock_device import HiDockJensen
+
+from .test_ci_skip import device_test_ci_skip
 
 
 def test_reset_with_connected_device():

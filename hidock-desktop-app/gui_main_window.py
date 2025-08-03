@@ -145,14 +145,12 @@ class HiDockToolGUI(
             os.path.join(os.path.expanduser("~"), ".hidock", "cache"),
             device_lock=self.device_lock,
         )
-        
+
         # Initialize offline mode manager
         from offline_mode_manager import OfflineModeManager
-        self.offline_mode_manager = OfflineModeManager(
-            self.file_operations_manager,
-            self.download_directory
-        )
-        
+
+        self.offline_mode_manager = OfflineModeManager(self.file_operations_manager, self.download_directory)
+
         self.audio_player = EnhancedAudioPlayer(self)
 
         self.available_usb_devices = []
@@ -244,7 +242,7 @@ class HiDockToolGUI(
         self.create_widgets()
         self._set_minimum_window_size()
         self.apply_theme_and_color()
-        
+
         # Show cached files immediately if available (offline mode)
         self.after(50, self._show_cached_files_on_startup)
         # Update menu states to show correct initial button states (orange Connect button when disconnected)
@@ -644,7 +642,7 @@ class HiDockToolGUI(
         self.bind_all("<Control-comma>", lambda e: self.open_settings_window())
         self.bind_all("<Control-s>", lambda e: self.stop_audio_playback_gui())
         self.bind_all("<space>", lambda e: self.pause_audio_playback_gui())
-        
+
         # Window geometry auto-save
         self.bind("<Configure>", self._on_window_configure)
         self._geometry_save_timer = None
@@ -1095,7 +1093,7 @@ class HiDockToolGUI(
             self.status_file_counts_label_header.configure(text=file_counts_text)
         if hasattr(self, "download_dir_button_header") and self.download_dir_button_header.winfo_exists():
             self.download_dir_button_header.configure(text=f"Dir: {os.path.basename(self.download_directory)}")
-        
+
         # Show/hide disconnected indicator
         is_connected = self.device_manager.device_interface.is_connected()
         if hasattr(self, "disconnected_indicator") and self.disconnected_indicator.winfo_exists():
@@ -1103,7 +1101,7 @@ class HiDockToolGUI(
                 self.disconnected_indicator.pack(side="left", padx=10, pady=2)
             else:
                 self.disconnected_indicator.pack_forget()
-        
+
         self.update_status_bar(connection_status=conn_status_text)
 
     def _update_menu_states(self):
@@ -1131,8 +1129,9 @@ class HiDockToolGUI(
                 None,
             )
             if file_detail:
-                is_audio_file = (file_detail["name"].lower().endswith(".wav") or 
-                               file_detail["name"].lower().endswith(".hda"))
+                is_audio_file = file_detail["name"].lower().endswith(".wav") or file_detail["name"].lower().endswith(
+                    ".hda"
+                )
                 if not is_connected:
                     # When not connected, can only play downloaded files
                     local_path = self._get_local_filepath(file_detail["name"])
@@ -1151,14 +1150,15 @@ class HiDockToolGUI(
             # Play available in both connected and offline modes (if file is downloaded)
             self.actions_menu.entryconfig("Play Selected", state="normal" if can_play_selected else "disabled")
             # Get Insights should work offline for downloaded files
-            can_get_insights = (has_selection and num_selected == 1 and 
-                              not self.is_long_operation_active and not self.is_audio_playing)
+            can_get_insights = (
+                has_selection and num_selected == 1 and not self.is_long_operation_active and not self.is_audio_playing
+            )
             if can_get_insights and not is_connected:
                 # When not connected, only allow insights for downloaded files
                 file_iid = self.file_tree.selection()[0]
                 local_path = self._get_local_filepath(file_iid)
                 can_get_insights = os.path.exists(local_path)
-            
+
             self.actions_menu.entryconfig(
                 "Get Insights",
                 state="normal" if can_get_insights else "disabled",
@@ -1254,9 +1254,7 @@ class HiDockToolGUI(
                         command=self.download_selected_files_gui,
                         state=(
                             "normal"
-                            if has_selection
-                            and not self.is_long_operation_active
-                            and not self.is_audio_playing
+                            if has_selection and not self.is_long_operation_active and not self.is_audio_playing
                             else "disabled"
                         ),
                         image=self.icons.get("download"),
@@ -1302,8 +1300,12 @@ class HiDockToolGUI(
                 )
             else:
                 # Insights require downloaded files, so check if file is playable (downloaded)
-                can_get_insights = (has_selection and num_selected == 1 and 
-                                  not self.is_long_operation_active and not self.is_audio_playing)
+                can_get_insights = (
+                    has_selection
+                    and num_selected == 1
+                    and not self.is_long_operation_active
+                    and not self.is_audio_playing
+                )
                 if can_get_insights and not is_connected:
                     # When not connected, only allow insights for downloaded files
                     file_iid = self.file_tree.selection()[0]
@@ -1312,7 +1314,7 @@ class HiDockToolGUI(
                 elif can_get_insights:
                     # When connected, allow insights for any selected file
                     can_get_insights = True
-                
+
                 self.toolbar_insights_button.configure(
                     text="Get Insights",
                     command=self.get_insights_selected_file_gui,
@@ -1334,9 +1336,7 @@ class HiDockToolGUI(
                         command=self.delete_selected_files_gui,
                         state=(
                             "normal"
-                            if has_selection
-                            and not self.is_long_operation_active
-                            and not self.is_audio_playing
+                            if has_selection and not self.is_long_operation_active and not self.is_audio_playing
                             else "disabled"
                         ),
                         image=self.icons.get("delete"),
@@ -1523,28 +1523,30 @@ class HiDockToolGUI(
                     "_show_cached_files_on_startup",
                     f"Showing {len(cached_files)} cached files on startup",
                 )
-                
+
                 # Convert cached files to GUI format
                 files_dict = self._convert_cached_files_to_gui_format(cached_files)
-                
+
                 # Sort and display
                 sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
                 self._populate_treeview_from_data(sorted_files)
-                
+
                 # Update status to show cached mode
-                downloaded_count = len([f for f in files_dict if f.get("local_path") and os.path.exists(f["local_path"])])
+                downloaded_count = len(
+                    [f for f in files_dict if f.get("local_path") and os.path.exists(f["local_path"])]
+                )
                 self.update_status_bar(
                     connection_status="Status: Disconnected",
                     progress_text=f"Showing {len(cached_files)} cached files ({downloaded_count} playable)",
                 )
-                
+
         except Exception as e:
             logger.warning(
                 "GUI",
                 "_show_cached_files_on_startup",
                 f"Error showing cached files: {e}",
             )
-    
+
     def _convert_cached_files_to_gui_format(self, cached_files):
         """Convert cached FileMetadata objects to GUI display format."""
         files_dict = []
@@ -1554,20 +1556,22 @@ class HiDockToolGUI(
                 gui_status = "Downloaded"
             else:
                 gui_status = "On Device"
-            
-            files_dict.append({
-                "name": f_info.filename,
-                "length": f_info.size,
-                "duration": f_info.duration,
-                "createDate": (f_info.date_created.strftime("%Y/%m/%d") if f_info.date_created else "---"),
-                "createTime": (f_info.date_created.strftime("%H:%M:%S") if f_info.date_created else "---"),
-                "time": f_info.date_created,
-                "version": "0",  # Version 0 for cached files when not connected
-                "original_index": i + 1,
-                "gui_status": gui_status,
-                "local_path": f_info.local_path,
-                "checksum": f_info.checksum,
-            })
+
+            files_dict.append(
+                {
+                    "name": f_info.filename,
+                    "length": f_info.size,
+                    "duration": f_info.duration,
+                    "createDate": (f_info.date_created.strftime("%Y/%m/%d") if f_info.date_created else "---"),
+                    "createTime": (f_info.date_created.strftime("%H:%M:%S") if f_info.date_created else "---"),
+                    "time": f_info.date_created,
+                    "version": "0",  # Version 0 for cached files when not connected
+                    "original_index": i + 1,
+                    "gui_status": gui_status,
+                    "local_path": f_info.local_path,
+                    "checksum": f_info.checksum,
+                }
+            )
         return files_dict
 
     def apply_appearance_mode_theme_color(self, color_tuple_or_str):
@@ -1620,14 +1624,10 @@ class HiDockToolGUI(
         files_header_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 2))
         self.status_storage_label_header = ctk.CTkLabel(files_header_frame, text="Storage: ---", anchor="w")
         self.status_storage_label_header.pack(side="left", padx=10, pady=2)
-        
+
         # Add disconnected indicator
         self.disconnected_indicator = ctk.CTkLabel(
-            files_header_frame, 
-            text="🔌 DISCONNECTED", 
-            anchor="w",
-            text_color="orange",
-            font=("Arial", 12, "bold")
+            files_header_frame, text="🔌 DISCONNECTED", anchor="w", text_color="orange", font=("Arial", 12, "bold")
         )
         # Initially hidden, will be shown when disconnected
         # self.disconnected_indicator.pack(side="left", padx=10, pady=2)
@@ -1702,8 +1702,9 @@ class HiDockToolGUI(
 
         # Auto-save selection mode preference
         from config_and_logger import update_config_settings
+
         update_config_settings({"single_selection_mode": new_mode})
-        
+
         # Update menu states
         self._update_menu_states()
 
@@ -1818,6 +1819,7 @@ class HiDockToolGUI(
         # Update config variable and save efficiently
         self.visualizer_pinned_var.set(self.visualizer_pinned)
         from config_and_logger import update_config_settings
+
         update_config_settings({"visualizer_pinned": self.visualizer_pinned})
 
         # Update pin button appearance
@@ -2897,10 +2899,10 @@ You can dismiss this warning and continue using the application with limited aud
                 self._download_for_playback_and_play(filename, local_filepath)
             else:
                 messagebox.showinfo(
-                    "File Not Available", 
+                    "File Not Available",
                     f"'{filename}' is not downloaded and device is disconnected.\n\n"
                     "Please connect the device to download the file, or select a downloaded file.",
-                    parent=self
+                    parent=self,
                 )
 
     def on_closing(self):
@@ -2959,11 +2961,16 @@ You can dismiss this warning and continue using the application with limited aud
         # Only save session-specific settings on shutdown
         # User preferences should already be saved when changed
         from config_and_logger import update_config_settings
-        update_config_settings({
-            "treeview_columns_display_order": ",".join(self.file_tree["displaycolumns"]) if hasattr(self, "file_tree") and self.file_tree.winfo_exists() else self.config.get("treeview_columns_display_order", "name,size,duration,date,time,status"),
-            "treeview_sort_col_id": self.treeview_sort_column or self.saved_treeview_sort_column,
-            "treeview_sort_descending": self.treeview_sort_reverse
-        })
+
+        update_config_settings(
+            {
+                "treeview_columns_display_order": ",".join(self.file_tree["displaycolumns"])
+                if hasattr(self, "file_tree") and self.file_tree.winfo_exists()
+                else self.config.get("treeview_columns_display_order", "name,size,duration,date,time,status"),
+                "treeview_sort_col_id": self.treeview_sort_column or self.saved_treeview_sort_column,
+                "treeview_sort_descending": self.treeview_sort_reverse,
+            }
+        )
         if self.device_manager.device_interface.is_connected():
             self.device_manager.device_interface.disconnect()
         if self.current_playing_temp_file and os.path.exists(self.current_playing_temp_file):
@@ -2978,17 +2985,18 @@ You can dismiss this warning and continue using the application with limited aud
         self.destroy()
         logger.info("GUI", "on_closing", "Application shutdown complete.")
         sys.exit(0)
-    
+
     def _on_window_configure(self, event):
         """Handle window resize/move events with debouncing."""
         if event.widget == self:  # Only for main window
             if self._geometry_save_timer:
                 self.after_cancel(self._geometry_save_timer)
             self._geometry_save_timer = self.after(1000, self._save_window_geometry)
-    
+
     def _save_window_geometry(self):
         """Save current window geometry."""
         from config_and_logger import update_config_settings
+
         update_config_settings({"window_geometry": self.geometry()})
 
     def _process_selected_audio(self, file_iid):

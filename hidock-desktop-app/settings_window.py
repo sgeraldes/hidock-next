@@ -8,15 +8,15 @@ changes to general application preferences, connection parameters,
 operation timeouts, device-specific behaviors, and logging options.
 """
 
+import asyncio
 import base64
 
 # import json  # Future: for advanced configuration import/export
 import os
 import threading  # For device settings apply thread
 import tkinter
-from tkinter import filedialog, messagebox
-import asyncio
 from pathlib import Path
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 import usb.core  # For specific exception handling
@@ -223,7 +223,7 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._reset_to_defaults,
         )
         self.reset_button.pack(side="left", padx=(0, 10))
-        
+
         self.close_button = ctk.CTkButton(
             action_buttons_subframe,
             text="Close",
@@ -738,12 +738,12 @@ class SettingsDialog(ctk.CTkToplevel):
     def _setup_key_bindings(self):
         """Setup key bindings after widgets are created."""
         try:
-            if hasattr(self, 'close_button') and self.close_button.winfo_exists():
+            if hasattr(self, "close_button") and self.close_button.winfo_exists():
                 self.bind("<Return>", lambda event: self.close_button.invoke())
                 self.bind("<Escape>", lambda event: self.close_button.invoke())
         except Exception as e:
             logger.debug("SettingsDialog", "_setup_key_bindings", f"Key binding setup: {e}")
-    
+
     def _finalize_initialization_and_button_states(self):
         """
         Finalizes the dialog initialization and sets the initial button states.
@@ -1219,15 +1219,15 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Save only the changed settings instead of entire config
         from config_and_logger import update_config_settings
-        
+
         # Build dictionary of only the settings that changed
         settings_to_save = {}
-        
+
         # Add all the settings that were modified
         for var_name, local_tk_var in self.local_vars.items():
             if hasattr(self.parent_gui, var_name):
                 config_key = var_name.replace("_var", "")
-                
+
                 # Special mappings for config keys
                 if config_key == "logger_processing_level":
                     config_key = "log_level"
@@ -1235,19 +1235,23 @@ class SettingsDialog(ctk.CTkToplevel):
                     config_key = "quit_without_prompt_if_connected"
                 elif config_key == "recording_check_interval":
                     config_key = "recording_check_interval_s"
-                
+
                 # Skip device settings and log colors (handled separately)
                 if not (config_key.startswith("log_color_") or config_key.startswith("device_setting_")):
                     value = local_tk_var.get()
                     # Convert string values back to integers for numeric variables
                     if var_name in [
-                        "selected_vid_var", "selected_pid_var", "target_interface_var",
-                        "recording_check_interval_var", "default_command_timeout_ms_var",
-                        "file_stream_timeout_s_var", "auto_refresh_interval_s_var"
+                        "selected_vid_var",
+                        "selected_pid_var",
+                        "target_interface_var",
+                        "recording_check_interval_var",
+                        "default_command_timeout_ms_var",
+                        "file_stream_timeout_s_var",
+                        "auto_refresh_interval_s_var",
                     ]:
                         value = int(value.strip())
                     settings_to_save[config_key] = value
-        
+
         # Add log colors
         log_colors = {}
         for level_key in Logger.LEVELS:
@@ -1261,11 +1265,11 @@ class SettingsDialog(ctk.CTkToplevel):
                 ]
         if log_colors:
             settings_to_save["log_colors"] = log_colors
-        
+
         # Add download directory if changed
         if old_download_directory != self.parent_gui.download_directory:
             settings_to_save["download_directory"] = self.parent_gui.download_directory
-        
+
         # Add AI API key if present
         if hasattr(self, "api_key_entry"):
             api_key = self.api_key_entry.get().strip()
@@ -1276,7 +1280,7 @@ class SettingsDialog(ctk.CTkToplevel):
             elif f"ai_api_key_{provider}_encrypted" in self.parent_gui.config:
                 # Remove key if empty - need to handle this separately
                 del self.parent_gui.config[f"ai_api_key_{provider}_encrypted"]
-        
+
         # Save only the changed settings
         update_config_settings(settings_to_save)
         logger.info("SettingsDialog", "apply_settings", "Settings applied and saved.")
@@ -1711,102 +1715,104 @@ class SettingsDialog(ctk.CTkToplevel):
                 "_initial_enhanced_scan_thread",
                 f"Error in initial scan: {e}",
             )
-    
+
     def _on_appearance_change(self, value):
         """Handle appearance mode change with immediate save and apply."""
         from config_and_logger import update_config_settings
+
         update_config_settings({"appearance_mode": value})
         self.parent_gui.appearance_mode_var.set(value)
         self.parent_gui.apply_theme_and_color()
-    
+
     def _on_theme_change(self, value):
         """Handle color theme change with immediate save and apply."""
         from config_and_logger import update_config_settings
+
         update_config_settings({"color_theme": value})
         self.parent_gui.color_theme_var.set(value)
         self.parent_gui.apply_theme_and_color()
-    
+
     def _reset_to_defaults(self):
         """Reset all settings to default values."""
         if not messagebox.askyesno(
             "Reset to Defaults",
             "This will reset ALL settings to their default values.\n\nThis action cannot be undone. Continue?",
-            parent=self
+            parent=self,
         ):
             return
-        
+
         try:
             from config_and_logger import DEFAULT_CONFIG, update_config_settings
-            
+
             # Save default config (this wipes existing config)
             update_config_settings(DEFAULT_CONFIG.copy())
-            
+
             # Update parent GUI with defaults
             self.parent_gui.config = DEFAULT_CONFIG.copy()
-            
+
             # Reload parent GUI variables from defaults
             self.parent_gui._initialize_vars_from_config()
-            
+
             # Apply theme changes
             self.parent_gui.apply_theme_and_color()
-            
+
             messagebox.showinfo(
                 "Reset Complete",
                 "All settings have been reset to defaults.\n\nPlease restart the application for all changes to take effect.",
-                parent=self
+                parent=self,
             )
-            
+
             # Close settings dialog
             self.destroy()
-            
+
         except Exception as e:
             logger.error("SettingsDialog", "_reset_to_defaults", f"Error resetting to defaults: {e}")
-            messagebox.showerror(
-                "Reset Failed",
-                f"Failed to reset settings: {e}",
-                parent=self
-            )
-    
+            messagebox.showerror("Reset Failed", f"Failed to reset settings: {e}", parent=self)
+
     def _on_setting_change(self, var_name=None, index=None, mode=None):
         """Handle any setting change with immediate save."""
         if self._settings_dialog_initializing:
             return
-        
+
         # Auto-save the changed setting immediately
         self._auto_save_settings()
-    
+
     def _auto_save_settings(self):
         """Auto-save all current settings immediately."""
         try:
             from config_and_logger import update_config_settings
-            
+
             settings_to_save = {}
-            
+
             # Check if local_vars exists and is populated
-            if not hasattr(self, 'local_vars') or not self.local_vars:
+            if not hasattr(self, "local_vars") or not self.local_vars:
                 logger.debug("SettingsDialog", "_auto_save_settings", "No local vars to save")
                 return
-            
+
             # Save all current settings
             for var_name, local_tk_var in self.local_vars.items():
                 if hasattr(self.parent_gui, var_name):
                     parent_var = getattr(self.parent_gui, var_name)
-                    
+
                     value = local_tk_var.get()
                     # Convert string values back to integers for numeric variables
                     if var_name in [
-                        "selected_vid_var", "selected_pid_var", "target_interface_var",
-                        "recording_check_interval_var", "default_command_timeout_ms_var",
-                        "file_stream_timeout_s_var", "auto_refresh_interval_s_var"
+                        "selected_vid_var",
+                        "selected_pid_var",
+                        "target_interface_var",
+                        "recording_check_interval_var",
+                        "default_command_timeout_ms_var",
+                        "file_stream_timeout_s_var",
+                        "auto_refresh_interval_s_var",
                     ]:
                         try:
                             value = int(str(value).strip())
                         except (ValueError, AttributeError):
                             continue  # Skip invalid values
-                    
+
                     # Update parent variable
                     parent_var.set(value)
-                    
+
                     # Map to config key
                     config_key = var_name.replace("_var", "")
                     if config_key == "logger_processing_level":
@@ -1815,11 +1821,11 @@ class SettingsDialog(ctk.CTkToplevel):
                         config_key = "quit_without_prompt_if_connected"
                     elif config_key == "recording_check_interval":
                         config_key = "recording_check_interval_s"
-                    
+
                     # Skip device settings and log colors (handled separately)
                     if not (config_key.startswith("log_color_") or config_key.startswith("device_setting_")):
                         settings_to_save[config_key] = value
-            
+
             # Handle log colors
             log_colors = {}
             for level_key in Logger.LEVELS:
@@ -1833,19 +1839,19 @@ class SettingsDialog(ctk.CTkToplevel):
                     ]
             if log_colors:
                 settings_to_save["log_colors"] = log_colors
-            
+
             # Handle download directory
             if self.current_dialog_download_dir[0] != self.parent_gui.download_directory:
                 self.parent_gui.download_directory = self.current_dialog_download_dir[0]
                 settings_to_save["download_directory"] = self.current_dialog_download_dir[0]
-            
+
             # Save settings
             if settings_to_save:
                 update_config_settings(settings_to_save)
-                
+
                 # Apply changes to parent GUI
                 self.parent_gui.apply_theme_and_color()
                 logger.set_level(self.parent_gui.logger_processing_level_var.get())
-                
+
         except Exception as e:
             logger.error("SettingsDialog", "_auto_save_settings", f"Error auto-saving settings: {e}")

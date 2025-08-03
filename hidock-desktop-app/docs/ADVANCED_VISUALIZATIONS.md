@@ -30,7 +30,7 @@ Beyond basic loudness visualization, transcribed audio files can display rich an
 ```python
 SENTIMENT_COLORS = {
     "positive": "#4CAF50",      # Green
-    "neutral": "#9E9E9E",       # Gray  
+    "neutral": "#9E9E9E",       # Gray
     "negative": "#F44336",      # Red
     "excited": "#FF9800",       # Orange
     "calm": "#2196F3",          # Blue
@@ -54,7 +54,7 @@ def calculate_sentiment_bar(sentiment_data):
     base_height = sentiment_data["intensity"] * 40  # Max 40px
     opacity = sentiment_data["confidence"]  # 0.0 to 1.0
     color = SENTIMENT_COLORS[sentiment_data["emotion"]]
-    
+
     return {
         "height": base_height,
         "color": color,
@@ -95,7 +95,7 @@ Transcript: "I'm really excited about this project..."
 ```python
 SPEAKER_COLORS = [
     "#4CAF50",  # Green - Speaker A
-    "#2196F3",  # Blue - Speaker B  
+    "#2196F3",  # Blue - Speaker B
     "#FF9800",  # Orange - Speaker C
     "#9C27B0",  # Purple - Speaker D
     "#00BCD4",  # Cyan - Speaker E
@@ -164,7 +164,7 @@ CONFIDENCE_LEVELS = {
 ```python
 TOPIC_COLORS = {
     "business": "#1976D2",
-    "finance": "#388E3C", 
+    "finance": "#388E3C",
     "technology": "#7B1FA2",
     "strategy": "#F57C00",
     "analytics": "#5D4037",
@@ -174,7 +174,7 @@ TOPIC_COLORS = {
 TOPIC_ICONS = {
     "business": "🏢",
     "finance": "💰",
-    "technology": "💻", 
+    "technology": "💻",
     "strategy": "🎯",
     "analytics": "📊",
     "personal": "👤"
@@ -291,7 +291,7 @@ ACTION_PATTERNS = {
     },
     "followup": {
         "patterns": [r"\b(follow up|check back|revisit)\b", r"\b(next week|later)\b"],
-        "symbol": "📋", 
+        "symbol": "📋",
         "color": "#2196F3"
     }
 }
@@ -323,7 +323,7 @@ VISUALIZATION_MODES = {
 **Dropdown for "More"**:
 
 - 🏷️ Topics
-- ⚡ Energy  
+- ⚡ Energy
 - ❓ Q&A
 - ✅ Actions
 
@@ -344,13 +344,13 @@ class VisualizationData:
     energy_level: str
     question_type: Optional[str]
     action_items: List[ActionItem]
-    
-@dataclass 
+
+@dataclass
 class SentimentData:
     emotion: str
     confidence: float
     intensity: float
-    
+
 @dataclass
 class ActionItem:
     type: str  # "decision", "action", "followup"
@@ -366,7 +366,7 @@ def generate_visualization_data(transcription_result):
     Convert AI transcription results into visualization data
     """
     segments = []
-    
+
     for segment in transcription_result.segments:
         viz_data = VisualizationData(
             timestamp=segment.start,
@@ -381,7 +381,7 @@ def generate_visualization_data(transcription_result):
             action_items=extract_actions(segment.text)
         )
         segments.append(viz_data)
-    
+
     return segments
 ```
 
@@ -394,7 +394,7 @@ def generate_visualization_data(transcription_result):
 - **Q&A**: Identify unresolved questions
 - **Actions**: Extract next steps automatically
 
-### Interview Analysis  
+### Interview Analysis
 
 - **Energy**: Find most engaging moments
 - **Topics**: See subject coverage

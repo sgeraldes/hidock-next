@@ -22,7 +22,7 @@ class OfflineModeManager:
         self.file_operations_manager = file_operations_manager
         self.download_directory = download_directory
         self.is_offline_mode = False
-        
+
         logger.info("OfflineMode", "__init__", "Offline mode manager initialized")
 
     def enter_offline_mode(self):
@@ -49,11 +49,11 @@ class OfflineModeManager:
         """Get only files that have been downloaded and are available locally."""
         cached_files = self.get_cached_file_list()
         downloaded_files = []
-        
+
         for file_metadata in cached_files:
             if file_metadata.local_path and os.path.exists(file_metadata.local_path):
                 downloaded_files.append(file_metadata)
-        
+
         logger.info("OfflineMode", "get_downloaded_files_only", f"Found {len(downloaded_files)} downloaded files")
         return downloaded_files
 
@@ -75,7 +75,7 @@ class OfflineModeManager:
         """Update file status indicators for offline mode display."""
         for file_dict in files_dict:
             filename = file_dict["name"]
-            
+
             # Check if file is available locally
             if self.is_file_playable_offline(filename):
                 file_dict["gui_status"] = "Downloaded"
@@ -83,32 +83,33 @@ class OfflineModeManager:
             else:
                 file_dict["gui_status"] = "On Device (Offline)"
                 file_dict["offline_available"] = False
-                
+
         return files_dict
 
     def get_offline_statistics(self) -> dict:
         """Get statistics about offline availability."""
         cached_files = self.get_cached_file_list()
         downloaded_files = self.get_downloaded_files_only()
-        
+
         total_cached_size = sum(f.size for f in cached_files)
         downloaded_size = sum(f.size for f in downloaded_files)
-        
+
         stats = {
             "total_cached_files": len(cached_files),
             "downloaded_files": len(downloaded_files),
             "offline_availability_percent": (len(downloaded_files) / len(cached_files) * 100) if cached_files else 0,
             "total_cached_size_mb": total_cached_size / (1024 * 1024),
             "downloaded_size_mb": downloaded_size / (1024 * 1024),
-            "last_cache_update": self._get_last_cache_update()
+            "last_cache_update": self._get_last_cache_update(),
         }
-        
+
         return stats
 
     def _get_last_cache_update(self) -> Optional[datetime]:
         """Get the timestamp of the last cache update."""
         try:
             import sqlite3
+
             with sqlite3.connect(self.file_operations_manager.metadata_cache.db_path) as conn:
                 cursor = conn.execute("SELECT MAX(cache_timestamp) FROM file_metadata")
                 result = cursor.fetchone()

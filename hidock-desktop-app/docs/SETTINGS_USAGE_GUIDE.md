@@ -125,13 +125,13 @@ def on_column_click(self, column_id):
     else:
         self.current_sort_column = column_id
         self.sort_reverse = False
-    
+
     # Save sorting preferences
     update_config_settings({
         'treeview_sort_col_id': self.current_sort_column,
         'treeview_sort_descending': self.sort_reverse
     })
-    
+
     # Apply sorting to treeview
     self.apply_sort_to_treeview()
 ```

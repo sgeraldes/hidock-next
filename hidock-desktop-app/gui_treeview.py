@@ -375,13 +375,11 @@ class TreeViewMixin:
         # Save sort state for persistence
         self.saved_treeview_sort_column = col
         self.saved_treeview_sort_reverse = self.treeview_sort_reverse
-        
+
         # Auto-save sort preferences
         from config_and_logger import update_config_settings
-        update_config_settings({
-            "treeview_sort_col_id": col,
-            "treeview_sort_descending": self.treeview_sort_reverse
-        })
+
+        update_config_settings({"treeview_sort_col_id": col, "treeview_sort_descending": self.treeview_sort_reverse})
 
         # Restore selection and scroll position
         if selected_iids:

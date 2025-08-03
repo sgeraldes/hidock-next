@@ -40,7 +40,7 @@ Created `test_ci_skip.py` module that:
 def is_ci_environment():
     """Check if running in CI environment"""
     ci_indicators = [
-        'CI', 'GITHUB_ACTIONS', 'TRAVIS', 'JENKINS_URL', 
+        'CI', 'GITHUB_ACTIONS', 'TRAVIS', 'JENKINS_URL',
         'BUILDKITE', 'CIRCLECI', 'GITLAB_CI', 'APPVEYOR', 'TF_BUILD'
     ]
     return any(os.getenv(indicator) for indicator in ci_indicators)
@@ -56,7 +56,7 @@ def test_device_function():
 All device tests now have the `@device_test_ci_skip` decorator:
 
 - ✅ `test_connection_recovery_integration.py` - Both test functions
-- ✅ `test_device_reset.py` - Both pytest test functions  
+- ✅ `test_device_reset.py` - Both pytest test functions
 - ✅ `test_device_reset_simple.py` - Device test function
 
 ### CI Behavior

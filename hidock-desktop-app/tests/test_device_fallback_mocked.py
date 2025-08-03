@@ -153,7 +153,9 @@ class TestDeviceFallbackMocked:
         assert result.name == "HiDock hidock-p1"
         assert result.serial_number == "P1123456"
         assert result.connected is True
-        mock_jensen.connect.assert_called_once_with(target_interface_number=0, vid=0x10D6, pid=0xAF0E, auto_retry=True, force_reset=False)
+        mock_jensen.connect.assert_called_once_with(
+            target_interface_number=0, vid=0x10D6, pid=0xAF0E, auto_retry=True, force_reset=False
+        )
 
     @pytest.mark.unit
     async def test_connect_configured_device_failure(self, mock_adapter):
@@ -202,7 +204,9 @@ class TestDeviceFallbackMocked:
 
         await adapter.connect(device_id="10d6:af0c", auto_retry=False)
 
-        mock_jensen.connect.assert_called_once_with(target_interface_number=0, vid=0x10D6, pid=0xAF0C, auto_retry=False, force_reset=False)
+        mock_jensen.connect.assert_called_once_with(
+            target_interface_number=0, vid=0x10D6, pid=0xAF0C, auto_retry=False, force_reset=False
+        )
 
     @pytest.mark.unit
     async def test_connect_invalid_device_id_format(self, mock_adapter):

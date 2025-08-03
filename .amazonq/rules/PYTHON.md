@@ -76,12 +76,12 @@ You must follow this exact sequence for every task. This workflow is designed to
     # 1. Format code to ensure consistency
     python -m black .
     isort .
-    
+
     # 2. Run all linters and type checks for code quality
     python -m flake8 .
     python -m pylint .
     mypy .
-    
+
     # 3. Run all tests to confirm nothing has broken
     python -m pytest
     ```

@@ -230,7 +230,6 @@ class TestSettingsPersistence:
         with patch("config_and_logger.open", mock_open()) as mock_file, patch(
             "config_and_logger.json.dump"
         ) as mock_json_dump, patch("config_and_logger.logger") as mock_logger:
-
             config_and_logger.save_config(self.test_config)
 
             # Should open file for writing
@@ -256,10 +255,7 @@ class TestSettingsPersistence:
         sort_config = {"treeview_sort_col_id": "name", "treeview_sort_descending": True}
 
         # Test saving
-        with patch("config_and_logger.open", mock_open()), patch(
-            "config_and_logger.json.dump"
-        ) as mock_json_dump:
-
+        with patch("config_and_logger.open", mock_open()), patch("config_and_logger.json.dump") as mock_json_dump:
             config_and_logger.save_config(sort_config)
 
             # Verify sorting settings are included
@@ -335,10 +331,9 @@ class TestSettingsPersistence:
         # Test with corrupted JSON
         corrupted_json = '{"autoconnect": true, "invalid": }'
 
-        with patch(
-            "config_and_logger.open", mock_open(read_data=corrupted_json)
-        ), patch("builtins.print") as mock_print:
-
+        with patch("config_and_logger.open", mock_open(read_data=corrupted_json)), patch(
+            "builtins.print"
+        ) as mock_print:
             loaded_config = config_and_logger.load_config()
 
             # Should fall back to defaults
@@ -353,10 +348,7 @@ class TestSettingsPersistence:
     @pytest.mark.unit
     def test_missing_config_file_handling(self):
         """Test handling when config file doesn't exist."""
-        with patch(
-            "config_and_logger.open", side_effect=FileNotFoundError
-        ), patch("builtins.print") as mock_print:
-
+        with patch("config_and_logger.open", side_effect=FileNotFoundError), patch("builtins.print") as mock_print:
             loaded_config = config_and_logger.load_config()
 
             # Should return defaults

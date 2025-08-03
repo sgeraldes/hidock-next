@@ -142,48 +142,36 @@ class DeviceActionsMixin:
             device_info = None
             connection_attempts = 0
             max_attempts = 2  # Try normal connection, then with reset if needed
-            
+
             with self.device_lock:
                 vid, pid = (
                     self.selected_vid_var.get(),
                     self.selected_pid_var.get(),
                 )
                 device_id = f"{vid:04x}:{pid:04x}"
-                
+
                 # First attempt: normal connection
                 try:
                     device_info = asyncio.run(self.device_manager.device_interface.connect(device_id=device_id))
                     connection_attempts += 1
                 except Exception as first_error:
                     connection_attempts += 1
-                    logger.warning(
-                        "GUI",
-                        "_connect_device_thread",
-                        f"First connection attempt failed: {first_error}"
-                    )
-                    
+                    logger.warning("GUI", "_connect_device_thread", f"First connection attempt failed: {first_error}")
+
                     # If first attempt failed with timeout or health check issues, try with device reset
                     error_str = str(first_error).lower()
                     if ("timeout" in error_str or "health check" in error_str) and connection_attempts < max_attempts:
-                        logger.info(
-                            "GUI",
-                            "_connect_device_thread",
-                            "Retrying connection with device reset"
-                        )
+                        logger.info("GUI", "_connect_device_thread", "Retrying connection with device reset")
                         try:
                             # Try connection with force reset
                             device_info = asyncio.run(
-                                self.device_manager.device_interface.connect(
-                                    device_id=device_id, force_reset=True
-                                )
+                                self.device_manager.device_interface.connect(device_id=device_id, force_reset=True)
                             )
                             connection_attempts += 1
                         except Exception as second_error:
                             connection_attempts += 1
                             logger.error(
-                                "GUI",
-                                "_connect_device_thread",
-                                f"Connection with reset also failed: {second_error}"
+                                "GUI", "_connect_device_thread", f"Connection with reset also failed: {second_error}"
                             )
                             # Re-raise the second error as it's the final attempt
                             raise second_error
@@ -192,7 +180,6 @@ class DeviceActionsMixin:
                         raise first_error
 
             if self.device_manager.device_interface.is_connected() and device_info:
-                
                 # Build the status text from the info we just got.
                 conn_status_text = f"Status: Connected ({device_info.model.value or 'HiDock'})"
                 if device_info.serial_number != "N/A":
@@ -300,7 +287,7 @@ class DeviceActionsMixin:
                 recovery_message = user_message
                 if connection_attempts > 1:
                     recovery_message += "\n\nNote: Automatic device reset was attempted but failed."
-                
+
                 self.after(
                     0,
                     lambda: messagebox.showerror(
@@ -320,7 +307,7 @@ class DeviceActionsMixin:
         finally:
             if self.winfo_exists():
                 self.after(0, self._update_menu_states)
-    
+
     def _show_cached_files_after_disconnect(self):
         """Show cached files when not connected."""
         try:
@@ -329,8 +316,10 @@ class DeviceActionsMixin:
                 files_dict = self._convert_cached_files_to_gui_format(cached_files)
                 sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
                 self._populate_treeview_from_data(sorted_files)
-                
-                downloaded_count = len([f for f in files_dict if f.get("local_path") and os.path.exists(f["local_path"])])
+
+                downloaded_count = len(
+                    [f for f in files_dict if f.get("local_path") and os.path.exists(f["local_path"])]
+                )
                 self.update_status_bar(
                     connection_status="Status: Disconnected",
                     progress_text=f"Showing {len(cached_files)} cached files ({downloaded_count} playable)",
@@ -377,16 +366,16 @@ class DeviceActionsMixin:
             if self.device_manager.device_interface.is_connected():
                 # Reset device state before disconnecting to ensure clean state
                 try:
-                    if hasattr(self.device_manager.device_interface, 'reset_device_state'):
+                    if hasattr(self.device_manager.device_interface, "reset_device_state"):
                         self.device_manager.device_interface.reset_device_state()
                 except Exception as e:
                     logger.warning("GUI", "disconnect_device", f"Device reset warning: {e}")
-                
+
                 asyncio.run(self.device_manager.device_interface.disconnect())
-        
+
         # Show cached files after disconnect
         self._show_cached_files_after_disconnect()
-        
+
         self.stop_auto_file_refresh_periodic_check()
         self.stop_recording_status_check()
         self.update_all_status_info()

@@ -96,6 +96,7 @@ class EventHandlersMixin:
 
             self.config["download_directory"] = new_dir
             from config_and_logger import update_config_settings
+
             update_config_settings({"download_directory": new_dir})
             if hasattr(self, "download_dir_button_header") and self.download_dir_button_header.winfo_exists():
                 self.download_dir_button_header.configure(text=f"Dir: {os.path.basename(self.download_directory)}")
@@ -221,7 +222,7 @@ class EventHandlersMixin:
                             return
                     start_range_idx = min(anchor_index, current_motion_index)
                     end_range_idx = max(anchor_index, current_motion_index)
-                    items_in_current_drag_sweep = all_children[start_range_idx: end_range_idx + 1]
+                    items_in_current_drag_sweep = all_children[start_range_idx : end_range_idx + 1]
                     if self._drag_action_is_deselect:
                         logger.debug(
                             "GUI",
@@ -304,9 +305,10 @@ class EventHandlersMixin:
         """
         # self.logs_visible = self.logs_visible_var.get() # This line was redundant in original
         self._update_optional_panes_visibility()
-        
+
         # Save logs panel visibility preference
         from config_and_logger import update_config_settings
+
         update_config_settings({"logs_pane_visible": self.logs_visible_var.get()})
 
     def _on_file_double_click(self, event):  # Identical to original

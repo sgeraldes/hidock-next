@@ -150,11 +150,7 @@ with patch.dict(
 ):
     # Import after mocking
     import audio_visualization
-    from audio_visualization import (
-        AudioVisualizationWidget,
-        SpectrumAnalyzer,
-        WaveformVisualizer,
-    )
+    from audio_visualization import AudioVisualizationWidget, SpectrumAnalyzer, WaveformVisualizer
 
 
 # Mock PlaybackPosition dataclass
@@ -177,7 +173,6 @@ class TestWaveformVisualizer(unittest.TestCase):
         ) as mock_canvas, patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
             WaveformVisualizer, "_initialize_plot"
         ):
-
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
@@ -201,7 +196,6 @@ class TestWaveformVisualizer(unittest.TestCase):
         with patch("audio_visualization.Figure") as mock_figure, patch(
             "audio_visualization.FigureCanvasTkAgg"
         ) as mock_canvas, patch.object(WaveformVisualizer, "_initialize_plot"):
-
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
@@ -227,7 +221,6 @@ class TestWaveformVisualizer(unittest.TestCase):
         with patch("audio_visualization.Figure") as mock_figure, patch(
             "audio_visualization.FigureCanvasTkAgg"
         ) as mock_canvas, patch.object(WaveformVisualizer, "_setup_styling"):
-
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
@@ -256,7 +249,6 @@ class TestWaveformVisualizer(unittest.TestCase):
         ) as mock_canvas, patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
             WaveformVisualizer, "_initialize_plot"
         ):
-
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
@@ -288,7 +280,6 @@ class TestWaveformVisualizer(unittest.TestCase):
         ) as mock_canvas, patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
             WaveformVisualizer, "_initialize_plot"
         ):
-
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
@@ -366,7 +357,6 @@ class TestWaveformVisualizer(unittest.TestCase):
         ), patch(
             "audio_visualization.logger"
         ) as mock_logger:
-
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
@@ -450,7 +440,6 @@ class TestWaveformVisualizer(unittest.TestCase):
         ), patch.object(
             WaveformVisualizer, "_add_position_indicator"
         ):
-
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
@@ -548,7 +537,6 @@ class TestSpectrumAnalyzer(unittest.TestCase):
         ) as mock_canvas, patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(
             SpectrumAnalyzer, "_initialize_plot"
         ):
-
             # Setup mock figure and canvas
             mock_fig = Mock()
             mock_ax = Mock()
@@ -725,7 +713,6 @@ class TestAudioVisualizationWidget(unittest.TestCase):
         with patch.object(AudioVisualizationWidget, "_create_speed_controls"), patch.object(
             AudioVisualizationWidget, "_update_tab_state"
         ), patch("os.path.exists", return_value=True), patch("PIL.Image.open") as mock_image_open:
-
             mock_image = Mock()
             mock_image_open.return_value = mock_image
 
@@ -933,7 +920,6 @@ class TestWaveformVisualizerErrorHandling(unittest.TestCase):
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(WaveformVisualizer, "_initialize_plot"):
-
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.waveform_data = None
 
@@ -949,7 +935,6 @@ class TestWaveformVisualizerErrorHandling(unittest.TestCase):
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(WaveformVisualizer, "_initialize_plot"):
-
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
             visualizer.sample_rate = 44100
@@ -982,7 +967,6 @@ class TestWaveformVisualizerErrorHandling(unittest.TestCase):
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(WaveformVisualizer, "_initialize_plot"):
-
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
             visualizer.sample_rate = 44100
@@ -1019,7 +1003,6 @@ class TestWaveformVisualizerErrorHandling(unittest.TestCase):
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(WaveformVisualizer, "_initialize_plot"):
-
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
             visualizer.sample_rate = 44100
@@ -1048,7 +1031,6 @@ class TestWaveformVisualizerErrorHandling(unittest.TestCase):
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(WaveformVisualizer, "_initialize_plot"):
-
             visualizer = WaveformVisualizer(mock_parent)
             visualizer.waveform_data = np.array([0.1, 0.2, 0.3, 0.4, 0.5])
             visualizer.sample_rate = 44100
@@ -1131,7 +1113,6 @@ class TestWaveformVisualizerAdditionalCoverage:
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(WaveformVisualizer, "_initialize_plot"):
-
             visualizer = WaveformVisualizer(mock_parent)
 
             # Mock matplotlib objects to raise exception
@@ -1154,7 +1135,6 @@ class TestWaveformVisualizerAdditionalCoverage:
         mock_parent = Mock()
 
         with patch.object(WaveformVisualizer, "_setup_styling"), patch.object(WaveformVisualizer, "_initialize_plot"):
-
             visualizer = WaveformVisualizer(mock_parent)
 
             # Test with AudioProcessor returning empty data

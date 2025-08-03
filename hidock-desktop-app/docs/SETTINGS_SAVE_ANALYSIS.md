@@ -84,7 +84,7 @@ After comprehensive analysis of the HiDock Next codebase, I've identified **all 
 def _toggle_visualizer_pin(self):
     self.visualizer_pinned = not self.visualizer_pinned
     self.visualizer_pinned_var.set(self.visualizer_pinned)
-    
+
     # CHANGE: Use partial save instead of full config
     from config_and_logger import update_config_settings
     update_config_settings({"visualizer_pinned": self.visualizer_pinned})
@@ -135,7 +135,7 @@ def on_closing(self):
         "window_geometry": self.geometry(),
         # Remove all other settings - they should already be saved
     })
-    
+
     # ... rest of shutdown logic ...
 ```
 

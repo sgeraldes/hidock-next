@@ -30,11 +30,11 @@ def save_config(config_data_to_save):
             existing_config = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         existing_config = get_default_config()
-    
+
     # Merge new settings with existing ones
     merged_config = existing_config.copy()
     merged_config.update(config_data_to_save)
-    
+
     # Save the merged configuration
     with open(_CONFIG_FILE_PATH, "w", encoding="utf-8") as f:
         json.dump(merged_config, f, indent=4)

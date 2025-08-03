@@ -61,10 +61,10 @@ class HiDockJensen:
 
     def download_recording(self, filename, timeout_s):
         """Download recording with progress tracking."""
-        
+
     def get_connection_stats(self):
         """Get connection statistics and health metrics."""
-        
+
     def perform_health_check(self):
         """Perform device health check with error recovery."""
 ```
@@ -110,12 +110,12 @@ class HiDockJensen:
    ```bash
    # Run all tests with coverage
    pytest
-   
+
    # Run specific test categories
    pytest -m unit          # Unit tests only
    pytest -m integration   # Integration tests
    pytest -m device        # Device tests (requires hardware)
-   
+
    # Run specific test files
    pytest tests/test_settings_window.py -v
    ```
@@ -126,11 +126,11 @@ class HiDockJensen:
    # Format code (120-char line length)
    black .
    isort .
-   
+
    # Lint code
    flake8 .
    pylint .
-   
+
    # Type checking (with exclusions for GUI modules)
    mypy .
    ```
@@ -140,7 +140,7 @@ class HiDockJensen:
    ```bash
    # Install hooks
    pre-commit install
-   
+
    # Run manually on all files
    pre-commit run --all-files
 

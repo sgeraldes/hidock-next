@@ -47,7 +47,7 @@ def _deferred_selection_update(self):
     """Deferred selection update with 150ms debouncing for performance."""
     if hasattr(self, '_selection_update_job') and self._selection_update_job:
         self.after_cancel(self._selection_update_job)
-    
+
     self._selection_update_job = self.after(150, self._execute_deferred_selection_update)
 ```
 
@@ -98,12 +98,12 @@ def _load_waveform_background(self, file_path):
     """Load waveform in background thread with immediate visual feedback."""
     # Immediate visual feedback
     self.audio_viz_widget.show_loading()
-    
+
     # Cancel previous loading if in progress
     if hasattr(self, '_waveform_thread') and self._waveform_thread.is_alive():
         self._waveform_cancel_event.set()
         self._waveform_thread.join(timeout=0.1)
-    
+
     # Start new background loading
     self._waveform_cancel_event = threading.Event()
     self._waveform_thread = threading.Thread(
@@ -141,15 +141,15 @@ class TestWaveformLoadingIntegration:
     def test_immediate_loading_feedback(self):
         """Test immediate visual feedback during waveform loading."""
         # Should show loading state immediately (<10ms)
-        
+
     def test_background_processing(self):
         """Test waveform processing in background thread."""
         # Should not block UI thread
-        
+
     def test_smart_cancellation(self):
         """Test cancellation when selection changes."""
         # Should cancel previous loading automatically
-        
+
     def test_data_optimization(self):
         """Test audio data downsampling for performance."""
         # Should downsample to ~2000 points

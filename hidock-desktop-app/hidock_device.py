@@ -217,17 +217,17 @@ class HiDockJensen:
         This is useful when the device is in an inconsistent state after a communication error.
         """
         logger.info("Jensen", "reset_device_state", "Resetting device state")
-        
+
         with self._usb_lock:
             # Clear receive buffer to remove any stale data
             self.receive_buffer.clear()
-            
+
             # Reset sequence ID to avoid conflicts
             self.sequence_id = 0
-            
+
             # Clear error counts
             self.reset_error_counts()
-            
+
             # If device is connected, try to clear endpoint halts
             if self.device and self.ep_in and self.ep_out:
                 try:
@@ -237,7 +237,7 @@ class HiDockJensen:
                     logger.debug("Jensen", "reset_device_state", "Cleared endpoint halts")
                 except usb.core.USBError as e:
                     logger.debug("Jensen", "reset_device_state", f"Could not clear halts: {e}")
-                
+
                 # Try to flush any pending data from IN endpoint
                 try:
                     for _ in range(10):  # Limited attempts to avoid infinite loop
@@ -250,7 +250,7 @@ class HiDockJensen:
                     pass
                 except usb.core.USBError as e:
                     logger.debug("Jensen", "reset_device_state", f"Flush error: {e}")
-            
+
             logger.info("Jensen", "reset_device_state", "Device state reset complete")
 
     def is_connected(self) -> bool:
@@ -397,11 +397,7 @@ class HiDockJensen:
                 self._connection_retry_count += 1
 
                 # If we're getting timeout errors on the first retry, try a device reset
-                if (
-                    self._connection_retry_count == 1
-                    and "timeout" in str(error_msg).lower()
-                    and not force_reset
-                ):
+                if self._connection_retry_count == 1 and "timeout" in str(error_msg).lower() and not force_reset:
                     logger.info(
                         "Jensen",
                         "connect",
@@ -917,7 +913,7 @@ class HiDockJensen:
                         return {
                             "id": response_cmd_id,
                             "sequence": response_seq_id,
-                            "body": msg_bytes_full[12: 12 + body_len],
+                            "body": msg_bytes_full[12 : 12 + body_len],
                         }
                     else:
                         logger.warning(
@@ -1405,7 +1401,7 @@ class HiDockJensen:
             and file_list_aggregate_data[offset] == 0xFF
             and file_list_aggregate_data[offset + 1] == 0xFF
         ):
-            total_files_from_header = struct.unpack(">I", file_list_aggregate_data[offset + 2: offset + 6])[0]
+            total_files_from_header = struct.unpack(">I", file_list_aggregate_data[offset + 2 : offset + 6])[0]
             offset += 6
 
         parsed_file_count = 0
@@ -1417,23 +1413,23 @@ class HiDockJensen:
                 file_version = file_list_aggregate_data[offset]
                 offset += 1
 
-                name_len = struct.unpack(">I", b"\x00" + file_list_aggregate_data[offset: offset + 3])[0]
+                name_len = struct.unpack(">I", b"\x00" + file_list_aggregate_data[offset : offset + 3])[0]
                 offset += 3
 
                 if offset + name_len > len(file_list_aggregate_data):
                     break
 
-                filename = "".join(chr(b) for b in file_list_aggregate_data[offset: offset + name_len] if b > 0)
+                filename = "".join(chr(b) for b in file_list_aggregate_data[offset : offset + name_len] if b > 0)
                 offset += name_len
 
                 min_remaining = 4 + 6 + 16
                 if offset + min_remaining > len(file_list_aggregate_data):
                     break
 
-                file_length_bytes = struct.unpack(">I", file_list_aggregate_data[offset: offset + 4])[0]
+                file_length_bytes = struct.unpack(">I", file_list_aggregate_data[offset : offset + 4])[0]
                 offset += 4
                 offset += 6  # Skip 6 bytes
-                signature_hex = file_list_aggregate_data[offset: offset + 16].hex()
+                signature_hex = file_list_aggregate_data[offset : offset + 16].hex()
                 offset += 16
 
                 # Parse date/time from filename

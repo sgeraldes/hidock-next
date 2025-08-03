@@ -494,7 +494,6 @@ class TestProcessAudioFileForInsights:
         with patch("transcription_module.transcribe_audio") as mock_transcribe, patch(
             "transcription_module.extract_meeting_insights"
         ) as mock_extract_insights, patch("transcription_module.os.remove") as mock_remove:
-
             mock_transcribe.return_value = {"transcription": "HTA transcription"}
             mock_extract_insights.return_value = {"summary": "HTA summary"}
 

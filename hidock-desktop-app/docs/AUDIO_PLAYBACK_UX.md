@@ -66,11 +66,11 @@ def create_loudness_visualization(audio_data, width=800):
     for segment in audio_segments:
         loudness = calculate_rms_loudness(segment)
         speech_probability = detect_speech_activity(segment)
-        
+
         bar_height = loudness * 60  # Max 60px
         bar_color = "#4CAF50" if speech_probability > 0.5 else "#757575"
         bars.append((bar_height, bar_color))
-    
+
     return bars
 ```
 
@@ -91,7 +91,7 @@ BUTTON_SIZE = 32  # pixels
 BUTTON_SPACING = 8  # pixels between buttons
 BUTTON_COLORS = {
     "play": "#4CAF50",      # Green
-    "pause": "#FF9800",     # Orange  
+    "pause": "#FF9800",     # Orange
     "stop": "#757575"       # Gray
 }
 ```
@@ -127,7 +127,7 @@ BUTTON_COLORS = {
 SPEED_PRESETS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 KEYBOARD_SHORTCUTS = {
     "space": "play_pause",
-    "left": "skip_backward_10s", 
+    "left": "skip_backward_10s",
     "right": "skip_forward_10s",
     "up": "speed_increase",
     "down": "speed_decrease"
@@ -156,7 +156,7 @@ For transcribed files, enhance the audio player with transcript features:
 
 ```
 audio_player_component.py      # Main audio player widget
-audio_visualization.py         # Loudness visualization logic  
+audio_visualization.py         # Loudness visualization logic
 audio_controls.py             # Play/pause/stop controls
 audio_scrubber.py             # Position scrubbing functionality
 ```
@@ -214,7 +214,7 @@ audio_scrubber.py             # Position scrubbing functionality
 - Add time display and scrub bar
 - Remove toolbar audio buttons
 
-#### Phase 2: Enhanced Visualization (1-2 hours)  
+#### Phase 2: Enhanced Visualization (1-2 hours)
 
 - Implement loudness-based visualization
 - Add clickable position seeking

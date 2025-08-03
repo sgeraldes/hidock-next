@@ -291,30 +291,30 @@ class TestWaveformLoadingIntegration:
     def test_background_waveform_processing(self):
         """Test that waveform processing can handle real audio data."""
         import os
-        import wave
         import struct
+        import wave
         from unittest.mock import Mock, patch
 
         import numpy as np
 
         # Create a simple test.wav file if it doesn't exist
         test_file = os.path.join(os.path.dirname(__file__), "test.wav")
-        
+
         if not os.path.exists(test_file):
             # Create a simple 1-second 44.1kHz mono WAV file
             sample_rate = 44100
             duration = 1.0
             frequency = 440  # A4 note
-            
+
             # Generate sine wave
             t = np.linspace(0, duration, int(sample_rate * duration), False)
             wave_data = np.sin(2 * np.pi * frequency * t)
-            
+
             # Convert to 16-bit integers
             wave_data = (wave_data * 32767).astype(np.int16)
-            
+
             # Write WAV file
-            with wave.open(test_file, 'w') as wav_file:
+            with wave.open(test_file, "w") as wav_file:
                 wav_file.setnchannels(1)  # Mono
                 wav_file.setsampwidth(2)  # 16-bit
                 wav_file.setframerate(sample_rate)
@@ -325,10 +325,10 @@ class TestWaveformLoadingIntegration:
         mock_sample_rate = 44100
 
         # Mock the WaveformVisualizer class instead of non-existent WaveformLoader
-        with patch('audio_visualization.WaveformVisualizer') as mock_visualizer_class:
+        with patch("audio_visualization.WaveformVisualizer") as mock_visualizer_class:
             mock_visualizer = Mock()
             mock_visualizer_class.return_value = mock_visualizer
-            
+
             # Mock the GUI components
             mock_main_window = Mock()
             mock_visualizer_widget = Mock()
@@ -347,11 +347,11 @@ class TestWaveformLoadingIntegration:
             # Test that the waveform visualizer can load audio
             mock_visualizer.load_audio.return_value = True
             result = mock_visualizer.load_audio(test_file)
-            
+
             # Verify that the waveform visualizer was used
             assert result is True
             mock_visualizer.load_audio.assert_called_once_with(test_file)
-            
+
             # Clean up test file if we created it
             if os.path.exists(test_file):
                 try:

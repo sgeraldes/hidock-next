@@ -164,7 +164,6 @@ class TestAudioProcessor:
         with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
             "audio_player_enhanced.AudioSegment"
         ) as mock_audio_segment, patch("audio_player_enhanced.wave.open") as mock_wave_open:
-            
             mock_audio_segment.from_file.side_effect = Exception("Pydub failed")
 
             mock_wav_file = Mock()
@@ -326,20 +325,22 @@ class TestAudioProcessor:
     def test_extract_waveform_data_wave_module_fallback(self):
         """Test extract_waveform_data using wave module when scipy fails with numba circular import"""
         # Simulate numba circular import error from scipy
-        numba_error = Exception("cannot import name 'ComplexModel' from partially initialized module 'numba.core.datamodel.models'")
-        
+        numba_error = Exception(
+            "cannot import name 'ComplexModel' from partially initialized module 'numba.core.datamodel.models'"
+        )
+
         with patch("audio_player_enhanced.wave.open") as mock_wave_open:
             mock_wav_file = Mock()
-            mock_wav_file.readframes.return_value = b'\x00\x10\x00\x20\x00\x30\x00\x40'  # 4 int16 samples
+            mock_wav_file.readframes.return_value = b"\x00\x10\x00\x20\x00\x30\x00\x40"  # 4 int16 samples
             mock_wav_file.getframerate.return_value = 44100
             mock_wav_file.getnchannels.return_value = 1
             mock_wav_file.getsampwidth.return_value = 2
             mock_wave_open.return_value.__enter__.return_value = mock_wav_file
-            
+
             # Make scipy.io.wavfile.read fail with numba error, forcing wave module fallback
             with patch("audio_player_enhanced.wavfile.read", side_effect=numba_error):
                 waveform, sample_rate = AudioProcessor.extract_waveform_data("/test/file.wav", 1000)
-        
+
         assert sample_rate == 44100
         assert len(waveform) == 4
         # Should be normalized int16 values

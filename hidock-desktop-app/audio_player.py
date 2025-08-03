@@ -351,16 +351,18 @@ class AudioPlayerMixin:
         """Handles changes to the volume slider."""
         if self.audio_player:
             self.audio_player.set_volume(float(value))
-        
+
         # Auto-save volume preference
         from config_and_logger import update_config_settings
+
         update_config_settings({"playback_volume": float(value)})
 
     def _on_loop_toggle(self):
         """Handles toggling the loop checkbox."""
         if self.audio_player:
             self.audio_player.set_loop(self.loop_playback_var.get())
-        
+
         # Auto-save loop preference
         from config_and_logger import update_config_settings
+
         update_config_settings({"loop_playback": self.loop_playback_var.get()})
