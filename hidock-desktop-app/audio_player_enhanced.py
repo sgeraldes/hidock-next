@@ -1112,9 +1112,9 @@ class EnhancedAudioPlayer:
 
     def _notify_playlist_changed(self):
         """Notify playlist change listeners"""
-        if self.on_playlist_changed:
+        if self.on_playlist_changed and callable(self.on_playlist_changed):  # pylint: disable=not-callable
             try:
-                self.on_playlist_changed()
+                self.on_playlist_changed()  # pylint: disable=not-callable
             except Exception as e:
                 logger.error(
                     "EnhancedAudioPlayer",

@@ -12,16 +12,19 @@ The HiDock device tests were experiencing race conditions when run as a bundle, 
 ## Root Causes
 
 ### 1. USB Device State Management
+
 - USB devices can get stuck in inconsistent states after communication errors
 - Multiple tests accessing the device without proper serialization
 - Device reset operations not being properly coordinated
 
 ### 2. Threading and Async Issues
+
 - Mix of synchronous USB operations and asynchronous test functions
 - No proper locking mechanism for device access across async operations
 - Race conditions between device connection/disconnection operations
 
 ### 3. Test Isolation Problems
+
 - Tests not properly isolated from each other
 - Shared device state bleeding between tests
 - Insufficient cleanup between test runs
@@ -47,6 +50,7 @@ class DeviceTestManager:
 ```
 
 **Key Features:**
+
 - **Exclusive Access**: Only one test can access the device at a time
 - **Async Support**: Proper async locking for async test functions
 - **Cleanup Delays**: Automatic delays between tests to ensure device state reset
@@ -71,6 +75,7 @@ def ensure_device_disconnected(device_instance):
 ```
 
 **Benefits:**
+
 - **Robust Cleanup**: Handles exceptions during cleanup gracefully
 - **State Reset**: Ensures device state is properly reset
 - **Error Tolerance**: Continues cleanup even if some operations fail
@@ -91,6 +96,7 @@ async def test_connection_recovery_after_error():
 ```
 
 **Improvements:**
+
 - **Exclusive Access**: Each test gets exclusive device access
 - **Proper Delays**: Strategic delays to allow device state transitions
 - **Enhanced Cleanup**: Comprehensive cleanup in finally blocks
@@ -115,15 +121,18 @@ def device_test_isolation(request):
 ## Files Modified
 
 ### Core Fix Files
+
 - `tests/test_race_condition_fix.py` - Main race condition fix implementation
 - `tests/conftest.py` - Enhanced pytest configuration
 
 ### Updated Test Files
+
 - `tests/test_connection_recovery_integration.py` - Connection recovery tests
 - `tests/test_device_reset.py` - Device reset functionality tests
 - `tests/test_disconnected_mode_integration.py` - Disconnected mode tests
 
 ### Verification Files
+
 - `tests/test_race_condition_verification.py` - Tests to verify the fix works
 - `test_race_condition_runner.py` - Test runner for race condition verification
 
@@ -167,19 +176,25 @@ def test_my_sync_device_function():
 ## Testing the Fix
 
 ### Verification Tests
+
 Run the verification tests to ensure the fix works:
+
 ```bash
 python -m pytest tests/test_race_condition_verification.py -v
 ```
 
 ### Race Condition Test Runner
+
 Use the test runner to verify problematic tests now pass consistently:
+
 ```bash
 python test_race_condition_runner.py
 ```
 
 ### Individual Test Verification
+
 Run previously failing tests multiple times:
+
 ```bash
 python -m pytest tests/test_connection_recovery_integration.py -v --count=5
 ```
@@ -214,6 +229,7 @@ python -m pytest tests/test_connection_recovery_integration.py -v --count=5
 The race condition fix provides a robust solution for managing device tests in the HiDock project. By implementing proper test isolation, device state management, and async coordination, tests now run reliably both individually and as a bundle.
 
 The fix is designed to be:
+
 - **Easy to adopt**: Simple context managers and decorators
 - **Robust**: Handles errors and edge cases gracefully
 - **Extensible**: Can be enhanced for future requirements

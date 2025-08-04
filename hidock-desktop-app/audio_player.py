@@ -57,7 +57,7 @@ class AudioPlayer:
             self._is_playing = True
             if self.on_start:
                 self.on_start(filepath)
-        except pygame.error as e:
+        except Exception as e:  # pygame.error when pygame is available
             self._is_playing = False
             if self.on_error:
                 self.on_error(f"Could not play file: {e}")
@@ -92,7 +92,7 @@ class AudioPlayer:
             return
         try:
             pygame.mixer.music.set_pos(position_s)
-        except pygame.error as e:
+        except Exception as e:  # pygame.error when pygame is available
             if self.on_error:
                 self.on_error(f"Error seeking audio: {e}")
 

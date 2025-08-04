@@ -119,8 +119,8 @@ class TestEnhancedDeviceSelector:
             mock_parent._last_child_ids = {}
             mock_parent.winfo_children.return_value = []
 
-            with patch("customtkinter.CTkFrame.__init__", return_value=None):
-                selector = EnhancedDeviceSelector.__new__(EnhancedDeviceSelector)
+            with patch.object(EnhancedDeviceSelector, "__init__", return_value=None):
+                selector = EnhancedDeviceSelector(mock_parent)
                 devices = selector._enumerate_usb_devices()
 
         assert len(devices) == 2
@@ -157,8 +157,12 @@ class TestEnhancedDeviceSelector:
         with patch("usb.util.get_string") as mock_get_string:
             mock_get_string.side_effect = ["Device A", "Device B"]
 
-            with patch("customtkinter.CTkFrame.__init__", return_value=None):
-                selector = EnhancedDeviceSelector.__new__(EnhancedDeviceSelector)
+            mock_parent = Mock()
+            mock_parent._last_child_ids = {}
+            mock_parent.winfo_children.return_value = []
+
+            with patch.object(EnhancedDeviceSelector, "__init__", return_value=None):
+                selector = EnhancedDeviceSelector(mock_parent)
                 devices = selector._enumerate_usb_devices()
 
         assert len(devices) == 2
@@ -173,10 +177,10 @@ class TestEnhancedDeviceSelector:
         mock_parent._last_child_ids = {}
         mock_parent.winfo_children.return_value = []
 
-        with patch("customtkinter.CTkFrame.__init__", return_value=None):
+        with patch.object(EnhancedDeviceSelector, "__init__", return_value=None):
             with patch.object(EnhancedDeviceSelector, "_load_icons"):
                 with patch.object(EnhancedDeviceSelector, "_create_widgets"):
-                    selector = EnhancedDeviceSelector.__new__(EnhancedDeviceSelector)
+                    selector = EnhancedDeviceSelector(mock_parent)
                     selector.scan_callback = scan_callback
                     selector.devices = []
                     selector.is_scanning = True

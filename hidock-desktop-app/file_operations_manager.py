@@ -264,6 +264,12 @@ class FileMetadataCache:
                 )
         return metadata_list
 
+    def close(self):
+        """Close database connections and cleanup resources."""
+        # SQLite connections are already handled by context managers
+        # This method is here for explicit cleanup if needed
+        pass
+
 
 class FileOperationsManager:
     """
@@ -350,19 +356,19 @@ class FileOperationsManager:
 
     def _execute_operation(self, operation: FileOperation):
         """Execute a single file operation."""
+        # Check for cancellation before starting execution
+        if operation.status == FileOperationStatus.CANCELLED:
+            logger.info(
+                "FileOpsManager",
+                "_execute_operation",
+                f"Operation {operation.operation_id} was cancelled before " "execution",
+            )
+            return
+
         operation.status = FileOperationStatus.IN_PROGRESS
         operation.start_time = datetime.now()
 
         try:
-            # Check for cancellation before starting execution
-            if operation.status == FileOperationStatus.CANCELLED:
-                logger.info(
-                    "FileOpsManager",
-                    "_execute_operation",
-                    f"Operation {operation.operation_id} was cancelled before execution",
-                )
-                return
-
             if operation.operation_type == FileOperationType.DOWNLOAD:
                 self._execute_download(operation)
             elif operation.operation_type == FileOperationType.DELETE:
@@ -372,12 +378,13 @@ class FileOperationsManager:
             elif operation.operation_type == FileOperationType.ANALYZE:
                 self._execute_analyze(operation)
 
-            # Check for cancellation after execution (in case it was cancelled during execution)
+            # Check for cancellation after execution
+            # (in case it was cancelled during execution)
             if operation.status == FileOperationStatus.CANCELLED:
                 logger.info(
                     "FileOpsManager",
                     "_execute_operation",
-                    f"Operation {operation.operation_id} was cancelled during execution",
+                    f"Operation {operation.operation_id} was cancelled " "during execution",
                 )
                 return
 
@@ -674,7 +681,7 @@ class FileOperationsManager:
         if metadata.duration > 0:
             bytes_per_second = metadata.size / metadata.duration
             # Normalize based on typical audio file sizes
-            efficiency = min(100, (bytes_per_second / 16000) * 100)
+            efficiency = min(100.0, (bytes_per_second / 16000) * 100)
             return round(efficiency, 2)
         return 0.0
 

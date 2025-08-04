@@ -148,11 +148,23 @@ class TestSaveConfig:
     def test_save_config_success(self, mock_logger, mock_json_dump, mock_file):
         """Test successful config saving"""
         test_config = {"test": "data"}
+        existing_config = {"existing": "data", "test": "old_data"}
+
+        # Mock the first open call (reading existing config)
+        mock_file.return_value.read.return_value = json.dumps(existing_config)
 
         save_config(test_config)
 
-        mock_file.assert_called_once()
-        mock_json_dump.assert_called_once_with(test_config, mock_file.return_value.__enter__.return_value, indent=4)
+        # Should be called twice: once for reading, once for writing
+        assert mock_file.call_count == 2
+        # First call should be read mode
+        assert mock_file.call_args_list[0][0][1] == "r"
+        # Second call should be write mode
+        assert mock_file.call_args_list[1][0][1] == "w"
+
+        # Should save the merged config
+        expected_config = {"existing": "data", "test": "data"}
+        mock_json_dump.assert_called_once_with(expected_config, mock_file.return_value.__enter__.return_value, indent=4)
         mock_logger.info.assert_called_once()
 
     @patch("config_and_logger.open", side_effect=IOError("Permission denied"))
@@ -462,3 +474,109 @@ class TestErrorScenarios:
 
         # Should not print anything for None level
         mock_print.assert_not_called()
+
+
+class TestConfigValidation:
+    """Test configuration validation scenarios"""
+
+    def test_validate_and_merge_config_callable_validator_invalid(self):
+        """Test callable validator with invalid value"""
+        defaults = {"log_level": "INFO"}
+        loaded_config = {"log_level": "INVALID_LEVEL"}
+
+        with patch("builtins.print") as mock_print:
+            result = config_and_logger._validate_and_merge_config(defaults, loaded_config)
+
+        # Should print warning and use default
+        mock_print.assert_called_once()
+        assert "Invalid value for log_level" in mock_print.call_args[0][0]
+        assert result["log_level"] == "INFO"
+
+    def test_validate_and_merge_config_tuple_type_invalid(self):
+        """Test tuple type validation with invalid type"""
+        defaults = {"playback_volume": 0.5}
+        loaded_config = {"playback_volume": "not_a_number"}  # string when expecting int or float
+
+        with patch("builtins.print") as mock_print:
+            result = config_and_logger._validate_and_merge_config(defaults, loaded_config)
+
+        # Should print warning and use default
+        mock_print.assert_called_once()
+        assert "Invalid type for playback_volume" in mock_print.call_args[0][0]
+        assert result["playback_volume"] == 0.5
+
+    def test_validate_and_merge_config_bool_string_conversion_invalid(self):
+        """Test boolean string conversion with invalid string"""
+        defaults = {"autoconnect": False}
+        loaded_config = {"autoconnect": "maybe"}  # Invalid boolean string
+
+        with patch("builtins.print") as mock_print:
+            result = config_and_logger._validate_and_merge_config(defaults, loaded_config)
+
+        # Should print warning and use default
+        mock_print.assert_called_once()
+        assert "Invalid boolean value for autoconnect" in mock_print.call_args[0][0]
+        assert result["autoconnect"] is False
+
+    def test_validate_and_merge_config_bool_invalid_type(self):
+        """Test boolean validation with invalid type"""
+        defaults = {"autoconnect": False}
+        loaded_config = {"autoconnect": [1, 2, 3]}  # List when expecting bool
+
+        with patch("builtins.print") as mock_print:
+            result = config_and_logger._validate_and_merge_config(defaults, loaded_config)
+
+        # Should print warning and use default
+        mock_print.assert_called_once()
+        assert "Invalid type for autoconnect" in mock_print.call_args[0][0]
+        assert result["autoconnect"] is False
+
+    def test_validate_and_merge_config_general_type_invalid(self):
+        """Test general type validation with invalid type"""
+        defaults = {"selected_vid": 1234}
+        loaded_config = {"selected_vid": "not_a_number"}  # String when expecting int
+
+        with patch("builtins.print") as mock_print:
+            result = config_and_logger._validate_and_merge_config(defaults, loaded_config)
+
+        # Should print warning and use default
+        mock_print.assert_called_once()
+        assert "Invalid type for selected_vid" in mock_print.call_args[0][0]
+        assert result["selected_vid"] == 1234
+
+
+class TestUpdateConfigSettings:
+    """Test update_config_settings function"""
+
+    def test_update_config_settings(self):
+        """Test update_config_settings calls save_config"""
+        settings = {"test_setting": "test_value"}
+
+        with patch("config_and_logger.save_config") as mock_save:
+            config_and_logger.update_config_settings(settings)
+
+        mock_save.assert_called_once_with(settings)
+
+
+class TestSaveConfigFileNotFound:
+    """Test save_config with FileNotFoundError scenario"""
+
+    def test_save_config_file_not_found_fallback(self):
+        """Test save_config fallback when existing config file not found"""
+        config_data = {"new_setting": "new_value"}
+
+        with patch("builtins.open", mock_open()) as mock_file, patch(
+            "json.load", side_effect=FileNotFoundError()
+        ), patch("json.dump") as mock_dump, patch("config_and_logger.get_default_config") as mock_default:
+            mock_default.return_value = {"default_key": "default_value"}
+
+            config_and_logger.save_config(config_data)
+
+            # Should use default config as base
+            mock_default.assert_called_once()
+
+            # Should save merged config
+            expected_config = {"default_key": "default_value", "new_setting": "new_value"}
+            mock_dump.assert_called_once()
+            saved_config = mock_dump.call_args[0][0]
+            assert saved_config == expected_config

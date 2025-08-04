@@ -7,11 +7,13 @@ The settings persistence system has been fixed to prevent settings from being ov
 ## Functions Available
 
 ### `save_config(config_data)`
+
 - **Purpose**: Saves configuration data, merging with existing settings
 - **Behavior**: Automatically merges new settings with existing ones to preserve all settings
 - **Usage**: Can be used with either full config objects or partial settings
 
 ### `update_config_settings(settings_dict)`
+
 - **Purpose**: Updates only specific settings (alias for save_config)
 - **Behavior**: Same as save_config - merges with existing settings
 - **Usage**: Preferred for updating only a few specific settings
@@ -46,6 +48,7 @@ save_config(partial_config)  # Now preserves other settings
 ### For Application Code
 
 1. **Use update_config_settings for small/frequent changes** (RECOMMENDED):
+
    ```python
    update_config_settings({
        'treeview_sort_col_id': 'name',
@@ -54,6 +57,7 @@ save_config(partial_config)  # Now preserves other settings
    ```
 
 2. **Use save_config only for bulk operations**:
+
    ```python
    # Only for application shutdown or settings dialog
    save_config(self.config)

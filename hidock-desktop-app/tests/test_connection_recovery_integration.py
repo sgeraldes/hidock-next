@@ -103,7 +103,7 @@ async def test_connection_recovery_after_error():
                 print("6. ✓ Cleanup completed")
                 # Additional cleanup delay
                 await asyncio.sleep(0.5)
-            except:
+            except Exception:
                 pass  # Ignore cleanup errors
 
 
@@ -176,7 +176,7 @@ def test_gui_connection_retry_logic():
                 print("4. ✓ Cleanup completed")
                 # Additional cleanup delay
                 time.sleep(0.5)
-            except:
+            except Exception:
                 pass  # Ignore cleanup errors
 
 

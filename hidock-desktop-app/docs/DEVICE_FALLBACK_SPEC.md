@@ -16,6 +16,7 @@
 ## Proposed Solution
 
 ### 1. Smart Connection Logic
+
 ```python
 def connect_device_smart(self):
     """Connect with intelligent fallback"""
@@ -51,6 +52,7 @@ def connect_device_smart(self):
 ```
 
 ### 2. Config File Creation Policy
+
 - Only create config file when:
   - User changes settings
   - User explicitly saves preferences
@@ -60,12 +62,15 @@ def connect_device_smart(self):
   - View-only operations
 
 ### 3. Device Model Display
+
 - Show actual connected device in status bar
 - Display configured vs connected device when different
 - Example: "Connected to HiDock H1E (configured: P1)"
 
 ### 4. Multi-Device Priority
+
 When multiple devices available:
+
 1. Prefer configured device if available
 2. Fall back to device priority order:
    - Same model as configured

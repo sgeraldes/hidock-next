@@ -44,15 +44,15 @@ def run_test(test_name, iterations=3):
             )
 
             if result.returncode == 0:
-                print(f"  ✓ PASSED")
+                print("  ✓ PASSED")
                 success_count += 1
             else:
-                print(f"  ✗ FAILED")
+                print("  ✗ FAILED")
                 print(f"  Error: {result.stderr.strip()}")
                 failure_count += 1
 
         except subprocess.TimeoutExpired:
-            print(f"  ✗ TIMEOUT")
+            print("  ✗ TIMEOUT")
             failure_count += 1
         except Exception as e:
             print(f"  ✗ ERROR: {e}")
@@ -66,7 +66,7 @@ def run_test(test_name, iterations=3):
     print(f"  Failures:  {failure_count}/{iterations}")
 
     if failure_count == 0:
-        print(f"  🎉 All iterations passed! Race condition likely fixed.")
+        print("  🎉 All iterations passed! Race condition likely fixed.")
         return True
     else:
         print(f"  ⚠️  {failure_count} failures detected. Race condition may still exist.")

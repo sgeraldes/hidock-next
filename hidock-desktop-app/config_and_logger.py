@@ -384,11 +384,12 @@ def save_config(config_data_to_save):
         with open(_CONFIG_FILE_PATH, "w", encoding="utf-8") as f:
             json.dump(merged_config, f, indent=4)
 
-        # Use the global logger instance to log this action
+        # Log what specific settings were saved
+        settings_list = ", ".join([f"{k}={v}" for k, v in config_data_to_save.items()])
         logger.info(
             "ConfigManager",
             "save_config",
-            f"Configuration saved to {_CONFIG_FILE_PATH} (merged {len(merged_config)} settings)",
+            f"Saved {len(config_data_to_save)} setting(s): {settings_list}",
         )
     except IOError:
         logger.error("ConfigManager", "save_config", f"Error writing to {_CONFIG_FILE_PATH}.")

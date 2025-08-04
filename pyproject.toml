@@ -4,3 +4,29 @@ line-length = 120
 [tool.isort]
 profile = "black"
 line_length = 120
+
+[tool.flake8]
+max-line-length = 120
+extend-ignore = ["E203", "W503"]
+
+[tool.pylint.format]
+max-line-length = 120
+
+[tool.pylint.messages_control]
+# Disable checks that conflict with Black/Flake8 or are handled better by other tools
+disable = [
+    "C0114",  # missing-module-docstring (handled by flake8-docstrings if needed)
+    "C0115",  # missing-class-docstring (handled by flake8-docstrings if needed)
+    "C0116",  # missing-function-docstring (handled by flake8-docstrings if needed)
+    "R0903",  # too-few-public-methods (often not relevant)
+    "C0103",  # invalid-name (Black handles naming style)
+    "W0613",  # unused-argument (often needed for API compatibility)
+    "R0801",  # duplicate-code (often false positives)
+    "C0301",  # line-too-long (handled by Black and Flake8)
+]
+
+[tool.pylint.design]
+# Allow reasonable complexity
+max-args = 8
+max-locals = 20
+max-branches = 15

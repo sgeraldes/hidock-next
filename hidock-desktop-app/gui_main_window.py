@@ -41,7 +41,7 @@ from audio_player_enhanced import EnhancedAudioPlayer
 from audio_visualization import AudioVisualizationWidget
 
 # Import Logger class for type hints if any
-from config_and_logger import Logger, load_config, logger, save_config
+from config_and_logger import Logger, load_config, logger
 
 # Import from our other modules
 from constants import DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID
@@ -482,7 +482,11 @@ class HiDockToolGUI(
             # Import encryption here to avoid dependency issues
             import base64
 
-            from cryptography.fernet import Fernet
+            try:
+                from cryptography.fernet import Fernet
+            except ImportError:
+                logger.error("GUI", "get_decrypted_api_key", "cryptography package not installed")
+                return ""
 
             # Try to load existing key from config directory
             config_dir = os.path.dirname(self.config.get("config_file_path", ""))
@@ -1212,7 +1216,6 @@ class HiDockToolGUI(
                     command=self.disconnect_device,
                     state="normal",
                     image=self.icons.get("disconnect"),
-                    fg_color=None,  # Default color
                 )
             else:
                 self.toolbar_connect_button.configure(
@@ -1231,7 +1234,6 @@ class HiDockToolGUI(
                         if not self._is_ui_refresh_in_progress and not self.is_long_operation_active
                         else "disabled"
                     ),
-                    fg_color=None,  # Default color
                 )
             else:
                 self.toolbar_refresh_button.configure(
@@ -1258,7 +1260,6 @@ class HiDockToolGUI(
                             else "disabled"
                         ),
                         image=self.icons.get("download"),
-                        fg_color=None,  # Default color
                     )
                 else:
                     self.toolbar_download_button.configure(
@@ -1340,7 +1341,6 @@ class HiDockToolGUI(
                             else "disabled"
                         ),
                         image=self.icons.get("delete"),
-                        fg_color=None,  # Default color
                     )
                 else:
                     self.toolbar_delete_button.configure(
@@ -2094,7 +2094,7 @@ class HiDockToolGUI(
     def _on_transcription_cancelled(self):
         """Handle transcription cancellation in main thread."""
         self._set_long_operation_active_state(False, "Transcription")
-        self.update_status_bar(ready_text="Transcription cancelled")
+        self.update_status_bar(progress_text="Transcription cancelled")
 
         # Update UI
         self.transcription_status_label.configure(text="❌ Transcription cancelled by user")
@@ -2921,7 +2921,10 @@ You can dismiss this warning and continue using the application with limited aud
         ):
             logger.info("GUI", "on_closing", "Quit cancelled by user.")
             return
-        self.config["window_geometry"] = self.geometry()
+        # Save window geometry on close
+        from config_and_logger import update_config_settings
+
+        update_config_settings({"window_geometry": self.geometry()})
         self.config["autoconnect"] = self.autoconnect_var.get()
         self.config["download_directory"] = self.download_directory
         self.config["log_level"] = self.logger_processing_level_var.get()
@@ -2964,9 +2967,11 @@ You can dismiss this warning and continue using the application with limited aud
 
         update_config_settings(
             {
-                "treeview_columns_display_order": ",".join(self.file_tree["displaycolumns"])
-                if hasattr(self, "file_tree") and self.file_tree.winfo_exists()
-                else self.config.get("treeview_columns_display_order", "name,size,duration,date,time,status"),
+                "treeview_columns_display_order": (
+                    ",".join(self.file_tree["displaycolumns"])
+                    if hasattr(self, "file_tree") and self.file_tree.winfo_exists()
+                    else self.config.get("treeview_columns_display_order", "name,size,duration,date,time,status")
+                ),
                 "treeview_sort_col_id": self.treeview_sort_column or self.saved_treeview_sort_column,
                 "treeview_sort_descending": self.treeview_sort_reverse,
             }
@@ -2987,17 +2992,9 @@ You can dismiss this warning and continue using the application with limited aud
         sys.exit(0)
 
     def _on_window_configure(self, event):
-        """Handle window resize/move events with debouncing."""
-        if event.widget == self:  # Only for main window
-            if self._geometry_save_timer:
-                self.after_cancel(self._geometry_save_timer)
-            self._geometry_save_timer = self.after(1000, self._save_window_geometry)
-
-    def _save_window_geometry(self):
-        """Save current window geometry."""
-        from config_and_logger import update_config_settings
-
-        update_config_settings({"window_geometry": self.geometry()})
+        """Handle window resize/move events - no auto-saving."""
+        # Window geometry will only be saved on app close
+        pass
 
     def _process_selected_audio(self, file_iid):
         file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)

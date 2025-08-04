@@ -98,14 +98,19 @@ include = '\.pyi?$'
 extend-exclude = '''
 /(
   # directories
-  \.eggs
+  tests
+  | __pycache__
   | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
   | \.venv
+  | \.mypy_cache
+  | \.pytest_cache
+  | htmlcov
   | build
   | dist
+  | .*\.egg-info
+  | docs
+  | icons
+  | themes
 )/
 '''
 
@@ -119,12 +124,48 @@ known_first_party = ["hidock_device", "gui_main_window", "config_and_logger"]
 max-line-length = 120
 extend-ignore = ["E203", "W503"]
 exclude = [
-    ".git",
+    "tests",
     "__pycache__",
+    ".git",
     ".venv",
+    ".mypy_cache",
+    ".pytest_cache",
+    "htmlcov",
     "build",
     "dist",
     "*.egg-info",
+    "docs",
+    "icons",
+    "themes",
+]
+
+[tool.pylint.format]
+max-line-length = 120
+
+[tool.pylint.messages_control]
+disable = [
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-locals",
+    "too-many-branches",
+    "too-many-statements",
+]
+
+[tool.pylint.master]
+ignore-paths = [
+    "tests",
+    "__pycache__",
+    ".git",
+    ".venv",
+    ".mypy_cache",
+    ".pytest_cache",
+    "htmlcov",
+    "build",
+    "dist",
+    ".*\\.egg-info",
+    "docs",
+    "icons",
+    "themes",
 ]
 
 [tool.mypy]
@@ -195,11 +236,18 @@ filterwarnings = [
 source = ["."]
 omit = [
     "tests/*",
+    "__pycache__/*",
+    ".git/*",
     ".venv/*",
+    ".mypy_cache/*",
+    ".pytest_cache/*",
+    "htmlcov/*",
     "build/*",
     "dist/*",
     "*.egg-info/*",
-    "hidock-web-app/*",
+    "docs/*",
+    "icons/*",
+    "themes/*",
 ]
 
 [tool.coverage.report]

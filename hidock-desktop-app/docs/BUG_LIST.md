@@ -1150,28 +1150,33 @@ _All low-priority issues have been resolved and moved to the Fixed Issues sectio
 ## Notes for Bug Reporting and Tracking
 
 ### Multi-Provider AI Architecture Notes
+
 - When reporting AI-related bugs, specify the provider being used (Gemini, OpenAI, Anthropic, etc.)
 - Include provider configuration details (model, endpoint for local providers)
 - Check if the issue occurs with mock providers (empty API keys) for development testing
 - Verify API key validity and provider-specific settings before reporting bugs
 
 ### Local AI Provider Considerations
+
 - Ollama and LM Studio bugs may be related to server availability or model loading
 - Check local server endpoints (localhost:11434 for Ollama, localhost:1234/v1 for LM Studio)
 - Verify models are properly downloaded and available in local providers
 - Network connectivity issues may affect local provider communication
 
 ### Security and Encryption
+
 - API key related bugs should never include actual keys in bug reports
 - Encrypted storage issues may require config file reset (backup first)
 - Fernet encryption errors may indicate corrupted configuration data
 
 ### Background Processing
+
 - Progress tracking bugs should include operation type and file size details
 - Cancellation issues should specify at what stage cancellation was attempted
 - Thread safety issues may manifest as UI freezes or data corruption
 
 ### Audio Processing
+
 - HTA conversion bugs should include file size and version information
 - Waveform visualization issues may be related to matplotlib backend
 - Speed control bugs should specify the target speed and audio format

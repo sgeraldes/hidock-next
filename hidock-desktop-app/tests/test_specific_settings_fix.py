@@ -36,7 +36,7 @@ class TestSpecificSettingsFix:
                 loaded_config = json.load(f)
 
             assert loaded_config["treeview_sort_col_id"] == "name"
-            assert loaded_config["treeview_sort_descending"] == False
+            assert loaded_config["treeview_sort_descending"] is False
 
         finally:
             if os.path.exists(temp_config_path):
@@ -59,7 +59,7 @@ class TestSpecificSettingsFix:
             with open(temp_config_path, "r") as f:
                 loaded_config = json.load(f)
 
-            assert loaded_config["quit_without_prompt_if_connected"] == True
+            assert loaded_config["quit_without_prompt_if_connected"] is True
 
         finally:
             if os.path.exists(temp_config_path):
@@ -136,8 +136,8 @@ class TestSpecificSettingsFix:
 
             # Verify all settings were saved and loaded correctly
             assert loaded_config["treeview_sort_col_id"] == "size"
-            assert loaded_config["treeview_sort_descending"] == False
-            assert loaded_config["quit_without_prompt_if_connected"] == True
+            assert loaded_config["treeview_sort_descending"] is False
+            assert loaded_config["quit_without_prompt_if_connected"] is True
             assert loaded_config["log_level"] == "DEBUG"
             assert loaded_config["recording_check_interval_s"] == 15
 

@@ -7,6 +7,7 @@ This document outlines the technical architecture for implementing the comprehen
 ## Current Architecture Analysis
 
 ### Strengths
+
 - **Modular Design**: Clear separation of concerns with mixins (TreeViewMixin, DeviceActionsMixin, etc.)
 - **Enhanced Audio Player**: `EnhancedAudioPlayer` with proper state management
 - **Visualization Framework**: Existing `AudioVisualizationWidget` with matplotlib integration
@@ -14,6 +15,7 @@ This document outlines the technical architecture for implementing the comprehen
 - **Threading**: Background operations with proper GUI thread safety
 
 ### Areas for Improvement
+
 - **Audio Player Integration**: Current toolbar buttons feel disconnected from content
 - **Visualization Limitations**: Static waveform without interaction capabilities
 - **Status System**: Limited workflow integration for transcription states
@@ -58,6 +60,7 @@ class IntegratedAudioPlayer(ctk.CTkFrame):
 ```
 
 **Integration Strategy:**
+
 - Replace `AudioVisualizationWidget` usage in `gui_main_window.py`
 - Maintain backward compatibility during transition
 - Use composition over inheritance for flexibility
@@ -114,6 +117,7 @@ class SentimentRenderer(VisualizationRenderer):
 ```
 
 **Benefits:**
+
 - **Extensible**: Easy to add new visualization types
 - **Testable**: Each renderer can be unit tested independently
 - **Maintainable**: Clear separation of concerns
@@ -149,6 +153,7 @@ class EnhancedAudioProcessor:
 ```
 
 **Open Source Dependencies:**
+
 - **librosa**: Audio analysis (already in use)
 - **pyannote-audio**: Speaker diarization (optional, for advanced features)
 - **webrtcvad**: Voice activity detection (lightweight alternative)
@@ -613,17 +618,20 @@ class SettingsDialog(ctk.CTkToplevel):
 ### Open Source Component Selection
 
 #### Audio Processing
+
 - **librosa**: Already in use, excellent for audio analysis
 - **soundfile**: For audio I/O operations
 - **webrtcvad**: Lightweight voice activity detection
 - **pyannote-audio**: Advanced speaker diarization (optional)
 
 #### Visualization
+
 - **matplotlib**: Already in use, mature and flexible
 - **numpy**: Essential for numerical operations
 - **scipy**: Signal processing utilities
 
 #### UI Components
+
 - **CustomTkinter**: Already in use, modern styling
 - **PIL/Pillow**: Image processing for icons
 - **tkinter**: Base GUI framework
@@ -631,6 +639,7 @@ class SettingsDialog(ctk.CTkToplevel):
 ### Performance Considerations
 
 #### Audio Processing Optimization
+
 ```python
 # Implement caching for expensive operations
 class AudioAnalysisCache:
@@ -657,6 +666,7 @@ class AudioAnalysisCache:
 ```
 
 #### Visualization Performance
+
 - **Data Downsampling**: Limit visualization points to ~800 for smooth rendering
 - **Lazy Loading**: Load visualization data only when needed
 - **Background Processing**: Process audio analysis in worker threads
@@ -665,6 +675,7 @@ class AudioAnalysisCache:
 ### Error Handling and Resilience
 
 #### Graceful Degradation
+
 ```python
 class VisualizationFallbackManager:
     """Handles fallbacks when advanced visualizations fail"""
@@ -693,6 +704,7 @@ class VisualizationFallbackManager:
 ### Testing Strategy
 
 #### Unit Tests
+
 ```python
 # test_visualization_renderers.py
 import unittest
@@ -738,6 +750,7 @@ class TestVisualizationRenderers(unittest.TestCase):
 ```
 
 #### Integration Tests
+
 ```python
 # test_integrated_audio_player.py
 import unittest
@@ -779,16 +792,19 @@ class TestIntegratedAudioPlayer(unittest.TestCase):
 ### Migration Strategy
 
 #### Phase 1: Parallel Implementation
+
 - Implement new components alongside existing ones
 - Add feature flags to switch between old and new implementations
 - Maintain full backward compatibility
 
 #### Phase 2: Gradual Rollout
+
 - Default to new implementation for new installations
 - Provide option to revert to old implementation
 - Monitor for issues and user feedback
 
 #### Phase 3: Legacy Removal
+
 - Remove old implementation after stability is confirmed
 - Clean up unused code and dependencies
 - Update documentation and examples
@@ -796,16 +812,19 @@ class TestIntegratedAudioPlayer(unittest.TestCase):
 ### Documentation and Maintenance
 
 #### Code Documentation
+
 - Comprehensive docstrings for all public methods
 - Type hints for all function parameters and return values
 - Architecture decision records (ADRs) for major design choices
 
 #### User Documentation
+
 - Updated user guide with new audio player features
 - Visualization mode explanations with screenshots
 - Troubleshooting guide for common issues
 
 #### Maintenance Plan
+
 - Regular dependency updates
 - Performance monitoring and optimization
 - User feedback integration process
@@ -815,6 +834,7 @@ class TestIntegratedAudioPlayer(unittest.TestCase):
 This architecture plan provides a comprehensive, maintainable solution for implementing the UX enhancements while preserving the existing codebase's strengths. The modular design allows for incremental implementation and easy testing, while the use of established open-source components ensures reliability and community support.
 
 The plan prioritizes:
+
 1. **User Experience**: Intuitive, integrated audio controls
 2. **Maintainability**: Clean, modular architecture
 3. **Extensibility**: Easy to add new visualization modes

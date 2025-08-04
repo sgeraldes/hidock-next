@@ -89,8 +89,72 @@ def setup_test_environment(monkeypatch):
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
 
+@pytest.fixture
+def mock_tkinter_root():
+    """Create a mock tkinter root for CTk variable creation."""
+    import tkinter as tk
+
+    import customtkinter as ctk
+
+    # Create a temporary root window
+    root = tk.Tk()
+    root.withdraw()  # Hide the window
+
+    # Set as default root for variable creation
+    tk._default_root = root
+
+    yield root
+
+    # Cleanup
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+    tk._default_root = None
+
+
+@pytest.fixture
+def database_cleanup():
+    """Ensure database connections are properly closed after tests."""
+    import gc
+    import sqlite3
+
+    # Store original connections
+    original_connections = []
+
+    yield
+
+    # Force garbage collection to close any lingering connections
+    gc.collect()
+
+    # Additional cleanup for Windows file locking issues
+    import time
+
+    time.sleep(0.1)  # Small delay to allow file handles to close
+
+
 # Global lock for device test isolation
 _DEVICE_TEST_LOCK = threading.RLock()
+
+
+@pytest.fixture(autouse=True)
+def auto_database_cleanup():
+    """Automatically clean up database connections for all tests."""
+    import gc
+    import sqlite3
+
+    yield
+
+    # Force cleanup of any database connections
+    gc.collect()
+
+    # Close any remaining sqlite connections
+    for obj in gc.get_objects():
+        if isinstance(obj, sqlite3.Connection):
+            try:
+                obj.close()
+            except Exception:
+                pass
 
 
 @pytest.fixture(scope="function")

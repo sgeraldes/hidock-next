@@ -54,7 +54,7 @@ class TestOfflineAudioRequirements:
             can_get_insights = file_exists_locally
 
         # Verify: Get Insights should be enabled for downloaded files when connected
-        assert can_get_insights == True, "Get Insights should work for downloaded files when connected"
+        assert can_get_insights is True, "Get Insights should work for downloaded files when connected"
 
     def test_get_insights_works_for_downloaded_file_when_disconnected(self):
         """Test: Get Insights works for downloaded files when device is disconnected."""
@@ -77,7 +77,7 @@ class TestOfflineAudioRequirements:
             can_get_insights = file_exists_locally
 
         # Verify: Get Insights should be enabled for downloaded files even when disconnected
-        assert can_get_insights == True, "Get Insights should work for downloaded files when disconnected"
+        assert can_get_insights is True, "Get Insights should work for downloaded files when disconnected"
 
     def test_get_insights_disabled_for_non_downloaded_file_when_disconnected(self):
         """Test: Get Insights disabled for non-downloaded files when device is disconnected."""
@@ -97,7 +97,7 @@ class TestOfflineAudioRequirements:
             can_get_insights = file_exists_locally
 
         # Verify: Get Insights should be disabled for non-downloaded files when disconnected
-        assert can_get_insights == False, "Get Insights should be disabled for non-downloaded files when disconnected"
+        assert can_get_insights is False, "Get Insights should be disabled for non-downloaded files when disconnected"
 
     def test_play_works_for_downloaded_file_when_disconnected(self):
         """Test: Play works for downloaded files when device is disconnected."""
@@ -121,7 +121,7 @@ class TestOfflineAudioRequirements:
             can_play_selected = False
 
         # Verify: Play should be enabled for downloaded files even when disconnected
-        assert can_play_selected == True, "Play should work for downloaded files when disconnected"
+        assert can_play_selected is True, "Play should work for downloaded files when disconnected"
 
     def test_play_enabled_for_non_downloaded_file_when_connected(self):
         """Test: Play enabled for non-downloaded files when device is connected (downloads first, then plays)."""
@@ -145,7 +145,7 @@ class TestOfflineAudioRequirements:
             can_play_selected = False
 
         # Verify: Play should be enabled (will download first, then play)
-        assert can_play_selected == True, "Play should work for on-device files when connected"
+        assert can_play_selected is True, "Play should work for on-device files when connected"
 
     def test_play_disabled_for_non_downloaded_file_when_disconnected(self):
         """Test: Play disabled for non-downloaded files when device is disconnected."""
@@ -169,4 +169,4 @@ class TestOfflineAudioRequirements:
             can_play_selected = False
 
         # Verify: Play should be disabled for non-downloaded files when disconnected
-        assert can_play_selected == False, "Play should be disabled for non-downloaded files when disconnected"
+        assert can_play_selected is False, "Play should be disabled for non-downloaded files when disconnected"

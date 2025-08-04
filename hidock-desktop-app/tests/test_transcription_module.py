@@ -621,6 +621,266 @@ class TestExceptionHandling:
             assert "Could not clean up temporary file" in warning_call[0][2]
 
 
+class TestTranscriptionModuleUtilities:
+    """Test additional utility functions and edge cases in transcription module."""
+
+    def test_module_docstring(self):
+        """Test that module has proper docstring."""
+        import transcription_module
+
+        assert transcription_module.__doc__ is not None
+        assert len(transcription_module.__doc__.strip()) > 0
+        assert "transcription" in transcription_module.__doc__.lower()
+
+    def test_module_imports(self):
+        """Test that all required modules are imported."""
+        import transcription_module
+
+        # Check imports exist
+        assert hasattr(transcription_module, "json")
+        assert hasattr(transcription_module, "os")
+        assert hasattr(transcription_module, "wave")
+        assert hasattr(transcription_module, "ai_service")
+        assert hasattr(transcription_module, "logger")
+
+    def test_module_constants_availability(self):
+        """Test that module constants are available."""
+        assert TRANSCRIPTION_FAILED_DEFAULT_MSG is not None
+        assert TRANSCRIPTION_PARSE_ERROR_MSG_PREFIX is not None
+        assert isinstance(TRANSCRIPTION_FAILED_DEFAULT_MSG, str)
+        assert isinstance(TRANSCRIPTION_PARSE_ERROR_MSG_PREFIX, str)
+
+    def test_get_audio_duration_precision(self):
+        """Test _get_audio_duration rounding behavior."""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+            temp_path = temp_file.name
+
+        try:
+            with patch("transcription_module.wave.open") as mock_wave_open:
+                mock_wave_file = Mock()
+                mock_wave_file.getnframes.return_value = 88200  # 2 seconds at 44.1kHz
+                mock_wave_file.getframerate.return_value = 44100
+                mock_wave_open.return_value.__enter__.return_value = mock_wave_file
+
+                duration = _get_audio_duration(temp_path)
+
+                # 2 seconds = 0.033 minutes, should round to 0
+                assert duration == 0
+
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    def test_get_audio_duration_longer_file(self):
+        """Test _get_audio_duration with longer audio file."""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+            temp_path = temp_file.name
+
+        try:
+            with patch("transcription_module.wave.open") as mock_wave_open:
+                mock_wave_file = Mock()
+                mock_wave_file.getnframes.return_value = 4410000  # 100 seconds at 44.1kHz
+                mock_wave_file.getframerate.return_value = 44100
+                mock_wave_open.return_value.__enter__.return_value = mock_wave_file
+
+                duration = _get_audio_duration(temp_path)
+
+                # 100 seconds = 1.67 minutes, should round to 2
+                assert duration == 2
+
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    @pytest.mark.asyncio
+    async def test_process_audio_file_with_mp3_extension(self):
+        """Test process_audio_file_for_insights with non-HTA extension."""
+        with patch("transcription_module.os.path.exists", return_value=True), patch(
+            "transcription_module.transcribe_audio"
+        ) as mock_transcribe, patch("transcription_module.extract_meeting_insights") as mock_extract_insights, patch(
+            "transcription_module._get_audio_duration", return_value=3
+        ):
+            mock_transcribe.return_value = {"transcription": "MP3 transcription"}
+            mock_extract_insights.return_value = {
+                "summary": "MP3 summary",
+                "meeting_details": {"duration_minutes": 0},  # Will be updated
+            }
+
+            result = await process_audio_file_for_insights("/test/audio.mp3", "gemini", "test_key")
+
+            assert result["transcription"] == "MP3 transcription"
+            assert result["insights"]["summary"] == "MP3 summary"
+            # Duration should NOT be calculated for non-WAV files
+            assert result["insights"]["meeting_details"]["duration_minutes"] == 0
+
+    @pytest.mark.asyncio
+    async def test_process_audio_file_hta_cleanup_error_but_success(self):
+        """Test process_audio_file_for_insights with HTA cleanup error but successful processing."""
+        with patch("transcription_module.os.path.exists", return_value=True), patch(
+            "transcription_module.os.path.splitext", return_value=("/test/audio", ".hta")
+        ), patch("hta_converter.convert_hta_to_wav", return_value="/temp/converted.wav"), patch(
+            "transcription_module.transcribe_audio"
+        ) as mock_transcribe, patch(
+            "transcription_module.extract_meeting_insights"
+        ) as mock_extract_insights, patch(
+            "transcription_module.os.remove", side_effect=Exception("Cleanup failed")
+        ), patch(
+            "transcription_module.logger"
+        ) as mock_logger:
+            mock_transcribe.return_value = {"transcription": "HTA transcription"}
+            mock_extract_insights.return_value = {"summary": "HTA summary"}
+
+            result = await process_audio_file_for_insights("/test/audio.hta", "gemini", "test_key")
+
+            # Should still return successful result despite cleanup failure
+            assert result["transcription"] == "HTA transcription"
+            assert result["insights"]["summary"] == "HTA summary"
+
+            # Should log warning about cleanup failure
+            mock_logger.warning.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_process_audio_file_file_exists_check_error(self):
+        """Test process_audio_file_for_insights when file existence check itself fails."""
+        with patch("transcription_module.os.path.exists", side_effect=Exception("Filesystem error")):
+            result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
+
+            assert "error" in result
+            assert "Error preparing audio file" in result["error"]
+
+    def test_call_gemini_api_parameter_types(self):
+        """Test _call_gemini_api with different parameter types."""
+        # Test with empty payload (should handle gracefully)
+        result = _call_gemini_api({}, "")
+        assert result is not None
+        assert "candidates" in result
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_unknown_error(self):
+        """Test transcribe_audio when ai_service returns success=False with no error message."""
+        with patch("transcription_module.ai_service") as mock_ai_service:
+            mock_ai_service.configure_provider.return_value = True
+            mock_ai_service.transcribe_audio.return_value = {
+                "success": False
+                # No error key provided
+            }
+
+            result = await transcribe_audio("/test/audio.wav", "gemini", "test_key")
+
+            assert "Transcription failed: Unknown error" in result["transcription"]
+
+    @pytest.mark.asyncio
+    async def test_extract_meeting_insights_no_topics(self):
+        """Test extract_meeting_insights when analysis has no topics."""
+        with patch("transcription_module.ai_service") as mock_ai_service:
+            mock_ai_service.configure_provider.return_value = True
+            mock_ai_service.analyze_text.return_value = {
+                "success": True,
+                "analysis": {
+                    "summary": "Test summary",
+                    "sentiment": "Positive",
+                    "action_items": ["Item 1"],
+                    # No topics key
+                },
+            }
+
+            result = await extract_meeting_insights("Test transcription", "gemini", "test_key")
+
+            assert result["summary"] == "Test summary"
+            assert result["category"] == "N/A"  # No topics means N/A
+            assert result["project_context"] == "N/A"  # No topics means N/A
+            assert result["overall_sentiment_meeting"] == "Positive"
+            assert result["action_items"] == ["Item 1"]
+
+    @pytest.mark.asyncio
+    async def test_extract_meeting_insights_empty_topics(self):
+        """Test extract_meeting_insights when analysis has empty topics list."""
+        with patch("transcription_module.ai_service") as mock_ai_service:
+            mock_ai_service.configure_provider.return_value = True
+            mock_ai_service.analyze_text.return_value = {
+                "success": True,
+                "analysis": {"summary": "Test summary", "topics": [], "sentiment": "Neutral"},  # Empty topics list
+            }
+
+            result = await extract_meeting_insights("Test transcription", "gemini", "test_key")
+
+            assert result["summary"] == "Test summary"
+            assert result["category"] == "N/A"  # Empty topics means N/A
+            assert result["project_context"] == "N/A"  # Empty topics means N/A
+
+    @pytest.mark.asyncio
+    async def test_transcribe_audio_empty_string_result(self):
+        """Test transcribe_audio when ai_service returns empty string."""
+        with patch("transcription_module.ai_service") as mock_ai_service:
+            mock_ai_service.configure_provider.return_value = True
+            mock_ai_service.transcribe_audio.return_value = {"success": True, "transcription": ""}  # Empty string
+
+            result = await transcribe_audio("/test/audio.wav", "gemini", "test_key")
+
+            assert result["transcription"] == ""
+
+    def test_module_functions_exist(self):
+        """Test that all expected functions are defined in the module."""
+        expected_functions = [
+            "_call_gemini_api",
+            "transcribe_audio",
+            "extract_meeting_insights",
+            "_get_audio_duration",
+            "process_audio_file_for_insights",
+            "main_test",
+        ]
+
+        for func_name in expected_functions:
+            assert hasattr(transcription_module, func_name)
+            assert callable(getattr(transcription_module, func_name))
+
+    @pytest.mark.asyncio
+    async def test_main_test_function_execution_path(self):
+        """Test main_test function execution with mocked environment."""
+        with patch("transcription_module.os.path.exists", return_value=True), patch(
+            "transcription_module.os.environ.get", return_value="mock_key"
+        ), patch("transcription_module.process_audio_file_for_insights") as mock_process, patch(
+            "transcription_module.logger"
+        ) as mock_logger, patch(
+            "builtins.print"
+        ) as mock_print, patch(
+            "transcription_module.json.dumps", return_value='{"mock": "output"}'
+        ):
+            mock_process.return_value = {"transcription": "test", "insights": {"summary": "test"}}
+
+            await main_test()
+
+            # Verify function execution path
+            mock_logger.info.assert_called()
+            mock_process.assert_called_once()
+            mock_print.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_process_audio_file_transcription_starts_with_failed(self):
+        """Test process_audio_file when transcription result starts with 'Transcription failed'."""
+        with patch("transcription_module.os.path.exists", return_value=True), patch(
+            "transcription_module.transcribe_audio"
+        ) as mock_transcribe, patch("transcription_module.extract_meeting_insights") as mock_extract_insights:
+            mock_transcribe.return_value = {"transcription": "Transcription failed: some error"}
+
+            result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")
+
+            # Should skip insights extraction when transcription fails
+            assert result["transcription"] == "Transcription failed: some error"
+            assert result["insights"]["summary"] == "N/A - Transcription failed"
+            mock_extract_insights.assert_not_called()
+
+    def test_import_google_generativeai_module_check(self):
+        """Test the google.generativeai import handling."""
+        # This test verifies the module handles the optional import gracefully
+        import transcription_module
+
+        # The module should define genai (even if it's None)
+        assert hasattr(transcription_module, "genai")
+        # genai could be None if import failed, or the actual module if available
+        # Either case should be handled by the code
+
+
 class TestMainTestFunction:
     """Test the main_test function for command-line usage"""
 

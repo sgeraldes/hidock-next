@@ -1,6 +1,7 @@
 # Device Connection Fallback - Test Results
 
 ## Test Scenario
+
 - **Config**: P1 device configured (VID: 0x10D6, PID: 0xAF0E)
 - **Hardware**: H1E device connected (VID: 0x10D6, PID: 0xB00D)
 - **Expected**: App should detect mismatch and fall back to available device
@@ -12,6 +13,7 @@ The smart connection fallback logic has been successfully implemented in `gui_ac
 ### Key Features Implemented
 
 1. **Smart Connection Logic** (`_connect_device_thread` method):
+
    ```python
    try:
        # Try configured device first
@@ -47,6 +49,7 @@ The smart connection fallback logic has been successfully implemented in `gui_ac
 ## Behavior Verification
 
 ### Manual Connect Button
+
 When user clicks "Connect" with P1 configured but H1E connected:
 
 1. **Step 1**: Attempts connection to P1 (0x10D6:0xAF0E)
@@ -59,6 +62,7 @@ When user clicks "Connect" with P1 configured but H1E connected:
 8. **Step 8**: Updates UI to show H1E as selected device for this session
 
 ### Autoconnect Scenario
+
 When autoconnect is enabled with device mismatch:
 
 1. **Discovery Phase**: Finds available devices (including H1E)
@@ -82,7 +86,8 @@ def get_default_config():
     }
 ```
 
-### Benefits:
+### Benefits
+
 - **Universal Compatibility**: Works with any HiDock device (H1, H1E, P1)
 - **Smart Fallback**: Automatically adapts to available hardware
 - **Clear User Feedback**: Shows which device is actually connected
@@ -105,6 +110,7 @@ The device fallback functionality is **fully implemented and ready for use**:
 5. ✅ Graceful error handling for device conflicts
 
 **User Experience**: If a user has P1 configured but connects an H1E, the app will:
+
 - Try P1 first (as configured)
 - Detect P1 is not available
 - Show "Trying HiDock H1E (configured device not found)..."

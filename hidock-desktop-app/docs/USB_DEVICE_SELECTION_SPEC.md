@@ -3,6 +3,7 @@
 ## How It Should Work
 
 ### 1. Device Detection
+
 - **Automatic Discovery**: The system should automatically detect all USB devices, with special recognition for HiDock devices
 - **HiDock Device Identification**:
   - Vendor ID (VID): `0x10D6` (Actions Semiconductor)
@@ -18,6 +19,7 @@
   - VID/PID in hex format
 
 ### 2. Settings Persistence
+
 - **Selected Device**: The selected VID/PID should persist in `hidock_config.json`
 - **Autoconnect Behavior**:
   - If `autoconnect: true`, attempt to connect to saved VID/PID on startup
@@ -28,6 +30,7 @@
   - Save immediately when Apply/OK is clicked
 
 ### 3. Device Selector UI
+
 - **Status Indicators**:
   - 🟢 Connected - Device is currently connected
   - 🔵 Available - Device detected but not connected
@@ -39,6 +42,7 @@
 - **Disable When Connected**: Device selection should be disabled while connected
 
 ### 4. Error Handling
+
 - **No Devices Found**: Clear message when no USB devices detected
 - **No HiDock Devices**: Specific message when USB devices found but no HiDock
 - **Permission Errors**: Handle USB access permission issues gracefully
@@ -47,53 +51,63 @@
 ## Test Plan
 
 ### Test Case 1: Fresh Install Detection
+
 1. Delete config file
 2. Start application
 3. **Expected**: Device selector shows all USB devices with HiDock devices marked and sorted first
 
 ### Test Case 2: Autoconnect Success
+
 1. Set autoconnect=true with valid VID/PID
 2. Start application
 3. **Expected**: Automatically connects to saved device
 
 ### Test Case 3: Autoconnect Fallback
+
 1. Set autoconnect=true with non-existent VID/PID
 2. Start application with HiDock device connected
 3. **Expected**: Falls back to available HiDock device
 
 ### Test Case 4: Manual Device Selection
+
 1. Open Settings → Connection tab
 2. Select a different device
 3. Click Apply
 4. **Expected**: Config file updated with new VID/PID
 
 ### Test Case 5: Settings Persistence
+
 1. Select device in settings
 2. Apply changes
 3. Restart application
 4. **Expected**: Previously selected device is remembered
 
 ### Test Case 6: Device Scan with No HiDock
+
 1. Disconnect all HiDock devices
 2. Click Scan in device selector
 3. **Expected**: Shows "0 HiDock devices" with other USB devices listed
 
 ### Test Case 7: Device Scan with HiDock
+
 1. Connect HiDock device
 2. Click Scan in device selector
 3. **Expected**: Shows HiDock device count and lists them first
 
 ### Test Case 8: Connected Device Lock
+
 1. Connect to a device
 2. Open Settings
 3. **Expected**: Device selector is disabled with warning message
 
 ### Test Case 9: Multiple HiDock Devices
+
 1. Connect multiple HiDock devices
 2. Open device selector
 3. **Expected**: All HiDock devices shown, sorted by model
 
 ### Test Case 10: Invalid Config Recovery
+
 1. Set invalid VID/PID in config (e.g., strings instead of numbers)
 2. Start application
 3. **Expected**: Gracefully handles invalid config, uses defaults

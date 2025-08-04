@@ -8,14 +8,12 @@ changes to general application preferences, connection parameters,
 operation timeouts, device-specific behaviors, and logging options.
 """
 
-import asyncio
 import base64
 
 # import json  # Future: for advanced configuration import/export
 import os
 import threading  # For device settings apply thread
 import tkinter
-from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -29,7 +27,7 @@ except ImportError:
     ENCRYPTION_AVAILABLE = False
     Fernet = None  # Define Fernet as None when not available
 
-from config_and_logger import Logger, logger, save_config  # For type hint and logger instance
+from config_and_logger import Logger, logger, update_config_settings  # For type hint and logger instance
 
 
 class SettingsDialog(ctk.CTkToplevel):
@@ -65,7 +63,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.grab_set()
 
         self._settings_dialog_initializing = True  # Flag to prevent premature updates
-        self.settings_changed_tracker = [False]  # Use a list to pass by reference
+        # Settings are saved atomically when changed - no change tracking
 
         # Store current values of relevant CTk Variables from parent_gui for local use and reset
         self.local_vars = {}
@@ -150,6 +148,12 @@ class SettingsDialog(ctk.CTkToplevel):
             "ai_deepseek_base_url_var": "StringVar",
             "ai_ollama_base_url_var": "StringVar",
             "ai_lmstudio_base_url_var": "StringVar",
+            "single_selection_mode_var": "BooleanVar",
+            "visualizer_pinned_var": "BooleanVar",
+            "loop_playback_var": "BooleanVar",
+            "volume_var": "DoubleVar",
+            "logs_visible_var": "BooleanVar",
+            "gui_log_filter_level_var": "StringVar",
         }
         for var_name, var_type_str in vars_to_clone_map.items():
             if hasattr(self.parent_gui, var_name):
@@ -170,7 +174,15 @@ class SettingsDialog(ctk.CTkToplevel):
                     parent_value = str(parent_value)
 
                 self.local_vars[var_name] = var_class(value=parent_value)
-                self.local_vars[var_name].trace_add("write", self._on_setting_change)
+
+                # Create a closure to capture the var_name for the trace callback
+                def make_trace_callback(variable_name):
+                    def callback(*args):
+                        self._on_setting_change(variable_name)
+
+                    return callback
+
+                self.local_vars[var_name].trace_add("write", make_trace_callback(var_name))
 
         # Clone log color variables
         for level_key in Logger.LEVELS:  # Iterate directly over dictionary keys
@@ -180,7 +192,9 @@ class SettingsDialog(ctk.CTkToplevel):
                 if hasattr(self.parent_gui, var_name):
                     parent_var = getattr(self.parent_gui, var_name)
                     self.local_vars[var_name] = ctk.StringVar(value=parent_var.get())
-                    self.local_vars[var_name].trace_add("write", self._on_setting_change)
+
+                    # Use the same make_trace_callback function defined above
+                    self.local_vars[var_name].trace_add("write", make_trace_callback(var_name))
 
     def _create_settings_widgets(self):
         """
@@ -199,6 +213,7 @@ class SettingsDialog(ctk.CTkToplevel):
         tab_device_specific = tabview.add(" Device Specific ")
         tab_ai_transcription = tabview.add(" AI Transcription ")
         tab_logging = tabview.add(" Logging ")
+        tab_advanced = tabview.add(" Advanced ")
 
         self._populate_general_tab(tab_general)
         self._populate_connection_tab(tab_connection)
@@ -206,6 +221,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._populate_device_specific_tab(tab_device_specific)
         self._populate_ai_transcription_tab(tab_ai_transcription)
         self._populate_logging_tab(tab_logging)
+        self._populate_advanced_tab(tab_advanced)
 
         # --- Buttons Frame ---
         buttons_frame = ctk.CTkFrame(main_content_frame, fg_color="transparent")
@@ -214,16 +230,7 @@ class SettingsDialog(ctk.CTkToplevel):
         action_buttons_subframe = ctk.CTkFrame(buttons_frame, fg_color="transparent")
         action_buttons_subframe.pack(side="right")
 
-        # Only Close button and Reset to Defaults
-        self.reset_button = ctk.CTkButton(
-            action_buttons_subframe,
-            text="Reset to Defaults",
-            fg_color="orange",
-            hover_color="darkorange",
-            command=self._reset_to_defaults,
-        )
-        self.reset_button.pack(side="left", padx=(0, 10))
-
+        # Only Close button
         self.close_button = ctk.CTkButton(
             action_buttons_subframe,
             text="Close",
@@ -484,6 +491,99 @@ class SettingsDialog(ctk.CTkToplevel):
             )
             self._update_color_preview_widget(dark_preview_frame, dark_color_var_ref)
 
+    def _populate_advanced_tab(self, tab):
+        """Populates the 'Advanced' tab with advanced settings and reset functionality."""
+        scroll_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Reset Section
+        ctk.CTkLabel(
+            scroll_frame, text="⚠️ Danger Zone:", font=ctk.CTkFont(weight="bold", size=16), text_color="red"
+        ).pack(anchor="w", pady=(5, 2), padx=5)
+
+        self.reset_button = ctk.CTkButton(
+            scroll_frame,
+            text="Reset All Settings to Defaults",
+            fg_color="red",
+            hover_color="darkred",
+            command=self._reset_to_defaults,
+            width=250,
+            height=40,
+        )
+        self.reset_button.pack(anchor="w", padx=10, pady=10)
+
+        ctk.CTkLabel(
+            scroll_frame,
+            text="⚠️ This will reset ALL settings to defaults and cannot be undone!",
+            font=ctk.CTkFont(size=10),
+            text_color="orange",
+        ).pack(anchor="w", padx=10, pady=(0, 20))
+
+        # Advanced UI Settings
+        ctk.CTkLabel(scroll_frame, text="Advanced UI Settings:", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", pady=(10, 2), padx=5
+        )
+
+        # Add missing settings that should be exposed
+        if "single_selection_mode_var" in self.local_vars:
+            ctk.CTkCheckBox(
+                scroll_frame,
+                text="Single selection mode (vs multi-select)",
+                variable=self.local_vars["single_selection_mode_var"],
+            ).pack(anchor="w", pady=5, padx=10)
+
+        if "visualizer_pinned_var" in self.local_vars:
+            ctk.CTkCheckBox(
+                scroll_frame, text="Keep audio visualizer pinned", variable=self.local_vars["visualizer_pinned_var"]
+            ).pack(anchor="w", pady=5, padx=10)
+
+        if "loop_playback_var" in self.local_vars:
+            ctk.CTkCheckBox(
+                scroll_frame, text="Loop audio playback", variable=self.local_vars["loop_playback_var"]
+            ).pack(anchor="w", pady=5, padx=10)
+
+        if "volume_var" in self.local_vars:
+            ctk.CTkLabel(scroll_frame, text="Default playback volume:").pack(anchor="w", pady=(10, 0), padx=10)
+            volume_frame = ctk.CTkFrame(scroll_frame)
+            volume_frame.pack(fill="x", pady=2, padx=10)
+
+            volume_slider = ctk.CTkSlider(
+                volume_frame, from_=0.0, to=1.0, variable=self.local_vars["volume_var"], number_of_steps=100
+            )
+            volume_slider.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+            self.volume_label = ctk.CTkLabel(volume_frame, text="0.5", width=40)
+            self.volume_label.pack(side="right")
+
+            # Update volume label when slider changes
+            self.local_vars["volume_var"].trace_add("write", self._update_volume_label)
+            self._update_volume_label()
+
+        # Debug Settings
+        ctk.CTkLabel(scroll_frame, text="Debug Settings:", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", pady=(20, 2), padx=5
+        )
+
+        if "logs_visible_var" in self.local_vars:
+            ctk.CTkCheckBox(
+                scroll_frame, text="Show logs panel by default", variable=self.local_vars["logs_visible_var"]
+            ).pack(anchor="w", pady=5, padx=10)
+
+        if "gui_log_filter_level_var" in self.local_vars:
+            ctk.CTkLabel(scroll_frame, text="GUI Log Filter Level:").pack(anchor="w", pady=(10, 0), padx=10)
+            ctk.CTkComboBox(
+                scroll_frame,
+                variable=self.local_vars["gui_log_filter_level_var"],
+                values=list(Logger.LEVELS.keys()),
+                state="readonly",
+            ).pack(fill="x", pady=2, padx=10)
+
+    def _update_volume_label(self, *args):
+        """Update the volume display label."""
+        if hasattr(self, "volume_label") and "volume_var" in self.local_vars:
+            volume_value = self.local_vars["volume_var"].get()
+            self.volume_label.configure(text=f"{volume_value:.2f}")
+
     def _populate_ai_transcription_tab(self, tab):
         """Populates the 'AI Transcription' tab with AI service settings."""
         scroll_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
@@ -525,6 +625,10 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.api_key_entry = ctk.CTkEntry(api_key_frame, placeholder_text="Enter your API key", show="*", width=300)
         self.api_key_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        # Save API key when user finishes typing (on focus out)
+        self.api_key_entry.bind("<FocusOut>", self._save_api_key)
+        self.api_key_entry.bind("<Return>", self._save_api_key)
 
         self.validate_key_button = ctk.CTkButton(
             api_key_frame, text="Validate", width=80, command=self._validate_api_key
@@ -755,47 +859,14 @@ class SettingsDialog(ctk.CTkToplevel):
             if not self.winfo_exists():
                 return
             self._settings_dialog_initializing = False
-            self.settings_changed_tracker[0] = False
             logger.debug(
                 "SettingsDialog",
                 "_core_final_setup",
-                "Initialization complete. Change tracking active.",
+                "Initialization complete. Atomic saves active.",
             )
 
         if self.winfo_exists():
             self.after(50, _core_final_setup)
-
-    def _update_button_states_on_change(self, _var_name=None, _index=None, _mode=None):
-        """
-        Updates the state of the OK, Apply, and Cancel/Close buttons.
-
-        Called whenever a setting value changes to enable/disable buttons appropriately.
-        """
-        if not self.winfo_exists():
-            return
-        if self._settings_dialog_initializing:
-            return
-        if not self.settings_changed_tracker[0]:
-            self.settings_changed_tracker[0] = True
-            logger.debug(
-                "SettingsDialog",
-                "_update_button_states_on_change",
-                "First change, transitioning buttons.",
-            )
-            if self.ok_button.winfo_exists() and self.ok_button.winfo_ismapped():
-                self.ok_button.pack_forget()
-            if self.apply_button.winfo_exists() and self.apply_button.winfo_ismapped():
-                self.apply_button.pack_forget()
-            if self.cancel_close_button.winfo_exists() and self.cancel_close_button.winfo_ismapped():
-                self.cancel_close_button.pack_forget()
-            self.ok_button.pack(side="left", padx=(0, 5))
-            self.apply_button.pack(side="left", padx=5)
-            self.cancel_close_button.pack(side="left", padx=(5, 0))
-            self.ok_button.configure(state="normal", fg_color=self.color_ok_blue)  # Ensure OK button color is set
-            self.apply_button.configure(state="normal")
-            self.cancel_close_button.configure(text="Cancel", fg_color=self.color_cancel_red)
-        elif self.apply_button.winfo_exists() and self.apply_button.winfo_ismapped():
-            self.apply_button.configure(state="normal")
 
     def _select_download_dir_action(self):
         """Opens a file dialog to select the download directory and updates the UI."""
@@ -808,7 +879,9 @@ class SettingsDialog(ctk.CTkToplevel):
             self.current_dialog_download_dir[0] = selected_dir
             if hasattr(self, "current_dl_dir_label_settings") and self.current_dl_dir_label_settings.winfo_exists():
                 self.current_dl_dir_label_settings.configure(text=self.current_dialog_download_dir[0])
-            self._auto_save_settings()  # Auto-save immediately
+            # Update parent GUI and save atomically
+            self.parent_gui.download_directory = selected_dir
+            update_config_settings({"download_directory": selected_dir})
 
     def _reset_download_dir_action(self):
         """Resets the download directory to the application's current working directory."""
@@ -817,42 +890,9 @@ class SettingsDialog(ctk.CTkToplevel):
             self.current_dialog_download_dir[0] = default_dir
             if hasattr(self, "current_dl_dir_label_settings") and self.current_dl_dir_label_settings.winfo_exists():
                 self.current_dl_dir_label_settings.configure(text=self.current_dialog_download_dir[0])
-            self._auto_save_settings()  # Auto-save immediately
-
-    def _on_device_selected_in_settings(self, _choice):  # CTkComboBox passes choice, mark as unused
-        """
-        Handles the selection change in the device combobox.
-
-        Updates the selected VID/PID variables based on the user's selection.
-        """
-        if not self.settings_device_combobox or not self.settings_device_combobox.winfo_exists():
-            return
-        selection = self.settings_device_combobox.get()  # Get current value
-        if not selection or selection == "--- Devices with Issues ---":
-            return
-        selected_device_info = next(
-            (dev for dev in self.parent_gui.available_usb_devices if dev[0] == selection),
-            None,
-        )
-        if selected_device_info:
-            _, vid, pid = selected_device_info
-            vid_str = str(vid)
-            pid_str = str(pid)
-            if self.local_vars["selected_vid_var"].get() != vid_str:
-                self.local_vars["selected_vid_var"].set(vid_str)
-            if self.local_vars["selected_pid_var"].get() != pid_str:
-                self.local_vars["selected_pid_var"].set(pid_str)
-            if (
-                self.local_vars["selected_vid_var"].get() == vid_str
-                and self.local_vars["selected_pid_var"].get() == pid_str
-            ):
-                self._update_button_states_on_change()  # Manually trigger change
-        else:
-            logger.warning(
-                "SettingsDialog",
-                "_on_device_selected",
-                f"Could not find details for: '{selection}'",
-            )
+            # Update parent GUI and save atomically
+            self.parent_gui.download_directory = default_dir
+            update_config_settings({"download_directory": default_dir})
 
     def _update_color_preview_widget(self, frame_widget, color_string_var):
         """
@@ -987,7 +1027,7 @@ class SettingsDialog(ctk.CTkToplevel):
                 self.parent_gui.scan_usb_devices_for_settings(
                     self,
                     initial_load=True,
-                    change_callback=self._update_button_states_on_change,
+                    change_callback=None,  # No callback for atomic saves
                 )
         except Exception as e:
             logger.error(
@@ -1077,337 +1117,22 @@ class SettingsDialog(ctk.CTkToplevel):
 
         return True
 
-    def _perform_apply_settings_logic(self, update_dialog_baseline=False):
-        """
-        Applies the settings from the dialog's local variables to the parent GUI's state and config.
-
-        Args:
-        update_dialog_baseline (bool): If True, updates the dialog's internal snapshot
-        to the newly applied settings (used for the 'Apply' button).
-        """
-        # Validate numeric settings first
-        if not self._validate_numeric_settings():
-            return  # Don't apply if validation fails
-
-        # Apply local_vars to parent_gui's vars and config
-        for var_name, local_tk_var in self.local_vars.items():
-            if hasattr(self.parent_gui, var_name):
-                parent_var = getattr(self.parent_gui, var_name)
-
-                # Convert string values back to integers for numeric variables
-                value = local_tk_var.get()
-                if var_name in [
-                    "selected_vid_var",
-                    "selected_pid_var",
-                    "target_interface_var",
-                    "recording_check_interval_var",
-                    "default_command_timeout_ms_var",
-                    "file_stream_timeout_s_var",
-                    "auto_refresh_interval_s_var",
-                ]:
-                    value = int(value.strip())
-
-                parent_var.set(value)  # This will trigger traces on parent if any
-
-                # Update the main config dictionary directly for saving
-                # Need to map var_name (e.g. "autoconnect_var") to config key (e.g. "autoconnect")
-                config_key = var_name.replace("_var", "")
-
-                # Special mappings for config keys that don't follow the simple pattern
-                if config_key == "logger_processing_level":
-                    config_key = "log_level"
-                elif config_key == "quit_without_prompt":
-                    config_key = "quit_without_prompt_if_connected"
-                elif config_key == "recording_check_interval":
-                    config_key = "recording_check_interval_s"
-                elif config_key == "default_command_timeout_ms":
-                    config_key = "default_command_timeout_ms"  # Already correct
-                elif config_key == "file_stream_timeout_s":
-                    config_key = "file_stream_timeout_s"  # Already correct
-                elif config_key == "auto_refresh_interval_s":
-                    config_key = "auto_refresh_interval_s"  # Already correct
-
-                if config_key.startswith("log_color_") and config_key.endswith(("_light", "_dark")):
-                    pass  # Log colors handled separately
-                elif config_key.startswith("device_setting_"):  # These are not directly in config
-                    pass
-                else:
-                    self.parent_gui.config[config_key] = value
-
-        # Apply log colors
-        if "log_colors" not in self.parent_gui.config:
-            self.parent_gui.config["log_colors"] = {}
-        for level_key in Logger.LEVELS:  # Iterate directly over dictionary keys
-            level_lower = level_key.lower()
-            light_var_name = f"log_color_{level_lower}_light_var"
-            dark_var_name = f"log_color_{level_lower}_dark_var"
-            if light_var_name in self.local_vars and dark_var_name in self.local_vars:
-                self.parent_gui.config["log_colors"][level_key] = [
-                    self.local_vars[light_var_name].get(),
-                    self.local_vars[dark_var_name].get(),
-                ]
-
-        # Handle AI transcription API key encryption and storage
-        if hasattr(self, "api_key_entry"):
-            api_key = self.api_key_entry.get().strip()
-            provider = self.local_vars["ai_api_provider_var"].get()
-
-            if api_key:
-                encrypted_key = self._encrypt_api_key(api_key)
-                self.parent_gui.config[f"ai_api_key_{provider}_encrypted"] = encrypted_key
-            else:
-                # Remove key if empty
-                if f"ai_api_key_{provider}_encrypted" in self.parent_gui.config:
-                    del self.parent_gui.config[f"ai_api_key_{provider}_encrypted"]
-
-        # Check if download directory actually changed
-        old_download_directory = self.parent_gui.download_directory
-        self.parent_gui.download_directory = self.current_dialog_download_dir[0]
-        self.parent_gui.config["download_directory"] = self.parent_gui.download_directory
-
-        # If download directory changed, refresh file status
-        if old_download_directory != self.parent_gui.download_directory:
-            logger.info(
-                "SettingsDialog",
-                "_perform_apply_settings_logic",
-                f"Download directory changed from '{old_download_directory}' to '{self.parent_gui.download_directory}'",
-            )
-            # Update file operations manager with new download directory
-            if hasattr(self.parent_gui, "file_operations_manager"):
-                from pathlib import Path
-
-                self.parent_gui.file_operations_manager.download_dir = Path(self.parent_gui.download_directory)
-                self.parent_gui.file_operations_manager.download_dir.mkdir(parents=True, exist_ok=True)
-
-            # Refresh file status to reflect availability in new directory
-            if hasattr(self.parent_gui, "refresh_file_status_after_directory_change"):
-                self.parent_gui.refresh_file_status_after_directory_change()
-
-        # Trigger updates in parent GUI
-        self.parent_gui.apply_theme_and_color()  # Applies appearance dependent styles
-        logger.set_level(self.parent_gui.logger_processing_level_var.get())  # Update global logger
-        logger.update_config(
-            {
-                "suppress_console_output": self.parent_gui.suppress_console_output_var.get(),
-                "suppress_gui_log_output": self.parent_gui.suppress_gui_log_output_var.get(),
-            }
-        )
-        self.parent_gui.update_log_colors_gui()  # Use public method
-        self.parent_gui.update_all_status_info()
-
-        # Apply device-specific settings if connected and changed
-        if self.dock.is_connected() and self._fetched_device_settings_for_dialog:
-            changed_device_settings = {}
-            conceptual_device_setting_keys = {
-                "autoRecord": "device_setting_auto_record_var",
-                "autoPlay": "device_setting_auto_play_var",
-                "bluetoothTone": "device_setting_bluetooth_tone_var",
-                "notificationSound": "device_setting_notification_sound_var",
-            }
-            for (
-                conceptual_key,
-                local_var_name,
-            ) in conceptual_device_setting_keys.items():
-                current_val = self.local_vars[local_var_name].get()
-                fetched_val = self._fetched_device_settings_for_dialog.get(conceptual_key)
-                if (
-                    current_val != fetched_val and fetched_val is not None
-                ):  # Only if fetched_val was successfully loaded
-                    changed_device_settings[conceptual_key] = current_val
-            if changed_device_settings:
-                self.parent_gui.apply_device_settings_from_dialog(changed_device_settings)  # Call parent's method
-
-        # Save only the changed settings instead of entire config
-        from config_and_logger import update_config_settings
-
-        # Build dictionary of only the settings that changed
-        settings_to_save = {}
-
-        # Add all the settings that were modified
-        for var_name, local_tk_var in self.local_vars.items():
-            if hasattr(self.parent_gui, var_name):
-                config_key = var_name.replace("_var", "")
-
-                # Special mappings for config keys
-                if config_key == "logger_processing_level":
-                    config_key = "log_level"
-                elif config_key == "quit_without_prompt":
-                    config_key = "quit_without_prompt_if_connected"
-                elif config_key == "recording_check_interval":
-                    config_key = "recording_check_interval_s"
-
-                # Skip device settings and log colors (handled separately)
-                if not (config_key.startswith("log_color_") or config_key.startswith("device_setting_")):
-                    value = local_tk_var.get()
-                    # Convert string values back to integers for numeric variables
-                    if var_name in [
-                        "selected_vid_var",
-                        "selected_pid_var",
-                        "target_interface_var",
-                        "recording_check_interval_var",
-                        "default_command_timeout_ms_var",
-                        "file_stream_timeout_s_var",
-                        "auto_refresh_interval_s_var",
-                    ]:
-                        value = int(value.strip())
-                    settings_to_save[config_key] = value
-
-        # Add log colors
-        log_colors = {}
-        for level_key in Logger.LEVELS:
-            level_lower = level_key.lower()
-            light_var_name = f"log_color_{level_lower}_light_var"
-            dark_var_name = f"log_color_{level_lower}_dark_var"
-            if light_var_name in self.local_vars and dark_var_name in self.local_vars:
-                log_colors[level_key] = [
-                    self.local_vars[light_var_name].get(),
-                    self.local_vars[dark_var_name].get(),
-                ]
-        if log_colors:
-            settings_to_save["log_colors"] = log_colors
-
-        # Add download directory if changed
-        if old_download_directory != self.parent_gui.download_directory:
-            settings_to_save["download_directory"] = self.parent_gui.download_directory
-
-        # Add AI API key if present
-        if hasattr(self, "api_key_entry"):
-            api_key = self.api_key_entry.get().strip()
-            provider = self.local_vars["ai_api_provider_var"].get()
-            if api_key:
-                encrypted_key = self._encrypt_api_key(api_key)
-                settings_to_save[f"ai_api_key_{provider}_encrypted"] = encrypted_key
-            elif f"ai_api_key_{provider}_encrypted" in self.parent_gui.config:
-                # Remove key if empty - need to handle this separately
-                del self.parent_gui.config[f"ai_api_key_{provider}_encrypted"]
-
-        # Save only the changed settings
-        update_config_settings(settings_to_save)
-        logger.info("SettingsDialog", "apply_settings", "Settings applied and saved.")
-
-        if update_dialog_baseline:  # If "Apply" was clicked, update the baseline for this dialog
-            self.initial_config_snapshot = self.parent_gui.config.copy()  # Re-snapshot
-            self._clone_parent_vars()  # Re-clone vars to update local_vars to current parent state
-            self.initial_download_directory = self.parent_gui.download_directory
-            self.current_dialog_download_dir[0] = self.parent_gui.download_directory
-            # Re-fetch device settings for baseline if needed,
-            # or use current local_vars as new baseline
-            if self.dock.is_connected():
-                self._fetched_device_settings_for_dialog["autoRecord"] = self.local_vars[
-                    "device_setting_auto_record_var"
-                ].get()
-                self._fetched_device_settings_for_dialog["autoPlay"] = self.local_vars[
-                    "device_setting_auto_play_var"
-                ].get()
-                self._fetched_device_settings_for_dialog["bluetoothTone"] = self.local_vars[
-                    "device_setting_bluetooth_tone_var"
-                ].get()
-                self._fetched_device_settings_for_dialog["notificationSound"] = self.local_vars[
-                    "device_setting_notification_sound_var"
-                ].get()
-
-    def _ok_action(self):
-        """
-        Handles the 'OK' button click.
-
-        Applies settings if changed and closes the dialog.
-        """
-        if self.settings_changed_tracker[0]:
-            self._perform_apply_settings_logic(update_dialog_baseline=False)
-        self.destroy()
-
-    def _apply_action_ui_handler(self):
-        """Handles the 'Apply' button click, applying settings and updating the dialog state."""
-        if self.settings_changed_tracker[0]:
-            self._perform_apply_settings_logic(update_dialog_baseline=True)
-
-            def _update_dialog_ui_after_apply():
-                if self.winfo_exists():
-                    self.settings_changed_tracker[0] = False
-                    if self.ok_button.winfo_exists():
-                        self.ok_button.configure(state="disabled")
-                        self.ok_button.pack_forget()
-                    if self.apply_button.winfo_exists():
-                        self.apply_button.configure(state="disabled")
-                        self.apply_button.pack_forget()
-                    if self.cancel_close_button.winfo_exists():
-                        self.cancel_close_button.configure(text="Close", fg_color=self.color_close_grey)
-                    self.focus_set()
-
-            if self.winfo_exists():
-                self.after(160, _update_dialog_ui_after_apply)
-
     def _cancel_close_action(self):
         """
-        Handles the 'Cancel' or 'Close' button click.
+        Handles the 'Close' button click.
 
-        If settings were changed, resets the local variables to the initial state before closing.
+        With atomic saves, all changes are already saved, so just close.
         """
-        if self.settings_changed_tracker[0]:
-            # Reset local_vars to their state at the time of the last "Apply" or dialog open
-            for (
-                config_key,
-                initial_config_value,
-            ) in self.initial_config_snapshot.items():
-                if config_key == "log_colors":
-                    # initial_config_value is the dict of log colors.
-                    for (
-                        level_key,
-                        color_pair,
-                    ) in initial_config_value.items():  # Iterate the dict
-                        level_lower = level_key.lower()
-                        light_var_name = f"log_color_{level_lower}_light_var"
-                        dark_var_name = f"log_color_{level_lower}_dark_var"
-                        if light_var_name in self.local_vars and len(color_pair) > 0:
-                            self.local_vars[light_var_name].set(color_pair[0])
-                        if dark_var_name in self.local_vars and len(color_pair) > 1:
-                            self.local_vars[dark_var_name].set(color_pair[1])
-                elif config_key == "download_directory":
-                    # Handled separately by resetting self.current_dialog_download_dir[0]
-                    # to self.initial_download_directory (which is updated on Apply)
-                    pass
-                else:
-                    # General config keys like "autoconnect", "log_level", "appearance_mode"
-                    # Map config key from snapshot to local CTk variable name
-                    local_var_name = config_key + "_var"  # Default mapping
-                    if config_key == "log_level":
-                        local_var_name = "logger_processing_level_var"
-                    elif config_key == "quit_without_prompt_if_connected":
-                        local_var_name = "quit_without_prompt_var"
-                    # Add other special mappings
-                    # if config_key doesn't directly map by appending "_var"
-
-                    if local_var_name in self.local_vars:
-                        self.local_vars[local_var_name].set(initial_config_value)
-
-            # Reset device settings. These are not in initial_config_snapshot.
-            # Their values in self.local_vars should be reset to what they were when
-            # the dialog was opened or after the last "Apply". This means resetting
-            # them to the parent_gui's current CTkVar values (which reflect the last applied state).
-            device_setting_vars_to_reset = [
-                "device_setting_auto_record_var",
-                "device_setting_auto_play_var",
-                "device_setting_bluetooth_tone_var",
-                "device_setting_notification_sound_var",
-            ]
-            for ds_var_name in device_setting_vars_to_reset:
-                if hasattr(self.parent_gui, ds_var_name) and ds_var_name in self.local_vars:
-                    parent_var = getattr(self.parent_gui, ds_var_name)
-                    if self.local_vars[ds_var_name].get() != parent_var.get():
-                        self.local_vars[ds_var_name].set(parent_var.get())
-
-            # Reset download directory specifically
-            self.current_dialog_download_dir[0] = self.initial_download_directory
-            if hasattr(self, "current_dl_dir_label_settings") and self.current_dl_dir_label_settings.winfo_exists():
-                self.current_dl_dir_label_settings.configure(text=self.current_dialog_download_dir[0])
-
-            logger.info("SettingsDialog", "cancel_close_action", "Settings changes cancelled.")
+        logger.info("SettingsDialog", "close_action", "Closing settings dialog.")
         self.destroy()
 
     # AI Transcription Helper Methods
 
     def _on_ai_provider_changed(self, *args):
         """Called when AI provider selection changes."""
+        # Save current API key before switching providers
+        self._save_api_key()
+
         self._update_model_list()
         self._load_api_key_status()
         self._update_provider_config()
@@ -1646,9 +1371,29 @@ class SettingsDialog(ctk.CTkToplevel):
         if hasattr(self, "api_key_status_label") and hasattr(self, "validate_key_button"):
             if success:
                 self.api_key_status_label.configure(text="Status: Valid API key", text_color="green")
+                # Save the validated API key
+                self._save_api_key()
             else:
                 self.api_key_status_label.configure(text="Status: Invalid API key", text_color="red")
             self.validate_key_button.configure(state="normal")
+
+    def _save_api_key(self, event=None):
+        """Save the API key for the current provider."""
+        if not hasattr(self, "api_key_entry"):
+            return
+
+        api_key = self.api_key_entry.get().strip()
+        if not api_key:
+            return
+
+        provider = self.local_vars["ai_api_provider_var"].get()
+        encrypted_key = self._encrypt_api_key(api_key)
+
+        # Save encrypted API key
+        config_key = f"ai_api_key_{provider}_encrypted"
+        update_config_settings({config_key: encrypted_key})
+
+        logger.info("SettingsDialog", "_save_api_key", f"Saved API key for provider: {provider}")
 
     # Enhanced Device Selector Methods
 
@@ -1665,8 +1410,13 @@ class SettingsDialog(ctk.CTkToplevel):
             self.local_vars["selected_vid_var"].set(str(device_info.vendor_id))
             self.local_vars["selected_pid_var"].set(str(device_info.product_id))
 
-            # Auto-save device selection immediately
-            self._auto_save_settings()
+            # Update parent GUI and save device selection atomically
+            self.parent_gui.selected_vid_var.set(str(device_info.vendor_id))
+            self.parent_gui.selected_pid_var.set(str(device_info.product_id))
+
+            # Save only the device selection settings atomically
+            device_settings = {"selected_vid": int(device_info.vendor_id), "selected_pid": int(device_info.product_id)}
+            update_config_settings(device_settings)
 
         except Exception as e:
             logger.error(
@@ -1742,13 +1492,14 @@ class SettingsDialog(ctk.CTkToplevel):
             return
 
         try:
-            from config_and_logger import DEFAULT_CONFIG, update_config_settings
+            from config_and_logger import get_default_config, update_config_settings
 
             # Save default config (this wipes existing config)
-            update_config_settings(DEFAULT_CONFIG.copy())
+            default_config = get_default_config()
+            update_config_settings(default_config.copy())
 
             # Update parent GUI with defaults
-            self.parent_gui.config = DEFAULT_CONFIG.copy()
+            self.parent_gui.config = default_config.copy()
 
             # Reload parent GUI variables from defaults
             self.parent_gui._initialize_vars_from_config()
@@ -1758,7 +1509,8 @@ class SettingsDialog(ctk.CTkToplevel):
 
             messagebox.showinfo(
                 "Reset Complete",
-                "All settings have been reset to defaults.\n\nPlease restart the application for all changes to take effect.",
+                "All settings have been reset to defaults.\n\n"
+                "Please restart the application for all changes to take effect.",
                 parent=self,
             )
 
@@ -1772,86 +1524,91 @@ class SettingsDialog(ctk.CTkToplevel):
     def _on_setting_change(self, var_name=None, index=None, mode=None):
         """Handle any setting change with immediate save."""
         if self._settings_dialog_initializing:
+            logger.debug("SettingsDialog", "_on_setting_change", f"Skipping {var_name} - dialog initializing")
             return
 
-        # Auto-save the changed setting immediately
-        self._auto_save_settings()
+        # Save only the specific setting that changed atomically
+        if var_name:
+            logger.debug("SettingsDialog", "_on_setting_change", f"Setting changed: {var_name}")
+            self._save_single_setting(var_name)
+        else:
+            logger.debug("SettingsDialog", "_on_setting_change", "Setting change called without var_name")
 
-    def _auto_save_settings(self):
-        """Auto-save all current settings immediately."""
+    def _save_single_setting(self, var_name):
+        """Save a single setting atomically."""
         try:
-            from config_and_logger import update_config_settings
-
-            settings_to_save = {}
-
-            # Check if local_vars exists and is populated
-            if not hasattr(self, "local_vars") or not self.local_vars:
-                logger.debug("SettingsDialog", "_auto_save_settings", "No local vars to save")
+            if not hasattr(self, "local_vars") or var_name not in self.local_vars:
+                logger.debug("SettingsDialog", "_save_single_setting", f"Skipping {var_name} - not in local_vars")
                 return
 
-            # Save all current settings
-            for var_name, local_tk_var in self.local_vars.items():
-                if hasattr(self.parent_gui, var_name):
-                    parent_var = getattr(self.parent_gui, var_name)
+            local_tk_var = self.local_vars[var_name]
+            if not hasattr(self.parent_gui, var_name):
+                logger.debug("SettingsDialog", "_save_single_setting", f"Skipping {var_name} - not in parent_gui")
+                return
 
-                    value = local_tk_var.get()
-                    # Convert string values back to integers for numeric variables
-                    if var_name in [
-                        "selected_vid_var",
-                        "selected_pid_var",
-                        "target_interface_var",
-                        "recording_check_interval_var",
-                        "default_command_timeout_ms_var",
-                        "file_stream_timeout_s_var",
-                        "auto_refresh_interval_s_var",
-                    ]:
-                        try:
-                            value = int(str(value).strip())
-                        except (ValueError, AttributeError):
-                            continue  # Skip invalid values
+            parent_var = getattr(self.parent_gui, var_name)
+            value = local_tk_var.get()
 
-                    # Update parent variable
-                    parent_var.set(value)
+            logger.debug("SettingsDialog", "_save_single_setting", f"Processing {var_name} with value: {value}")
 
-                    # Map to config key
-                    config_key = var_name.replace("_var", "")
-                    if config_key == "logger_processing_level":
-                        config_key = "log_level"
-                    elif config_key == "quit_without_prompt":
-                        config_key = "quit_without_prompt_if_connected"
-                    elif config_key == "recording_check_interval":
-                        config_key = "recording_check_interval_s"
+            # Convert string values back to integers for numeric variables
+            if var_name in [
+                "selected_vid_var",
+                "selected_pid_var",
+                "target_interface_var",
+                "recording_check_interval_var",
+                "default_command_timeout_ms_var",
+                "file_stream_timeout_s_var",
+                "auto_refresh_interval_s_var",
+            ]:
+                try:
+                    value = int(str(value).strip())
+                    logger.debug("SettingsDialog", "_save_single_setting", f"Converted {var_name} to int: {value}")
+                except (ValueError, AttributeError):
+                    logger.warning(
+                        "SettingsDialog", "_save_single_setting", f"Invalid numeric value for {var_name}: {value}"
+                    )
+                    return  # Skip invalid values
 
-                    # Skip device settings and log colors (handled separately)
-                    if not (config_key.startswith("log_color_") or config_key.startswith("device_setting_")):
-                        settings_to_save[config_key] = value
+            # Update parent variable
+            parent_var.set(value)
 
-            # Handle log colors
-            log_colors = {}
-            for level_key in Logger.LEVELS:
-                level_lower = level_key.lower()
-                light_var_name = f"log_color_{level_lower}_light_var"
-                dark_var_name = f"log_color_{level_lower}_dark_var"
-                if light_var_name in self.local_vars and dark_var_name in self.local_vars:
-                    log_colors[level_key] = [
-                        self.local_vars[light_var_name].get(),
-                        self.local_vars[dark_var_name].get(),
-                    ]
-            if log_colors:
-                settings_to_save["log_colors"] = log_colors
+            # Map to config key and save atomically
+            config_key = var_name.replace("_var", "")
+            if config_key == "logger_processing_level":
+                config_key = "log_level"
+            elif config_key == "quit_without_prompt":
+                config_key = "quit_without_prompt_if_connected"
+            elif config_key == "recording_check_interval":
+                config_key = "recording_check_interval_s"
+            # autoconnect maps directly to autoconnect (no change needed)
 
-            # Handle download directory
-            if self.current_dialog_download_dir[0] != self.parent_gui.download_directory:
-                self.parent_gui.download_directory = self.current_dialog_download_dir[0]
-                settings_to_save["download_directory"] = self.current_dialog_download_dir[0]
+            logger.debug("SettingsDialog", "_save_single_setting", f"Mapped {var_name} to config key: {config_key}")
 
-            # Save settings
-            if settings_to_save:
-                update_config_settings(settings_to_save)
+            # Skip device settings and log colors (handled separately)
+            if config_key.startswith("log_color_") or config_key.startswith("device_setting_"):
+                logger.debug(
+                    "SettingsDialog", "_save_single_setting", f"Skipping {config_key} - device/log color setting"
+                )
+                return
 
-                # Apply changes to parent GUI
-                self.parent_gui.apply_theme_and_color()
-                logger.set_level(self.parent_gui.logger_processing_level_var.get())
+            # Handle AI settings properly
+            if config_key.startswith("ai_"):
+                # AI API key needs encryption - handle separately
+                if config_key == "ai_api_key":
+                    logger.debug(
+                        "SettingsDialog",
+                        "_save_single_setting",
+                        f"Skipping {config_key} - API key handled by validate button",
+                    )
+                    return
+                # Save other AI settings normally
+                logger.info("SettingsDialog", "_save_single_setting", f"Saving AI setting: {config_key} = {value}")
+                update_config_settings({config_key: value})
+                return
+
+            logger.info("SettingsDialog", "_save_single_setting", f"Saving setting: {config_key} = {value}")
+            update_config_settings({config_key: value})
 
         except Exception as e:
-            logger.error("SettingsDialog", "_auto_save_settings", f"Error auto-saving settings: {e}")
+            logger.error("SettingsDialog", "_save_single_setting", f"Error saving {var_name}: {e}")

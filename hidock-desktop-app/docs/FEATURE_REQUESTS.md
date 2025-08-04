@@ -479,6 +479,7 @@ _Features that have been considered but rejected will be documented here with re
 ## Notes for Developers
 
 ### General Guidelines
+
 - When implementing features, consider the impact on existing functionality and ensure backward compatibility
 - All new features should include appropriate error handling and user feedback
 - Consider performance implications, especially for real-time features like audio visualization
@@ -488,6 +489,7 @@ _Features that have been considered but rejected will be documented here with re
 - Document any new configuration options or settings added by features
 
 ### AI Provider Integration
+
 - Use the unified `ai_service.py` architecture for any new AI providers
 - Implement the `AIProvider` abstract base class for consistency
 - Always provide mock responses for development without API keys
@@ -495,18 +497,21 @@ _Features that have been considered but rejected will be documented here with re
 - Never log or expose API keys in debug output
 
 ### Security Considerations
+
 - Use Fernet encryption for any sensitive data storage
 - Validate all user inputs, especially for external API calls
 - Implement proper authentication and authorization for AI providers
 - Follow secure coding practices for API key management
 
 ### Performance Optimization
+
 - Use background threading for long-running AI operations
 - Implement proper cancellation mechanisms for user control
 - Consider memory usage when processing large audio files
 - Optimize UI updates to prevent blocking during AI processing
 
 ### Testing Strategy
+
 - Include unit tests for all AI provider implementations
 - Test with mock providers to avoid API costs during development
 - Implement integration tests for critical workflows

@@ -12,33 +12,33 @@
     "auto_refresh_interval_s": 30,
     "quit_without_prompt_if_connected": true,
     "appearance_mode": "System",
-    "color_theme": "blue",
+    "color_theme": "dark-blue",
     "suppress_console_output": false,
     "suppress_gui_log_output": true,
-    "window_geometry": "950x830+501+43",
+    "window_geometry": "950x850+100+100",
     "treeview_columns_display_order": "name,size,duration,date,time,status",
     "logs_pane_visible": false,
     "gui_log_filter_level": "DEBUG",
     "loop_playback": false,
-    "playback_volume": 0.7,
-    "treeview_sort_col_id": "datetime",
+    "playback_volume": 0.5,
+    "treeview_sort_col_id": "size",
     "treeview_sort_descending": true,
     "log_colors": {
-        "DEBUG": [
-            "#202020",
-            "#D0D0D0"
-        ],
-        "INFO": [
-            "#606060",
-            "#A0A0A0"
+        "ERROR": [
+            "#FF6347",
+            "#FF4747"
         ],
         "WARNING": [
             "#FFA500",
             "#FFB732"
         ],
-        "ERROR": [
-            "#FF6347",
-            "#FF4747"
+        "INFO": [
+            "#606060",
+            "#A0A0A0"
+        ],
+        "DEBUG": [
+            "#202020",
+            "#D0D0D0"
         ],
         "CRITICAL": [
             "#DC143C",
@@ -51,7 +51,7 @@
     "icon_fallback_color_2": "default",
     "icon_size_str": "32",
     "ai_api_provider": "gemini",
-    "ai_api_key_gemini_encrypted": "encrypted-key",
+    "ai_api_key_gemini_encrypted": "test-api-key",
     "ai_model": "gemini-2.5-flash",
     "ai_temperature": 0.7,
     "ai_max_tokens": 4000,
@@ -62,5 +62,6 @@
     "ai_deepseek_base_url": "https://api.deepseek.com",
     "ai_ollama_base_url": "http://localhost:11434",
     "ai_lmstudio_base_url": "http://localhost:1234/v1",
-    "new_setting": "new_value"
+    "new_setting": "new_value",
+    "config_file_path": "C:\\Users\\SEBAST~1\\AppData\\Local\\Temp\\tmpsqqz5wnd.json"
 }

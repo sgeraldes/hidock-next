@@ -356,7 +356,7 @@ class TestWaveformLoadingIntegration:
             if os.path.exists(test_file):
                 try:
                     os.remove(test_file)
-                except:
+                except Exception:
                     pass  # Ignore cleanup errors
 
     @pytest.mark.integration

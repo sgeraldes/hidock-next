@@ -15,7 +15,7 @@ through a unified interface. Returns mock responses for development without API 
 import json
 import os
 import wave
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ai_service import ai_service
 from config_and_logger import logger
@@ -35,7 +35,7 @@ TRANSCRIPTION_FAILED_DEFAULT_MSG = "Transcription failed or no content returned.
 TRANSCRIPTION_PARSE_ERROR_MSG_PREFIX = "Error parsing transcription response:"
 
 
-def _call_gemini_api(payload: Dict[str, Any], api_key: str = "") -> Dict[str, Any] | None:
+def _call_gemini_api(payload: Dict[str, Any], api_key: str = "") -> Optional[Dict[str, Any]]:
     """
     Helper function to make a synchronous call to the Gemini API.
 
@@ -100,7 +100,7 @@ async def transcribe_audio(
     audio_file_path: str,
     provider: str = "gemini",
     api_key: str = "",
-    config: Dict[str, Any] = None,
+    config: Optional[Dict[str, Any]] = None,
     language: str = "auto",
 ) -> Dict[str, str]:
     """
@@ -153,7 +153,7 @@ async def extract_meeting_insights(
     transcription: str,
     provider: str = "gemini",
     api_key: str = "",
-    config: Dict[str, Any] = None,
+    config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Extracts structured insights from a transcription using the specified AI provider.
@@ -246,7 +246,7 @@ async def process_audio_file_for_insights(
     audio_file_path: str,
     provider: str = "gemini",
     api_key: str = "",
-    config: Dict[str, Any] = None,
+    config: Optional[Dict[str, Any]] = None,
     language: str = "auto",
 ) -> Dict[str, Any]:
     """
@@ -361,7 +361,7 @@ async def process_audio_file_for_insights(
     }
 
 
-async def main_test():
+async def main_test() -> None:
     """
     Example usage for testing the module from the command line.
     Requires a valid audio file path and a GEMINI_API_KEY environment variable.

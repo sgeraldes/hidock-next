@@ -152,7 +152,7 @@ async def test_connection_with_timeout_recovery():
                     import asyncio
 
                     await asyncio.sleep(0.5)
-                except:
+                except Exception:
                     pass  # Ignore cleanup errors
 
         except Exception as e:

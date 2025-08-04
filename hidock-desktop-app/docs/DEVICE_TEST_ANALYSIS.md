@@ -3,12 +3,14 @@
 ## Overview
 
 This document analyzes the device test situation and provides solutions for:
+
 1. **CI Environment Handling**: Skip device tests in CI/GitHub while running locally
 2. **Test Failure Analysis**: Identify and fix the 3 failing device tests
 
 ## Current Test Status
 
 ### Total Tests: 620 collected
+
 - **Passed**: 593 tests
 - **Failed**: 24 tests (including 3 device-specific failures)
 - **Skipped**: 3 tests (legitimate skips for missing implementations)
@@ -91,6 +93,7 @@ The test suite is **NOT** skipping many tests locally. The 3 skips are legitimat
 ### Current Implementation
 
 The race condition fix is working for most tests:
+
 - ✅ 5 out of 8 device tests are now passing
 - ✅ Race condition protection is in place
 - ✅ Device isolation is working
@@ -100,6 +103,7 @@ The race condition fix is working for most tests:
 The 3 failing tests need additional fixes:
 
 #### 1. Health Check Timeout Issue
+
 ```python
 # In desktop_device_adapter.py - health check is too aggressive
 if not self._perform_health_check():
@@ -107,6 +111,7 @@ if not self._perform_health_check():
 ```
 
 #### 2. Async Context Manager Issue
+
 ```python
 # Some tests still using sync context manager for async operations
 with device_test_manager.exclusive_device_access("test"):  # Wrong for async
@@ -118,6 +123,7 @@ async with device_test_manager.exclusive_async_device_access("test"):
 ```
 
 #### 3. Device State Reset Timing
+
 ```python
 # Need longer delays for device state transitions
 await asyncio.sleep(0.5)  # Current
@@ -150,6 +156,7 @@ await asyncio.sleep(1.0)  # May need longer
 ## Usage Examples
 
 ### Running Tests Locally
+
 ```bash
 # All tests (device tests will run if hardware available)
 python -m pytest
@@ -162,6 +169,7 @@ CI=1 python -m pytest
 ```
 
 ### Running Tests in CI
+
 ```bash
 # Device tests automatically skipped
 python -m pytest
@@ -169,6 +177,7 @@ python -m pytest
 ```
 
 ### Adding New Device Tests
+
 ```python
 from .test_ci_skip import device_test_ci_skip
 

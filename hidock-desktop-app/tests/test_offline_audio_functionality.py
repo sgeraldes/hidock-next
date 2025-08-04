@@ -60,6 +60,8 @@ class TestOfflineAudioFunctionality:
             gui.file_tree = Mock()
             gui.file_tree.selection.return_value = ["test_audio.wav"]
             gui.file_tree.winfo_exists.return_value = True
+            gui.file_tree.get_children.return_value = ["test_audio.wav"]
+            gui.file_tree.item.return_value = {"values": ["test_audio.wav", "Downloaded", "1024", "00:01:00"]}
 
             # Mock _get_local_filepath to return our test file
             gui._get_local_filepath = Mock(return_value=self.test_audio_file)
@@ -70,6 +72,9 @@ class TestOfflineAudioFunctionality:
             # Verify that the audio player was called to play the file
             mock_player_instance.load_track.assert_called_once_with(self.test_audio_file)
             mock_player_instance.play.assert_called_once()
+
+            # Clean up GUI
+            gui.destroy()
 
     def test_can_get_insights_from_downloaded_audio_when_disconnected(self):
         """Test that insights can be extracted from downloaded audio files when disconnected."""
@@ -105,6 +110,8 @@ class TestOfflineAudioFunctionality:
             gui.file_tree = Mock()
             gui.file_tree.selection.return_value = ["test_audio.wav"]
             gui.file_tree.winfo_exists.return_value = True
+            gui.file_tree.get_children.return_value = ["test_audio.wav"]
+            gui.file_tree.item.return_value = {"values": ["test_audio.wav", "Downloaded", "1024", "00:01:00"]}
 
             # Mock _get_local_filepath to return our test file
             gui._get_local_filepath = Mock(return_value=self.test_audio_file)
@@ -136,6 +143,9 @@ class TestOfflineAudioFunctionality:
             # Verify that insights processing was initiated
             gui._show_transcription_processing_state.assert_called_once_with("test_audio.wav")
 
+            # Clean up GUI
+            gui.destroy()
+
     def test_menu_states_allow_offline_operations(self):
         """Test that menu states correctly enable offline operations for downloaded files."""
 
@@ -162,6 +172,8 @@ class TestOfflineAudioFunctionality:
             gui.file_tree = Mock()
             gui.file_tree.selection.return_value = ["test_audio.wav"]
             gui.file_tree.winfo_exists.return_value = True
+            gui.file_tree.get_children.return_value = ["test_audio.wav"]
+            gui.file_tree.item.return_value = {"values": ["test_audio.wav", "Downloaded", "1024", "00:01:00"]}
 
             # Mock _get_local_filepath to return our test file (exists)
             gui._get_local_filepath = Mock(return_value=self.test_audio_file)
@@ -185,6 +197,9 @@ class TestOfflineAudioFunctionality:
             gui.actions_menu.entryconfig.assert_any_call("Get Insights", state="normal")
             gui.toolbar_play_button.configure.assert_called()
             gui.toolbar_insights_button.configure.assert_called()
+
+            # Clean up GUI
+            gui.destroy()
 
     def test_cannot_play_non_downloaded_audio_when_disconnected(self):
         """Test that non-downloaded audio files cannot be played when disconnected."""
@@ -220,6 +235,8 @@ class TestOfflineAudioFunctionality:
             gui.file_tree = Mock()
             gui.file_tree.selection.return_value = ["not_downloaded.wav"]
             gui.file_tree.winfo_exists.return_value = True
+            gui.file_tree.get_children.return_value = ["not_downloaded.wav"]
+            gui.file_tree.item.return_value = {"values": ["not_downloaded.wav", "Not Downloaded", "0", "00:00:00"]}
 
             # Mock _get_local_filepath to return non-existent file
             non_existent_file = os.path.join(self.temp_dir, "not_downloaded.wav")
@@ -234,3 +251,6 @@ class TestOfflineAudioFunctionality:
                 mock_messagebox.showinfo.assert_called_once()
                 mock_player_instance.load_track.assert_not_called()
                 mock_player_instance.play.assert_not_called()
+
+            # Clean up GUI
+            gui.destroy()

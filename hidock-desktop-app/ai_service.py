@@ -46,13 +46,8 @@ except ImportError:
     anthropic = None
     ANTHROPIC_AVAILABLE = False
 
-try:
-    import boto3
-
-    AMAZON_AVAILABLE = True
-except ImportError:
-    boto3 = None
-    AMAZON_AVAILABLE = False
+# Amazon Bedrock support placeholder
+AMAZON_AVAILABLE = False
 
 try:
     import requests
@@ -73,22 +68,22 @@ class AIProvider(ABC):
     @abstractmethod
     def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio file to text"""
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def analyze_text(self, text: str, analysis_type: str = "insights") -> Dict[str, Any]:
         """Analyze text and extract insights"""
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def is_available(self) -> bool:
         """Check if the provider is available"""
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def validate_api_key(self) -> bool:
         """Validate the API key by making a test request"""
-        pass
+        raise NotImplementedError
 
 
 class GeminiProvider(AIProvider):
@@ -96,7 +91,7 @@ class GeminiProvider(AIProvider):
 
     def __init__(self, api_key: str, config: Dict[str, Any] = None):
         super().__init__(api_key, config)
-        if GEMINI_AVAILABLE and api_key:
+        if GEMINI_AVAILABLE and api_key and genai is not None:
             genai.configure(api_key=api_key)
 
     def is_available(self) -> bool:
@@ -641,7 +636,7 @@ class OllamaProvider(AIProvider):
                 },
             }
 
-            response = requests.post(f"{self.base_url}/api/generate", headers=headers, json=data)
+            response = requests.post(f"{self.base_url}/api/generate", headers=headers, json=data, timeout=30)
             response.raise_for_status()
 
             result = response.json()
@@ -781,7 +776,11 @@ class LMStudioProvider(AIProvider):
 
 
 class AIServiceManager:
-    """Unified AI service manager"""
+    """Unified AI service manager for handling multiple AI providers.
+
+    This class manages configuration and interaction with various AI providers
+    including Gemini, OpenAI, Anthropic, OpenRouter, Ollama, and LM Studio.
+    """
 
     def __init__(self):
         self.providers = {}

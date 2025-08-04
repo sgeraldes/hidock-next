@@ -63,6 +63,9 @@ class WaveformVisualizer:
         # Pack the canvas to fill available space
         self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=2, pady=2)
 
+        # Initialize zoom label (will be set by parent if needed)
+        self.zoom_label = None
+
     def _setup_styling(self):
         """Setup matplotlib styling for dark theme"""
         self.figure.patch.set_facecolor("#2b2b2b")
@@ -319,7 +322,8 @@ class WaveformVisualizer:
 
     def _update_zoom_display(self):
         """Update the zoom level display"""
-        self.zoom_label.configure(text=f"{self.zoom_level:.1f}x")
+        if self.zoom_label:
+            self.zoom_label.configure(text=f"{self.zoom_level:.1f}x")
 
     def clear(self):
         """Clear the visualization"""

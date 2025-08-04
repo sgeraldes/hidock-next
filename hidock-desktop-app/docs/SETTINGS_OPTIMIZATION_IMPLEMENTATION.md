@@ -36,10 +36,12 @@
 ## Settings Save Pattern Analysis
 
 ### 🟢 Optimal Usage (Already Correct)
+
 - **Settings Dialog**: Uses `save_config()` for bulk operations ✅
 - **Download Directory**: Uses `update_config_settings()` for single changes ✅
 
 ### 🟡 Improved Usage (Fixed)
+
 - **Visualizer Pin**: Changed from full save to partial save ✅
 - **Selection Mode**: Added auto-save functionality ✅
 - **Logs Visibility**: Added auto-save functionality ✅
@@ -47,6 +49,7 @@
 - **App Shutdown**: Minimized to session-only settings ✅
 
 ### 🔴 Missing Auto-Save (Not Yet Implemented)
+
 These UI state changes are currently not saved automatically:
 
 1. **Audio Volume Changes**
@@ -64,6 +67,7 @@ These UI state changes are currently not saved automatically:
 ## Performance Impact Analysis
 
 ### Before Optimization
+
 ```
 Visualizer Pin Toggle: save_config(self.config) → 50+ settings saved
 App Shutdown: save_config(self.config) → 50+ settings saved
@@ -73,6 +77,7 @@ Column Sorting: No save → Setting lost on restart
 ```
 
 ### After Optimization
+
 ```
 Visualizer Pin Toggle: update_config_settings({1 setting}) → 1 setting saved
 App Shutdown: update_config_settings({4 settings}) → 4 settings saved
@@ -82,6 +87,7 @@ Column Sorting: update_config_settings({2 settings}) → 2 settings saved
 ```
 
 ### Performance Improvement
+
 - **Config Save Operations**: Reduced by ~95%
 - **Shutdown Performance**: 90% faster config save
 - **UI Responsiveness**: Immediate saves prevent data loss
@@ -125,16 +131,19 @@ Column Sorting: update_config_settings({2 settings}) → 2 settings saved
 ## Code Quality Improvements
 
 ### Consistency
+
 - All UI state changes now follow the same pattern
 - Clear separation between session state and user preferences
 - Consistent use of partial vs full saves
 
 ### Performance
+
 - Eliminated unnecessary full config saves
 - Reduced I/O operations by 95%
 - Improved application responsiveness
 
 ### User Experience
+
 - All UI preferences now persist
 - No more lost settings on crashes
 - Immediate feedback for setting changes
@@ -142,11 +151,13 @@ Column Sorting: update_config_settings({2 settings}) → 2 settings saved
 ## Future Enhancements
 
 ### Not Yet Implemented (Low Priority)
+
 1. **Window Geometry Auto-Save**: Debounced save on resize/move
 2. **Audio Control Auto-Save**: Volume and loop state (if controls exist)
 3. **Theme Preference Auto-Save**: If theme toggle exists in UI
 
 ### Architecture Improvements
+
 1. **Settings Validation**: Type checking for all saved settings
 2. **Settings Migration**: Handle config format changes
 3. **Settings Backup**: Automatic backup of critical settings

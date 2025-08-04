@@ -21,6 +21,7 @@ htmlcov/
 .coverage
 .coverage.*
 .coveragerc
+.mypy_cache/
 
 # ===================================================================
 # Project-Specific & User Files
@@ -47,6 +48,10 @@ audio/
 # Database files and dumps
 *.sql
 *.dump
+
+# Temporary fix/utility scripts
+fix_*.py
+temp_*.py
 *.sqlite3
 
 # ===================================================================
@@ -72,6 +77,9 @@ dist/
 build/
 *.egg-info/
 *.egg
+
+# Project-specific generated files
+_version.py
 
 # Log files
 logs/

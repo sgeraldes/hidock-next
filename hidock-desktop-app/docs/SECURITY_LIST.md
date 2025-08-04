@@ -15,6 +15,7 @@ The application implements enterprise-grade API key security:
 - **Zero Hardcoding**: No API keys hardcoded in source code
 
 **Implementation Details:**
+
 - **File**: `settings_window.py` - Secure key management UI
 - **File**: `config_and_logger.py` - Encrypted configuration storage
 - **File**: `ai_service.py` - Secure key usage in provider implementations

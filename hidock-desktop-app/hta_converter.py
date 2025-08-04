@@ -314,11 +314,11 @@ class HTAConverter:
     def _create_wav_file(self, output_path: str, audio_data: bytes, sample_rate: int, channels: int):
         """Create WAV file from audio data."""
         try:
-            with wave.open(output_path, "wb") as wav_file:
-                wav_file.setnchannels(channels)
-                wav_file.setsampwidth(2)  # 16-bit audio
-                wav_file.setframerate(sample_rate)
-                wav_file.writeframes(audio_data)
+            with wave.open(output_path, "wb") as wav_file:  # pylint: disable=no-member
+                wav_file.setnchannels(channels)  # pylint: disable=no-member
+                wav_file.setsampwidth(2)  # 16-bit audio  # pylint: disable=no-member
+                wav_file.setframerate(sample_rate)  # pylint: disable=no-member
+                wav_file.writeframes(audio_data)  # pylint: disable=no-member
 
         except Exception as e:
             logger.error("HTAConverter", "_create_wav_file", f"Error creating WAV file: {e}")

@@ -19,10 +19,13 @@ This project uses pre-commit hooks to ensure code quality before commits.
 Before each commit, the following checks run automatically:
 
 ### Python Code (Desktop App)
-- **Flake8**: Code style and error checking (120 char line length)
+- **Flake8**: Code style and error checking (120 char line length, E203/W503 exceptions for Black)
 - **Black**: Automatic formatting (120 char line length)
-- **isort**: Import sorting
+- **isort**: Import sorting with Black profile
 - **pytest**: Run Python tests on pre-push (optional if tests exist)
+
+**Note**: Pylint is available via VS Code tasks but not included in pre-commit hooks to keep commits fast.
+Use `Ctrl+Shift+P` → "Tasks: Run Task" → "Pylint Python Code" for comprehensive analysis.
 
 ### JavaScript/TypeScript (Web Apps)
 - **ESLint**: Code style and error checking for both web apps

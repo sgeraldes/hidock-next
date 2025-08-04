@@ -14,6 +14,7 @@ Users reported persistent problems with application settings not being saved:
 The issue was **NOT** in the settings dialog, Apply button logic, or column sorting implementation. The real problem was in the `save_config()` function in `config_and_logger.py`:
 
 ### Before Fix
+
 ```python
 def save_config(config_data_to_save):
     # This would OVERWRITE the entire config file
@@ -22,6 +23,7 @@ def save_config(config_data_to_save):
 ```
 
 ### After Fix
+
 ```python
 def save_config(config_data_to_save):
     # Load existing config to preserve all settings
@@ -43,6 +45,7 @@ def save_config(config_data_to_save):
 ## TDD Process Followed
 
 ### 1. Red Phase - Failing Tests
+
 Created comprehensive tests that reproduced the exact user complaints:
 
 - `test_settings_overwrite_issue` - Demonstrated settings being lost
@@ -50,9 +53,11 @@ Created comprehensive tests that reproduced the exact user complaints:
 - `test_multiple_save_operations_preserve_all_settings` - Tested multiple saves
 
 ### 2. Green Phase - Implementation
+
 Fixed the `save_config()` function to merge settings instead of overwriting them.
 
 ### 3. Refactor Phase - Cleanup
+
 - Cleaned up test code
 - Added proper error handling
 - Ensured all tests pass

@@ -71,8 +71,8 @@ class TestSettingsPersistence:
             assert loaded_config[key] == value
 
     @pytest.mark.unit
-    def test_settings_window_saves_config_on_apply(self):
-        """Test that settings window saves config when Apply is clicked."""
+    def test_settings_window_saves_config_on_change(self):
+        """Test that settings window saves config when settings are changed."""
 
         # Create mock parent GUI with config
         mock_parent = Mock()
@@ -96,29 +96,22 @@ class TestSettingsPersistence:
         dialog = settings_window.SettingsDialog.__new__(settings_window.SettingsDialog)
         dialog.parent_gui = mock_parent
         dialog.dock = mock_dock
-        dialog.local_vars = {}
-        dialog.settings_changed_tracker = [True]
-        # pylint: disable=protected-access
-        dialog._fetched_device_settings_for_dialog = {}
-        dialog.current_dialog_download_dir = ["/test/path"]
-        dialog.initial_download_directory = "/test/path"
+        dialog.local_vars = {"autoconnect_var": Mock(), "log_level_var": Mock()}
+        dialog.var_name_to_config_key_map = {"autoconnect_var": "autoconnect", "log_level_var": "log_level"}
 
-        # Mock the validation method to return True
-        # pylint: disable=protected-access
-        dialog._validate_numeric_settings = Mock(return_value=True)
+        with patch("settings_window.update_config_settings") as mock_update_config:
+            # Test saving a single setting
+            dialog.local_vars["autoconnect_var"].get.return_value = True
+            dialog._save_single_setting("autoconnect_var")
 
-        with patch("settings_window.save_config") as mock_save_config:
-            # pylint: disable=protected-access
-            dialog._perform_apply_settings_logic(update_dialog_baseline=False)
-
-            # Should call save_config with parent's config
-            mock_save_config.assert_called_once_with(mock_parent.config)
+            # Should call update_config_settings with the setting
+            mock_update_config.assert_called_once_with({"autoconnect": True})
 
     @pytest.mark.unit
     def test_main_window_saves_config_on_closing(self):  # pylint: disable=too-many-statements
         """Test that main window saves config when closing."""
         # Mock the main window class
-        with patch("gui_main_window.save_config") as mock_save_config:
+        with patch("config_and_logger.save_config") as mock_save_config:
             # Create a mock main window instance
             mock_window = Mock()
             mock_window.config = self.test_config.copy()
@@ -151,7 +144,17 @@ class TestSettingsPersistence:
             mock_window.single_selection_mode_var.get.return_value = True
 
             # Mock file tree
-            mock_window.file_tree = {"displaycolumns": ["name", "datetime", "size"]}
+            mock_file_tree = Mock()
+            mock_file_tree.winfo_exists.return_value = True
+
+            # Mock the dictionary-like access
+            def file_tree_getitem(key):
+                if key == "displaycolumns":
+                    return ["name", "datetime", "size"]
+                return None
+
+            mock_file_tree.__getitem__ = Mock(side_effect=file_tree_getitem)
+            mock_window.file_tree = mock_file_tree
 
             # Mock device manager
             mock_window.device_manager.device_interface.is_connected.return_value = False
@@ -183,12 +186,11 @@ class TestSettingsPersistence:
             mock_save_config.assert_called_once()
             saved_config = mock_save_config.call_args[0][0]
 
-            # Verify key settings were saved
-            assert saved_config["window_geometry"] == "800x600+100+100"
-            assert saved_config["autoconnect"] is True
-            assert saved_config["download_directory"] == "/test/path"
-            assert saved_config["appearance_mode"] == "Dark"
+            # Verify save_config was called with the expected subset of config
+            assert "treeview_columns_display_order" in saved_config
+            assert saved_config["treeview_columns_display_order"] == "name,datetime,size"
             assert saved_config["treeview_sort_col_id"] == "name"
+            assert saved_config["treeview_sort_descending"] is False
 
     @pytest.mark.unit
     def test_download_directory_change_saves_config(self):
@@ -219,7 +221,7 @@ class TestSettingsPersistence:
             gui_event_handlers.EventHandlersMixin._select_download_dir_from_header_button(mock_gui)
 
             # Should save config with new directory
-            mock_save_config.assert_called_once_with(mock_gui.config)
+            mock_save_config.assert_called_once_with({"download_directory": "/new/path"})
             assert mock_gui.config["download_directory"] == "/new/path"
             assert mock_gui.download_directory == "/new/path"
 
@@ -227,21 +229,33 @@ class TestSettingsPersistence:
     def test_config_save_function_writes_correctly(self):
         """Test that save_config function writes data correctly."""
 
-        with patch("config_and_logger.open", mock_open()) as mock_file, patch(
+        # Mock the file operations - save_config reads existing config first
+        mock_file_handle = mock_open(read_data=json.dumps({}))
+        with patch("config_and_logger.open", mock_file_handle) as mock_file, patch(
             "config_and_logger.json.dump"
         ) as mock_json_dump, patch("config_and_logger.logger") as mock_logger:
             config_and_logger.save_config(self.test_config)
 
-            # Should open file for writing
-            mock_file.assert_called_once()
-            call_args = mock_file.call_args
-            assert call_args[0][1] == "w"
-            assert call_args[1]["encoding"] == "utf-8"
+            # Should open file twice - once for reading, once for writing
+            assert mock_file.call_count == 2
+
+            # First call should be for reading
+            read_call = mock_file.call_args_list[0]
+            assert read_call[0][1] == "r"
+            assert read_call[1]["encoding"] == "utf-8"
+
+            # Second call should be for writing
+            write_call = mock_file.call_args_list[1]
+            assert write_call[0][1] == "w"
+            assert write_call[1]["encoding"] == "utf-8"
 
             # Should dump JSON with proper formatting
             mock_json_dump.assert_called_once()
             json_call_args = mock_json_dump.call_args
-            assert json_call_args[0][0] == self.test_config
+            # The saved config should contain our test config
+            saved_config = json_call_args[0][0]
+            for key, value in self.test_config.items():
+                assert saved_config[key] == value
             assert json_call_args[1]["indent"] == 4
 
             # Should log success

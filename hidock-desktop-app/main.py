@@ -26,7 +26,7 @@ from config_and_logger import logger  # For the top-level exception handler
 from gui_main_window import HiDockToolGUI
 
 
-def main():
+def main() -> None:
     """Initializes and runs the HiDock Tool application."""
     # It's good practice to set the appearance mode and theme early,
     # though HiDockToolGUI also does this. This ensures CTk is initialized
