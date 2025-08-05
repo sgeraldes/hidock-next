@@ -9,7 +9,7 @@ This document provides a comprehensive security analysis of the `hidock-desktop-
 The application implements enterprise-grade API key security:
 
 - **Fernet Encryption**: All API keys are encrypted using the `cryptography` library's Fernet symmetric encryption
-- **Secure Storage**: Encrypted keys stored in `hidock_tool_config.json` with no plain text exposure
+- **Secure Storage**: Encrypted keys stored in `hidock_config.json` with no plain text exposure
 - **Memory Safety**: Keys are decrypted only when needed and not logged or exposed in debug output
 - **Multi-Provider Support**: Individual encrypted storage for 11 different AI providers
 - **Zero Hardcoding**: No API keys hardcoded in source code

@@ -83,10 +83,209 @@ def mock_config():
 
 
 @pytest.fixture(autouse=True)
-def setup_test_environment(monkeypatch):
-    """Set up test environment variables."""
+def setup_test_environment(monkeypatch, tmp_path):
+    """Set up comprehensive test environment isolation to prevent production data contamination."""
+    # Set environment variables to indicate testing mode
     monkeypatch.setenv("TESTING", "1")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+
+    # Create isolated test directories
+    test_root = tmp_path / "hidock_test_isolation"
+    test_config_dir = test_root / "config"
+    test_cache_dir = test_root / "cache"
+    test_downloads_dir = test_root / "downloads"
+    test_home_dir = test_root / "home"
+
+    # Create all test directories
+    for dir_path in [test_config_dir, test_cache_dir, test_downloads_dir, test_home_dir]:
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+    # === CONFIG FILE ISOLATION ===
+    import config_and_logger
+
+    monkeypatch.setattr(config_and_logger, "_SCRIPT_DIR", str(test_config_dir))
+    monkeypatch.setattr(config_and_logger, "_CONFIG_FILE_PATH", str(test_config_dir / "hidock_config.json"))
+
+    # === CACHE AND DATABASE ISOLATION ===
+    # Patch file operations manager cache location
+    import file_operations_manager
+
+    original_init = file_operations_manager.FileOperationsManager.__init__
+
+    def isolated_init(self, device_interface, download_dir=None, cache_dir=None, device_lock=None):
+        # Force use of test directories
+        download_dir = download_dir or str(test_downloads_dir)
+        cache_dir = str(test_cache_dir)
+        return original_init(self, device_interface, download_dir, cache_dir, device_lock)
+
+    monkeypatch.setattr(file_operations_manager.FileOperationsManager, "__init__", isolated_init)
+
+    # Patch storage management cache location
+    try:
+        import storage_management
+
+        original_storage_init = storage_management.StorageOptimizer.__init__
+
+        def isolated_storage_init(self, base_paths=None, cache_dir=None):
+            # Force use of test cache directory
+            cache_dir = str(test_cache_dir)
+            # Provide default base_paths if not specified
+            if base_paths is None:
+                base_paths = [str(test_downloads_dir)]
+            return original_storage_init(self, base_paths, cache_dir)
+
+        monkeypatch.setattr(storage_management.StorageOptimizer, "__init__", isolated_storage_init)
+    except ImportError:
+        pass  # Module may not be available in all test contexts
+
+    # === HOME DIRECTORY ISOLATION ===
+    # Patch Path.home() to return test directory
+    from pathlib import Path
+
+    original_home = Path.home
+    monkeypatch.setattr(Path, "home", lambda: Path(test_home_dir))
+
+    # Patch os.path.expanduser to return test directory
+    import os
+
+    original_expanduser = os.path.expanduser
+
+    def isolated_expanduser(path):
+        # Convert to string if it's a Path object
+        path_str = str(path) if hasattr(path, "__fspath__") or not isinstance(path, str) else path
+        if path_str.startswith("~"):
+            return str(test_home_dir / path_str[2:] if len(path_str) > 1 else test_home_dir)
+        return original_expanduser(path)
+
+    monkeypatch.setattr(os.path, "expanduser", isolated_expanduser)
+
+    # === DEFAULT DOWNLOAD DIRECTORY ISOLATION ===
+    # Patch the default config to use test download directory
+    original_get_default_config = config_and_logger.get_default_config
+
+    def isolated_get_default_config():
+        config = original_get_default_config()
+        config["download_directory"] = str(test_downloads_dir)
+        return config
+
+    monkeypatch.setattr(config_and_logger, "get_default_config", isolated_get_default_config)
+
+    # === PREVENT SETTINGS WINDOW FROM AFFECTING PRODUCTION ===
+    try:
+        import settings_window
+
+        # Ensure settings window uses isolated config
+        if hasattr(settings_window, "SettingsDialog"):
+            original_settings_init = settings_window.SettingsDialog.__init__
+
+            def isolated_settings_init(self, parent_gui, initial_config=None):
+                # Always use isolated config
+                if initial_config is None:
+                    initial_config = config_and_logger.load_config()
+                return original_settings_init(self, parent_gui, initial_config)
+
+            monkeypatch.setattr(settings_window.SettingsDialog, "__init__", isolated_settings_init)
+    except ImportError:
+        pass
+
+    # === CLEANUP WARNING ===
+    # Add a prominent warning if isolation fails
+    import warnings
+
+    def check_isolation():
+        """Verify test isolation is working correctly."""
+        real_home = original_home()
+        test_config_path = config_and_logger._CONFIG_FILE_PATH
+
+        # Check if we're accidentally using real home directory
+        if str(real_home) in test_config_path:
+            warnings.warn(
+                f"TEST ISOLATION FAILURE: Config path {test_config_path} "
+                f"appears to use real home directory {real_home}. "
+                "This could contaminate production data!",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # Ensure test cache directory is being used
+        if str(real_home) in str(test_cache_dir):
+            warnings.warn(
+                f"TEST ISOLATION FAILURE: Cache directory appears to use real home directory. "
+                "This could contaminate production data!",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    # Run isolation check
+    check_isolation()
+
+    # Store test directories for potential use by individual tests
+    monkeypatch.setenv("HIDOCK_TEST_CONFIG_DIR", str(test_config_dir))
+    monkeypatch.setenv("HIDOCK_TEST_CACHE_DIR", str(test_cache_dir))
+    monkeypatch.setenv("HIDOCK_TEST_DOWNLOADS_DIR", str(test_downloads_dir))
+    monkeypatch.setenv("HIDOCK_TEST_HOME_DIR", str(test_home_dir))
+
+
+@pytest.fixture
+def isolated_dirs():
+    """Provide access to isolated test directories for individual tests."""
+    return {
+        "config": os.getenv("HIDOCK_TEST_CONFIG_DIR"),
+        "cache": os.getenv("HIDOCK_TEST_CACHE_DIR"),
+        "downloads": os.getenv("HIDOCK_TEST_DOWNLOADS_DIR"),
+        "home": os.getenv("HIDOCK_TEST_HOME_DIR"),
+    }
+
+
+@pytest.fixture
+def verify_no_production_contamination():
+    """Fixture to verify no production files are created during test."""
+    from pathlib import Path
+
+    # Production paths that should never be touched
+    production_paths = [
+        Path.home() / "hidock_config.json",
+        Path.home() / ".hidock",
+        Path.home() / "HiDock_Downloads",
+        Path("hidock_config.json"),
+    ]
+
+    # Store initial state
+    initial_state = {}
+    for path in production_paths:
+        try:
+            initial_state[path] = {"exists": path.exists(), "mtime": path.stat().st_mtime if path.exists() else None}
+        except (OSError, PermissionError):
+            initial_state[path] = {"exists": False, "mtime": None}
+
+    yield  # Run the test
+
+    # Check for contamination after test
+    contaminated_files = []
+    for path in production_paths:
+        try:
+            current_exists = path.exists()
+            current_mtime = path.stat().st_mtime if current_exists else None
+
+            initial = initial_state[path]
+
+            # Check if file was created
+            if not initial["exists"] and current_exists:
+                contaminated_files.append(f"Created: {path}")
+
+            # Check if existing file was modified
+            elif initial["exists"] and current_exists and initial["mtime"] != current_mtime:
+                contaminated_files.append(f"Modified: {path}")
+
+        except (OSError, PermissionError):
+            continue
+
+    if contaminated_files:
+        raise AssertionError(
+            f"Production data contamination detected:\n"
+            + "\n".join(contaminated_files)
+            + "\n\nTests must not modify production files!"
+        )
 
 
 @pytest.fixture
