@@ -71,6 +71,10 @@ temp_*.py
 credentials.json
 secrets.yaml
 
+# Configuration files with API keys and user data
+hidock_config.json
+**/hidock_config.json
+
 # Build & dependency directories (can apply to any language)
 node_modules/
 dist/

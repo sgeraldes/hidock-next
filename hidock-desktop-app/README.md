@@ -158,6 +158,19 @@ Additional libraries needed for USB communication:
 3. **Download your recordings** from the device to your computer
 4. **Start organizing and playing** your audio files with basic controls
 
+## ⚙️ Configuration
+
+The application uses `hidock_config.json` to store your preferences, device settings, and encrypted API keys.
+
+**🔒 Security Note:** This file contains encrypted sensitive data and is automatically excluded from version control.
+
+**📁 Location:** The config file is created in the application directory on first run.
+
+**🔧 Setup:**
+- Copy `hidock_config.json.example` to `hidock_config.json` to get started
+- The application will create default settings if no config file exists
+- All API keys are encrypted using Fernet encryption before storage
+
 ## 📚 Documentation & Support
 
 **For detailed information:**

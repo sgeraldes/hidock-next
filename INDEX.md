@@ -125,7 +125,7 @@ hidock-desktop-app/
 │
 ├── ⚙️ Configuration
 │   ├── config_and_logger.py           # Configuration management and structured logging
-│   ├── hidock_config.json             # Application configuration (user preferences, device settings)
+│   ├── hidock_config.json             # Application configuration (user preferences, device settings) - NOT COMMITTED
 │   └── hidock_config.json.example     # Configuration template with all available options
 │
 ├── 🎨 Resources
