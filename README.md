@@ -1,7 +1,7 @@
 # **HiDock Next** 🎵
 
 **The| **🤖 Cloud AI** | 🚧 **Alpha Testing** - Gemini stubs only | 🚧 **Planned** | 🚧 **Alpha Testing** - Gemini only |
-| **🏠 Local AI** | 🚧 **Roadmap** - Whisper/Vosk planned | 🚧 **Roadmap** - WebAssembly | ❌ **Not Planned** |ltimate HiDock Management Suite with AI-Powered Transcription**
+| **🏠 Local AI** | 🚧 **Roadmap** - Whisper/Vosk planned | 🚧 **Roadmap** - WebAssembly | ❌ **Not Planned** |
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
@@ -12,6 +12,25 @@
 
 ## 🚀 **Quick Start**
 
+**Choose your platform:**
+
+### 🪟 **Windows (Easiest)**
+```cmd
+git clone https://github.com/sgeraldes/hidock-next.git
+cd hidock-next
+setup-windows.bat
+```
+*Need Python/Node.js? Run `install-prerequisites.bat` first*
+
+### 🐧🍎 **Linux/Mac (One Command)**
+```bash
+git clone https://github.com/sgeraldes/hidock-next.git
+cd hidock-next
+chmod +x setup-unix.sh && ./setup-unix.sh
+```
+*Need Python/Node.js? Run `./install-prerequisites.sh` first*
+
+### 🐍 **Any Platform (Interactive)**
 ```bash
 git clone https://github.com/sgeraldes/hidock-next.git
 cd hidock-next
@@ -19,7 +38,7 @@ python setup.py
 # Choose option 1 (End User) or 2 (Developer)
 ```
 
-**That's it!** The setup script handles everything automatically.
+**That's it!** The setup scripts handle everything automatically.
 
 ## 📊 **Application Comparison**
 
@@ -29,8 +48,8 @@ python setup.py
 | **🎵 Audio Playback** | ⚠️ **Basic** - Known speed bugs | ❌ **Not Implemented** | ❌ **Not Applicable** |
 | **📱 File Operations** | ✅ **Stable** - Download/delete/batch | ❌ **Limited** | ❌ **Not Applicable** |
 | **🤖 Cloud AI** | 🚧 **Future Feature** | 🚧 **Future Feature** | ✅ **Implemented** |
-| **� Local AI** | 🚧 **Planned** - Whisper/Vosk/SpeechT5 | 🚧 **Planned** - WebAssembly | ❌ **Not Planned** |
-| **�🎨 User Interface** | ✅ **Stable** - CustomTkinter GUI | ✅ **Modern** - React/TypeScript | ✅ **Modern** - React UI |
+| **🏠 Local AI** | 🚧 **Planned** - Whisper/Vosk/SpeechT5 | 🚧 **Planned** - WebAssembly | ❌ **Not Planned** |
+| **🎨 User Interface** | ✅ **Stable** - CustomTkinter GUI | ✅ **Modern** - React/TypeScript | ✅ **Modern** - React UI |
 | **🔐 Privacy Mode** | ✅ **Complete** - Fully offline ready | ⚠️ **Partial** - Browser dependent | ⚠️ **Cloud-based** |
 | **📋 Batch Processing** | ✅ **Implemented** | ❌ **Not Implemented** | ✅ **Core Feature** |
 | **⚙️ Configuration** | ✅ **Advanced** - Full settings | ⚠️ **Basic** - Limited options | ⚠️ **Basic** - API only |
@@ -70,6 +89,7 @@ python setup.py
 - **🔒 Privacy First:** Local AI models (Ollama, LM Studio) for complete offline functionality
 - **🎵 Professional Audio:** Enhanced playback, waveform visualization, speed control
 - **⚡ Modern UI:** Desktop (Python/CustomTkinter) and Web (Next.js/TypeScript) applications
+- **🪟 Smart Window Management:** Automatic position/size saving with multi-monitor support
 - **🛡️ Secure:** Encrypted API key storage, local data processing
 
 ## 📱 **Applications**
@@ -175,35 +195,19 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ### **👤 End Users - Just Use the Apps**
 
-**Want to use HiDock immediately? Pick your platform:**
+**Want to use HiDock immediately? The setup scripts above handle everything!**
 
-#### **🪟 Windows (Easiest)**
-```cmd
-# Double-click this file:
-setup-windows.bat
-```
-
-#### **🐧🍎 Linux/Mac (One Command)**
-```bash
-chmod +x setup-unix.sh && ./setup-unix.sh
-```
-
-#### **🐍 Any Platform (Interactive)**
-```bash
-git clone https://github.com/sgeraldes/hidock-next.git
-cd hidock-next
-python setup.py
-# Choose option 1 (End User)
-```
+- **Windows**: Double-click `setup-windows.bat`
+- **Linux/Mac**: Run `./setup-unix.sh`
+- **Any Platform**: Run `python setup.py` and choose option 1
 
 ### **👨‍💻 Developers - Contribute Code**
 
-```bash
-git clone https://github.com/sgeraldes/hidock-next.git
-cd hidock-next
-python setup.py
-# Choose option 2 (Developer)
-```
+**Same setup scripts work for developers too!**
+
+- **Windows**: `setup-windows.bat` (installs dev dependencies)
+- **Linux/Mac**: `./setup-unix.sh` (installs dev dependencies)  
+- **Any Platform**: `python setup.py` and choose option 2 (full dev environment)
 
 ### **📱 After Setup**
 
@@ -421,12 +425,18 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 # Quick developer setup
 python setup.py  # Choose option 2 (Developer)
 
+# Or manual setup:
+cd hidock-desktop-app
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -e ".[dev]"
+
 # Pre-commit hooks (installed automatically)
 pre-commit install
 
 # Run comprehensive test suite (600+ tests)
-cd hidock-desktop-app && python -m pytest  # Runs all tests with coverage
-cd hidock-web-app && npm test
+python -m pytest  # Runs all tests with coverage
 
 # Run specific test categories
 pytest -m unit          # Unit tests only

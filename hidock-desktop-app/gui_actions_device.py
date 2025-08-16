@@ -8,6 +8,7 @@ refreshing file lists, and other device-specific commands.
 """
 import asyncio
 import os
+import platform
 import threading
 import tkinter
 import traceback
@@ -24,43 +25,86 @@ from file_operations_manager import FileMetadata
 class DeviceActionsMixin:
     """A mixin for handling device-related actions."""
 
-    def _initialize_backend_early(self):  # Identical to original
+    def _initialize_backend_early(self):
+        """Initialize libusb backend with cross-platform support.
+        
+        Handles macOS (Apple Silicon and Intel), Linux, and Windows with
+        comprehensive path detection and fallback mechanisms.
+        """
+        import platform
+        
         error_to_report, local_backend_instance = None, None
         try:
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            dll_paths_to_try = (
-                [os.path.join(script_dir, name) for name in ["libusb-1.0.dll"]]
-                + [os.path.join(script_dir, "MS64", "dll", name) for name in ["libusb-1.0.dll"]]
-                + [os.path.join(script_dir, "MS32", "dll", name) for name in ["libusb-1.0.dll"]]
-            )
-            dll_path = next((p for p in dll_paths_to_try if os.path.exists(p)), None)
-            if not dll_path:
+            system = platform.system()
+            
+            # Build platform-specific library paths
+            if system == "Darwin":  # macOS
+                lib_paths_to_try = [
+                    "/opt/homebrew/lib/libusb-1.0.dylib",  # Apple Silicon Homebrew
+                    "/usr/local/lib/libusb-1.0.dylib",     # Intel Mac Homebrew
+                    "/opt/local/lib/libusb-1.0.dylib",     # MacPorts
+                    "/usr/lib/libusb-1.0.dylib",           # System location
+                ]
+            elif system == "Linux":
+                lib_paths_to_try = [
+                    "/usr/lib/x86_64-linux-gnu/libusb-1.0.so",  # Ubuntu/Debian x64
+                    "/usr/lib/aarch64-linux-gnu/libusb-1.0.so", # Ubuntu/Debian ARM64
+                    "/usr/lib64/libusb-1.0.so",                  # RHEL/CentOS/Fedora x64
+                    "/usr/lib/libusb-1.0.so",                    # Generic location
+                    "/usr/local/lib/libusb-1.0.so",              # Compiled from source
+                ]
+            elif system == "Windows":
+                lib_paths_to_try = (
+                    [os.path.join(script_dir, name) for name in ["libusb-1.0.dll"]]
+                    + [os.path.join(script_dir, "MS64", "dll", name) for name in ["libusb-1.0.dll"]]
+                    + [os.path.join(script_dir, "MS32", "dll", name) for name in ["libusb-1.0.dll"]]
+                    + [os.path.join(script_dir, "lib", name) for name in ["libusb-1.0.dll"]]
+                )
+            else:
+                # Unknown system - try generic paths
+                lib_paths_to_try = []
                 logger.warning(
                     "GUI",
                     "_initialize_backend_early",
-                    "libusb-1.0.dll not found locally. Trying system paths.",
+                    f"Unknown system '{system}', will try system paths only.",
                 )
+            
+            # Try to find the library in the specified paths
+            lib_path = next((p for p in lib_paths_to_try if os.path.exists(p)), None)
+            
+            if not lib_path:
+                logger.warning(
+                    "GUI",
+                    "_initialize_backend_early",
+                    f"libusb library not found in expected {system} paths. Trying system paths.",
+                )
+                # Fallback to system paths
                 local_backend_instance = usb.backend.libusb1.get_backend()
                 if not local_backend_instance:
-                    error_to_report = "Libusb backend failed from system paths."
+                    error_to_report = f"Libusb backend failed from system paths on {system}."
             else:
                 logger.info(
                     "GUI",
                     "_initialize_backend_early",
-                    f"Attempting backend with DLL: {dll_path}",
+                    f"Found libusb library at: {lib_path}",
                 )
-                local_backend_instance = usb.backend.libusb1.get_backend(find_library=lambda x: dll_path)
+                # Use the found library path
+                local_backend_instance = usb.backend.libusb1.get_backend(find_library=lambda x: lib_path)
                 if not local_backend_instance:
-                    error_to_report = f"Failed with DLL: {dll_path}. Check 32/64 bit."
+                    error_to_report = f"Failed to initialize backend with library: {lib_path}. Check architecture compatibility."
+            
             if error_to_report:
                 logger.error("GUI", "_initialize_backend_early", error_to_report)
                 return False, error_to_report, None
+                
             logger.info(
                 "GUI",
                 "_initialize_backend_early",
-                f"Backend initialized: {local_backend_instance}",
+                f"Backend initialized successfully: {local_backend_instance}",
             )
             return True, None, local_backend_instance
+            
         except (
             OSError,
             usb.core.USBError,
@@ -68,7 +112,7 @@ class DeviceActionsMixin:
             AttributeError,
             ImportError,
         ) as e:
-            error_to_report = f"Unexpected error initializing libusb: {e}"
+            error_to_report = f"Unexpected error initializing libusb on {platform.system()}: {e}"
             logger.error(
                 "GUI",
                 "_initialize_backend_early",
@@ -195,6 +239,8 @@ class DeviceActionsMixin:
                     ),
                 )
                 self.after(0, self._update_menu_states)
+                # Exit offline mode since we're now connected
+                self.offline_mode_manager.exit_offline_mode()
                 # Update UI to show connected state immediately
                 self.after(0, self._show_connected_state)
                 # Show cached files immediately if available, then refresh
@@ -249,6 +295,8 @@ class DeviceActionsMixin:
                         width=550,  # Adjusted width
                     )
                     self._connection_error_banner.show()
+                # Enter offline mode when connection fails
+                self.offline_mode_manager.enter_offline_mode()
                 # Show cached files when connection fails
                 self.after(0, self._show_cached_files_after_disconnect)
                 # Update menu states to show disconnected state
@@ -301,7 +349,8 @@ class DeviceActionsMixin:
                     lambda: self.update_status_bar(connection_status=status_message),
                 )
                 if not self.device_manager.device_interface.is_connected():
-                    # Show cached files instead of clearing everything
+                    # Enter offline mode and show cached files instead of clearing everything
+                    self.offline_mode_manager.enter_offline_mode()
                     self.after(0, self._show_cached_files_after_disconnect)
                     self.after(0, self._update_menu_states)
         finally:
@@ -311,18 +360,23 @@ class DeviceActionsMixin:
     def _show_cached_files_after_disconnect(self):
         """Show cached files when not connected."""
         try:
+            # Ensure we're in offline mode
+            self.offline_mode_manager.enter_offline_mode()
+            
             cached_files = self.file_operations_manager.metadata_cache.get_all_metadata()
             if cached_files:
                 files_dict = self._convert_cached_files_to_gui_format(cached_files)
                 sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
                 self._populate_treeview_from_data(sorted_files)
 
-                downloaded_count = len(
-                    [f for f in files_dict if f.get("local_path") and os.path.exists(f["local_path"])]
-                )
+                # Use offline mode manager for statistics
+                offline_stats = self.offline_mode_manager.get_offline_statistics()
+                downloaded_count = offline_stats["downloaded_files"]
+                availability_percent = offline_stats["offline_availability_percent"]
+                
                 self.update_status_bar(
                     connection_status="Status: Disconnected",
-                    progress_text=f"Showing {len(cached_files)} cached files ({downloaded_count} playable)",
+                    progress_text=f"Showing {len(cached_files)} cached files ({downloaded_count} playable, {availability_percent:.0f}% available offline)",
                 )
             else:
                 if hasattr(self, "file_tree") and self.file_tree.winfo_exists():
@@ -373,7 +427,8 @@ class DeviceActionsMixin:
 
                 asyncio.run(self.device_manager.device_interface.disconnect())
 
-        # Show cached files after disconnect
+        # Enter offline mode and show cached files after disconnect
+        self.offline_mode_manager.enter_offline_mode()
         self._show_cached_files_after_disconnect()
 
         self.stop_auto_file_refresh_periodic_check()

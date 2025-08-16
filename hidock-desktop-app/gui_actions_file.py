@@ -7,6 +7,8 @@ for handling file operations such as downloading, deleting, and transcribing.
 """
 import json
 import os
+import subprocess
+import sys
 import threading
 
 # import time  # Commented out - not used in current implementation
@@ -110,7 +112,24 @@ class FileActionsMixin:
             self.update_status_bar(progress_text=status_text)
             # For downloads, show "Downloaded" status instead of "Completed"
             if operation.operation_type.value == "download":
+                # Update the metadata cache with the local file path
+                local_filepath = self._get_local_filepath(operation.filename)
+                cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(operation.filename)
+                if cached_metadata:
+                    cached_metadata.local_path = local_filepath
+                    self.file_operations_manager.metadata_cache.set_metadata(cached_metadata)
+                
+                # Update the displayed file details
+                for file_detail in self.displayed_files_details:
+                    if file_detail["name"] == operation.filename:
+                        file_detail["local_path"] = local_filepath
+                        file_detail["gui_status"] = "Downloaded"
+                        break
+                
                 self._update_file_status_in_treeview(operation.filename, "Downloaded", ("downloaded_ok",))
+                
+                # Refresh the file status to ensure consistency
+                self._refresh_single_file_status(operation.filename)
             elif operation.operation_type.value == "delete":
                 # For deletions, remove the file from the treeview and refresh the file list
                 self._remove_file_from_treeview(operation.filename)
@@ -243,6 +262,444 @@ class FileActionsMixin:
 
             # Refresh the file list to ensure consistent state
             self.refresh_file_list_gui()
+
+    def _open_file_locally(self, filename):
+        """Open a downloaded file in the system's default application."""
+        try:
+            local_filepath = self._get_local_filepath(filename)
+            if not os.path.exists(local_filepath):
+                messagebox.showerror(
+                    "File Not Found",
+                    f"Local file not found: {local_filepath}\nPlease download the file first.",
+                    parent=self,
+                )
+                return
+            
+            # Open file with system default application
+            import sys
+            import subprocess
+            
+            if sys.platform == "win32":
+                os.startfile(local_filepath)
+            elif sys.platform == "darwin":  # macOS
+                subprocess.call(["open", local_filepath])
+            else:  # Linux
+                subprocess.call(["xdg-open", local_filepath])
+                
+            logger.info("FileActionsMixin", "_open_file_locally", f"Opened file locally: {local_filepath}")
+            
+        except Exception as e:
+            logger.error("FileActionsMixin", "_open_file_locally", f"Error opening file {filename}: {e}")
+            messagebox.showerror(
+                "Open File Error",
+                f"Could not open file '{filename}' locally.\nError: {e}",
+                parent=self,
+            )
+
+    def _delete_from_device(self, filenames):
+        """Delete files from the HiDock device with comprehensive validation and error handling."""
+        if not filenames:
+            return
+            
+        # Pre-deletion validation
+        try:
+            self._validate_device_for_deletion(filenames)
+        except Exception as e:
+            messagebox.showerror(
+                "Cannot Delete from Device",
+                f"Device deletion not possible:\n\n{str(e)}",
+                parent=self,
+            )
+            return
+            
+        count = len(filenames)
+        file_list = "\n".join([f"• {name}" for name in filenames[:5]])
+        if count > 5:
+            file_list += f"\n... and {count - 5} more files"
+            
+        # Enhanced confirmation with device status
+        device_status = self._get_device_status_for_deletion()
+        if not messagebox.askyesno(
+            "Delete from Device",
+            f"Are you sure you want to permanently delete {count} file(s) from the HiDock device?\n\n"
+            f"{file_list}\n\n"
+            f"Device Status: {device_status}\n\n"
+            "⚠️ This action cannot be undone!",
+            parent=self,
+        ):
+            return
+            
+        # Execute with proper error handling
+        try:
+            self.file_operations_manager.queue_batch_delete(filenames, self._update_operation_progress)
+        except Exception as e:
+            logger.error("FileActionsMixin", "_delete_from_device", f"Device deletion failed: {e}")
+            messagebox.showerror(
+                "Device Deletion Failed",
+                f"Failed to delete files from device:\n\n{str(e)}",
+                parent=self,
+            )
+    
+    def _validate_device_for_deletion(self, filenames):
+        """Validate device state and files before deletion."""
+        # Check device connection
+        if not self.device_manager.device_interface.is_connected():
+            raise RuntimeError("Device is not connected. Please connect the device and try again.")
+            
+        # Check for active recordings
+        recording_files = []
+        for filename in filenames:
+            file_detail = next((f for f in self.displayed_files_details if f["name"] == filename), None)
+            if file_detail and file_detail.get("is_recording"):
+                recording_files.append(filename)
+                
+        if recording_files:
+            raise RuntimeError(f"Cannot delete active recordings: {', '.join(recording_files[:3])}")
+            
+        # Check for files currently being downloaded
+        downloading_files = []
+        for filename in filenames:
+            if self.file_operations_manager.is_file_operation_active(filename, FileOperationType.DOWNLOAD):
+                downloading_files.append(filename)
+                
+        if downloading_files:
+            raise RuntimeError(f"Cannot delete files currently being downloaded: {', '.join(downloading_files[:3])}")
+    
+    def _get_device_status_for_deletion(self):
+        """Get device status information for deletion confirmation."""
+        try:
+            if hasattr(self, 'device_manager') and self.device_manager.device_interface.is_connected():
+                return "Connected and Ready"
+            else:
+                return "Disconnected"
+        except Exception:
+            return "Status Unknown"
+        
+    def _delete_local_copy(self, filenames):
+        """Delete local copies of files with confirmation."""
+        if not filenames:
+            return
+            
+        # Check for files that are currently in use and cannot be deleted
+        locked_files = self._check_file_locks(filenames)
+        if locked_files:
+            self._handle_locked_files(locked_files)
+            # Remove locked files from the deletion list
+            filenames = [f for f in filenames if f not in [lf[0] for lf in locked_files]]
+            if not filenames:
+                return  # No files left to delete
+            
+        # Comprehensive file handle release for any files to be deleted
+        files_to_release = set(filenames)
+        handles_released = False
+        
+        for filename in files_to_release:
+            if hasattr(self, 'current_playing_filename_for_replay') and self.current_playing_filename_for_replay == filename:
+                self.stop_audio_playback_gui()
+                handles_released = True
+                
+        # Stop any ongoing waveform/spectrum analysis that might hold file handles
+        if hasattr(self, 'audio_visualization_widget'):
+            self.audio_visualization_widget.clear()
+            self.audio_visualization_widget.stop_spectrum_analysis()
+            handles_released = True
+            
+        # Stop any ongoing transcription that might hold file handles
+        if hasattr(self, 'is_long_operation_active') and self.is_long_operation_active:
+            # Cancel transcription if active
+            if hasattr(self, '_cancel_transcription'):
+                self._cancel_transcription()
+            handles_released = True
+            
+        # Force garbage collection to release any remaining handles
+        if handles_released:
+            import gc
+            import time
+            gc.collect()
+            time.sleep(0.5)  # Increased delay for comprehensive handle release
+            
+        # Filter to only files that actually exist locally
+        existing_files = []
+        for filename in filenames:
+            local_path = self._get_local_filepath(filename)
+            if os.path.exists(local_path):
+                existing_files.append(filename)
+                
+        if not existing_files:
+            messagebox.showinfo(
+                "No Local Files",
+                "No local copies found for the selected files.",
+                parent=self,
+            )
+            return
+            
+        count = len(existing_files)
+        file_list = "\n".join([f"• {name}" for name in existing_files[:5]])
+        if count > 5:
+            file_list += f"\n... and {count - 5} more files"
+            
+        if not messagebox.askyesno(
+            "Delete Local Copies",
+            f"Are you sure you want to delete {count} local file(s)?\n\n"
+            f"{file_list}\n\n"
+            "Files will remain on the device and can be re-downloaded.",
+            parent=self,
+        ):
+            return
+            
+        # Delete local files
+        deleted_count = 0
+        failed_files = []
+        for filename in existing_files:
+            try:
+                local_path = self._get_local_filepath(filename)
+                
+                # Remove read-only attribute if present (cross-platform)
+                if os.path.exists(local_path):
+                    import stat
+                    # Set read/write permissions for owner (works on Windows, macOS, Linux)
+                    os.chmod(local_path, stat.S_IWRITE | stat.S_IREAD)
+                
+                os.remove(local_path)
+                deleted_count += 1
+                
+                # Update metadata cache
+                cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(filename)
+                if cached_metadata:
+                    cached_metadata.local_path = None
+                    self.file_operations_manager.metadata_cache.set_metadata(cached_metadata)
+                
+                # Update displayed file details
+                for file_detail in self.displayed_files_details:
+                    if file_detail["name"] == filename:
+                        file_detail["local_path"] = None
+                        # Check if we're in offline mode to set appropriate status
+                        if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                            file_detail["gui_status"] = "On Device (Offline)"
+                        else:
+                            file_detail["gui_status"] = "On Device"
+                        break
+                        
+                # Update treeview with appropriate offline status
+                if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                    self._update_file_status_in_treeview(filename, "On Device (Offline)", ())
+                else:
+                    self._update_file_status_in_treeview(filename, "On Device", ())
+                
+            except Exception as e:
+                logger.error("FileActionsMixin", "_delete_local_copy", f"Error deleting {filename}: {e}")
+                failed_files.append((filename, str(e)))
+                
+        # Show appropriate message based on results
+        if failed_files:
+            if deleted_count > 0:
+                error_details = "\n".join([f"• {name}: {error}" for name, error in failed_files[:3]])
+                if len(failed_files) > 3:
+                    error_details += f"\n... and {len(failed_files) - 3} more errors"
+                    
+                messagebox.showwarning(
+                    "Partial Success",
+                    f"Successfully deleted {deleted_count} file(s).\n\nFailed to delete {len(failed_files)} file(s):\n{error_details}",
+                    parent=self,
+                )
+            else:
+                error_details = "\n".join([f"• {name}: {error}" for name, error in failed_files[:3]])
+                if len(failed_files) > 3:
+                    error_details += f"\n... and {len(failed_files) - 3} more errors"
+                    
+                messagebox.showerror(
+                    "Deletion Failed",
+                    f"Failed to delete {len(failed_files)} local file(s):\n\n{error_details}",
+                    parent=self,
+                )
+        else:
+            messagebox.showinfo(
+                "Local Files Deleted",
+                f"Successfully deleted {deleted_count} local file(s).",
+                parent=self,
+            )
+    
+    def _check_file_locks(self, filenames):
+        """Check for file locks that would prevent deletion."""
+        locked_files = []
+        
+        for filename in filenames:
+            local_path = self._get_local_filepath(filename)
+            
+            # If file is currently being played, stop playback automatically
+            if hasattr(self, 'current_playing_filename_for_replay') and self.current_playing_filename_for_replay == filename:
+                logger.info("FileActionsMixin", "_check_file_locks", f"Stopping audio playback to delete {filename}")
+                self.stop_audio_playback_gui()
+                # Continue to check other locks after stopping playback
+                
+            # Check if file is being downloaded
+            if self.file_operations_manager.is_file_operation_active(filename, FileOperationType.DOWNLOAD):
+                locked_files.append((filename, "File is currently being downloaded"))
+                continue
+                
+            # Check if file is locked by another process
+            if self._is_file_locked(local_path):
+                locked_files.append((filename, "File is locked by another process"))
+                continue
+                
+            # Check if file is being used by transcription
+            if self._is_file_in_transcription(filename):
+                locked_files.append((filename, "File is being transcribed"))
+                continue
+                
+        return locked_files
+    
+    def _is_file_locked(self, file_path):
+        """Check if a file is locked by another process."""
+        if not os.path.exists(file_path):
+            return False
+            
+        try:
+            # Try to open the file in exclusive mode with multiple attempts
+            for attempt in range(3):
+                try:
+                    with open(file_path, 'r+b') as f:
+                        pass
+                    return False  # File is not locked
+                except (IOError, OSError, PermissionError):
+                    if attempt < 2:  # Not the last attempt
+                        import time
+                        time.sleep(0.2)  # Brief delay before retry
+                        continue
+                    return True  # File is locked after all attempts
+        except Exception:
+            # Any other exception means we can't access the file
+            return True
+    
+    def _is_file_in_transcription(self, filename):
+        """Check if file is currently being transcribed."""
+        # Check if there's an active transcription operation
+        return hasattr(self, 'is_long_operation_active') and self.is_long_operation_active
+    
+    def _handle_locked_files(self, locked_files):
+        """Handle files that are locked and cannot be deleted."""
+        if not locked_files:
+            return
+            
+        error_details = "\n".join([f"• {name}: {reason}" for name, reason in locked_files[:5]])
+        if len(locked_files) > 5:
+            error_details += f"\n... and {len(locked_files) - 5} more files"
+            
+        messagebox.showwarning(
+            "Files Cannot Be Deleted",
+            f"Cannot delete {len(locked_files)} file(s) because they are in use:\n\n{error_details}\n\n"
+            "Please close any applications using these files and try again.",
+            parent=self,
+        )
+    
+    def _delete_single_local_file_with_retry(self, filename, max_retries=3):
+        """Delete a single local file with retry mechanism."""
+        local_path = self._get_local_filepath(filename)
+        
+        for attempt in range(max_retries):
+            try:
+                # Remove read-only attribute if present (cross-platform)
+                if os.path.exists(local_path):
+                    import stat
+                    # Set read/write permissions for owner (works on Windows, macOS, Linux)
+                    os.chmod(local_path, stat.S_IWRITE | stat.S_IREAD)
+                
+                os.remove(local_path)
+                
+                # Update metadata cache
+                cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(filename)
+                if cached_metadata:
+                    cached_metadata.local_path = None
+                    self.file_operations_manager.metadata_cache.set_metadata(cached_metadata)
+                
+                # Update displayed file details
+                for file_detail in self.displayed_files_details:
+                    if file_detail["name"] == filename:
+                        file_detail["local_path"] = None
+                        # Check if we're in offline mode to set appropriate status
+                        if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                            file_detail["gui_status"] = "On Device (Offline)"
+                        else:
+                            file_detail["gui_status"] = "On Device"
+                        break
+                        
+                # Update treeview with appropriate offline status
+                if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                    self._update_file_status_in_treeview(filename, "On Device (Offline)", ())
+                else:
+                    self._update_file_status_in_treeview(filename, "On Device", ())
+                
+                logger.info("FileActionsMixin", "_delete_single_local_file_with_retry", 
+                           f"Successfully deleted {filename} on attempt {attempt + 1}")
+                return True
+                
+            except PermissionError as e:
+                self._last_deletion_error = f"Permission denied: {str(e)}"
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(0.5)  # Brief delay before retry
+                    continue
+                    
+            except FileNotFoundError:
+                # File already deleted - consider this success
+                logger.info("FileActionsMixin", "_delete_single_local_file_with_retry", 
+                           f"File {filename} already deleted")
+                return True
+                
+            except Exception as e:
+                self._last_deletion_error = str(e)
+                break
+                
+        logger.error("FileActionsMixin", "_delete_single_local_file_with_retry", 
+                    f"Failed to delete {filename} after {max_retries} attempts: {self._last_deletion_error}")
+        return False
+
+    def _refresh_single_file_status(self, filename):
+        """Refresh the status of a single file to ensure proper display."""
+        try:
+            # Get the cached metadata
+            cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(filename)
+            if not cached_metadata:
+                return
+            
+            # Check if file exists locally
+            local_filepath = self._get_local_filepath(filename)
+            file_exists = os.path.exists(local_filepath)
+            
+            # Update the cached metadata if needed
+            if file_exists and not cached_metadata.local_path:
+                cached_metadata.local_path = local_filepath
+                self.file_operations_manager.metadata_cache.set_metadata(cached_metadata)
+            elif not file_exists and cached_metadata.local_path:
+                cached_metadata.local_path = None
+                self.file_operations_manager.metadata_cache.set_metadata(cached_metadata)
+            
+            # Update the displayed file details
+            for file_detail in self.displayed_files_details:
+                if file_detail["name"] == filename:
+                    file_detail["local_path"] = local_filepath if file_exists else None
+                    if file_exists:
+                        file_detail["gui_status"] = "Downloaded"
+                    else:
+                        # Check if we're in offline mode to set appropriate status
+                        if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                            file_detail["gui_status"] = "On Device (Offline)"
+                        else:
+                            file_detail["gui_status"] = "On Device"
+                    break
+            
+            # Update the treeview display
+            if file_exists:
+                self._update_file_status_in_treeview(filename, "Downloaded", ("downloaded_ok",))
+            else:
+                # Check if we're in offline mode to set appropriate status
+                if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                    self._update_file_status_in_treeview(filename, "On Device (Offline)", ())
+                else:
+                    self._update_file_status_in_treeview(filename, "On Device", ())
+                
+        except Exception as e:
+            logger.error("FileActionsMixin", "_refresh_single_file_status", f"Error refreshing status for {filename}: {e}")
 
     def cancel_selected_downloads_gui(self):
         """Cancels download operations for selected files."""

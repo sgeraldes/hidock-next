@@ -12,6 +12,9 @@ from unittest.mock import MagicMock, Mock, patch
 import customtkinter as ctk
 import pytest
 
+# Mark all tests in this file as GUI tests - incompatible with parallel execution
+pytestmark = pytest.mark.gui
+
 
 class TestOfflineAudioFunctionality:
     """Test audio playback and insights functionality when disconnected."""

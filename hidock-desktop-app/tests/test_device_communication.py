@@ -14,6 +14,9 @@ import pytest
 import usb.core
 import usb.util
 
+# Mark as GUI test for architectural separation
+pytestmark = pytest.mark.gui
+
 from constants import (
     CMD_GET_DEVICE_INFO,
     CMD_TRANSFER_FILE,

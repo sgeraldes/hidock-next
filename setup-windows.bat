@@ -16,9 +16,18 @@ echo [1/4] Checking Python...
 py -3.12 --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo ERROR: Python 3.12 not found!
+    echo:
     echo HiDock requires Python 3.12 for optimal compatibility.
-    echo Please install Python 3.12 from https://python.org
-    echo Available versions: py -0
+    echo:
+    echo INSTALL PYTHON 3.12:
+    echo 1. Go to: https://python.org/downloads/
+    echo 2. Download Python 3.12.x for Windows
+    echo 3. Run installer and CHECK "Add Python to PATH"
+    echo 4. Restart this script
+    echo:
+    echo Available Python versions on your system:
+    py -0 2>nul || echo   (None found - please install Python)
+    echo:
     pause
     exit /b 1
 ) else (
@@ -37,7 +46,7 @@ echo Upgrading pip and installing build tools...
 .venv\Scripts\python -m pip install --upgrade pip setuptools wheel
 
 echo Installing dependencies (this may take a few minutes)...
-.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\pip install -e ".[dev]"
 if %errorlevel% neq 0 (
     echo:
     echo ERROR: Failed to install dependencies!
@@ -56,7 +65,15 @@ echo [3/4] Checking Node.js for Web Apps...
 node --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo Node.js not found - skipping web apps setup
-    echo Install Node.js 18+ from https://nodejs.org if you want the web apps
+    echo:
+    echo OPTIONAL: Install Node.js for Web Apps
+    echo 1. Go to: https://nodejs.org/
+    echo 2. Download LTS version (18+)
+    echo 3. Run installer with default settings
+    echo 4. Restart this script to set up web apps
+    echo:
+    echo (Desktop app will work without Node.js)
+    echo:
 ) else (
     echo Node.js found! Setting up web apps...
 

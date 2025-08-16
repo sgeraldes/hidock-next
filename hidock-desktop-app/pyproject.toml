@@ -43,6 +43,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.10.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-xdist>=3.0.0",
     "black>=23.0.0",
     "flake8>=6.0.0",
     "isort>=5.12.0",
@@ -61,6 +62,7 @@ hidock-next = "main:main"
 
 [tool.setuptools_scm]
 write_to = "_version.py"
+fallback_version = "0.1.0.dev0"
 
 [tool.setuptools]
 py-modules = [
@@ -222,10 +224,12 @@ addopts = [
     "--cov-fail-under=80",
 ]
 markers = [
-    "unit: Unit tests",
-    "integration: Integration tests",
+    "unit: Unit tests (safe for parallel)",
+    "integration: Integration tests (may need isolation)",
     "slow: Slow running tests",
-    "device: Tests requiring actual device connection",
+    "device: Tests requiring actual device connection (no parallel)",
+    "gui: GUI tests (no parallel)",
+    "fileio: File I/O tests (may need isolation)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

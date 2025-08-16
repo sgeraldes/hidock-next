@@ -63,6 +63,12 @@ flowchart TD
    - Current status
    - Known issues
 
+7. `testingPatterns.md`
+   - Test integration rules
+   - File organization per INDEX.md
+   - Test consolidation approach
+   - Coverage requirements
+
 ### Additional Context
 
 Create additional files/folders within `./.amazonq/project-intelligence` when they help organize:

@@ -403,6 +403,12 @@ class EventHandlersMixin:
                 )
         elif status in ["Downloaded", "Downloaded OK", "downloaded_ok"]:
             context_menu.add_command(
+                label="Open Locally",
+                command=lambda: self._open_file_locally(item_iid),
+                image=self.menu_icons.get("folder"),
+                compound="left",
+            )
+            context_menu.add_command(
                 label="Re-download",
                 command=self.download_selected_files_gui,
                 image=self.menu_icons.get("download"),
@@ -426,12 +432,24 @@ class EventHandlersMixin:
             )
 
         if not file_detail.get("is_recording"):
-            context_menu.add_command(
-                label="Delete",
-                command=self.delete_selected_files_gui,
-                image=self.menu_icons.get("delete"),
-                compound="left",
-            )
+            # Add device delete option if connected
+            is_connected = self.device_manager.device_interface.is_connected()
+            if is_connected:
+                context_menu.add_command(
+                    label="Delete from Device",
+                    command=lambda: self._delete_from_device([item_iid]),
+                    image=self.menu_icons.get("delete"),
+                    compound="left",
+                )
+            
+            # Add local delete option if file is downloaded
+            if status in ["Downloaded", "Downloaded OK", "downloaded_ok"]:
+                context_menu.add_command(
+                    label="Delete Local Copy",
+                    command=lambda: self._delete_local_copy([item_iid]),
+                    image=self.menu_icons.get("delete"),
+                    compound="left",
+                )
 
     def _add_multi_file_context_menu_items(self, context_menu, selection):
         """Adds context menu items for multiple selected files."""
@@ -450,12 +468,27 @@ class EventHandlersMixin:
         )
 
         if not is_any_recording:
-            context_menu.add_command(
-                label=f"Delete Selected ({num_selected})",
-                command=self.delete_selected_files_gui,
-                image=self.menu_icons.get("delete"),
-                compound="left",
-            )
+            # Add device delete option if connected
+            is_connected = self.device_manager.device_interface.is_connected()
+            if is_connected:
+                context_menu.add_command(
+                    label=f"Delete from Device ({num_selected})",
+                    command=lambda: self._delete_from_device(selection),
+                    image=self.menu_icons.get("delete"),
+                    compound="left",
+                )
+            
+            # Add local delete option if any files are downloaded
+            downloaded_files = [iid for iid in selection if 
+                              next((f for f in self.displayed_files_details if f["name"] == iid), {})
+                              .get("gui_status") in ["Downloaded", "Downloaded OK", "downloaded_ok"]]
+            if downloaded_files:
+                context_menu.add_command(
+                    label=f"Delete Local Copies ({len(downloaded_files)})",
+                    command=lambda: self._delete_local_copy(downloaded_files),
+                    image=self.menu_icons.get("delete"),
+                    compound="left",
+                )
 
     def _on_file_right_click(self, event):  # Identical to original, uses self._apply_appearance_mode_theme_color
         clicked_item_iid = self.file_tree.identify_row(event.y)

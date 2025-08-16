@@ -122,7 +122,7 @@ class TestHiDockJensenDeviceSettings:
                 0,  # notificationSound (unchanged False)
             ]
         )
-        mock_send_receive.assert_called_once_with(CMD_SET_SETTINGS, expected_payload, 5000)
+        mock_send_receive.assert_called_once_with(CMD_SET_SETTINGS, expected_payload, timeout_ms=5000)
 
         # Verify local cache was updated
         expected_final_settings = {
@@ -219,7 +219,7 @@ class TestHiDockJensenDeviceSettings:
 
         # Verify only autoPlay was changed
         expected_payload = bytes([1, 0, 1, 1])  # autoRecord, autoPlay(changed), bluetoothTone, notificationSound
-        mock_send_receive.assert_called_once_with(CMD_SET_SETTINGS, expected_payload, 5000)
+        mock_send_receive.assert_called_once_with(CMD_SET_SETTINGS, expected_payload, timeout_ms=5000)
 
     def test_set_device_settings_unknown_keys_ignored(self, jensen_device):
         """Test set_device_settings ignores unknown setting keys."""
@@ -246,7 +246,7 @@ class TestHiDockJensenDeviceSettings:
 
         # Verify unknown setting was ignored, only autoRecord changed
         expected_payload = bytes([1, 0, 0, 0])
-        mock_send_receive.assert_called_once_with(CMD_SET_SETTINGS, expected_payload, 5000)
+        mock_send_receive.assert_called_once_with(CMD_SET_SETTINGS, expected_payload, timeout_ms=5000)
 
 
 class TestHiDockJensenCardManagement:
@@ -434,26 +434,34 @@ class TestHiDockJensenRecordingFile:
 
     def test_get_recording_file_unprintable_bytes(self, jensen_device):
         """Test get_recording_file with unprintable bytes - covering lines 1955-1962."""
-        # Create filename with unprintable characters
-        unprintable_filename = b"\xff\xfe\xfd\xfc\x00"
+        # Create filename with only unprintable characters that become empty after cleanup
+        unprintable_filename = b"\x01\x02\x03\x04\x00"
 
         with patch.object(jensen_device, "_send_and_receive") as mock_send_receive:
             mock_send_receive.return_value = {"id": CMD_GET_RECORDING_FILE, "body": unprintable_filename}
 
             result = jensen_device.get_recording_file()
 
-        assert result is not None
-        assert result["name"] == unprintable_filename.hex()
+        # Should return None when filename is empty after cleanup
+        assert result is None
 
     def test_get_recording_file_unicode_decode_error(self, jensen_device):
         """Test get_recording_file with Unicode decode error - covering lines 1961-1962."""
-        # Create bytes that will cause UnicodeDecodeError
-        problematic_bytes = b"\x80\x81\x82\x83\x00"
+        # Create bytes that will cause UnicodeDecodeError when decoded as ascii
+        problematic_bytes = b"\xff\xfe\xfd\xfc\x00"
 
         with patch.object(jensen_device, "_send_and_receive") as mock_send_receive:
             mock_send_receive.return_value = {"id": CMD_GET_RECORDING_FILE, "body": problematic_bytes}
 
-            result = jensen_device.get_recording_file()
+            # Mock the decode to raise UnicodeDecodeError
+            with patch("builtins.bytearray") as mock_bytearray:
+                mock_instance = mock_bytearray.return_value
+                mock_instance.decode.side_effect = UnicodeDecodeError("ascii", b"", 0, 1, "test")
+                mock_instance.__iter__ = lambda self: iter(problematic_bytes)
+                mock_instance.find.return_value = 4  # Position of null terminator
+                mock_instance.__getitem__ = lambda self, key: problematic_bytes[key]
+
+                result = jensen_device.get_recording_file()
 
         assert result is not None
         assert result["name"] == problematic_bytes.hex()

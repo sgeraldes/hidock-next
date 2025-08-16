@@ -1,0 +1,339 @@
+"""
+Tests for gui_treeview.py TreeViewMixin functionality.
+"""
+
+import tkinter as tk
+from datetime import datetime
+from unittest.mock import MagicMock, Mock, patch
+
+import pytest
+
+from file_operations_manager import FileMetadata
+# Note: Import removed to prevent actual GUI interaction
+
+
+class TestTreeViewMixin:
+    """Test cases for TreeViewMixin functionality."""
+
+    @pytest.fixture
+    def mock_gui(self):
+        """Create a mock GUI instance with TreeViewMixin."""
+        mock = Mock()
+        mock.config = {"download_directory": "/test/downloads"}
+        mock.file_tree = Mock()
+        mock.file_tree.delete = Mock()
+        mock.file_tree.insert = Mock()
+        mock.file_tree.item = Mock()
+        mock.file_tree.set = Mock()
+        mock.file_tree.heading = Mock()
+        mock.file_tree.tag_configure = Mock()
+        mock.file_tree.configure = Mock()
+        mock.file_tree.get_children = Mock(return_value=[])
+        mock.file_tree.selection = Mock(return_value=[])
+        mock.single_select_mode = Mock()
+        mock.single_select_mode.get = Mock(return_value=True)
+        mock.info_label = Mock()
+        mock.status_bar = Mock()
+        mock.sort_column = "name"
+        mock.sort_reverse = False
+        mock.logger = Mock()
+        mock.download_directory = "/test/downloads"
+        mock._last_loaded_waveform_file = None
+        mock.after = Mock()
+        return mock
+
+    @pytest.fixture
+    def sample_file_metadata(self):
+        """Create sample file metadata for testing."""
+        return [
+            FileMetadata(
+                filename="file1.wav",
+                size=1024,
+                duration=10.5,
+                date_created=datetime(2024, 1, 1, 12, 0, 0),
+                device_path="/device/file1.wav",
+                local_path=None,
+            ),
+            FileMetadata(
+                filename="file2.wav",
+                size=2048,
+                duration=20.0,
+                date_created=datetime(2024, 1, 2, 12, 0, 0),
+                device_path="/device/file2.wav",
+                local_path="/test/downloads/file2.wav",
+            ),
+            FileMetadata(
+                filename="file3.wav",
+                size=512,
+                duration=5.25,
+                date_created=datetime(2024, 1, 3, 12, 0, 0),
+                device_path="/device/file3.wav",
+                local_path=None,
+            ),
+        ]
+
+    @pytest.mark.unit
+    def test_create_file_tree_frame(self, mock_gui):
+        """Test file tree frame creation."""
+        parent_frame = Mock()
+        
+        # Test the method
+        # Simulate the method call without actual execution
+        mock_gui._create_file_tree_frame = Mock()
+        mock_gui._create_file_tree_frame(parent_frame)
+        
+        # Should create treeview with columns
+        assert mock_gui.file_tree.heading.call_count >= 5  # Name, Status, Duration, Size, Created
+
+    @pytest.mark.unit
+    def test_show_loading_state(self, mock_gui):
+        """Test showing loading state in treeview."""
+        mock_gui.file_tree.get_children.return_value = ["item1", "item2"]
+        
+        TreeViewMixin.show_loading_state(mock_gui)
+        
+        # Should delete all items
+        mock_gui.file_tree.delete.assert_called_with("item1", "item2")
+        # Should insert loading message
+        mock_gui.file_tree.insert.assert_called()
+        # Should update info label
+        mock_gui.info_label.configure.assert_called()
+
+    @pytest.mark.unit
+    def test_populate_treeview_from_data(self, mock_gui, sample_file_metadata):
+        """Test populating treeview with file data."""
+        mock_gui.file_tree.get_children.return_value = ["old_item"]
+        mock_gui.file_tree.insert.return_value = "new_item"
+        
+        TreeViewMixin._populate_treeview_from_data(mock_gui, sample_file_metadata)
+        
+        # Should delete old items
+        mock_gui.file_tree.delete.assert_called_with("old_item")
+        # Should insert new items
+        assert mock_gui.file_tree.insert.call_count == 3
+        # Should update info label
+        mock_gui.info_label.configure.assert_called()
+
+    @pytest.mark.unit
+    def test_update_file_status_in_treeview(self, mock_gui):
+        """Test updating file status in treeview."""
+        file_iid = "file1"
+        mock_gui.file_tree.item.return_value = {"tags": ["existing_tag"]}
+        
+        TreeViewMixin._update_file_status_in_treeview(
+            mock_gui, file_iid, "Downloaded", ["downloaded"]
+        )
+        
+        # Should update status column
+        mock_gui.file_tree.set.assert_called_with(file_iid, "Status", "Downloaded")
+        # Should update tags
+        mock_gui.file_tree.item.assert_called()
+
+    @pytest.mark.unit
+    def test_remove_file_from_treeview(self, mock_gui):
+        """Test removing file from treeview."""
+        file_iid = "file1"
+        mock_gui.file_tree.get_children.return_value = ["file1", "file2"]
+        
+        TreeViewMixin._remove_file_from_treeview(mock_gui, file_iid)
+        
+        # Should delete the file
+        mock_gui.file_tree.delete.assert_called_with(file_iid)
+        # Should update info label
+        mock_gui.info_label.configure.assert_called()
+
+    @pytest.mark.unit
+    def test_sort_files_data(self, mock_gui, sample_file_metadata):
+        """Test sorting files data by different columns."""
+        # Test sort by name
+        sorted_data = TreeViewMixin._sort_files_data(
+            mock_gui, sample_file_metadata, "name", False
+        )
+        assert sorted_data[0].filename == "file1.wav"
+        assert sorted_data[2].filename == "file3.wav"
+        
+        # Test sort by size
+        sorted_data = TreeViewMixin._sort_files_data(
+            mock_gui, sample_file_metadata, "size", False
+        )
+        assert sorted_data[0].size == 512
+        assert sorted_data[2].size == 2048
+        
+        # Test sort by duration (reverse)
+        sorted_data = TreeViewMixin._sort_files_data(
+            mock_gui, sample_file_metadata, "duration", True
+        )
+        assert sorted_data[0].duration == 20.0
+        assert sorted_data[2].duration == 5.25
+
+    @pytest.mark.unit
+    def test_sort_treeview_column(self, mock_gui):
+        """Test sorting treeview by column."""
+        mock_gui.file_tree.get_children.return_value = ["item1", "item2"]
+        mock_gui.file_tree.set.side_effect = [
+            ("file1.wav", "10 KB", "5:00", "Not Downloaded"),
+            ("file2.wav", "20 KB", "10:00", "Downloaded"),
+        ]
+        
+        TreeViewMixin.sort_treeview_column(mock_gui, "name", False)
+        
+        # Should update sort state
+        assert mock_gui.sort_column == "name"
+        # Should delete and reinsert items
+        mock_gui.file_tree.delete.assert_called()
+
+    @pytest.mark.unit
+    def test_update_treeview_heading_indicator(self, mock_gui):
+        """Test updating treeview heading sort indicators."""
+        TreeViewMixin._update_treeview_heading_indicator(mock_gui, "name", False)
+        
+        # Should update heading text with arrow
+        calls = mock_gui.file_tree.heading.call_args_list
+        assert any("↑" in str(call) or "↓" in str(call) for call in calls)
+
+    @pytest.mark.unit
+    def test_on_file_double_click_filtered(self, mock_gui):
+        """Test double-click event filtering."""
+        event = Mock()
+        event.widget = mock_gui.file_tree
+        mock_gui.file_tree.identify_row.return_value = "file1"
+        mock_gui.file_tree.selection.return_value = ["file1"]
+        mock_gui._on_file_double_click = Mock()
+        
+        # Set up timer mock
+        mock_gui._double_click_timer = None
+        
+        # First click
+        TreeViewMixin._on_file_double_click_filtered(mock_gui, event)
+        assert mock_gui._double_click_timer is not None
+        
+        # Second click (double-click)
+        TreeViewMixin._on_file_double_click_filtered(mock_gui, event)
+        mock_gui._on_file_double_click.assert_called_once()
+
+    @pytest.mark.unit
+    def test_apply_saved_sort_state(self, mock_gui, sample_file_metadata):
+        """Test applying saved sort state."""
+        mock_gui.sort_column = "size"
+        mock_gui.sort_reverse = True
+        
+        sorted_data = TreeViewMixin._apply_saved_sort_state_to_tree_and_ui(
+            mock_gui, sample_file_metadata
+        )
+        
+        # Should return sorted data
+        assert sorted_data[0].size == 2048  # Largest first (reverse)
+        # Should update heading indicator
+        mock_gui.file_tree.heading.assert_called()
+
+    @pytest.mark.unit
+    def test_update_treeview_selectmode(self, mock_gui):
+        """Test updating treeview selection mode."""
+        # Test single selection mode
+        mock_gui.single_select_mode.get.return_value = True
+        TreeViewMixin._update_treeview_selectmode(mock_gui)
+        mock_gui.file_tree.configure.assert_called_with(selectmode="browse")
+        
+        # Test multi selection mode
+        mock_gui.single_select_mode.get.return_value = False
+        TreeViewMixin._update_treeview_selectmode(mock_gui)
+        mock_gui.file_tree.configure.assert_called_with(selectmode="extended")
+
+    @pytest.mark.unit
+    def test_update_selection_buttons_visibility(self, mock_gui):
+        """Test updating selection-dependent buttons visibility."""
+        mock_gui.download_button = Mock()
+        mock_gui.play_button = Mock()
+        mock_gui.delete_button = Mock()
+        mock_gui.process_insights_button = Mock()
+        
+        # Test with selection
+        mock_gui.file_tree.selection.return_value = ["file1"]
+        TreeViewMixin._update_selection_buttons_visibility(mock_gui)
+        
+        mock_gui.download_button.configure.assert_called_with(state="normal")
+        mock_gui.play_button.configure.assert_called_with(state="normal")
+        
+        # Test without selection
+        mock_gui.file_tree.selection.return_value = []
+        TreeViewMixin._update_selection_buttons_visibility(mock_gui)
+        
+        mock_gui.download_button.configure.assert_called_with(state="disabled")
+        mock_gui.play_button.configure.assert_called_with(state="disabled")
+
+    @pytest.mark.unit
+    def test_file_status_tags(self, mock_gui, sample_file_metadata):
+        """Test file status tag assignment."""
+        mock_gui.file_tree.insert.return_value = "item1"
+        
+        # File with local_path should get "downloaded" tag
+        TreeViewMixin._populate_treeview_from_data(mock_gui, [sample_file_metadata[1]])
+        
+        insert_call = mock_gui.file_tree.insert.call_args
+        assert "downloaded" in insert_call[1]["tags"]
+
+    @pytest.mark.unit
+    def test_empty_file_list(self, mock_gui):
+        """Test handling empty file list."""
+        TreeViewMixin._populate_treeview_from_data(mock_gui, [])
+        
+        # Should clear treeview
+        mock_gui.file_tree.delete.assert_called()
+        # Should not insert any items
+        mock_gui.file_tree.insert.assert_not_called()
+        # Should update info label
+        mock_gui.info_label.configure.assert_called_with(text="0 files")
+
+    @pytest.mark.unit
+    def test_sort_with_none_values(self, mock_gui):
+        """Test sorting with None values in data."""
+        files_with_none = [
+            FileMetadata(
+                filename="file1.wav",
+                size=None,
+                duration=10.0,
+                date_created=datetime.now(),
+                device_path="/device/file1.wav",
+                local_path=None,
+            ),
+            FileMetadata(
+                filename="file2.wav",
+                size=1024,
+                duration=None,
+                date_created=datetime.now(),
+                device_path="/device/file2.wav",
+                local_path=None,
+            ),
+        ]
+        
+        # Should handle None values without error
+        sorted_data = TreeViewMixin._sort_files_data(
+            mock_gui, files_with_none, "size", False
+        )
+        assert len(sorted_data) == 2
+
+    @pytest.mark.integration
+    def test_full_treeview_workflow(self, mock_gui, sample_file_metadata):
+        """Test complete treeview workflow from loading to sorting."""
+        # Show loading state
+        TreeViewMixin.show_loading_state(mock_gui)
+        
+        # Populate with data
+        TreeViewMixin._populate_treeview_from_data(mock_gui, sample_file_metadata)
+        
+        # Update file status
+        TreeViewMixin._update_file_status_in_treeview(
+            mock_gui, "file1", "Downloaded", ["downloaded"]
+        )
+        
+        # Sort by different columns
+        TreeViewMixin.sort_treeview_column(mock_gui, "size", True)
+        
+        # Update selection mode
+        TreeViewMixin._update_treeview_selectmode(mock_gui)
+        
+        # Verify all operations were called
+        assert mock_gui.file_tree.delete.called
+        assert mock_gui.file_tree.insert.called
+        assert mock_gui.file_tree.set.called
+        assert mock_gui.file_tree.configure.called

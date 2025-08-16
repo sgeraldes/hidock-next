@@ -22,19 +22,28 @@
 
 ## 📖 Reference Documentation
 
-| Document                                               | Purpose                      | Audience   |
-| ------------------------------------------------------ | ---------------------------- | ---------- |
-| **[docs/API.md](docs/API.md)**                         | Complete API documentation   | Developers |
-| **[docs/TESTING.md](docs/TESTING.md)**                 | Testing guide and frameworks | Developers |
-| **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Common issues and solutions  | Everyone   |
+| Document                                                                           | Purpose                            | Audience   |
+| ---------------------------------------------------------------------------------- | ---------------------------------- | ---------- |
+| **[docs/API.md](docs/API.md)**                                                     | Complete API documentation         | Developers |
+| **[docs/TESTING.md](docs/TESTING.md)**                                             | Testing guide and frameworks       | Developers |
+| **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**                             | Common issues and solutions        | Everyone   |
+| **[docs/WINDOW_GEOMETRY_IMPLEMENTATION.md](docs/WINDOW_GEOMETRY_IMPLEMENTATION.md)** | Window position/size saving details | Developers |
+| **[docs/SECURITY_RECOMMENDATIONS.md](docs/SECURITY_RECOMMENDATIONS.md)**           | Security best practices            | Developers |
+| **[docs/HIDOCK_DESKTOP_TEST_COVERAGE.md](docs/HIDOCK_DESKTOP_TEST_COVERAGE.md)**   | Test coverage analysis             | Developers |
+| **[docs/HIDOCK_DESKTOP_DEVELOPMENT.md](docs/HIDOCK_DESKTOP_DEVELOPMENT.md)**       | Desktop app development guide      | Developers |
 
 ## 📋 Project Information
 
-| Document                                                               | Purpose                        | Audience   |
-| ---------------------------------------------------------------------- | ------------------------------ | ---------- |
-| **[docs/ROADMAP.md](docs/ROADMAP.md)**                                 | Future plans and features      | Everyone   |
-| **[docs/TECHNICAL_SPECIFICATION.md](docs/TECHNICAL_SPECIFICATION.md)** | Technical architecture details | Developers |
-| **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**                           | Deployment instructions        | DevOps     |
+| Document                                                                           | Purpose                        | Audience   |
+| ---------------------------------------------------------------------------------- | ------------------------------ | ---------- |
+| **[docs/ROADMAP.md](docs/ROADMAP.md)**                                             | Future plans and features      | Everyone   |
+| **[docs/TECHNICAL_SPECIFICATION.md](docs/TECHNICAL_SPECIFICATION.md)**             | Technical architecture details | Developers |
+| **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**                                       | Deployment instructions        | DevOps     |
+| **[docs/CLEANUP_REPORT.md](docs/CLEANUP_REPORT.md)**                               | Repository cleanup history     | Developers |
+| **[docs/SETTINGS_AND_TEST_IMPROVEMENTS.md](docs/SETTINGS_AND_TEST_IMPROVEMENTS.md)** | Recent settings improvements   | Developers |
+| **[docs/DOCUMENTATION_REVIEW_REPORT.md](docs/DOCUMENTATION_REVIEW_REPORT.md)**     | Documentation review status    | Developers |
+| **[docs/ACCEPTANCE_CRITERIA.md](docs/ACCEPTANCE_CRITERIA.md)**                     | Project acceptance criteria    | Developers |
+| **[docs/REFERENCE_HIDOCK.md](docs/REFERENCE_HIDOCK.md)**                           | Legacy HiDock reference        | Developers |
 
 ## 📱 Application-Specific
 
@@ -87,6 +96,14 @@
 
 ## 🎯 Recent Updates
 
+**August 5 2025 - Window Geometry Feature:**
+
+- ✅ Window position and size saving implemented
+- ✅ Off-screen window detection and automatic correction
+- ✅ Debounced auto-save system (500ms timer)
+- ✅ Comprehensive geometry validation for multi-monitor setups
+- ✅ Complete test coverage for window geometry functionality
+
 **July 30 2025 - Performance Optimization Initiative:**
 
 - ✅ Single/multi selection mode toggle with persistent state
@@ -104,4 +121,4 @@
 - ✅ Automated testing on commit and push
 
 ---
-*This index is automatically updated with new documentation. Last updated: July 2025*
+*This index is automatically updated with new documentation. Last updated: August 2025*

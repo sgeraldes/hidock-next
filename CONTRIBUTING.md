@@ -10,11 +10,19 @@ We're excited to have you contribute to our open-source HiDock management platfo
 ```bash
 git clone https://github.com/sgeraldes/hidock-next.git
 cd hidock-next
+
+# Windows:
+setup-windows.bat
+
+# Linux/Mac:
+chmod +x setup-unix.sh && ./setup-unix.sh
+
+# Any Platform (Interactive):
 python setup.py
 # Choose option 2 (Developer)
 ```
 
-This automated setup handles everything you need for development.
+These automated setup scripts handle everything you need for development.
 
 ## 📖 How to Contribute
 
@@ -254,16 +262,17 @@ We recognize significant contributors in our:
 1. **Test failures**: Check [docs/TESTING.md](docs/TESTING.md) troubleshooting section
 2. **Settings dialog issues**: Review `test_settings_*.py` files for examples
 3. **Device communication**: Check device selector bug fix implementation
-4. **Pre-commit hook issues**: Ensure `pip install -e ".[dev]"` was used
+4. **Pre-commit hook issues**: Ensure `pip install -e ".[dev]"` was used (not requirements.txt)
 5. **Coverage issues**: Use `pytest --cov=. --cov-report=html` to identify gaps
 
 ### **Common Development Issues:**
 
-- **Import errors**: Ensure virtual environment and dev dependencies installed
+- **Import errors**: Ensure virtual environment and dev dependencies installed with `pip install -e ".[dev]"`
 - **Test failures**: Check that CustomTkinter components are properly mocked
 - **Coverage below 80%**: Add tests for uncovered code paths
 - **Settings validation**: Follow temperature (0.0-2.0) and token (1-32000) ranges
 - **Device selector**: Use `set_enabled()` method, not `configure(state=...)`
+- **Dependencies**: Never use `requirements.txt` - all dependencies are in `pyproject.toml`
 
 ### **Need Help?**
 

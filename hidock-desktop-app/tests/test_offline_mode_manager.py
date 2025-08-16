@@ -120,6 +120,17 @@ class TestOfflineModeManager:
             ),
         ]
 
+        # Mock metadata cache to return the appropriate metadata for each file
+        def mock_get_metadata(filename):
+            for file_meta in mock_files:
+                if file_meta.filename == filename:
+                    mock_metadata = Mock()
+                    mock_metadata.local_path = file_meta.local_path
+                    return mock_metadata
+            return None
+
+        self.mock_file_ops.metadata_cache.get_metadata.side_effect = mock_get_metadata
+
         with patch.object(self.manager, "get_cached_file_list", return_value=mock_files), patch(
             "offline_mode_manager.logger"
         ) as mock_logger:
@@ -236,3 +247,37 @@ class TestOfflineModeManager:
             assert result[0]["offline_available"] is True
             assert result[1]["gui_status"] == "On Device (Offline)"
             assert result[1]["offline_available"] is False
+
+    def test_enhanced_offline_file_discovery(self):
+        """Test enhanced offline file discovery that checks download directory."""
+        # Create test files in download directory
+        file1_path = os.path.join(self.temp_dir, "2025Aug04-160656-Rec02.wav")
+        file2_path = os.path.join(self.temp_dir, "2025Aug04-183011-Rec05.wav")
+        
+        with open(file1_path, "w") as f:
+            f.write("test audio content 1")
+        with open(file2_path, "w") as f:
+            f.write("test audio content 2")
+
+        # Mock cached files without local_path set
+        mock_files = [
+            FileMetadata("2025Aug04-160656-Rec02.hda", 1024, 60.0, datetime(2024, 1, 1, 12, 0, 0), "/device/file1.hda"),
+            FileMetadata("2025Aug04-183011-Rec05.hda", 2048, 120.0, datetime(2024, 1, 2, 12, 0, 0), "/device/file2.hda"),
+            FileMetadata("2025Aug04-999999-Rec99.hda", 4096, 180.0, datetime(2024, 1, 3, 12, 0, 0), "/device/file3.hda"),
+        ]
+
+        # Mock metadata cache to return None (no cached metadata with local_path)
+        self.mock_file_ops.metadata_cache.get_metadata.return_value = None
+        
+        with patch.object(self.manager, "get_cached_file_list", return_value=mock_files):
+            downloaded_files = self.manager.get_downloaded_files_only()
+            
+            # Should find 2 files that exist in download directory
+            assert len(downloaded_files) == 2
+            assert downloaded_files[0].filename == "2025Aug04-160656-Rec02.hda"
+            assert downloaded_files[1].filename == "2025Aug04-183011-Rec05.hda"
+            
+            # Test individual file checking
+            assert self.manager.is_file_playable_offline("2025Aug04-160656-Rec02.hda") is True
+            assert self.manager.is_file_playable_offline("2025Aug04-183011-Rec05.hda") is True
+            assert self.manager.is_file_playable_offline("2025Aug04-999999-Rec99.hda") is False

@@ -9,6 +9,7 @@ operation timeouts, device-specific behaviors, and logging options.
 """
 
 import base64
+import binascii
 
 # import json  # Future: for advanced configuration import/export
 import os
@@ -1294,8 +1295,25 @@ class SettingsDialog(ctk.CTkToplevel):
                 decrypted = f.decrypt(encrypted_bytes)
                 return decrypted.decode()
             return encrypted_key
+        except (binascii.Error, ValueError) as e:
+            logger.error("SettingsDialog", "_decrypt_api_key", f"Invalid encrypted key format: {e}")
+            # Clear the corrupted key
+            provider = self.local_vars["ai_api_provider_var"].get()
+            config_key = f"ai_api_key_{provider}_encrypted"
+            update_config_settings({config_key: ""})
+            return ""
         except Exception as e:
             logger.error("SettingsDialog", "_decrypt_api_key", f"Error decrypting API key: {e}")
+            # If decryption fails, it might be due to a corrupted key file
+            # Try to regenerate the encryption key
+            try:
+                config_dir = os.path.dirname(self.parent_gui.config.get("config_file_path", ""))
+                key_file = os.path.join(config_dir, ".hidock_key.dat")
+                if os.path.exists(key_file):
+                    os.remove(key_file)
+                    logger.info("SettingsDialog", "_decrypt_api_key", "Removed corrupted encryption key file")
+            except Exception as cleanup_error:
+                logger.warning("SettingsDialog", "_decrypt_api_key", f"Could not clean up key file: {cleanup_error}")
             return ""
 
     def _load_api_key_status(self):
@@ -1315,8 +1333,10 @@ class SettingsDialog(ctk.CTkToplevel):
                             text_color="green",
                         )
                     else:
+                        # Decryption failed - clear the entry and show helpful message
+                        self.api_key_entry.delete(0, "end")
                         self.api_key_status_label.configure(
-                            text="Status: Key found but decryption failed",
+                            text="Status: Decryption failed - please re-enter your API key",
                             text_color="red",
                         )
                 else:
@@ -1328,6 +1348,12 @@ class SettingsDialog(ctk.CTkToplevel):
                 "_load_api_key_status",
                 f"Error loading API key status: {e}",
             )
+            # Show error in UI
+            if hasattr(self, "api_key_status_label"):
+                self.api_key_status_label.configure(
+                    text="Status: Error loading key - please re-enter",
+                    text_color="red",
+                )
 
     def _validate_api_key(self):
         """Validate the entered API key by making a test API call."""

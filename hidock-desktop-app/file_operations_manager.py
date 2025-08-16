@@ -418,9 +418,27 @@ class FileOperationsManager:
         filename = operation.filename
         local_path = self.download_dir / filename
 
+        # Check for cancellation before starting
+        if operation.status == FileOperationStatus.CANCELLED:
+            logger.info(
+                "FileOpsManager",
+                "_execute_download",
+                f"Download of {filename} was cancelled before execution",
+            )
+            return
+
         # The progress callback from the device adapter is more detailed (OperationProgress)
         # than what the old code expected. We need to adapt and forward to the GUI.
         def adapter_progress_callback(op_progress: OperationProgress):
+            # Check for cancellation during progress updates
+            if operation.status == FileOperationStatus.CANCELLED:
+                logger.info(
+                    "FileOpsManager",
+                    "_execute_download",
+                    f"Download of {filename} cancelled during progress update",
+                )
+                return
+                
             operation.progress = op_progress.progress * 100.0
             if operation.operation_id in self.progress_callbacks:
                 # The GUI's callback expects a FileOperation object.
@@ -444,6 +462,21 @@ class FileOperationsManager:
                     "_execute_download",
                     f"No cached metadata found for {filename}, will fetch from device",
                 )
+
+            # Check for existing file and handle appropriately
+            if local_path.exists():
+                # If file exists and is being played, don't overwrite
+                try:
+                    # Try to open file exclusively to check if it's locked
+                    with open(local_path, 'r+b') as test_file:
+                        pass  # File is not locked
+                except (PermissionError, OSError):
+                    logger.warning(
+                        "FileOpsManager",
+                        "_execute_download",
+                        f"File {filename} appears to be in use, skipping download",
+                    )
+                    raise IOError(f"File {filename} is currently in use and cannot be overwritten")
 
             # Use device lock if available to prevent conflicts with other device operations
             if self.device_lock:
@@ -481,6 +514,15 @@ class FileOperationsManager:
                 f"Download execution failed for {filename}: {e}",
             )
             raise IOError(f"Download failed for {filename}") from e
+
+        # Check for cancellation before validation
+        if operation.status == FileOperationStatus.CANCELLED:
+            logger.info(
+                "FileOpsManager",
+                "_execute_download",
+                f"Download of {filename} was cancelled before validation",
+            )
+            return
 
         # Validate downloaded file
         if self._validate_downloaded_file(filename, local_path):
@@ -780,23 +822,38 @@ class FileOperationsManager:
             operation = self.active_operations[operation_id]
             operation.status = FileOperationStatus.CANCELLED
 
-            # Clean up partial downloads
+            # Clean up partial downloads with retry mechanism
             if operation.operation_type == FileOperationType.DOWNLOAD:
                 partial_file_path = self.download_dir / operation.filename
                 if partial_file_path.exists():
-                    try:
-                        partial_file_path.unlink()
-                        logger.info(
-                            "FileOpsManager",
-                            "cancel_operation",
-                            f"Cleaned up partial download: {partial_file_path}",
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "FileOpsManager",
-                            "cancel_operation",
-                            f"Failed to clean up partial download {partial_file_path}: {e}",
-                        )
+                    # Try multiple times to delete partial file (may be locked)
+                    for attempt in range(3):
+                        try:
+                            partial_file_path.unlink()
+                            logger.info(
+                                "FileOpsManager",
+                                "cancel_operation",
+                                f"Cleaned up partial download: {partial_file_path}",
+                            )
+                            break
+                        except (PermissionError, OSError) as e:
+                            if attempt < 2:  # Not the last attempt
+                                import time
+                                time.sleep(0.5)  # Wait before retry
+                                continue
+                            else:
+                                logger.warning(
+                                    "FileOpsManager",
+                                    "cancel_operation",
+                                    f"Failed to clean up partial download {partial_file_path} after {attempt + 1} attempts: {e}",
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "FileOpsManager",
+                                "cancel_operation",
+                                f"Failed to clean up partial download {partial_file_path}: {e}",
+                            )
+                            break
 
             logger.info(
                 "FileOpsManager",

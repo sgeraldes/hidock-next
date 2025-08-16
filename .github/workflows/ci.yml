@@ -65,8 +65,9 @@ jobs:
         mypy . --ignore-missing-imports
 
     - name: Test with pytest
+      working-directory: ./hidock-desktop-app
       run: |
-        pytest tests/ -v --cov=. --cov-report=xml --cov-report=term-missing
+        pytest tests/ -c pytest-ci.ini
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4

@@ -15,6 +15,8 @@ This document contains the mandatory, non-negotiable rules and procedures for al
 
 - **Adherence to Project Standards:** You must operate strictly within the established standards of this project. This includes the branching strategy, code style, and commit conventions detailed in this document and in `CONTRIBUTING.md`.
 
+- **File Organization Compliance:** You must strictly follow the project structure documented in `INDEX.md`. Never create documents, tests, or code files outside their designated directories. Always consult `INDEX.md` before creating new files to ensure proper placement within the established architecture.
+
 - **Integrity of Tooling:** You are strictly forbidden from modifying any configuration files (e.g., `.pre-commit-config.yaml`, `pyproject.toml`) to bypass or disable tests, linters, or any other quality checks.
 
 ---
@@ -45,12 +47,13 @@ You must follow this exact sequence for every task. This workflow is designed to
 ### Step 1: Write the Tests
 
 - **Test Location Rules:**
-  - Always place tests in the `tests/` directory
-  - **Never create standalone test files** - integrate into existing test modules
+  - Always place tests in the `tests/` directory as documented in INDEX.md
+  - **MANDATORY: Integrate tests into existing test modules** - never create standalone test files unless absolutely necessary
   - Follow naming convention: `test_<module_name>.py` for the module being tested
-  - If testing GUI components, add to `test_gui_components.py`
-  - If testing utilities, add to `test_utils.py`
-  - Create new test files only when no appropriate existing file exists
+  - **Consult INDEX.md for existing test file structure** before creating new files
+  - Add to existing test classes when logical (e.g., `TestFileOperationsManager`, `TestDeviceInterface`)
+  - Only create new test files when no appropriate existing file exists AND the functionality is substantial enough to warrant its own module
+  - **File Organization Priority**: Follow the comprehensive test structure documented in INDEX.md under `hidock-desktop-app/tests/`
 
 - **Test Structure:**
   - Add test methods to existing test classes when logical

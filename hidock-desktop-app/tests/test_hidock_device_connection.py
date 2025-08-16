@@ -159,7 +159,7 @@ class TestHiDockJensenConnection:
         success, error = jensen_device._attempt_connection(0, DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID)
 
         assert success is False
-        assert "Resource busy" in error
+        assert "Device is busy" in error
         assert jensen_device._error_counts["connection_lost"] == 1
 
     @patch("hidock_device.usb.core.find")
@@ -242,7 +242,7 @@ class TestHiDockJensenConnection:
         success, error = jensen_device._attempt_connection(0, DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID)
 
         assert success is False
-        assert "Resource busy" in error
+        assert "Device is busy" in error
         assert jensen_device._error_counts["connection_lost"] == 1
 
     @patch("hidock_device.usb.core.find")
@@ -398,10 +398,13 @@ class TestHiDockJensenDisconnection:
         # Make release_interface raise USB error
         mock_release.side_effect = usb.core.USBError("Release error")
 
+        # Store original device reference
+        original_device = jensen_device.device
+
         jensen_device.disconnect()
 
         # Should still call dispose_resources despite error
-        mock_dispose.assert_called_once_with(jensen_device.device)
+        mock_dispose.assert_called_once_with(original_device)
 
     @patch("hidock_device.usb.util.release_interface")
     @patch("hidock_device.usb.util.dispose_resources")
@@ -409,10 +412,13 @@ class TestHiDockJensenDisconnection:
         """Test kernel driver reattachment on non-Windows - covering lines 640-656."""
         jensen_device.device.attach_kernel_driver = Mock()
 
+        # Store original device reference
+        original_device = jensen_device.device
+
         with patch("hidock_device.sys.platform", "linux"):
             jensen_device.disconnect()
 
-        jensen_device.device.attach_kernel_driver.assert_called_once_with(0)
+        original_device.attach_kernel_driver.assert_called_once_with(0)
 
     @patch("hidock_device.usb.util.release_interface")
     @patch("hidock_device.usb.util.dispose_resources")
@@ -420,11 +426,14 @@ class TestHiDockJensenDisconnection:
         """Test kernel driver reattachment error - covering lines 648-656."""
         jensen_device.device.attach_kernel_driver = Mock(side_effect=usb.core.USBError("Attach error"))
 
+        # Store original device reference
+        original_device = jensen_device.device
+
         with patch("hidock_device.sys.platform", "linux"):
             jensen_device.disconnect()
 
         # Should still proceed despite reattach error
-        mock_dispose.assert_called_once_with(jensen_device.device)
+        mock_dispose.assert_called_once_with(original_device)
 
     @patch("hidock_device.usb.util.release_interface")
     @patch("hidock_device.usb.util.dispose_resources")
@@ -432,11 +441,14 @@ class TestHiDockJensenDisconnection:
         """Test kernel driver reattachment with NotImplementedError."""
         jensen_device.device.attach_kernel_driver = Mock(side_effect=NotImplementedError("Not implemented"))
 
+        # Store original device reference
+        original_device = jensen_device.device
+
         with patch("hidock_device.sys.platform", "linux"):
             jensen_device.disconnect()
 
         # Should still proceed despite not implemented error
-        mock_dispose.assert_called_once_with(jensen_device.device)
+        mock_dispose.assert_called_once_with(original_device)
 
 
 class TestHiDockJensenResetDeviceState:
@@ -470,6 +482,9 @@ class TestHiDockJensenResetDeviceState:
         jensen_device.ep_in.bEndpointAddress = EP_IN_ADDR
         jensen_device.ep_out.bEndpointAddress = EP_OUT_ADDR
 
+        # Mock device.read to return bytes data, then empty to break loop
+        jensen_device.device.read.side_effect = [b"test_data", b""]
+
         jensen_device.reset_device_state()
 
         # Verify clear_halt was called on both endpoints
@@ -487,6 +502,9 @@ class TestHiDockJensenResetDeviceState:
 
         # Make clear_halt raise USB error
         jensen_device.device.clear_halt.side_effect = usb.core.USBError("Clear halt error")
+
+        # Mock device.read to return empty to avoid flush loop
+        jensen_device.device.read.side_effect = usb.core.USBTimeoutError("Timeout")
 
         # Should not raise exception
         jensen_device.reset_device_state()

@@ -11,6 +11,9 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+# Mark as GUI test for architectural separation
+pytestmark = pytest.mark.gui
+
 import main
 from main import main as main_func
 

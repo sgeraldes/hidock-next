@@ -1,0 +1,466 @@
+"""
+Tests for gui_actions_device.py DeviceActionsMixin functionality.
+"""
+
+import threading
+import time
+from datetime import datetime
+from unittest.mock import MagicMock, Mock, call, patch
+
+import pytest
+
+from file_operations_manager import FileMetadata
+from gui_actions_device import DeviceActionsMixin
+
+
+class TestDeviceActionsMixin:
+    """Test cases for DeviceActionsMixin functionality."""
+
+    @pytest.fixture
+    def mock_gui(self):
+        """Create a mock GUI instance with DeviceActionsMixin."""
+        mock = Mock(spec=DeviceActionsMixin)
+        mock.config = {
+            "vendor_id": 0x1234,
+            "product_id": 0x5678,
+            "download_directory": "/test/downloads",
+            "auto_connect": False,
+            "device_settings": {},
+        }
+        
+        # Device related attributes
+        mock.dock = None
+        mock.device_manager = Mock()
+        mock.file_operations_manager = Mock()
+        mock.download_directory = "/test/downloads"
+        mock.cached_files_data = []
+        mock._is_device_connected = False
+        
+        # GUI elements
+        mock.status_bar = Mock()
+        mock.connect_button = Mock()
+        mock.disconnect_button = Mock()
+        mock.format_button = Mock()
+        mock.sync_time_button = Mock()
+        mock.file_tree = Mock()
+        mock.info_label = Mock()
+        mock.logger = Mock()
+        
+        # Methods
+        mock.after = Mock()
+        mock._save_config = Mock()
+        mock._show_error = Mock()
+        mock._apply_appearance_mode_theme_color = Mock(return_value="#ffffff")
+        mock._populate_treeview_from_data = Mock()
+        mock._update_directory_header = Mock()
+        mock._update_selection_buttons_visibility = Mock()
+        mock.show_loading_state = Mock()
+        
+        # Timers
+        mock._recording_check_timer = None
+        mock._auto_refresh_timer = None
+        
+        return mock
+
+    @pytest.fixture
+    def mock_device(self):
+        """Create a mock device."""
+        device = Mock()
+        device.connected = True
+        device.connect = Mock(return_value=True)
+        device.disconnect = Mock()
+        device.list_files = Mock(return_value=[])
+        device.get_device_info = Mock(return_value={
+            "battery_level": 85,
+            "storage_used": 1024,
+            "storage_total": 2048,
+            "firmware_version": "1.0.0",
+        })
+        device.format_sd_card = Mock(return_value=True)
+        device.sync_time = Mock(return_value=True)
+        device.reset_device = Mock(return_value=True)
+        return device
+
+    @pytest.fixture
+    def sample_files(self):
+        """Create sample file metadata."""
+        return [
+            FileMetadata(
+                filename="file1.wav",
+                size=1024,
+                duration=10.5,
+                date_created=datetime.now(),
+                device_path="/device/file1.wav",
+                local_path=None,
+            ),
+            FileMetadata(
+                filename="file2.wav",
+                size=2048,
+                duration=20.0,
+                date_created=datetime.now(),
+                device_path="/device/file2.wav",
+                local_path="/test/downloads/file2.wav",
+            ),
+        ]
+
+    @pytest.mark.unit
+    def test_initialize_backend_early(self, mock_gui):
+        """Test early backend initialization."""
+        with patch("device_interface.DeviceManager") as mock_dm_class:
+            with patch("file_operations_manager.FileOperationsManager") as mock_fom_class:
+                mock_dm = Mock()
+                mock_fom = Mock()
+                mock_dm_class.return_value = mock_dm
+                mock_fom_class.return_value = mock_fom
+                
+                DeviceActionsMixin._initialize_backend_early(mock_gui)
+                
+                assert mock_gui.device_manager == mock_dm
+                assert mock_gui.file_operations_manager == mock_fom
+
+    @pytest.mark.unit
+    def test_attempt_autoconnect_on_startup(self, mock_gui):
+        """Test auto-connect on startup."""
+        mock_gui.config["auto_connect"] = True
+        mock_gui.device_manager.find_devices = Mock(return_value=[
+            {"vendor_id": 0x1234, "product_id": 0x5678}
+        ])
+        mock_gui.connect_device = Mock()
+        
+        DeviceActionsMixin.attempt_autoconnect_on_startup(mock_gui)
+        
+        # Should wait briefly then connect
+        mock_gui.after.assert_called()
+        # Simulate the after callback
+        callback = mock_gui.after.call_args[0][1]
+        callback()
+        mock_gui.connect_device.assert_called_once()
+
+    @pytest.mark.unit
+    def test_connect_device(self, mock_gui):
+        """Test device connection."""
+        mock_gui._is_device_connected = False
+        
+        with patch("threading.Thread") as mock_thread_class:
+            mock_thread = Mock()
+            mock_thread_class.return_value = mock_thread
+            
+            DeviceActionsMixin.connect_device(mock_gui)
+            
+            # Should start connection thread
+            mock_thread_class.assert_called_once()
+            mock_thread.start.assert_called_once()
+            # Should update status
+            mock_gui.status_bar.configure.assert_called()
+
+    @pytest.mark.unit
+    def test_connect_device_thread_success(self, mock_gui, mock_device):
+        """Test successful device connection thread."""
+        mock_gui.device_manager.create_device = Mock(return_value=mock_device)
+        mock_gui._show_connected_state = Mock()
+        mock_gui.refresh_file_list_gui = Mock()
+        mock_gui.start_recording_status_check = Mock()
+        mock_gui.start_auto_file_refresh_periodic_check = Mock()
+        
+        DeviceActionsMixin._connect_device_thread(mock_gui)
+        
+        # Should connect and update UI
+        assert mock_gui.dock == mock_device
+        assert mock_gui._is_device_connected is True
+        mock_gui._show_connected_state.assert_called_once()
+        mock_gui.refresh_file_list_gui.assert_called_once()
+
+    @pytest.mark.unit
+    def test_connect_device_thread_failure(self, mock_gui):
+        """Test failed device connection thread."""
+        mock_gui.device_manager.create_device = Mock(side_effect=Exception("Connection failed"))
+        
+        DeviceActionsMixin._connect_device_thread(mock_gui)
+        
+        # Should show error
+        mock_gui._show_error.assert_called()
+        assert mock_gui._is_device_connected is False
+
+    @pytest.mark.unit
+    def test_disconnect_device(self, mock_gui, mock_device):
+        """Test device disconnection."""
+        mock_gui.dock = mock_device
+        mock_gui._is_device_connected = True
+        mock_gui.cached_files_data = []
+        mock_gui.stop_recording_status_check = Mock()
+        mock_gui.stop_auto_file_refresh_periodic_check = Mock()
+        mock_gui._show_cached_files_after_disconnect = Mock()
+        
+        DeviceActionsMixin.disconnect_device(mock_gui)
+        
+        # Should disconnect device
+        mock_device.disconnect.assert_called_once()
+        assert mock_gui.dock is None
+        assert mock_gui._is_device_connected is False
+        mock_gui._show_cached_files_after_disconnect.assert_called_once()
+
+    @pytest.mark.unit
+    def test_show_cached_files_after_disconnect(self, mock_gui, sample_files):
+        """Test showing cached files after disconnect."""
+        mock_gui.cached_files_data = sample_files
+        
+        DeviceActionsMixin._show_cached_files_after_disconnect(mock_gui)
+        
+        # Should update UI with cached data
+        mock_gui._populate_treeview_from_data.assert_called_with(sample_files)
+        mock_gui.status_bar.configure.assert_called()
+        mock_gui.connect_button.configure.assert_called_with(state="normal")
+
+    @pytest.mark.unit
+    def test_handle_auto_disconnect_ui(self, mock_gui):
+        """Test handling auto-disconnect UI update."""
+        mock_gui._is_device_connected = True
+        mock_gui.dock = None
+        mock_gui.stop_recording_status_check = Mock()
+        mock_gui.stop_auto_file_refresh_periodic_check = Mock()
+        
+        DeviceActionsMixin.handle_auto_disconnect_ui(mock_gui)
+        
+        # Should update UI for disconnected state
+        assert mock_gui._is_device_connected is False
+        mock_gui.status_bar.configure.assert_called()
+
+    @pytest.mark.unit
+    def test_refresh_file_list_gui(self, mock_gui, mock_device):
+        """Test refreshing file list."""
+        mock_gui.dock = mock_device
+        mock_gui._is_device_connected = True
+        
+        with patch("threading.Thread") as mock_thread_class:
+            mock_thread = Mock()
+            mock_thread_class.return_value = mock_thread
+            
+            DeviceActionsMixin.refresh_file_list_gui(mock_gui)
+            
+            # Should start refresh thread
+            mock_thread_class.assert_called_once()
+            mock_thread.start.assert_called_once()
+
+    @pytest.mark.unit
+    def test_update_downloaded_file_status(self, mock_gui, sample_files):
+        """Test updating downloaded file status."""
+        import os
+        
+        # Create a mock file
+        with patch("os.path.exists") as mock_exists:
+            mock_exists.return_value = True
+            
+            DeviceActionsMixin._update_downloaded_file_status(mock_gui, sample_files)
+            
+            # First file should get local_path set
+            assert sample_files[0].local_path is not None
+            # Second file already has local_path
+            assert sample_files[1].local_path == "/test/downloads/file2.wav"
+
+    @pytest.mark.unit
+    def test_refresh_file_status_after_directory_change(self, mock_gui):
+        """Test refreshing file status after directory change."""
+        mock_gui.file_tree.get_children.return_value = ["item1", "item2"]
+        mock_gui.file_tree.item.return_value = {
+            "values": ["file1.wav", "Not Downloaded", "10s", "1KB", "2024-01-01"]
+        }
+        mock_gui._update_file_status_in_treeview = Mock()
+        
+        with patch("os.path.exists", return_value=True):
+            DeviceActionsMixin.refresh_file_status_after_directory_change(mock_gui)
+            
+            # Should update file status
+            mock_gui._update_file_status_in_treeview.assert_called()
+
+    @pytest.mark.unit
+    def test_show_connected_state(self, mock_gui, mock_device):
+        """Test showing connected device state."""
+        mock_gui.dock = mock_device
+        
+        DeviceActionsMixin._show_connected_state(mock_gui)
+        
+        # Should update UI for connected state
+        mock_gui.status_bar.configure.assert_called()
+        mock_gui.connect_button.configure.assert_called_with(state="disabled")
+        mock_gui.disconnect_button.configure.assert_called_with(state="normal")
+
+    @pytest.mark.unit
+    def test_refresh_file_list_thread(self, mock_gui, mock_device, sample_files):
+        """Test file list refresh thread."""
+        mock_gui.dock = mock_device
+        mock_gui._is_device_connected = True
+        mock_device.list_files.return_value = [
+            {
+                "filename": "file1.wav",
+                "size": 1024,
+                "duration": 10.5,
+                "date_created": "2024-01-01T12:00:00",
+                "device_path": "/device/file1.wav",
+            }
+        ]
+        mock_gui.file_operations_manager.create_file_metadata = Mock(
+            return_value=sample_files[0]
+        )
+        mock_gui._apply_saved_sort_state_to_tree_and_ui = Mock(
+            return_value=sample_files[:1]
+        )
+        
+        DeviceActionsMixin._refresh_file_list_thread(mock_gui)
+        
+        # Should populate treeview with files
+        mock_gui._populate_treeview_from_data.assert_called()
+        # Should cache files
+        assert len(mock_gui.cached_files_data) == 1
+
+    @pytest.mark.unit
+    def test_start_recording_status_check(self, mock_gui):
+        """Test starting recording status check."""
+        mock_gui._recording_check_timer = None
+        mock_gui.after.return_value = "timer_id"
+        
+        DeviceActionsMixin.start_recording_status_check(mock_gui)
+        
+        assert mock_gui._recording_check_timer == "timer_id"
+        mock_gui.after.assert_called()
+
+    @pytest.mark.unit
+    def test_stop_recording_status_check(self, mock_gui):
+        """Test stopping recording status check."""
+        mock_gui._recording_check_timer = "timer_id"
+        mock_gui.after_cancel = Mock()
+        
+        DeviceActionsMixin.stop_recording_status_check(mock_gui)
+        
+        mock_gui.after_cancel.assert_called_with("timer_id")
+        assert mock_gui._recording_check_timer is None
+
+    @pytest.mark.unit
+    def test_format_sd_card_gui(self, mock_gui, mock_device):
+        """Test SD card formatting GUI."""
+        mock_gui.dock = mock_device
+        mock_gui._is_device_connected = True
+        
+        with patch("customtkinter.CTkInputDialog") as mock_dialog_class:
+            mock_dialog = Mock()
+            mock_dialog.get_input.return_value = "hidock"
+            mock_dialog_class.return_value = mock_dialog
+            
+            with patch("threading.Thread") as mock_thread_class:
+                mock_thread = Mock()
+                mock_thread_class.return_value = mock_thread
+                
+                DeviceActionsMixin.format_sd_card_gui(mock_gui)
+                
+                # Should show confirmation dialog
+                mock_dialog_class.assert_called()
+                # Should start format thread
+                mock_thread_class.assert_called()
+                mock_thread.start.assert_called()
+
+    @pytest.mark.unit
+    def test_format_sd_card_thread(self, mock_gui, mock_device):
+        """Test SD card format thread."""
+        mock_gui.dock = mock_device
+        mock_gui.refresh_file_list_gui = Mock()
+        
+        DeviceActionsMixin._format_sd_card_thread(mock_gui)
+        
+        # Should format and refresh
+        mock_device.format_sd_card.assert_called_once()
+        mock_gui.refresh_file_list_gui.assert_called_once()
+
+    @pytest.mark.unit
+    def test_sync_device_time_gui(self, mock_gui, mock_device):
+        """Test device time sync GUI."""
+        mock_gui.dock = mock_device
+        mock_gui._is_device_connected = True
+        
+        with patch("threading.Thread") as mock_thread_class:
+            mock_thread = Mock()
+            mock_thread_class.return_value = mock_thread
+            
+            DeviceActionsMixin.sync_device_time_gui(mock_gui)
+            
+            # Should start sync thread
+            mock_thread_class.assert_called()
+            mock_thread.start.assert_called()
+
+    @pytest.mark.unit
+    def test_sync_device_time_thread(self, mock_gui, mock_device):
+        """Test device time sync thread."""
+        mock_gui.dock = mock_device
+        
+        DeviceActionsMixin._sync_device_time_thread(mock_gui)
+        
+        # Should sync time
+        mock_device.sync_time.assert_called_once()
+        mock_gui.status_bar.configure.assert_called()
+
+    @pytest.mark.unit
+    def test_check_recording_status_periodically(self, mock_gui, mock_device):
+        """Test periodic recording status check."""
+        mock_gui.dock = mock_device
+        mock_gui._is_device_connected = True
+        mock_gui._recording_check_timer = "timer_id"
+        mock_gui.after.return_value = "new_timer_id"
+        
+        # Mock device info with recording status
+        mock_device.get_device_info.return_value = {
+            "recording": True,
+            "battery_level": 80,
+        }
+        
+        DeviceActionsMixin._check_recording_status_periodically(mock_gui)
+        
+        # Should update status bar
+        mock_gui.status_bar.configure.assert_called()
+        # Should schedule next check
+        assert mock_gui._recording_check_timer == "new_timer_id"
+
+    @pytest.mark.unit
+    def test_check_auto_file_refresh_periodically(self, mock_gui):
+        """Test periodic auto file refresh check."""
+        mock_gui._is_device_connected = True
+        mock_gui._auto_refresh_timer = "timer_id"
+        mock_gui.after.return_value = "new_timer_id"
+        mock_gui.config["auto_refresh_enabled"] = True
+        mock_gui.config["auto_refresh_interval"] = 30
+        
+        # Mock file counts changed
+        mock_gui.file_tree.get_children.return_value = ["item1", "item2"]
+        mock_gui._cached_file_count = 1  # Different from current
+        mock_gui.refresh_file_list_gui = Mock()
+        
+        DeviceActionsMixin._check_auto_file_refresh_periodically(mock_gui)
+        
+        # Should trigger refresh
+        mock_gui.refresh_file_list_gui.assert_called_once()
+        # Should schedule next check
+        assert mock_gui._auto_refresh_timer == "new_timer_id"
+
+    @pytest.mark.integration
+    def test_full_connection_workflow(self, mock_gui, mock_device):
+        """Test complete device connection workflow."""
+        mock_gui.device_manager.create_device = Mock(return_value=mock_device)
+        mock_gui._show_connected_state = Mock()
+        mock_gui.refresh_file_list_gui = Mock()
+        mock_gui.start_recording_status_check = Mock()
+        mock_gui.start_auto_file_refresh_periodic_check = Mock()
+        
+        # Connect device
+        DeviceActionsMixin._connect_device_thread(mock_gui)
+        
+        # Verify connection
+        assert mock_gui._is_device_connected is True
+        assert mock_gui.dock == mock_device
+        
+        # Disconnect device
+        mock_gui.stop_recording_status_check = Mock()
+        mock_gui.stop_auto_file_refresh_periodic_check = Mock()
+        mock_gui._show_cached_files_after_disconnect = Mock()
+        
+        DeviceActionsMixin.disconnect_device(mock_gui)
+        
+        # Verify disconnection
+        assert mock_gui._is_device_connected is False
+        assert mock_gui.dock is None

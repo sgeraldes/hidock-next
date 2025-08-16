@@ -10,6 +10,11 @@ import sys
 import unittest
 from unittest.mock import MagicMock, Mock, PropertyMock, patch
 
+import pytest
+
+# Mark as GUI test for architectural separation
+pytestmark = pytest.mark.gui
+
 # Add current directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -47,6 +52,7 @@ class MockNumpyEdgeCase:
     """Enhanced mock numpy for edge case testing"""
 
     array = MockNumpyArrayEdgeCase
+    ndarray = MockNumpyArrayEdgeCase  # Add ndarray attribute for type hints
 
     @staticmethod
     def linspace(start, stop, num):
@@ -209,7 +215,8 @@ class TestWaveformVisualizerEdgeCases(unittest.TestCase):
             mock_fig_class.return_value = mock_fig
             mock_canvas_class.return_value = Mock()
 
-            visualizer = WaveformVisualizer(mock_parent)
+            visualizer = Mock(spec=WaveformVisualizer)
+            visualizer.update_position = WaveformVisualizer.update_position.__get__(visualizer)
             visualizer.waveform_data = MockNumpyArrayEdgeCase([0.1, 0.2, 0.3])
             visualizer.zoom_level = 2.0
             visualizer.total_duration = 0.0  # Edge case: zero duration
@@ -241,7 +248,8 @@ class TestWaveformVisualizerEdgeCases(unittest.TestCase):
             mock_fig_class.return_value = mock_fig
             mock_canvas_class.return_value = Mock()
 
-            visualizer = WaveformVisualizer(mock_parent)
+            visualizer = Mock(spec=WaveformVisualizer)
+            visualizer.load_audio = WaveformVisualizer.load_audio.__get__(visualizer)
 
             # This should return False and trigger line 156
             result = visualizer.load_audio("/test/empty.wav")
@@ -267,7 +275,8 @@ class TestSpectrumAnalyzerEdgeCases(unittest.TestCase):
             mock_fig_class.return_value = mock_fig
             mock_canvas_class.return_value = Mock()
 
-            analyzer = SpectrumAnalyzer(mock_parent)
+            analyzer = Mock(spec=SpectrumAnalyzer)
+            analyzer.start_analysis = SpectrumAnalyzer.start_analysis.__get__(analyzer)
 
             # Test with empty audio data
             empty_data = MockNumpyArrayEdgeCase([])
@@ -290,7 +299,8 @@ class TestSpectrumAnalyzerEdgeCases(unittest.TestCase):
             mock_fig_class.return_value = mock_fig
             mock_canvas_class.return_value = Mock()
 
-            analyzer = SpectrumAnalyzer(mock_parent)
+            analyzer = Mock(spec=SpectrumAnalyzer)
+            analyzer._update_spectrum = SpectrumAnalyzer._update_spectrum.__get__(analyzer)
             analyzer.is_running = True
             analyzer.audio_data = MockNumpyArrayEdgeCase([0.1, 0.2])  # Very short data
             analyzer.sample_rate = 44100
@@ -322,7 +332,8 @@ class TestSpectrumAnalyzerEdgeCases(unittest.TestCase):
             mock_canvas_instance.draw_idle.side_effect = Exception("Canvas draw error")
             mock_canvas_class.return_value = mock_canvas_instance
 
-            analyzer = SpectrumAnalyzer(mock_parent)
+            analyzer = Mock(spec=SpectrumAnalyzer)
+            analyzer._update_spectrum = SpectrumAnalyzer._update_spectrum.__get__(analyzer)
             analyzer.canvas = mock_canvas_instance
             analyzer.is_running = True
             analyzer.audio_data = MockNumpyArrayEdgeCase([0.1, 0.2, 0.3] * 1000)
@@ -348,7 +359,8 @@ class TestAudioVisualizationWidgetEdgeCases(unittest.TestCase):
         with patch.object(AudioVisualizationWidget, "_create_speed_controls"), patch.object(
             AudioVisualizationWidget, "_update_tab_state"
         ), patch("builtins.__import__", side_effect=ImportError("PIL not available")):
-            widget = AudioVisualizationWidget(mock_parent)
+            widget = Mock(spec=AudioVisualizationWidget)
+            widget._load_theme_icons = AudioVisualizationWidget._load_theme_icons.__get__(widget)
 
             # This should trigger import error handling
             widget._load_theme_icons()
@@ -359,34 +371,31 @@ class TestAudioVisualizationWidgetEdgeCases(unittest.TestCase):
 
     def test_get_main_window_with_complex_hierarchy(self):
         """Test _get_main_window with complex widget hierarchy"""
-        mock_parent = Mock()
+        # Create a mock widget instance without calling __init__
+        widget = Mock(spec=AudioVisualizationWidget)
+        widget._get_main_window = AudioVisualizationWidget._get_main_window.__get__(widget)
 
-        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
-            AudioVisualizationWidget, "_create_speed_controls"
-        ), patch.object(AudioVisualizationWidget, "_update_tab_state"):
-            widget = AudioVisualizationWidget(mock_parent)
+        # Create a hierarchy: widget -> parent1 -> parent2 -> parent3 (with audio_player)
+        parent1 = Mock()
+        parent2 = Mock()
+        parent3 = Mock()
+        parent3.audio_player = Mock()  # This should be found
 
-            # Create a hierarchy: widget -> parent1 -> parent2 -> parent3 (with audio_player)
-            parent1 = Mock()
-            parent2 = Mock()
-            parent3 = Mock()
-            parent3.audio_player = Mock()  # This should be found
+        widget.master = parent1
+        parent1.master = parent2
+        parent2.master = parent3
+        parent3.master = None
 
-            widget.master = parent1
-            parent1.master = parent2
-            parent2.master = parent3
-            parent3.master = None
+        # None of the intermediate parents have audio_player
+        if hasattr(parent1, "audio_player"):
+            del parent1.audio_player
+        if hasattr(parent2, "audio_player"):
+            del parent2.audio_player
 
-            # None of the intermediate parents have audio_player
-            if hasattr(parent1, "audio_player"):
-                del parent1.audio_player
-            if hasattr(parent2, "audio_player"):
-                del parent2.audio_player
+        result = widget._get_main_window()
 
-            result = widget._get_main_window()
-
-            # Should find parent3 which has audio_player
-            self.assertEqual(result, parent3)
+        # Should find parent3 which has audio_player
+        self.assertEqual(result, parent3)
 
     def test_on_tab_changed_with_audio_processor_error(self):
         """Test _on_tab_changed when AudioProcessor raises error"""
@@ -395,7 +404,8 @@ class TestAudioVisualizationWidgetEdgeCases(unittest.TestCase):
         with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
             AudioVisualizationWidget, "_create_speed_controls"
         ), patch.object(AudioVisualizationWidget, "_update_tab_state"):
-            widget = AudioVisualizationWidget(mock_parent)
+            widget = Mock(spec=AudioVisualizationWidget)
+            widget._on_tab_changed = AudioVisualizationWidget._on_tab_changed.__get__(widget)
             widget.notebook = Mock()
             widget.notebook.get.return_value = "Spectrum"
 
@@ -423,7 +433,8 @@ class TestAudioVisualizationWidgetEdgeCases(unittest.TestCase):
         with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
             AudioVisualizationWidget, "_create_speed_controls"
         ), patch.object(AudioVisualizationWidget, "_update_tab_state"):
-            widget = AudioVisualizationWidget(mock_parent)
+            widget = Mock(spec=AudioVisualizationWidget)
+            widget._update_speed_display = AudioVisualizationWidget._update_speed_display.__get__(widget)
             widget.current_speed = 1.5
 
             # Don't set speed_label attribute to test hasattr check
@@ -442,7 +453,8 @@ class TestAudioVisualizationWidgetEdgeCases(unittest.TestCase):
         with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
             AudioVisualizationWidget, "_create_speed_controls"
         ), patch.object(AudioVisualizationWidget, "_update_tab_state"):
-            widget = AudioVisualizationWidget(mock_parent)
+            widget = Mock(spec=AudioVisualizationWidget)
+            widget._toggle_theme = AudioVisualizationWidget._toggle_theme.__get__(widget)
             widget.is_dark_theme = True
             widget.theme_toggle = Mock()
             widget.moon_icon = Mock()
@@ -483,7 +495,18 @@ class TestMiscellaneousEdgeCases(unittest.TestCase):
             mock_fig_class.return_value = mock_fig
             mock_canvas_class.return_value = Mock()
 
-            visualizer = WaveformVisualizer(mock_parent)
+            visualizer = Mock(spec=WaveformVisualizer)
+            visualizer.clear = WaveformVisualizer.clear.__get__(visualizer)
+            visualizer._initialize_plot = mock_init
+            visualizer._update_zoom_display = Mock()
+
+            # Initialize attributes that clear() will modify
+            visualizer.waveform_data = "some_data"
+            visualizer.sample_rate = 44100
+            visualizer.current_position = 10.0
+            visualizer.total_duration = 100.0
+            visualizer.zoom_level = 2.0
+            visualizer.zoom_center = 0.7
 
             # Remove some attributes to test robustness
             if hasattr(visualizer, "zoom_label"):
@@ -510,7 +533,8 @@ class TestMiscellaneousEdgeCases(unittest.TestCase):
             mock_fig_class.return_value = mock_fig
             mock_canvas_class.return_value = Mock()
 
-            analyzer = SpectrumAnalyzer(mock_parent)
+            analyzer = Mock(spec=SpectrumAnalyzer)
+            analyzer.stop_analysis = SpectrumAnalyzer.stop_analysis.__get__(analyzer)
             analyzer.is_running = True
             analyzer.animation = None  # No animation to stop
 
@@ -526,7 +550,8 @@ class TestMiscellaneousEdgeCases(unittest.TestCase):
         with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
             AudioVisualizationWidget, "_create_speed_controls"
         ), patch.object(AudioVisualizationWidget, "_update_tab_state"):
-            widget = AudioVisualizationWidget(mock_parent)
+            widget = Mock(spec=AudioVisualizationWidget)
+            widget.set_audio_player = AudioVisualizationWidget.set_audio_player.__get__(widget)
 
             # Test setting audio_player to None
             widget.set_audio_player(None)

@@ -1146,10 +1146,10 @@ class HiDockToolGUI(
             else:
                 can_play_selected = False
         if hasattr(self, "actions_menu"):
-            # Download only available when connected
+            # Download available when connected and has selection (audio playback doesn't block downloads)
             self.actions_menu.entryconfig(
                 "Download Selected",
-                state="normal" if is_connected and has_selection else "disabled",
+                state="normal" if is_connected and has_selection and not self.is_long_operation_active else "disabled",
             )
             # Play available in both connected and offline modes (if file is downloaded)
             self.actions_menu.entryconfig("Play Selected", state="normal" if can_play_selected else "disabled")
@@ -1256,7 +1256,8 @@ class HiDockToolGUI(
                         command=self.download_selected_files_gui,
                         state=(
                             "normal"
-                            if has_selection and not self.is_long_operation_active and not self.is_audio_playing
+                            if has_selection and not self.is_long_operation_active
+                            # Removed: and not self.is_audio_playing - downloads should be allowed during playback
                             else "disabled"
                         ),
                         image=self.icons.get("download"),
@@ -1332,14 +1333,18 @@ class HiDockToolGUI(
                 )
             else:
                 if is_connected:
+                    # Check if any selected files are currently playing
+                    can_delete = has_selection and not self.is_long_operation_active
+                    if can_delete and self.is_audio_playing and self.current_playing_filename_for_replay:
+                        # Check if any selected files are currently playing
+                        selected_filenames = [self.file_tree.item(iid)["values"][1] for iid in self.file_tree.selection()]
+                        if self.current_playing_filename_for_replay in selected_filenames:
+                            can_delete = False  # Can't delete currently playing file
+                    
                     self.toolbar_delete_button.configure(
                         text="Delete",
                         command=self.delete_selected_files_gui,
-                        state=(
-                            "normal"
-                            if has_selection and not self.is_long_operation_active and not self.is_audio_playing
-                            else "disabled"
-                        ),
+                        state="normal" if can_delete else "disabled",
                         image=self.icons.get("delete"),
                     )
                 else:
@@ -1516,6 +1521,9 @@ class HiDockToolGUI(
     def _show_cached_files_on_startup(self):
         """Show cached files immediately on startup for better user experience."""
         try:
+            # Enter offline mode since we're not connected
+            self.offline_mode_manager.enter_offline_mode()
+            
             cached_files = self.file_operations_manager.metadata_cache.get_all_metadata()
             if cached_files:
                 logger.info(
@@ -1531,13 +1539,14 @@ class HiDockToolGUI(
                 sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
                 self._populate_treeview_from_data(sorted_files)
 
-                # Update status to show cached mode
-                downloaded_count = len(
-                    [f for f in files_dict if f.get("local_path") and os.path.exists(f["local_path"])]
-                )
+                # Update status to show cached mode with offline statistics
+                offline_stats = self.offline_mode_manager.get_offline_statistics()
+                downloaded_count = offline_stats["downloaded_files"]
+                availability_percent = offline_stats["offline_availability_percent"]
+                
                 self.update_status_bar(
                     connection_status="Status: Disconnected",
-                    progress_text=f"Showing {len(cached_files)} cached files ({downloaded_count} playable)",
+                    progress_text=f"Showing {len(cached_files)} cached files ({downloaded_count} playable, {availability_percent:.0f}% available offline)",
                 )
 
         except Exception as e:
@@ -1551,8 +1560,11 @@ class HiDockToolGUI(
         """Convert cached FileMetadata objects to GUI display format."""
         files_dict = []
         for i, f_info in enumerate(cached_files):
+            # Use offline mode manager to determine proper local file path
+            local_path = self.offline_mode_manager.get_offline_file_path(f_info.filename)
+            
             # Determine status: Downloaded if local file exists, On Device if cached but not downloaded
-            if f_info.local_path and os.path.exists(f_info.local_path):
+            if local_path and os.path.exists(local_path):
                 gui_status = "Downloaded"
             else:
                 gui_status = "On Device"
@@ -1562,16 +1574,19 @@ class HiDockToolGUI(
                     "name": f_info.filename,
                     "length": f_info.size,
                     "duration": f_info.duration,
-                    "createDate": (f_info.date_created.strftime("%Y/%m/%d") if f_info.date_created else "---"),
+                    "createDate": (f_info.date_created.strftime("%Y-%m-%d") if f_info.date_created else "---"),
                     "createTime": (f_info.date_created.strftime("%H:%M:%S") if f_info.date_created else "---"),
                     "time": f_info.date_created,
                     "version": "0",  # Version 0 for cached files when not connected
                     "original_index": i + 1,
                     "gui_status": gui_status,
-                    "local_path": f_info.local_path,
+                    "local_path": local_path,
                     "checksum": f_info.checksum,
                 }
             )
+        
+        # Use offline mode manager to update status indicators properly
+        files_dict = self.offline_mode_manager.update_offline_status_indicators(files_dict)
         return files_dict
 
     def apply_appearance_mode_theme_color(self, color_tuple_or_str):
@@ -2921,10 +2936,8 @@ You can dismiss this warning and continue using the application with limited aud
         ):
             logger.info("GUI", "on_closing", "Quit cancelled by user.")
             return
-        # Save window geometry on close
-        from config_and_logger import update_config_settings
-
-        update_config_settings({"window_geometry": self.geometry()})
+        # Window geometry is now saved automatically during resize/move events
+        # No need to save it again on close
         self.config["autoconnect"] = self.autoconnect_var.get()
         self.config["download_directory"] = self.download_directory
         self.config["log_level"] = self.logger_processing_level_var.get()
@@ -2992,9 +3005,36 @@ You can dismiss this warning and continue using the application with limited aud
         sys.exit(0)
 
     def _on_window_configure(self, event):
-        """Handle window resize/move events - no auto-saving."""
-        # Window geometry will only be saved on app close
-        pass
+        """Handle window resize/move events and save geometry."""
+        # Only handle events for the main window (not child widgets)
+        if event.widget == self:
+            # Cancel any existing timer to avoid excessive saves
+            if self._geometry_save_timer:
+                self.after_cancel(self._geometry_save_timer)
+            
+            # Schedule geometry save after a short delay to batch multiple events
+            self._geometry_save_timer = self.after(500, self._save_window_geometry)
+
+    def _save_window_geometry(self):
+        """Save the current window geometry to configuration."""
+        try:
+            current_geometry = self.geometry()
+            from config_and_logger import update_config_settings
+            update_config_settings({"window_geometry": current_geometry})
+            logger.debug(
+                "GUI",
+                "_save_window_geometry",
+                f"Window geometry saved: {current_geometry}",
+            )
+        except Exception as e:
+            logger.error(
+                "GUI",
+                "_save_window_geometry",
+                f"Error saving window geometry: {e}",
+            )
+        finally:
+            # Clear the timer reference
+            self._geometry_save_timer = None
 
     def _process_selected_audio(self, file_iid):
         file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)

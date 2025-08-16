@@ -51,6 +51,8 @@ hidock-next/
 ├── 🔄 Setup Scripts
 │   ├── setup-windows.bat              # Windows development environment setup
 │   ├── setup-unix.sh                  # Unix/Linux development environment setup
+│   ├── install-prerequisites.bat      # Windows automatic Python/Node.js installer
+│   ├── install-prerequisites.sh       # Unix automatic Python/Node.js installer
 │   ├── setup-precommit.bat            # Windows pre-commit hooks installation
 │   ├── setup-precommit.sh             # Unix pre-commit hooks installation
 │   ├── cleanup.bat                    # Windows cleanup utility for temporary files
@@ -70,8 +72,7 @@ hidock-next/
 ├── 🛠️ Development Tools
 │   ├── .vscode/                       # VS Code workspace configuration
 │   ├── .github/                       # GitHub workflows and templates
-│   ├── .pytest_cache/                 # Pytest cache directory
-│   └── htmlcov/                       # Python test coverage HTML reports
+│   └── .pytest_cache/                 # Pytest cache directory
 ```
 
 ---
@@ -98,9 +99,7 @@ hidock-desktop-app/
 │   └── libusb-1.0.dll                 # Windows USB library for device communication
 │
 ├── 🎵 Audio Processing
-│   ├── audio_player.py                # Basic audio playback with volume control and seeking
 │   ├── audio_player_enhanced.py       # Advanced audio player with visualization and effects
-│   ├── audio_processing_advanced.py   # Digital signal processing, filters, and audio analysis
 │   ├── audio_visualization.py         # Real-time audio visualization (waveform, spectrum, VU meters)
 │   └── transcription_module.py        # AI-powered audio transcription with multiple provider support
 │
@@ -352,6 +351,8 @@ Historical and temporary files organized for reference without cluttering active
 archive/
 ├── 🔧 Temporary Scripts
 │   └── temp-scripts/                               # Utility scripts moved from active development
+│       ├── audio_player.py                         # Basic audio player (superseded by enhanced version)
+│       ├── audio_processing_advanced.py            # Advanced audio processing (unused, future feature)
 │       ├── check_formatting.py                     # Code formatting validation script
 │       ├── column_sorting_example.py               # GUI sorting implementation example
 │       ├── run_audio_visualization_tests.py        # Audio visualization test runner
@@ -361,11 +362,14 @@ archive/
 └── 📊 Testing Documentation
     └── testing-docs/                               # Historical testing achievements and reports
         ├── AUDIO_VISUALIZATION_TEST_COVERAGE.md    # Audio testing coverage analysis
+        ├── FINAL_GUI_TEST_REPORT.md                # Final GUI test resolution report  
+        ├── GUI_TEST_COVERAGE_SUMMARY.md            # GUI test coverage summary
+        ├── GUI_TEST_FIXES_SUMMARY.md               # GUI test fixes summary
         ├── PROFESSIONAL_TESTING_CERTIFICATION.md   # Testing methodology certification
-    ├── PROJECT_COMPLETION_SUMMARY.md               # Project milestone summaries
+        ├── PROJECT_COMPLETION_SUMMARY.md           # Project milestone summaries
         ├── TESTING_ACHIEVEMENTS.md                 # Testing accomplishments and metrics
         ├── TESTING_COVERAGE_ENHANCEMENT_SUMMARY.md # Coverage improvement reports
-    ├── TESTING_COVERAGE_IMPROVEMENT.md             # Testing enhancement documentation
+        ├── TESTING_COVERAGE_IMPROVEMENT.md         # Testing enhancement documentation
         └── detailed test plan(temporal).md         # Time-based testing strategy
 ```
 

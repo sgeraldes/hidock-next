@@ -182,15 +182,23 @@ class TestSettingsPersistence:
             with patch("sys.exit"):
                 gui_main_window.HiDockToolGUI.on_closing(mock_window)
 
-            # Should call save_config
-            mock_save_config.assert_called_once()
-            saved_config = mock_save_config.call_args[0][0]
-
-            # Verify save_config was called with the expected subset of config
-            assert "treeview_columns_display_order" in saved_config
-            assert saved_config["treeview_columns_display_order"] == "name,datetime,size"
-            assert saved_config["treeview_sort_col_id"] == "name"
-            assert saved_config["treeview_sort_descending"] is False
+            # Should call save_config (may be called multiple times for different settings)
+            mock_save_config.assert_called()
+            assert mock_save_config.call_count >= 1
+            
+            # Verify that save_config was called with treeview settings
+            calls = mock_save_config.call_args_list
+            treeview_settings_saved = False
+            for call in calls:
+                saved_config = call[0][0]
+                if "treeview_columns_display_order" in saved_config:
+                    treeview_settings_saved = True
+                    assert saved_config["treeview_columns_display_order"] == "name,datetime,size"
+                    assert saved_config["treeview_sort_col_id"] == "name"
+                    assert saved_config["treeview_sort_descending"] is False
+                    break
+            
+            assert treeview_settings_saved, "Treeview settings should have been saved"
 
     @pytest.mark.unit
     def test_download_directory_change_saves_config(self):

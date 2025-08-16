@@ -22,10 +22,20 @@ elif command -v python &> /dev/null; then
     echo "✓ Python found!"
 else
     echo "❌ ERROR: Python not found!"
-    echo "Please install Python 3.8+ first:"
-    echo "• Ubuntu/Debian: sudo apt install python3 python3-venv python3-pip"
-    echo "• CentOS/RHEL: sudo dnf install python3 python3-pip"
-    echo "• macOS: brew install python3 (or download from python.org)"
+    echo ""
+    echo "INSTALL PYTHON FIRST:"
+    echo ""
+    echo "🐧 Ubuntu/Debian:"
+    echo "   sudo apt update && sudo apt install python3 python3-venv python3-pip"
+    echo ""
+    echo "🎩 CentOS/RHEL/Fedora:"
+    echo "   sudo dnf install python3 python3-pip python3-venv"
+    echo ""
+    echo "🍎 macOS:"
+    echo "   brew install python3"
+    echo "   (or download from https://python.org/downloads/)"
+    echo ""
+    echo "Then restart this script."
     exit 1
 fi
 
@@ -51,7 +61,7 @@ echo "Upgrading pip and installing dependencies..."
 source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 echo "Installing dependencies (this may take a few minutes)..."
-pip install -r requirements.txt || {
+pip install -e ".[dev]" || {
     echo ""
     echo "❌ ERROR: Failed to install dependencies!"
     echo "Check your internet connection and try again."
@@ -94,7 +104,22 @@ if command -v node &> /dev/null; then
     fi
 else
     echo "ℹ️  Node.js not found - skipping web apps setup"
-    echo "Install Node.js 18+ from https://nodejs.org if you want the web apps"
+    echo ""
+    echo "OPTIONAL: Install Node.js for Web Apps"
+    echo ""
+    echo "🐧 Ubuntu/Debian:"
+    echo "   curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -"
+    echo "   sudo apt-get install -y nodejs"
+    echo ""
+    echo "🎩 CentOS/RHEL/Fedora:"
+    echo "   sudo dnf install nodejs npm"
+    echo ""
+    echo "🍎 macOS:"
+    echo "   brew install node"
+    echo "   (or download from https://nodejs.org/)"
+    echo ""
+    echo "(Desktop app will work without Node.js)"
+    echo ""
     WEB_APP_READY=false
 fi
 

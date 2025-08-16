@@ -51,7 +51,12 @@ class OfflineModeManager:
         downloaded_files = []
 
         for file_metadata in cached_files:
-            if file_metadata.local_path and os.path.exists(file_metadata.local_path):
+            # Use the enhanced offline file path check
+            local_path = self.get_offline_file_path(file_metadata.filename)
+            if local_path:
+                # Update the metadata with the found local path if it wasn't set
+                if not file_metadata.local_path:
+                    file_metadata.local_path = local_path
                 downloaded_files.append(file_metadata)
 
         logger.info("OfflineMode", "get_downloaded_files_only", f"Found {len(downloaded_files)} downloaded files")
@@ -59,16 +64,30 @@ class OfflineModeManager:
 
     def is_file_playable_offline(self, filename: str) -> bool:
         """Check if a file can be played in offline mode."""
-        cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(filename)
-        if cached_metadata and cached_metadata.local_path:
-            return os.path.exists(cached_metadata.local_path)
-        return False
+        # Use get_offline_file_path which checks both cache and download directory
+        return self.get_offline_file_path(filename) is not None
 
     def get_offline_file_path(self, filename: str) -> Optional[str]:
         """Get the local file path for offline playback."""
+        # First check cached metadata
         cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(filename)
         if cached_metadata and cached_metadata.local_path and os.path.exists(cached_metadata.local_path):
             return cached_metadata.local_path
+        
+        # If not found in cache, check download directory directly
+        # Use the same filename sanitization as _get_local_filepath
+        safe_filename = filename.replace(":", "-").replace(" ", "_").replace("\\", "_").replace("/", "_")
+        
+        # Check for .wav file (converted from .hda)
+        wav_path = os.path.join(self.download_directory, safe_filename.replace(".hda", ".wav"))
+        if os.path.exists(wav_path):
+            return wav_path
+            
+        # Check for original .hda file
+        hda_path = os.path.join(self.download_directory, safe_filename)
+        if os.path.exists(hda_path):
+            return hda_path
+            
         return None
 
     def update_offline_status_indicators(self, files_dict: List[dict]) -> List[dict]:

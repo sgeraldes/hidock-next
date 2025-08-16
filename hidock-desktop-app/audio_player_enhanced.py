@@ -504,6 +504,9 @@ class EnhancedAudioPlayer:
             self.stop()
             self.current_position = 0.0
             self.playlist.clear()
+            
+            # Clean up any previous temp files
+            self._cleanup_temp_files()
 
             if self.playlist.add_track(filepath):
                 self.playlist.set_current_track(0)
@@ -618,15 +621,40 @@ class EnhancedAudioPlayer:
             return False
 
     def stop(self) -> bool:
-        """Stop playback"""
+        """Stop playback and release file handles"""
         try:
             if PYGAME_AVAILABLE and pygame.mixer.get_init():
                 pygame.mixer.music.stop()
+                # Unload the current music to release file handle
+                try:
+                    # pygame.mixer.music.unload() may not exist in all pygame versions
+                    if hasattr(pygame.mixer.music, 'unload'):
+                        pygame.mixer.music.unload()
+                    else:
+                        # Alternative: load a dummy sound to release the current file
+                        import tempfile
+                        import os
+                        temp_file = os.path.join(tempfile.gettempdir(), 'hidock_dummy.wav')
+                        if not os.path.exists(temp_file):
+                            # Create minimal WAV file
+                            with open(temp_file, 'wb') as f:
+                                f.write(b'RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00')
+                        pygame.mixer.music.load(temp_file)
+                except Exception as unload_error:
+                    logger.debug(
+                        "EnhancedAudioPlayer",
+                        "stop",
+                        f"Could not unload music (this is normal for older pygame versions): {unload_error}"
+                    )
 
             self._set_state(PlaybackState.STOPPED)
             self.current_position = 0.0
             self._stop_position_thread()
             self._notify_position_changed()
+            
+            # Clean up temporary speed-adjusted files
+            self._cleanup_temp_files()
+            
             return True
         except Exception as e:
             logger.error("EnhancedAudioPlayer", "stop", f"Error stopping playback: {e}")
@@ -1049,12 +1077,6 @@ class EnhancedAudioPlayer:
 
         return os.path.join(tempfile.gettempdir(), f"hidock_speed_adjusted_{self.playback_speed}x.wav")
 
-        logger.debug(
-            "EnhancedAudioPlayer",
-            "_position_update_worker",
-            "Position update thread stopped",
-        )
-
     def _set_state(self, new_state: PlaybackState):
         """Set playback state and notify listeners"""
         if self.state != new_state:
@@ -1127,9 +1149,37 @@ class EnhancedAudioPlayer:
         try:
             self.stop()
             self._stop_position_thread()
+            
+            # Clean up temporary files
+            self._cleanup_temp_files()
 
             if PYGAME_AVAILABLE and pygame.mixer.get_init():
                 pygame.mixer.quit()
 
         except Exception as e:
             logger.error("EnhancedAudioPlayer", "cleanup", f"Error during cleanup: {e}")
+    
+    def _cleanup_temp_files(self):
+        """Clean up temporary speed-adjusted audio files"""
+        try:
+            temp_file = self._get_temp_speed_file()
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                    logger.debug(
+                        "EnhancedAudioPlayer",
+                        "_cleanup_temp_files",
+                        f"Cleaned up temp file: {temp_file}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "EnhancedAudioPlayer",
+                        "_cleanup_temp_files",
+                        f"Could not remove temp file {temp_file}: {e}"
+                    )
+        except Exception as e:
+            logger.error(
+                "EnhancedAudioPlayer",
+                "_cleanup_temp_files",
+                f"Error during temp file cleanup: {e}"
+            )

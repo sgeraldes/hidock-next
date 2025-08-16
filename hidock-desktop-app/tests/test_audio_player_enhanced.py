@@ -9,6 +9,11 @@ import tempfile
 import unittest.mock as mock
 from unittest.mock import MagicMock, Mock, patch
 
+import pytest
+
+# Mark as GUI test for architectural separation
+pytestmark = pytest.mark.gui
+
 import numpy as np
 import pytest
 

@@ -174,17 +174,27 @@ def setup_test_environment(monkeypatch, tmp_path):
     try:
         import settings_window
 
-        # Ensure settings window uses isolated config
-        if hasattr(settings_window, "SettingsDialog"):
-            original_settings_init = settings_window.SettingsDialog.__init__
+        # Mock the entire SettingsDialog class to prevent GUI initialization
+        # This is safer than trying to monkey-patch __init__
+        class MockSettingsDialog:
+            def __init__(self, parent_gui, initial_config, hidock_instance, *args, **kwargs):
+                self.parent_gui = parent_gui
+                self.initial_config = initial_config or config_and_logger.load_config()
+                self.hidock_instance = hidock_instance
+                self.config_changed = False
 
-            def isolated_settings_init(self, parent_gui, initial_config=None):
-                # Always use isolated config
-                if initial_config is None:
-                    initial_config = config_and_logger.load_config()
-                return original_settings_init(self, parent_gui, initial_config)
+            def open_settings_dialog(self):
+                pass
 
-            monkeypatch.setattr(settings_window.SettingsDialog, "__init__", isolated_settings_init)
+            def apply_settings(self):
+                self.config_changed = True
+                return True
+
+            def save_and_close(self):
+                self.config_changed = True
+                return True
+
+        monkeypatch.setattr(settings_window, "SettingsDialog", MockSettingsDialog)
     except ImportError:
         pass
 
@@ -288,28 +298,39 @@ def verify_no_production_contamination():
         )
 
 
+# Architectural solution implemented via pytest markers
+# GUI tests are marked with @pytest.mark.gui and excluded from parallel execution
+# This eliminates thread conflicts without complex monkey-patching
+
+
 @pytest.fixture
 def mock_tkinter_root():
     """Create a mock tkinter root for CTk variable creation."""
     import tkinter as tk
+    from unittest.mock import Mock
 
     import customtkinter as ctk
 
-    # Create a temporary root window
-    root = tk.Tk()
-    root.withdraw()  # Hide the window
+    # Create a mock root instead of real Tkinter window to avoid GUI resource contention
+    root = Mock()
+    root.withdraw = Mock()
+    root.destroy = Mock()
+
+    # Mock common Tkinter attributes that tests might expect
+    root.winfo_screenwidth = Mock(return_value=1920)
+    root.winfo_screenheight = Mock(return_value=1080)
+    root.after = Mock()
+    root.update = Mock()
+    root.update_idletasks = Mock()
 
     # Set as default root for variable creation
+    original_root = getattr(tk, "_default_root", None)
     tk._default_root = root
 
     yield root
 
-    # Cleanup
-    try:
-        root.destroy()
-    except tk.TclError:
-        pass
-    tk._default_root = None
+    # Cleanup - restore original state
+    tk._default_root = original_root
 
 
 @pytest.fixture

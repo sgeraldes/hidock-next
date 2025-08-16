@@ -8,19 +8,35 @@ Choose the setup method that works best for you:
 
 **Just want to use HiDock apps? Pick your platform:**
 
-### 🪟 Windows (Double-click)
+### 🪟 Windows (Easiest)
 ```cmd
+# Clone first:
+git clone https://github.com/sgeraldes/hidock-next.git
+cd hidock-next
+
+# If you need Python/Node.js installed:
+install-prerequisites.bat
+
+# Then run the main setup:
 setup-windows.bat
 ```
-Double-click the `setup-windows.bat` file in Windows Explorer.
 
-### 🐧🍎 Linux/Mac (Terminal)
+### 🐧🍎 Linux/Mac (One Command)
 ```bash
+git clone https://github.com/sgeraldes/hidock-next.git
+cd hidock-next
+
+# If you need Python/Node.js installed:
+chmod +x install-prerequisites.sh && ./install-prerequisites.sh
+
+# Then run the main setup:
 chmod +x setup-unix.sh && ./setup-unix.sh
 ```
 
-### 🐍 Any Platform (Python)
+### 🐍 Any Platform (Interactive)
 ```bash
+git clone https://github.com/sgeraldes/hidock-next.git
+cd hidock-next
 python setup.py
 # Choose option 1 (End User)
 ```
@@ -31,9 +47,31 @@ python setup.py
 
 **Want to contribute code?**
 
+### Platform-Specific Setup (Recommended)
 ```bash
+# Windows:
+setup-windows.bat
+
+# Linux/Mac:
+./setup-unix.sh
+
+# Any Platform (Interactive):
 python setup.py
 # Choose option 2 (Developer)
+```
+
+### Manual Setup
+```bash
+# Desktop app
+cd hidock-desktop-app
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+# Web app
+cd hidock-web-app
+npm install
 ```
 
 This includes:
@@ -87,14 +125,22 @@ npm run dev
 After developer setup:
 
 ```bash
+# Activate environment first
+cd hidock-desktop-app
+# Windows: .venv\Scripts\activate
+source .venv/bin/activate
+
 # Test everything
-cd hidock-desktop-app && python -m pytest tests/ -v
-cd hidock-web-app && npm test
+python -m pytest tests/ -v
 
 # Check code quality
 pre-commit run --all-files
 
 # Format code
-cd hidock-desktop-app && black . && isort .
-cd hidock-web-app && npm run lint
+black . && isort .
+
+# Web app testing
+cd ../hidock-web-app
+npm test
+npm run lint
 ```

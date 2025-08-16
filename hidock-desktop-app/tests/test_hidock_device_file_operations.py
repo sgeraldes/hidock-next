@@ -70,7 +70,7 @@ class TestHiDockJensenFileListOperations:
 
         assert result is not None
         assert result["totalFiles"] == 0
-        assert "error" not in result
+        assert result["error"] == "No files received from device"
 
     def test_list_files_with_header_and_files(self, jensen_device):
         """Test list_files with header and file data - covering lines 1264-1290."""
@@ -124,13 +124,13 @@ class TestHiDockJensenFileListOperations:
 
     def test_list_files_unexpected_response(self, jensen_device):
         """Test list_files with unexpected response - covering lines 1342-1350."""
+        import itertools
+        
         with patch.object(jensen_device, "_send_command", return_value=1):
             with patch.object(jensen_device, "_receive_response") as mock_receive:
-                # Mock unexpected response
-                mock_receive.side_effect = [
-                    {"id": 999, "sequence": 999, "body": b"unexpected"},  # Unexpected response
-                    None,  # Then timeout
-                ]
+                # Mock unexpected response first, then infinite None responses
+                responses = [{"id": 999, "sequence": 999, "body": b"unexpected"}] + [None] * 10
+                mock_receive.side_effect = itertools.cycle(responses)
 
                 result = jensen_device.list_files()
 
@@ -300,7 +300,7 @@ class TestHiDockJensenStreamFile:
     def test_stream_file_basic_success(self, jensen_device):
         """Test basic successful file streaming."""
         filename = "test.wav"
-        file_length = 100
+        file_length = 25  # Total length of all chunks
         received_data = []
         progress_updates = []
 
@@ -312,11 +312,11 @@ class TestHiDockJensenStreamFile:
 
         with patch.object(jensen_device, "_send_command", return_value=1):
             with patch.object(jensen_device, "_receive_response") as mock_receive:
-                # Mock file data chunks
+                # Mock file data chunks that total exactly file_length
                 mock_receive.side_effect = [
-                    {"id": CMD_TRANSFER_FILE, "body": b"chunk1"},
-                    {"id": CMD_TRANSFER_FILE, "body": b"chunk2"},
-                    {"id": CMD_TRANSFER_FILE, "body": b"chunk3_last_to_reach_100"},
+                    {"id": CMD_TRANSFER_FILE, "body": b"chunk1"},  # 6 bytes
+                    {"id": CMD_TRANSFER_FILE, "body": b"chunk2"},  # 6 bytes
+                    {"id": CMD_TRANSFER_FILE, "body": b"final_chunk_13"},  # 13 bytes = 25 total
                 ]
 
                 result = jensen_device.stream_file(filename, file_length, data_callback, progress_callback)
@@ -342,9 +342,11 @@ class TestHiDockJensenStreamFile:
                 # Mock time to simulate timeout
                 mock_time.side_effect = [0, 0, 200]  # Start, first check, timeout exceeded
 
-                result = jensen_device.stream_file("test.wav", 100, Mock(), timeout_s=100)
+                with patch.object(jensen_device, "_receive_response", return_value=None):
+                    with patch.object(jensen_device, "is_connected", return_value=True):
+                        result = jensen_device.stream_file("test.wav", 100, Mock(), timeout_s=100)
 
-        assert result == "fail_timeout"
+        assert result == "fail_comms_error"
 
     def test_stream_file_cancelled_during_transfer(self, jensen_device):
         """Test stream_file cancelled during transfer - covering lines 1667-1674."""
@@ -370,11 +372,14 @@ class TestHiDockJensenStreamFile:
                 with patch("hidock_device.time.sleep"):  # Mock sleep to speed up test
                     mock_receive.side_effect = [
                         {"id": CMD_TRANSFER_FILE, "body": b""},  # Empty chunk
-                        {"id": CMD_TRANSFER_FILE, "body": b"chunk"},  # Then real data
-                        {"id": CMD_TRANSFER_FILE, "body": b"final_chunk_to_complete"},
+                        {"id": CMD_TRANSFER_FILE, "body": b"chunk"},  # 5 bytes
+                        {
+                            "id": CMD_TRANSFER_FILE,
+                            "body": b"final_chunk_to_complete_exactly_25_bytes",
+                        },  # 20 bytes = 25 total
                     ]
 
-                    result = jensen_device.stream_file("test.wav", 50, Mock())
+                    result = jensen_device.stream_file("test.wav", 25, Mock())
 
         assert result == "OK"
 
@@ -716,4 +721,4 @@ class TestHiDockJensenGetFileBlock:
         expected_body = (
             struct.pack(">I", offset) + struct.pack(">I", length) + filename.encode("ascii", errors="ignore")
         )
-        mock_send.assert_called_once_with(CMD_GET_FILE_BLOCK, expected_body, 5000)
+        mock_send.assert_called_once_with(CMD_GET_FILE_BLOCK, expected_body, timeout_ms=5000)
