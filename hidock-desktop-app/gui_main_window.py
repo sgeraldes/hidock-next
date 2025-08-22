@@ -966,6 +966,29 @@ class HiDockToolGUI(
             if progress_text is not None:
                 self.status_progress_text_label.configure(text=progress_text)
 
+    def _set_long_operation_active_state(self, state, operation):
+        """
+        Set the active state for long-running operations to manage UI state.
+        
+        Args:
+            state (bool): True to activate operation state, False to deactivate
+            operation (str): Description of the operation (e.g., "Transcription", "Formatting Storage")
+        """
+        try:
+            if state:
+                # Disable relevant UI elements during long operations
+                self.update_status_bar(progress_text=f"{operation} in progress...")
+                # You can add more UI state changes here as needed
+                if hasattr(self, 'get_insights_button'):
+                    self.get_insights_button.configure(state="disabled")
+            else:
+                # Re-enable UI elements after operation completes
+                self.update_status_bar(progress_text="Ready")
+                if hasattr(self, 'get_insights_button'):
+                    self.get_insights_button.configure(state="normal")
+        except Exception as e:
+            logger.error("HiDockToolGUI", "_set_long_operation_active_state", f"Error managing operation state: {e}")
+
     def update_all_status_info(self):
         """
         Kicks off a background thread to update all informational labels in the GUI

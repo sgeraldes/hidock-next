@@ -451,13 +451,31 @@ class HiDockJensen:
                         "_attempt_connection",
                         f"Kernel driver is active on Interface {target_interface_number}. Attempting to detach.",
                     )
-                    self.device.detach_kernel_driver(target_interface_number)
-                    logger.info(
-                        "Jensen",
-                        "_attempt_connection",
-                        f"Detached kernel driver from Interface {target_interface_number}.",
-                    )
-                    self.detached_kernel_driver_on_interface = target_interface_number
+                    try:
+                        self.device.detach_kernel_driver(target_interface_number)
+                        logger.info(
+                            "Jensen",
+                            "_attempt_connection",
+                            f"Detached kernel driver from Interface {target_interface_number}.",
+                        )
+                        self.detached_kernel_driver_on_interface = target_interface_number
+                    except usb.core.USBError as e_detach:
+                        if e_detach.errno == 13:  # Permission denied
+                            logger.warning(
+                                "Jensen",
+                                "_attempt_connection",
+                                f"Cannot detach kernel driver (permission denied). This is normal on macOS. "
+                                f"Continuing without detaching. Error: {e_detach}",
+                            )
+                            # Continue without detaching - many devices work fine without this
+                        else:
+                            logger.warning(
+                                "Jensen",
+                                "_attempt_connection",
+                                f"Failed to detach kernel driver (errno {e_detach.errno}). "
+                                f"Continuing anyway. Error: {e_detach}",
+                            )
+                            # Continue - this is often not critical for device operation
 
             try:
                 self.device.set_configuration()

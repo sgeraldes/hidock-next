@@ -1,9 +1,9 @@
 {
-    "autoconnect": false,
-    "download_directory": "E:/Code/hidock-next/audio",
+    "autoconnect": true,
+    "download_directory": "/Users/alanzur/Documents/GitHub/hidock-next/hidock-desktop-app/audio",
     "log_level": "DEBUG",
     "selected_vid": 4310,
-    "selected_pid": 45069,
+    "selected_pid": 45070,
     "target_interface": 0,
     "recording_check_interval_s": 60,
     "default_command_timeout_ms": 5000,
@@ -50,9 +50,9 @@
     "icon_fallback_color_1": "blue",
     "icon_fallback_color_2": "default",
     "icon_size_str": "32",
-    "ai_api_provider": "gemini",
+    "ai_api_provider": "openai",
     "ai_api_key_gemini_encrypted": "test-api-key",
-    "ai_model": "gemini-2.5-flash",
+    "ai_model": "gpt-4o-mini",
     "ai_temperature": 0.7,
     "ai_max_tokens": 4000,
     "ai_language": "en",
@@ -63,5 +63,6 @@
     "ai_ollama_base_url": "http://localhost:11434",
     "ai_lmstudio_base_url": "http://localhost:1234/v1",
     "new_setting": "new_value",
-    "config_file_path": "C:\\Users\\SEBAST~1\\AppData\\Local\\Temp\\tmpsqqz5wnd.json"
+    "config_file_path": "C:\\Users\\SEBAST~1\\AppData\\Local\\Temp\\tmpsqqz5wnd.json",
+    "ai_api_key_openai_encrypted": "Z0FBQUFBQm9xTjI1d25KT24yaG5yanpzS1VOOExvM2Q0R19uWjhucEhCN0pOTkhBZ19UOV8tN01qR2dTanVudlZYTUhQTGdoNzJKVFRIRkZRMGtuZWluSXNfYmVjc0ZJZXhfM2FrSW9OMlpkbHFCeEdCQXYzLWdHUnVRaDU5QUZNWEtRakxxQlpsbmhPbFB4RXhqTWRVX0s5cDE2bTZzTjR1ZWtiV1VtdlAwUHRqeE5mdmV5Z0JpTUxZUkFTVVBrSEpRMWR1SHNhZWxlMDNPV0xJemp5RzBGd3pPd2E1MHRKWTlOZGVBbjVPX0tvQzNWNkJiWjd0NkllemxIVGx3N25PQlEzYjdFSmEtZEhLZm1SSVR0bFJtS01SOURnbFFtZ0Y3eTlMNXNwM1F5RjVkNFlZZEIyRXM9"
 }

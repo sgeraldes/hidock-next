@@ -31,7 +31,7 @@ class TestConstants:
 
         # Test expected values
         assert constants.DEFAULT_VENDOR_ID == 0x10D6
-        assert constants.DEFAULT_PRODUCT_ID == 0xB00D
+        assert constants.DEFAULT_PRODUCT_ID == 0xB00E
 
     def test_endpoint_constants(self):
         """Test endpoint address constants."""

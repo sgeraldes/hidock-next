@@ -344,11 +344,11 @@ class DesktopDeviceAdapter(IDeviceInterface):
                     f"No cached size available, fetching file list for {recording_id}",
                 )
                 recordings = await self.get_recordings()
-                recording = next((r for r in recordings if r.id == recording_id), None)
+                recording = next((r for r in recordings if r["name"] == recording_id), None)
                 if not recording:
                     raise FileNotFoundError(f"Recording {recording_id} not found")
-                recording_filename = recording.filename
-                recording_size = recording.size
+                recording_filename = recording["name"]
+                recording_size = recording.get("size", 0)
 
             # Set up progress tracking
             if progress_callback:
@@ -428,7 +428,7 @@ class DesktopDeviceAdapter(IDeviceInterface):
         try:
             # Get recording info
             recordings = await self.get_recordings()
-            recording = next((r for r in recordings if r.id == recording_id), None)
+            recording = next((r for r in recordings if r["name"] == recording_id), None)
             if not recording:
                 raise FileNotFoundError(f"Recording {recording_id} not found")
 
@@ -436,14 +436,14 @@ class DesktopDeviceAdapter(IDeviceInterface):
                 progress_callback(
                     OperationProgress(
                         operation_id=f"delete_{recording_id}",
-                        operation_name=f"Deleting {recording.filename}",
+                        operation_name=f"Deleting {recording['name']}",
                         progress=0.5,
                         status=OperationStatus.IN_PROGRESS,
                     )
                 )
 
             # Delete using Jensen device
-            result = self.jensen_device.delete_file(recording.filename)
+            result = self.jensen_device.delete_file(recording["name"])
 
             if result.get("result") != "success":
                 raise RuntimeError(f"Delete failed: {result.get('result', 'unknown error')}")
@@ -452,7 +452,7 @@ class DesktopDeviceAdapter(IDeviceInterface):
                 progress_callback(
                     OperationProgress(
                         operation_id=f"delete_{recording_id}",
-                        operation_name=f"Deleted {recording.filename}",
+                        operation_name=f"Deleted {recording['name']}",
                         progress=1.0,
                         status=OperationStatus.COMPLETED,
                     )

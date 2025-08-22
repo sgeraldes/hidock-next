@@ -24,34 +24,52 @@ from file_operations_manager import FileMetadata
 class DeviceActionsMixin:
     """A mixin for handling device-related actions."""
 
-    def _initialize_backend_early(self):  # Identical to original
+    def _initialize_backend_early(self):  # Enhanced for cross-platform support
         error_to_report, local_backend_instance = None, None
         try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            dll_paths_to_try = (
-                [os.path.join(script_dir, name) for name in ["libusb-1.0.dll"]]
-                + [os.path.join(script_dir, "MS64", "dll", name) for name in ["libusb-1.0.dll"]]
-                + [os.path.join(script_dir, "MS32", "dll", name) for name in ["libusb-1.0.dll"]]
-            )
-            dll_path = next((p for p in dll_paths_to_try if os.path.exists(p)), None)
-            if not dll_path:
-                logger.warning(
-                    "GUI",
-                    "_initialize_backend_early",
-                    "libusb-1.0.dll not found locally. Trying system paths.",
-                )
-                local_backend_instance = usb.backend.libusb1.get_backend()
-                if not local_backend_instance:
-                    error_to_report = "Libusb backend failed from system paths."
-            else:
+            import sys
+            import platform
+            
+            # Import USB backend
+            import usb.backend.libusb1
+            
+            # Try system backend first (recommended for macOS/Linux)
+            if sys.platform in ('darwin', 'linux', 'linux2'):
                 logger.info(
                     "GUI",
                     "_initialize_backend_early",
-                    f"Attempting backend with DLL: {dll_path}",
+                    f"Platform {sys.platform} detected. Using system libusb backend.",
                 )
-                local_backend_instance = usb.backend.libusb1.get_backend(find_library=lambda x: dll_path)
+                local_backend_instance = usb.backend.libusb1.get_backend()
                 if not local_backend_instance:
-                    error_to_report = f"Failed with DLL: {dll_path}. Check 32/64 bit."
+                    error_to_report = f"System libusb backend failed on {sys.platform}. Please install libusb via package manager."
+            else:
+                # Windows: Try bundled DLL first, then system paths
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                dll_paths_to_try = (
+                    [os.path.join(script_dir, name) for name in ["libusb-1.0.dll"]]
+                    + [os.path.join(script_dir, "MS64", "dll", name) for name in ["libusb-1.0.dll"]]
+                    + [os.path.join(script_dir, "MS32", "dll", name) for name in ["libusb-1.0.dll"]]
+                )
+                dll_path = next((p for p in dll_paths_to_try if os.path.exists(p)), None)
+                if not dll_path:
+                    logger.warning(
+                        "GUI",
+                        "_initialize_backend_early",
+                        "libusb-1.0.dll not found locally. Trying system paths.",
+                    )
+                    local_backend_instance = usb.backend.libusb1.get_backend()
+                    if not local_backend_instance:
+                        error_to_report = "Libusb backend failed from system paths."
+                else:
+                    logger.info(
+                        "GUI",
+                        "_initialize_backend_early",
+                        f"Attempting backend with DLL: {dll_path}",
+                    )
+                    local_backend_instance = usb.backend.libusb1.get_backend(find_library=lambda x: dll_path)
+                    if not local_backend_instance:
+                        error_to_report = f"Failed with DLL: {dll_path}. Check 32/64 bit."
             if error_to_report:
                 logger.error("GUI", "_initialize_backend_early", error_to_report)
                 return False, error_to_report, None

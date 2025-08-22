@@ -38,62 +38,94 @@ class HTAConverter:
     def convert_hta_to_wav(self, hta_file_path: str, output_path: Optional[str] = None) -> Optional[str]:
         """
         Convert HiDock audio file (.hda/.hta) to WAV format.
+        
+        For transcription use, consider using convert_hta_for_transcription() 
+        which ensures better compatibility with AI services.
+        """
+        return self._convert_hta(hta_file_path, output_path, "wav")
 
-        The input files are MPEG Audio Layer 1/2 format that get converted to standard WAV.
+    def convert_hta_for_transcription(self, hta_file_path: str, output_path: Optional[str] = None) -> Optional[str]:
+        """
+        Convert HiDock audio file (.hda/.hta) to format optimized for transcription services.
+        
+        This method ensures the output is compatible with OpenAI Whisper and other transcription APIs.
+        Uses MP3 format which is more widely supported and has better compression.
+        """
+        if output_path is None:
+            base_name = os.path.splitext(os.path.basename(hta_file_path))[0]
+            output_path = os.path.join(self.temp_dir, f"{base_name}_transcription.mp3")
+        
+        return self._convert_hta(hta_file_path, output_path, "mp3")
+
+    def _convert_hta(self, hta_file_path: str, output_path: Optional[str] = None, format_type: str = "wav") -> Optional[str]:
+        """
+        Convert HiDock audio file (.hda/.hta) to specified format.
+
+        The input files are MPEG Audio Layer 1/2 format that get converted to the target format.
 
         Args:
             hta_file_path: Path to the input .hda/.hta file
-            output_path: Optional output path for the .wav file
+            output_path: Optional output path for the converted file
+            format_type: Target format ("wav" or "mp3")
 
         Returns:
-            Path to the converted .wav file, or None if conversion failed
+            Path to the converted file, or None if conversion failed
         """
         try:
             if not os.path.exists(hta_file_path):
                 logger.error(
                     "HTAConverter",
-                    "convert_hta_to_wav",
+                    "_convert_hta",
                     f"Input file not found: {hta_file_path}",
                 )
                 return None
 
-            if not hta_file_path.lower().endswith(".hta"):
+            if not hta_file_path.lower().endswith((".hta", ".hda")):
                 logger.error(
                     "HTAConverter",
-                    "convert_hta_to_wav",
-                    f"File is not an HTA file: {hta_file_path}",
+                    "_convert_hta",
+                    f"File is not an HTA/HDA file: {hta_file_path}",
                 )
                 return None
 
             # Generate output path if not provided
             if output_path is None:
                 base_name = os.path.splitext(os.path.basename(hta_file_path))[0]
-                output_path = os.path.join(self.temp_dir, f"{base_name}_converted.wav")
+                extension = "wav" if format_type == "wav" else "mp3"
+                output_path = os.path.join(self.temp_dir, f"{base_name}_converted.{extension}")
 
             logger.info(
                 "HTAConverter",
-                "convert_hta_to_wav",
-                f"Converting {hta_file_path} to {output_path}",
+                "_convert_hta",
+                f"Converting {hta_file_path} to {format_type.upper()}: {output_path}",
             )
 
-            # Try to analyze the HTA file structure
+            # For MP3 output, use direct pydub conversion for better compatibility
+            if format_type == "mp3":
+                return self._convert_to_mp3_direct(hta_file_path, output_path)
+            
+            # For WAV, use the existing pipeline
             audio_data, sample_rate, channels = self._parse_hta_file(hta_file_path)
 
             if audio_data is None:
                 return None
 
-            # Create WAV file
-            self._create_wav_file(output_path, audio_data, sample_rate, channels)
+            # Create output file
+            if format_type == "wav":
+                self._create_wav_file(output_path, audio_data, sample_rate, channels)
+            else:
+                logger.error("HTAConverter", "_convert_hta", f"Unsupported format: {format_type}")
+                return None
 
             logger.info(
                 "HTAConverter",
-                "convert_hta_to_wav",
+                "_convert_hta",
                 f"Successfully converted to {output_path}",
             )
             return output_path
 
         except Exception as e:
-            logger.error("HTAConverter", "convert_hta_to_wav", f"Error converting HTA file: {e}")
+            logger.error("HTAConverter", "_convert_hta", f"Error converting HTA file: {e}")
             return None
 
     def _parse_hta_file(self, hta_file_path: str) -> Tuple[Optional[bytes], int, int]:
@@ -224,12 +256,34 @@ class HTAConverter:
             except Exception:
                 # If mp3 format fails, try without specifying format
                 audio_io.seek(0)
-                audio_segment = AudioSegment.from_file(audio_io)
+                try:
+                    audio_segment = AudioSegment.from_file(audio_io)
+                    logger.info(
+                        "HTAConverter",
+                        "_parse_hta_format_1",
+                        "Successfully loaded audio with auto-detection",
+                    )
+                except Exception as e:
+                    logger.error(
+                        "HTAConverter",
+                        "_parse_hta_format_1", 
+                        f"Failed to load audio with pydub: {e}"
+                    )
+                    raise
+
+            # Normalize audio parameters for transcription compatibility
+            # Convert to 16-bit, and ensure compatible sample rate
+            audio_segment = audio_segment.set_sample_width(2)  # 16-bit
+            
+            # Ensure compatible sample rate for transcription
+            target_rate = self._get_compatible_sample_rate(audio_segment.frame_rate)
+            if audio_segment.frame_rate != target_rate:
                 logger.info(
                     "HTAConverter",
                     "_parse_hta_format_1",
-                    "Successfully loaded audio with auto-detection",
+                    f"Resampling from {audio_segment.frame_rate}Hz to {target_rate}Hz",
                 )
+                audio_segment = audio_segment.set_frame_rate(target_rate)
 
             # Convert to raw audio data
             # Export as WAV to get raw PCM data
@@ -311,18 +365,232 @@ class HTAConverter:
             )
             return None, 0, 0
 
-    def _create_wav_file(self, output_path: str, audio_data: bytes, sample_rate: int, channels: int):
-        """Create WAV file from audio data."""
+    def _convert_to_mp3_direct(self, hta_file_path: str, output_path: str) -> Optional[str]:
+        """
+        Convert HTA file directly to MP3 using pydub for optimal transcription compatibility.
+        
+        This method bypasses the WAV conversion pipeline and uses pydub's built-in
+        format detection and conversion capabilities.
+        """
         try:
+            from pydub import AudioSegment
+            
+            logger.info(
+                "HTAConverter",
+                "_convert_to_mp3_direct", 
+                f"Direct MP3 conversion: {hta_file_path} -> {output_path}"
+            )
+            
+            # Try to load the HTA file with pydub's format auto-detection
+            audio_segment = None
+            
+            # First try as MPEG/MP3 format
+            try:
+                audio_segment = AudioSegment.from_file(hta_file_path, format="mp3")
+                logger.info(
+                    "HTAConverter",
+                    "_convert_to_mp3_direct",
+                    f"Loaded as MPEG: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch"
+                )
+            except Exception as e1:
+                logger.debug("HTAConverter", "_convert_to_mp3_direct", f"MP3 format failed: {e1}")
+                
+                # Try without format specification (auto-detect)
+                try:
+                    audio_segment = AudioSegment.from_file(hta_file_path)
+                    logger.info(
+                        "HTAConverter",
+                        "_convert_to_mp3_direct",
+                        f"Loaded with auto-detection: {audio_segment.frame_rate}Hz, {audio_segment.channels}ch"
+                    )
+                except Exception as e2:
+                    logger.error(
+                        "HTAConverter",
+                        "_convert_to_mp3_direct", 
+                        f"Failed to load HTA file: {e2}"
+                    )
+                    return None
+            
+            if audio_segment is None:
+                return None
+            
+            # Optimize for transcription: normalize audio parameters
+            # Ensure 16-bit depth and compatible sample rate
+            audio_segment = audio_segment.set_sample_width(2)  # 16-bit
+            
+            # Use optimal sample rate for speech transcription
+            target_rate = self._get_compatible_sample_rate(audio_segment.frame_rate)
+            if audio_segment.frame_rate != target_rate:
+                logger.info(
+                    "HTAConverter",
+                    "_convert_to_mp3_direct",
+                    f"Resampling from {audio_segment.frame_rate}Hz to {target_rate}Hz for transcription"
+                )
+                audio_segment = audio_segment.set_frame_rate(target_rate)
+            
+            # Export as MP3 with settings optimized for transcription
+            audio_segment.export(
+                output_path,
+                format="mp3",
+                bitrate="128k",  # Good quality for transcription
+                parameters=["-ar", str(target_rate), "-ac", str(audio_segment.channels)]
+            )
+            
+            logger.info(
+                "HTAConverter",
+                "_convert_to_mp3_direct",
+                f"MP3 conversion successful: {target_rate}Hz, {audio_segment.channels}ch, 128kbps"
+            )
+            
+            return output_path
+            
+        except ImportError:
+            logger.error(
+                "HTAConverter", 
+                "_convert_to_mp3_direct",
+                "pydub not available. Cannot perform direct MP3 conversion."
+            )
+            return None
+        except Exception as e:
+            logger.error("HTAConverter", "_convert_to_mp3_direct", f"Direct MP3 conversion failed: {e}")
+            return None
+
+    def _create_wav_file(self, output_path: str, audio_data: bytes, sample_rate: int, channels: int):
+        """Create WAV file from audio data with transcription service compatibility."""
+        try:
+            # Ensure sample rate is compatible with transcription services
+            # OpenAI Whisper works best with common sample rates
+            target_sample_rate = self._get_compatible_sample_rate(sample_rate)
+            
+            if target_sample_rate != sample_rate:
+                logger.info(
+                    "HTAConverter", 
+                    "_create_wav_file", 
+                    f"Adjusting sample rate from {sample_rate}Hz to {target_sample_rate}Hz for transcription compatibility"
+                )
+                audio_data = self._resample_audio(audio_data, sample_rate, target_sample_rate, channels)
+                sample_rate = target_sample_rate
+
             with wave.open(output_path, "wb") as wav_file:  # pylint: disable=no-member
                 wav_file.setnchannels(channels)  # pylint: disable=no-member
                 wav_file.setsampwidth(2)  # 16-bit audio  # pylint: disable=no-member
                 wav_file.setframerate(sample_rate)  # pylint: disable=no-member
                 wav_file.writeframes(audio_data)  # pylint: disable=no-member
 
+            # Verify the created file is valid
+            self._verify_wav_file(output_path)
+            logger.info(
+                "HTAConverter", 
+                "_create_wav_file", 
+                f"Created WAV file: {channels} channel(s), {sample_rate}Hz, 16-bit PCM"
+            )
+
         except Exception as e:
             logger.error("HTAConverter", "_create_wav_file", f"Error creating WAV file: {e}")
             raise
+
+    def _get_compatible_sample_rate(self, sample_rate: int) -> int:
+        """
+        Get a sample rate compatible with transcription services.
+        
+        OpenAI Whisper and most transcription services work best with:
+        - 16000Hz (recommended for speech)
+        - 22050Hz, 44100Hz, 48000Hz (common rates)
+        """
+        # Common sample rates in order of preference for transcription
+        compatible_rates = [16000, 22050, 44100, 48000, 8000]
+        
+        # If already compatible, use as-is
+        if sample_rate in compatible_rates:
+            return sample_rate
+            
+        # For rates close to 16kHz (ideal for speech), use 16kHz
+        if 12000 <= sample_rate <= 20000:
+            return 16000
+            
+        # For higher rates, use 44.1kHz (CD quality)
+        if sample_rate > 20000:
+            return 44100
+            
+        # For very low rates, use 8kHz (minimum acceptable)
+        return 8000
+
+    def _resample_audio(self, audio_data: bytes, original_rate: int, target_rate: int, channels: int) -> bytes:
+        """
+        Resample audio data to target sample rate using basic interpolation.
+        
+        Note: This is a simple resampling method. For production use, 
+        consider using scipy.signal.resample or librosa for better quality.
+        """
+        try:
+            import numpy as np
+            
+            # Convert bytes to numpy array (16-bit signed integers)
+            if channels == 1:
+                audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            else:
+                audio_array = np.frombuffer(audio_data, dtype=np.int16).reshape(-1, channels)
+            
+            # Calculate resampling ratio
+            ratio = target_rate / original_rate
+            new_length = int(len(audio_array) * ratio)
+            
+            if channels == 1:
+                # Mono resampling
+                resampled = np.interp(
+                    np.linspace(0, len(audio_array) - 1, new_length),
+                    np.arange(len(audio_array)),
+                    audio_array
+                ).astype(np.int16)
+            else:
+                # Stereo resampling (resample each channel)
+                resampled_channels = []
+                for ch in range(channels):
+                    resampled_ch = np.interp(
+                        np.linspace(0, len(audio_array) - 1, new_length),
+                        np.arange(len(audio_array)),
+                        audio_array[:, ch]
+                    ).astype(np.int16)
+                    resampled_channels.append(resampled_ch)
+                resampled = np.column_stack(resampled_channels)
+            
+            return resampled.tobytes()
+            
+        except ImportError:
+            logger.warning(
+                "HTAConverter", 
+                "_resample_audio", 
+                "NumPy not available for resampling. Using original audio data."
+            )
+            return audio_data
+        except Exception as e:
+            logger.error("HTAConverter", "_resample_audio", f"Resampling failed: {e}")
+            return audio_data
+
+    def _verify_wav_file(self, wav_path: str) -> bool:
+        """
+        Verify that the created WAV file is valid and can be read.
+        """
+        try:
+            with wave.open(wav_path, "rb") as wav_file:
+                frames = wav_file.getnframes()
+                rate = wav_file.getframerate()
+                channels = wav_file.getnchannels()
+                sample_width = wav_file.getsampwidth()
+                
+                if frames == 0:
+                    raise ValueError("WAV file has no audio frames")
+                    
+                logger.debug(
+                    "HTAConverter",
+                    "_verify_wav_file", 
+                    f"WAV verification: {frames} frames, {rate}Hz, {channels}ch, {sample_width*8}-bit"
+                )
+                return True
+                
+        except Exception as e:
+            logger.error("HTAConverter", "_verify_wav_file", f"WAV file verification failed: {e}")
+            raise ValueError(f"Invalid WAV file created: {e}")
 
     def get_converted_file_path(self, hta_file_path: str) -> str:
         """Get the expected path for a converted file."""
@@ -372,6 +640,24 @@ def convert_hta_to_wav(hta_file_path: str, output_path: Optional[str] = None) ->
     """
     converter = get_hta_converter()
     return converter.convert_hta_to_wav(hta_file_path, output_path)
+
+
+def convert_hta_for_transcription(hta_file_path: str, output_path: Optional[str] = None) -> Optional[str]:
+    """
+    Convenience function to convert HTA file to transcription-optimized format.
+    
+    This method ensures compatibility with OpenAI Whisper and other transcription services
+    by using MP3 format with optimal settings for speech recognition.
+
+    Args:
+        hta_file_path: Path to the input .hta/.hda file
+        output_path: Optional output path for the converted file
+
+    Returns:
+        Path to the converted file, or None if conversion failed
+    """
+    converter = get_hta_converter()
+    return converter.convert_hta_for_transcription(hta_file_path, output_path)
 
 
 if __name__ == "__main__":

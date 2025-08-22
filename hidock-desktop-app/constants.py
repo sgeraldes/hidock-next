@@ -13,7 +13,7 @@ ease of modification.
 
 # --- USB Device Constants ---
 DEFAULT_VENDOR_ID = 0x10D6  # Actions Semiconductor
-DEFAULT_PRODUCT_ID = 0xB00D  # The PID for HiDock H1E as a default
+DEFAULT_PRODUCT_ID = 0xB00E  # The PID for HiDock P1 as a default
 
 # Target endpoints
 EP_OUT_ADDR = 0x01  # Physical endpoint 0x01, OUT direction
