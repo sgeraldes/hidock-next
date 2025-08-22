@@ -451,13 +451,34 @@ class HiDockJensen:
                         "_attempt_connection",
                         f"Kernel driver is active on Interface {target_interface_number}. Attempting to detach.",
                     )
-                    self.device.detach_kernel_driver(target_interface_number)
-                    logger.info(
-                        "Jensen",
-                        "_attempt_connection",
-                        f"Detached kernel driver from Interface {target_interface_number}.",
-                    )
-                    self.detached_kernel_driver_on_interface = target_interface_number
+                    try:
+                        self.device.detach_kernel_driver(target_interface_number)
+                        logger.info(
+                            "Jensen",
+                            "_attempt_connection",
+                            f"Detached kernel driver from Interface {target_interface_number}.",
+                        )
+                        self.detached_kernel_driver_on_interface = target_interface_number
+                    except usb.core.USBError as e_detach:
+                        if e_detach.errno == 13:  # Permission denied
+                            logger.warning(
+                                "Jensen",
+                                "_attempt_connection",
+                                f"Permission denied detaching kernel driver. Try running with sudo or check udev rules.",
+                            )
+                        elif sys.platform == "darwin":  # macOS specific handling
+                            logger.warning(
+                                "Jensen",
+                                "_attempt_connection",
+                                f"macOS kernel driver detach issue (expected): {e_detach}",
+                            )
+                        else:
+                            logger.error(
+                                "Jensen",
+                                "_attempt_connection",
+                                f"Failed to detach kernel driver: {e_detach}",
+                            )
+                            # Continue anyway as some systems work without detaching
 
             try:
                 self.device.set_configuration()

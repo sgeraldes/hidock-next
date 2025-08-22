@@ -298,6 +298,7 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
             (0x10D6, 0xAF0C),  # H1
             (0x10D6, 0xAF0D),  # H1E variant
             (0x10D6, 0xAF0E),  # P1
+            (0x10D6, 0xB00E),  # P1 variant
             (0x10D6, 0xB00D),  # H1E
         ]
         return (vendor_id, product_id) in hidock_devices
@@ -308,6 +309,7 @@ class EnhancedDeviceSelector(ctk.CTkFrame):
             0xAF0C: "H1",
             0xAF0D: "Device",  # H1E variant
             0xAF0E: "P1",
+            0xB00E: "P1 Variant",
             0xB00D: "H1E",
         }
         return model_map.get(product_id, f"Unknown ({hex(product_id)})")

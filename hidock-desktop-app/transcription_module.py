@@ -230,13 +230,40 @@ async def extract_meeting_insights(
 
 
 def _get_audio_duration(audio_path: str) -> int:
-    """Calculates the duration of a WAV audio file in minutes."""
+    """Calculates the duration of an audio file in minutes."""
     try:
-        with wave.open(audio_path, "rb") as wf:
-            frames = wf.getnframes()
-            rate = wf.getframerate()
-            duration_seconds = frames / float(rate) if rate else 0
-            return round(duration_seconds / 60)
+        ext = os.path.splitext(audio_path)[1].lower()
+        
+        if ext == ".wav":
+            # Use wave module for WAV files
+            with wave.open(audio_path, "rb") as wf:
+                frames = wf.getnframes()
+                rate = wf.getframerate()
+                duration_seconds = frames / float(rate) if rate else 0
+                return round(duration_seconds / 60)
+        else:
+            # Use pydub for other formats (MP3, etc.)
+            try:
+                from pydub import AudioSegment
+                
+                audio = AudioSegment.from_file(audio_path)
+                duration_seconds = len(audio) / 1000.0  # pydub returns duration in milliseconds
+                return round(duration_seconds / 60)
+            except ImportError:
+                logger.warning(
+                    "TranscriptionModule", 
+                    "_get_audio_duration", 
+                    f"pydub not available, cannot get duration for {ext} files"
+                )
+                return 0
+            except Exception as e:
+                logger.warning(
+                    "TranscriptionModule", 
+                    "_get_audio_duration", 
+                    f"Could not get duration with pydub: {e}"
+                )
+                return 0
+                
     except Exception as e:
         logger.warning("TranscriptionModule", "_get_audio_duration", f"Could not get duration: {e}")
         return 0
@@ -283,31 +310,30 @@ async def process_audio_file_for_insights(
         return {"error": f"Error preparing audio file: {e}"}
 
     try:
-        # Check if it's an HTA file and convert it first
+        # Check if it's an HTA/HDA file and convert it first
         ext = os.path.splitext(audio_file_path)[1].lower()
-        # _original_file_path = audio_file_path  # Future: for cleanup/restore operations
-        temp_wav_file = None
+        temp_audio_file = None
 
-        if ext == ".hta":
-            # Convert HTA to WAV
-            from hta_converter import convert_hta_to_wav
+        if ext in [".hta", ".hda"]:
+            # Convert HTA/HDA to transcription-optimized format (MP3)
+            from hta_converter import convert_hta_for_transcription
 
-            temp_wav_file = convert_hta_to_wav(audio_file_path)
-            if temp_wav_file:
-                audio_file_path = temp_wav_file
-                ext = ".wav"
+            temp_audio_file = convert_hta_for_transcription(audio_file_path)
+            if temp_audio_file:
+                audio_file_path = temp_audio_file
+                ext = os.path.splitext(temp_audio_file)[1].lower()
                 logger.info(
                     "TranscriptionModule",
                     "process_audio_file",
-                    f"Converted HTA file to {temp_wav_file}",
+                    f"Converted HDA/HTA file to transcription format: {temp_audio_file}",
                 )
             else:
                 logger.error(
                     "TranscriptionModule",
                     "process_audio_file",
-                    "Failed to convert HTA file",
+                    "Failed to convert HDA/HTA file for transcription",
                 )
-                return {"error": "Failed to convert HTA file to WAV format"}
+                return {"error": "Failed to convert HDA/HTA file to transcription format"}
 
     except Exception as e:
         logger.error("TranscriptionModule", "process_audio_file", f"File preparation error: {e}")
@@ -334,19 +360,19 @@ async def process_audio_file_for_insights(
 
     # --- Step 3: Enrich with local data ---
     if meeting_insights.get("meeting_details", {}).get("duration_minutes") == 0:
-        if ext == ".wav":  # Only calculate duration for WAV for now
+        if ext in [".wav", ".mp3"]:  # Calculate duration for supported formats
             meeting_insights.setdefault("meeting_details", {})["duration_minutes"] = _get_audio_duration(
                 audio_file_path
             )
 
-    # Clean up temporary WAV file if created
-    if temp_wav_file and os.path.exists(temp_wav_file):
+    # Clean up temporary converted file if created
+    if temp_audio_file and os.path.exists(temp_audio_file):
         try:
-            os.remove(temp_wav_file)
+            os.remove(temp_audio_file)
             logger.info(
                 "TranscriptionModule",
                 "process_audio_file",
-                f"Cleaned up temporary file: {temp_wav_file}",
+                f"Cleaned up temporary file: {temp_audio_file}",
             )
         except Exception as e:
             logger.warning(
