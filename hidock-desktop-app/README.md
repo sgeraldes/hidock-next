@@ -109,6 +109,8 @@ complete control and privacy.
    python setup.py
    ```
    Choose **Option 1** for standard installation
+   
+   **Linux users:** The setup will automatically detect missing system dependencies and offer to install them.
 
 3. **Launch the application:**
    ```bash
@@ -144,12 +146,44 @@ python main.py
 - **Storage:** ~200MB for application and dependencies
 - **Internet:** Only needed for initial Python/dependency download
 
-### **System Dependencies (Advanced Users)**
-Additional libraries needed for USB communication:
+### **System Dependencies**
 
-**Windows:** Usually works out of the box
-**macOS:** Install Homebrew, then run: `brew install libusb`
-**Linux:** Run: `sudo apt-get install libusb-1.0-0-dev`
+#### **🪟 Windows**
+Usually works out of the box - libusb is included with the Python dependencies.
+
+#### **🍎 macOS** 
+Install Homebrew, then run: `brew install libusb`
+
+#### **🐧 Linux (Recommended: Automated Setup)**
+**Best Option - Automated Script:**
+```bash
+python3 setup_linux_deps.py
+```
+
+**What this script does:**
+- ✅ **System Packages**: Installs tkinter, ffmpeg, libusb, audio libs, build tools
+- ✅ **USB Permissions**: Adds user to `dialout` group automatically
+- ✅ **Udev Rules**: Creates and installs device-specific USB access rules
+- ✅ **Dependency Verification**: Tests all components after installation
+- ✅ **Smart Package Manager**: Uses `nala` if available, falls back to `apt`
+- ✅ **User Guidance**: Provides troubleshooting tips and next steps
+
+**Manual Installation (Advanced Users):**
+```bash
+# Core system dependencies
+sudo apt update
+sudo apt install -y python3-tk python3-dev build-essential
+sudo apt install -y ffmpeg libavcodec-extra portaudio19-dev
+sudo apt install -y libusb-1.0-0-dev libudev-dev pkg-config
+
+# Set up USB permissions for device access
+sudo usermod -a -G dialout $USER
+# Create udev rule for HiDock device (replace VID:PID as needed)
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="10d6", ATTR{idProduct}=="b00d", GROUP="dialout", MODE="0664"' | sudo tee /etc/udev/rules.d/99-hidock.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+# Log out and back in for group changes to take effect
+```
 
 ## 🎯 Getting Started
 

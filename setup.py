@@ -188,23 +188,9 @@ def check_development_files():
         # Warn about Windows Defender
         print("ℹ️  If installs fail, check Windows Defender exclusions")
 
-    # Check Linux USB permissions
+    # Check Linux system dependencies
     elif platform.system() == "Linux":
-        try:
-            import getpass
-            import grp
-
-            username = getpass.getuser()
-            user_groups = [g.gr_name for g in grp.getgrall() if username in g.gr_mem]
-
-            if "dialout" not in user_groups:
-                print("⚠️  User not in 'dialout' group (needed for USB access)")
-                print("   Run: sudo usermod -a -G dialout $USER")
-                print("   Then log out and back in")
-            else:
-                print("✓ USB permissions configured (dialout group)")
-        except Exception:
-            print("ℹ️  Could not check USB permissions - you may need dialout group")
+        return check_linux_system_dependencies()
 
     # Check macOS dependencies
     elif platform.system() == "Darwin":
@@ -236,6 +222,162 @@ def check_development_files():
         print("ℹ️  Desktop app will create configuration on first run")
 
     return True
+
+
+def check_linux_system_dependencies():
+    """Check Linux system dependencies and offer to install them."""
+    print("\n🐧 Checking Linux system dependencies...")
+    
+    # Check for Debian-based distribution
+    debian_based = False
+    try:
+        result = run_command("which apt", check=False)
+        if result.returncode == 0:
+            debian_based = True
+    except Exception:
+        pass
+    
+    if not debian_based:
+        print("⚠️  Non-Debian distribution detected")
+        print("   You may need to manually install system dependencies")
+        return True
+    
+    missing_deps = []
+    
+    # Check Python tkinter
+    try:
+        result = run_command("python3 -c 'import tkinter'", check=False)
+        if result.returncode != 0:
+            missing_deps.append("Python tkinter")
+        else:
+            print("✓ Python tkinter available")
+    except Exception:
+        missing_deps.append("Python tkinter")
+    
+    # Check FFmpeg
+    try:
+        result = run_command("which ffmpeg", check=False)
+        if result.returncode != 0:
+            missing_deps.append("FFmpeg")
+        else:
+            print("✓ FFmpeg found")
+    except Exception:
+        missing_deps.append("FFmpeg")
+    
+    # Check libusb
+    try:
+        result = run_command("pkg-config --exists libusb-1.0", check=False)
+        if result.returncode != 0:
+            missing_deps.append("libusb development files")
+        else:
+            print("✓ libusb-1.0 found")
+    except Exception:
+        missing_deps.append("libusb development files")
+    
+    # Check build tools
+    try:
+        result = run_command("which gcc", check=False)
+        if result.returncode != 0:
+            missing_deps.append("build tools (GCC)")
+        else:
+            print("✓ Build tools available")
+    except Exception:
+        missing_deps.append("build tools (GCC)")
+    
+    # Check USB permissions
+    try:
+        import getpass
+        import grp
+
+        username = getpass.getuser()
+        user_groups = [g.gr_name for g in grp.getgrall() if username in g.gr_mem]
+
+        if "dialout" not in user_groups:
+            print("⚠️  User not in 'dialout' group (needed for USB access)")
+            missing_deps.append("USB permissions (dialout group)")
+        else:
+            print("✓ USB permissions configured (dialout group)")
+    except Exception:
+        print("ℹ️  Could not check USB permissions - you may need dialout group")
+        missing_deps.append("USB permissions check failed")
+    
+    if missing_deps:
+        print(f"\n⚠️  Missing system dependencies: {len(missing_deps)} issues found")
+        for dep in missing_deps:
+            print(f"   • {dep}")
+        
+        print("\n🔧 System dependencies are required for the HiDock Desktop Application:")
+        print("   • CustomTkinter requires system tkinter packages")
+        print("   • Audio processing requires FFmpeg and audio libraries")
+        print("   • Device communication requires libusb")
+        print("   • Python packages compilation requires build tools")
+        
+        print("\n📝 You have several options:")
+        print("1. 🚀 Run automated system setup (recommended)")
+        print("2. 📋 Show manual installation commands")
+        print("3. ⏭️  Continue anyway (may cause Python package installation failures)")
+        
+        while True:
+            try:
+                choice = input("\nChoose an option (1-3): ").strip()
+                if choice in ["1", "2", "3"]:
+                    break
+                print("Please enter 1, 2, or 3")
+            except KeyboardInterrupt:
+                print("\nSkipping system dependencies setup...")
+                return True
+        
+        if choice == "1":
+            print("\n🚀 Running automated Linux system dependencies setup...")
+            try:
+                result = run_command("python3 setup_linux_deps.py", check=False)
+                if result.returncode == 0:
+                    print("✅ System dependencies setup completed!")
+                    print("⚠️  If you were added to dialout group, you may need to log out and back in")
+                    return True
+                else:
+                    print("❌ System dependencies setup failed")
+                    print("   Continuing with Python setup, but you may encounter issues")
+                    return True
+            except Exception as e:
+                print(f"❌ Could not run system dependencies setup: {e}")
+                print("   Please run manually: python3 setup_linux_deps.py")
+                return True
+        
+        elif choice == "2":
+            print("\n📋 Manual installation commands for Debian/Ubuntu:")
+            print("")
+            print("# Update package lists")
+            print("sudo apt update")
+            print("")
+            print("# Install core dependencies")
+            print("sudo apt install -y python3-tk python3-dev build-essential")
+            print("sudo apt install -y ffmpeg libavcodec-extra portaudio19-dev")
+            print("sudo apt install -y libusb-1.0-0-dev libudev-dev pkg-config")
+            print("")
+            print("# Set up USB permissions")
+            print("sudo usermod -a -G dialout $USER")
+            print("")
+            print("# Log out and back in for group changes to take effect")
+            print("")
+            print("After installing, re-run this setup script.")
+            
+            continue_setup = input("\nContinue with Python setup anyway? (y/N): ").strip().lower()
+            if continue_setup == "y":
+                return True
+            else:
+                print("Please install system dependencies first, then re-run this script.")
+                sys.exit(0)
+        
+        elif choice == "3":
+            print("\n⚠️  Continuing without system dependencies...")
+            print("   Python package installation may fail")
+            print("   You can install system dependencies later with: python3 setup_linux_deps.py")
+            return True
+    
+    else:
+        print("✅ All required Linux system dependencies are available!")
+        return True
 
 
 def setup_api_keys():
@@ -826,6 +968,10 @@ def run_end_user_setup():
         has_node = check_node_version()
         check_permissions()
         check_disk_space()
+        
+        # Check system dependencies for Linux users
+        if platform.system() == "Linux":
+            check_linux_system_dependencies()
 
         # Simple environment setup
         print("\n📦 Setting up applications...")

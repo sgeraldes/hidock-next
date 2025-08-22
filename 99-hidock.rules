@@ -1,0 +1,16 @@
+# HiDock USB Device Access Rules
+# This file allows non-root users to access HiDock devices
+# Install this file to /etc/udev/rules.d/ and reload udev rules
+
+# HiDock H1E Device (Actions Semiconductor Co., Ltd)
+# Vendor ID: 10d6, Product ID: b00d
+SUBSYSTEM=="usb", ATTR{idVendor}=="10d6", ATTR{idProduct}=="b00d", MODE="0666", GROUP="dialout", TAG+="uaccess"
+
+# Alternative HiDock device IDs (if any)
+# Add more lines here if other HiDock devices have different vendor/product IDs
+# Example format:
+# SUBSYSTEM=="usb", ATTR{idVendor}=="xxxx", ATTR{idProduct}=="yyyy", MODE="0666", GROUP="dialout", TAG+="uaccess"
+
+# Generic rule for Actions Semiconductor devices (fallback)
+# This provides access to any Actions Semiconductor USB device
+SUBSYSTEM=="usb", ATTR{idVendor}=="10d6", MODE="0666", GROUP="dialout", TAG+="uaccess"

@@ -14,7 +14,16 @@ This guide covers setup for **both end users and developers**.
 3. Follow the prompts
 4. Done! 🎉
 
-#### **🐧🍎 Linux/Mac (One Command)**
+#### **🐧 Linux (Automated System Setup)**
+```bash
+# Step 1: Install system dependencies automatically
+python3 setup_linux_deps.py
+
+# Step 2: Run application setup
+chmod +x setup-unix.sh && ./setup-unix.sh
+```
+
+#### **🍎 Mac (One Command)**
 ```bash
 chmod +x setup-unix.sh && ./setup-unix.sh
 ```
@@ -88,20 +97,70 @@ brew install libusb
 
 #### Linux (Ubuntu/Debian)
 
+**🚀 Recommended: Use the Automated Setup Script**
+
+We provide a comprehensive Linux setup script that handles all system dependencies:
+
+```bash
+python3 setup_linux_deps.py
+```
+
+**What this script does:**
+- ✅ **Detects your Linux distribution** (Debian, Ubuntu, Mint, Pop OS, etc.)
+- ✅ **Updates package lists** using nala (preferred) or apt
+- ✅ **Installs core dependencies**: 
+  - Python tkinter and development headers
+  - FFmpeg and audio processing libraries
+  - USB communication libraries (libusb)
+  - GUI libraries and build tools
+  - Optional multimedia utilities
+- ✅ **Configures USB permissions**:
+  - Adds user to `dialout` group automatically
+  - Creates and installs HiDock-specific udev rules
+  - Reloads udev rules for immediate effect
+- ✅ **Verifies installation** with comprehensive dependency testing
+- ✅ **Provides guidance** for next steps and troubleshooting
+
+**Manual Installation (Advanced Users Only):**
+
 ```bash
 # Update package list
 sudo apt-get update
 
-# Install libusb development files
-sudo apt-get install libusb-1.0-0-dev
+# Core system dependencies
+sudo apt install -y python3-tk python3-dev build-essential
+sudo apt install -y ffmpeg libavcodec-extra portaudio19-dev
+sudo apt install -y libusb-1.0-0-dev libudev-dev pkg-config
+sudo apt install -y libxcb1-dev libcairo2-dev git curl wget cmake
 
-# Install Python development files
-sudo apt-get install python3-dev
+# Audio system integration
+sudo apt install -y libasound2-dev libpulse-dev libjack-jackd2-dev
+sudo apt install -y v4l-utils mediainfo sox libsox-fmt-all
 
-# Add user to dialout group for USB access
+# USB permissions setup
 sudo usermod -a -G dialout $USER
+
+# Create udev rule for HiDock devices
+sudo tee /etc/udev/rules.d/99-hidock.rules << 'EOF'
+# HiDock USB Device udev rules
+SUBSYSTEM=="usb", ATTR{idVendor}=="10d6", ATTR{idProduct}=="b00d", GROUP="dialout", MODE="0664", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="10d6", ATTRS{idProduct}=="b00d", GROUP="dialout", MODE="0664", TAG+="uaccess"
+EOF
+
+# Reload udev rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+
 # Log out and back in for group changes to take effect
+echo "Please log out and back in for USB permissions to take effect"
 ```
+
+**Why use the automated script?**
+- Handles all edge cases and error conditions
+- Works across different Debian-based distributions
+- Provides detailed progress feedback and troubleshooting
+- Verifies all dependencies after installation
+- Much faster and less error-prone than manual setup
 
 ## Project Setup
 

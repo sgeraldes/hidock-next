@@ -21,6 +21,7 @@ import traceback
 import customtkinter as ctk  # For CTkInputDialog in settings, and CTk itself
 
 from config_and_logger import logger  # For the top-level exception handler
+from runtime_deps_check import check_and_handle_runtime_deps  # Runtime dependency checker
 
 # Import the main GUI class and the logger
 from gui_main_window import HiDockToolGUI
@@ -28,6 +29,12 @@ from gui_main_window import HiDockToolGUI
 
 def main() -> None:
     """Initializes and runs the HiDock Tool application."""
+    # Check runtime dependencies before starting the GUI
+    print("🔍 HiDock Desktop - Checking runtime dependencies...")
+    if not check_and_handle_runtime_deps():
+        print("❌ Runtime dependencies check failed or was cancelled.")
+        sys.exit(1)
+    
     # It's good practice to set the appearance mode and theme early,
     # though HiDockToolGUI also does this. This ensures CTk is initialized
     # with a theme before any widgets might be created, even implicitly.

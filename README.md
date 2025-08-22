@@ -22,7 +22,18 @@ setup-windows.bat
 ```
 *Need Python/Node.js? Run `install-prerequisites.bat` first*
 
-### 🐧🍎 **Linux/Mac (One Command)**
+### 🐧 **Linux (Automated)**
+```bash
+git clone https://github.com/sgeraldes/hidock-next.git
+cd hidock-next
+# Automated system dependencies (recommended)
+python3 setup_linux_deps.py
+# Then run main setup
+chmod +x setup-unix.sh && ./setup-unix.sh
+```
+*Handles system packages, USB permissions, and dependencies automatically*
+
+### 🍎 **Mac (One Command)**
 ```bash
 git clone https://github.com/sgeraldes/hidock-next.git
 cd hidock-next

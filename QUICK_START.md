@@ -21,7 +21,20 @@ install-prerequisites.bat
 setup-windows.bat
 ```
 
-### 🐧🍎 Linux/Mac (One Command)
+### 🐧 Linux (Automated System Setup)
+```bash
+git clone https://github.com/sgeraldes/hidock-next.git
+cd hidock-next
+
+# Step 1: Install system dependencies (automated)
+python3 setup_linux_deps.py
+
+# Step 2: Run main application setup
+chmod +x setup-unix.sh && ./setup-unix.sh
+```
+*Automatically handles system packages, USB permissions, and udev rules*
+
+### 🍎 Mac (One Command)
 ```bash
 git clone https://github.com/sgeraldes/hidock-next.git
 cd hidock-next
