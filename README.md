@@ -97,8 +97,10 @@ python setup.py
 ## ✨ **Key Features**
 
 - **🤖 11 AI Providers:** Gemini, OpenAI, Anthropic, OpenRouter, Amazon, Qwen, DeepSeek, Ollama, LM Studio
+- **🎙️ Enhanced Audio Transcription:** AI-optimized HTA→MP3 conversion with smart resampling (16kHz for speech)
 - **🔒 Privacy First:** Local AI models (Ollama, LM Studio) for complete offline functionality
 - **🎵 Professional Audio:** Enhanced playback, waveform visualization, speed control
+- **🖥️ Cross-Platform USB:** Improved device support for H1, H1E, P1 variants across Windows/macOS/Linux
 - **⚡ Modern UI:** Desktop (Python/CustomTkinter) and Web (Next.js/TypeScript) applications
 - **🪟 Smart Window Management:** Automatic position/size saving with multi-monitor support
 - **🛡️ Secure:** Encrypted API key storage, local data processing
@@ -484,6 +486,17 @@ black . && isort . && flake8 . && pylint .
 ## **📄 License**
 
 This project is licensed under the **MIT License** - see [LICENSE](LICENSE) for details.
+
+## **👥 Contributors**
+
+Special thanks to our amazing contributors who help make HiDock Next better:
+
+- **[@Averus89](https://github.com/Averus89)** - *First Contributor* 🥇
+  - Enhanced HTA to MP3 transcription conversion with AI-optimized audio processing
+  - Improved cross-platform USB device handling for better macOS and Linux compatibility
+  - Added P1 device variant support and enhanced audio duration calculation
+
+*Want to contribute? Check out our [Contributing Guide](CONTRIBUTING.md) to get started!*
 
 ## **🙏 Acknowledgements**
 
