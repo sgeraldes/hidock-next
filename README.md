@@ -322,6 +322,32 @@ ollama serve  # Start Ollama server
 - **Connection Statistics:** Detailed metrics and performance monitoring
 - **Auto-recovery:** Automatic reconnection and error handling
 
+### **📅 Calendar Integration (Beta)**
+
+**Outlook calendar integration with intelligent meeting correlation**
+
+- **OAuth2 Authentication:** Secure Microsoft Azure AD login with encrypted credential storage
+- **Meeting Correlation:** Automatic matching of recordings to calendar events (±15 minute window)
+- **Microsoft Graph API:** Complete integration with Microsoft 365 calendar system
+- **Meeting Metadata:** Display meeting title, organizer, attendees, and start time with recordings
+- **Privacy-First:** All credentials encrypted locally, no data stored externally
+- **Background Sync:** Automatic calendar fetching with intelligent caching
+- **Manual Linking:** Fallback option to manually link recordings to meetings
+
+**Current Status:**
+- ✅ **Backend Complete:** Full OAuth2, API integration, and correlation algorithms implemented
+- 🚧 **UI Integration:** Settings panels and meeting display components in development
+- 📋 **Testing Available:** Manual test scripts and automated tests provided
+
+**Setup Instructions:**
+```bash
+# See CALENDAR_INTEGRATION_TEST_SETUP.md for detailed setup
+# Run manual test to verify backend integration:
+python manual_outlook_calendar_test.py
+```
+
+> 📖 **Testing Guide:** See [`CALENDAR_INTEGRATION_TEST_SETUP.md`](CALENDAR_INTEGRATION_TEST_SETUP.md) for Azure app registration and testing instructions
+
 ## **🔒 Security & Privacy**
 
 ### **Data Protection**
@@ -371,8 +397,7 @@ ollama serve  # Start Ollama server
 - **Linux:** Ubuntu/Debian with libusb-dev
 
 ## **🔮 Roadmap & Future Plans**
-
-### **Recently Completed (Last 2 Weeks)**
+### **🚀 Recently Completed (Last 2 Weeks)**
 
 **🎯 Major Feature Implementations:**
 - **✅ 11-Provider AI Integration:** Complete multi-provider AI system with Gemini, OpenAI, Anthropic, OpenRouter, Amazon, Qwen, DeepSeek, Ollama, LM Studio - unified interface with secure encrypted API key management
@@ -381,6 +406,7 @@ ollama serve  # Start Ollama server
 - **✅ Professional Device Selector:** Enhanced interface with status indicators, device categorization, real-time scanning, and comprehensive error handling for all HiDock models
 - **✅ HTA Audio Converter:** Automatic conversion of proprietary .hta files to WAV format with device-specific audio format detection (H1E: MPEG Layer 1/2, P1: different format)
 - **✅ Background Processing System:** Non-blocking AI operations with progress tracking, cancellation support, queue management, and comprehensive error handling
+- **✅ Outlook Calendar Integration (Backend):** Complete OAuth2 authentication with Microsoft Graph API, secure encrypted credential storage, meeting correlation algorithms (±15 min window), and comprehensive error handling - ready for UI integration
 
 **🔧 Performance & Infrastructure:**
 - **✅ Settings Performance Optimization:** Reduced config save operations by 95% - only changed settings saved instead of entire config (50+ settings)
@@ -405,6 +431,7 @@ ollama serve  # Start Ollama server
 
 ### **Near Term**
 
+- **Calendar Integration UI:** Complete Outlook calendar UI integration with settings panels, meeting display, and manual linking interface
 - **Model Auto-Discovery:** Detect available local models automatically
 - **Custom Prompts:** User-defined analysis templates with provider-specific optimization
 - **Export Formats:** PDF, Word, JSON export options with formatting

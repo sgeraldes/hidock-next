@@ -823,6 +823,14 @@ class DeviceActionsMixin:
                     }
                 )
 
+            # Enhance files with meeting metadata from Outlook calendar
+            if hasattr(self, 'enhance_files_with_meeting_data'):
+                try:
+                    files_dict = self.enhance_files_with_meeting_data(files_dict)
+                    logger.debug("GUI", "_refresh_file_list_thread", f"Enhanced {len(files_dict)} files with meeting data")
+                except Exception as e:
+                    logger.warning("GUI", "_refresh_file_list_thread", f"Failed to enhance files with meeting data: {e}")
+
             # Use robust recording detection instead of assuming first item is recording
             current_recording_filename = None
             try:
