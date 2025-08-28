@@ -1,7 +1,8 @@
 # **HiDock Next** 🎵
 
-**The| **🤖 Cloud AI** | 🚧 **Alpha Testing** - Gemini stubs only | 🚧 **Planned** | 🚧 **Alpha Testing** - Gemini only |
-| **🏠 Local AI** | 🚧 **Roadmap** - Whisper/Vosk planned | 🚧 **Roadmap** - WebAssembly | ❌ **Not Planned** |
+**The Community-Driven HiDock Device Management Platform**
+
+Complete audio device management with AI-powered transcription, calendar integration, and cross-platform support.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
@@ -51,6 +52,32 @@ python setup.py
 
 **That's it!** The setup scripts handle everything automatically.
 
+## 🚀 **Running Applications**
+
+After setup, launch applications easily from any location:
+
+### **From Repository Root:**
+```bash
+# Windows
+run-desktop.bat          # Launch desktop app
+run-web.bat             # Launch web app
+
+# Linux + Mac + WSL
+./run-desktop.sh        # Launch desktop app  
+./run-web.sh            # Launch web app
+```
+
+### **From Application Directories:**
+```bash
+# Desktop app
+cd hidock-desktop-app && ./run.sh    # Unix
+cd hidock-desktop-app && run.bat     # Windows
+
+# Web app  
+cd hidock-web-app && ./run.sh        # Unix
+cd hidock-web-app && run.bat         # Windows
+```
+
 ## 📊 **Application Comparison**
 
 | Feature | 🖥️ **Desktop App** | 🌐 **Web App** | 📊 **Audio Insights** |
@@ -69,7 +96,7 @@ python setup.py
 
 | Application | **Overall Maturity** | **Recommended For** | **Current Status** |
 |-------------|----------------------|---------------------|-------------------|
-| **🖥️ Desktop App** | **🟡 Beta** - Core stable, audio WIP | **Daily Use** - Device mgmt | **Nearing 1.0** |
+| **🖥️ Desktop App** | **🟢 Beta Ready** - Core stable, calendar integration complete | **Daily Use** - Full device management | **Ready for 1.0-beta** |
 | **🌐 Web App** | **🔴 Alpha** - Early development | **Testing** - Interface preview | **Experimental** |
 | **📊 Audio Insights** | **🟢 Stable** - Production ready | **AI Processing** - Batch workflows | **Production Ready** |
 
@@ -96,14 +123,15 @@ python setup.py
 
 ## ✨ **Key Features**
 
-- **🤖 11 AI Providers:** Gemini, OpenAI, Anthropic, OpenRouter, Amazon, Qwen, DeepSeek, Ollama, LM Studio
-- **🎙️ Enhanced Audio Transcription:** AI-optimized HTA→MP3 conversion with smart resampling (16kHz for speech)
-- **🔒 Privacy First:** Local AI models (Ollama, LM Studio) for complete offline functionality
-- **🎵 Professional Audio:** Enhanced playback, waveform visualization, speed control
-- **🖥️ Cross-Platform USB:** Improved device support for H1, H1E, P1 variants across Windows/macOS/Linux
-- **⚡ Modern UI:** Desktop (Python/CustomTkinter) and Web (Next.js/TypeScript) applications
-- **🪟 Smart Window Management:** Automatic position/size saving with multi-monitor support
-- **🛡️ Secure:** Encrypted API key storage, local data processing
+- **📅 Calendar Integration:** Complete Outlook integration with automatic meeting correlation, visual feedback, and intelligent caching
+- **🚀 Cross-Platform Launchers:** Easy application launching with Windows (.bat) and Unix (.sh) scripts for all platforms
+- **🎵 Audio Metadata System:** Advanced audio processing with meeting correlation and metadata management
+- **🤖 Multi-AI Provider Support:** Framework for 11 AI providers including local models (Ollama, LM Studio)
+- **🎙️ Professional Audio Processing:** Enhanced HTA→MP3 conversion with smart resampling (16kHz for speech)
+- **🖥️ Robust Device Management:** Full USB control for H1, H1E, P1 variants across Windows/macOS/Linux
+- **⚡ Modern Desktop UI:** CustomTkinter-based interface with smart window management and multi-monitor support
+- **🔒 Privacy & Security:** Encrypted API key storage, complete offline functionality, local data processing
+- **🧪 Comprehensive Testing:** 580+ tests with >90% coverage ensuring reliability and stability
 
 ## 📱 **Applications**
 
@@ -116,14 +144,15 @@ python setup.py
 ## 📚 **Documentation**
 
 - **[🚀 Quick Start Guide](QUICK_START.md)** - Get started in 5 minutes
-- **[👨‍💻 Contributing Guide](CONTRIBUTING.md)** - Development setup and guidelines
-- **[📖 Full Documentation](DOCUMENTATION_INDEX.md)** - Complete documentation index
-- **[🛠️ VS Code Setup](docs/VSCODE_CONFIGURATION.md)** - Development environment configuration
-- **[🔧 Troubleshooting](docs/TROUBLESHOOTING.md)** - Common issues and solutions
+- **[📖 Complete Documentation Index](docs/INDEX.md)** - Full repository documentation map
+- **[👨‍💻 Contributing Guide](docs/development/CONTRIBUTING.md)** - Development setup and guidelines
+- **[📅 Calendar Integration](docs/development/CALENDAR_INTEGRATION.md)** - Complete calendar system documentation
+- **[🤖 AI Assistant Config](docs/development/CLAUDE.md)** - Claude Code integration guide
+- **[🔧 Setup Guide](docs/SETUP.md)** - Detailed setup instructions
 
 ## 🤝 **Contributing**
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
+We welcome contributions! Please see [docs/development/CONTRIBUTING.md](docs/development/CONTRIBUTING.md) for:
 - Development setup
 - Code quality standards
 - Testing requirements
