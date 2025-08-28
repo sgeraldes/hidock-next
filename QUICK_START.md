@@ -15,7 +15,7 @@ git clone https://github.com/sgeraldes/hidock-next.git
 cd hidock-next
 
 # If you need Python/Node.js installed:
-install-prerequisites.bat
+scripts\setup\install-prerequisites.bat
 
 # Then run the main setup:
 setup-windows.bat
@@ -27,7 +27,7 @@ git clone https://github.com/sgeraldes/hidock-next.git
 cd hidock-next
 
 # Step 1: Install system dependencies (automated)
-python3 setup_linux_deps.py
+python3 scripts/setup/setup_linux_deps.py
 
 # Step 2: Run main application setup
 chmod +x setup-unix.sh && ./setup-unix.sh
@@ -40,7 +40,7 @@ git clone https://github.com/sgeraldes/hidock-next.git
 cd hidock-next
 
 # If you need Python/Node.js installed:
-chmod +x install-prerequisites.sh && ./install-prerequisites.sh
+chmod +x scripts/setup/install-prerequisites.sh && ./scripts/setup/install-prerequisites.sh
 
 # Then run the main setup:
 chmod +x setup-unix.sh && ./setup-unix.sh
@@ -101,6 +101,11 @@ After setup, you can run:
 
 ### Desktop Application
 ```bash
+# Option 1: Use convenience launcher from root
+.\run-desktop.bat    # Windows
+./run-desktop.sh     # Linux/Mac (if available)
+
+# Option 2: Manual launch
 cd hidock-desktop-app
 # Windows:
 .venv\Scripts\activate
@@ -112,6 +117,11 @@ python main.py
 
 ### Web Application
 ```bash
+# Option 1: Use convenience launcher from root
+.\run-web.bat        # Windows
+./run-web.sh         # Linux/Mac (if available)
+
+# Option 2: Manual launch
 cd hidock-web-app
 npm run dev
 # Open: http://localhost:5173

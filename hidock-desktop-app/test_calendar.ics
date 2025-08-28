@@ -1,0 +1,44 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//HiDock Desktop//Calendar Integration Test//EN
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+
+BEGIN:VEVENT
+UID:test-meeting-1@hidock.com
+DTSTART:20250822T140000Z
+DTEND:20250822T150000Z
+SUMMARY:Team Stand-up Meeting
+DESCRIPTION:Daily team synchronization meeting
+LOCATION:Conference Room A
+ORGANIZER:CN=Alice Johnson:MAILTO:alice@company.com
+ATTENDEE:CN=Bob Smith:MAILTO:bob@company.com
+ATTENDEE:CN=Charlie Brown:MAILTO:charlie@company.com
+STATUS:CONFIRMED
+END:VEVENT
+
+BEGIN:VEVENT
+UID:test-meeting-2@hidock.com
+DTSTART:20250822T160000Z
+DTEND:20250822T170000Z
+SUMMARY:Product Planning Session
+DESCRIPTION:Quarterly product planning and roadmap discussion
+LOCATION:Meeting Room 2
+ORGANIZER:CN=Alice Johnson:MAILTO:alice@company.com
+ATTENDEE:CN=Diana Prince:MAILTO:diana@company.com
+STATUS:CONFIRMED
+END:VEVENT
+
+BEGIN:VEVENT
+UID:test-meeting-3@hidock.com
+DTSTART:20250823T100000Z
+DTEND:20250823T110000Z
+SUMMARY:Client Presentation
+DESCRIPTION:Quarterly review presentation to key client
+LOCATION:Virtual - Zoom
+ORGANIZER:CN=Alice Johnson:MAILTO:alice@company.com
+ATTENDEE:CN=Client Rep:MAILTO:client@external.com
+STATUS:CONFIRMED
+END:VEVENT
+
+END:VCALENDAR

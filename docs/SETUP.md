@@ -17,7 +17,7 @@ This guide covers setup for **both end users and developers**.
 #### **🐧 Linux (Automated System Setup)**
 ```bash
 # Step 1: Install system dependencies automatically
-python3 setup_linux_deps.py
+python3 scripts/setup/setup_linux_deps.py
 
 # Step 2: Run application setup
 chmod +x setup-unix.sh && ./setup-unix.sh
@@ -102,7 +102,7 @@ brew install libusb
 We provide a comprehensive Linux setup script that handles all system dependencies:
 
 ```bash
-python3 setup_linux_deps.py
+python3 scripts/setup/setup_linux_deps.py
 ```
 
 **What this script does:**

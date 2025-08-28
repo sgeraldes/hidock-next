@@ -1,0 +1,56 @@
+[pytest]
+# HiDock Desktop Application - Enhanced Pytest Configuration
+# Optimized for our comprehensive testing infrastructure
+
+asyncio_mode = auto
+asyncio_default_fixture_loop_scope = function
+testpaths = tests
+python_files = test_*.py
+python_classes = Test*
+python_functions = test_*
+
+addopts =
+    -v
+    --tb=short
+    --strict-markers
+    --cov=.
+    --cov-report=html:htmlcov
+    --cov-report=term-missing
+    --cov-fail-under=80
+    --cov-config=.coveragerc
+
+# Enhanced markers for our comprehensive test suite
+markers =
+    gui: Tests that interact with GUI components and are incompatible with parallel execution
+    unit: Unit tests for individual components
+    integration: Integration tests for component interaction
+    slow: Slow running tests (deselect with '-m "not slow"')
+    device: Tests requiring actual device connection
+    core: Tests for core modules with 80%+ coverage
+    enhanced: Tests for enhanced modules and utilities
+    smoke: Basic smoke tests for essential functionality
+    regression: Tests that prevent regression bugs
+    utilities: Tests for test utilities and fixtures
+    database: Tests involving database operations
+    filesystem: Tests involving file system operations
+    mock_heavy: Tests with extensive mocking
+    settings: Tests that modify application settings or configuration
+    contamination_check: Tests that require extra contamination protection
+
+# Enhanced warning filters (temporarily disabled to identify warnings)
+# filterwarnings =
+#     ignore::DeprecationWarning
+#     ignore::PendingDeprecationWarning
+#     ignore::UserWarning:customtkinter.*
+#     ignore::UserWarning:PIL.*
+#     ignore::RuntimeWarning:asyncio.*
+#     ignore::pytest.PytestDeprecationWarning
+
+# Minimum pytest version
+minversion = 6.0
+
+# Console output style
+console_output_style = progress
+
+# Cache directory
+cache_dir = .pytest_cache

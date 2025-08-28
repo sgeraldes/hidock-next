@@ -823,6 +823,30 @@ class DeviceActionsMixin:
                     }
                 )
 
+            # Enhance files with meeting metadata from calendar cache (synchronous to preserve cached data)
+            if hasattr(self, 'enhance_files_with_meeting_data_sync'):
+                try:
+                    files_dict = self.enhance_files_with_meeting_data_sync(files_dict)
+                    logger.debug("GUI", "_refresh_file_list_thread", f"Enhanced {len(files_dict)} files with meeting data")
+                except Exception as e:
+                    logger.warning("GUI", "_refresh_file_list_thread", f"Failed to enhance files with meeting data: {e}")
+            
+            # Queue async calendar enhancement for background updates (if calendar system available)
+            if hasattr(self, 'enhance_files_with_meeting_data_async'):
+                try:
+                    # Start async enhancement in background without replacing current data
+                    self.enhance_files_with_meeting_data_async(files_dict, callback=self._on_async_calendar_update_complete)
+                except Exception as e:
+                    logger.debug("GUI", "_refresh_file_list_thread", f"Failed to start async calendar enhancement: {e}")
+            
+            # Enhance files with audio metadata (transcription, AI analysis, user edits)
+            if hasattr(self, 'enhance_files_with_audio_metadata'):
+                try:
+                    files_dict = self.enhance_files_with_audio_metadata(files_dict)
+                    logger.debug("GUI", "_refresh_file_list_thread", f"Enhanced {len(files_dict)} files with audio metadata")
+                except Exception as e:
+                    logger.warning("GUI", "_refresh_file_list_thread", f"Failed to enhance files with audio metadata: {e}")
+
             # Use robust recording detection instead of assuming first item is recording
             current_recording_filename = None
             try:

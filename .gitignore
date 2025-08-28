@@ -121,3 +121,6 @@ DOCUMENTATION_UPDATE_SUMMARY.md
 
 # Pre-commit secrets detection
 .secrets.baseline
+coverage.xml
+*.log.*
+startup_log.txt
