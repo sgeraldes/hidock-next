@@ -1,0 +1,11 @@
+{
+    "contextFileName": "AGENT.md",
+    "autoAccept": true,
+    "preferredEditor": "code-insiders",
+    "telemetry": {
+        "enabled": false
+        // "target": "local",
+        // "otlpEndpoint": "http://localhost:16686",
+        // "logPrompts": false
+        }
+}

@@ -2,6 +2,16 @@
 """
 Outlook Calendar Service for HiDock Desktop App.
 
+⚠️  CALENDAR INTEGRATION DISABLED BY DEFAULT ⚠️
+
+This module requires enterprise-level Azure AD credentials that regular users
+don't have access to, so it's disabled by default.
+
+For advanced users who want calendar integration:
+1. Install optional dependency: pip install hidock-next[calendar]
+2. Enable in configuration: calendar_provider = "outlook"
+3. Configure Azure AD credentials in Settings
+
 This module provides integration with Microsoft Outlook calendar via the O365 library,
 allowing audio files to be correlated with calendar meetings for enhanced metadata.
 """
@@ -92,8 +102,8 @@ class MeetingMetadata:
 class OutlookCalendarService:
     """Service for integrating with Microsoft Outlook calendar."""
     
-    def __init__(self, config_manager):
-        self.config_manager = config_manager
+    def __init__(self, config):
+        self.config = config
         self.account: Optional[Account] = None
         self.schedule: Optional[Schedule] = None
         self.cache_file = "outlook_calendar_cache.json"
@@ -109,7 +119,7 @@ class OutlookCalendarService:
     
     def is_enabled(self) -> bool:
         """Check if Outlook integration is enabled in settings."""
-        return self.config_manager.get("outlook_integration_enabled", False)
+        return self.config.get("calendar_provider", "disabled") == "outlook"
     
     def is_authenticated(self) -> bool:
         """Check if user is authenticated with Outlook."""
@@ -161,31 +171,27 @@ class OutlookCalendarService:
             return False
     
     def _save_credentials(self, client_id: str, client_secret: str, tenant_id: str):
-        """Save encrypted credentials to config."""
+        """Save credentials to config (Note: For now, credentials are managed via settings UI)."""
         try:
-            # Use the same encryption method as API keys
-            encrypted_data = {
-                'client_id': self.config_manager._encrypt_text(client_id),
-                'client_secret': self.config_manager._encrypt_text(client_secret),
-                'tenant_id': tenant_id  # Tenant ID is not sensitive
-            }
-            self.config_manager.set("outlook_credentials", encrypted_data)
-            logger.info("OutlookService", "_save_credentials", "Credentials saved securely")
+            # Credentials are saved via the settings UI encryption system
+            # This method is kept for compatibility but doesn't implement encryption here
+            logger.info("OutlookService", "_save_credentials", "Credentials should be saved via settings UI")
         except Exception as e:
             logger.error("OutlookService", "_save_credentials", f"Error saving credentials: {e}")
     
     def _load_credentials(self) -> Optional[Tuple[str, str, str]]:
-        """Load and decrypt credentials from config."""
+        """Load credentials from config."""
         try:
-            encrypted_data = self.config_manager.get("outlook_credentials")
-            if not encrypted_data:
+            client_id = self.config.get('calendar_outlook_client_id', '')
+            # Note: Client secret decryption should be handled by the caller
+            client_secret_encrypted = self.config.get('calendar_outlook_client_secret_encrypted', '')
+            tenant_id = self.config.get('calendar_outlook_tenant_id', 'common')
+            
+            if not client_id or not client_secret_encrypted:
                 return None
                 
-            client_id = self.config_manager._decrypt_text(encrypted_data['client_id'])
-            client_secret = self.config_manager._decrypt_text(encrypted_data['client_secret'])
-            tenant_id = encrypted_data.get('tenant_id', 'common')
-            
-            return client_id, client_secret, tenant_id
+            # For now, return the encrypted secret - decryption will be handled elsewhere
+            return client_id, client_secret_encrypted, tenant_id
         except Exception as e:
             logger.error("OutlookService", "_load_credentials", f"Error loading credentials: {e}")
             return None

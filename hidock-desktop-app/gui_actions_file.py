@@ -98,14 +98,26 @@ class FileActionsMixin:
     def _perform_gui_update_for_operation(self, operation):
         """Performs the actual GUI update on the main thread."""
         if operation.status == FileOperationStatus.IN_PROGRESS:
-            status_text = (
-                f"{operation.operation_type.value.capitalize()} " f"{operation.filename}: {operation.progress:.0f}%"
-            )
+            # Create proper display text and tags for different operation types
+            if operation.operation_type.value == "delete":
+                display_text = f"Deleting ({operation.progress:.0f}%)"
+                status_text = f"Deleting {operation.filename}: {operation.progress:.0f}%"
+                tags = ("delete",)
+            elif operation.operation_type.value == "download":
+                display_text = f"Downloading ({operation.progress:.0f}%)"
+                status_text = f"Downloading {operation.filename}: {operation.progress:.0f}%"
+                tags = ("download",)
+            else:
+                # Fallback for other operation types
+                display_text = f"{operation.operation_type.value.capitalize()} ({operation.progress:.0f}%)"
+                status_text = f"{operation.operation_type.value.capitalize()} {operation.filename}: {operation.progress:.0f}%"
+                tags = (operation.operation_type.value,)
+                
             self.update_status_bar(progress_text=status_text)
             self._update_file_status_in_treeview(
                 operation.filename,
-                f"{operation.operation_type.value.capitalize()} ({operation.progress:.0f}%)",
-                (operation.operation_type.value,),
+                display_text,
+                tags,
             )
         elif operation.status == FileOperationStatus.COMPLETED:
             status_text = f"{operation.operation_type.value.capitalize()} {operation.filename} complete."
@@ -131,10 +143,15 @@ class FileActionsMixin:
                 # Refresh the file status to ensure consistency
                 self._refresh_single_file_status(operation.filename)
             elif operation.operation_type.value == "delete":
-                # For deletions, remove the file from the treeview and refresh the file list
+                # For deletions, remove the file from the treeview and update local state
                 self._remove_file_from_treeview(operation.filename)
-                # Refresh the file list to ensure consistency with device state
-                self.refresh_file_list_gui()
+                # Remove from displayed files details
+                self.displayed_files_details = [f for f in self.displayed_files_details if f["name"] != operation.filename]
+                # Remove from metadata cache
+                self.file_operations_manager.metadata_cache.remove_metadata(operation.filename)
+                
+                # Schedule a batch refresh check (only refresh once after all deletions complete)
+                self._schedule_post_deletion_refresh()
             else:
                 self._update_file_status_in_treeview(operation.filename, "Completed", ("completed",))
         elif operation.status == FileOperationStatus.FAILED:
@@ -260,8 +277,8 @@ class FileActionsMixin:
 
             self.update_status_bar(progress_text=f"Cancelled {cancelled_count} download(s).")
 
-            # Refresh the file list to ensure consistent state
-            self.refresh_file_list_gui()
+            # Note: File list refresh is not needed for cancellations
+            # Files remain on device, only local operation status changes
 
     def _open_file_locally(self, filename):
         """Open a downloaded file in the system's default application."""
@@ -701,6 +718,51 @@ class FileActionsMixin:
         except Exception as e:
             logger.error("FileActionsMixin", "_refresh_single_file_status", f"Error refreshing status for {filename}: {e}")
 
+    def _schedule_post_deletion_refresh(self):
+        """Schedule a file list refresh after all deletions are complete (batched refresh)."""
+        # Cancel any existing refresh timer
+        if hasattr(self, '_deletion_refresh_timer'):
+            try:
+                self.after_cancel(self._deletion_refresh_timer)
+            except:
+                pass  # Timer already executed or cancelled
+        
+        # Schedule a new refresh with a short delay to batch multiple deletions
+        self._deletion_refresh_timer = self.after(2000, self._perform_post_deletion_refresh)  # 2 second delay
+    
+    def _perform_post_deletion_refresh(self):
+        """Perform the actual file list refresh after batch deletions are complete."""
+        try:
+            # Check if there are any active delete operations still running
+            active_operations = self.file_operations_manager.get_all_active_operations()
+            active_deletes = [
+                op for op in active_operations 
+                if op.operation_type == FileOperationType.DELETE 
+                and op.status in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
+            ]
+            
+            if active_deletes:
+                # Still have active deletions, reschedule
+                logger.debug("FileActionsMixin", "_perform_post_deletion_refresh", 
+                           f"Still {len(active_deletes)} active deletions, rescheduling refresh")
+                self._deletion_refresh_timer = self.after(1000, self._perform_post_deletion_refresh)
+                return
+            
+            # All deletions complete, perform refresh
+            logger.info("FileActionsMixin", "_perform_post_deletion_refresh", 
+                       "All deletions complete, refreshing file list")
+            self.refresh_file_list_gui()
+            
+        except Exception as e:
+            logger.error("FileActionsMixin", "_perform_post_deletion_refresh", 
+                        f"Error during post-deletion refresh: {e}")
+            # Fallback: still try to refresh even if there was an error
+            try:
+                self.refresh_file_list_gui()
+            except Exception as refresh_error:
+                logger.error("FileActionsMixin", "_perform_post_deletion_refresh", 
+                           f"Fallback refresh also failed: {refresh_error}")
+
     def cancel_selected_downloads_gui(self):
         """Cancels download operations for selected files."""
         selected_iids = self.file_tree.selection()
@@ -749,5 +811,5 @@ class FileActionsMixin:
 
             self.update_status_bar(progress_text=f"Cancelled {cancelled_count} download(s) for selected files.")
 
-            # Refresh the file list to ensure consistent state
-            self.refresh_file_list_gui()
+            # Note: File list refresh is not needed for cancellations
+            # Files remain on device, only local operation status changes

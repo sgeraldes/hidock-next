@@ -155,6 +155,16 @@ class SettingsDialog(ctk.CTkToplevel):
             "volume_var": "DoubleVar",
             "logs_visible_var": "BooleanVar",
             "gui_log_filter_level_var": "StringVar",
+            "calendar_chunking_period_var": "StringVar",
+            "enable_file_logging_var": "BooleanVar",
+            "enable_console_logging_var": "BooleanVar",
+            "enable_gui_logging_var": "BooleanVar",
+            "log_file_path_var": "StringVar",
+            "log_file_max_size_mb_var": "StringVar",  # Changed from IntVar to prevent TclError
+            "log_file_backup_count_var": "StringVar",  # Changed from IntVar to prevent TclError
+            "console_log_level_var": "StringVar",
+            "gui_log_level_var": "StringVar",
+            "file_log_level_var": "StringVar",
         }
         for var_name, var_type_str in vars_to_clone_map.items():
             if hasattr(self.parent_gui, var_name):
@@ -171,6 +181,8 @@ class SettingsDialog(ctk.CTkToplevel):
                     "default_command_timeout_ms_var",
                     "file_stream_timeout_s_var",
                     "auto_refresh_interval_s_var",
+                    "log_file_max_size_mb_var",
+                    "log_file_backup_count_var",
                 ]:
                     parent_value = str(parent_value)
 
@@ -212,6 +224,7 @@ class SettingsDialog(ctk.CTkToplevel):
         tab_connection = tabview.add(" Connection ")
         tab_operation = tabview.add(" Operation ")
         tab_device_specific = tabview.add(" Device Specific ")
+        # Calendar integration removed - impractical for regular users
         tab_ai_transcription = tabview.add(" AI Transcription ")
         tab_logging = tabview.add(" Logging ")
         tab_advanced = tabview.add(" Advanced ")
@@ -220,6 +233,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._populate_connection_tab(tab_connection)
         self._populate_operation_tab(tab_operation)
         self._populate_device_specific_tab(tab_device_specific)
+        # Calendar tab removed
         self._populate_ai_transcription_tab(tab_ai_transcription)
         self._populate_logging_tab(tab_logging)
         self._populate_advanced_tab(tab_advanced)
@@ -385,6 +399,32 @@ class SettingsDialog(ctk.CTkToplevel):
             textvariable=self.local_vars["auto_refresh_interval_s_var"],
             width=60,
         ).pack(anchor="w", pady=(2, 10), padx=10)
+        
+        # Calendar Settings Section
+        ctk.CTkLabel(
+            scroll_frame,
+            text="Calendar Settings:",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(anchor="w", pady=(15, 2), padx=5)
+        ctk.CTkLabel(scroll_frame, text="Calendar Chunking Period (for batch retrieval optimization):").pack(
+            anchor="w", pady=(5, 0), padx=10
+        )
+        ctk.CTkComboBox(
+            scroll_frame,
+            variable=self.local_vars["calendar_chunking_period_var"],
+            values=["1 Day", "1 Week", "2 Weeks", "1 Month", "3 Months"],
+            state="readonly",
+            width=120,
+        ).pack(anchor="w", pady=(2, 5), padx=10)
+        
+        # Calendar info label
+        calendar_info = ctk.CTkLabel(
+            scroll_frame,
+            text="💡 Larger periods reduce API calls but may increase initial loading time.",
+            font=ctk.CTkFont(size=10),
+            text_color="gray70",
+        )
+        calendar_info.pack(anchor="w", pady=(0, 10), padx=10)
 
     def _populate_device_specific_tab(self, tab):
         """Populates the 'Device Specific' tab with relevant settings widgets."""
@@ -424,38 +464,145 @@ class SettingsDialog(ctk.CTkToplevel):
         )
         self.notification_sound_checkbox.pack(anchor="w", padx=10, pady=(2, 10))
 
+    # Calendar integration removed - impractical for regular users
+
     def _populate_logging_tab(self, tab):
         """Populates the 'Logging' tab with relevant settings widgets."""
         scroll_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
         scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Console Logging Section
         ctk.CTkLabel(
             scroll_frame,
-            text="General Logging Settings:",
+            text="Console Logging:",
             font=ctk.CTkFont(weight="bold"),
         ).pack(anchor="w", pady=(5, 2), padx=5)
-        ctk.CTkLabel(scroll_frame, text="Logger Processing Level:").pack(anchor="w", pady=(5, 0), padx=10)
-        ctk.CTkComboBox(
+        
+        self.console_enable_checkbox = ctk.CTkCheckBox(
             scroll_frame,
-            variable=self.local_vars["logger_processing_level_var"],
+            text="Enable console logging",
+            variable=self.local_vars["enable_console_logging_var"],
+            command=self._on_console_logging_enabled_changed,
+        )
+        self.console_enable_checkbox.pack(anchor="w", pady=(5, 5), padx=10)
+        
+        console_level_frame = ctk.CTkFrame(scroll_frame)
+        console_level_frame.pack(fill="x", pady=2, padx=10)
+        ctk.CTkLabel(console_level_frame, text="Level:", width=80, anchor="w").pack(side="left", padx=(5, 5))
+        self.console_log_level_combo = ctk.CTkComboBox(
+            console_level_frame,
+            variable=self.local_vars["console_log_level_var"],
             values=list(Logger.LEVELS.keys()),
             state="readonly",
-        ).pack(fill="x", pady=2, padx=10)
-        ctk.CTkCheckBox(
+            width=120,
+        )
+        self.console_log_level_combo.pack(side="left", padx=(0, 5))
+        
+        # GUI Logging Section
+        ctk.CTkLabel(
             scroll_frame,
-            text="Suppress console output (logs still go to GUI)",
-            variable=self.local_vars["suppress_console_output_var"],
-        ).pack(anchor="w", pady=(5, 0), padx=10)
-        ctk.CTkCheckBox(
+            text="GUI Logging:",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(anchor="w", pady=(20, 2), padx=5)
+        
+        self.gui_enable_checkbox = ctk.CTkCheckBox(
             scroll_frame,
-            text="Suppress GUI log output (logs only to console/stderr)",
-            variable=self.local_vars["suppress_gui_log_output_var"],
-        ).pack(anchor="w", pady=(0, 10), padx=10)
+            text="Enable GUI logging",
+            variable=self.local_vars["enable_gui_logging_var"],
+            command=self._on_gui_logging_enabled_changed,
+        )
+        self.gui_enable_checkbox.pack(anchor="w", pady=(5, 5), padx=10)
+        
+        gui_level_frame = ctk.CTkFrame(scroll_frame)
+        gui_level_frame.pack(fill="x", pady=2, padx=10)
+        ctk.CTkLabel(gui_level_frame, text="Level:", width=80, anchor="w").pack(side="left", padx=(5, 5))
+        self.gui_log_level_combo = ctk.CTkComboBox(
+            gui_level_frame,
+            variable=self.local_vars["gui_log_level_var"],
+            values=list(Logger.LEVELS.keys()),
+            state="readonly",
+            width=120,
+        )
+        self.gui_log_level_combo.pack(side="left", padx=(0, 5))
+        
+        # Add info text about GUI logging behavior
+        ctk.CTkLabel(
+            scroll_frame,
+            text="💡 GUI logs are hidden by default and auto-show on ERROR/CRITICAL messages",
+            font=ctk.CTkFont(size=10),
+            text_color="gray70",
+        ).pack(anchor="w", pady=(2, 10), padx=10)
+        
+        # File Logging Section
+        ctk.CTkLabel(
+            scroll_frame,
+            text="File Logging:",
+            font=ctk.CTkFont(weight="bold"),
+        ).pack(anchor="w", pady=(20, 2), padx=5)
+        
+        self.file_enable_checkbox = ctk.CTkCheckBox(
+            scroll_frame,
+            text="Enable file logging",
+            variable=self.local_vars["enable_file_logging_var"],
+            command=self._on_file_logging_enabled_changed,
+        )
+        self.file_enable_checkbox.pack(anchor="w", pady=(5, 5), padx=10)
+        
+        file_level_frame = ctk.CTkFrame(scroll_frame)
+        file_level_frame.pack(fill="x", pady=2, padx=10)
+        ctk.CTkLabel(file_level_frame, text="Level:", width=80, anchor="w").pack(side="left", padx=(5, 5))
+        self.file_log_level_combo = ctk.CTkComboBox(
+            file_level_frame,
+            variable=self.local_vars["file_log_level_var"],
+            values=list(Logger.LEVELS.keys()),
+            state="readonly",
+            width=120,
+        )
+        self.file_log_level_combo.pack(side="left", padx=(0, 5))
+        
+        # File logging path
+        log_path_frame = ctk.CTkFrame(scroll_frame)
+        log_path_frame.pack(fill="x", pady=2, padx=10)
+        ctk.CTkLabel(log_path_frame, text="File Path:", width=80, anchor="w").pack(side="left", padx=(5, 5))
+        self.log_file_path_entry = ctk.CTkEntry(
+            log_path_frame,
+            textvariable=self.local_vars["log_file_path_var"],
+            width=200,
+        )
+        self.log_file_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        # File logging max size
+        log_size_frame = ctk.CTkFrame(scroll_frame)
+        log_size_frame.pack(fill="x", pady=2, padx=10)
+        ctk.CTkLabel(log_size_frame, text="Max Size (MB):", width=80, anchor="w").pack(side="left", padx=(5, 5))
+        self.log_file_max_size_entry = ctk.CTkEntry(
+            log_size_frame,
+            textvariable=self.local_vars["log_file_max_size_mb_var"],
+            width=80,
+        )
+        self.log_file_max_size_entry.pack(side="left", padx=(0, 5))
+        
+        # File logging backup count
+        log_backup_frame = ctk.CTkFrame(scroll_frame)
+        log_backup_frame.pack(fill="x", pady=2, padx=10)
+        ctk.CTkLabel(log_backup_frame, text="Backup Count:", width=80, anchor="w").pack(side="left", padx=(5, 5))
+        self.log_file_backup_count_entry = ctk.CTkEntry(
+            log_backup_frame,
+            textvariable=self.local_vars["log_file_backup_count_var"],
+            width=80,
+        )
+        self.log_file_backup_count_entry.pack(side="left", padx=(0, 5))
+        
+        # Initialize control states
+        self._on_console_logging_enabled_changed()
+        self._on_gui_logging_enabled_changed()
+        self._on_file_logging_enabled_changed()
 
         ctk.CTkLabel(
             scroll_frame,
             text="Log Level Colors (Hex Codes, e.g., #RRGGBB):",
             font=ctk.CTkFont(weight="bold"),
-        ).pack(anchor="w", pady=(10, 10), padx=5)
+        ).pack(anchor="w", pady=(20, 10), padx=5)
         for level_name_upper in ["ERROR", "WARNING", "INFO", "DEBUG", "CRITICAL"]:
             level_name_lower = level_name_upper.lower()
             level_frame = ctk.CTkFrame(scroll_frame)
@@ -1245,7 +1392,13 @@ class SettingsDialog(ctk.CTkToplevel):
             return None
 
         # Try to load existing key from config directory
-        config_dir = os.path.dirname(self.parent_gui.config.get("config_file_path", ""))
+        config_file_path = self.parent_gui.config.get("config_file_path", "")
+        if config_file_path:
+            config_dir = os.path.dirname(config_file_path)
+        else:
+            # Fallback to current directory if config path not available
+            config_dir = os.getcwd()
+        
         key_file = os.path.join(config_dir, ".hidock_key.dat")
 
         try:
@@ -1586,6 +1739,8 @@ class SettingsDialog(ctk.CTkToplevel):
                 "default_command_timeout_ms_var",
                 "file_stream_timeout_s_var",
                 "auto_refresh_interval_s_var",
+                "log_file_max_size_mb_var",
+                "log_file_backup_count_var",
             ]:
                 try:
                     value = int(str(value).strip())
@@ -1638,3 +1793,46 @@ class SettingsDialog(ctk.CTkToplevel):
 
         except Exception as e:
             logger.error("SettingsDialog", "_save_single_setting", f"Error saving {var_name}: {e}")
+    
+    def _on_console_logging_enabled_changed(self):
+        """Handle console logging enable/disable changes."""
+        if not hasattr(self, "local_vars") or "enable_console_logging_var" not in self.local_vars:
+            return
+        
+        enabled = self.local_vars["enable_console_logging_var"].get()
+        
+        # Enable/disable console logging level combo
+        if hasattr(self, "console_log_level_combo"):
+            self.console_log_level_combo.configure(state="readonly" if enabled else "disabled")
+    
+    def _on_gui_logging_enabled_changed(self):
+        """Handle GUI logging enable/disable changes."""
+        if not hasattr(self, "local_vars") or "enable_gui_logging_var" not in self.local_vars:
+            return
+        
+        enabled = self.local_vars["enable_gui_logging_var"].get()
+        
+        # Enable/disable GUI logging level combo
+        if hasattr(self, "gui_log_level_combo"):
+            self.gui_log_level_combo.configure(state="readonly" if enabled else "disabled")
+    
+    def _on_file_logging_enabled_changed(self):
+        """Handle file logging enable/disable changes."""
+        if not hasattr(self, "local_vars") or "enable_file_logging_var" not in self.local_vars:
+            return
+        
+        enabled = self.local_vars["enable_file_logging_var"].get()
+        
+        # Enable/disable file logging related fields
+        state = "normal" if enabled else "disabled"
+        
+        if hasattr(self, "log_file_path_entry"):
+            self.log_file_path_entry.configure(state=state)
+        if hasattr(self, "log_file_max_size_entry"):
+            self.log_file_max_size_entry.configure(state=state)
+        if hasattr(self, "log_file_backup_count_entry"):
+            self.log_file_backup_count_entry.configure(state=state)
+        if hasattr(self, "file_log_level_combo"):
+            self.file_log_level_combo.configure(state="readonly" if enabled else "disabled")
+    
+    # Calendar integration methods removed - impractical for regular users

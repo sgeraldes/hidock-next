@@ -59,10 +59,10 @@ complete control and privacy.
 - **🔍 Smart Search:** Find recordings by tags, date, duration, or filename
 - **📊 Recording Insights:** See recording statistics, duration trends, storage usage
 
-### 🎯 **Phase 3: Calendar Integration**
-- **📅 Outlook Integration:** Link recordings to calendar meetings automatically
-- **⏰ Meeting Context:** Auto-tag recordings with meeting details and participants
-- **📆 Multiple Calendar Support:** Google Calendar, Apple Calendar, and other providers
+### 🎯 **Phase 3: Calendar Integration** *(Disabled by Default)*
+- **📅 Advanced Calendar Features:** Currently disabled for regular users (requires enterprise setup)
+- **🔧 Developer/Enterprise Use:** Available with `pip install hidock-next[calendar]` for advanced users
+- **📋 Simple Alternative Planned:** File-based calendar import (.ics) for future releases
 
 ### 🎯 **Phase 4: AI-Powered Features**
 - **🤖 Local AI Transcription:** Convert speech to text with offline models

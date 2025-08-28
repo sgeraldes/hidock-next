@@ -344,11 +344,11 @@ class DesktopDeviceAdapter(IDeviceInterface):
                     f"No cached size available, fetching file list for {recording_id}",
                 )
                 recordings = await self.get_recordings()
-                recording = next((r for r in recordings if r.id == recording_id), None)
+                recording = next((r for r in recordings if r.get('name') == recording_id), None)
                 if not recording:
                     raise FileNotFoundError(f"Recording {recording_id} not found")
-                recording_filename = recording.filename
-                recording_size = recording.size
+                recording_filename = recording['name']
+                recording_size = recording['length']
 
             # Set up progress tracking
             if progress_callback:
@@ -426,24 +426,22 @@ class DesktopDeviceAdapter(IDeviceInterface):
             raise ConnectionError("No device connected")
 
         try:
-            # Get recording info
-            recordings = await self.get_recordings()
-            recording = next((r for r in recordings if r.id == recording_id), None)
-            if not recording:
-                raise FileNotFoundError(f"Recording {recording_id} not found")
+            # Use recording_id as filename directly (following WebUSB implementation)
+            # This avoids the expensive file list operation
+            filename = recording_id
 
             if progress_callback:
                 progress_callback(
                     OperationProgress(
                         operation_id=f"delete_{recording_id}",
-                        operation_name=f"Deleting {recording.filename}",
+                        operation_name=f"Deleting {filename}",
                         progress=0.5,
                         status=OperationStatus.IN_PROGRESS,
                     )
                 )
 
-            # Delete using Jensen device
-            result = self.jensen_device.delete_file(recording.filename)
+            # Delete using Jensen device - pass filename directly
+            result = self.jensen_device.delete_file(filename)
 
             if result.get("result") != "success":
                 raise RuntimeError(f"Delete failed: {result.get('result', 'unknown error')}")
@@ -452,7 +450,7 @@ class DesktopDeviceAdapter(IDeviceInterface):
                 progress_callback(
                     OperationProgress(
                         operation_id=f"delete_{recording_id}",
-                        operation_name=f"Deleted {recording.filename}",
+                        operation_name=f"Deleted {filename}",
                         progress=1.0,
                         status=OperationStatus.COMPLETED,
                     )

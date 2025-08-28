@@ -330,7 +330,7 @@ def check_linux_system_dependencies():
         if choice == "1":
             print("\n🚀 Running automated Linux system dependencies setup...")
             try:
-                result = run_command("python3 setup_linux_deps.py", check=False)
+                result = run_command("python3 scripts/setup/setup_linux_deps.py", check=False)
                 if result.returncode == 0:
                     print("✅ System dependencies setup completed!")
                     print("⚠️  If you were added to dialout group, you may need to log out and back in")
@@ -341,7 +341,7 @@ def check_linux_system_dependencies():
                     return True
             except Exception as e:
                 print(f"❌ Could not run system dependencies setup: {e}")
-                print("   Please run manually: python3 setup_linux_deps.py")
+                print("   Please run manually: python3 scripts/setup/setup_linux_deps.py")
                 return True
         
         elif choice == "2":
@@ -372,7 +372,7 @@ def check_linux_system_dependencies():
         elif choice == "3":
             print("\n⚠️  Continuing without system dependencies...")
             print("   Python package installation may fail")
-            print("   You can install system dependencies later with: python3 setup_linux_deps.py")
+            print("   You can install system dependencies later with: python3 scripts/setup/setup_linux_deps.py")
             return True
     
     else:

@@ -2,6 +2,16 @@
 """
 Calendar Service Interface and Implementation
 
+⚠️  CALENDAR INTEGRATION DISABLED BY DEFAULT ⚠️
+
+This module is NOT used by default to avoid requiring enterprise-level
+Azure AD credentials that regular users don't have access to.
+
+For advanced users who want calendar integration:
+1. Install optional dependency: pip install hidock-next[calendar]
+2. Enable in configuration: calendar_provider = "outlook"
+3. Configure Azure AD credentials in Settings
+
 This module provides the calendar integration functionality for HiDock Next,
 enabling automatic correlation of meeting recordings with calendar events.
 

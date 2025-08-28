@@ -21,7 +21,7 @@ class TreeViewMixin:
         tree_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
-        columns = ("num", "name", "datetime", "size", "duration", "version", "status")
+        columns = ("num", "name", "datetime", "size", "duration", "meeting", "version", "status")
         # Set initial selectmode based on configuration
         initial_selectmode = "browse" if self.single_selection_mode_var.get() else "extended"
         self.file_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode=initial_selectmode)
@@ -30,6 +30,9 @@ class TreeViewMixin:
         self.file_tree.tag_configure("size_mismatch", foreground="orange")
         self.file_tree.tag_configure("downloaded_ok", foreground="green")
         self.file_tree.tag_configure("downloading", foreground="dark orange")
+        self.file_tree.tag_configure("download", foreground="dark orange")  # For download operations
+        self.file_tree.tag_configure("deleting", foreground="red")
+        self.file_tree.tag_configure("delete", foreground="red")  # For delete operations
         self.file_tree.tag_configure("queued", foreground="gray50")
         self.file_tree.tag_configure("cancelled", foreground="firebrick3")
         self.file_tree.tag_configure("playing", foreground="purple")
@@ -50,13 +53,15 @@ class TreeViewMixin:
                 self.file_tree["displaycolumns"] = columns
         else:
             self.file_tree["displaycolumns"] = columns
-        for col, text in self.original_tree_headings.items():
-            is_numeric = col in ["size", "duration"]
-            self.file_tree.heading(
-                col,
-                text=text,
-                command=lambda c=col, n=is_numeric: self.sort_treeview_column(c, n),
-            )
+        for col in columns:
+            if col in self.original_tree_headings:
+                text = self.original_tree_headings[col]
+                is_numeric = col in ["size", "duration"]
+                self.file_tree.heading(
+                    col,
+                    text=text,
+                    command=lambda c=col, n=is_numeric: self.sort_treeview_column(c, n),
+                )
             if col == "num":
                 self.file_tree.column(col, width=40, minwidth=40, stretch=False)
             elif col == "name":
@@ -65,6 +70,8 @@ class TreeViewMixin:
                 self.file_tree.column(col, width=80, minwidth=60, anchor="e")
             elif col == "datetime":
                 self.file_tree.column(col, width=150, minwidth=120, anchor="center")
+            elif col == "meeting":
+                self.file_tree.column(col, width=200, minwidth=150, anchor="w")
             elif col == "version":
                 self.file_tree.column(col, width=70, minwidth=50, anchor="center")
             else:
@@ -196,6 +203,9 @@ class TreeViewMixin:
 
             # Format version - display the raw value from the device
             version_str = str(file_info.get("version", "N/A"))
+            
+            # Get meeting information
+            meeting_text = file_info.get("meeting_display_text", "")
 
             values = (
                 file_info.get("original_index", i + 1),
@@ -203,6 +213,7 @@ class TreeViewMixin:
                 datetime_str,
                 size_mb_str,
                 duration_str,
+                meeting_text,
                 version_str,
                 status_text,
             )
@@ -401,11 +412,15 @@ class TreeViewMixin:
             return
         # Use basic ASCII characters that should display on all systems
         arrow = " v" if reverse else " ^"
-        for col_id, text in self.original_tree_headings.items():
-            if col_id == sorted_by_col:
-                self.file_tree.heading(col_id, text=text + arrow)
-            else:
-                self.file_tree.heading(col_id, text=text)
+        # Only update headings for columns that exist in the treeview
+        treeview_columns = self.file_tree["columns"]
+        for col_id in treeview_columns:
+            if col_id in self.original_tree_headings:
+                text = self.original_tree_headings[col_id]
+                if col_id == sorted_by_col:
+                    self.file_tree.heading(col_id, text=text + arrow)
+                else:
+                    self.file_tree.heading(col_id, text=text)
 
     def _on_file_double_click_filtered(self, event):
         """

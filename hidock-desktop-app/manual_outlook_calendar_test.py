@@ -25,7 +25,7 @@ import traceback
 # Add the current directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config_and_logger import ConfigManager, logger
+from config_and_logger import load_config, save_config, logger
 from outlook_calendar_service import OutlookCalendarService, OUTLOOK_AVAILABLE
 
 
@@ -33,8 +33,8 @@ class OutlookCalendarTester:
     """Test class for Outlook Calendar integration."""
     
     def __init__(self):
-        self.config_manager = ConfigManager()
-        self.outlook_service = OutlookCalendarService(self.config_manager)
+        self.config = load_config()
+        self.outlook_service = OutlookCalendarService(self.config)
         
     def check_prerequisites(self):
         """Check if all prerequisites are met."""
@@ -88,7 +88,7 @@ class OutlookCalendarTester:
         
         try:
             # Enable integration for testing
-            self.config_manager.set("outlook_integration_enabled", True)
+            self.config['calendar_provider'] = 'outlook'
             
             # Attempt authentication
             success = self.outlook_service.authenticate(client_id, client_secret, tenant_id)
@@ -240,9 +240,10 @@ class OutlookCalendarTester:
             choice = input("\nDo you want to remove saved credentials? (y/N): ").strip().lower()
             if choice == 'y':
                 # Remove outlook credentials from config
-                if self.config_manager.get("outlook_credentials"):
+                if self.config.get("calendar_outlook_client_id"):
                     # Don't actually remove - just disable for testing
-                    self.config_manager.set("outlook_integration_enabled", False)
+                    self.config['calendar_provider'] = 'disabled'
+                    save_config(self.config)
                     print("✅ Integration disabled (credentials kept for future use)")
                 else:
                     print("ℹ️  No saved credentials to remove")
@@ -260,7 +261,7 @@ class OutlookCalendarTester:
             return False
         
         # Check if already authenticated
-        if self.config_manager.get("outlook_integration_enabled") and self.outlook_service.auto_authenticate():
+        if self.config.get("calendar_provider") == 'outlook' and self.outlook_service.auto_authenticate():
             print("\n✅ Found saved credentials - auto-authentication successful!")
             
             choice = input("Use saved credentials? (Y/n): ").strip().lower()

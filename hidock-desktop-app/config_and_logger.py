@@ -49,8 +49,10 @@ def get_default_config() -> dict:
         "quit_without_prompt_if_connected": False,
         "appearance_mode": "System",
         "color_theme": "blue",
-        "suppress_console_output": False,
-        "suppress_gui_log_output": False,
+        "suppress_console_output": False,  # Deprecated - use enable_console_logging
+        "suppress_gui_log_output": False,  # Deprecated - use enable_gui_logging
+        "enable_console_logging": True,
+        "enable_gui_logging": True,
         "window_geometry": "950x850+100+100",  # Default window size and position
         "treeview_columns_display_order": "name,size,duration,date,time,status",
         "logs_pane_visible": False,
@@ -71,6 +73,14 @@ def get_default_config() -> dict:
         "icon_fallback_color_1": "blue",
         "icon_fallback_color_2": "default",
         "icon_size_str": "32",
+        "calendar_chunking_period": "1 Week",
+        "enable_file_logging": False,
+        "log_file_path": "hidock.log",
+        "log_file_max_size_mb": 10,
+        "log_file_backup_count": 5,
+        "console_log_level": "INFO",
+        "gui_log_level": "ERROR",  # Emergency visibility only
+        "file_log_level": "DEBUG",  # Complete logging for users
     }
 
 
@@ -96,6 +106,14 @@ def _validate_and_merge_config(defaults, loaded_config):
         "suppress_gui_log_output": bool,
         "logs_pane_visible": bool,
         "loop_playback": bool,
+        "enable_file_logging": bool,
+        "enable_console_logging": bool,
+        "enable_gui_logging": bool,
+        "log_file_max_size_mb": int,
+        "log_file_backup_count": int,
+        "console_log_level": lambda x: x in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        "gui_log_level": lambda x: x in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        "file_log_level": lambda x: x in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         "selected_vid": int,
         "selected_pid": int,
         "target_interface": int,
@@ -202,13 +220,13 @@ def load_config():
 # Logger class definition (identical to the one in the original script)
 class Logger:
     """
-
-    A flexible logger for console and GUI output with configurable levels.
+    A flexible logger for console, GUI, and file output with configurable levels.
 
     This logger supports different logging levels (DEBUG, INFO, WARNING, ERROR,
-    CRITICAL), colored console output (on supported terminals), and can route
-    log messages to a GUI callback function. Its behavior, such as log level
-    and output suppression, can be configured via a dictionary.
+    CRITICAL), colored console output (on supported terminals), can route
+    log messages to a GUI callback function, and can write logs to files with
+    automatic rotation. Its behavior, such as log level, output suppression,
+    and file logging settings, can be configured via a dictionary.
     """
 
     LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
@@ -225,14 +243,20 @@ class Logger:
         Args:
             initial_config (dict, optional): A dictionary containing initial
                 configuration for the logger, such as 'log_level',
-                'suppress_console_output', and 'suppress_gui_log_output'.
+                'suppress_console_output', 'suppress_gui_log_output',
+                and file logging options including independent levels
+                for console, GUI, and file outputs.
                 Defaults to an empty dictionary if None.
         """
         self.gui_log_callback = None
+        self.gui_callbacks = []  # Support for multiple GUI callbacks
+        self.log_file = None
         # Use a copy of the initial_config for the logger
         # to avoid modifying the shared config dict directly by mistake
         self.config = initial_config.copy() if initial_config else {}
         self.set_level(self.config.get("log_level", "INFO"))
+        self._setup_independent_levels()
+        self._setup_file_logging()
 
     def set_gui_log_callback(self, callback):
         """
@@ -244,11 +268,37 @@ class Logger:
         """
         self.gui_log_callback = callback
 
+    def add_gui_callback(self, callback):
+        """
+        Adds a GUI callback function for processing log messages.
+        
+        This allows multiple GUI components to receive log messages,
+        enabling features like auto-show for critical messages.
+
+        Args:
+            callback (callable): A function that accepts five arguments:
+                log_level (str), module (str), function (str), 
+                message (str), formatted_message (str).
+        """
+        if callback not in self.gui_callbacks:
+            self.gui_callbacks.append(callback)
+
+    def remove_gui_callback(self, callback):
+        """
+        Removes a GUI callback function.
+
+        Args:
+            callback (callable): The callback function to remove.
+        """
+        if callback in self.gui_callbacks:
+            self.gui_callbacks.remove(callback)
+
     def set_level(self, level_name):
         """
-        Sets the minimum logging level for the logger.
+        Sets the minimum logging level for the logger (global fallback).
 
-        Messages with a level lower than this will be ignored.
+        This level is used as a fallback when independent levels are not set.
+        Individual output levels (console, GUI, file) take precedence if configured.
 
         Args:
             level_name (str): The name of the log level (e.g., "INFO", "DEBUG").
@@ -262,9 +312,101 @@ class Logger:
                 "info",
                 "Logger",
                 "set_level",
-                f"Log level set to {level_name.upper()}",
+                f"Global log level set to {level_name.upper()}",
                 force_level=self.LEVELS["INFO"],
             )
+
+    def _setup_independent_levels(self):
+        """
+        Sets up independent log levels for console, GUI, and file outputs.
+        Falls back to the global log_level if individual levels are not set.
+        """
+        fallback_level = self.config.get("log_level", "INFO")
+        
+        # Set individual levels, falling back to global level
+        console_level_str = self.config.get("console_log_level", fallback_level)
+        gui_level_str = self.config.get("gui_log_level", fallback_level)
+        file_level_str = self.config.get("file_log_level", fallback_level)
+        
+        self.console_level = self.LEVELS.get(console_level_str.upper(), self.LEVELS["INFO"])
+        self.gui_level = self.LEVELS.get(gui_level_str.upper(), self.LEVELS["INFO"])
+        self.file_level = self.LEVELS.get(file_level_str.upper(), self.LEVELS["INFO"])
+        
+        # Log the configured levels
+        self._log(
+            "info",
+            "Logger",
+            "_setup_independent_levels",
+            f"Independent levels - Console: {console_level_str.upper()}, GUI: {gui_level_str.upper()}, File: {file_level_str.upper()}",
+            force_level=self.LEVELS["INFO"],
+        )
+
+    def _setup_file_logging(self):
+        """
+        Sets up file logging if enabled in configuration.
+        """
+        if not self.config.get("enable_file_logging", False):
+            if self.log_file:
+                self.log_file.close()
+                self.log_file = None
+            return
+
+        log_file_path = self.config.get("log_file_path", "hidock.log")
+        
+        # Make path absolute if relative
+        if not os.path.isabs(log_file_path):
+            log_file_path = os.path.join(_SCRIPT_DIR, log_file_path)
+        
+        # Rotate log file if it exists and exceeds max size
+        self._rotate_log_file_if_needed(log_file_path)
+        
+        try:
+            self.log_file = open(log_file_path, "a", encoding="utf-8")
+            # Write a startup marker
+            startup_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.log_file.write(f"\n=== Logger started at {startup_time} ===\n")
+            self.log_file.flush()
+        except IOError as e:
+            # Fall back to console logging if file cannot be opened
+            print(f"[ERROR] Logger::_setup_file_logging - Cannot open log file {log_file_path}: {e}")
+            self.log_file = None
+
+    def _rotate_log_file_if_needed(self, log_file_path):
+        """
+        Rotates log file if it exceeds maximum size.
+        
+        Args:
+            log_file_path (str): Path to the log file
+        """
+        try:
+            if not os.path.exists(log_file_path):
+                return
+            
+            max_size_bytes = self.config.get("log_file_max_size_mb", 10) * 1024 * 1024
+            backup_count = self.config.get("log_file_backup_count", 5)
+            
+            if os.path.getsize(log_file_path) >= max_size_bytes:
+                # Close existing file handle if open
+                if self.log_file:
+                    self.log_file.close()
+                    self.log_file = None
+                
+                # Rotate existing backup files
+                for i in range(backup_count - 1, 0, -1):
+                    old_file = f"{log_file_path}.{i}"
+                    new_file = f"{log_file_path}.{i + 1}"
+                    if os.path.exists(old_file):
+                        if os.path.exists(new_file):
+                            os.remove(new_file)
+                        os.rename(old_file, new_file)
+                
+                # Move current log to .1
+                backup_file = f"{log_file_path}.1"
+                if os.path.exists(backup_file):
+                    os.remove(backup_file)
+                os.rename(log_file_path, backup_file)
+        except OSError as e:
+            print(f"[WARNING] Logger::_rotate_log_file_if_needed - Error rotating log file: {e}")
 
     def update_config(self, new_config_dict):
         """
@@ -272,17 +414,39 @@ class Logger:
 
         Args:
             new_config_dict (dict): A dictionary with configuration keys
-                to update (e.g., 'log_level', 'suppress_console_output').
+                to update (e.g., 'log_level', 'suppress_console_output',
+                independent output levels).
         """
         # Ensure that the logger's internal config is updated carefully
+        old_file_logging_enabled = self.config.get("enable_file_logging", False)
         self.config.update(new_config_dict)
-        # Potentially re-evaluate log level if "log_level" is in new_config_dict
-        if "log_level" in new_config_dict:
-            self.set_level(new_config_dict["log_level"])
+        
+        # Re-evaluate log levels if any level setting changed
+        level_settings_changed = any(key in new_config_dict for key in [
+            "log_level", "console_log_level", "gui_log_level", "file_log_level",
+            "enable_console_logging", "enable_gui_logging"
+        ])
+        
+        if level_settings_changed:
+            if "log_level" in new_config_dict:
+                self.set_level(new_config_dict["log_level"])
+            self._setup_independent_levels()
+            
+        # Re-setup file logging if file logging settings changed
+        new_file_logging_enabled = self.config.get("enable_file_logging", False)
+        file_logging_settings_changed = any(key in new_config_dict for key in [
+            "enable_file_logging", "log_file_path", "log_file_max_size_mb", "log_file_backup_count"
+        ])
+        
+        if file_logging_settings_changed or old_file_logging_enabled != new_file_logging_enabled:
+            self._setup_file_logging()
 
     def _log(self, level_str, module, procedure, message, force_level=None):
         """
         Internal logging method that handles message formatting and output.
+        
+        Now supports independent log levels for console, GUI, and file outputs.
+        Each output type has its own threshold level that is checked independently.
 
         Args:
             level_str (str): The string representation of the log level (e.g., "info").
@@ -290,18 +454,19 @@ class Logger:
             procedure (str): The name of the function/method originating the log.
             message (str): The log message.
             force_level (int, optional): If provided, this level is used for the
-                check instead of `self.level`. Useful for internal logger messages.
+                check instead of individual output levels. Useful for internal logger messages.
         """
         msg_level_val = self.LEVELS.get(level_str.upper())
-        effective_level_check = force_level if force_level is not None else self.level
-
-        if msg_level_val is None or msg_level_val < effective_level_check:
+        if msg_level_val is None:
             return
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         base_log_message = f"[{timestamp}][{level_str.upper()}] {str(module)}::{str(procedure)} - {message}"
 
-        if not self.config.get("suppress_console_output", False):
+        # Console output - check if enabled and meets level threshold
+        console_threshold = force_level if force_level is not None else getattr(self, 'console_level', self.level)
+        console_enabled = self.config.get("enable_console_logging", not self.config.get("suppress_console_output", False))
+        if console_enabled and msg_level_val >= console_threshold:
             level_upper = level_str.upper()
             color_map = {
                 "ERROR": self.COLOR_RED,
@@ -318,10 +483,36 @@ class Logger:
             else:
                 print(console_message)
 
-        if self.gui_log_callback:
-            # Check the suppress_gui_log_output flag from its own config
-            if not self.config.get("suppress_gui_log_output", False):
+        # GUI output - check if enabled and meets level threshold
+        gui_threshold = force_level if force_level is not None else getattr(self, 'gui_level', self.level)
+        gui_enabled = self.config.get("enable_gui_logging", not self.config.get("suppress_gui_log_output", False))
+        if gui_enabled and msg_level_val >= gui_threshold:
+            # Call the original GUI callback if set
+            if self.gui_log_callback:
                 self.gui_log_callback(base_log_message + "\n", level_str.upper())
+            
+            # Call all additional GUI callbacks (for auto-show functionality, etc.)
+            for callback in self.gui_callbacks:
+                try:
+                    callback(level_str.upper(), module, procedure, message, base_log_message)
+                except Exception as e:
+                    # Avoid recursive logging issues by using print for callback errors
+                    print(f"[WARNING] Logger::_log - Error in GUI callback: {e}")
+        
+        # File output - check individual file level or force_level
+        file_threshold = force_level if force_level is not None else getattr(self, 'file_level', self.level)
+        if (self.log_file and 
+            self.config.get("enable_file_logging", False) and 
+            msg_level_val >= file_threshold):
+            try:
+                self.log_file.write(base_log_message + "\n")
+                self.log_file.flush()
+            except IOError as e:
+                # If file write fails, disable file logging to prevent spam
+                print(f"[ERROR] Logger::_log - Failed to write to log file: {e}")
+                if self.log_file:
+                    self.log_file.close()
+                    self.log_file = None
 
     def info(self, module, procedure, message):
         """Logs a message with INFO level."""
@@ -338,6 +529,28 @@ class Logger:
     def warning(self, module, procedure, message):
         """Logs a message with WARNING level."""
         self._log("warning", module, procedure, message)
+
+    def critical(self, module, procedure, message):
+        """Logs a message with CRITICAL level."""
+        self._log("critical", module, procedure, message)
+
+    def close(self):
+        """
+        Closes the log file if it's open.
+        """
+        if self.log_file:
+            try:
+                self.log_file.close()
+            except IOError:
+                pass  # Ignore errors during cleanup
+            finally:
+                self.log_file = None
+
+    def __del__(self):
+        """
+        Ensures log file is closed when logger is destroyed.
+        """
+        self.close()
 
 
 # --- Global Logger Instance ---
@@ -400,11 +613,13 @@ def save_config(config_data_to_save):
 def update_config_settings(settings_to_update):
     """
     Updates specific settings in the configuration file without overwriting other settings.
-
-    This function is now just an alias for save_config since save_config now
-    handles merging automatically.
+    
+    This function saves the settings to the config file and also updates the global
+    logger instance with the new configuration.
 
     Args:
         settings_to_update (dict): Dictionary containing only the settings to update.
     """
     save_config(settings_to_update)
+    # Also update the global logger with the new settings
+    logger.update_config(settings_to_update)
