@@ -78,33 +78,51 @@ cd hidock-web-app && ./run.sh        # Unix
 cd hidock-web-app && run.bat         # Windows
 ```
 
+## 📊 **Platform Feature Matrix**
+
+| Feature | 🪟 **Windows** | 🍎 **macOS** | 🐧 **Linux** |
+|---------|----------------|--------------|--------------|
+| **📁 Device Management** | ✅ **Full Support** | ✅ **Full Support** | ✅ **Full Support** |
+| **🎵 Audio Processing** | ✅ **Full Support** | ✅ **Full Support** | ✅ **Full Support** |
+| **📱 File Operations** | ✅ **Full Support** | ✅ **Full Support** | ✅ **Full Support** |
+| **📅 Calendar Integration** | ✅ **Outlook COM** | ❌ **Not Available** | ❌ **Not Available** |
+| **🤝 Meeting Correlation** | ✅ **Automatic** | ❌ **Not Available** | ❌ **Not Available** |
+| **🚀 Cross-Platform Launchers** | ✅ **.bat scripts** | ✅ **.sh scripts** | ✅ **.sh scripts** |
+| **🎨 GUI Interface** | ✅ **CustomTkinter** | ✅ **CustomTkinter** | ✅ **CustomTkinter** |
+| **🔐 Offline Mode** | ✅ **Complete** | ✅ **Complete** | ✅ **Complete** |
+
 ## 📊 **Application Comparison**
 
 | Feature | 🖥️ **Desktop App** | 🌐 **Web App** | 📊 **Audio Insights** |
 |---------|---------------------|-----------------|------------------------|
 | **📁 Device Management** | ✅ **Stable** - Full USB control | ❌ **Not Implemented** | ❌ **Not Applicable** |
-| **🎵 Audio Playback** | ⚠️ **Basic** - Known speed bugs | ❌ **Not Implemented** | ❌ **Not Applicable** |
+| **🎵 Audio Playback** | ✅ **Stable** - Enhanced player | ❌ **Not Implemented** | ❌ **Not Applicable** |
 | **📱 File Operations** | ✅ **Stable** - Download/delete/batch | ❌ **Limited** | ❌ **Not Applicable** |
-| **🤖 Cloud AI** | 🚧 **Future Feature** | 🚧 **Future Feature** | ✅ **Implemented** |
-| **🏠 Local AI** | 🚧 **Planned** - Whisper/Vosk/SpeechT5 | 🚧 **Planned** - WebAssembly | ❌ **Not Planned** |
+| **📅 Calendar Features** | ✅ **Windows Only** | ❌ **Not Implemented** | ❌ **Not Applicable** |
+| **🤖 Cloud AI** | 🚧 **Framework Ready** | 🚧 **Planned** | ✅ **Implemented** |
 | **🎨 User Interface** | ✅ **Stable** - CustomTkinter GUI | ✅ **Modern** - React/TypeScript | ✅ **Modern** - React UI |
 | **🔐 Privacy Mode** | ✅ **Complete** - Fully offline ready | ⚠️ **Partial** - Browser dependent | ⚠️ **Cloud-based** |
 | **📋 Batch Processing** | ✅ **Implemented** | ❌ **Not Implemented** | ✅ **Core Feature** |
-| **⚙️ Configuration** | ✅ **Advanced** - Full settings | ⚠️ **Basic** - Limited options | ⚠️ **Basic** - API only |
 
 ### **📈 Maturity Levels**
 
 | Application | **Overall Maturity** | **Recommended For** | **Current Status** |
 |-------------|----------------------|---------------------|-------------------|
-| **🖥️ Desktop App** | **🟢 Beta Ready** - Core stable, calendar integration complete | **Daily Use** - Full device management | **Ready for 1.0-beta** |
+| **🖥️ Desktop App** | **🟢 Beta Ready** - Core stable, Windows calendar integration | **Daily Use** - Device mgmt (calendar: Windows only) | **Ready for 1.0-beta** |
 | **🌐 Web App** | **🔴 Alpha** - Early development | **Testing** - Interface preview | **Experimental** |
 | **📊 Audio Insights** | **🟢 Stable** - Production ready | **AI Processing** - Batch workflows | **Production Ready** |
 
 ### **🎯 Which Should You Choose?**
 
-- **Want reliable device control?** → **Desktop App** (best choice for daily use)
-- **Prefer browser-based interface?** → **Web App** (experimental, limited features)
-- **Need AI transcription now?** → **Audio Insights** (dedicated tool for batch processing)
+**By Platform:**
+- **🪟 Windows Users:** → **Desktop App** (full features including calendar integration)
+- **🍎 macOS/🐧 Linux Users:** → **Desktop App** (all features except calendar integration)
+- **🌐 Any Platform:** → **Web App** (experimental, limited features)
+
+**By Use Case:**
+- **Daily device management:** → **Desktop App** (best choice for all platforms)
+- **Need calendar integration:** → **Desktop App on Windows only**
+- **AI transcription now:** → **Audio Insights** (dedicated tool for batch processing)
 
 ### **🗺️ AI Provider Roadmap**
 
@@ -123,9 +141,9 @@ cd hidock-web-app && run.bat         # Windows
 
 ## ✨ **Key Features**
 
-- **📅 Calendar Integration:** Complete Outlook integration with automatic meeting correlation, visual feedback, and intelligent caching
+- **📅 Calendar Integration:** Outlook integration with meeting correlation (🪟 **Windows only** - macOS/Linux planned)
 - **🚀 Cross-Platform Launchers:** Easy application launching with Windows (.bat) and Unix (.sh) scripts for all platforms
-- **🎵 Audio Metadata System:** Advanced audio processing with meeting correlation and metadata management
+- **🎵 Audio Metadata System:** Advanced audio processing with metadata management (meeting correlation on Windows only)
 - **🤖 Multi-AI Provider Support:** Framework for 11 AI providers including local models (Ollama, LM Studio)
 - **🎙️ Professional Audio Processing:** Enhanced HTA→MP3 conversion with smart resampling (16kHz for speech)
 - **🖥️ Robust Device Management:** Full USB control for H1, H1E, P1 variants across Windows/macOS/Linux

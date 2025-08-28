@@ -4,6 +4,14 @@
 
 The HiDock Desktop Application features comprehensive calendar integration with Microsoft Outlook, providing automatic meeting detection and association for audio recordings. This system enhances the user experience by automatically matching recordings with calendar meetings based on time correlation.
 
+## ⚠️ **Platform Compatibility**
+
+**🪟 Windows Only**: Calendar integration currently works only on Windows using the Outlook COM API.
+
+- ✅ **Windows**: Full Outlook COM integration
+- ❌ **macOS**: Not available (EventKit integration planned)
+- ❌ **Linux**: Not available (cross-platform solution planned)
+
 ## Recent Improvements (August 2025)
 
 ### Major Fixes and Enhancements
