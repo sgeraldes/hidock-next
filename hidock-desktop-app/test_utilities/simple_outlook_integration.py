@@ -134,14 +134,14 @@ class SimpleOutlookIntegration:
             try:
                 return self._get_meetings_via_com(target_date)
             except Exception as e:
-                logger.warning(f"COM method failed: {e}")
+                logger.warning("COM method failed: Exception occurred during COM operation")
         
         # Fall back to export files
         if "export" in self.available_methods:
             try:
                 return self._get_meetings_via_export(target_date)
             except Exception as e:
-                logger.warning(f"Export method failed: {e}")
+                logger.warning("Export method failed: Exception occurred during export operation")
         
         return []
     
@@ -210,14 +210,14 @@ class SimpleOutlookIntegration:
                         meetings.append(meeting)
                         
                     except Exception as e:
-                        logger.debug(f"Error processing appointment: {e}")
+                        logger.debug("Error processing appointment: Exception occurred during appointment processing")
                         continue
                 
                 logger.info(f"Found {len(meetings)} meetings via COM for {target_date.date()}")
                 return meetings
             
             except Exception as e:
-                logger.warning(f"Outlook COM attempt {attempt + 1}/{max_retries} failed: {e}")
+                logger.warning(f"Outlook COM attempt {attempt + 1}/{max_retries} failed: Exception occurred")
                 try:
                     pythoncom.CoUninitialize()
                 except:
@@ -231,7 +231,7 @@ class SimpleOutlookIntegration:
                     continue
                 else:
                     # Final attempt failed
-                    logger.error(f"Error accessing Outlook via COM after {max_retries} attempts: {e}")
+                    logger.error(f"Error accessing Outlook via COM after {max_retries} attempts: Exception occurred")
                     return []
         
         # This should never be reached due to the loop structure, but add for safety
@@ -289,7 +289,7 @@ class SimpleOutlookIntegration:
             logger.info(f"Found {len(meetings)} meetings in {latest_file}")
             return meetings
         except Exception as e:
-            logger.error(f"Error parsing ICS file {latest_file}: {e}")
+            logger.error(f"Error parsing ICS file {latest_file}: Exception occurred during parsing")
             return []
     
     def _parse_ics_file(self, file_path: str, target_date: datetime) -> List[SimpleMeeting]:
@@ -365,7 +365,7 @@ class SimpleOutlookIntegration:
             )
             
         except Exception as e:
-            logger.debug(f"Error parsing ICS event: {e}")
+            logger.debug("Error parsing ICS event: Exception occurred during event parsing")
             return None
     
     def _parse_ics_datetime(self, datetime_str: str) -> datetime:
@@ -413,14 +413,14 @@ class SimpleOutlookIntegration:
             try:
                 return self._get_meetings_via_com_range(start_date, end_date)
             except Exception as e:
-                logger.warning(f"COM range method failed: {e}")
+                logger.warning("COM range method failed: Exception occurred during range query")
         
         # Fall back to getting meetings day by day
         if "export" in self.available_methods or "com" in self.available_methods:
             try:
                 return self._get_meetings_day_by_day(start_date, end_date)
             except Exception as e:
-                logger.warning(f"Day-by-day fallback failed: {e}")
+                logger.warning("Day-by-day fallback failed: Exception occurred during day-by-day query")
         
         return []
     
@@ -500,7 +500,7 @@ class SimpleOutlookIntegration:
                     break
                     
                 except Exception as format_error:
-                    logger.debug(f"Outlook COM: Date format {date_format} failed: {format_error}")
+                    logger.debug(f"Outlook COM: Date format {date_format} failed: Exception occurred")
                     continue
             
             if not filtered_appointments:
@@ -550,14 +550,14 @@ class SimpleOutlookIntegration:
                     meetings.append(meeting)
                     
                 except Exception as e:
-                    logger.debug(f"Error processing appointment: {e}")
+                    logger.debug("Error processing appointment: Exception occurred during appointment processing")
                     continue
             
             logger.info(f"Found {len(meetings)} meetings via COM for range {start_date.date()} to {end_date.date()}")
             return meetings
             
         except Exception as e:
-            logger.error(f"Error accessing Outlook via COM for date range: {e}")
+            logger.error("Error accessing Outlook via COM for date range: Exception occurred")
             return []
         finally:
             try:
@@ -577,7 +577,7 @@ class SimpleOutlookIntegration:
                 all_meetings.extend(day_meetings)
                 logger.debug(f"Found {len(day_meetings)} meetings for {current_date.date()}")
             except Exception as e:
-                logger.warning(f"Error getting meetings for {current_date.date()}: {e}")
+                logger.warning(f"Error getting meetings for {current_date.date()}: Exception occurred")
             
             current_date += timedelta(days=1)
         
@@ -665,7 +665,7 @@ class SimpleOutlookIntegration:
             
         except Exception as e:
             self.last_error = str(e)
-            logger.error(f"Calendar refresh failed: {e}")
+            logger.error("Calendar refresh failed: Exception occurred during refresh")
             return False
     
     def get_events(self, start_date: datetime = None, end_date: datetime = None) -> List[SimpleMeeting]:

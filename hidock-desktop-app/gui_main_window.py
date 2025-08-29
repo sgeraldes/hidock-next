@@ -3398,10 +3398,33 @@ You can dismiss this warning and continue using the application with limited aud
             meeting_type = "In-person" if meeting.location else "Virtual"
             if meeting.location:
                 location_lower = meeting.location.lower()
-                if "teams.microsoft.com" in location_lower:
-                    meeting_type = "Teams"
-                elif "zoom.us" in location_lower:
-                    meeting_type = "Zoom"
+                # Use proper URL parsing for security
+                from urllib.parse import urlparse
+                try:
+                    # Check if location contains URLs and parse them
+                    import re
+                    urls = re.findall(r'https?://[^\s<>"\']+', location_lower)
+                    for url in urls:
+                        parsed = urlparse(url)
+                        hostname = parsed.hostname
+                        if hostname and hostname.endswith("teams.microsoft.com"):
+                            meeting_type = "Teams"
+                            break
+                        elif hostname and hostname.endswith("zoom.us"):
+                            meeting_type = "Zoom"
+                            break
+                    else:
+                        # Fallback for simple text matching (non-URL context)
+                        if "teams meeting" in location_lower or "microsoft teams" in location_lower:
+                            meeting_type = "Teams"
+                        elif "zoom meeting" in location_lower:
+                            meeting_type = "Zoom"
+                except Exception:
+                    # Fallback for parsing errors
+                    if "teams meeting" in location_lower or "microsoft teams" in location_lower:
+                        meeting_type = "Teams"
+                    elif "zoom meeting" in location_lower:
+                        meeting_type = "Zoom"
             
             return {
                 'has_meeting': True,

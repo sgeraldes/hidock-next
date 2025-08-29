@@ -57,7 +57,15 @@ class MeetingMetadata:
         self.location: str = event_data.get('location', '')
         self.body: str = event_data.get('body', '')
         self.meeting_url: str = event_data.get('meeting_url', '')
-        self.is_teams_meeting: bool = 'teams.microsoft.com' in self.meeting_url.lower()
+        # Use proper URL parsing for security
+        self.is_teams_meeting: bool = False
+        if self.meeting_url:
+            from urllib.parse import urlparse
+            try:
+                parsed = urlparse(self.meeting_url)
+                self.is_teams_meeting = parsed.hostname and parsed.hostname.endswith('teams.microsoft.com')
+            except Exception:
+                self.is_teams_meeting = False
         self.is_recurring: bool = event_data.get('is_recurring', False)
         self.categories: List[str] = event_data.get('categories', [])
         self.sensitivity: str = event_data.get('sensitivity', 'normal')
@@ -278,9 +286,21 @@ class OutlookCalendarService:
             
             # Look for Teams/meeting URLs in body or location
             for text in [body_text, event.location or ""]:
-                if 'teams.microsoft.com' in text.lower():
-                    # Extract Teams URL
-                    import re
+                # Use proper URL parsing for security
+                import re
+                from urllib.parse import urlparse
+                # Extract potential URLs
+                url_matches = re.findall(r'https?://[^\s<>"\']+', text)
+                for url in url_matches:
+                    try:
+                        parsed = urlparse(url)
+                        if parsed.hostname and parsed.hostname.endswith('teams.microsoft.com'):
+                            meeting_url = url
+                            break
+                    except Exception:
+                        continue
+                else:
+                    # Legacy fallback for direct Teams URL pattern matching
                     teams_match = re.search(r'https://teams\.microsoft\.com/[^\s<>"\']+', text)
                     if teams_match:
                         meeting_url = teams_match.group()

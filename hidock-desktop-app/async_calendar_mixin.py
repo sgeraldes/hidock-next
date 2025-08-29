@@ -267,10 +267,33 @@ class AsyncCalendarMixin:
             meeting_type = "Virtual"
             if cached_meeting.location:
                 location_lower = cached_meeting.location.lower()
-                if "teams.microsoft.com" in location_lower:
-                    meeting_type = "Teams"
-                elif "zoom.us" in location_lower or "zoom.com" in location_lower:
-                    meeting_type = "Zoom"
+                # Use proper URL parsing for security
+                from urllib.parse import urlparse
+                try:
+                    # Check if location contains URLs and parse them
+                    import re
+                    urls = re.findall(r'https?://[^\s<>"\']+', location_lower)
+                    for url in urls:
+                        parsed = urlparse(url)
+                        hostname = parsed.hostname
+                        if hostname and hostname.endswith("teams.microsoft.com"):
+                            meeting_type = "Teams"
+                            break
+                        elif hostname and (hostname.endswith("zoom.us") or hostname.endswith("zoom.com")):
+                            meeting_type = "Zoom"
+                            break
+                    else:
+                        # Fallback for simple text matching (non-URL context)
+                        if "teams meeting" in location_lower or "microsoft teams" in location_lower:
+                            meeting_type = "Teams"
+                        elif "zoom meeting" in location_lower:
+                            meeting_type = "Zoom"
+                except Exception:
+                    # Fallback for parsing errors
+                    if "teams meeting" in location_lower or "microsoft teams" in location_lower:
+                        meeting_type = "Teams"
+                    elif "zoom meeting" in location_lower:
+                        meeting_type = "Zoom"
                 elif cached_meeting.location and not any(url in location_lower for url in ["http", ".com", ".net"]):
                     meeting_type = "In-person"
             
