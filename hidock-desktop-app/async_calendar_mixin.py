@@ -328,6 +328,13 @@ class AsyncCalendarMixin:
         # During force refresh, NEVER show "Syncing..." for files without meetings
         if hasattr(self, '_force_refresh_mode') and self._force_refresh_mode:
             display_text = ''
+        # During connection when loading cached files, NEVER show "Syncing..." 
+        elif (hasattr(self, 'device_manager') and 
+              self.device_manager and 
+              hasattr(self.device_manager, 'device_interface') and
+              self.device_manager.device_interface.is_connected()):
+            # Device is connected, so don't show sync status for files that already have cached state
+            display_text = ''
         elif (hasattr(self, '_calendar_sync_status') and 
               self._calendar_sync_status == 'syncing' and 
               hasattr(self, '_calendar_processed_files') and

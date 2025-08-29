@@ -3306,6 +3306,12 @@ You can dismiss this warning and continue using the application with limited aud
                         old_text = displayed_file.get("meeting_display_text", "None")
                         new_text = enhanced_file.get("meeting_display_text", "None")
                         
+                        # Don't update with temporary sync statuses - only update with actual meeting data or empty string
+                        if new_text in ['Syncing...', 'Refreshing...', 'Processing...']:
+                            logger.debug("CalendarSync", "_on_async_calendar_update_complete",
+                                       f"Skipping temporary sync status '{new_text}' for {filename}")
+                            continue
+                        
                         if old_text != new_text:
                             self.displayed_files_details[i]["meeting_display_text"] = new_text
                             files_updated += 1
