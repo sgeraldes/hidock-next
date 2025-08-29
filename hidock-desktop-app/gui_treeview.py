@@ -527,6 +527,12 @@ class TreeViewMixin:
             # Store active filters
             self.calendar_filters_active = filters.copy()
             
+            # Debug logging to understand the issue
+            logger.debug("TreeView", "apply_filters", 
+                        f"Filter engine available: {self.calendar_filter_engine is not None}")
+            logger.debug("TreeView", "apply_filters", f"Filters received: {filters}")
+            logger.debug("TreeView", "apply_filters", f"Filters truthiness: {bool(filters)}")
+            
             # Apply filters using the filter engine
             if self.calendar_filter_engine and filters:
                 self.filtered_files_data = self.calendar_filter_engine.apply_filters(
@@ -537,7 +543,10 @@ class TreeViewMixin:
             else:
                 # No filters active, show all files
                 self.filtered_files_data = self.all_files_data.copy()
-                logger.debug("TreeView", "apply_filters", "No filters active, showing all files")
+                if not self.calendar_filter_engine:
+                    logger.warning("TreeView", "apply_filters", "Calendar filter engine is None!")
+                else:
+                    logger.debug("TreeView", "apply_filters", "No filters active, showing all files")
             
             # Apply existing sort order to filtered data
             if hasattr(self, 'treeview_sort_column') and self.treeview_sort_column:
