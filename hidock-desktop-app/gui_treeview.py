@@ -18,6 +18,10 @@ class TreeViewMixin:
 
     def _create_file_tree_frame(self, parent_frame):
         """Creates the file treeview and its associated scrollbar."""
+        # If TreeView already exists, don't create a new one to avoid overwriting configurations
+        if hasattr(self, 'file_tree') and self.file_tree is not None:
+            return
+            
         tree_frame = ctk.CTkFrame(parent_frame, fg_color="transparent", border_width=0)
         tree_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         tree_frame.grid_columnconfigure(0, weight=1)
