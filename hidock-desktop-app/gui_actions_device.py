@@ -926,6 +926,18 @@ class DeviceActionsMixin:
                         },
                     )
             all_files_to_display = list(files_dict)
+            
+            # Enhance files with download status information for proper TreeView coloring
+            if all_files_to_display and hasattr(self, 'offline_mode_manager'):
+                try:
+                    all_files_to_display = self.offline_mode_manager.update_offline_status_indicators(all_files_to_display)
+                    # When connected, adjust offline status indicators for connected mode
+                    for file_dict in all_files_to_display:
+                        if file_dict.get("gui_status") == "On Device (Offline)":
+                            file_dict["gui_status"] = "On Device"
+                    logger.debug("GUI", "refresh_file_list_gui", f"Enhanced {len(all_files_to_display)} files with download status indicators")
+                except Exception as e:
+                    logger.warning("GUI", "refresh_file_list_gui", f"Failed to enhance files with offline status: {e}")
 
             if all_files_to_display:
                 if self.saved_treeview_sort_column and self.saved_treeview_sort_column in self.original_tree_headings:
