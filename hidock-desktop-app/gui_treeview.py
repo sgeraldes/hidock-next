@@ -509,8 +509,9 @@ class TreeViewMixin:
     
     def set_calendar_filter_engine(self, filter_engine):
         """Set the calendar filter engine instance."""
+        logger.debug("TreeView", "set_filter_engine", f"Setting filter engine: {filter_engine is not None}")
         self.calendar_filter_engine = filter_engine
-        logger.debug("TreeView", "set_filter_engine", "Calendar filter engine set")
+        logger.debug("TreeView", "set_filter_engine", f"Calendar filter engine set: {self.calendar_filter_engine is not None}")
     
     def apply_calendar_filters(self, filters: Dict[str, Any]):
         """
