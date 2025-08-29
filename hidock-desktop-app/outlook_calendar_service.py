@@ -306,13 +306,12 @@ class OutlookCalendarService:
                     if teams_match:
                         meeting_url = teams_match.group()
                         break
-                elif 'zoom.us' in text.lower():
-                    # Extract Zoom URL
-                    import re
-                    zoom_match = re.search(r'https://[\w-]+\.zoom\.us/[^\s<>"\']+', text)
-                    if zoom_match:
-                        meeting_url = zoom_match.group()
-                        break
+                    elif 'zoom.us' in text.lower():
+                        # Extract Zoom URL
+                        zoom_match = re.search(r'https://[\w-]+\.zoom\.us/[^\s<>"\']+', text)
+                        if zoom_match:
+                            meeting_url = zoom_match.group()
+                            break
             
             return {
                 'id': event.object_id if hasattr(event, 'object_id') else '',

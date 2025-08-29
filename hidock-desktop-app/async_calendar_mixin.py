@@ -294,7 +294,9 @@ class AsyncCalendarMixin:
                         meeting_type = "Teams"
                     elif "zoom meeting" in location_lower:
                         meeting_type = "Zoom"
-                elif cached_meeting.location and not any(url in location_lower for url in ["http", ".com", ".net"]):
+                
+                # Check if it's an in-person meeting (location without URLs)
+                if not any(url in location_lower for url in ["http", ".com", ".net"]):
                     meeting_type = "In-person"
             
             return {
