@@ -72,6 +72,13 @@ python setup.py
 - **Node.js 18 or higher** - [Download Node.js](https://nodejs.org/) _(for web app)_
 - **Git** - [Download Git](https://git-scm.com/) _(for developers)_
 
+### 📋 Dependency Management
+
+**HiDock Desktop** uses modern Python dependency management:
+- **Primary:** `pyproject.toml` (canonical source of truth)
+- **Compatibility:** `requirements.txt` (auto-generated for tools compatibility)
+- **Installation:** Use `pip install -e .` or `pip install -e ".[dev]"` for development
+
 ### System Dependencies
 
 #### Windows

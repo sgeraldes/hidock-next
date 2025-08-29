@@ -1,0 +1,18 @@
+# AUTO-GENERATED from pyproject.toml - DO NOT EDIT MANUALLY
+# This file is for compatibility with tools expecting requirements.txt
+# The canonical dependency list is in pyproject.toml
+#
+# To install: pip install -e .
+# To install with dev dependencies: pip install -e ".[dev]"
+# To install with calendar support: pip install -e ".[calendar]"
+
+pyusb
+customtkinter
+Pillow
+pygame
+google-generativeai
+matplotlib
+numpy
+scipy
+cryptography
+pydub
