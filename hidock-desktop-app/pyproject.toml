@@ -34,6 +34,8 @@ dependencies = [
     "scipy",
     "cryptography",
     "pydub",
+    "O365[calendar]>=2.0.0",
+    "psutil>=5.8.0",
 ]
 dynamic = ["version"]
 
@@ -50,10 +52,9 @@ dev = [
     "pylint>=2.17.0",
     "mypy>=1.0.0",
 ]
-calendar = [
-    "O365[calendar]>=2.0.0",
-    "psutil>=5.8.0",
-]
+# calendar dependencies moved to core dependencies above
+# keeping this section for backward compatibility (empty)
+calendar = []
 
 [project.urls]
 Homepage = "https://github.com/sgeraldes/hidock-next"

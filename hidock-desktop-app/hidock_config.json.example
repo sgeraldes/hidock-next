@@ -68,5 +68,5 @@
     "ai_cohere_base_url": "https://api.cohere.ai/v1",
     "_comment": "API keys will be stored encrypted when you enter them in Settings > AI Configuration",
     "visualizer_pinned": false,
-    "_calendar_comment": "Calendar integration disabled by default - requires optional O365 dependency: pip install hidock-next[calendar]"
+    "_calendar_comment": "Calendar integration available on Windows only - uses Outlook COM API and Microsoft Graph"
 }

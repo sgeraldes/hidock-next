@@ -59,10 +59,11 @@ complete control and privacy.
 - **🔍 Smart Search:** Find recordings by tags, date, duration, or filename
 - **📊 Recording Insights:** See recording statistics, duration trends, storage usage
 
-### 🎯 **Phase 3: Calendar Integration** *(Disabled by Default)*
-- **📅 Advanced Calendar Features:** Currently disabled for regular users (requires enterprise setup)
-- **🔧 Developer/Enterprise Use:** Available with `pip install hidock-next[calendar]` for advanced users
-- **📋 Simple Alternative Planned:** File-based calendar import (.ics) for future releases
+### 🎯 **Phase 3: Calendar Integration** *(Windows Only)*
+- **📅 Outlook Calendar Integration:** Automatically correlate recordings with calendar meetings
+- **🪟 Windows Platform:** Uses Outlook COM API - works with installed Outlook
+- **🔒 Secure Authentication:** OAuth2 integration with Microsoft Graph API
+- **📋 Future Enhancement:** Cross-platform .ics file import planned
 
 ### 🎯 **Phase 4: AI-Powered Features**
 - **🤖 Local AI Transcription:** Convert speech to text with offline models
@@ -133,6 +134,9 @@ python -m venv .venv
 
 # Install the application with development tools
 pip install -e ".[dev]"
+
+# Note: Calendar integration dependencies are included by default
+# Works on Windows only (uses Outlook COM API)
 
 # Run the application
 python main.py
