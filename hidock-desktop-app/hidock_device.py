@@ -1258,9 +1258,11 @@ class HiDockJensen:
                 file_list_chunks = []
                 expected_file_count = None
 
-                # Handler function mimicking the web version's Jensen.registerHandler pattern
+                # Optimized handler - avoids parsing on every chunk
+                total_bytes_received = 0
+                
                 def file_list_handler(response_data):
-                    nonlocal expected_file_count
+                    nonlocal expected_file_count, total_bytes_received
 
                     if not response_data or len(response_data) == 0:
                         # Empty response signals end of transmission
@@ -1273,17 +1275,15 @@ class HiDockJensen:
 
                     # Accumulate this chunk
                     file_list_chunks.append(response_data)
+                    total_bytes_received += len(response_data)
                     logger.debug(
                         "Jensen",
                         "list_files",
-                        f"Accumulated chunk {len(file_list_chunks)}, size: {len(response_data)} bytes",
+                        f"Accumulated chunk {len(file_list_chunks)}, size: {len(response_data)} bytes, total: {total_bytes_received}",
                     )
 
-                    # Parse accumulated file data to check completion
-                    files = self._parse_file_list_chunks(file_list_chunks)
-
-                    # Get expected count from first chunk header if available
-                    if expected_file_count is None and file_list_chunks:
+                    # Get expected count from first chunk header if available (fast header extraction)
+                    if expected_file_count is None and len(file_list_chunks) == 1:
                         first_chunk = file_list_chunks[0]
                         if len(first_chunk) >= 6 and first_chunk[0] == 0xFF and first_chunk[1] == 0xFF:
                             expected_file_count = struct.unpack(">I", first_chunk[2:6])[0]
@@ -1293,46 +1293,62 @@ class HiDockJensen:
                                 f"Expected {expected_file_count} files from header",
                             )
 
-                    # Log current progress
-                    files_parsed = len(files)
-                    logger.debug(
-                        "Jensen",
-                        "list_files",
-                        f"Parsed {files_parsed}/{expected_file_count or '?'} files so far",
-                    )
-
-                    # Check if we have all expected files
-                    if expected_file_count is not None and files_parsed >= expected_file_count:
-                        logger.info(
+                    # Fast completion estimation (avoids expensive parsing)
+                    if expected_file_count is not None:
+                        # Heuristic: ~100 bytes per file on average (filename + metadata)
+                        # Subtract 6 bytes for header
+                        estimated_files = max(0, (total_bytes_received - 6) // 100)
+                        
+                        logger.debug(
                             "Jensen",
                             "list_files",
-                            f"Received all {expected_file_count} files, completing",
+                            f"Estimated {estimated_files}/{expected_file_count} files from {total_bytes_received} bytes",
                         )
-                        return files  # Complete - return final file list
+                        
+                        # Only parse when we think we have enough data
+                        if estimated_files >= expected_file_count:
+                            logger.info(
+                                "Jensen",
+                                "list_files",
+                                f"Estimated completion reached, parsing accumulated data",
+                            )
+                            files = self._parse_file_list_chunks(file_list_chunks)
+                            
+                            if len(files) >= expected_file_count:
+                                logger.info(
+                                    "Jensen",
+                                    "list_files",
+                                    f"Parsed {len(files)} files, completing",
+                                )
+                                return files  # Complete - return final file list
+                            else:
+                                logger.debug(
+                                    "Jensen",
+                                    "list_files",
+                                    f"Parsed only {len(files)} files, need {expected_file_count - len(files)} more",
+                                )
 
-                    # Continue receiving more data - this is critical for multi-chunk transfers
-                    logger.debug(
-                        "Jensen",
-                        "list_files",
-                        f"Continue receiving: need {(expected_file_count or 0) - files_parsed} more files",
-                    )
+                    # Continue receiving more data
                     return None
 
-                # Web-style continuous receiving until handler indicates completion
+                # Optimized receiving with adaptive timeout
                 final_files = None
                 consecutive_timeouts = 0
-                max_consecutive_timeouts = 5  # Increased from 3 to be more patient
+                max_consecutive_timeouts = 3  # Reduced for faster response
+                adaptive_timeout = 1000  # Start with shorter timeout
 
                 while final_files is None:
                     response = self._receive_response(
                         seq_id,
-                        timeout_ms=2000,
-                        streaming_cmd_id=CMD_GET_FILE_LIST,  # Increased timeout
+                        timeout_ms=adaptive_timeout,
+                        streaming_cmd_id=CMD_GET_FILE_LIST,
                     )
 
                     if response and response["id"] == CMD_GET_FILE_LIST:
                         seq_id = response["sequence"]
                         consecutive_timeouts = 0
+                        # Reset to shorter timeout after successful receive
+                        adaptive_timeout = 1000
 
                         # Process this chunk through our handler
                         result = file_list_handler(response["body"])
@@ -1344,10 +1360,13 @@ class HiDockJensen:
 
                     elif response is None:  # Timeout
                         consecutive_timeouts += 1
+                        # Increase timeout gradually for slow transfers
+                        adaptive_timeout = min(adaptive_timeout * 1.5, 3000)
+                        
                         logger.debug(
                             "Jensen",
                             "list_files",
-                            f"Timeout {consecutive_timeouts}/{max_consecutive_timeouts}",
+                            f"Timeout {consecutive_timeouts}/{max_consecutive_timeouts}, adaptive timeout: {adaptive_timeout}ms",
                         )
 
                         # Don't give up too early - only complete if we're confident we have all data
@@ -1403,55 +1422,69 @@ class HiDockJensen:
         Returns:
             List of file info dictionaries
         """
-        files = []
-
-        # Combine all chunks into a single byte array
-        file_list_aggregate_data = bytearray()
+        # Optimized buffer combination - pre-calculate size to avoid reallocations
+        total_size = sum(len(chunk) for chunk in chunks)
+        if total_size == 0:
+            return []
+            
+        file_list_aggregate_data = bytearray(total_size)
+        
+        data_offset = 0
         for chunk in chunks:
-            file_list_aggregate_data.extend(chunk)
+            chunk_len = len(chunk)
+            file_list_aggregate_data[data_offset:data_offset + chunk_len] = chunk
+            data_offset += chunk_len
 
-        if not file_list_aggregate_data:
-            return files
-
-        offset = 0
+        parse_offset = 0
         total_files_from_header = -1
 
         # Check for header with total file count
         if (
             len(file_list_aggregate_data) >= 6
-            and file_list_aggregate_data[offset] == 0xFF
-            and file_list_aggregate_data[offset + 1] == 0xFF
+            and file_list_aggregate_data[parse_offset] == 0xFF
+            and file_list_aggregate_data[parse_offset + 1] == 0xFF
         ):
-            total_files_from_header = struct.unpack(">I", file_list_aggregate_data[offset + 2 : offset + 6])[0]
-            offset += 6
+            total_files_from_header = struct.unpack(">I", file_list_aggregate_data[parse_offset + 2 : parse_offset + 6])[0]
+            parse_offset += 6
+
+        # Pre-allocate files list for better performance
+        files = []
+        if total_files_from_header > 0:
+            files = [None] * total_files_from_header  # Pre-allocate
+            files.clear()  # Clear but keep capacity
 
         parsed_file_count = 0
-        while offset < len(file_list_aggregate_data):
+        while parse_offset < len(file_list_aggregate_data):
             try:
-                if offset + 4 > len(file_list_aggregate_data):
+                if parse_offset + 4 > len(file_list_aggregate_data):
                     break
 
-                file_version = file_list_aggregate_data[offset]
-                offset += 1
+                file_version = file_list_aggregate_data[parse_offset]
+                parse_offset += 1
 
-                name_len = struct.unpack(">I", b"\x00" + file_list_aggregate_data[offset : offset + 3])[0]
-                offset += 3
+                name_len = struct.unpack(">I", b"\x00" + file_list_aggregate_data[parse_offset : parse_offset + 3])[0]
+                parse_offset += 3
 
-                if offset + name_len > len(file_list_aggregate_data):
+                if parse_offset + name_len > len(file_list_aggregate_data):
                     break
 
-                filename = "".join(chr(b) for b in file_list_aggregate_data[offset : offset + name_len] if b > 0)
-                offset += name_len
+                # Optimized filename parsing - avoid generator expression
+                filename = ""
+                for i in range(name_len):
+                    byte_val = file_list_aggregate_data[parse_offset + i]
+                    if byte_val > 0:
+                        filename += chr(byte_val)
+                parse_offset += name_len
 
                 min_remaining = 4 + 6 + 16
-                if offset + min_remaining > len(file_list_aggregate_data):
+                if parse_offset + min_remaining > len(file_list_aggregate_data):
                     break
 
-                file_length_bytes = struct.unpack(">I", file_list_aggregate_data[offset : offset + 4])[0]
-                offset += 4
-                offset += 6  # Skip 6 bytes
-                signature_hex = file_list_aggregate_data[offset : offset + 16].hex()
-                offset += 16
+                file_length_bytes = struct.unpack(">I", file_list_aggregate_data[parse_offset : parse_offset + 4])[0]
+                parse_offset += 4
+                parse_offset += 6  # Skip 6 bytes
+                signature_hex = file_list_aggregate_data[parse_offset : parse_offset + 16].hex()
+                parse_offset += 16
 
                 # Parse date/time from filename
                 (
@@ -1483,7 +1516,7 @@ class HiDockJensen:
                 logger.error(
                     "Jensen",
                     "parse_file_list_chunks",
-                    f"Parsing error at offset {offset}: {e}",
+                    f"Parsing error at offset {parse_offset}: {e}",
                 )
                 break
 
