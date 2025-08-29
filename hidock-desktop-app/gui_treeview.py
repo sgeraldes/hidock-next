@@ -273,8 +273,11 @@ class TreeViewMixin:
                 selected_iids = self.file_tree.selection()
                 scroll_pos = self.file_tree.yview()
 
-                # Repopulate with sorted data
-                self._populate_treeview_from_data(sorted_files)
+                # Repopulate with sorted data (filtering-aware)
+                if hasattr(self, 'update_files_data_for_filtering'):
+                    self.update_files_data_for_filtering(sorted_files)
+                else:
+                    self._populate_treeview_from_data(sorted_files)
 
                 # Restore selection and scroll position
                 if selected_iids:
@@ -378,8 +381,11 @@ class TreeViewMixin:
         # Sort the data
         sorted_files = self._sort_files_data(self.displayed_files_details, col, self.treeview_sort_reverse)
 
-        # Repopulate the treeview with sorted data
-        self._populate_treeview_from_data(sorted_files)
+        # Repopulate the treeview with sorted data (filtering-aware)
+        if hasattr(self, 'update_files_data_for_filtering'):
+            self.update_files_data_for_filtering(sorted_files)
+        else:
+            self._populate_treeview_from_data(sorted_files)
 
         # Update the heading indicator
         self._update_treeview_heading_indicator(col, self.treeview_sort_reverse)
