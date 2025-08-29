@@ -6,6 +6,7 @@ import time
 import tkinter
 from datetime import datetime
 from tkinter import ttk
+from typing import List, Dict, Any, Optional
 
 import customtkinter as ctk
 
@@ -494,3 +495,169 @@ class TreeViewMixin:
                 self.clear_selection_button_header.pack_forget()
             else:
                 self.clear_selection_button_header.pack(side="right", padx=(2, 5), pady=2)
+
+    # Calendar Search and Filtering Methods
+    
+    def initialize_calendar_filtering(self):
+        """Initialize calendar filtering variables."""
+        self.all_files_data = []  # Store all files (unfiltered)
+        self.filtered_files_data = []  # Store currently filtered files
+        self.calendar_filters_active = {}  # Store active filters
+        self.calendar_filter_engine = None  # Will be initialized when needed
+        
+        logger.debug("TreeView", "init_filtering", "Calendar filtering initialized")
+    
+    def set_calendar_filter_engine(self, filter_engine):
+        """Set the calendar filter engine instance."""
+        self.calendar_filter_engine = filter_engine
+        logger.debug("TreeView", "set_filter_engine", "Calendar filter engine set")
+    
+    def apply_calendar_filters(self, filters: Dict[str, Any]):
+        """
+        Apply calendar filters to the file list and update the TreeView.
+        
+        Args:
+            filters: Dictionary of filter criteria
+        """
+        try:
+            if not hasattr(self, 'all_files_data'):
+                logger.warning("TreeView", "apply_filters", "Calendar filtering not initialized")
+                return
+            
+            # Store active filters
+            self.calendar_filters_active = filters.copy()
+            
+            # Apply filters using the filter engine
+            if self.calendar_filter_engine and filters:
+                self.filtered_files_data = self.calendar_filter_engine.apply_filters(
+                    self.all_files_data, filters
+                )
+                logger.debug("TreeView", "apply_filters", 
+                           f"Applied filters: {len(self.all_files_data)} -> {len(self.filtered_files_data)} files")
+            else:
+                # No filters active, show all files
+                self.filtered_files_data = self.all_files_data.copy()
+                logger.debug("TreeView", "apply_filters", "No filters active, showing all files")
+            
+            # Apply existing sort order to filtered data
+            if hasattr(self, 'treeview_sort_column') and self.treeview_sort_column:
+                self.filtered_files_data = self._sort_files_data(
+                    self.filtered_files_data,
+                    self.treeview_sort_column,
+                    getattr(self, 'treeview_sort_reverse', False)
+                )
+            
+            # Update the TreeView with filtered data
+            self._populate_treeview_from_data(self.filtered_files_data)
+            
+            # Update calendar search widget result count if available
+            if hasattr(self, 'calendar_search_widget') and self.calendar_search_widget:
+                self.calendar_search_widget.set_result_count(len(self.filtered_files_data))
+            
+            # Update status bar
+            self.update_all_status_info()
+            
+        except Exception as e:
+            logger.error("TreeView", "apply_filters", f"Error applying calendar filters: {e}")
+    
+    def clear_calendar_filters(self):
+        """Clear all calendar filters and show all files."""
+        self.apply_calendar_filters({})
+    
+    def update_files_data_for_filtering(self, files_data: List[Dict[str, Any]]):
+        """
+        Update the files data for filtering. This should be called whenever
+        new file data is loaded from the device.
+        
+        Args:
+            files_data: Updated list of file dictionaries
+        """
+        try:
+            if not hasattr(self, 'all_files_data'):
+                self.initialize_calendar_filtering()
+            
+            # Store the complete file list
+            self.all_files_data = files_data.copy()
+            
+            # Reapply current filters to the new data
+            if self.calendar_filters_active:
+                self.apply_calendar_filters(self.calendar_filters_active)
+            else:
+                # No filters active, just update the displayed data
+                self.filtered_files_data = self.all_files_data.copy()
+                self._populate_treeview_from_data(self.filtered_files_data)
+                
+                # Update search widget result count
+                if hasattr(self, 'calendar_search_widget') and self.calendar_search_widget:
+                    self.calendar_search_widget.set_result_count(len(self.filtered_files_data))
+            
+            logger.debug("TreeView", "update_files_data", 
+                       f"Updated files data: {len(files_data)} total files")
+            
+        except Exception as e:
+            logger.error("TreeView", "update_files_data", f"Error updating files data: {e}")
+    
+    def get_current_displayed_files(self) -> List[Dict[str, Any]]:
+        """
+        Get the currently displayed files (after filtering).
+        
+        Returns:
+            List of currently displayed file dictionaries
+        """
+        if hasattr(self, 'filtered_files_data'):
+            return self.filtered_files_data.copy()
+        elif hasattr(self, 'displayed_files_details'):
+            return self.displayed_files_details.copy()
+        else:
+            return []
+    
+    def get_all_files_data(self) -> List[Dict[str, Any]]:
+        """
+        Get all files data (before filtering).
+        
+        Returns:
+            List of all file dictionaries
+        """
+        if hasattr(self, 'all_files_data'):
+            return self.all_files_data.copy()
+        elif hasattr(self, 'displayed_files_details'):
+            return self.displayed_files_details.copy()
+        else:
+            return []
+    
+    def is_calendar_filter_active(self) -> bool:
+        """
+        Check if any calendar filters are currently active.
+        
+        Returns:
+            True if filters are active, False otherwise
+        """
+        return bool(getattr(self, 'calendar_filters_active', {}))
+    
+    def get_calendar_filter_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about current filtering state.
+        
+        Returns:
+            Dictionary with filtering statistics
+        """
+        try:
+            total_files = len(getattr(self, 'all_files_data', []))
+            filtered_files = len(getattr(self, 'filtered_files_data', []))
+            
+            return {
+                'total_files': total_files,
+                'filtered_files': filtered_files,
+                'hidden_files': total_files - filtered_files,
+                'filters_active': self.is_calendar_filter_active(),
+                'active_filters': getattr(self, 'calendar_filters_active', {}).copy()
+            }
+        except Exception as e:
+            logger.error("TreeView", "get_filter_stats", f"Error getting filter stats: {e}")
+            return {
+                'total_files': 0,
+                'filtered_files': 0,
+                'hidden_files': 0,
+                'filters_active': False,
+                'active_filters': {}
+            }

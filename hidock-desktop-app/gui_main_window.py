@@ -57,6 +57,8 @@ from gui_event_handlers import EventHandlersMixin
 from gui_treeview import TreeViewMixin
 from async_calendar_mixin import AsyncCalendarMixin
 from audio_metadata_mixin import AudioMetadataMixin
+from calendar_search_widget import CalendarSearchWidget
+from calendar_filter_engine import CalendarFilterEngine
 
 # from settings_window import SettingsDialog  # Commented out - not used directly
 # from storage_management import StorageMonitor, StorageOptimizer  # Future: storage features
@@ -490,6 +492,194 @@ class HiDockToolGUI(
         
         # Calendar performance settings
         self.calendar_chunking_period_var = ctk.StringVar(value=get_conf("calendar_chunking_period", "1 Week"))
+        
+        # Initialize calendar search and filtering components
+        self._initialize_calendar_search()
+
+    def _initialize_calendar_search(self):
+        """Initialize calendar search and filtering components."""
+        try:
+            # Initialize the filter engine
+            self.calendar_filter_engine = CalendarFilterEngine()
+            
+            # Initialize TreeView filtering (will be set up after TreeView is created)
+            self.calendar_search_widget = None  # Will be created in _create_files_panel
+            
+            logger.info("GUI", "init_calendar_search", "Calendar search components initialized")
+            
+        except Exception as e:
+            logger.error("GUI", "init_calendar_search", f"Error initializing calendar search: {e}")
+
+    def _create_calendar_search_widget(self, parent_frame):
+        """Create the calendar search widget and integrate it with filtering."""
+        try:
+            # Create the search widget
+            self.calendar_search_widget = CalendarSearchWidget(
+                parent_frame,
+                search_callback=self._on_calendar_search,
+                fg_color="transparent",
+                border_width=0
+            )
+            self.calendar_search_widget.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
+            
+            logger.debug("GUI", "create_search_widget", "Calendar search widget created")
+            
+        except Exception as e:
+            logger.error("GUI", "create_search_widget", f"Error creating calendar search widget: {e}")
+    
+    def _on_calendar_search(self, filters):
+        """Handle calendar search/filter changes."""
+        try:
+            logger.debug("GUI", "calendar_search", f"Search filters changed: {filters}")
+            
+            # Apply the filters using TreeView mixin
+            self.apply_calendar_filters(filters)
+            
+        except Exception as e:
+            logger.error("GUI", "calendar_search", f"Error handling calendar search: {e}")
+    
+    def _create_file_tree_frame_with_search_support(self, parent_frame):
+        """Create the file tree frame and set up search integration."""
+        try:
+            # Create the normal tree frame (row=2 because of search widget)
+            self._create_file_tree_frame_at_row(parent_frame, row=2)
+            
+            # Initialize calendar filtering in TreeView
+            self.initialize_calendar_filtering()
+            
+            # Set the filter engine in TreeView
+            self.set_calendar_filter_engine(self.calendar_filter_engine)
+            
+            logger.debug("GUI", "create_tree_with_search", "File tree with search support created")
+            
+        except Exception as e:
+            logger.error("GUI", "create_tree_with_search", f"Error creating tree with search: {e}")
+    
+    def _create_file_tree_frame_at_row(self, parent_frame, row=1):
+        """Create file tree frame at specified row (modified version of _create_file_tree_frame)."""
+        tree_frame = ctk.CTkFrame(parent_frame, fg_color="transparent", border_width=0)
+        tree_frame.grid(row=row, column=0, sticky="nsew", padx=5, pady=5)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+        columns = ("num", "name", "datetime", "size", "duration", "meeting", "version", "status")
+        # Set initial selectmode based on configuration
+        initial_selectmode = "browse" if self.single_selection_mode_var.get() else "extended"
+        self.file_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode=initial_selectmode)
+        self.file_tree.tag_configure("downloaded", foreground="blue")
+        self.file_tree.tag_configure("recording", foreground="red", font=("Arial", 10, "bold"))
+        self.file_tree.tag_configure("size_mismatch", foreground="orange")
+        self.file_tree.tag_configure("downloaded_ok", foreground="green")
+        self.file_tree.tag_configure("downloading", foreground="dark orange")
+        self.file_tree.tag_configure("download", foreground="dark orange")  # For download operations
+        self.file_tree.tag_configure("deleting", foreground="red")
+        self.file_tree.tag_configure("delete", foreground="red")  # For delete operations
+        self.file_tree.tag_configure("queued", foreground="gray50")
+        self.file_tree.tag_configure("cancelled", foreground="firebrick3")
+        self.file_tree.tag_configure("playing", foreground="purple")
+        if self.treeview_columns_display_order_str:
+            loaded_column_order = self.treeview_columns_display_order_str.split(",")
+            valid_loaded_order = [c for c in loaded_column_order if c in columns]
+            if len(valid_loaded_order) == len(columns) and set(valid_loaded_order) == set(columns):
+                try:
+                    self.file_tree["displaycolumns"] = valid_loaded_order
+                except tkinter.TclError as e:
+                    logger.warning(
+                        "GUI",
+                        "create_widgets",
+                        f"Failed to apply saved column order '{valid_loaded_order}' (TclError): {e}. Using default.",
+                    )
+                    self.file_tree["displaycolumns"] = columns
+            else:
+                self.file_tree["displaycolumns"] = columns
+        else:
+            self.file_tree["displaycolumns"] = columns
+        for col in columns:
+            if col in self.original_tree_headings:
+                text = self.original_tree_headings[col]
+                is_numeric = col in ["size", "duration"]
+                self.file_tree.heading(
+                    col,
+                    text=text,
+                    command=lambda c=col, n=is_numeric: self.sort_treeview_column(c, n),
+                )
+            if col == "num":
+                self.file_tree.column(col, width=40, minwidth=40, stretch=False)
+            elif col == "name":
+                self.file_tree.column(col, width=250, minwidth=150, stretch=True)
+            elif col in ["size", "duration"]:
+                self.file_tree.column(col, width=80, minwidth=60, anchor="e")
+            elif col == "datetime":
+                self.file_tree.column(col, width=150, minwidth=120, anchor="center")
+            elif col == "meeting":
+                self.file_tree.column(col, width=200, minwidth=150, anchor="w")
+            elif col == "version":
+                self.file_tree.column(col, width=70, minwidth=50, anchor="center")
+            else:
+                self.file_tree.column(col, width=100, minwidth=80, anchor="w")
+        self.file_tree.grid(row=0, column=0, sticky="nsew")
+
+        # Create and configure scrollbar - simplest possible approach
+        self.tree_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.file_tree.yview)
+        self.tree_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.file_tree.configure(yscrollcommand=self.tree_scrollbar.set)
+
+        # Configure frame columns
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(1, weight=0)
+        self.file_tree.bind("<<TreeviewSelect>>", self.on_file_selection_change)
+        self.file_tree.bind("<Double-1>", self._on_file_double_click_filtered)
+        self.file_tree.bind("<Button-3>", self._on_file_right_click)
+        self.file_tree.bind("<Control-a>", lambda event: self.select_all_files_action())
+        self.file_tree.bind("<Control-A>", lambda event: self.select_all_files_action())
+        self.file_tree.bind("<Delete>", self._on_delete_key_press)
+        self.file_tree.bind("<Return>", self._on_enter_key_press)
+        self.file_tree.bind("<ButtonPress-1>", self._on_file_button1_press)
+        self.file_tree.bind("<B1-Motion>", self._on_file_b1_motion)
+        self.file_tree.bind("<ButtonRelease-1>", self._on_file_button1_release)
+        
+        # Set up keyboard shortcuts for search
+        self._setup_calendar_search_shortcuts()
+
+    def _setup_calendar_search_shortcuts(self):
+        """Set up keyboard shortcuts for calendar search functionality."""
+        try:
+            # Ctrl+F to focus search
+            self.bind("<Control-f>", lambda event: self._focus_calendar_search())
+            self.bind("<Control-F>", lambda event: self._focus_calendar_search())
+            
+            # Escape to clear search when search widget is focused
+            self.bind("<Escape>", lambda event: self._clear_calendar_search_if_focused())
+            
+            logger.debug("GUI", "setup_search_shortcuts", "Calendar search keyboard shortcuts set up")
+            
+        except Exception as e:
+            logger.error("GUI", "setup_search_shortcuts", f"Error setting up search shortcuts: {e}")
+    
+    def _focus_calendar_search(self):
+        """Focus the calendar search entry."""
+        try:
+            if hasattr(self, 'calendar_search_widget') and self.calendar_search_widget:
+                self.calendar_search_widget.focus_search()
+                return "break"  # Prevent default behavior
+        except Exception as e:
+            logger.error("GUI", "focus_search", f"Error focusing search: {e}")
+        return None
+    
+    def _clear_calendar_search_if_focused(self):
+        """Clear calendar search if the search widget is currently focused."""
+        try:
+            if (hasattr(self, 'calendar_search_widget') and 
+                self.calendar_search_widget and 
+                self.calendar_search_widget.search_entry.winfo_exists() and
+                str(self.focus_get()) == str(self.calendar_search_widget.search_entry)):
+                
+                # Only clear if search widget is focused
+                self.calendar_search_widget._clear_search()
+                return "break"  # Prevent default behavior
+                
+        except Exception as e:
+            logger.error("GUI", "clear_search_if_focused", f"Error in search clear: {e}")
+        return None
 
     def get_decrypted_api_key(self, provider=None):
         """Get the decrypted API key for the specified provider."""
@@ -1637,9 +1827,14 @@ class HiDockToolGUI(
                 except Exception as e:
                     logger.warning("GUI", "_show_cached_files_on_startup", f"Failed to enhance cached files with audio metadata: {e}")
 
-                # Sort and display
+                # Sort and display with filtering support
                 sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
-                self._populate_treeview_from_data(sorted_files)
+                
+                # Use filtering-aware update method if available
+                if hasattr(self, 'update_files_data_for_filtering'):
+                    self.update_files_data_for_filtering(sorted_files)
+                else:
+                    self._populate_treeview_from_data(sorted_files)
 
                 # Update status to show cached mode with offline statistics
                 offline_stats = self.offline_mode_manager.get_offline_statistics()
@@ -1789,8 +1984,9 @@ class HiDockToolGUI(
         files_frame = ctk.CTkFrame(self.main_content_frame)
         files_frame.grid(row=0, column=0, sticky="nsew", padx=0, pady=(0, 5))
         files_frame.grid_columnconfigure(0, weight=1)
-        files_frame.grid_rowconfigure(0, weight=0)
-        files_frame.grid_rowconfigure(1, weight=1)
+        files_frame.grid_rowconfigure(0, weight=0)  # Header
+        files_frame.grid_rowconfigure(1, weight=0)  # Search widget
+        files_frame.grid_rowconfigure(2, weight=1)  # TreeView
         files_header_frame = ctk.CTkFrame(files_frame, fg_color="transparent")
         files_header_frame.grid(row=0, column=0, sticky="ew", padx=5, pady=(5, 2))
         self.status_storage_label_header = ctk.CTkLabel(files_header_frame, text="Storage: ---", anchor="w")
@@ -1849,7 +2045,11 @@ class HiDockToolGUI(
             fg_color="green" if self.single_selection_mode_var.get() else "blue",
         )
         self.selection_mode_toggle_button.pack(side="right", padx=(2, 2), pady=2)
-        self._create_file_tree_frame(files_frame)
+        
+        # Create calendar search widget
+        self._create_calendar_search_widget(files_frame)
+        
+        self._create_file_tree_frame_with_search_support(files_frame)
         # Apply initial selection mode and button visibility
         self._update_selection_buttons_visibility()
         self.file_tree.bind("<Control-A>", lambda event: self.select_all_files_action())
@@ -3679,8 +3879,11 @@ You can dismiss this warning and continue using the application with limited aud
                             except Exception as e:
                                 logger.warning("GUI", "force_refresh_calendar_gui", f"Could not re-apply audio metadata: {e}")
                         
-                        # Update the TreeView with refreshed data
-                        self._populate_treeview_from_data(enhanced_files)
+                        # Update the TreeView with refreshed data (filtering-aware)
+                        if hasattr(self, 'update_files_data_for_filtering'):
+                            self.update_files_data_for_filtering(enhanced_files)
+                        else:
+                            self._populate_treeview_from_data(enhanced_files)
                         
                         # Also update the stored displayed_files_details for consistency
                         self.displayed_files_details = enhanced_files
@@ -3908,8 +4111,11 @@ You can dismiss this warning and continue using the application with limited aud
                 file_data['meeting_display_text'] = status_text
                 file_data['has_meeting'] = False
             
-            # Refresh the TreeView to show the status
-            self._populate_treeview_from_data(self.displayed_files_details)
+            # Refresh the TreeView to show the status (filtering-aware)
+            if hasattr(self, 'update_files_data_for_filtering'):
+                self.update_files_data_for_filtering(self.displayed_files_details)
+            else:
+                self._populate_treeview_from_data(self.displayed_files_details)
             
         except Exception as e:
             logger.error("GUI", "_set_calendar_refresh_status_for_all_files", f"Error setting refresh status: {e}")
@@ -3927,8 +4133,11 @@ You can dismiss this warning and continue using the application with limited aud
                     file_data['meeting_display_text'] = ''
                     file_data['has_meeting'] = False
             
-            # Refresh the TreeView
-            self._populate_treeview_from_data(self.displayed_files_details)
+            # Refresh the TreeView (filtering-aware)
+            if hasattr(self, 'update_files_data_for_filtering'):
+                self.update_files_data_for_filtering(self.displayed_files_details)
+            else:
+                self._populate_treeview_from_data(self.displayed_files_details)
             
         except Exception as e:
             logger.error("GUI", "_clear_calendar_refresh_status_for_all_files", f"Error clearing refresh status: {e}")
