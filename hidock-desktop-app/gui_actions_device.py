@@ -626,9 +626,29 @@ class DeviceActionsMixin:
                     for i, f_info in enumerate(cached_files)
                 ]
 
+                # Enhance files with meeting metadata from calendar integration (synchronous for cached files)
+                try:
+                    files_dict = self.enhance_files_with_meeting_data_sync(files_dict)
+                    logger.debug("GUI", "_show_cached_files_if_available", f"Enhanced {len(files_dict)} cached files with meeting data")
+                except Exception as e:
+                    logger.warning("GUI", "_show_cached_files_if_available", f"Failed to enhance cached files with meeting data: {e}")
+                
+                # Enhance files with audio metadata (transcription, AI analysis, user edits)
+                try:
+                    files_dict = self.enhance_files_with_audio_metadata(files_dict)
+                    logger.debug("GUI", "_show_cached_files_if_available", f"Enhanced {len(files_dict)} cached files with audio metadata")
+                except Exception as e:
+                    logger.warning("GUI", "_show_cached_files_if_available", f"Failed to enhance cached files with audio metadata: {e}")
+
                 # Update GUI with cached data
                 sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
-                self._populate_treeview_from_data(sorted_files)
+                
+                # Use filtering-aware update method if available
+                if hasattr(self, 'update_files_data_for_filtering'):
+                    self.update_files_data_for_filtering(sorted_files)
+                else:
+                    self._populate_treeview_from_data(sorted_files)
+                    
                 self.update_status_bar(
                     connection_status="Status: Connected",
                     progress_text=f"Showing {len(cached_files)} cached files, refreshing...",
