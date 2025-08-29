@@ -936,7 +936,11 @@ class DeviceActionsMixin:
                         self.treeview_sort_column,
                         self.treeview_sort_reverse,
                     )
-                self.after(0, self._populate_treeview_from_data, all_files_to_display)
+                # Use filtering-aware update method if available
+                if hasattr(self, 'update_files_data_for_filtering'):
+                    self.after(0, self.update_files_data_for_filtering, all_files_to_display)
+                else:
+                    self.after(0, self._populate_treeview_from_data, all_files_to_display)
             else:
                 self.after(
                     0,
