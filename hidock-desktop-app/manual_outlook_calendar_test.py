@@ -9,9 +9,10 @@ without the main GUI. It will guide you through the setup and authentication pro
     For automated unit tests, see tests/test_outlook_calendar_service.py
 
 Prerequisites:
-1. Install O365 library: pip install O365[calendar]
+1. O365 library is already installed with the app
 2. Create Azure AD Application (see CALENDAR_INTEGRATION_TEST_SETUP.md)
 3. Have access to Microsoft 365/Outlook calendar
+4. Windows OS with Outlook installed
 
 Usage:
     python manual_outlook_calendar_test.py
@@ -43,7 +44,7 @@ class OutlookCalendarTester:
         # Check O365 library
         if not OUTLOOK_AVAILABLE:
             print("❌ O365 library not available")
-            print("   Install with: pip install O365[calendar]")
+            print("   This should not happen as O365 is included by default")
             return False
         print("✅ O365 library is available")
         

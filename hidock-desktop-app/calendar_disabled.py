@@ -5,10 +5,11 @@ Calendar Integration Disabled
 This file provides stubs for calendar integration when the O365 dependency
 is not available or when calendar integration is disabled for regular users.
 
-For advanced users who want calendar integration:
-1. Install the optional dependency: pip install hidock-next[calendar]
-2. Enable in configuration: calendar_provider = "outlook"
-3. Configure Azure AD credentials in Settings
+Calendar integration is only available on Windows:
+1. Calendar dependencies are already installed with the app
+2. Requires Windows with Outlook installed (uses COM API)
+3. Enable in Settings > Calendar Configuration
+4. Configure Azure AD credentials for Microsoft Graph API
 """
 
 import logging
@@ -47,7 +48,7 @@ class DisabledCalendarService:
             "available": False,
             "enabled": False,
             "authenticated": False,
-            "status": "Calendar integration disabled - install with: pip install hidock-next[calendar]",
+            "status": "Calendar integration unavailable - Windows with Outlook required",
             "last_sync": "Never"
         }
 

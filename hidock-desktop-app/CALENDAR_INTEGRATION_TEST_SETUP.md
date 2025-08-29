@@ -8,10 +8,14 @@ The Outlook Calendar integration is **fully implemented and ready for testing**.
 
 ## 🚀 **Quick Test Setup (5 minutes)**
 
-### **Step 1: Install Required Library**
+### **Step 1: Verify Dependencies** 
 ```bash
-python3 -m pip install O365[calendar]
+# O365 library is now included by default with HiDock installation
+# No additional installation needed - verify it's available:
+python3 -c "import O365; print('O365 library available')"
 ```
+
+**Note:** Calendar integration requires Windows OS with Outlook installed.
 
 ### **Step 2: Create Azure AD Application** 
 *(Required for OAuth2 authentication - this is how Microsoft secures calendar access)*

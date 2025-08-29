@@ -7,10 +7,11 @@ Outlook Calendar Service for HiDock Desktop App.
 This module requires enterprise-level Azure AD credentials that regular users
 don't have access to, so it's disabled by default.
 
-For advanced users who want calendar integration:
-1. Install optional dependency: pip install hidock-next[calendar]
-2. Enable in configuration: calendar_provider = "outlook"
-3. Configure Azure AD credentials in Settings
+Calendar integration is only available on Windows:
+1. Calendar dependencies are already installed with the app
+2. Requires Windows with Outlook installed (uses COM API)
+3. Enable in Settings > Calendar Configuration
+4. Configure Azure AD credentials for Microsoft Graph API
 
 This module provides integration with Microsoft Outlook calendar via the O365 library,
 allowing audio files to be correlated with calendar meetings for enhanced metadata.
@@ -40,7 +41,7 @@ except ImportError:
     logger.warning(
         "OutlookService", 
         "ImportError", 
-        "O365 library not available. Install with: pip install O365[calendar]"
+        "O365 library not available. This should not happen as dependencies are included by default."
     )
 
 
