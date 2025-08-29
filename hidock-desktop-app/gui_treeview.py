@@ -503,9 +503,12 @@ class TreeViewMixin:
         self.all_files_data = []  # Store all files (unfiltered)
         self.filtered_files_data = []  # Store currently filtered files
         self.calendar_filters_active = {}  # Store active filters
-        self.calendar_filter_engine = None  # Will be initialized when needed
         
-        logger.debug("TreeView", "init_filtering", "Calendar filtering initialized")
+        # Don't overwrite calendar_filter_engine if it already exists (set by GUI)
+        if not hasattr(self, 'calendar_filter_engine'):
+            self.calendar_filter_engine = None  # Will be initialized when needed
+        
+        logger.debug("TreeView", "init_filtering", f"Calendar filtering initialized, engine exists: {hasattr(self, 'calendar_filter_engine') and self.calendar_filter_engine is not None}")
     
     def set_calendar_filter_engine(self, filter_engine):
         """Set the calendar filter engine instance."""
