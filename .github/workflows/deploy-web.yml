@@ -1,10 +1,11 @@
 name: Deploy Web App
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'hidock-web-app/**'
+  # Disabled until Vercel secrets are configured
+  # push:
+  #   branches: [ main ]
+  #   paths:
+  #     - 'hidock-web-app/**'
   workflow_dispatch:
 
 permissions:

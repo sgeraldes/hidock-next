@@ -1,8 +1,10 @@
 name: Auto Labeler
 
 on:
-  issues:
-    types: [opened, edited]
+  # Disabled until labeler configuration is created
+  # issues:
+  #   types: [opened, edited]
+  workflow_dispatch:
 
 jobs:
   label-issues:
