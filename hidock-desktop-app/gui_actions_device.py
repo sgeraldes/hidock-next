@@ -366,8 +366,28 @@ class DeviceActionsMixin:
             cached_files = self.file_operations_manager.metadata_cache.get_all_metadata()
             if cached_files:
                 files_dict = self._convert_cached_files_to_gui_format(cached_files)
+                
+                # Enhance files with meeting metadata from calendar integration (synchronous for cached files)
+                try:
+                    files_dict = self.enhance_files_with_meeting_data_sync(files_dict)
+                    logger.debug("GUI", "_show_cached_files_after_disconnect", f"Enhanced {len(files_dict)} cached files with meeting data")
+                except Exception as e:
+                    logger.warning("GUI", "_show_cached_files_after_disconnect", f"Failed to enhance cached files with meeting data: {e}")
+                
+                # Enhance files with audio metadata (transcription, AI analysis, user edits)
+                try:
+                    files_dict = self.enhance_files_with_audio_metadata(files_dict)
+                    logger.debug("GUI", "_show_cached_files_after_disconnect", f"Enhanced {len(files_dict)} cached files with audio metadata")
+                except Exception as e:
+                    logger.warning("GUI", "_show_cached_files_after_disconnect", f"Failed to enhance cached files with audio metadata: {e}")
+                
                 sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
-                self._populate_treeview_from_data(sorted_files)
+                
+                # Use filtering-aware update method if available
+                if hasattr(self, 'update_files_data_for_filtering'):
+                    self.update_files_data_for_filtering(sorted_files)
+                else:
+                    self._populate_treeview_from_data(sorted_files)
 
                 # Use offline mode manager for statistics
                 offline_stats = self.offline_mode_manager.get_offline_statistics()

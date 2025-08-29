@@ -508,13 +508,12 @@ class TreeViewMixin:
         if not hasattr(self, 'calendar_filter_engine'):
             self.calendar_filter_engine = None  # Will be initialized when needed
         
-        logger.debug("TreeView", "init_filtering", f"Calendar filtering initialized, engine exists: {hasattr(self, 'calendar_filter_engine') and self.calendar_filter_engine is not None}")
+        logger.debug("TreeView", "init_filtering", "Calendar filtering initialized")
     
     def set_calendar_filter_engine(self, filter_engine):
         """Set the calendar filter engine instance."""
-        logger.debug("TreeView", "set_filter_engine", f"Setting filter engine: {filter_engine is not None}")
         self.calendar_filter_engine = filter_engine
-        logger.debug("TreeView", "set_filter_engine", f"Calendar filter engine set: {self.calendar_filter_engine is not None}")
+        logger.debug("TreeView", "set_filter_engine", "Calendar filter engine set")
     
     def apply_calendar_filters(self, filters: Dict[str, Any]):
         """
@@ -531,12 +530,6 @@ class TreeViewMixin:
             # Store active filters
             self.calendar_filters_active = filters.copy()
             
-            # Debug logging to understand the issue
-            logger.debug("TreeView", "apply_filters", 
-                        f"Filter engine available: {self.calendar_filter_engine is not None}")
-            logger.debug("TreeView", "apply_filters", f"Filters received: {filters}")
-            logger.debug("TreeView", "apply_filters", f"Filters truthiness: {bool(filters)}")
-            
             # Apply filters using the filter engine
             if self.calendar_filter_engine and filters:
                 self.filtered_files_data = self.calendar_filter_engine.apply_filters(
@@ -547,10 +540,7 @@ class TreeViewMixin:
             else:
                 # No filters active, show all files
                 self.filtered_files_data = self.all_files_data.copy()
-                if not self.calendar_filter_engine:
-                    logger.warning("TreeView", "apply_filters", "Calendar filter engine is None!")
-                else:
-                    logger.debug("TreeView", "apply_filters", "No filters active, showing all files")
+                logger.debug("TreeView", "apply_filters", "No filters active, showing all files")
             
             # Apply existing sort order to filtered data
             if hasattr(self, 'treeview_sort_column') and self.treeview_sort_column:

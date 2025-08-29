@@ -500,9 +500,7 @@ class HiDockToolGUI(
         """Initialize calendar search and filtering components."""
         try:
             # Initialize the filter engine
-            logger.debug("GUI", "init_calendar_search", "Creating CalendarFilterEngine...")
             self.calendar_filter_engine = CalendarFilterEngine()
-            logger.debug("GUI", "init_calendar_search", f"Filter engine created: {self.calendar_filter_engine is not None}")
             
             # Initialize TreeView filtering (will be set up after TreeView is created)
             self.calendar_search_widget = None  # Will be created in _create_files_panel
@@ -511,8 +509,6 @@ class HiDockToolGUI(
             
         except Exception as e:
             logger.error("GUI", "init_calendar_search", f"Error initializing calendar search: {e}")
-            import traceback
-            traceback.print_exc()
             # Set to None on error to prevent further issues
             self.calendar_filter_engine = None
 
@@ -553,24 +549,13 @@ class HiDockToolGUI(
             # Initialize calendar filtering in TreeView
             self.initialize_calendar_filtering()
             
-            # Debug: Check if filter engine exists
-            logger.debug("GUI", "create_tree_with_search", 
-                        f"Filter engine before setting: {self.calendar_filter_engine is not None}")
-            
             # Set the filter engine in TreeView
             self.set_calendar_filter_engine(self.calendar_filter_engine)
-            
-            # Debug: Verify it was set correctly
-            if hasattr(self, 'calendar_filter_engine'):
-                logger.debug("GUI", "create_tree_with_search", 
-                           f"TreeView filter engine after setting: {getattr(self, 'calendar_filter_engine', None) is not None}")
             
             logger.debug("GUI", "create_tree_with_search", "File tree with search support created")
             
         except Exception as e:
             logger.error("GUI", "create_tree_with_search", f"Error creating tree with search: {e}")
-            import traceback
-            traceback.print_exc()
     
     def _create_file_tree_frame_at_row(self, parent_frame, row=1):
         """Create file tree frame at specified row (modified version of _create_file_tree_frame)."""
