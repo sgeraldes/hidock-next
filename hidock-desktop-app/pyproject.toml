@@ -36,6 +36,7 @@ dependencies = [
     "pydub",
     "O365[calendar]>=2.0.0",
     "psutil>=5.8.0",
+    "pywin32>=306; platform_system=='Windows'",
 ]
 dynamic = ["version"]
 
