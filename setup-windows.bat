@@ -14,7 +14,7 @@ pause
 echo:
 echo [1/4] Checking Python...
 py -3.12 --version >nul 2>&1
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo ERROR: Python 3.12 not found!
     echo:
     echo HiDock requires Python 3.12 for optimal compatibility.
@@ -63,7 +63,7 @@ cd ..
 echo:
 echo [3/4] Checking Node.js for Web Apps...
 node --version >nul 2>&1
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo Node.js not found - skipping web apps setup
     echo:
     echo OPTIONAL: Install Node.js for Web Apps
@@ -80,7 +80,7 @@ if %errorlevel% neq 0 (
     echo Setting up HiDock Web App...
     cd hidock-web-app
     call npm install
-    if %errorlevel% neq 0 (
+    if errorlevel 1 (
         echo WARNING: Web app setup failed
     ) else (
         echo Web app setup complete!
@@ -124,3 +124,4 @@ echo:
 echo Enjoy using HiDock! 🎵
 echo:
 pause
+
