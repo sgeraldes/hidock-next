@@ -1,0 +1,90 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Desktop App",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/hidock-desktop-app/main.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/hidock-desktop-app",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/hidock-desktop-app"
+            }
+        },
+        {
+            "name": "Python: Debug Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "tests/",
+                "-v",
+                "--tb=short"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/hidock-desktop-app",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/hidock-desktop-app"
+            }
+        },
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/hidock-desktop-app"
+        },
+        {
+            "name": "Python: Test File (Sequential)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "${file}",
+                "-v",
+                "--tb=short"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/hidock-desktop-app",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/hidock-desktop-app"
+            }
+        },
+        {
+            "name": "Python: Test File (Parallel)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "${file}",
+                "-n", "auto",
+                "-v",
+                "--tb=short"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/hidock-desktop-app",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/hidock-desktop-app"
+            }
+        },
+        {
+            "name": "Python: All Tests (Parallel)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "tests/",
+                "-n", "auto",
+                "-v",
+                "--tb=short"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/hidock-desktop-app",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/hidock-desktop-app"
+            }
+        }
+    ]
+}

@@ -6,8 +6,8 @@ REM Navigate to project root (two levels up from scripts/run)
 cd /d "%~dp0\..\.."
 
 REM Check if we're in the correct directory
-if not exist "hidock-web-app" (
-    echo Error: hidock-web-app directory not found!
+if not exist "apps\web" (
+    echo Error: apps\web directory not found!
     echo Make sure the hidock-next project structure is intact.
     echo Current directory: %CD%
     pause
@@ -15,7 +15,7 @@ if not exist "hidock-web-app" (
 )
 
 REM Navigate to web app directory
-cd hidock-web-app
+cd apps\web
 
 REM Check if node_modules exists
 if not exist "node_modules" (
@@ -33,7 +33,7 @@ if not exist "node_modules" (
 
 REM Check if package.json exists
 if not exist "package.json" (
-    echo Error: package.json not found in hidock-web-app directory!
+    echo Error: package.json not found in apps\web directory!
     pause
     exit /b 1
 )

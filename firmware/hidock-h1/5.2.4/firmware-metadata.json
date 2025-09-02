@@ -1,0 +1,17 @@
+{
+  "id": "5438620995336425472",
+  "model": "hidock-h1",
+  "versionCode": "5.2.4",
+  "versionNumber": 328196,
+  "signature": "bef616fd7a09ceb4fa81db1f585e11ed",
+  "fileName": "35a48a6c1a7b4909abf51ca48275da55",
+  "fileLength": 4124160,
+  "remark": "1. Improved Bluetooth stability\r\n2. Improved Firmware OTA stability\r\n3. Added multi-language audio prompt",
+  "createTime": 1744208672459,
+  "state": "normal",
+  "nextStep": null,
+  "nextHint": null,
+  "nextTitle": null,
+  "downloadUrl": "https://hinotes.hidock.com/v2/device/firmware/download/35a48a6c1a7b4909abf51ca48275da55",
+  "downloadStatus": "untested"
+}

@@ -397,6 +397,42 @@ rm -rf .venv
 python -m venv .venv
 ```
 
+#### Device Connection Issues
+
+**Problem:** Connection fails silently or shows error messages
+
+**Windows:**
+- **Device busy:** Close original HiDock software or other instances of this app
+- **Access denied:** Run as administrator, especially for first connection
+- **Driver issues:** Use Zadig to install WinUSB/libusb driver
+- **USB issues:** Try different USB ports
+
+**Linux:**
+- **Permission denied:** Check dialout group membership (`groups $USER`)
+- **Device busy:** Close other applications using the device
+- **USB rules:** Check if udev rules are properly installed
+- **Test with sudo:** Temporarily run with `sudo` to test permissions
+
+**macOS:**
+- **Device busy:** Close other HiDock applications
+- **Permission issues:** Check System Preferences > Security & Privacy
+- **USB hub issues:** Try connecting directly to Mac ports
+
+**Status Messages to Watch For:**
+- `"Status: Device Busy"` → Close other HiDock applications
+- `"Status: Access Denied"` → Try running as administrator/sudo
+- `"Status: Connection Failed"` → Check USB connection and device power
+
+#### File List Issues
+
+**Problem:** Getting partial file lists (e.g., "286/480 files")
+
+**Solutions:**
+1. **Automatic retry:** The app will automatically retry with longer timeouts
+2. **USB stability:** Try different USB cables or ports if issues persist
+3. **Device health:** Ensure device isn't corrupted or low on memory
+4. **Check logs:** Look for "INCOMPLETE DATA" warnings in console output
+
 #### USB Permission Issues
 
 **Windows:**

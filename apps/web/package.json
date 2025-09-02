@@ -1,0 +1,49 @@
+{
+  "name": "hidock-community-web-app",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Community-driven web application for HiDock device management and AI-powered audio transcription",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "test": "vitest --run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest --coverage"
+  },
+  "dependencies": {
+    "@google/generative-ai": "*",
+    "clsx": "*",
+    "date-fns": "*",
+    "lucide-react": "*",
+    "react": "*",
+    "react-dom": "*",
+    "react-router-dom": "*",
+    "tailwindcss": "^3.4.17",
+    "zustand": "*"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "*",
+    "@testing-library/react": "*",
+    "@testing-library/user-event": "*",
+    "@types/react": "*",
+    "@types/react-dom": "*",
+    "@typescript-eslint/eslint-plugin": "*",
+    "@typescript-eslint/parser": "*",
+    "@vitejs/plugin-react": "*",
+    "@vitest/ui": "*",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^8.0.0",
+    "eslint-plugin-react-hooks": "*",
+    "eslint-plugin-react-refresh": "*",
+    "jsdom": "*",
+    "msw": "*",
+    "postcss": "^8.5.6",
+    "typescript": "*",
+    "vite": "*",
+    "vitest": "*"
+  }
+}

@@ -1,0 +1,237 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Test: Fast Parallel (Unit Only)",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; pytest -n auto -m 'unit' --tb=short",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Safe Parallel (No Device/GUI)",
+            "type": "shell", 
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; pytest -n auto -m 'not device and not gui' --tb=short",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Full Sequential (All Tests)",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; pytest --tb=short",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always", 
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Coverage Report (Sequential)",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; pytest --cov=. --cov-report=html --cov-report=term-missing",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Coverage Report (Parallel)",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; pytest -n auto --cov=. --cov-report=html --cov-report=term-missing",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Parallel Safe Tests (Coverage)",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; coverage erase; pytest -n auto -m 'not device and not gui' --cov=. --cov-append --cov-report=",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Sequential Device/GUI Tests (Coverage)",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; pytest -m 'device or gui' --cov=. --cov-append --cov-report=",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Generate Coverage Report",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; coverage html; coverage report",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Hybrid Coverage (All Tests)",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; coverage erase; .venv\\Scripts\\python.exe -m pytest -n auto -m 'not device and not gui' --cov=. --cov-append --cov-report= & .venv\\Scripts\\python.exe -m pytest -m 'device or gui' --cov=. --cov-append --cov-report=; coverage html; coverage xml; coverage report",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Hybrid Coverage (Direct Python)",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\coverage.exe erase; .venv\\Scripts\\python.exe -m pytest -n auto -m 'not device and not gui' --cov=. --cov-append --cov-report= & .venv\\Scripts\\python.exe -m pytest -m 'device or gui' --cov=. --cov-append --cov-report=; .venv\\Scripts\\coverage.exe html; .venv\\Scripts\\coverage.exe xml; .venv\\Scripts\\coverage.exe report",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                },
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Quick Parallel (File Operations Only)",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; pytest -n auto tests/test_file_operations_gui.py -v",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Test: Parallel with Specific Worker Count",
+            "type": "shell",
+            "command": "cd hidock-desktop-app; .venv\\Scripts\\Activate.ps1; pytest -n 4 --tb=short",
+            "options": {
+                "shell": {
+                    "executable": "powershell.exe",
+                    "args": ["-Command"]
+                }
+            },
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "new"
+            },
+            "problemMatcher": []
+        }
+    ]
+}

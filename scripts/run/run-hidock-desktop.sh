@@ -7,8 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/../.."
 
 # Check if we're in the correct directory
-if [ ! -d "hidock-desktop-app" ]; then
-    echo "Error: hidock-desktop-app directory not found!"
+if [ ! -d "apps/desktop" ]; then
+    echo "Error: apps/desktop directory not found!"
     echo "Make sure the hidock-next project structure is intact."
     echo "Current directory: $(pwd)"
     read -p "Press Enter to continue..."
@@ -16,7 +16,7 @@ if [ ! -d "hidock-desktop-app" ]; then
 fi
 
 # Navigate to desktop app directory
-cd hidock-desktop-app
+cd apps/desktop
 
 # Check if virtual environment exists
 if [ ! -d ".venv" ]; then
@@ -48,7 +48,7 @@ fi
 
 echo "Checking if main.py exists..."
 if [ ! -f "main.py" ]; then
-    echo "Error: main.py not found in hidock-desktop-app directory!"
+    echo "Error: main.py not found in apps/desktop directory!"
     read -p "Press Enter to continue..."
     exit 1
 fi

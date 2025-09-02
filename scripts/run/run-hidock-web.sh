@@ -7,8 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/../.."
 
 # Check if we're in the correct directory
-if [ ! -d "hidock-web-app" ]; then
-    echo "Error: hidock-web-app directory not found!"
+if [ ! -d "apps/web" ]; then
+    echo "Error: apps/web directory not found!"
     echo "Make sure the hidock-next project structure is intact."
     echo "Current directory: $(pwd)"
     read -p "Press Enter to continue..."
@@ -16,11 +16,11 @@ if [ ! -d "hidock-web-app" ]; then
 fi
 
 # Navigate to web app directory
-cd hidock-web-app
+cd apps/web
 
 # Check if package.json exists
 if [ ! -f "package.json" ]; then
-    echo "Error: package.json not found in hidock-web-app directory!"
+    echo "Error: package.json not found in apps/web directory!"
     read -p "Press Enter to continue..."
     exit 1
 fi

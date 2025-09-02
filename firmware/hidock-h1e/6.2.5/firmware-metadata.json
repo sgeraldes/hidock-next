@@ -1,0 +1,17 @@
+{
+  "id": "5438621636762947584",
+  "model": "hidock-h1e",
+  "versionCode": "6.2.5",
+  "versionNumber": 393733,
+  "signature": "d38b66b51b222a89ca49d2d769d7f42e",
+  "fileName": "20ec7c710a9945428a5d3f0d904876c2",
+  "fileLength": 3451904,
+  "remark": "1. Improved microphone signal processing\r\n2. Improved Bluetooth stability\r\n3. Improved Firmware OTA stability\r\n4. Added multi-language audio prompt",
+  "createTime": 1744208710725,
+  "state": "normal",
+  "nextStep": null,
+  "nextHint": null,
+  "nextTitle": null,
+  "downloadUrl": "https://hinotes.hidock.com/v2/device/firmware/download/20ec7c710a9945428a5d3f0d904876c2",
+  "downloadStatus": "404 - endpoint not found"
+}

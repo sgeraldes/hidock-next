@@ -1,0 +1,12 @@
+{
+    "recommendations": [
+        "ms-python.python",
+        "ms-python.black-formatter",
+        "ms-python.flake8",
+        "ms-python.pylint",
+        "ms-python.mypy-type-checker",
+        "ryanluker.vscode-coverage-gutters",
+        "esbenp.prettier-vscode",
+        "DavidAnson.vscode-markdownlint"
+    ]
+}

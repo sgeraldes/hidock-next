@@ -1,0 +1,440 @@
+{
+  "generation_timestamp": "2025-08-31",
+  "total_parameters": 72,
+  "structured_count": 36,
+  "hypothesis_count": 36,
+  "parameters": [
+    {
+      "index": 1,
+      "hex": "",
+      "bytes": 0,
+      "description": "Empty (like GET_DEVICE_INFO)"
+    },
+    {
+      "index": 2,
+      "hex": "0000",
+      "bytes": 2,
+      "description": "uint16: 0"
+    },
+    {
+      "index": 3,
+      "hex": "0100",
+      "bytes": 2,
+      "description": "uint16: 1"
+    },
+    {
+      "index": 4,
+      "hex": "0200",
+      "bytes": 2,
+      "description": "uint16: 2"
+    },
+    {
+      "index": 5,
+      "hex": "0a00",
+      "bytes": 2,
+      "description": "uint16: 10"
+    },
+    {
+      "index": 6,
+      "hex": "6400",
+      "bytes": 2,
+      "description": "uint16: 100"
+    },
+    {
+      "index": 7,
+      "hex": "ffff",
+      "bytes": 2,
+      "description": "uint16: 65535"
+    },
+    {
+      "index": 8,
+      "hex": "00000000",
+      "bytes": 4,
+      "description": "uint32: 0"
+    },
+    {
+      "index": 9,
+      "hex": "01000000",
+      "bytes": 4,
+      "description": "uint32: 1"
+    },
+    {
+      "index": 10,
+      "hex": "02000000",
+      "bytes": 4,
+      "description": "uint32: 2"
+    },
+    {
+      "index": 11,
+      "hex": "0a000000",
+      "bytes": 4,
+      "description": "uint32: 10"
+    },
+    {
+      "index": 12,
+      "hex": "64000000",
+      "bytes": 4,
+      "description": "uint32: 100"
+    },
+    {
+      "index": 13,
+      "hex": "e8030000",
+      "bytes": 4,
+      "description": "uint32: 1000"
+    },
+    {
+      "index": 14,
+      "hex": "ffffffff",
+      "bytes": 4,
+      "description": "uint32: 4294967295"
+    },
+    {
+      "index": 15,
+      "hex": "8ca1b46800000000",
+      "bytes": 8,
+      "description": "timestamp: 1756668300"
+    },
+    {
+      "index": 16,
+      "hex": "7c93b46800000000",
+      "bytes": 8,
+      "description": "timestamp: 1756664700"
+    },
+    {
+      "index": 17,
+      "hex": "9cafb46800000000",
+      "bytes": 8,
+      "description": "timestamp: 1756671900"
+    },
+    {
+      "index": 18,
+      "hex": "000000000000",
+      "bytes": 6,
+      "description": "file_id=0, block=0"
+    },
+    {
+      "index": 19,
+      "hex": "000000000100",
+      "bytes": 6,
+      "description": "file_id=0, block=1"
+    },
+    {
+      "index": 20,
+      "hex": "010000000000",
+      "bytes": 6,
+      "description": "file_id=1, block=0"
+    },
+    {
+      "index": 21,
+      "hex": "010000000100",
+      "bytes": 6,
+      "description": "file_id=1, block=1"
+    },
+    {
+      "index": 22,
+      "hex": "020000000000",
+      "bytes": 6,
+      "description": "file_id=2, block=0"
+    },
+    {
+      "index": 23,
+      "hex": "020000000100",
+      "bytes": 6,
+      "description": "file_id=2, block=1"
+    },
+    {
+      "index": 24,
+      "hex": "0100",
+      "bytes": 2,
+      "description": "command_ref: 1"
+    },
+    {
+      "index": 25,
+      "hex": "0400",
+      "bytes": 2,
+      "description": "command_ref: 4"
+    },
+    {
+      "index": 26,
+      "hex": "0600",
+      "bytes": 2,
+      "description": "command_ref: 6"
+    },
+    {
+      "index": 27,
+      "hex": "0b00",
+      "bytes": 2,
+      "description": "command_ref: 11"
+    },
+    {
+      "index": 28,
+      "hex": "00",
+      "bytes": 1,
+      "description": "status_flag: 0x00"
+    },
+    {
+      "index": 29,
+      "hex": "01",
+      "bytes": 1,
+      "description": "status_flag: 0x01"
+    },
+    {
+      "index": 30,
+      "hex": "ff",
+      "bytes": 1,
+      "description": "status_flag: 0xff"
+    },
+    {
+      "index": 31,
+      "hex": "0000",
+      "bytes": 2,
+      "description": "state_query: 0"
+    },
+    {
+      "index": 32,
+      "hex": "0100",
+      "bytes": 2,
+      "description": "state_query: 1"
+    },
+    {
+      "index": 33,
+      "hex": "0200",
+      "bytes": 2,
+      "description": "state_query: 2"
+    },
+    {
+      "index": 34,
+      "hex": "0300",
+      "bytes": 2,
+      "description": "state_query: 3"
+    },
+    {
+      "index": 35,
+      "hex": "0e00",
+      "bytes": 2,
+      "description": "state_query: 14"
+    },
+    {
+      "index": 36,
+      "hex": "0f00",
+      "bytes": 2,
+      "description": "state_query: 15"
+    },
+    {
+      "index": 37,
+      "hex": "0100",
+      "bytes": 2,
+      "description": "Query status of command 1"
+    },
+    {
+      "index": 38,
+      "hex": "0200",
+      "bytes": 2,
+      "description": "Query status of command 2"
+    },
+    {
+      "index": 39,
+      "hex": "0300",
+      "bytes": 2,
+      "description": "Query status of command 3"
+    },
+    {
+      "index": 40,
+      "hex": "0400",
+      "bytes": 2,
+      "description": "Query status of command 4"
+    },
+    {
+      "index": 41,
+      "hex": "0500",
+      "bytes": 2,
+      "description": "Query status of command 5"
+    },
+    {
+      "index": 42,
+      "hex": "0600",
+      "bytes": 2,
+      "description": "Query status of command 6"
+    },
+    {
+      "index": 43,
+      "hex": "0700",
+      "bytes": 2,
+      "description": "Query status of command 7"
+    },
+    {
+      "index": 44,
+      "hex": "0800",
+      "bytes": 2,
+      "description": "Query status of command 8"
+    },
+    {
+      "index": 45,
+      "hex": "0900",
+      "bytes": 2,
+      "description": "Query status of command 9"
+    },
+    {
+      "index": 46,
+      "hex": "0b00",
+      "bytes": 2,
+      "description": "Query status of command 11"
+    },
+    {
+      "index": 47,
+      "hex": "0c00",
+      "bytes": 2,
+      "description": "Query status of command 12"
+    },
+    {
+      "index": 48,
+      "hex": "0d00",
+      "bytes": 2,
+      "description": "Query status of command 13"
+    },
+    {
+      "index": 49,
+      "hex": "1000",
+      "bytes": 2,
+      "description": "Query status of command 16"
+    },
+    {
+      "index": 50,
+      "hex": "1100",
+      "bytes": 2,
+      "description": "Query status of command 17"
+    },
+    {
+      "index": 51,
+      "hex": "1200",
+      "bytes": 2,
+      "description": "Query status of command 18"
+    },
+    {
+      "index": 52,
+      "hex": "1300",
+      "bytes": 2,
+      "description": "Query status of command 19"
+    },
+    {
+      "index": 53,
+      "hex": "1400",
+      "bytes": 2,
+      "description": "Query status of command 20"
+    },
+    {
+      "index": 54,
+      "hex": "01",
+      "bytes": 1,
+      "description": "Debug info: USB subsystem"
+    },
+    {
+      "index": 55,
+      "hex": "02",
+      "bytes": 1,
+      "description": "Debug info: Audio subsystem"
+    },
+    {
+      "index": 56,
+      "hex": "03",
+      "bytes": 1,
+      "description": "Debug info: Storage subsystem"
+    },
+    {
+      "index": 57,
+      "hex": "04",
+      "bytes": 1,
+      "description": "Debug info: Power management"
+    },
+    {
+      "index": 58,
+      "hex": "05",
+      "bytes": 1,
+      "description": "Debug info: Firmware subsystem"
+    },
+    {
+      "index": 59,
+      "hex": "0e",
+      "bytes": 1,
+      "description": "Debug info: Command 14 subsystem"
+    },
+    {
+      "index": 60,
+      "hex": "0f",
+      "bytes": 1,
+      "description": "Debug info: Command 15 subsystem"
+    },
+    {
+      "index": 61,
+      "hex": "0000",
+      "bytes": 2,
+      "description": "State query: General device state"
+    },
+    {
+      "index": 62,
+      "hex": "0100",
+      "bytes": 2,
+      "description": "State query: Recording state"
+    },
+    {
+      "index": 63,
+      "hex": "0200",
+      "bytes": 2,
+      "description": "State query: Playback state"
+    },
+    {
+      "index": 64,
+      "hex": "0300",
+      "bytes": 2,
+      "description": "State query: Storage state"
+    },
+    {
+      "index": 65,
+      "hex": "0400",
+      "bytes": 2,
+      "description": "State query: Battery state"
+    },
+    {
+      "index": 66,
+      "hex": "0e00",
+      "bytes": 2,
+      "description": "State query: Command 14 state"
+    },
+    {
+      "index": 67,
+      "hex": "0f00",
+      "bytes": 2,
+      "description": "State query: Command 15 state"
+    },
+    {
+      "index": 68,
+      "hex": "1234",
+      "bytes": 2,
+      "description": "Auth token: Jensen magic partial"
+    },
+    {
+      "index": 69,
+      "hex": "1234000e",
+      "bytes": 4,
+      "description": "Auth token: Jensen magic + cmd 14"
+    },
+    {
+      "index": 70,
+      "hex": "1234000f",
+      "bytes": 4,
+      "description": "Auth token: Jensen magic + cmd 15"
+    },
+    {
+      "index": 71,
+      "hex": "000e1234",
+      "bytes": 4,
+      "description": "Auth token: Cmd 14 + Jensen magic"
+    },
+    {
+      "index": 72,
+      "hex": "000f1234",
+      "bytes": 4,
+      "description": "Auth token: Cmd 15 + Jensen magic"
+    }
+  ]
+}

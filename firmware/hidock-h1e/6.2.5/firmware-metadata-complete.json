@@ -1,0 +1,101 @@
+{
+  "extraction_info": {
+    "extracted_at": "2025-08-30T21:09:38.679923",
+    "source": "hinotes.hidock.com HAR capture",
+    "extractor_version": "1.0.0"
+  },
+  "firmware_info": {
+    "filename": "20ec7c710a9945428a5d3f0d904876c2",
+    "version_code": "0x60205",
+    "version_name": "6.2.5_2503241721",
+    "board_name": "ats2835p_evb",
+    "ota_version_check": "false",
+    "file_size": 3451904,
+    "container_format": "ACTTEST0"
+  },
+  "validation": {
+    "md5_hash": "d38b66b51b222a89ca49d2d769d7f42e",
+    "md5_verified": true,
+    "expected_hash": "d38b66b51b222a89ca49d2d769d7f42e",
+    "size_verified": true,
+    "format_verified": true
+  },
+  "partitions": {
+    "count": 6,
+    "total_size": 3447396,
+    "details": [
+      {
+        "id": 1,
+        "type": "BOOT",
+        "name": "fw0_boot",
+        "filename": "mbrec.bin",
+        "size": 4096,
+        "extracted_size": 4096,
+        "checksum": "0x8f514d09",
+        "calculated_checksum": "0x9f04f94f",
+        "extracted_path": "firmware/hidock-h1e/6.2.5/partitions/mbrec.bin"
+      },
+      {
+        "id": 3,
+        "type": "SYSTEM",
+        "name": "fw0_sys",
+        "filename": "zephyr.bin",
+        "size": 1260064,
+        "extracted_size": 1260064,
+        "checksum": "0x1f3a7570",
+        "calculated_checksum": "0x2777e7e8",
+        "extracted_path": "firmware/hidock-h1e/6.2.5/partitions/zephyr.bin"
+      },
+      {
+        "id": 224,
+        "type": "SUGR",
+        "name": "fw_dsp_bk",
+        "filename": "RomeApp.bin",
+        "size": 430020,
+        "extracted_size": 430020,
+        "checksum": "0x4da37140",
+        "calculated_checksum": "0xbdeed181",
+        "extracted_path": "firmware/hidock-h1e/6.2.5/partitions/RomeApp.bin"
+      },
+      {
+        "id": 9,
+        "type": "SUGR",
+        "name": "fw0_uac",
+        "filename": "UAC.bin",
+        "size": 1024,
+        "extracted_size": 1024,
+        "checksum": "0xd18d87df",
+        "calculated_checksum": "0xdceb218e",
+        "extracted_path": "firmware/hidock-h1e/6.2.5/partitions/UAC.bin"
+      },
+      {
+        "id": 11,
+        "type": "SUGR",
+        "name": "fw_ig_d",
+        "filename": "IG1202dl.bin",
+        "size": 704000,
+        "extracted_size": 704000,
+        "checksum": "0xc6d2f351",
+        "calculated_checksum": "0x515b288d",
+        "extracted_path": "firmware/hidock-h1e/6.2.5/partitions/IG1202dl.bin"
+      },
+      {
+        "id": 225,
+        "type": "SUGR",
+        "name": "fw_sdfs_bk",
+        "filename": "sdfs.bin",
+        "size": 1048192,
+        "extracted_size": 1048192,
+        "checksum": "0x2b4d60f7",
+        "calculated_checksum": "0x139e9c01",
+        "extracted_path": "firmware/hidock-h1e/6.2.5/partitions/sdfs.bin"
+      }
+    ]
+  },
+  "download_info": {
+    "download_url": "https://hinotes.hidock.com/v2/device/firmware/download/20ec7c710a9945428a5d3f0d904876c2",
+    "download_status": "404 - endpoint not found",
+    "mime_type": "application/octet-stream",
+    "compression": -705
+  }
+}
