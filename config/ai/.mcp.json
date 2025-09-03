@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "rest-api": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "C:/Users/geraldes/AppData/Roaming/npm/node_modules/dkmaker-mcp-rest-api/build/index.js"
+      ],
+      "env": {
+        "REST_BASE_URL": "https://hinotes.hidock.com",
+        "AUTH_APIKEY_HEADER_NAME": "accesstoken",
+        "AUTH_APIKEY_VALUE": "M4XoUFm5OOygd5snWe10lMxtSqadM2KOp2wWObw554iUyTaEZbVXdu11TZ3zD4SD"
+      }
+    }
+  }
+}

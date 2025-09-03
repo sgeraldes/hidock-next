@@ -6,8 +6,8 @@ REM Navigate to project root (two levels up from scripts/run)
 cd /d "%~dp0\..\.."
 
 REM Check if we're in the correct directory
-if not exist "hidock-desktop-app" (
-    echo Error: hidock-desktop-app directory not found!
+if not exist "apps\desktop" (
+    echo Error: apps\desktop directory not found!
     echo Make sure the hidock-next project structure is intact.
     echo Current directory: %CD%
     pause
@@ -15,7 +15,7 @@ if not exist "hidock-desktop-app" (
 )
 
 REM Navigate to desktop app directory
-cd hidock-desktop-app
+cd apps\desktop
 
 REM Check if virtual environment exists
 if not exist ".venv" (

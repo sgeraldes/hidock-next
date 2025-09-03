@@ -6,6 +6,9 @@
 .venv/
 venv/
 ENV/
+apps/desktop/.venv/
+apps/web/node_modules/
+apps/audio-insights/node_modules/
 
 # Python cache files
 __pycache__/
@@ -13,21 +16,29 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+apps/desktop/__pycache__/
+apps/desktop/scripts/__pycache__/
+apps/desktop/src/__pycache__/
 
 # Test and coverage reports
 .pytest_cache/
+temp/pytest_cache/
+apps/desktop/.pytest_cache/
 coverage/
 htmlcov/
+apps/desktop/htmlcov/
 .coverage
 .coverage.*
 .coveragerc
 .mypy_cache/
+temp/mypy_cache/
 
 # ===================================================================
 # Project-Specific & User Files
 # ===================================================================
 
 # Custom folders that should not be in the repository
+archive/
 archived/
 reference/
 audio/
@@ -81,6 +92,9 @@ dist/
 build/
 *.egg-info/
 *.egg
+apps/desktop/*.egg-info/
+apps/desktop/build/
+apps/desktop/dist/
 
 # Project-specific generated files
 _version.py
@@ -88,6 +102,16 @@ _version.py
 # Log files
 logs/
 *.log
+apps/desktop/logs/*.log
+apps/desktop/logs/*.txt
+
+# Session logs and temporary documentation
+docs/session-logs/
+session_logs/
+*-SESSION.txt
+*-CALENDAR_INTEGRATION.txt
+*-FIRMWARE_RESEARCH.txt
+*-UX-UI_IMPROVEMENTS.txt
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -101,7 +125,8 @@ Desktop.ini
 
 # Editor & IDE directories
 .idea/
-.vscode/
+# Keep VSCode settings in config/ide/vscode
+# .vscode/
 *.sublime-workspace
 *.suo
 *.ntvs*

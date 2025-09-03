@@ -1,0 +1,234 @@
+{
+  "session_info": {
+    "timestamp": "2025-08-31T15:53:00.574547",
+    "commands_tested": [
+      14,
+      15
+    ],
+    "total_tests": 22,
+    "parameters_per_command": 11
+  },
+  "results": [
+    {
+      "command": 14,
+      "parameters": "34121000",
+      "parameter_length": 4,
+      "description": "Jensen magic + Command 10",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011492252349853516,
+      "interesting": false
+    },
+    {
+      "command": 14,
+      "parameters": "34120000",
+      "parameter_length": 4,
+      "description": "Jensen magic (32-bit)",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011068105697631836,
+      "interesting": false
+    },
+    {
+      "command": 14,
+      "parameters": "78563412",
+      "parameter_length": 4,
+      "description": "Standard magic number",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011507511138916016,
+      "interesting": false
+    },
+    {
+      "command": 14,
+      "parameters": "4445425547",
+      "parameter_length": 5,
+      "description": "Debug mode text",
+      "response": "",
+      "status": "success",
+      "response_time": 0.012395620346069336,
+      "interesting": false
+    },
+    {
+      "command": 14,
+      "parameters": "41444d494e",
+      "parameter_length": 5,
+      "description": "Admin access text",
+      "response": "",
+      "status": "success",
+      "response_time": 0.012529850006103516,
+      "interesting": false
+    },
+    {
+      "command": 14,
+      "parameters": "0a000000",
+      "parameter_length": 4,
+      "description": "Command 10, subcommand 0",
+      "response": "",
+      "status": "success",
+      "response_time": 0.012214422225952148,
+      "interesting": false
+    },
+    {
+      "command": 14,
+      "parameters": "0a000100",
+      "parameter_length": 4,
+      "description": "Command 10, subcommand 1",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011627674102783203,
+      "interesting": false
+    },
+    {
+      "command": 14,
+      "parameters": "d6100db0",
+      "parameter_length": 4,
+      "description": "VID + PID",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011697053909301758,
+      "interesting": false
+    },
+    {
+      "command": 14,
+      "parameters": "05020600",
+      "parameter_length": 4,
+      "description": "Firmware version code",
+      "response": "",
+      "status": "success",
+      "response_time": 0.01069951057434082,
+      "interesting": false
+    },
+    {
+      "command": 14,
+      "parameters": "01000000",
+      "parameter_length": 4,
+      "description": "Query state 1",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011176347732543945,
+      "interesting": false
+    },
+    {
+      "command": 14,
+      "parameters": "00000000",
+      "parameter_length": 4,
+      "description": "Query state 0",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011185646057128906,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "34121000",
+      "parameter_length": 4,
+      "description": "Jensen magic + Command 10",
+      "response": "",
+      "status": "success",
+      "response_time": 0.010883569717407227,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "34120000",
+      "parameter_length": 4,
+      "description": "Jensen magic (32-bit)",
+      "response": "",
+      "status": "success",
+      "response_time": 0.013074398040771484,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "78563412",
+      "parameter_length": 4,
+      "description": "Standard magic number",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011960983276367188,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "4445425547",
+      "parameter_length": 5,
+      "description": "Debug mode text",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011569499969482422,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "41444d494e",
+      "parameter_length": 5,
+      "description": "Admin access text",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011536359786987305,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "0a000000",
+      "parameter_length": 4,
+      "description": "Command 10, subcommand 0",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011043071746826172,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "0a000100",
+      "parameter_length": 4,
+      "description": "Command 10, subcommand 1",
+      "response": "",
+      "status": "success",
+      "response_time": 0.011727094650268555,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "d6100db0",
+      "parameter_length": 4,
+      "description": "VID + PID",
+      "response": "",
+      "status": "success",
+      "response_time": 0.010713577270507812,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "05020600",
+      "parameter_length": 4,
+      "description": "Firmware version code",
+      "response": "",
+      "status": "success",
+      "response_time": 0.014128446578979492,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "01000000",
+      "parameter_length": 4,
+      "description": "Query state 1",
+      "response": "",
+      "status": "success",
+      "response_time": 0.014864921569824219,
+      "interesting": false
+    },
+    {
+      "command": 15,
+      "parameters": "00000000",
+      "parameter_length": 4,
+      "description": "Query state 0",
+      "response": "",
+      "status": "success",
+      "response_time": 0.01099705696105957,
+      "interesting": false
+    }
+  ],
+  "interesting_count": 0
+}

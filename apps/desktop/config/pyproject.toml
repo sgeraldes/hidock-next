@@ -1,0 +1,275 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hidock-next"
+description = "Community-driven HiDock device management and AI transcription platform"
+readme = "README.md"
+license = "MIT"
+authors = [
+    {name = "HiDock Community", email = "community@hidock-next.org"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "pyusb",
+    "customtkinter",
+    "Pillow",
+    "pygame",
+    "google-generativeai",
+    "matplotlib",
+    "numpy",
+    "scipy",
+    "cryptography",
+    "pydub",
+    "O365[calendar]>=2.0.0",
+    "psutil>=5.8.0",
+    "pywin32>=306; platform_system=='Windows'",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.10.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-xdist>=3.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "isort>=5.12.0",
+    "pylint>=2.17.0",
+    "mypy>=1.0.0",
+]
+# calendar dependencies moved to core dependencies above
+# keeping this section for backward compatibility (empty)
+calendar = []
+
+[project.urls]
+Homepage = "https://github.com/sgeraldes/hidock-next"
+Repository = "https://github.com/sgeraldes/hidock-next.git"
+Issues = "https://github.com/sgeraldes/hidock-next/issues"
+Documentation = "https://github.com/sgeraldes/hidock-next/wiki"
+
+[project.scripts]
+hidock-next = "main:main"
+
+[tool.setuptools_scm]
+write_to = "_version.py"
+fallback_version = "0.1.0.dev0"
+
+[tool.setuptools]
+py-modules = [
+    "main",
+    "ai_service",
+    "audio_player",
+    "audio_player_enhanced",
+    "audio_processing_advanced",
+    "audio_visualization",
+    "config_and_logger",
+    "constants",
+    "ctk_custom_widgets",
+    "desktop_device_adapter",
+    "device_interface",
+    "enhanced_device_selector",
+    "enhanced_gui_integration",
+    "file_operations_manager",
+    "gui_actions_device",
+    "gui_actions_file",
+    "gui_auxiliary",
+    "gui_event_handlers",
+    "gui_main_window",
+    "gui_treeview",
+    "hidock_device",
+    "hta_converter",
+    "settings_window",
+    "storage_management",
+    "transcription_module"
+]
+
+[tool.black]
+line-length = 120
+target-version = ['py38', 'py39', 'py310', 'py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  tests
+  | __pycache__
+  | \.git
+  | \.venv
+  | \.mypy_cache
+  | \.pytest_cache
+  | htmlcov
+  | build
+  | dist
+  | .*\.egg-info
+  | docs
+  | icons
+  | themes
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 120
+known_first_party = ["hidock_device", "gui_main_window", "config_and_logger"]
+
+[tool.flake8]
+max-line-length = 120
+extend-ignore = ["E203", "W503"]
+exclude = [
+    "tests",
+    "__pycache__",
+    ".git",
+    ".venv",
+    ".mypy_cache",
+    ".pytest_cache",
+    "htmlcov",
+    "build",
+    "dist",
+    "*.egg-info",
+    "docs",
+    "icons",
+    "themes",
+]
+
+[tool.pylint.format]
+max-line-length = 120
+
+[tool.pylint.messages_control]
+disable = [
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-locals",
+    "too-many-branches",
+    "too-many-statements",
+]
+
+[tool.pylint.master]
+ignore-paths = [
+    "tests",
+    "__pycache__",
+    ".git",
+    ".venv",
+    ".mypy_cache",
+    ".pytest_cache",
+    "htmlcov",
+    "build",
+    "dist",
+    ".*\\.egg-info",
+    "docs",
+    "icons",
+    "themes",
+]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+exclude = [
+    "gui_main_window.py",
+    "gui_event_handlers.py",
+    "gui_auxiliary.py",
+    "gui_treeview.py",
+    "gui_actions_device.py",
+    "gui_actions_file.py",
+    "ctk_custom_widgets.py",
+    "enhanced_gui_integration.py",
+    "settings_window.py",
+    "hta_converter.py",
+    "storage_management.py",
+    "ai_service.py"
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "customtkinter.*",
+    "pygame.*",
+    "usb.*",
+    "PIL.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--disable-warnings",
+    "--cov=.",
+    "--cov-report=html:htmlcov",
+    "--cov-report=term-missing",
+    "--cov-fail-under=80",
+]
+markers = [
+    "unit: Unit tests (safe for parallel)",
+    "integration: Integration tests (may need isolation)",
+    "slow: Slow running tests",
+    "device: Tests requiring actual device connection (no parallel)",
+    "gui: GUI tests (no parallel)",
+    "fileio: File I/O tests (may need isolation)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+    "tests/*",
+    "__pycache__/*",
+    ".git/*",
+    ".venv/*",
+    ".mypy_cache/*",
+    ".pytest_cache/*",
+    "htmlcov/*",
+    "build/*",
+    "dist/*",
+    "*.egg-info/*",
+    "docs/*",
+    "icons/*",
+    "themes/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]

@@ -1,8 +1,0 @@
-{
-  "name": "Audio Insights Extractor",
-  "description": "An application to upload or record audio, transcribe it, and extract key insights using Gemini API.",
-  "requestFramePermissions": [
-    "microphone"
-  ],
-  "prompt": ""
-}

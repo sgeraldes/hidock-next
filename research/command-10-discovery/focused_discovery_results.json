@@ -1,0 +1,232 @@
+{
+  "session_info": {
+    "session_id": "cmd10_session_1756664579",
+    "start_time": "2025-08-31T15:22:59.593005",
+    "end_time": "2025-08-31T15:23:21.831414",
+    "total_tests": 11,
+    "recovery_attempts": 0,
+    "max_recovery_attempts": 3
+  },
+  "test_results": [
+    {
+      "timestamp": "2025-08-31T15:22:59.611937",
+      "command_id": 10,
+      "parameters": "34121000",
+      "parameter_length": 4,
+      "description": "Jensen magic + Command 10",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 3,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.02404499053955078,
+      "recovery_required": false,
+      "device_healthy_after": true
+    },
+    {
+      "timestamp": "2025-08-31T15:23:01.640636",
+      "command_id": 10,
+      "parameters": "34120000",
+      "parameter_length": 4,
+      "description": "Jensen magic (32-bit)",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 6,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.011556386947631836,
+      "recovery_required": false,
+      "device_healthy_after": true
+    },
+    {
+      "timestamp": "2025-08-31T15:23:03.656376",
+      "command_id": 10,
+      "parameters": "78563412",
+      "parameter_length": 4,
+      "description": "Standard magic number",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 9,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.011794328689575195,
+      "recovery_required": false,
+      "device_healthy_after": true
+    },
+    {
+      "timestamp": "2025-08-31T15:23:05.681017",
+      "command_id": 10,
+      "parameters": "4445425547",
+      "parameter_length": 5,
+      "description": "Debug mode text",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 12,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.012227773666381836,
+      "recovery_required": false,
+      "device_healthy_after": true
+    },
+    {
+      "timestamp": "2025-08-31T15:23:07.698328",
+      "command_id": 10,
+      "parameters": "41444d494e",
+      "parameter_length": 5,
+      "description": "Admin access text",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 15,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.014856815338134766,
+      "recovery_required": false,
+      "device_healthy_after": true
+    },
+    {
+      "timestamp": "2025-08-31T15:23:09.719704",
+      "command_id": 10,
+      "parameters": "0a000000",
+      "parameter_length": 4,
+      "description": "Command 10, subcommand 0",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 18,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.016370296478271484,
+      "recovery_required": false,
+      "device_healthy_after": true
+    },
+    {
+      "timestamp": "2025-08-31T15:23:11.740800",
+      "command_id": 10,
+      "parameters": "0a000100",
+      "parameter_length": 4,
+      "description": "Command 10, subcommand 1",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 21,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.012166738510131836,
+      "recovery_required": false,
+      "device_healthy_after": true
+    },
+    {
+      "timestamp": "2025-08-31T15:23:13.756973",
+      "command_id": 10,
+      "parameters": "d6100db0",
+      "parameter_length": 4,
+      "description": "VID + PID",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 24,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.011844873428344727,
+      "recovery_required": false,
+      "device_healthy_after": true
+    },
+    {
+      "timestamp": "2025-08-31T15:23:15.774248",
+      "command_id": 10,
+      "parameters": "05020600",
+      "parameter_length": 4,
+      "description": "Firmware version code",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 27,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.011577129364013672,
+      "recovery_required": false,
+      "device_healthy_after": true
+    },
+    {
+      "timestamp": "2025-08-31T15:23:17.789881",
+      "command_id": 10,
+      "parameters": "01000000",
+      "parameter_length": 4,
+      "description": "Query state 1",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 30,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.017426013946533203,
+      "recovery_required": false,
+      "device_healthy_after": true
+    },
+    {
+      "timestamp": "2025-08-31T15:23:19.812927",
+      "command_id": 10,
+      "parameters": "00000000",
+      "parameter_length": 4,
+      "description": "Query state 0",
+      "status": "success",
+      "response": {
+        "type": "structured",
+        "command_id": 10,
+        "sequence": 33,
+        "body_length": 1,
+        "body_hex": "00",
+        "body_ascii": "."
+      },
+      "error": null,
+      "response_time": 0.014958381652832031,
+      "recovery_required": false,
+      "device_healthy_after": true
+    }
+  ]
+}

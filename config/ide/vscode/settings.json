@@ -1,0 +1,144 @@
+{
+    // These settings align your editor with the hidock-next project standards
+    // as defined in CONTRIBUTING.md. They will only apply to this workspace.
+    "editor.rulers": [120],
+    // Python formatting - Using Black (overrides global autopep8 settings)
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+        }
+    },
+    "flake8.args": ["--max-line-length=120", "--extend-ignore=E203,W503"],
+    "flake8.path": ["${workspaceFolder}/apps/desktop/.venv/Scripts/flake8.exe"],
+    "flake8.cwd": "${workspaceFolder}/apps/desktop",
+    "python.defaultInterpreterPath": "${workspaceFolder}/apps/desktop/.venv/Scripts/python.exe",
+    // Pylance settings (primary type checker)
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.autoImportCompletions": true,
+
+    // TypeScript/JavaScript settings
+    "[typescript]": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "editor.formatOnSave": true
+    },
+    "[javascript]": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "editor.formatOnSave": true
+    },
+    "[json]": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "editor.formatOnSave": true
+    },
+    "[markdown]": {
+        "editor.defaultFormatter": "DavidAnson.vscode-markdownlint",
+        "editor.formatOnSave": true,
+        "editor.wordWrap": "on",
+        "editor.rulers": [120],
+        "editor.codeActionsOnSave": {
+            "source.fixAll.markdownlint": "explicit"
+        }
+    },
+
+    // ESLint settings
+    "eslint.workingDirectories": ["apps/web"],
+    "eslint.validate": ["javascript", "typescript", "javascriptreact", "typescriptreact"],
+    
+    // Terminal settings - optimized for development automation
+    "terminal.integrated.shellIntegration.enabled": true,
+    "terminal.integrated.automationProfile.windows": {
+        "source": "PowerShell",
+        "args": ["-NoProfile", "-NoLogo"],
+        "icon": "terminal-powershell"
+    },
+    "terminal.integrated.env.windows": {
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUNBUFFERED": "1",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"
+    },
+    
+    // -------------------------------------------------------------------------
+    // Kiro Agent Settings
+    // Configuration for the Kiro Agent Tool (AWS)
+    // -------------------------------------------------------------------------
+    "kiroAgent.agentAutonomy": "Autopilot", // Sets the autonomy level for the agent.
+    "kiroAgent.agentModelSelection": "CLAUDE_SONNET_4_20250514_V1_0", // Specifies the AI model to be used by the agent.
+    "kiroAgent.configureMCP": "Disabled",
+    "kiroAgent.enableTabAutocomplete": true, // Enables tab-based autocompletion from the agent.
+    "kiroAgent.trustedCommands": [
+        // A list of shell commands the agent is allowed to execute without prompting.
+        "npm install",
+        "npm run dev",
+        "python -c \"from hidock_device import HiDockJensen; print('Import successful')\"",
+        "python *",
+        "pip install *",
+        "npm run build",
+        "npm *",
+        "npx *",
+        "wc *",
+        "Get-Content *",
+        "powershell *",
+        "Get-ChildItem *",
+        "dir *"
+    ],
+    "python.testing.pytestArgs": [
+        "apps/desktop/tests",
+        "--cache-dir=${workspaceFolder}/temp/pytest_cache",
+        "--ignore=archive",
+        "--ignore=docs", 
+        "--tb=short",
+        "-v",
+        "-n",
+        "auto",
+        "--dist=worksteal",
+        "-m",
+        "not gui"
+    ],
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+    "python.testing.autoTestDiscoverOnSaveEnabled": false,
+    // "python.testing.cwd": "${workspaceFolder}/apps/desktop",
+    "claudeAutopilot.session.skipPermissions": true,
+    
+    // Pylint extension settings (optional - only if ms-python.pylint is installed)
+    "pylint.args": ["--rcfile=${workspaceFolder}/.pylintrc"],
+    "pylint.path": ["${workspaceFolder}/apps/desktop/.venv/Scripts/pylint.exe"],
+    "pylint.cwd": "${workspaceFolder}/apps/desktop",
+    
+    // Markdown settings
+    "markdownlint.config": {
+        "MD032": false,
+        "MD022": false, 
+        "MD031": false,
+        "MD036": false,
+        "MD013": { "line_length": 120 }
+    },
+    
+    // Code Spell Checker settings - disable notifications and diagnostics
+    // "cSpell.enabled": false,
+    "cSpell.diagnosticLevel": "Hint",
+    "cSpell.showAutocompleteDirectiveSuggestions": true,
+    
+    // Coverage Gutters settings for coverage visualization
+    "coverage-gutters.coverageFileNames": [
+        "coverage.xml",
+        ".coverage",
+        "htmlcov/index.html"
+    ],
+    "coverage-gutters.coverageBaseDir": "${workspaceFolder}/apps/desktop",
+    "coverage-gutters.showGutterCoverage": true,
+    "coverage-gutters.showLineCoverage": true,
+    "coverage-gutters.showRulerCoverage": true,
+    "coverage-gutters.showStatusBarToggler": true,
+    "coverage-gutters.highlightdark": "rgba(255, 0, 0, 0.2)",
+    "coverage-gutters.highlightlight": "rgba(255, 0, 0, 0.2)",
+    "coverage-gutters.partialHighlightDark": "rgba(255, 255, 0, 0.2)",
+    "coverage-gutters.partialHighlightLight": "rgba(255, 255, 0, 0.2)",
+    "coverage-gutters.coverageReportFileName": "coverage.xml",
+    "coverage-gutters.manualCoverageFilePaths": [
+        "${workspaceFolder}/apps/desktop/coverage.xml"
+    ],
+    // Cache directories
+    "python.linting.mypyCacheDir": "${workspaceFolder}/temp/mypy_cache"
+}

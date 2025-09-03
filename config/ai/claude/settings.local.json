@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "rest-api"
+  ],
+  "enableAllProjectMcpServers": true
+}

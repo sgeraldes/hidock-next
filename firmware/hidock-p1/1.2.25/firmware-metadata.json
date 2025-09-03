@@ -1,0 +1,61 @@
+{
+  "model": "hidock-p1",
+  "versionCode": "1.2.25",
+  "versionNumber": null,
+  "publishDate": 1756352129776,
+  "changeLogs": "1. Fixed file list display errors caused by excessive recording files in HiNotes app.\r\n2. Fixed the issue where recording files could not be deleted after playback.\r\n3. Fix low headset volume issue.",
+  "apiEndpoint": "/v2/device/firmware/latest",
+  "apiStatus": "Returns null - P1 may use different API or endpoint",
+  "allVersions": [
+    {
+      "version": "1.2.25",
+      "publishDate": 1756352129776,
+      "changeLogs": "1. Fixed file list display errors caused by excessive recording files in HiNotes app.\r\n2. Fixed the issue where recording files could not be deleted after playback.\r\n3. Fix low headset volume issue."
+    },
+    {
+      "version": "1.2.18",
+      "publishDate": 1753963410952,
+      "changeLogs": "1. Support HiNotes App (beta) functionality.\r\n2. Fixed intermittent recording file duplication or loss issues."
+    },
+    {
+      "version": "1.2.14",
+      "publishDate": 1753530982901,
+      "changeLogs": "1. Fixed occasional HiNotes connection failures.\r\n2. Improve battery level detection accuracy.\r\n3. Add Recording and VoiceMark tones."
+    },
+    {
+      "version": "1.2.11",
+      "publishDate": 1752918769735,
+      "changeLogs": "1. Improved BlueCatch function, fixed random crash.\r\n2. Improved noise reduction for Room mode.\r\n3. Fixed some bugs for recording playback."
+    },
+    {
+      "version": "1.2.8",
+      "publishDate": 1749725949103,
+      "changeLogs": "1. Adjusted tones and updated BNC demo.\r\n2. Optimized power consumption. Adjusted led brightness.\r\n3. Optimized device OTA bugs.\r\n4. Optimized bluetooth connection stability. Fixed silent bug when mode switching.\r\n5. Enhanced BNC noise reduction.\r\n6. Fixed some bugs in playback mode.\r\n7. Fixed some issues with device performance at low power."
+    },
+    {
+      "version": "1.1.6",
+      "publishDate": 1746015283033,
+      "changeLogs": "1. Fixed the bug where the low-battery UI could not be disabled when powering on with low battery.\r\n2. Fixed the bug where the touch strip could still trigger recording during playback mode.\r\n3. Fixed the issue where playback mode without USB connection would trigger auto-shutdown after 10 minutes.\r\n4. Added prompt tones and playback volume adjustment functionality in playback mode.\r\n5. Increased Bluetooth headset mic input gain.\r\n6. Optimized battery level detection when charging.\r\n7. UI improvements: Adjusted side LED lighting and shutdown vibration feedback.\r\n8. Added calendar synchronization functionality.\r\n9. Optimized compatibility with custom USB-cables to prevent disconnection issues on some PCs, which caused audio loss."
+    },
+    {
+      "version": "1.1.5",
+      "publishDate": 1745827392192,
+      "changeLogs": "1. DSP Updates: Added Mic 48kHz non-stationary noise cancellation in Room Mode, adjusted Room Mode EQ.\r\n2. Bluetooth Updates: Added auto volume adaptation to fix low volume issues with some headphones.\r\n3. Bluetooth Connection: Fixed mismatched UI/device connection status or inconsistency status between UAC and Bluetooth.\r\n4. UI Enhancements: Adjusted LED display effects and optimized motor vibration.\r\n5. Fixed the bug UAC plug/unplug triggering auto mute/unmute.\r\n6. Adjusted button logic in playback mode."
+    },
+    {
+      "version": "1.0.12",
+      "publishDate": 1745336293111,
+      "changeLogs": "1. Optimize USB cable connections to resolve device disconnections on some PCs that cause no audio during calls"
+    },
+    {
+      "version": "1.0.11",
+      "publishDate": 1744994733229,
+      "changeLogs": "1. Optimized noise cancellation issues and enabled for the BNC demo.\r\n2. Fixed the probabilistic failure to stop Whisper recordings upon button release.\r\n3. Fixed startup issues when the battery is extremely low.\r\n4. Fixed probabilistic data loss when stopping recordings under specific conditions.\r\n5. Optimized pop noise after bluetooth headphones connected.\r\n6. Added auto volume adaptation to fix low volume issues with some headphones.\r\n7. Fixed mismatched UI/device connection status or inconsistency status between UAC and Bluetooth.\r\n8. UI Enhancements: Adjusted LED display effects and added some notification tones.\r\n9. Fixed the bug UAC plug/unplug triggering auto mute/unmute.\r\n10. Adjusted button logic in playback mode."
+    },
+    {
+      "version": "1.0.10",
+      "publishDate": 1743164763216,
+      "changeLogs": "1. Optimization the power consumption for recording.\r\n2. Fixed the recording issue where interrupting a Room/Call recording with a Whisper recording would generate two separate files.\r\n3. New web APIs for device charging status and battery level.\r\n4. Fixed the pop noise after bluetooth headphones connected.\r\n5. Optimized USB-Cable communication stability.\r\n6. Optimized bluetooth headphones reconnection logic."
+    }
+  ]
+}
