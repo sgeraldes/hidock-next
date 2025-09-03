@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/typescript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![Version](https://img.shields.io/badge/version-1.0--RC1-green.svg)](https://github.com/sgeraldes/hidock-next/releases)
 
-![HiDock Desktop Application](docs/assets/screenshots/Screenshot%202025-08-29%20135217.png)
+![HiDock Desktop Application](docs/hidock-desktop-app.png)
 *HiDock Desktop - Professional audio recording management with AI transcription*
 
 ## ✨ Features
