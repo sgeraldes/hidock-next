@@ -1,4 +1,5 @@
 @echo off
+setlocal enabledelayedexpansion
 REM HiDock Next - Simple Windows Setup
 REM Double-click this file to set up HiDock apps
 
@@ -14,7 +15,7 @@ pause
 echo:
 echo [1/4] Checking Python...
 py -3.12 --version >nul 2>&1
-if %errorlevel% neq 0 (
+if !errorlevel! neq 0 (
     echo ERROR: Python 3.12 not found!
     echo:
     echo HiDock requires Python 3.12 for optimal compatibility.
@@ -47,7 +48,7 @@ echo Upgrading pip and installing build tools...
 
 echo Installing dependencies (this may take a few minutes)...
 .venv\Scripts\pip install -e ".[dev]"
-if %errorlevel% neq 0 (
+if !errorlevel! neq 0 (
     echo:
     echo ERROR: Failed to install dependencies!
     echo Check your internet connection and try again.
@@ -63,7 +64,7 @@ cd ..
 echo:
 echo [3/4] Checking Node.js for Web Apps...
 node --version >nul 2>&1
-if %errorlevel% neq 0 (
+if !errorlevel! neq 0 (
     echo Node.js not found - skipping web apps setup
     echo:
     echo OPTIONAL: Install Node.js for Web Apps
@@ -80,7 +81,7 @@ if %errorlevel% neq 0 (
     echo Setting up HiDock Web App...
     cd hidock-web-app
     call npm install
-    if %errorlevel% neq 0 (
+    if !errorlevel! neq 0 (
         echo WARNING: Web app setup failed
     ) else (
         echo Web app setup complete!
@@ -90,7 +91,7 @@ if %errorlevel% neq 0 (
     echo Setting up Audio Insights Extractor...
     cd audio-insights-extractor
     call npm install
-    if %errorlevel% neq 0 (
+    if !errorlevel! neq 0 (
         echo WARNING: Audio Insights Extractor setup failed
     ) else (
         echo Audio Insights Extractor setup complete!
