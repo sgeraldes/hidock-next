@@ -1,18 +1,20 @@
 # HiDock Next 🎵
 
-**Professional Desktop & Web Applications for HiDock Device Management**
+**Desktop & Web Applications for Managing Files on HiDock® Devices**
+
+> **Disclaimer:** This is an unofficial, third-party application not affiliated with or endorsed by HiDock or its manufacturers. HiDock® is a trademark of its respective owners.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![TypeScript](https://img.shields.io/badge/typescript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![Version](https://img.shields.io/badge/version-1.0--RC1-green.svg)](https://github.com/sgeraldes/hidock-next/releases)
 
-![HiDock Desktop Application](docs/hidock-desktop-app.png)
-*HiDock Desktop - Professional audio recording management with AI transcription*
+![Desktop Application Screenshot](docs/hidock-desktop-app.png)
+*Desktop file manager for HiDock® devices - Download, organize, and transcribe audio files*
 
 ## ✨ Features
 
-- 🎙️ **Complete Device Management** - Full control over HiDock recording devices
+- 🎙️ **Device File Management** - Browse, download, and organize files from HiDock® devices
 - 🎵 **Advanced Audio Player** - Built-in player with waveform visualization
 - 🤖 **AI Transcription** - Support for 11+ AI providers (OpenAI, Gemini, Claude, etc.)
 - 📅 **Calendar Integration** - Automatic meeting correlation (Windows)
