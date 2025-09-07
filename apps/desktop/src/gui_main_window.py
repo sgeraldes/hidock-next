@@ -1176,6 +1176,23 @@ class HiDockToolGUI(
             compound="left",
         )
         self.actions_menu.add_command(
+            label="Cancel Active Deletions",
+            command=self.cancel_active_deletions_gui,
+            state="disabled",
+            image=self.menu_icons.get("cancel"),
+            compound="left",
+        )
+        self.actions_menu.add_separator()
+        self.actions_menu.add_command(
+            label="🛑 Cancel ALL Operations",
+            command=self.cancel_all_operations_gui,
+            state="disabled",
+            accelerator="Ctrl+Shift+C",
+            image=self.menu_icons.get("stop"),
+            compound="left",
+        )
+        self.actions_menu.add_separator()
+        self.actions_menu.add_command(
             label="Select All",
             command=self.select_all_files_action,
             state="disabled",
@@ -1380,6 +1397,19 @@ class HiDockToolGUI(
             image=self.icons.get("delete"),
         )
         self.toolbar_delete_button.pack(side="left", padx=toolbar_button_padx, pady=toolbar_button_pady)
+        
+        # Add Cancel Operations button
+        self.toolbar_cancel_button = ctk.CTkButton(
+            self.toolbar_frame,
+            text="🛑 Cancel",
+            command=self.cancel_all_operations_gui,
+            width=toolbar_button_width,
+            image=self.icons.get("stop", self.icons.get("cancel")),
+            fg_color="darkred",
+            hover_color="red",
+        )
+        self.toolbar_cancel_button.pack(side="left", padx=(20, 2), pady=toolbar_button_pady)
+        
         self.toolbar_settings_button = ctk.CTkButton(
             self.toolbar_frame,
             text="Settings",
@@ -1669,11 +1699,21 @@ class HiDockToolGUI(
             self.actions_menu.entryconfig("Select All", state="normal" if can_select_all else "disabled")
             self.actions_menu.entryconfig("Clear Selection", state="normal" if has_selection else "disabled")
 
-            # Check if there are active downloads to cancel
+            # Check if there are active operations to cancel
+            all_active_operations = self.file_operations_manager.get_all_active_operations()
+            active_operations = [
+                op for op in all_active_operations
+                if op.status.value in ["pending", "in_progress"]
+            ]
+            
+            # Separate by operation type
             active_downloads = [
-                op
-                for op in self.file_operations_manager.get_all_active_operations()
-                if op.operation_type.value == "download" and op.status.value in ["pending", "in_progress"]
+                op for op in active_operations
+                if op.operation_type.value == "download"
+            ]
+            active_deletions = [
+                op for op in active_operations
+                if op.operation_type.value == "delete"
             ]
 
             # Check if selected files have active downloads
@@ -1691,6 +1731,20 @@ class HiDockToolGUI(
                 "Cancel All Downloads",
                 state="normal" if active_downloads else "disabled",
             )
+            self.actions_menu.entryconfig(
+                "Cancel Active Deletions",
+                state="normal" if active_deletions else "disabled",
+            )
+            self.actions_menu.entryconfig(
+                "🛑 Cancel ALL Operations",
+                state="normal" if active_operations else "disabled",
+            )
+            
+            # Update Cancel toolbar button
+            if hasattr(self, "toolbar_cancel_button"):
+                self.toolbar_cancel_button.configure(
+                    state="normal" if active_operations else "disabled"
+                )
 
             # Update playback controls based on audio player state
             is_playing = hasattr(self, "audio_player") and self.audio_player.state.value in ["playing", "paused"]

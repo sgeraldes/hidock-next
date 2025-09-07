@@ -149,3 +149,4 @@ DOCUMENTATION_UPDATE_SUMMARY.md
 coverage.xml
 *.log.*
 startup_log.txt
+apps/web/.vite/

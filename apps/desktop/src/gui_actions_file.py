@@ -144,14 +144,21 @@ class FileActionsMixin:
                 self._refresh_single_file_status(operation.filename)
             elif operation.operation_type.value == "delete":
                 # For deletions, remove the file from the treeview and update local state
+                # The file_iid is the filename for our treeview implementation
                 self._remove_file_from_treeview(operation.filename)
-                # Remove from displayed files details
-                self.displayed_files_details = [f for f in self.displayed_files_details if f["name"] != operation.filename]
+                # Note: _remove_file_from_treeview already removes from displayed_files_details
+                
                 # Remove from metadata cache
                 self.file_operations_manager.metadata_cache.remove_metadata(operation.filename)
                 
-                # Schedule a batch refresh check (only refresh once after all deletions complete)
-                self._schedule_post_deletion_refresh()
+                # Update file count in status bar
+                file_count = len(self.displayed_files_details)
+                self.update_status_bar(file_count=file_count)
+                
+                # NO NEED TO REFRESH! We've already removed the file from all local state.
+                # The old code called _schedule_post_deletion_refresh() which would fetch 
+                # the entire file list again after 2 seconds - causing the 30+ second delay
+                # for large file collections.
             else:
                 self._update_file_status_in_treeview(operation.filename, "Completed", ("completed",))
         elif operation.status == FileOperationStatus.FAILED:
@@ -813,3 +820,73 @@ class FileActionsMixin:
 
             # Note: File list refresh is not needed for cancellations
             # Files remain on device, only local operation status changes
+    
+    def cancel_all_operations_gui(self):
+        """Cancels ALL active operations (downloads, deletions, etc.)."""
+        active_operations = self.file_operations_manager.get_all_active_operations()
+        pending_operations = [
+            op for op in active_operations
+            if op.status in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
+        ]
+        
+        if not pending_operations:
+            messagebox.showinfo("No Active Operations", "No active operations to cancel.", parent=self)
+            return
+        
+        # Count operations by type
+        downloads = [op for op in pending_operations if op.operation_type == FileOperationType.DOWNLOAD]
+        deletions = [op for op in pending_operations if op.operation_type == FileOperationType.DELETE]
+        
+        # Build informative message
+        message_parts = []
+        if downloads:
+            message_parts.append(f"{len(downloads)} download(s)")
+        if deletions:
+            message_parts.append(f"{len(deletions)} deletion(s)")
+        
+        if messagebox.askyesno(
+            "Cancel All Operations",
+            f"Are you sure you want to cancel {' and '.join(message_parts)}?\n\n"
+            "This will stop all active file operations.",
+            parent=self,
+        ):
+            cancelled_count = 0
+            for operation in pending_operations:
+                if self.file_operations_manager.cancel_operation(operation.operation_id):
+                    cancelled_count += 1
+                    # Update the file status in the treeview based on operation type
+                    if operation.operation_type == FileOperationType.DELETE:
+                        # For cancelled deletions, restore to "On Device" status
+                        self._update_file_status_in_treeview(operation.filename, "On Device", ())
+                    else:
+                        # For other operations, show "Cancelled" status
+                        self._update_file_status_in_treeview(operation.filename, "Cancelled", ("cancelled",))
+            
+            self.update_status_bar(progress_text=f"Cancelled {cancelled_count} operation(s).")
+    
+    def cancel_active_deletions_gui(self):
+        """Cancels all active deletion operations."""
+        active_operations = self.file_operations_manager.get_all_active_operations()
+        delete_operations = [
+            op for op in active_operations
+            if op.operation_type == FileOperationType.DELETE
+            and op.status in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
+        ]
+        
+        if not delete_operations:
+            messagebox.showinfo("No Deletions", "No active deletions to cancel.", parent=self)
+            return
+        
+        if messagebox.askyesno(
+            "Cancel Deletions",
+            f"Are you sure you want to cancel {len(delete_operations)} active deletion(s)?",
+            parent=self,
+        ):
+            cancelled_count = 0
+            for operation in delete_operations:
+                if self.file_operations_manager.cancel_operation(operation.operation_id):
+                    cancelled_count += 1
+                    # Restore status to "On Device" since deletion was cancelled
+                    self._update_file_status_in_treeview(operation.filename, "On Device", ())
+            
+            self.update_status_bar(progress_text=f"Cancelled {cancelled_count} deletion(s).")
