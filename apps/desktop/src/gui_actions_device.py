@@ -127,43 +127,51 @@ class DeviceActionsMixin:
         if not self.backend_initialized_successfully:
             logger.warning("GUI", "attempt_autoconnect", "Skipping autoconnect, USB backend error.")
             return
-        if self.autoconnect_var.get() and not self.device_manager.device_interface.jensen_device.is_connected():
-            logger.info(
-                "GUI",
-                "attempt_autoconnect",
-                "Attempting autoconnect with device discovery...",
-            )
-
-            # Try to discover available devices first
-            try:
-                discovered_devices = asyncio.run(self.device_manager.device_interface.discover_devices())
-                if discovered_devices:
-                    # Use the first discovered device
-                    first_device = discovered_devices[0]
-                    logger.info(
-                        "GUI",
-                        "attempt_autoconnect",
-                        f"Auto-discovered device: {first_device.name}",
-                    )
-
-                    # Update the selected VID/PID to match the discovered device
-                    self.selected_vid_var.set(first_device.vendor_id)
-                    self.selected_pid_var.set(first_device.product_id)
-
-                    self.connect_device()
-                else:
-                    logger.info(
-                        "GUI",
-                        "attempt_autoconnect",
-                        "No HiDock devices discovered, trying configured device...",
-                    )
-                    self.connect_device()
-            except Exception as e:
-                logger.warning(
+        
+        # Always try to discover devices first, even if not auto-connecting
+        # This helps set the correct PID for the connected device
+        try:
+            discovered_devices = asyncio.run(self.device_manager.device_interface.discover_devices())
+            if discovered_devices:
+                # Use the first discovered device
+                first_device = discovered_devices[0]
+                logger.info(
                     "GUI",
                     "attempt_autoconnect",
-                    f"Device discovery failed: {e}, trying configured device...",
+                    f"Auto-discovered device: {first_device.name} (PID: {hex(first_device.product_id)})",
                 )
+
+                # Update the selected VID/PID to match the discovered device
+                self.selected_vid_var.set(first_device.vendor_id)
+                self.selected_pid_var.set(first_device.product_id)
+                
+                # Save the discovered PID to config for next time
+                self.config["selected_pid"] = first_device.product_id
+                self.config["selected_vid"] = first_device.vendor_id
+                
+                # If autoconnect is enabled, connect to the discovered device
+                if self.autoconnect_var.get() and not self.device_manager.device_interface.jensen_device.is_connected():
+                    logger.info("GUI", "attempt_autoconnect", "Auto-connecting to discovered device...")
+                    self.connect_device()
+            else:
+                logger.info(
+                    "GUI",
+                    "attempt_autoconnect",
+                    "No HiDock devices discovered",
+                )
+                # If autoconnect is enabled and no device found, try with default PID
+                if self.autoconnect_var.get() and not self.device_manager.device_interface.jensen_device.is_connected():
+                    logger.info("GUI", "attempt_autoconnect", "Trying with default configuration...")
+                    self.connect_device()
+        except Exception as e:
+            logger.warning(
+                "GUI",
+                "attempt_autoconnect",
+                f"Device discovery failed: {e}",
+            )
+            # If autoconnect is enabled, try with configured device
+            if self.autoconnect_var.get() and not self.device_manager.device_interface.jensen_device.is_connected():
+                logger.info("GUI", "attempt_autoconnect", "Falling back to configured device...")
                 self.connect_device()
 
     def connect_device(self):  # Identical to original, parent=self for dialogs

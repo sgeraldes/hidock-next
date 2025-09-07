@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional  # Removed Any - not used
 
 from config_and_logger import logger
-from constants import DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID
+from constants import DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID, HIDOCK_PRODUCT_IDS
 from device_interface import (  # DeviceModel,  # Commented out - not used directly, but detect_device_model returns it
     AudioRecording,
     ConnectionStats,
@@ -61,9 +61,9 @@ class DesktopDeviceAdapter(IDeviceInterface):
             # to scan USB devices more systematically
             devices = []
 
-            # Try common HiDock product IDs
-            # Include both H1E (0xB00D) and P1 (0xB00E) PIDs
-            product_ids = [0xB00E, 0xB00D, 0xAF0C, 0xAF0D, 0xAF0E, DEFAULT_PRODUCT_ID]
+            # Try all known HiDock product IDs
+            # Use the comprehensive list from constants
+            product_ids = HIDOCK_PRODUCT_IDS
 
             for pid in product_ids:
                 try:
