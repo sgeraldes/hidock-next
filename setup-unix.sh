@@ -50,7 +50,7 @@ fi
 # Set up Desktop App
 echo ""
 echo "[2/4] Setting up Desktop App..."
-cd hidock-desktop-app
+cd apps/desktop
 
 if [ ! -d ".venv" ]; then
     echo "Creating Python environment..."
@@ -81,7 +81,7 @@ if command -v node &> /dev/null; then
         echo "✓ Node.js found! Setting up web apps..."
 
         echo "Setting up HiDock Web App..."
-        cd hidock-web-app
+        cd apps/web
         npm install || {
             echo "⚠️  WARNING: Web app setup failed"
         }
@@ -89,7 +89,7 @@ if command -v node &> /dev/null; then
         cd ..
 
         echo "Setting up Audio Insights Extractor..."
-        cd audio-insights-extractor
+        cd apps/audio-insights
         npm install || {
             echo "⚠️  WARNING: Audio Insights Extractor setup failed"
         }
@@ -131,14 +131,14 @@ echo ""
 echo "🚀 HOW TO RUN:"
 echo ""
 echo "Desktop App:"
-echo "  1. cd hidock-desktop-app"
+echo "  1. cd apps/desktop"
 echo "  2. source .venv/bin/activate"
 echo "  3. python main.py"
 echo ""
 
 if [ "$WEB_APP_READY" = true ]; then
     echo "Web App:"
-    echo "  1. cd hidock-web-app"
+    echo "  1. cd apps/web"
     echo "  2. npm run dev"
     echo "  3. Open: http://localhost:5173"
     echo ""

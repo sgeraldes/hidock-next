@@ -663,8 +663,9 @@ def detect_device_model(vendor_id: int, product_id: int) -> DeviceModel:
     model_map = {
         0xAF0C: DeviceModel.H1,
         0xAF0D: DeviceModel.H1E,
-        0xB00D: DeviceModel.H1E,  # Add PID from logs for H1E
+        0xB00D: DeviceModel.H1E,  # H1E device
         0xAF0E: DeviceModel.P1,
+        0xB00E: DeviceModel.P1,  # P1 device (newer PID)
     }
 
     return model_map.get(product_id, DeviceModel.UNKNOWN)

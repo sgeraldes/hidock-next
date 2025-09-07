@@ -62,7 +62,8 @@ class DesktopDeviceAdapter(IDeviceInterface):
             devices = []
 
             # Try common HiDock product IDs
-            product_ids = [0xAF0C, 0xAF0D, 0xAF0E, DEFAULT_PRODUCT_ID]
+            # Include both H1E (0xB00D) and P1 (0xB00E) PIDs
+            product_ids = [0xB00E, 0xB00D, 0xAF0C, 0xAF0D, 0xAF0E, DEFAULT_PRODUCT_ID]
 
             for pid in product_ids:
                 try:
