@@ -150,3 +150,6 @@ coverage.xml
 *.log.*
 startup_log.txt
 apps/web/.vite/
+.venv.nix/
+.venv.win/
+NUL
