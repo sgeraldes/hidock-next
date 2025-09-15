@@ -5,7 +5,12 @@ import os
 import sys
 
 import pytest
+from tests.helpers.optional import require
+require("usb", marker="integration")
+
 import usb.backend.libusb1
+
+pytestmark = [pytest.mark.integration]
 
 # Add parent directory to path for imports when running standalone
 if __name__ == "__main__":

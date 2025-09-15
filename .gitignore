@@ -104,6 +104,7 @@ logs/
 *.log
 apps/desktop/logs/*.log
 apps/desktop/logs/*.txt
+.hidock_setup.log
 
 # Session logs and temporary documentation
 docs/session-logs/

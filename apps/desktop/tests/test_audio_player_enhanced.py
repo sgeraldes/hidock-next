@@ -13,9 +13,10 @@ import pytest
 
 # Mark as GUI test for architectural separation
 pytestmark = pytest.mark.gui
+from tests.helpers.optional import require
+require("numpy", marker="gui")
 
 import numpy as np
-import pytest
 
 from audio_player_enhanced import (
     PYDUB_AVAILABLE,

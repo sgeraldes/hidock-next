@@ -8,7 +8,7 @@ The HiDock Desktop App is a Python-based GUI application for managing audio reco
 
 A compliant development environment is critical for maintaining code quality and consistency. Follow these steps once to prepare your local environment.
 
-The `requirements.txt` file must be updated with any new dependencies.
+The `pyproject.toml` file must be updated with any new dependencies in the `dependencies` section.
 
 ## Development Workflow
 

@@ -30,3 +30,59 @@ disable = [
 max-args = 8
 max-locals = 20
 max-branches = 15
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+select = ["E", "F", "I"]
+ignore = ["E203", "W503"]
+
+# ---------------------------------------------------------------------------
+# PEP 621 project metadata (enables editable install without invoking custom
+# CLI parsing in setup.py for build-time commands like egg_info)
+# ---------------------------------------------------------------------------
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hidock-next"
+version = "0.0.0"
+description = "HiDock Next tooling and desktop environment setup"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "HiDock Contributors"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.optional-dependencies]
+desktop = [
+    "customtkinter>=5.2.0; platform_system == 'Windows' or platform_system == 'Linux' or platform_system == 'Darwin'",
+    "pyusb>=1.2.1",
+]
+audio = [
+    "numpy>=1.26",
+    "pydub>=0.25.1",
+    "pygame>=2.5.0",
+]
+integration = [
+    "requests>=2.32.0",
+]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5.0",
+    "black>=24.4",
+    "isort>=5.13",
+]
+
+[tool.setuptools]
+packages = []  # rely on namespace-less layout; editable install mainly for tests
+

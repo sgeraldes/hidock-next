@@ -11,11 +11,14 @@ import time
 from unittest.mock import Mock, patch
 
 import pytest
+from tests.helpers.optional import require
+require("usb", marker="integration")
+
 import usb.core
 import usb.util
 
 # Mark as GUI test for architectural separation
-pytestmark = pytest.mark.gui
+pytestmark = [pytest.mark.gui, pytest.mark.integration]
 
 from constants import (
     CMD_GET_DEVICE_INFO,

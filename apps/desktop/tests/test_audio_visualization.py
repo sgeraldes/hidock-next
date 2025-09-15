@@ -10,6 +10,8 @@ import tempfile
 import unittest
 import unittest.mock as mock
 from unittest.mock import MagicMock, Mock, patch
+from tests.helpers.optional import require
+require("numpy", marker="gui")
 
 import numpy as np
 import pytest

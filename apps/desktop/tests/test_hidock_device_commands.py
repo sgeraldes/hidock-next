@@ -10,10 +10,15 @@ from datetime import datetime
 from unittest.mock import Mock, patch
 
 import pytest
+from tests.helpers.optional import require
+require("usb", marker="integration")
+
 import usb.core
 
 from constants import CMD_GET_DEVICE_INFO, CMD_GET_DEVICE_TIME, CMD_SET_DEVICE_TIME, CMD_TRANSFER_FILE
 from hidock_device import HiDockJensen
+
+pytestmark = [pytest.mark.integration]
 
 
 class TestHiDockJensenDeviceInfo:

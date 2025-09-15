@@ -1,6 +1,6 @@
 # HiDock Desktop Application 🖥️
 
-**Transform your HiDock recordings with reliable device management and local audio control**
+**Transform your HiDock recordings with reliable device management and local audio control.**
 
 ![HiDock Desktop Screenshot](../docs/assets/hidock-desktop-screenshot.png)
 
@@ -23,12 +23,14 @@ complete control and privacy.
 ## ✨ Current Features
 
 ### 🎵 **Audio Playback** *(Work in Progress)*
+
 - **Basic Playback:** Play, pause, stop controls with volume adjustment
 - **Visual Analysis:** Real-time waveform display and spectrum analyzer
 - **Format Support:** Native HiDock .hda files, plus .wav, .mp3, .flac
 - **⚠️ Known Issues:** Speed control has bugs (pitch changes, occasional failures)
 
 ### 🔌 **Reliable Device Management**
+
 - **Direct USB Connection:** Stable communication with your HiDock device
 - **File Operations:** Download, delete, and manage files reliably
 - **Live Monitoring:** Real-time device status and storage information
@@ -36,12 +38,14 @@ complete control and privacy.
 - **Smart Caching:** Efficient data handling for responsive interface
 
 ### 🎨 **Modern Interface**
+
 - **Intuitive Design:** Clean, professional interface that's easy to use
 - **Dark/Light Themes:** Choose your preferred visual style
 - **Responsive Layout:** Adapts to your screen size and preferences
 - **Font Awesome Icons:** Professional iconography throughout
 
 ### 🔒 **Privacy & Control**
+
 - **Completely Local:** No internet connection required
 - **Your Data:** Files stay on your device, you control everything
 - **Open Source:** Full transparency, modify as needed
@@ -50,34 +54,40 @@ complete control and privacy.
 ## 🗺️ Roadmap
 
 ### 🎯 **Phase 1: Audio Improvements (Next Release)**
+
 - **🔧 Fix Speed Control:** Resolve pitch changes and playback failures
 - **⏯️ Enhanced Playback:** Reliable variable speed (0.25x-2.0x) without pitch distortion
 - **⏱️ Precise Seeking:** Accurate position control and timeline navigation
 
 ### 🎯 **Phase 2: Smart Organization**
+
 - **📝 File Tagging:** Add custom tags to organize recordings by topic, project, or type
 - **🔍 Smart Search:** Find recordings by tags, date, duration, or filename
 - **📊 Recording Insights:** See recording statistics, duration trends, storage usage
 
 ### 🎯 **Phase 3: Calendar Integration** *(Windows Only)*
+
 - **📅 Outlook Calendar Integration:** Automatically correlate recordings with calendar meetings
 - **🪟 Windows Platform:** Uses Outlook COM API - works with installed Outlook
 - **🔒 Secure Authentication:** OAuth2 integration with Microsoft Graph API
 - **📋 Future Enhancement:** Cross-platform .ics file import planned
 
 ### 🎯 **Phase 4: AI-Powered Features**
+
 - **🤖 Local AI Transcription:** Convert speech to text with offline models
 - **📋 Smart Summaries:** Generate meeting summaries and action items
 - **🔍 Content Search:** Search within transcribed audio content
 - **🏷️ Auto-Tagging:** AI-suggested tags based on audio content
 
 ### 🎯 **Phase 5: Advanced Collaboration (Future)**
+
 - **📤 Secure Sharing:** Share recordings with encrypted links
 - **👥 Team Workspaces:** Collaborate on recordings with team members
 - **📝 Collaborative Notes:** Add shared notes and comments to recordings
 - **🔄 Version Control:** Track changes and annotations over time
 
 ### 🎯 **Future Enhancements**
+
 - **🌐 Web Dashboard:** Browser-based interface for remote access
 - **📱 Mobile Companion:** iOS/Android app for remote control
 - **🔗 API Access:** Integrate with other tools and workflows
@@ -95,9 +105,11 @@ complete control and privacy.
    - ✅ **Check "Add Python to PATH"** (very important!)
    - ✅ Use default settings for everything else
 4. **Verify installation:** Open terminal/command prompt and type:
+
    ```bash
    python --version
    ```
+
    You should see something like "Python 3.12.x"
 
 **Already have Python?** Make sure it's version 3.12 with the command above.
@@ -106,14 +118,17 @@ complete control and privacy.
 
 1. **Download** the project and open a terminal/command prompt
 2. **Run the automated setup:**
+
    ```bash
    python setup.py
    ```
+
    Choose **Option 1** for standard installation
-   
+
    **Linux users:** The setup will automatically detect missing system dependencies and offer to install them.
 
 3. **Launch the application:**
+
    ```bash
    cd hidock-desktop-app
    python main.py
@@ -142,6 +157,25 @@ pip install -e ".[dev]"
 python main.py
 ```
 
+## 🔧 Virtual Environment Strategy
+
+This project uses **per-platform virtual environments** to avoid cross-OS conflicts (Windows vs WSL vs macOS vs Linux). Do NOT reuse a single `.venv` across platforms.
+
+Use the selector:
+
+```bash
+python scripts/env/select_venv.py --ensure --print
+```
+
+Activation examples:
+
+- Windows: `apps/desktop/.venv.win/Scripts/activate`
+- WSL: `source apps/desktop/.venv.wsl/bin/activate`
+- Linux: `source apps/desktop/.venv.linux/bin/activate`
+- macOS: `source apps/desktop/.venv.mac/bin/activate`
+
+Details & migration from legacy `.venv`: see `../../docs/VENV.md`.
+
 ## 📋 System Requirements
 
 - **Operating System:** Windows 10+, macOS 10.14+, or Linux (Ubuntu 20.04+)
@@ -153,18 +187,23 @@ python main.py
 ### **System Dependencies**
 
 #### **🪟 Windows**
+
 Usually works out of the box - libusb is included with the Python dependencies.
 
-#### **🍎 macOS** 
+#### **🍎 macOS**
+
 Install Homebrew, then run: `brew install libusb`
 
 #### **🐧 Linux (Recommended: Automated Setup)**
+
 **Best Option - Automated Script:**
+
 ```bash
 python3 setup_linux_deps.py
 ```
 
 **What this script does:**
+
 - ✅ **System Packages**: Installs tkinter, ffmpeg, libusb, audio libs, build tools
 - ✅ **USB Permissions**: Adds user to `dialout` group automatically
 - ✅ **Udev Rules**: Creates and installs device-specific USB access rules
@@ -173,6 +212,7 @@ python3 setup_linux_deps.py
 - ✅ **User Guidance**: Provides troubleshooting tips and next steps
 
 **Manual Installation (Advanced Users):**
+
 ```bash
 # Core system dependencies
 sudo apt update
@@ -205,6 +245,7 @@ The application uses `hidock_config.json` to store your preferences, device sett
 **📁 Location:** The config file is created in the application directory on first run.
 
 **🔧 Setup:**
+
 - Copy `hidock_config.json.example` to `hidock_config.json` to get started
 - The application will create default settings if no config file exists
 - All API keys are encrypted using Fernet encryption before storage
@@ -212,6 +253,7 @@ The application uses `hidock_config.json` to store your preferences, device sett
 ## 📚 Documentation & Support
 
 **For detailed information:**
+
 - [📖 Complete Documentation](../docs/) - Installation guides, troubleshooting, advanced features
 - [👨‍💻 Development Guide](../CONTRIBUTING.md) - Contributing, code standards, development setup
 

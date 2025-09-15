@@ -1,0 +1,18 @@
+{
+    // Workspace-specific VSCode overrides (auto-generated to enforce 120-col flake8)
+    "editor.rulers": [120],
+    "python.linting.flake8Enabled": true,
+    // Ensure we point to the same interpreter used for desktop app (fallback if not yet created)
+    "python.defaultInterpreterPath": "${workspaceFolder}/apps/desktop/.venv/Scripts/python.exe",
+    // Force flake8 to use 120 max line length & ignore stylistic conflicts with Black
+    "flake8.args": ["--max-line-length=120", "--extend-ignore=E203,W503"],
+    // If the flake8 path inside the venv exists, VSCode will use it; otherwise global flake8 or tool-managed
+    "flake8.path": [
+        "${workspaceFolder}/apps/desktop/.venv/Scripts/flake8.exe",
+        "${workspaceFolder}/.venv/Scripts/flake8.exe"
+    ],
+    // Set working directory for relative import resolution & config discovery
+    "flake8.cwd": "${workspaceFolder}",
+    // Optional: show Pylance in basic mode consistent with repo template config
+    "python.analysis.typeCheckingMode": "basic"
+}

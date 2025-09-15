@@ -7,9 +7,14 @@ import os
 import tempfile
 import wave
 from unittest.mock import Mock, patch, MagicMock
+from tests.helpers.optional import require
+require("numpy", marker="integration")
 
 import numpy as np
 import pytest
+
+# Mark entire module as integration (heavy numpy processing)
+pytestmark = pytest.mark.integration
 
 
 class TestAdvancedAudioProcessing:

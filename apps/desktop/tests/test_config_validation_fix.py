@@ -9,9 +9,13 @@ import json
 import os
 import tempfile
 from unittest.mock import patch
+from tests.helpers.optional import require
+require("customtkinter", marker="gui")
 
 import customtkinter as ctk
 import pytest
+
+pytestmark = [pytest.mark.gui]
 
 
 class TestConfigValidation:
