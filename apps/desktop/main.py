@@ -19,6 +19,9 @@ import os
 import tkinter  # For tkinter.Menu and messagebox
 import traceback
 
+# Suppress pygame welcome message before any imports that might use pygame
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
+
 # Add the src directory to Python path so all existing imports work
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 

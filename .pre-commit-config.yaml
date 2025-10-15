@@ -1,0 +1,47 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+  - repo: https://github.com/psf/black
+    rev: 24.8.0
+    hooks:
+      - id: black
+        language_version: python3
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile=black", "--filter-files"]
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.9
+    hooks:
+      - id: bandit
+        name: bandit (security)
+        args: ["-q", "-r", "apps/desktop", "hidock_shims"]
+        additional_dependencies: ["bandit[toml]"]
+  - repo: local
+    hooks:
+      - id: pytest-fast
+        name: pytest (fast core)
+        entry: python -m pytest -q
+        language: system
+        pass_filenames: false
+        stages: [commit]
+        types: [python]
+        additional_dependencies: []
+        # Allow skipping with SKIP_TESTS=1 env var
+  # Note: pre-commit core doesn't officially support 'condition'; kept as documentation placeholder.
+  # To skip tests set SKIP_TESTS=1 before committing.

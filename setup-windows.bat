@@ -45,10 +45,10 @@ exit /b 1
 echo:
 echo [2/4] Setting up Desktop App...
 REM Resolve per-platform venv path (will not create yet)
-for /f "usebackq delims=" %%I in (`python scripts\env\select_venv.py --print 2^>nul`) do set VENV_PATH=%%I
+for /f "usebackq delims=" %%I in (`python scripts\env\select_venv.py --print`) do set VENV_PATH=%%I
 if not defined VENV_PATH (
-    echo Resolving environment path (creating)...
-    for /f "usebackq delims=" %%I in (`python scripts\env\select_venv.py --ensure --print 2^>nul`) do set VENV_PATH=%%I
+    echo Resolving environment path ^(creating^)...
+    for /f "usebackq delims=" %%I in (`python scripts\env\select_venv.py --ensure --print`) do set VENV_PATH=%%I
 )
 if not defined VENV_PATH (
     echo ERROR: Could not resolve/create virtual environment.
