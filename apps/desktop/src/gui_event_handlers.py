@@ -108,8 +108,10 @@ class EventHandlersMixin:
 
             # Update file operations manager with new download directory
             if hasattr(self, "file_operations_manager"):
-                self.file_operations_manager.download_dir = Path(new_dir)
-                self.file_operations_manager.download_dir.mkdir(parents=True, exist_ok=True)
+                self.file_operations_manager.set_download_directory(new_dir)
+
+            if hasattr(self, "offline_mode_manager"):
+                self.offline_mode_manager.download_directory = new_dir
 
             # Refresh file status to reflect availability in new directory
             if hasattr(self, "refresh_file_status_after_directory_change"):

@@ -4,8 +4,7 @@ Provides prominent, customizable toast notifications for user feedback.
 """
 
 import customtkinter as ctk
-import threading
-import time
+import tkinter as tk
 from typing import Literal, Optional
 
 
@@ -43,7 +42,7 @@ class ToastNotification:
         self.height = height
         
         self.toast_window: Optional[ctk.CTkToplevel] = None
-        self.dismiss_timer: Optional[threading.Timer] = None
+        self._dismiss_after_id: Optional[str] = None
         self.is_dismissed = False
         
         # Color schemes for different toast types
@@ -143,8 +142,16 @@ class ToastNotification:
         # Configure window
         self.toast_window.geometry(f"{self.width}x{self.height}")
         self.toast_window.resizable(False, False)
-        self.toast_window.overrideredirect(True)  # Remove window decorations
-        self.toast_window.wm_attributes("-topmost", True)  # Always on top
+        try:
+            self.toast_window.overrideredirect(True)  # Remove window decorations
+        except tk.TclError:
+            # Some window managers on macOS may reject overrideredirect immediately; ignore
+            pass
+
+        try:
+            self.toast_window.wm_attributes("-topmost", True)  # Always on top
+        except tk.TclError:
+            pass
         
         # Bind to parent destruction to clean up properly
         self.parent.bind("<Destroy>", lambda e: self.dismiss(), add=True)
@@ -238,9 +245,8 @@ class ToastNotification:
         
         # Auto-dismiss timer
         if self.duration > 0:
-            self.dismiss_timer = threading.Timer(self.duration / 1000.0, self.dismiss)
-            self.dismiss_timer.daemon = True
-            self.dismiss_timer.start()
+            if self.toast_window and self.toast_window.winfo_exists():
+                self._dismiss_after_id = self.toast_window.after(self.duration, self.dismiss)
     
     def _position_toast(self):
         """Position the toast based on the specified position."""
@@ -299,8 +305,12 @@ class ToastNotification:
         self.is_dismissed = True
         
         # Cancel timer if running
-        if self.dismiss_timer:
-            self.dismiss_timer.cancel()
+        if self._dismiss_after_id and self.toast_window and self.toast_window.winfo_exists():
+            try:
+                self.toast_window.after_cancel(self._dismiss_after_id)
+            except Exception:
+                pass
+        self._dismiss_after_id = None
         
         # Destroy window safely
         try:

@@ -620,21 +620,36 @@ class DeviceActionsMixin:
         if not download_dir or not os.path.exists(download_dir):
             return
 
-        # Get all files in download directory once
-        try:
-            downloaded_files = set(os.listdir(download_dir))
-        except (OSError, PermissionError):
-            return
+        mp3_dir = os.path.join(download_dir, "mp3")
+        hda_dir = os.path.join(download_dir, "hda")
+        downloaded_files = set()
+
+        for base in (mp3_dir, hda_dir, download_dir):
+            try:
+                entries = os.listdir(base)
+                downloaded_files.update((base, entry) for entry in entries)
+            except (OSError, PermissionError):
+                continue
 
         # Batch process files - minimal logging
         found_count = 0
         for f_info in files:
             # Generate the safe filename as _get_local_filepath does
             safe_filename = f_info.filename.replace(":", "-").replace(" ", "_").replace("\\", "_").replace("/", "_")
-            if safe_filename in downloaded_files:
-                local_filepath = os.path.join(download_dir, safe_filename)
-                # Skip the isfile check for performance - trust the directory listing
-                f_info.local_path = local_filepath
+            mp3_entry = (mp3_dir, safe_filename.replace(".hda", ".mp3"))
+            hda_entry = (hda_dir, safe_filename)
+            legacy_entry = (download_dir, safe_filename)
+
+            target_path = None
+            if mp3_entry in downloaded_files:
+                target_path = os.path.join(*mp3_entry)
+            elif hda_entry in downloaded_files:
+                target_path = os.path.join(*hda_entry)
+            elif legacy_entry in downloaded_files:
+                target_path = os.path.join(*legacy_entry)
+
+            if target_path:
+                f_info.local_path = target_path
                 found_count += 1
 
         # Single summary log instead of per-file logging

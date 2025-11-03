@@ -12,10 +12,13 @@ It is designed to be used asynchronously and supports multiple AI providers
 through a unified interface. Returns mock responses for development without API keys.
 """
 
+import concurrent.futures
 import json
 import os
+import tempfile
 import wave
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ai_service import ai_service
 from config_and_logger import logger
@@ -33,6 +36,9 @@ except ImportError:
 # --- Constants ---
 TRANSCRIPTION_FAILED_DEFAULT_MSG = "Transcription failed or no content returned."
 TRANSCRIPTION_PARSE_ERROR_MSG_PREFIX = "Error parsing transcription response:"
+
+# Adaptive chunk sizing hint across runs
+_CHUNK_MS_HINT: Optional[int] = None
 
 
 def _call_gemini_api(payload: Dict[str, Any], api_key: str = "") -> Optional[Dict[str, Any]]:
@@ -102,7 +108,7 @@ async def transcribe_audio(
     api_key: str = "",
     config: Optional[Dict[str, Any]] = None,
     language: str = "auto",
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     """
     Transcribes audio file using the specified AI provider.
 
@@ -135,18 +141,19 @@ async def transcribe_audio(
     result = ai_service.transcribe_audio(provider, audio_file_path, language)
 
     if result.get("success"):
-        transcription_text = result.get("transcription", TRANSCRIPTION_FAILED_DEFAULT_MSG)
         logger.info(
             "TranscriptionModule",
             "transcribe_audio",
             f"Transcription successful with {provider}",
         )
     else:
-        transcription_text = f"Transcription failed: {result.get('error', 'Unknown error')}"
-        logger.error("TranscriptionModule", "transcribe_audio", transcription_text)
+        logger.error(
+            "TranscriptionModule",
+            "transcribe_audio",
+            f"Transcription failed: {result.get('error', 'Unknown error')}",
+        )
 
-    # The raw text from Gemini may contain speaker labels like "Speaker A: ..."
-    return {"transcription": transcription_text}
+    return result
 
 
 async def extract_meeting_insights(
@@ -269,12 +276,208 @@ def _get_audio_duration(audio_path: str) -> int:
         return 0
 
 
+def _split_audio_into_chunks(
+    audio_file_path: str,
+    max_bytes: int,
+    overlap_ms: int = 1000,
+    progress_callback: Optional[Callable[[str, Optional[float]], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Split audio into chunks that remain under the provider upload limit.
+    """
+    global _CHUNK_MS_HINT
+
+    def _progress(message: str, fraction: Optional[float] = None) -> None:
+        if progress_callback:
+            progress_callback(message, fraction)
+
+    try:
+        from pydub import AudioSegment
+    except ImportError as exc:  # pragma: no cover
+        logger.error("TranscriptionModule", "_split_audio_into_chunks", f"pydub not available: {exc}")
+        return None
+
+    try:
+        audio = AudioSegment.from_file(audio_file_path)
+    except Exception as exc:
+        logger.error("TranscriptionModule", "_split_audio_into_chunks", f"Failed to load audio: {exc}")
+        return None
+
+    duration_ms = len(audio)
+    size_bytes = os.path.getsize(audio_file_path)
+
+    if size_bytes <= max_bytes:
+        return [
+            {
+                "path": audio_file_path,
+                "cleanup": False,
+                "start_ms": 0,
+                "duration_ms": duration_ms,
+            }
+        ]
+
+    _progress("Analyzing audio for chunking…", 0.05)
+
+    effective_limit = int(max_bytes * 0.8)
+    if effective_limit <= 0:
+        effective_limit = max_bytes
+
+    bytes_per_ms = size_bytes / max(duration_ms, 1)
+
+    if _CHUNK_MS_HINT:
+        chunk_ms = int(_CHUNK_MS_HINT)
+    else:
+        chunk_ms = int(effective_limit / max(bytes_per_ms, 1))
+
+    chunk_ms = max(chunk_ms, overlap_ms + 1000)  # ensure forward progress
+
+    fmt = os.path.splitext(audio_file_path)[1].lstrip(".").lower() or "mp3"
+
+    duration_sec = max(duration_ms / 1000.0, 1.0)
+    estimated_kbps = int((size_bytes * 8) / duration_sec / 1000)
+    bitrate_kbps = max(64, min(192, estimated_kbps))
+    bitrate_param = f"{bitrate_kbps}k"
+
+    segments: List[Tuple[int, int, int]] = []  # (index, start_ms, end_ms)
+    start_ms = 0
+    idx = 0
+
+    while start_ms < duration_ms:
+        if cancel_callback and cancel_callback():
+            return None
+
+        end_ms = min(duration_ms, start_ms + chunk_ms)
+        if end_ms <= start_ms:
+            end_ms = min(duration_ms, start_ms + overlap_ms + 1000)
+
+        segments.append((idx, start_ms, end_ms))
+        if end_ms >= duration_ms:
+            break
+
+        start_ms = max(0, end_ms - overlap_ms)
+        idx += 1
+
+    total_segments = len(segments)
+    if total_segments == 0:
+        return None
+
+    if total_segments == 1:
+        _CHUNK_MS_HINT = segments[0][2] - segments[0][1]
+        return [
+            {
+                "path": audio_file_path,
+                "cleanup": False,
+                "start_ms": segments[0][1],
+                "duration_ms": segments[0][2] - segments[0][1],
+            }
+        ]
+
+    _progress(f"Encoding {total_segments} chunks…", 0.1)
+
+    segment_payloads: List[Tuple[int, Any, int, int]] = []
+    for index, start_ms, end_ms in segments:
+        if cancel_callback and cancel_callback():
+            return None
+        segment_payloads.append((index, audio[start_ms:end_ms], start_ms, end_ms - start_ms))
+
+    chunks: List[Optional[Dict[str, Any]]] = [None] * total_segments
+
+    def _export(idx: int, segment, start_ms: int, duration_ms: int) -> Dict[str, Any]:
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f"_chunk{idx:03d}.{fmt}")
+        temp_path = temp_file.name
+        temp_file.close()
+
+        export_kwargs = {"format": fmt}
+        parameters: List[str] = []
+        if fmt in {"mp3", "ogg", "m4a", "aac", "wma"}:
+            export_kwargs["bitrate"] = bitrate_param
+            parameters = ["-ar", str(segment.frame_rate), "-ac", str(segment.channels)]
+
+        try:
+            segment.export(temp_path, **export_kwargs, parameters=parameters)  # type: ignore[arg-type]
+        except TypeError:
+            segment.export(temp_path, **export_kwargs)
+
+        chunk_size = os.path.getsize(temp_path)
+        if chunk_size > max_bytes:
+            os.unlink(temp_path)
+            raise ValueError(
+                f"Chunk {idx} exceeded size limit ({chunk_size} bytes > {max_bytes} bytes)."
+            )
+
+        return {
+            "path": temp_path,
+            "cleanup": True,
+            "start_ms": start_ms,
+            "duration_ms": duration_ms,
+        }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, total_segments)) as executor:
+        future_map = {
+            executor.submit(_export, idx, segment, start_ms, duration_ms): idx
+            for idx, segment, start_ms, duration_ms in segment_payloads
+        }
+
+        completed = 0
+        for future in concurrent.futures.as_completed(future_map):
+            idx = future_map[future]
+            if cancel_callback and cancel_callback():
+                for pending in future_map:
+                    pending.cancel()
+                _cleanup_chunk_files([chunk for chunk in chunks if isinstance(chunk, dict)])
+                return None
+
+            try:
+                chunk_info = future.result()
+            except Exception as exc:
+                logger.error(
+                    "TranscriptionModule",
+                    "_split_audio_into_chunks",
+                    f"Chunk export failed: {exc}",
+                )
+                _cleanup_chunk_files([chunk for chunk in chunks if isinstance(chunk, dict)])
+                return None
+
+            chunks[idx] = chunk_info
+            completed += 1
+            _progress(f"Chunk {completed}/{total_segments} ready", completed / total_segments)
+
+    ordered_chunks = [chunk for chunk in chunks if chunk is not None]
+    if not ordered_chunks:
+        return None
+
+    _CHUNK_MS_HINT = max(chunk["duration_ms"] for chunk in ordered_chunks)
+
+    return ordered_chunks
+
+
+def _cleanup_chunk_files(chunks: List[Dict[str, Any]]) -> None:
+    if not chunks:
+        return
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        if chunk.get("cleanup") and chunk.get("path"):
+            try:
+                if os.path.exists(chunk["path"]):
+                    os.remove(chunk["path"])
+            except Exception as exc:  # pragma: no cover - best effort cleanup
+                logger.debug(
+                    "TranscriptionModule",
+                    "_cleanup_chunk_files",
+                    f"Failed to remove chunk {chunk['path']}: {exc}",
+                )
+
+
 async def process_audio_file_for_insights(
     audio_file_path: str,
     provider: str = "gemini",
     api_key: str = "",
     config: Optional[Dict[str, Any]] = None,
     language: str = "auto",
+    progress_callback: Optional[Callable[[str, Optional[float]], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
     Orchestrates the full audio processing pipeline: read, transcribe, and extract insights.
@@ -291,61 +494,201 @@ async def process_audio_file_for_insights(
     Returns:
         A dictionary containing the transcription, insights, and any errors.
     """
+    def _report(message: str, fraction: float = None) -> None:
+        if progress_callback is None:
+            return
+
+        try:
+            if fraction is None:
+                fraction_value = None
+            else:
+                fraction_value = max(0.0, min(1.0, fraction))
+            progress_callback(message, fraction_value)
+        except Exception as callback_error:  # pylint: disable=broad-except
+            logger.debug(
+                "TranscriptionModule",
+                "process_audio_file",
+                f"Progress callback failed ({callback_error})",
+            )
+
+    temp_audio_file = None
+    temp_audio_cleanup = False
+    chunk_infos: List[Dict[str, Any]] = []
+
     logger.info(
         "TranscriptionModule",
         "process_audio_file",
         f"Processing: {audio_file_path} with {provider}",
     )
+    _report("Preparing audio for transcription…", 0.02)
+
+    def _should_cancel() -> bool:
+        return bool(cancel_callback and cancel_callback())
 
     try:
         if not os.path.exists(audio_file_path):
-            logger.error(
-                "TranscriptionModule",
-                "process_audio_file",
-                f"File not found: {audio_file_path}",
-            )
+            _report("Audio file not found", 1.0)
             return {"error": "Audio file not found."}
     except Exception as e:
         logger.error("TranscriptionModule", "process_audio_file", f"File preparation error: {e}")
+        _report("Error preparing audio file", 1.0)
         return {"error": f"Error preparing audio file: {e}"}
 
     try:
         # Check if it's an HTA/HDA file and convert it first
         ext = os.path.splitext(audio_file_path)[1].lower()
         temp_audio_file = None
+        temp_audio_cleanup = False
 
         if ext in [".hta", ".hda"]:
-            # Convert HTA/HDA to transcription-optimized format (MP3)
-            from hta_converter import convert_hta_for_transcription
+            mp3_candidate = None
+            try:
+                hda_path = Path(audio_file_path)
+                mp3_candidate = hda_path.parent.parent / "mp3" / (hda_path.stem + ".mp3")
+            except Exception:  # pragma: no cover - path assumptions may fail
+                mp3_candidate = None
 
-            temp_audio_file = convert_hta_for_transcription(audio_file_path)
-            if temp_audio_file:
-                audio_file_path = temp_audio_file
-                ext = os.path.splitext(temp_audio_file)[1].lower()
+            if mp3_candidate and mp3_candidate.exists():
+                audio_file_path = str(mp3_candidate)
+                ext = ".mp3"
                 logger.info(
                     "TranscriptionModule",
                     "process_audio_file",
-                    f"Converted HDA/HTA file to transcription format: {temp_audio_file}",
+                    f"Using pre-converted MP3 asset: {audio_file_path}",
                 )
             else:
-                logger.error(
-                    "TranscriptionModule",
-                    "process_audio_file",
-                    "Failed to convert HDA/HTA file for transcription",
-                )
-                return {"error": "Failed to convert HDA/HTA file to transcription format"}
+                # Convert HTA/HDA to transcription-optimized format (MP3)
+                from hta_converter import convert_hta_for_transcription, get_hta_converter
+
+                converter = get_hta_converter()
+                temp_audio_file = convert_hta_for_transcription(audio_file_path)
+                if temp_audio_file:
+                    audio_file_path = temp_audio_file
+                    ext = os.path.splitext(temp_audio_file)[1].lower()
+                    logger.info(
+                        "TranscriptionModule",
+                        "process_audio_file",
+                        f"Converted HDA/HTA file to transcription format: {temp_audio_file}",
+                    )
+
+                    temp_path = Path(temp_audio_file)
+                    try:
+                        temp_path.relative_to(converter.cache_dir)
+                        temp_audio_cleanup = False
+                    except Exception:  # ValueError on non-relative
+                        temp_audio_cleanup = True
+                else:
+                    _report("Failed to convert HiDock audio", 1.0)
+                    return {"error": "Failed to convert HDA/HTA file to transcription format"}
 
     except Exception as e:
         logger.error("TranscriptionModule", "process_audio_file", f"File preparation error: {e}")
+        _report("Error preparing audio file", 1.0)
         return {"error": f"Error preparing audio file: {e}"}
 
-    try:
-        # --- Step 1: Transcribe Audio ---
-        transcription_result = await transcribe_audio(audio_file_path, provider, api_key, config, language)
-        full_transcription = transcription_result.get("transcription", "")
+    chunk_infos: List[Dict[str, Any]] = []
+    transcripts_meta: List[Dict[str, Any]] = []
+    full_transcription = ""
+    meeting_insights: Dict[str, Any] = {}
 
-        # --- Step 2: Extract Insights ---
-        if full_transcription and not full_transcription.startswith("Transcription failed"):
+    try:
+        max_upload_bytes = 25 * 1024 * 1024
+        def chunk_progress(message: str, relative: Optional[float]) -> None:
+            if relative is None:
+                _report(message)
+            else:
+                _report(message, 0.12 + relative * 0.08)
+
+        chunk_infos = _split_audio_into_chunks(
+            audio_file_path,
+            max_upload_bytes,
+            overlap_ms=1500,
+            progress_callback=chunk_progress,
+            cancel_callback=_should_cancel,
+        )
+        if chunk_infos is None:
+            if _should_cancel():
+                _report("Transcription cancelled", 1.0)
+                return {"error": "Transcription cancelled by user."}
+            _report("Failed to prepare audio for transcription.", 1.0)
+            return {"error": "Failed to prepare audio for transcription."}
+
+        total_chunks = len(chunk_infos)
+        if total_chunks > 1:
+            _report(f"Splitting audio into {total_chunks} chunks…", 0.12)
+        else:
+            _report("Audio fits within upload limits.", 0.12)
+
+        transcribe_start = 0.2
+        transcribe_end = 0.8
+
+        for idx, chunk in enumerate(chunk_infos):
+            if _should_cancel():
+                _report("Transcription cancelled", 1.0)
+                return {"error": "Transcription cancelled by user."}
+
+            progress = transcribe_start + (idx / total_chunks) * (transcribe_end - transcribe_start)
+            message = (
+                f"Transcribing chunk {idx + 1}/{total_chunks}…"
+                if total_chunks > 1
+                else "Transcribing audio…"
+            )
+            _report(message, progress)
+
+            transcription_result = await transcribe_audio(chunk["path"], provider, api_key, config, language)
+
+            if _should_cancel():
+                _report("Transcription cancelled", 1.0)
+                return {"error": "Transcription cancelled by user."}
+
+            if not transcription_result.get("success"):
+                error_msg = transcription_result.get("error", "Unknown transcription error.")
+                logger.error(
+                    "TranscriptionModule",
+                    "process_audio_file",
+                    f"Chunk {idx + 1} failed: {error_msg}",
+                )
+                _report(f"Chunk {idx + 1} failed: {error_msg}", 1.0)
+                return {"error": error_msg}
+
+            chunk_text = transcription_result.get("transcription", "")
+            transcripts_meta.append(
+                {
+                    "text": chunk_text,
+                    "start_ms": chunk.get("start_ms", idx * 1000),
+                }
+            )
+
+            completed_fraction = transcribe_start + ((idx + 1) / total_chunks) * (transcribe_end - transcribe_start)
+            _report(f"Chunk {idx + 1}/{total_chunks} complete", completed_fraction)
+
+        if transcripts_meta:
+            if total_chunks > 1:
+                sections = []
+                for idx, entry in enumerate(transcripts_meta):
+                    timestamp = entry["start_ms"] / 1000.0
+                    sections.append(f"[Segment {idx + 1} @ {timestamp:.1f}s]\n{entry['text']}".rstrip())
+                full_transcription = "\n\n".join(sections)
+            else:
+                full_transcription = transcripts_meta[0]["text"]
+
+        _report("Combining transcript…", 0.82)
+
+        if not full_transcription:
+            logger.warning(
+                "TranscriptionModule",
+                "process_audio_file",
+                "Transcription produced no content.",
+            )
+            _report("Transcription produced no text", 1.0)
+            return {"error": "Transcription produced no text."}
+
+        if _should_cancel():
+            _report("Transcription cancelled", 1.0)
+            return {"error": "Transcription cancelled by user."}
+
+        if not full_transcription.startswith("Transcription failed"):
+            _report("Transcription complete. Extracting insights…", 0.85)
             meeting_insights = await extract_meeting_insights(full_transcription, provider, api_key, config)
         else:
             logger.warning(
@@ -353,10 +696,14 @@ async def process_audio_file_for_insights(
                 "process_audio_file",
                 "Skipping insights due to transcription failure.",
             )
-            meeting_insights = {"summary": "N/A - Transcription failed"}  # Provide failure context
+            _report("Transcription failed", 1.0)
+            meeting_insights = {"summary": "N/A - Transcription failed"}
     except Exception as e:
         logger.error("TranscriptionModule", "process_audio_file", f"Error during processing: {e}")
+        _report("Transcription error", 1.0)
         return {"error": f"Error preparing audio file: {e}"}
+    finally:
+        _cleanup_chunk_files(chunk_infos)
 
     # --- Step 3: Enrich with local data ---
     if meeting_insights.get("meeting_details", {}).get("duration_minutes") == 0:
@@ -366,7 +713,7 @@ async def process_audio_file_for_insights(
             )
 
     # Clean up temporary converted file if created
-    if temp_audio_file and os.path.exists(temp_audio_file):
+    if temp_audio_file and temp_audio_cleanup and os.path.exists(temp_audio_file):
         try:
             os.remove(temp_audio_file)
             logger.info(
@@ -381,10 +728,15 @@ async def process_audio_file_for_insights(
                 f"Could not clean up temporary file: {e}",
             )
 
-    return {
+    _report("Finalizing transcription results", 0.95)
+
+    result_payload = {
         "transcription": full_transcription,
         "insights": meeting_insights,
     }
+
+    _report("Transcription finished", 1.0)
+    return result_payload
 
 
 async def main_test() -> None:

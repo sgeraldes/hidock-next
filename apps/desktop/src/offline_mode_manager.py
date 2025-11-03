@@ -71,22 +71,30 @@ class OfflineModeManager:
         """Get the local file path for offline playback."""
         # First check cached metadata
         cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(filename)
-        if cached_metadata and cached_metadata.local_path and os.path.exists(cached_metadata.local_path):
-            return cached_metadata.local_path
+        if cached_metadata:
+            candidate_paths = [
+                getattr(cached_metadata, "local_path_mp3", None),
+                cached_metadata.local_path,
+            ]
+            for candidate in candidate_paths:
+                if candidate and os.path.exists(candidate):
+                    return candidate
         
         # If not found in cache, check download directory directly
         # Use the same filename sanitization as _get_local_filepath
         safe_filename = filename.replace(":", "-").replace(" ", "_").replace("\\", "_").replace("/", "_")
         
-        # Check for .wav file (converted from .hda)
-        wav_path = os.path.join(self.download_directory, safe_filename.replace(".hda", ".wav"))
-        if os.path.exists(wav_path):
-            return wav_path
-            
-        # Check for original .hda file
-        hda_path = os.path.join(self.download_directory, safe_filename)
+        mp3_path = os.path.join(self.download_directory, "mp3", safe_filename.replace(".hda", ".mp3"))
+        if os.path.exists(mp3_path):
+            return mp3_path
+
+        hda_path = os.path.join(self.download_directory, "hda", safe_filename)
         if os.path.exists(hda_path):
             return hda_path
+
+        legacy_path = os.path.join(self.download_directory, safe_filename)
+        if os.path.exists(legacy_path):
+            return legacy_path
             
         return None
 

@@ -9,6 +9,7 @@ pyusb
 customtkinter
 Pillow
 pygame
+openai>=1.0.0
 google-generativeai
 matplotlib
 numpy
