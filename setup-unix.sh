@@ -1,8 +1,14 @@
-#!/bin/bash
+#!/bin/zsh
 # HiDock Next - Simple Linux/Mac Setup
 # Run: chmod +x setup-unix.sh && ./setup-unix.sh
 
-set -e  # Exit on any error
+# Ensure zsh behaves consistently with POSIX-style scripts
+emulate -L zsh
+setopt errexit pipefail  # Exit on any error, fail pipelines
+
+SCRIPT_DIR=${0:A:h}
+cd "$SCRIPT_DIR"
+ROOT_DIR=$PWD
 
 echo ""
 echo "================================"
@@ -40,9 +46,10 @@ else
 fi
 
 # Check Python version
-PYTHON_VERSION=$($PYTHON_CMD --version 2>&1 | cut -d' ' -f2 | cut -d'.' -f1,2)
-if [ "$(printf '%s\n' "3.12" "$PYTHON_VERSION" | sort -V | head -n1)" != "3.12" ]; then
-    echo "❌ ERROR: Python 3.12 required for optimal compatibility, found $PYTHON_VERSION"
+PYTHON_VERSION=$($PYTHON_CMD -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+IFS='.' read -r PY_MAJOR PY_MINOR <<< "$PYTHON_VERSION"
+if (( PY_MAJOR < 3 || (PY_MAJOR == 3 && PY_MINOR < 12) )); then
+    echo "❌ ERROR: Python 3.12 required for optimal compatibility, found $PY_MAJOR.$PY_MINOR"
     echo "Some packages may not work with other versions"
     exit 1
 fi
@@ -50,7 +57,7 @@ fi
 # Set up Desktop App
 echo ""
 echo "[2/4] Setting up Desktop App..."
-cd apps/desktop
+cd "$ROOT_DIR/apps/desktop"
 
 if [ ! -d ".venv" ]; then
     echo "Creating Python environment..."
@@ -60,17 +67,28 @@ fi
 echo "Upgrading pip and installing dependencies..."
 source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
+
 echo "Installing dependencies (this may take a few minutes)..."
-pip install -e ".[dev]" || {
-    echo ""
-    echo "❌ ERROR: Failed to install dependencies!"
-    echo "Check your internet connection and try again."
-    echo ""
-    exit 1
-}
+if [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
+    pip install -e ".[dev]" || {
+        echo ""
+        echo "❌ ERROR: Failed to install dependencies!"
+        echo "Check your internet connection and try again."
+        echo ""
+        exit 1
+    }
+else
+    pip install -r config/requirements.txt && pip install -r config/requirements-dev.txt || {
+        echo ""
+        echo "❌ ERROR: Failed to install dependencies!"
+        echo "Check your internet connection and try again."
+        echo ""
+        exit 1
+    }
+fi
 
 echo "✅ Desktop app setup complete!"
-cd ..
+cd "$ROOT_DIR"
 
 # Check Node.js for Web Apps
 echo ""
@@ -81,20 +99,20 @@ if command -v node &> /dev/null; then
         echo "✓ Node.js found! Setting up web apps..."
 
         echo "Setting up HiDock Web App..."
-        cd apps/web
+        cd "$ROOT_DIR/apps/web"
         npm install || {
             echo "⚠️  WARNING: Web app setup failed"
         }
         echo "✅ Web app setup complete!"
-        cd ..
+        cd "$ROOT_DIR"
 
         echo "Setting up Audio Insights Extractor..."
-        cd apps/audio-insights
+        cd "$ROOT_DIR/apps/audio-insights"
         npm install || {
             echo "⚠️  WARNING: Audio Insights Extractor setup failed"
         }
         echo "✅ Audio Insights Extractor setup complete!"
-        cd ..
+        cd "$ROOT_DIR"
 
         WEB_APP_READY=true
     else

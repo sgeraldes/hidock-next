@@ -32,7 +32,14 @@ class FileActionsMixin:
             str: A safe local file path.
         """
         safe_filename = device_filename.replace(":", "-").replace(" ", "_").replace("\\", "_").replace("/", "_")
-        return os.path.join(self.download_directory, safe_filename)
+        mp3_path = os.path.join(self.download_directory, "mp3", os.path.splitext(safe_filename)[0] + ".mp3")
+        if os.path.exists(mp3_path):
+            return mp3_path
+        hda_path = os.path.join(self.download_directory, "hda", safe_filename)
+        if os.path.exists(hda_path):
+            return hda_path
+        legacy_path = os.path.join(self.download_directory, safe_filename)
+        return legacy_path
 
     def download_selected_files_gui(self):
         """Handles the download of selected files in the GUI by setting up a queue."""

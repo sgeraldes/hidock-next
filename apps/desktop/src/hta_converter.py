@@ -15,11 +15,13 @@ This converter attempts multiple detection strategies to handle different format
 Requirements: 4.3
 """
 
+import hashlib
 import os
 
 # import struct  # Future: for binary data parsing if needed
 import tempfile
 import wave
+from pathlib import Path
 from typing import Optional, Tuple
 
 from config_and_logger import logger
@@ -34,6 +36,12 @@ class HTAConverter:
 
     def __init__(self):
         self.temp_dir = tempfile.gettempdir()
+        self.cache_dir = Path.home() / ".hidock" / "transcription_cache"
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            logger.warning("HTAConverter", "__init__", f"Could not create cache directory: {exc}")
+            self.cache_dir = Path(self.temp_dir)
 
     def convert_hta_to_wav(self, hta_file_path: str, output_path: Optional[str] = None) -> Optional[str]:
         """
@@ -51,11 +59,36 @@ class HTAConverter:
         This method ensures the output is compatible with OpenAI Whisper and other transcription APIs.
         Uses MP3 format which is more widely supported and has better compression.
         """
+        base_path = Path(hta_file_path)
+        stat = base_path.stat()
+        cache_key = hashlib.sha256(f"{base_path.resolve()}::{stat.st_mtime_ns}::{stat.st_size}".encode()).hexdigest()
+        cached_path = self.cache_dir / f"{cache_key}.mp3"
+
+        if cached_path.exists():
+            logger.debug(
+                "HTAConverter",
+                "convert_hta_for_transcription",
+                f"Using cached transcription asset: {cached_path}",
+            )
+            return str(cached_path)
+
         if output_path is None:
-            base_name = os.path.splitext(os.path.basename(hta_file_path))[0]
-            output_path = os.path.join(self.temp_dir, f"{base_name}_transcription.mp3")
-        
-        return self._convert_hta(hta_file_path, output_path, "mp3")
+            output_path = str(cached_path)
+        else:
+            output_path = str(output_path)
+
+        converted_path = self._convert_hta(hta_file_path, output_path, "mp3")
+        if converted_path and cached_path != Path(converted_path):
+            try:
+                Path(converted_path).replace(cached_path)
+                converted_path = str(cached_path)
+            except Exception as exc:
+                logger.warning(
+                    "HTAConverter",
+                    "convert_hta_for_transcription",
+                    f"Failed to move converted file into cache: {exc}",
+                )
+        return converted_path
 
     def _convert_hta(self, hta_file_path: str, output_path: Optional[str] = None, format_type: str = "wav") -> Optional[str]:
         """
@@ -415,10 +448,19 @@ class HTAConverter:
                 return None
             
             # Optimize for transcription: normalize audio parameters
-            # Ensure 16-bit depth and compatible sample rate
             audio_segment = audio_segment.set_sample_width(2)  # 16-bit
-            
-            # Use optimal sample rate for speech transcription
+
+            target_channels = audio_segment.channels
+            if target_channels > 2:
+                target_channels = 2
+            if audio_segment.channels != target_channels:
+                logger.info(
+                    "HTAConverter",
+                    "_convert_to_mp3_direct",
+                    f"Adjusting channels from {audio_segment.channels} to {target_channels} for transcription"
+                )
+                audio_segment = audio_segment.set_channels(target_channels)
+
             target_rate = self._get_compatible_sample_rate(audio_segment.frame_rate)
             if audio_segment.frame_rate != target_rate:
                 logger.info(
@@ -427,19 +469,24 @@ class HTAConverter:
                     f"Resampling from {audio_segment.frame_rate}Hz to {target_rate}Hz for transcription"
                 )
                 audio_segment = audio_segment.set_frame_rate(target_rate)
-            
+
+            duration_sec = max(len(audio_segment) / 1000.0, 1.0)
+            estimated_kbps = int((os.path.getsize(hta_file_path) * 8) / duration_sec / 1000)
+            bitrate_kbps = max(64, min(192, estimated_kbps))
+            bitrate_param = f"{bitrate_kbps}k"
+
             # Export as MP3 with settings optimized for transcription
             audio_segment.export(
                 output_path,
                 format="mp3",
-                bitrate="128k",  # Good quality for transcription
-                parameters=["-ar", str(target_rate), "-ac", str(audio_segment.channels)]
+                bitrate=bitrate_param,
+                parameters=["-ar", str(target_rate), "-ac", str(target_channels)]
             )
             
             logger.info(
                 "HTAConverter",
                 "_convert_to_mp3_direct",
-                f"MP3 conversion successful: {target_rate}Hz, {audio_segment.channels}ch, 128kbps"
+                f"MP3 conversion successful: {target_rate}Hz, {target_channels}ch, {bitrate_param}"
             )
             
             return output_path

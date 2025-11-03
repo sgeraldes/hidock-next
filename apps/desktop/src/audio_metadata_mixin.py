@@ -306,9 +306,16 @@ class AudioMetadataMixin:
             # Check common download locations
             import os
             download_dir = getattr(self, 'download_directory', os.path.expanduser("~/Downloads"))
-            potential_path = os.path.join(download_dir, filename)
-            if os.path.exists(potential_path):
-                return potential_path
+            safe_filename = filename.replace(":", "-").replace(" ", "_").replace("\\", "_").replace("/", "_")
+            mp3_path = os.path.join(download_dir, "mp3", safe_filename.replace(".hda", ".mp3"))
+            if os.path.exists(mp3_path):
+                return mp3_path
+            hda_path = os.path.join(download_dir, "hda", safe_filename)
+            if os.path.exists(hda_path):
+                return hda_path
+            legacy_path = os.path.join(download_dir, safe_filename)
+            if os.path.exists(legacy_path):
+                return legacy_path
             
             return None
             

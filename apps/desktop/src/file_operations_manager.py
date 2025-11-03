@@ -25,6 +25,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import shutil
+
 from config_and_logger import logger
 from device_interface import OperationProgress
 
@@ -58,6 +60,7 @@ class FileMetadata:
     date_created: datetime
     device_path: str
     local_path: Optional[str] = None
+    local_path_mp3: Optional[str] = None
     checksum: Optional[str] = None
     file_type: Optional[str] = None
     transcription_status: Optional[str] = None
@@ -142,7 +145,7 @@ class FileSearchFilter:
                 return False
 
         if self.downloaded_only is not None:
-            is_downloaded = file_metadata.local_path is not None
+            is_downloaded = bool(file_metadata.local_path or getattr(file_metadata, "local_path_mp3", None))
             if is_downloaded != self.downloaded_only:
                 return False
 
@@ -176,11 +179,18 @@ class FileMetadataCache:
                     last_accessed TEXT,
                     download_count INTEGER,
                     tags TEXT,
-                    cache_timestamp TEXT
+                    cache_timestamp TEXT,
+                    local_path_mp3 TEXT
                 )
             """
             )
             conn.commit()
+            # Backfill schema changes for existing installations
+            cursor = conn.execute("PRAGMA table_info(file_metadata)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "local_path_mp3" not in columns:
+                conn.execute("ALTER TABLE file_metadata ADD COLUMN local_path_mp3 TEXT")
+                conn.commit()
 
     def get_metadata(self, filename: str) -> Optional[FileMetadata]:
         """Retrieve cached metadata for a file."""
@@ -202,6 +212,7 @@ class FileMetadataCache:
                     last_accessed=datetime.fromisoformat(row[9]) if row[9] else None,
                     download_count=row[10],
                     tags=json.loads(row[11]) if row[11] else [],
+                    local_path_mp3=row[13] if len(row) > 13 else None,
                 )
         return None
 
@@ -213,8 +224,8 @@ class FileMetadataCache:
                 INSERT OR REPLACE INTO file_metadata
                 (filename, size, duration, date_created, device_path, local_path,
                  checksum, file_type, transcription_status, last_accessed,
-                 download_count, tags, cache_timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 download_count, tags, cache_timestamp, local_path_mp3)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     metadata.filename,
@@ -230,6 +241,7 @@ class FileMetadataCache:
                     metadata.download_count,
                     json.dumps(metadata.tags),
                     datetime.now().isoformat(),
+                    metadata.local_path_mp3,
                 ),
             )
             conn.commit()
@@ -260,6 +272,7 @@ class FileMetadataCache:
                         last_accessed=(datetime.fromisoformat(row[9]) if row[9] else None),
                         download_count=row[10],
                         tags=json.loads(row[11]) if row[11] else [],
+                        local_path_mp3=row[13] if len(row) > 13 else None,
                     )
                 )
         return metadata_list
@@ -286,8 +299,7 @@ class FileOperationsManager:
     ):
         self.device_interface = device_interface
         self.device_lock = device_lock  # Optional device lock for synchronization
-        self.download_dir = Path(download_dir)
-        self.download_dir.mkdir(parents=True, exist_ok=True)
+        self._initialize_download_dirs(Path(download_dir))
 
         # Initialize metadata cache
         cache_dir = cache_dir or os.path.join(os.path.expanduser("~"), ".hidock", "cache")
@@ -416,7 +428,8 @@ class FileOperationsManager:
     def _execute_download(self, operation: FileOperation):
         """Execute a file download operation."""
         filename = operation.filename
-        local_path = self.download_dir / filename
+        safe_filename = self._sanitize_filename(filename)
+        local_path = self.hda_dir / safe_filename
 
         # Check for cancellation before starting
         if operation.status == FileOperationStatus.CANCELLED:
@@ -530,9 +543,25 @@ class FileOperationsManager:
             metadata = self.metadata_cache.get_metadata(filename)
             if metadata:
                 metadata.local_path = str(local_path)
+                mp3_path = self._ensure_mp3_for_hda(local_path)
+                if mp3_path:
+                    metadata.local_path_mp3 = str(mp3_path)
+                    logger.info(
+                        "FileOpsManager",
+                        "_execute_download",
+                        f"MP3 available at {mp3_path} for {filename}",
+                    )
                 metadata.download_count += 1
                 metadata.last_accessed = datetime.now()
                 self.metadata_cache.set_metadata(metadata)
+            else:
+                mp3_path = self._ensure_mp3_for_hda(local_path)
+                if mp3_path:
+                    logger.info(
+                        "FileOpsManager",
+                        "_execute_download",
+                        f"Generated MP3 at {mp3_path} for {filename}",
+                    )
 
             self.operation_stats["total_downloads"] += 1
             self.operation_stats["total_bytes_downloaded"] += local_path.stat().st_size
@@ -824,7 +853,7 @@ class FileOperationsManager:
 
             # Clean up partial downloads with retry mechanism
             if operation.operation_type == FileOperationType.DOWNLOAD:
-                partial_file_path = self.download_dir / operation.filename
+                partial_file_path = self.hda_dir / self._sanitize_filename(operation.filename)
                 if partial_file_path.exists():
                     # Try multiple times to delete partial file (may be locked)
                     for attempt in range(3):
@@ -969,3 +998,77 @@ class FileOperationsManager:
             thread.join(timeout=5.0)
 
         logger.info("FileOpsManager", "shutdown", "File operations manager shutdown complete")
+
+    def _initialize_download_dirs(self, base_path: Path) -> None:
+        self.download_dir = base_path
+        self.download_dir.mkdir(parents=True, exist_ok=True)
+        self.hda_dir = self.download_dir / "hda"
+        self.mp3_dir = self.download_dir / "mp3"
+        self.hda_dir.mkdir(parents=True, exist_ok=True)
+        self.mp3_dir.mkdir(parents=True, exist_ok=True)
+
+        # Migrate legacy files that may still reside in the base directory
+        try:
+            for legacy_file in self.download_dir.iterdir():
+                if legacy_file.is_file():
+                    suffix = legacy_file.suffix.lower()
+                    target_dir = None
+                    if suffix == ".hda":
+                        target_dir = self.hda_dir
+                    elif suffix == ".mp3":
+                        target_dir = self.mp3_dir
+
+                    if target_dir:
+                        target_path = target_dir / legacy_file.name
+                        if target_path.exists():
+                            continue
+                        legacy_file.replace(target_path)
+                        if suffix == ".hda":
+                            self._ensure_mp3_for_hda(target_path)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug(
+                "FileOpsManager",
+                "_initialize_download_dirs",
+                f"Legacy file migration skipped: {exc}",
+            )
+
+    def set_download_directory(self, new_dir: str) -> None:
+        new_path = Path(new_dir)
+        self._initialize_download_dirs(new_path)
+        logger.info("FileOpsManager", "set_download_directory", f"Download directory set to {new_path}")
+
+    @staticmethod
+    def _sanitize_filename(filename: str) -> str:
+        return (
+            filename.replace(":", "-")
+            .replace(" ", "_")
+            .replace("\\", "_")
+            .replace("/", "_")
+        )
+
+    def _ensure_mp3_for_hda(self, hda_path: Path) -> Optional[Path]:
+        try:
+            from hta_converter import convert_hta_for_transcription
+
+            if not hda_path.exists():
+                return None
+
+            cached_mp3 = convert_hta_for_transcription(str(hda_path))
+            if not cached_mp3:
+                return None
+
+            cached_path = Path(cached_mp3)
+            mp3_target = self.mp3_dir / (hda_path.stem + ".mp3")
+            mp3_target.parent.mkdir(parents=True, exist_ok=True)
+
+            if not mp3_target.exists() or cached_path.stat().st_mtime > mp3_target.stat().st_mtime:
+                shutil.copy2(cached_path, mp3_target)
+
+            return mp3_target
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error(
+                "FileOpsManager",
+                "_ensure_mp3_for_hda",
+                f"Failed to generate MP3 for {hda_path}: {exc}",
+            )
+            return None

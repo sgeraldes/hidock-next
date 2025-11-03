@@ -221,11 +221,23 @@ class OpenAIProvider(AIProvider):
 
     def __init__(self, api_key: str, config: Dict[str, Any] = None):
         super().__init__(api_key, config)
+        self.client = None
+        self._legacy_client = False
+
         if OPENAI_AVAILABLE and api_key:
-            self.client = openai.OpenAI(api_key=api_key)
+            if hasattr(openai, "OpenAI"):
+                try:
+                    self.client = openai.OpenAI(api_key=api_key)
+                except Exception as exc:
+                    logger.error("OpenAIProvider", "__init__", f"Failed to init OpenAI client: {exc}")
+                    self.client = None
+            else:
+                openai.api_key = api_key
+                self.client = openai
+                self._legacy_client = True
 
     def is_available(self) -> bool:
-        return OPENAI_AVAILABLE and bool(self.api_key)
+        return OPENAI_AVAILABLE and bool(self.api_key) and self.client is not None
 
     def validate_api_key(self) -> bool:
         """Validate OpenAI API key by making a test request"""
@@ -233,13 +245,32 @@ class OpenAIProvider(AIProvider):
             return False
 
         try:
-            # Make a simple completion request to test the API key
+            model_name = self.config.get("model", "gpt-4o-mini")
+
+            min_validation_tokens = 64
+
+            if self._legacy_client:
+                response = self.client.ChatCompletion.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=min_validation_tokens,
+                )
+                return bool(response and response.get("choices"))
+
+            if hasattr(self.client, "responses"):
+                response = self.client.responses.create(
+                    model=model_name,
+                    input="ping",
+                    max_output_tokens=min_validation_tokens,
+                )
+                return bool(response and getattr(response, "output", None))
+
             response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": "Test"}],
-                max_tokens=5,
+                model=model_name,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=min_validation_tokens,
             )
-            return bool(response and response.choices)
+            return bool(response and getattr(response, "choices", None))
         except Exception as e:
             logger.error("OpenAIProvider", "validate_api_key", f"API validation failed: {e}")
             return False
@@ -251,15 +282,22 @@ class OpenAIProvider(AIProvider):
 
         try:
             with open(audio_file_path, "rb") as audio_file:
-                transcript = self.client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    language=None if language == "auto" else language,
-                )
+                if self._legacy_client:
+                    transcript = self.client.Audio.transcribe(
+                        "whisper-1",
+                        audio_file,
+                        language=None if language == "auto" else language,
+                    )
+                else:
+                    transcript = self.client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_file,
+                        language=None if language == "auto" else language,
+                    )
 
             return {
                 "success": True,
-                "transcription": transcript.text,
+                "transcription": getattr(transcript, "text", transcript.get("text") if isinstance(transcript, dict) else ""),
                 "language": language,
                 "confidence": 0.9,
                 "provider": "openai",
@@ -275,37 +313,89 @@ class OpenAIProvider(AIProvider):
             return self._mock_response("analysis")
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.config.get("model", "gpt-4o-mini"),
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an AI assistant that analyzes text and provides "
-                            "structured insights in JSON format."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""
-                        Analyze this text and return JSON with this structure:
-                        {{
-                            "summary": "concise summary",
-                            "key_points": ["point 1", "point 2"],
-                            "action_items": ["action 1", "action 2"],
-                            "sentiment": "positive/negative/neutral",
-                            "topics": ["topic1", "topic2"]
-                        }}
+            model_name = self.config.get("model", "gpt-4o-mini")
+            temperature = self.config.get("temperature", 0.3)
+            max_tokens = self.config.get("max_tokens", 4000)
+            min_analysis_tokens = 256
 
-                        Text: {text}
-                        """,
-                    },
-                ],
-                temperature=self.config.get("temperature", 0.3),
-                max_tokens=self.config.get("max_tokens", 4000),
+            prompt_content = (
+                "Analyze this text and return JSON with this structure:\n"
+                "{\n"
+                '    "summary": "concise summary",\n'
+                '    "key_points": ["point 1", "point 2"],\n'
+                '    "action_items": ["action 1", "action 2"],\n'
+                '    "sentiment": "positive/negative/neutral",\n'
+                '    "topics": ["topic1", "topic2"]\n'
+                "}\n\n"
+                f"Text: {text}"
             )
 
-            response_text = response.choices[0].message.content.strip()
+            response_text = ""
+
+            if self._legacy_client:
+                legacy_response = self.client.ChatCompletion.create(
+                    model=model_name,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are an AI assistant that analyzes text and provides structured insights in JSON format."
+                            ),
+                        },
+                        {"role": "user", "content": prompt_content},
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                response_text = legacy_response["choices"][0]["message"]["content"].strip()
+            else:
+                modern_response = None
+                if hasattr(self.client, "responses"):
+                    modern_response = self.client.responses.create(
+                        model=model_name,
+                        input=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are an AI assistant that analyzes text and provides structured insights in JSON format."
+                                ),
+                            },
+                            {"role": "user", "content": prompt_content},
+                        ],
+                        temperature=temperature,
+                        max_output_tokens=max(max_tokens, min_analysis_tokens),
+                    )
+
+                    if modern_response and getattr(modern_response, "output", None):
+                        chunks = []
+                        for segment in modern_response.output:
+                            segment_content = segment.get("content") if isinstance(segment, dict) else None
+                            if isinstance(segment_content, list):
+                                for part in segment_content:
+                                    if isinstance(part, dict):
+                                        chunks.append(part.get("text", ""))
+                            elif isinstance(segment_content, str):
+                                chunks.append(segment_content)
+
+                        response_text = "".join(chunks).strip()
+
+                if not response_text:
+                    fallback_response = self.client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are an AI assistant that analyzes text and provides structured insights in JSON format."
+                                ),
+                            },
+                            {"role": "user", "content": prompt_content},
+                        ],
+                        temperature=temperature,
+                        max_tokens=max(max_tokens, min_analysis_tokens),
+                    )
+                    response_text = fallback_response.choices[0].message.content.strip()
+
             if response_text.startswith("```json"):
                 response_text = response_text[7:-3].strip()
 

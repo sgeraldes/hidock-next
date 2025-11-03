@@ -14,8 +14,7 @@ and optional log pane.
 """
 
 import asyncio
-
-# import json  # Commented out - not used in current implementation
+import difflib
 import os
 import subprocess
 import sys
@@ -66,6 +65,8 @@ from unified_filter_widget import UnifiedFilterWidget
 # from settings_window import SettingsDialog  # Commented out - not used directly
 # from storage_management import StorageMonitor, StorageOptimizer  # Future: storage features
 from transcription_module import process_audio_file_for_insights
+
+from typing import Optional, Dict
 
 
 class HiDockToolGUI(
@@ -2414,6 +2415,7 @@ class HiDockToolGUI(
             self.transcription_section, height=150, wrap="word", font=("Arial", 11)
         )
         self.transcription_textbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self._configure_textbox_tag(self.transcription_textbox, "diff_new", background="#1f3d63")
 
         # Insights section
         self.insights_section = ctk.CTkFrame(self.transcription_content)
@@ -2424,6 +2426,7 @@ class HiDockToolGUI(
 
         self.insights_textbox = ctk.CTkTextbox(self.insights_section, height=150, wrap="word", font=("Arial", 11))
         self.insights_textbox.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self._configure_textbox_tag(self.insights_textbox, "diff_new", background="#1f3d63")
 
         # Initially hide the content sections
         self.transcription_section.pack_forget()
@@ -2433,6 +2436,7 @@ class HiDockToolGUI(
         self.transcription_panel_visible = False
         self.transcription_content_loaded = False
         self.visualizer_expanded = False
+        self.transcription_history: Dict[str, Dict[str, str]] = {}
 
         # Background processing control
         self.transcription_cancelled = False
@@ -2752,7 +2756,9 @@ class HiDockToolGUI(
         # Update UI
         self.transcription_status_label.configure(text="❌ Transcription cancelled by user")
         self.cancel_transcription_button.pack_forget()
-        self.transcription_progress.stop()
+        if self.transcription_progress.cget("mode") == "indeterminate":
+            self.transcription_progress.stop()
+        self.transcription_progress.set(0.0)
         self.transcription_progress.pack_forget()
 
         # Reset content
@@ -2788,8 +2794,23 @@ class HiDockToolGUI(
             config = {k: v.get() if hasattr(v, "get") else v for k, v in config.items() if v is not None}
             language = self.ai_language_var.get()
 
+            def progress_callback(message: str, fraction: Optional[float]) -> None:
+                if self.transcription_cancelled:
+                    return
+                self.after(0, self._update_transcription_progress_ui, message, fraction)
+
             # Since process_audio_file_for_insights is async, we need to run it in an event loop
-            results = asyncio.run(process_audio_file_for_insights(file_path, provider, api_key, config, language))
+            results = asyncio.run(
+                process_audio_file_for_insights(
+                    file_path,
+                    provider,
+                    api_key,
+                    config,
+                    language,
+                    progress_callback=progress_callback,
+                    cancel_callback=lambda: self.transcription_cancelled,
+                )
+            )
 
             # Check for cancellation before updating UI
             if self.transcription_cancelled:
@@ -2816,7 +2837,9 @@ class HiDockToolGUI(
 
         # Hide progress controls
         self.cancel_transcription_button.pack_forget()
-        self.transcription_progress.stop()
+        if self.transcription_progress.cget("mode") == "indeterminate":
+            self.transcription_progress.stop()
+        self.transcription_progress.set(0.0)
         self.transcription_progress.pack_forget()
 
         if "error" in results:
@@ -2840,23 +2863,26 @@ class HiDockToolGUI(
             transcription_text = results.get("transcription", "No transcription found.")
             insights = results.get("insights", {})
 
+            previous_result = self.transcription_history.get(original_filename, {})
+            old_transcription = previous_result.get("transcription", "")
+            old_insights = previous_result.get("insights", "")
+
             # Update status
             self.transcription_status_label.configure(
                 text=f"✅ Transcription and insights completed for '{original_filename}'"
             )
 
-            # Update transcription text
-            self.transcription_textbox.configure(state="normal")
-            self.transcription_textbox.delete("1.0", "end")
-            self.transcription_textbox.insert("1.0", transcription_text)
-            self.transcription_textbox.configure(state="disabled")
+            # Update transcription text with diff highlighting
+            self._apply_text_with_diff(self.transcription_textbox, transcription_text, old_transcription, "diff_new")
 
             # Format and display insights
             insights_formatted = self._format_insights_for_display(insights)
-            self.insights_textbox.configure(state="normal")
-            self.insights_textbox.delete("1.0", "end")
-            self.insights_textbox.insert("1.0", insights_formatted)
-            self.insights_textbox.configure(state="disabled")
+            self._apply_text_with_diff(self.insights_textbox, insights_formatted, old_insights, "diff_new")
+
+            self.transcription_history[original_filename] = {
+                "transcription": transcription_text,
+                "insights": insights_formatted,
+            }
 
             self.update_status_bar(progress_text=f"Transcription complete for {original_filename}.")
 
@@ -5094,3 +5120,164 @@ You can dismiss this warning and continue using the application with limited aud
                 f"Failed to check selected files for meetings: {str(e)}",
                 parent=self
             )
+
+    def _set_long_operation_active_state(self, is_active: bool, operation_name: Optional[str] = None):
+        """Centralized handler for updating long-operation state and refreshing UI controls."""
+
+        def apply_state():
+            previous_name = self.active_operation_name
+            self.is_long_operation_active = bool(is_active)
+
+            if self.is_long_operation_active:
+                self.active_operation_name = operation_name or previous_name or "Operation"
+                if self.cancel_operation_event is None:
+                    self.cancel_operation_event = threading.Event()
+                else:
+                    self.cancel_operation_event.clear()
+            else:
+                self.active_operation_name = None
+                if self.cancel_operation_event:
+                    self.cancel_operation_event.clear()
+
+            try:
+                self._update_menu_states()
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.error(
+                    "GUI",
+                    "_set_long_operation_active_state",
+                    f"Failed to update menu/toolbar state: {exc}",
+                )
+
+        if threading.current_thread() is threading.main_thread():
+            apply_state()
+        else:
+            self.after(0, apply_state)
+
+    def request_cancel_operation(self):
+        """Handle user-initiated cancellation of the current long-running activity."""
+
+        current_operation = self.active_operation_name
+        logger.info(
+            "GUI",
+            "request_cancel_operation",
+            f"Cancellation requested for {current_operation or 'no active operation'}",
+        )
+
+        if current_operation == "Transcription":
+            self._cancel_transcription()
+            return
+
+        cancelled_any = False
+        try:
+            if hasattr(self, "file_operations_manager") and self.file_operations_manager:
+                active_ops = self.file_operations_manager.get_all_active_operations()
+                if active_ops:
+                    self.file_operations_manager.cancel_all_operations()
+                    cancelled_any = True
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("GUI", "request_cancel_operation", f"Error cancelling operations: {exc}")
+
+        if self.cancel_operation_event is None:
+            self.cancel_operation_event = threading.Event()
+        self.cancel_operation_event.set()
+
+        if cancelled_any:
+            self.update_status_bar(progress_text="Cancellation requested for active operations.")
+        elif current_operation:
+            self.update_status_bar(progress_text=f"Cancellation requested for {current_operation}.")
+
+        self._set_long_operation_active_state(False, current_operation)
+
+    def _show_transcription_processing_state(self, filename):
+        """Update the transcription panel to show processing state."""
+        # Ensure panel is visible
+        if not self.transcription_panel_visible:
+            self._toggle_transcription_panel()
+
+        # Show processing status with cancel button
+        self.transcription_status_label.configure(
+            text=f"🔄 Processing '{filename}' with AI transcription and insights..."
+        )
+        self.cancel_transcription_button.pack(side="right", padx=(10, 0))
+
+        # Show progress bar with indeterminate mode
+        self.transcription_progress.pack(fill="x", padx=10, pady=(0, 10))
+        self.transcription_progress.configure(mode="indeterminate")
+        self.transcription_progress.start()
+
+        # Clear previous content and show placeholders
+        self.transcription_textbox.delete("1.0", "end")
+        self.transcription_textbox.insert("1.0", "🎵 Transcribing audio... Please wait.")
+        self.transcription_textbox.configure(state="disabled")
+
+        self.insights_textbox.delete("1.0", "end")
+        self.insights_textbox.insert("1.0", "🧠 Extracting insights... Please wait.")
+        self.insights_textbox.configure(state="disabled")
+
+        # Show the content sections
+        self.transcription_section.pack(fill="both", expand=True, padx=5, pady=5)
+        self.insights_section.pack(fill="both", expand=True, padx=5, pady=5)
+
+    def _update_transcription_progress_ui(self, message: str, fraction: Optional[float]) -> None:
+        """Update transcription status label, progress bar, and status bar."""
+        if self.transcription_cancelled:
+            return
+
+        if message:
+            self.transcription_status_label.configure(text=message)
+            self.update_status_bar(progress_text=message)
+
+        if fraction is not None:
+            clamped = max(0.0, min(1.0, fraction))
+            if self.transcription_progress.cget("mode") != "determinate":
+                self.transcription_progress.configure(mode="determinate")
+            self.transcription_progress.set(clamped)
+
+    def _apply_text_with_diff(self, widget: ctk.CTkTextbox, new_text: str, old_text: str, tag_name: str) -> None:
+        """Insert text into a textbox and highlight additions compared to the previous value."""
+
+        if new_text is None:
+            new_text = ""
+        if old_text is None:
+            old_text = ""
+
+        tk_widget = self._get_text_widget(widget)
+
+        widget.configure(state="normal")
+        tk_widget.delete("1.0", "end")
+        tk_widget.insert("1.0", new_text)
+        remove_fn = getattr(tk_widget, "tag_remove", None)
+        if remove_fn:
+            remove_fn(tag_name, "1.0", "end")
+
+        if old_text:
+            diff = difflib.ndiff(old_text.splitlines(), new_text.splitlines())
+            current_line = 0
+            for line in diff:
+                if line.startswith("  "):
+                    current_line += 1
+                elif line.startswith("- "):
+                    continue
+                elif line.startswith("+ "):
+                    line_no = current_line + 1
+                    add_fn = getattr(tk_widget, "tag_add", None)
+                    if add_fn:
+                        add_fn(tag_name, f"{line_no}.0", f"{line_no}.end")
+                    current_line += 1
+                elif line.startswith("? "):
+                    continue
+        elif new_text:
+            add_fn = getattr(tk_widget, "tag_add", None)
+            if add_fn:
+                add_fn(tag_name, "1.0", "end")
+
+        widget.configure(state="disabled")
+
+    def _configure_textbox_tag(self, textbox: ctk.CTkTextbox, tag_name: str, **kwargs) -> None:
+        tk_widget = self._get_text_widget(textbox)
+        configure_fn = getattr(tk_widget, "tag_configure", None)
+        if configure_fn:
+            configure_fn(tag_name, **kwargs)
+
+    def _get_text_widget(self, textbox: ctk.CTkTextbox):
+        return getattr(textbox, "_textbox", textbox)

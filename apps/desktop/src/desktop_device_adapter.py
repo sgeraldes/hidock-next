@@ -122,48 +122,76 @@ class DesktopDeviceAdapter(IDeviceInterface):
             self._connection_start_time = datetime.now()
 
             # Extract VID/PID from device_id if provided
-            vid, pid = DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID
+            vid = DEFAULT_VENDOR_ID
+            candidate_pids = []
+
             if device_id and ":" in device_id:
                 try:
                     vid_str, pid_str = device_id.split(":")
-                    vid, pid = int(vid_str, 16), int(pid_str, 16)
+                    vid = int(vid_str, 16)
+                    candidate_pids = [int(pid_str, 16)]
                 except ValueError:
                     logger.warning(
-                        "DesktopDeviceAdapter", "connect", f"Invalid device_id format: {device_id}, using defaults"
+                        "DesktopDeviceAdapter",
+                        "connect",
+                        f"Invalid device_id format: {device_id}, using defaults",
                     )
 
-            # Connect using the Jensen device with optional force reset
-            success, error_msg = self.jensen_device.connect(
-                target_interface_number=0, vid=vid, pid=pid, auto_retry=auto_retry, force_reset=force_reset
-            )
+            if not candidate_pids:
+                candidate_pids = HIDOCK_PRODUCT_IDS or [DEFAULT_PRODUCT_ID]
 
-            if not success:
-                # If connection failed with timeout errors, try once more with force reset
-                if "timeout" in str(error_msg).lower() and not force_reset:
+            last_error_msg = None
+            connected_pid = None
+
+            for pid_candidate in candidate_pids:
+                success, error_msg = self.jensen_device.connect(
+                    target_interface_number=0,
+                    vid=vid,
+                    pid=pid_candidate,
+                    auto_retry=auto_retry,
+                    force_reset=force_reset,
+                )
+
+                if not success and "timeout" in str(error_msg).lower() and not force_reset:
                     logger.info(
                         "DesktopDeviceAdapter",
                         "connect",
-                        "Connection failed with timeout, retrying with device reset",
+                        f"Timeout connecting to PID {pid_candidate:04x}, retrying with device reset",
                     )
                     success, error_msg = self.jensen_device.connect(
-                        target_interface_number=0, vid=vid, pid=pid, auto_retry=False, force_reset=True
+                        target_interface_number=0,
+                        vid=vid,
+                        pid=pid_candidate,
+                        auto_retry=False,
+                        force_reset=True,
                     )
 
-                if not success:
-                    raise ConnectionError(error_msg or "Connection failed")
+                if success:
+                    connected_pid = pid_candidate
+                    break
+
+                last_error_msg = error_msg
+                logger.debug(
+                    "DesktopDeviceAdapter",
+                    "connect",
+                    f"PID {pid_candidate:04x} connection attempt failed: {error_msg}",
+                )
+
+            if connected_pid is None:
+                raise ConnectionError(last_error_msg or "Connection failed for all known device IDs")
 
             # Get device information
             device_info_raw = self.jensen_device.get_device_info() or {}
-            model = detect_device_model(vid, pid)
+            model = detect_device_model(vid, connected_pid)
 
             self._current_device_info = DeviceInfo(
-                id=f"{vid:04x}:{pid:04x}",
+                id=f"{vid:04x}:{connected_pid:04x}",
                 name=f"HiDock {model.value}",
                 model=model,
                 serial_number=device_info_raw.get("sn", "Unknown"),
                 firmware_version=device_info_raw.get("versionCode", "1.0.0"),
                 vendor_id=vid,
-                product_id=pid,
+                product_id=connected_pid,
                 connected=True,
                 connection_time=self._connection_start_time,
             )
