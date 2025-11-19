@@ -27,7 +27,9 @@ interface _FirmwareCheckRequest {
 }
 
 const FIRMWARE_API_BASE = 'https://hinotes.hidock.com';
-const API_TOKEN = 'M4XoUFm5OOygd5snWe10lMxtSqadM2KOp2wWObw554iUyTaEZbVXdu11TZ3zD4SD';
+// API token should be set via environment variable VITE_HINOTES_API_TOKEN
+// See config/.hinotes.config.example for setup instructions
+const API_TOKEN = import.meta.env.VITE_HINOTES_API_TOKEN || '';
 
 export class FirmwareService {
   /**

@@ -20,7 +20,7 @@ This document provides a complete technical analysis of the HiDock firmware upda
 
 ### 3. Device Upload
 - **Protocol**: WebUSB via jensen.js library
-- **Commands**: 
+- **Commands**:
   - Command 8: `requestFirmwareUpgrade(fileSize, versionNumber, timeout)`
   - Command 9: `uploadFirmware(binaryData, timeout, progressCallback)`
 - **Transfer**: Direct USB communication bypassing HTTP
@@ -78,7 +78,7 @@ This document provides a complete technical analysis of the HiDock firmware upda
 - **zephyr.bin**: Main Zephyr RTOS system image (largest component)
 - **sdfs.bin**: System data filesystem
 
-### Audio Processing Components  
+### Audio Processing Components
 - **RomeApp.bin**: DSP application for audio processing
 - **UAC.bin**: USB Audio Class implementation
 - **IG1202dl.bin**: Audio codec/DSP component
@@ -101,7 +101,8 @@ This document provides a complete technical analysis of the HiDock firmware upda
 - **Provider**: Google OAuth 2.0 via `accounts.google.com/gsi/client`
 - **Token Storage**: Client-side (localStorage/sessionStorage)
 - **Token Format**: 64-character alphanumeric string
-- **Header**: `accesstoken: M4XoUFm5OOygd5snWe10lMxtSqadM2KOp2wWObw554iUyTaEZbVXdu11TZ3zD4SD`
+- **Header**: `accesstoken: [REDACTED]`
+- **Obtain Token**: Login to https://hinotes.hidock.com and extract from browser dev tools
 
 ### API Authentication Requirements
 - **ALL API calls require authentication** via `accesstoken` header
@@ -126,7 +127,7 @@ This document provides a complete technical analysis of the HiDock firmware upda
 ### Container Format
 The ACTTEST0 format appears to be a custom OTA packaging system:
 - Fixed 512-byte header containing partition table
-- XML metadata describing partition layout and checksums  
+- XML metadata describing partition layout and checksums
 - Sequential partition data blocks
 - No apparent compression or encryption
 

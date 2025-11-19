@@ -9,8 +9,10 @@
       "env": {
         "REST_BASE_URL": "https://hinotes.hidock.com",
         "AUTH_APIKEY_HEADER_NAME": "accesstoken",
-        "AUTH_APIKEY_VALUE": "M4XoUFm5OOygd5snWe10lMxtSqadM2KOp2wWObw554iUyTaEZbVXdu11TZ3zD4SD"
-      }
+        "AUTH_APIKEY_VALUE": "YOUR_HINOTES_API_TOKEN_HERE"
+      },
+      "disabled": true,
+      "notes": "To enable: 1) Copy token from config/.hinotes.config, 2) Set AUTH_APIKEY_VALUE above, 3) Remove 'disabled: true'"
     }
   }
 }

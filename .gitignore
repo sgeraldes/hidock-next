@@ -83,6 +83,8 @@ credentials.json
 secrets.yaml
 oauth2_tokens.json
 **/oauth2_tokens.json
+.hinotes.config
+**/.hinotes.config
 
 # Configuration files with API keys and user data
 hidock_config.json

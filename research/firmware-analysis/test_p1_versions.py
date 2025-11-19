@@ -2,57 +2,88 @@
 """
 Test P1 firmware with different version formats
 """
-import requests
+
+import os
 import xml.etree.ElementTree as ET
 
+import requests
+
+
+def load_hinotes_token():
+    """Load HiNotes API token from config or environment"""
+    token = os.environ.get("HINOTES_API_TOKEN", "")
+    if not token:
+        config_path = os.path.join(os.path.dirname(__file__), "..", "..", "config", ".hinotes.config")
+        if os.path.exists(config_path):
+            with open(config_path, "r") as f:
+                for line in f:
+                    if line.startswith("HINOTES_API_TOKEN="):
+                        token = line.split("=", 1)[1].strip()
+                        break
+    return token
+
+
 def test_p1_version(version, model="hidock-p1"):
-    access_token = "M4XoUFm5OOygd5snWe10lMxtSqadM2KOp2wWObw554iUyTaEZbVXdu11TZ3zD4SD"
-    
+    access_token = load_hinotes_token()
+    if not access_token:
+        print("ERROR: HINOTES_API_TOKEN not found. See config/.hinotes.config.example")
+        return False
+
     session = requests.Session()
-    session.headers.update({'AccessToken': access_token})
-    
+    session.headers.update({"AccessToken": access_token})
+
     endpoint = "https://hinotes.hidock.com/v2/device/firmware/latest"
-    data = {
-        'version': version,
-        'model': model
-    }
-    
+    data = {"version": version, "model": model}
+
     try:
         response = session.post(endpoint, data=data)
         if response.status_code != 200:
             print(f"Version {version}: HTTP {response.status_code}")
             return None
-        
+
         root = ET.fromstring(response.text)
-        error_code = root.find('error').text if root.find('error') is not None else None
-        message = root.find('message').text if root.find('message') is not None else None
-        
-        if root.find('data') is not None:
-            data_elem = root.find('data')
-            id_elem = data_elem.find('id')
-            version_elem = data_elem.find('versionCode')
-            
+        error_code = root.find("error").text if root.find("error") is not None else None
+        message = root.find("message").text if root.find("message") is not None else None
+
+        if root.find("data") is not None:
+            data_elem = root.find("data")
+            id_elem = data_elem.find("id")
+            version_elem = data_elem.find("versionCode")
+
             if id_elem is not None and id_elem.text:
-                print(f"Version {version}: SUCCESS! ID={id_elem.text}, Latest={version_elem.text if version_elem is not None else 'None'}")
+                print(
+                    f"Version {version}: SUCCESS! ID={id_elem.text}, Latest={version_elem.text if version_elem is not None else 'None'}"
+                )
                 return True
             else:
                 print(f"Version {version}: No firmware ID (probably up to date)")
         else:
             print(f"Version {version}: No data element")
-        
+
     except Exception as e:
         print(f"Version {version}: Error - {e}")
-    
+
     return False
+
 
 # Test different version formats for P1
 version_tests = [
     # Numeric versions (lower range)
-    "0", "1", "10", "100", "1000", 
+    "0",
+    "1",
+    "10",
+    "100",
+    "1000",
     # Maybe P1 uses different encoding
-    "10000", "60000", "65000", "65800",
+    "10000",
+    "60000",
+    "65000",
+    "65800",
     # String versions (maybe P1 uses semantic versions)
-    "1.0.0", "1.2.0", "1.2.24", "0.0.1"
+    "1.0.0",
+    "1.2.0",
+    "1.2.24",
+    "0.0.1",
 ]
 
 print("Testing P1 firmware with different version formats:")

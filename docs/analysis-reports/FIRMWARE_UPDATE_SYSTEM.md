@@ -29,10 +29,10 @@ HiDock devices use a binary protocol over USB with the following message format:
 const COMMANDS = {
     0: "invalid-0",
     1: "get-device-info",           // Device version/serial info
-    2: "get-device-time", 
+    2: "get-device-time",
     3: "set-device-time",
     4: "get-file-list",
-    5: "transfer-file", 
+    5: "transfer-file",
     6: "get-file-count",
     7: "delete-file",
     8: "request-firmware-upgrade",   // Start firmware update
@@ -47,11 +47,11 @@ const COMMANDS = {
     19: "restore-factory-settings",
     20: "send-meeting-schedule-info",
     61447: "test-sn-write",
-    61448: "record-test-start", 
+    61448: "record-test-start",
     61449: "record-test-end",
     61451: "factory-reset",
     4097: "bluetooth-scan",
-    4098: "bluetooth-cmd", 
+    4098: "bluetooth-cmd",
     4099: "bluetooth-status"
 };
 ```
@@ -63,7 +63,7 @@ const COMMANDS = {
 ### 1. Get Device Information (Command 1)
 **Purpose**: Retrieve current firmware version and device serial number
 
-**Request**: 
+**Request**:
 ```javascript
 this.send(new Command(1), callback)
 ```
@@ -72,35 +72,35 @@ this.send(new Command(1), callback)
 ```javascript
 s.registerHandler(1, (e, t) => {
     let n = [], r = 0, i = [];
-    
+
     // Parse version from first 4 bytes
     for (let h = 0; h < 4; h++) {
         let a = 255 & e.body[h];
         h > 0 && n.push(String(a));
         r |= a << (8 * (4 - h - 1));
     }
-    
-    // Parse serial number from next 16 bytes  
+
+    // Parse serial number from next 16 bytes
     for (let h = 0; h < 16; h++) {
         let a = e.body[h + 4];
         a > 0 && i.push(String.fromCharCode(a));
     }
-    
+
     // Store in device context
     t.versionCode = n.join(".");
     t.versionNumber = r;
     t.serialNumber = i.join("");
-    
-    return { 
-        versionCode: n.join("."), 
-        versionNumber: r, 
-        sn: i.join("") 
+
+    return {
+        versionCode: n.join("."),
+        versionNumber: r,
+        sn: i.join("")
     };
 });
 ```
 
 **Response Format**:
-- `versionCode`: String (e.g., "5.5.14")  
+- `versionCode`: String (e.g., "5.5.14")
 - `versionNumber`: Integer (e.g., 328462)
 - `sn`: String (device serial number)
 
@@ -113,16 +113,16 @@ s.prototype.requestFirmwareUpgrade = async function (version1, version2, callbac
     let body = [];
     // Pack version1 as 32-bit integer (big-endian)
     body[0] = (version1 >> 24) & 255;
-    body[1] = (version1 >> 16) & 255; 
+    body[1] = (version1 >> 16) & 255;
     body[2] = (version1 >> 8) & 255;
     body[3] = 255 & version1;
-    
+
     // Pack version2 as 32-bit integer (big-endian)
     body[4] = (version2 >> 24) & 255;
     body[5] = (version2 >> 16) & 255;
     body[6] = (version2 >> 8) & 255;
     body[7] = 255 & version2;
-    
+
     return this.send(new Command(8).body(body), callback);
 };
 ```
@@ -165,7 +165,7 @@ The firmware version is displayed in the device configuration section:
 ```javascript
 "wu.ota.tip.message": 'New firmware was released for HiDock, please click "Proceed" to upgrade.'
 "wu.ota.tip.learn-more": "Learn more"
-"wu.ota.tip.ignore": "Ignore" 
+"wu.ota.tip.ignore": "Ignore"
 "wu.ota.tip.later": "Later"
 ```
 
@@ -178,7 +178,7 @@ The firmware version is displayed in the device configuration section:
 
 // Active update states
 "wu.ota.downloading": "Downloading"        // Downloading firmware from server
-"wu.ota.upgrading": "Upgrading"          // Uploading to device  
+"wu.ota.upgrading": "Upgrading"          // Uploading to device
 "wu.ota.waiting": "Verifying"            // Post-update verification
 
 // Progress descriptions
@@ -203,7 +203,7 @@ The firmware version is displayed in the device configuration section:
 ```
 
 **Upload Errors**:
-```javascript  
+```javascript
 "wu.ota.upgrading-timeout": "Firmware update failed, please try again later"
 "wu.ota.upgrading-fail": "Firmware update failed, please power off and power on to try again"
 ```
@@ -217,7 +217,7 @@ The firmware version is displayed in the device configuration section:
 **Device-Specific Errors**:
 ```javascript
 "device.ota.wrong-version-tip": "Upgrade failed: Outdated version or unsupported hardware. Please check for updates."
-"device.ota.busy-tip": "Upgrade failed: Device is busy, please try again later."  
+"device.ota.busy-tip": "Upgrade failed: Device is busy, please try again later."
 "device.ota.card-full-tip": "Upgrade failed: Storage is full, please delete files to free up space."
 "device.ota.card-error-tip": "Upgrade failed: Storage issue, please contact customer support."
 ```
@@ -243,11 +243,11 @@ The firmware version is displayed in the device configuration section:
 
 ### 1. Version Check Phase
 1. **Get Current Version**: Call `getDeviceInfo()` (Command 1)
-2. **Parse Version**: Extract `versionCode` and `versionNumber` 
+2. **Parse Version**: Extract `versionCode` and `versionNumber`
 3. **Check for Updates**: Compare with server-side latest version
 4. **Show Notification**: Display update available UI if newer version exists
 
-### 2. Download Phase  
+### 2. Download Phase
 1. **User Confirmation**: Show "Proceed" dialog with power warnings
 2. **Download Firmware**: Fetch firmware binary from server
 3. **Progress Tracking**: Show download progress bar
@@ -266,7 +266,7 @@ The firmware version is displayed in the device configuration section:
 4. **Success Confirmation**: Show completion message
 
 ### 5. Post-Update
-1. **Power Cycle Recommendation**: Advise user to fully power cycle device  
+1. **Power Cycle Recommendation**: Advise user to fully power cycle device
 2. **Feature Activation**: New firmware features become available
 3. **Settings Migration**: Handle any settings format changes
 
@@ -278,7 +278,7 @@ The firmware version is displayed in the device configuration section:
 
 **Network Errors**:
 - Firmware download failures
-- Server connectivity issues  
+- Server connectivity issues
 - Timeout during download
 
 **Device Errors**:
@@ -307,7 +307,7 @@ The firmware version is displayed in the device configuration section:
 
 **User-Guided Recovery**:
 - Power cycle instructions
-- USB reconnection steps  
+- USB reconnection steps
 - Page reload for connection issues
 - Factory reset as last resort
 
@@ -326,44 +326,44 @@ The firmware version is displayed in the device configuration section:
 
 **How The Version Check Likely Works:**
 
-1. **Dynamic Version Comparison**: 
+1. **Dynamic Version Comparison**:
    - Device reports current version via `getDeviceInfo()` (Command 1)
    - Site compares against server-provided latest version
    - Shows "v {{version}} Available" button only when update exists
 
 2. **Missing Server Implementation Details:**
    The archived files are client-side only. The actual server endpoints would be:
-   
+
    ```javascript
    // Version Check API (MISSING FROM ARCHIVES)
    GET /api/firmware/check?device=hidock-h1&version=5.5.14
-   Response: { 
-     "hasUpdate": true, 
-     "latestVersion": "5.5.15", 
-     "downloadUrl": "...", 
-     "changelog": "..." 
+   Response: {
+     "hasUpdate": true,
+     "latestVersion": "5.5.15",
+     "downloadUrl": "...",
+     "changelog": "..."
    }
-   
-   // Firmware Download API (MISSING FROM ARCHIVES)  
+
+   // Firmware Download API (MISSING FROM ARCHIVES)
    GET /api/firmware/download/{deviceModel}/{version}
    Response: Binary firmware data with content-length headers
-   
+
    // Update Verification API (MISSING FROM ARCHIVES)
    POST /api/firmware/verify
-   Body: { 
-     "device": "hidock-h1", 
-     "serial": "...", 
-     "version": "5.5.15", 
-     "success": true 
+   Body: {
+     "device": "hidock-h1",
+     "serial": "...",
+     "version": "5.5.15",
+     "success": true
    }
    ```
 
 3. **Implementation Strategy:**
    Since the UI is fully implemented but backend APIs are missing from archives, you would need to:
    - Create backend services to serve firmware metadata and binaries
-   - Implement version comparison logic 
+   - Implement version comparison logic
    - Connect the existing UI to your new APIs
-   
+
 4. **Version Storage Options:**
    - **Database**: Store device models, versions, and firmware binaries
    - **Configuration File**: JSON/YAML with version mappings
@@ -443,7 +443,7 @@ version=393733&model=hidock-h1e
 Response:
 {
   "error": 0,
-  "message": "success", 
+  "message": "success",
   "data": null
 }
 ```
@@ -513,9 +513,9 @@ async function checkFirmwareUpdate(deviceModel, currentVersion) {
         },
         body: `version=${currentVersion}&model=${deviceModel}`
     });
-    
+
     const result = await response.json();
-    
+
     if (result.error === 0 && result.data !== null) {
         return {
             hasUpdate: true,
@@ -525,7 +525,7 @@ async function checkFirmwareUpdate(deviceModel, currentVersion) {
             size: result.data.size
         };
     }
-    
+
     return { hasUpdate: false };
 }
 
@@ -570,14 +570,14 @@ if (updateInfo.hasUpdate) {
 POST https://hinotes.hidock.com/v2/device/firmware/latest
 Headers: {
     'Content-Type': 'application/x-www-form-urlencoded',
-    'accesstoken': 'M4XoUFm5OOygd5snWe10lMxtSqadM2KOp2wWObw554iUyTaEZbVXdu11TZ3zD4SD'
+    'accesstoken': '[REDACTED - Obtain from config/.hinotes.config]'
 }
 Body: version=393733&model=hidock-h1e
 
 // Response (no update available)
 {
     "error": 0,
-    "message": "success", 
+    "message": "success",
     "data": null
 }
 
@@ -643,7 +643,7 @@ async function checkFirmwareUpdate(model, currentBuild) {
             },
             body: `version=${currentBuild}&model=${model}`
         });
-        
+
         const result = await response.json();
         return result.error === 0 && result.data !== null ? {
             hasUpdate: true,
@@ -652,7 +652,7 @@ async function checkFirmwareUpdate(model, currentBuild) {
             changelog: result.data.changelog,
             size: result.data.size
         } : { hasUpdate: false };
-        
+
     } catch (error) {
         console.error('Failed to check for updates:', error);
         return { hasUpdate: false, error };
@@ -667,38 +667,38 @@ if (updateInfo.hasUpdate) {
     console.log(`📦 Current: ${deviceInfo.versionNumber}`);
     console.log(`🆕 Latest: ${updateInfo.newBuild}`);
     console.log(`📥 Size: ${(updateInfo.size / 1024 / 1024).toFixed(1)} MB`);
-    
+
     // Show update UI (like HiNotes does)
     // Display: "v ${updateInfo.newBuild} Available" button
-    
+
     // Download firmware binary
     console.log('⬇️ Downloading firmware...');
     const firmwareResponse = await fetch(updateInfo.downloadUrl);
     const firmwareData = new Uint8Array(await firmwareResponse.arrayBuffer());
-    
+
     console.log('🔄 Starting firmware update process...');
-    
+
     // 1. Request firmware upgrade (Command 8)
     await device.requestFirmwareUpgrade(
         parseInt(deviceInfo.versionNumber),    // Current build number
         parseInt(updateInfo.newBuild)          // New build number
     );
-    
-    // 2. Upload firmware data (Command 9) 
+
+    // 2. Upload firmware data (Command 9)
     await device.uploadFirmware(firmwareData, 30000, { // 30 second timeout
         onProgress: (progress) => {
             console.log(`📤 Upload progress: ${progress.percent}%`);
         }
     });
-    
+
     console.log('✅ Firmware upload complete! Device will reboot...');
-    
+
     // 3. Wait for device reconnection and verify
     setTimeout(async () => {
         try {
             await device.connect();
             const updatedInfo = await device.getDeviceInfo();
-            
+
             if (parseInt(updatedInfo.versionNumber) === parseInt(updateInfo.newBuild)) {
                 console.log('🎉 Firmware update successful!');
                 console.log(`Updated to build: ${updatedInfo.versionNumber}`);
@@ -709,7 +709,7 @@ if (updateInfo.hasUpdate) {
             console.error('❌ Failed to verify update:', error);
         }
     }, 10000); // Wait 10 seconds for reboot
-    
+
 } else {
     console.log('✅ Firmware is up to date');
     console.log(`Current build: ${deviceInfo.versionNumber}`);
@@ -754,7 +754,7 @@ export const FirmwareSettings: React.FC = () => {
         try {
             const deviceInfo = await device.getDeviceInfo();
             const updateCheck = await checkFirmwareUpdate('hidock-h1e', deviceInfo.versionNumber);
-            
+
             setFirmwareInfo({
                 current: deviceInfo.versionNumber,
                 latest: updateCheck.hasUpdate ? updateCheck.newBuild : undefined,
@@ -769,31 +769,31 @@ export const FirmwareSettings: React.FC = () => {
 
     const handleFirmwareUpdate = async () => {
         if (!firmwareInfo?.hasUpdate || !device) return;
-        
+
         setIsUpdating(true);
         setUpdateProgress(0);
-        
+
         try {
             // Download firmware
             const response = await fetch(firmwareInfo.downloadUrl!);
             const firmwareData = new Uint8Array(await response.arrayBuffer());
-            
+
             // Request upgrade
             await device.requestFirmwareUpgrade(
                 parseInt(firmwareInfo.current),
                 parseInt(firmwareInfo.latest!)
             );
-            
+
             // Upload with progress
             await device.uploadFirmware(firmwareData, 30000, {
                 onProgress: (progress: any) => {
                     setUpdateProgress(progress.percent);
                 }
             });
-            
+
             // Refresh status after update
             setTimeout(checkFirmwareStatus, 10000);
-            
+
         } catch (error) {
             console.error('Firmware update failed:', error);
         } finally {
@@ -809,13 +809,13 @@ export const FirmwareSettings: React.FC = () => {
     return (
         <div className="firmware-settings">
             <h3>Firmware Version</h3>
-            
+
             {firmwareInfo && (
                 <>
                     <div className="current-version">
                         Current: Build {firmwareInfo.current}
                     </div>
-                    
+
                     {firmwareInfo.hasUpdate && (
                         <div className="update-available">
                             <div className="update-info">
@@ -823,23 +823,23 @@ export const FirmwareSettings: React.FC = () => {
                                 <br />
                                 Size: {(firmwareInfo.size! / 1024 / 1024).toFixed(1)} MB
                             </div>
-                            
-                            <button 
+
+                            <button
                                 onClick={handleFirmwareUpdate}
                                 disabled={isUpdating}
                                 className="update-button"
                             >
-                                {isUpdating 
+                                {isUpdating
                                     ? `Updating... ${updateProgress}%`
                                     : `v ${firmwareInfo.latest} Available`
                                 }
                             </button>
                         </div>
                     )}
-                    
+
                     {isUpdating && (
                         <div className="progress-bar">
-                            <div 
+                            <div
                                 className="progress-fill"
                                 style={{ width: `${updateProgress}%` }}
                             />

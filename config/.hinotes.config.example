@@ -1,0 +1,7 @@
+# HiNotes API Configuration Template
+# Copy this file to .hinotes.config and add your actual token
+# DO NOT commit .hinotes.config to git!
+
+# HiNotes API Token
+# Obtain from: https://hinotes.hidock.com (login and extract from browser dev tools)
+HINOTES_API_TOKEN=your_token_here
