@@ -235,7 +235,7 @@ def _get_audio_duration(audio_path: str) -> int:
     """Calculates the duration of an audio file in minutes."""
     try:
         ext = os.path.splitext(audio_path)[1].lower()
-        
+
         if ext == ".wav":
             # Use wave module for WAV files
             with wave.open(audio_path, "rb") as wf:
@@ -247,25 +247,21 @@ def _get_audio_duration(audio_path: str) -> int:
             # Use pydub for other formats (MP3, etc.)
             try:
                 from pydub import AudioSegment
-                
+
                 audio = AudioSegment.from_file(audio_path)
                 duration_seconds = len(audio) / 1000.0  # pydub returns duration in milliseconds
                 return round(duration_seconds / 60)
             except ImportError:
                 logger.warning(
-                    "TranscriptionModule", 
-                    "_get_audio_duration", 
-                    f"pydub not available, cannot get duration for {ext} files"
+                    "TranscriptionModule",
+                    "_get_audio_duration",
+                    f"pydub not available, cannot get duration for {ext} files",
                 )
                 return 0
             except Exception as e:
-                logger.warning(
-                    "TranscriptionModule", 
-                    "_get_audio_duration", 
-                    f"Could not get duration with pydub: {e}"
-                )
+                logger.warning("TranscriptionModule", "_get_audio_duration", f"Could not get duration with pydub: {e}")
                 return 0
-                
+
     except Exception as e:
         logger.warning("TranscriptionModule", "_get_audio_duration", f"Could not get duration: {e}")
         return 0
@@ -369,7 +365,7 @@ async def process_audio_file_for_insights(
             )
 
             gemini_provider = ai_service.get_provider("gemini")
-            if gemini_provider and hasattr(gemini_provider, 'transcribe_and_analyze_audio'):
+            if gemini_provider and hasattr(gemini_provider, "transcribe_and_analyze_audio"):
                 result = gemini_provider.transcribe_and_analyze_audio(audio_file_path, language)
 
                 if result.get("success"):

@@ -112,12 +112,10 @@ class GeminiProvider(AIProvider):
 
             # Validate model name
             if not is_valid_model_name(model_name):
-                logger.warning("GeminiProvider", "validate_api_key",
-                             f"Unknown model name: {model_name}, using default")
+                logger.warning("GeminiProvider", "validate_api_key", f"Unknown model name: {model_name}, using default")
                 model_name = "gemini-2.0-flash-exp"
 
-            logger.info("GeminiProvider", "validate_api_key",
-                       f"Validating API key with model: {model_name}")
+            logger.info("GeminiProvider", "validate_api_key", f"Validating API key with model: {model_name}")
 
             model = genai.GenerativeModel(model_name)
             response = model.generate_content("Test validation message")
@@ -142,17 +140,14 @@ class GeminiProvider(AIProvider):
                 logger.error("GeminiProvider", "transcribe_and_analyze", msg)
                 return {"success": False, "error": msg, "provider": "gemini"}
 
-            logger.info("GeminiProvider", "transcribe_and_analyze",
-                       f"Using model: {model_name}")
+            logger.info("GeminiProvider", "transcribe_and_analyze", f"Using model: {model_name}")
 
             # Upload audio file to Gemini
-            logger.info("GeminiProvider", "transcribe_and_analyze",
-                       f"Uploading audio file: {audio_file_path}")
+            logger.info("GeminiProvider", "transcribe_and_analyze", f"Uploading audio file: {audio_file_path}")
 
             audio_file = genai.upload_file(audio_file_path)
 
-            logger.info("GeminiProvider", "transcribe_and_analyze",
-                       f"File uploaded successfully: {audio_file.uri}")
+            logger.info("GeminiProvider", "transcribe_and_analyze", f"File uploaded successfully: {audio_file.uri}")
 
             # Create model
             model = genai.GenerativeModel(model_name)
@@ -241,17 +236,15 @@ Provide structured meeting insights in strict JSON format:
 
             # Clean up: delete the uploaded file
             genai.delete_file(audio_file.name)
-            logger.info("GeminiProvider", "transcribe_and_analyze",
-                       "Uploaded file deleted")
+            logger.info("GeminiProvider", "transcribe_and_analyze", "Uploaded file deleted")
 
             # Parse response: split into transcription and analysis
             # Look for JSON in the response
-            json_start = response_text.find('{')
-            json_end = response_text.rfind('}') + 1
+            json_start = response_text.find("{")
+            json_end = response_text.rfind("}") + 1
 
             if json_start == -1 or json_end == 0:
-                logger.error("GeminiProvider", "transcribe_and_analyze",
-                           "Could not find JSON analysis in response")
+                logger.error("GeminiProvider", "transcribe_and_analyze", "Could not find JSON analysis in response")
                 return {"success": False, "error": "No JSON analysis found in response", "provider": "gemini"}
 
             transcription_text = response_text[:json_start].strip()
@@ -261,8 +254,7 @@ Provide structured meeting insights in strict JSON format:
             try:
                 analysis = json.loads(analysis_json)
             except json.JSONDecodeError as e:
-                logger.error("GeminiProvider", "transcribe_and_analyze",
-                           f"JSON parse error: {e}")
+                logger.error("GeminiProvider", "transcribe_and_analyze", f"JSON parse error: {e}")
                 # Return transcription only if analysis parsing fails
                 return {
                     "success": True,
@@ -270,7 +262,7 @@ Provide structured meeting insights in strict JSON format:
                     "language": language,
                     "confidence": 0.9,
                     "provider": "gemini",
-                    "analysis": None
+                    "analysis": None,
                 }
 
             return {
@@ -285,8 +277,8 @@ Provide structured meeting insights in strict JSON format:
                     "action_items": analysis.get("action_items", []),
                     "topics": analysis.get("topics", []),
                     "sentiment": analysis.get("sentiment", "neutral"),
-                    "participants": analysis.get("participants", [])
-                }
+                    "participants": analysis.get("participants", []),
+                },
             }
 
         except Exception as e:
@@ -309,17 +301,14 @@ Provide structured meeting insights in strict JSON format:
                 logger.error("GeminiProvider", "transcribe_audio", msg)
                 return {"success": False, "error": msg, "provider": "gemini"}
 
-            logger.info("GeminiProvider", "transcribe_audio",
-                       f"Using model: {model_name}")
+            logger.info("GeminiProvider", "transcribe_audio", f"Using model: {model_name}")
 
             # Upload audio file to Gemini
-            logger.info("GeminiProvider", "transcribe_audio",
-                       f"Uploading audio file: {audio_file_path}")
+            logger.info("GeminiProvider", "transcribe_audio", f"Uploading audio file: {audio_file_path}")
 
             audio_file = genai.upload_file(audio_file_path)
 
-            logger.info("GeminiProvider", "transcribe_audio",
-                       f"File uploaded successfully: {audio_file.uri}")
+            logger.info("GeminiProvider", "transcribe_audio", f"File uploaded successfully: {audio_file.uri}")
 
             # Create model
             model = genai.GenerativeModel(model_name)
@@ -352,8 +341,7 @@ Do NOT include any JSON formatting or explanatory text.
 
             # Clean up: delete the uploaded file
             genai.delete_file(audio_file.name)
-            logger.info("GeminiProvider", "transcribe_audio",
-                       "Uploaded file deleted")
+            logger.info("GeminiProvider", "transcribe_audio", "Uploaded file deleted")
 
             return {
                 "success": True,
@@ -377,8 +365,7 @@ Do NOT include any JSON formatting or explanatory text.
             model_name = self.config.get("model", "gemini-2.0-flash-exp")
             model_name = normalize_model_name(model_name)
 
-            logger.info("GeminiProvider", "analyze_text",
-                       f"Using model: {model_name}")
+            logger.info("GeminiProvider", "analyze_text", f"Using model: {model_name}")
 
             # Create model
             model = genai.GenerativeModel(model_name)
@@ -444,7 +431,7 @@ Return ONLY valid JSON, no markdown formatting or explanatory text.
                     "action_items": ["Task: Mock action 1 (assigned to: Speaker 1)", "Task: Mock action 2"],
                     "sentiment": "professional",
                     "topics": ["testing", "mock data", "combined approach"],
-                    "participants": ["Speaker 1", "Speaker 2"]
+                    "participants": ["Speaker 1", "Speaker 2"],
                 },
             }
         else:

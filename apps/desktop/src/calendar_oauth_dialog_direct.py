@@ -14,15 +14,16 @@ Features:
 - Automatic token refresh
 """
 
-import customtkinter as ctk
 import threading
-from typing import Optional, Callable
 from datetime import datetime
+from typing import Callable, Optional
+
+import customtkinter as ctk
 
 from config_and_logger import logger
+from microsoft_graph_api import MicrosoftGraphAPI
 from oauth2_manager import OAuth2Manager
 from oauth2_token_manager import OAuth2TokenManager
-from microsoft_graph_api import MicrosoftGraphAPI
 
 
 class DirectCalendarOAuthDialog(ctk.CTkToplevel):
@@ -76,11 +77,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
         main_frame.pack(fill="both", expand=True, padx=20, pady=20)
 
         # Title
-        title_label = ctk.CTkLabel(
-            main_frame,
-            text="Connect Your Calendar",
-            font=("Segoe UI", 18, "bold")
-        )
+        title_label = ctk.CTkLabel(main_frame, text="Connect Your Calendar", font=("Segoe UI", 18, "bold"))
         title_label.pack(pady=(0, 10))
 
         # Description
@@ -89,7 +86,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
             text="Link your calendar to automatically match recordings with meetings.",
             font=("Segoe UI", 11),
             wraplength=450,
-            justify="center"
+            justify="center",
         )
         desc_label.pack(pady=(0, 20))
 
@@ -97,11 +94,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
         provider_frame = ctk.CTkFrame(main_frame)
         provider_frame.pack(fill="x", pady=(0, 20))
 
-        provider_label = ctk.CTkLabel(
-            provider_frame,
-            text="Select Calendar Provider:",
-            font=("Segoe UI", 12, "bold")
-        )
+        provider_label = ctk.CTkLabel(provider_frame, text="Select Calendar Provider:", font=("Segoe UI", 12, "bold"))
         provider_label.pack(pady=(10, 5))
 
         # Radio buttons for provider selection
@@ -114,7 +107,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
             variable=self.selected_provider,
             value="microsoft",
             font=("Segoe UI", 11),
-            command=self._on_provider_changed
+            command=self._on_provider_changed,
         )
         microsoft_radio.pack(pady=5)
 
@@ -125,7 +118,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
             value="google",
             font=("Segoe UI", 11),
             state="disabled",  # Google not implemented yet
-            command=self._on_provider_changed
+            command=self._on_provider_changed,
         )
         google_radio.pack(pady=5)
 
@@ -133,20 +126,11 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
         self.status_frame = ctk.CTkFrame(main_frame)
         self.status_frame.pack(fill="x", pady=(0, 10))
 
-        self.status_label = ctk.CTkLabel(
-            self.status_frame,
-            text="",
-            font=("Segoe UI", 10),
-            wraplength=450
-        )
+        self.status_label = ctk.CTkLabel(self.status_frame, text="", font=("Segoe UI", 10), wraplength=450)
         self.status_label.pack(pady=10)
 
         # Progress indicator (hidden initially)
-        self.progress_label = ctk.CTkLabel(
-            main_frame,
-            text="",
-            font=("Segoe UI", 10, "bold")
-        )
+        self.progress_label = ctk.CTkLabel(main_frame, text="", font=("Segoe UI", 10, "bold"))
         self.progress_label.pack(pady=(0, 10))
 
         # Buttons frame
@@ -159,7 +143,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
             command=self._start_oauth_flow,
             width=150,
             height=35,
-            font=("Segoe UI", 12, "bold")
+            font=("Segoe UI", 12, "bold"),
         )
         self.connect_button.pack(side="left", padx=5)
 
@@ -170,7 +154,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
             width=120,
             height=35,
             fg_color="orange",
-            hover_color="darkorange"
+            hover_color="darkorange",
         )
         self.disconnect_button.pack(side="left", padx=5)
         self.disconnect_button.pack_forget()  # Hidden initially
@@ -182,7 +166,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
             width=100,
             height=35,
             fg_color="gray",
-            hover_color="darkgray"
+            hover_color="darkgray",
         )
         self.cancel_button.pack(side="left", padx=5)
 
@@ -193,7 +177,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
             font=("Segoe UI", 9),
             text_color="gray",
             wraplength=450,
-            justify="center"
+            justify="center",
         )
         self.info_label.pack(side="bottom", pady=(10, 0))
 
@@ -207,7 +191,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
                 access_token = self.token_manager.get_access_token(provider)
                 api = MicrosoftGraphAPI(access_token)
                 profile = api.get_user_profile()
-                email = profile.get('email', 'Unknown')
+                email = profile.get("email", "Unknown")
 
                 self._show_connected_status(email)
             except Exception as e:
@@ -219,10 +203,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
 
     def _show_connected_status(self, email: str):
         """Show that user is already connected."""
-        self.status_label.configure(
-            text=f"Already connected as: {email}",
-            text_color="green"
-        )
+        self.status_label.configure(text=f"Already connected as: {email}", text_color="green")
         self.connect_button.pack_forget()
         self.disconnect_button.pack(side="left", padx=5)
         self.info_label.configure(text="You can disconnect and reconnect with a different account if needed.")
@@ -242,11 +223,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
         self.progress_label.configure(text="Opening browser...")
 
         # Start OAuth flow in background thread
-        self.oauth_thread = threading.Thread(
-            target=self._run_oauth_flow,
-            args=(provider,),
-            daemon=True
-        )
+        self.oauth_thread = threading.Thread(target=self._run_oauth_flow, args=(provider,), daemon=True)
         self.oauth_thread.start()
 
         # Start progress animation
@@ -273,11 +250,11 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
             self.token_manager.save_tokens(provider, tokens)
 
             # Get user info
-            access_token = tokens['access_token']
-            if provider == 'microsoft':
+            access_token = tokens["access_token"]
+            if provider == "microsoft":
                 api = MicrosoftGraphAPI(access_token)
                 profile = api.get_user_profile()
-                email = profile.get('email', 'Unknown')
+                email = profile.get("email", "Unknown")
             else:
                 email = "Unknown"  # Google not implemented yet
 
@@ -326,10 +303,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
 
         # Update UI
         self.progress_label.configure(text="Connected!", text_color="green")
-        self.status_label.configure(
-            text=f"Successfully connected as: {email}",
-            text_color="green"
-        )
+        self.status_label.configure(text=f"Successfully connected as: {email}", text_color="green")
 
         # Show disconnect button
         self.connect_button.pack_forget()
@@ -375,7 +349,8 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
 
 
 # Example usage for testing
-if __name__ == '__main__':
+if __name__ == "__main__":
+
     def on_connect_success(provider: str, email: str):
         print(f"[OK] Connected to {provider}: {email}")
 

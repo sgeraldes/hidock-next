@@ -9,10 +9,11 @@ This module provides integration with the HiNotes cloud service for:
 Based on analysis of HiNotes API (see docs/transcription-feature/HINOTES_AUTHENTICATION_ANALYSIS.md)
 """
 
-import requests
 import logging
-from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -121,9 +122,7 @@ class HiNotesService:
         """
         if require_auth:
             if not self.token:
-                raise RuntimeError(
-                    "HiNotes not configured. Please set AccessToken in Settings."
-                )
+                raise RuntimeError("HiNotes not configured. Please set AccessToken in Settings.")
 
             # Add AccessToken header
             headers = kwargs.get("headers", {})
@@ -144,9 +143,7 @@ class HiNotesService:
                 logger.error("HiNotes AccessToken expired or invalid")
                 # Clear invalid token
                 self.clear_configuration()
-                raise RuntimeError(
-                    "HiNotes AccessToken expired. Please reconfigure in Settings."
-                )
+                raise RuntimeError("HiNotes AccessToken expired. Please reconfigure in Settings.")
 
             return response
 
@@ -281,9 +278,7 @@ class HiNotesService:
             "tz_offset": tz_offset_minutes,
         }
 
-        logger.debug(
-            f"Fetching calendar events: {params['start_time']} to {params['end_time']}"
-        )
+        logger.debug(f"Fetching calendar events: {params['start_time']} to {params['end_time']}")
 
         response = self._make_request("GET", "/v1/calendar/event/list", params=params)
 
@@ -333,9 +328,7 @@ class HiNotesService:
             "tz_offset": tz_offset_minutes,
         }
 
-        response = self._make_request(
-            "GET", "/v1/calendar/event/sync/device", params=params
-        )
+        response = self._make_request("GET", "/v1/calendar/event/sync/device", params=params)
 
         success = self._parse_response(response) is not None
 
@@ -380,9 +373,7 @@ class HiNotesService:
         device_status = self._parse_response(response)
 
         if device_status:
-            logger.info(
-                f"Device {device_sn}: ownership={device_status.get('ownership')}"
-            )
+            logger.info(f"Device {device_sn}: ownership={device_status.get('ownership')}")
 
         return device_status
 
@@ -446,6 +437,7 @@ def get_hinotes_service(config) -> HiNotesService:
 if __name__ == "__main__":
     """Test HiNotes service from command line."""
     import sys
+
     from config_and_logger import load_config
 
     # Load config

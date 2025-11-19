@@ -14,10 +14,11 @@ Features:
 - Cancellable operation
 """
 
-import customtkinter as ctk
 import threading
-from typing import Optional, Tuple, Callable
 from datetime import datetime
+from typing import Callable, Optional, Tuple
+
+import customtkinter as ctk
 
 from config_and_logger import logger
 from hinotes_calendar_service import HiNotesCalendarService
@@ -74,11 +75,7 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
         main_frame.pack(fill="both", expand=True, padx=20, pady=20)
 
         # Title
-        title_label = ctk.CTkLabel(
-            main_frame,
-            text="Connect Your Calendar",
-            font=("Segoe UI", 18, "bold")
-        )
+        title_label = ctk.CTkLabel(main_frame, text="Connect Your Calendar", font=("Segoe UI", 18, "bold"))
         title_label.pack(pady=(0, 10))
 
         # Description
@@ -87,7 +84,7 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
             text="Link your calendar to automatically match recordings with meetings.",
             font=("Segoe UI", 11),
             wraplength=450,
-            justify="center"
+            justify="center",
         )
         desc_label.pack(pady=(0, 20))
 
@@ -95,11 +92,7 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
         provider_frame = ctk.CTkFrame(main_frame)
         provider_frame.pack(fill="x", pady=(0, 20))
 
-        provider_label = ctk.CTkLabel(
-            provider_frame,
-            text="Select Calendar Provider:",
-            font=("Segoe UI", 12, "bold")
-        )
+        provider_label = ctk.CTkLabel(provider_frame, text="Select Calendar Provider:", font=("Segoe UI", 12, "bold"))
         provider_label.pack(pady=(10, 5))
 
         # Radio buttons for provider selection
@@ -111,34 +104,21 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
             text="Microsoft Outlook / Office 365",
             variable=self.selected_provider,
             value="microsoft",
-            font=("Segoe UI", 11)
+            font=("Segoe UI", 11),
         )
         microsoft_radio.pack(pady=5)
 
         google_radio = ctk.CTkRadioButton(
-            radio_frame,
-            text="Google Calendar",
-            variable=self.selected_provider,
-            value="google",
-            font=("Segoe UI", 11)
+            radio_frame, text="Google Calendar", variable=self.selected_provider, value="google", font=("Segoe UI", 11)
         )
         google_radio.pack(pady=5)
 
         # Status label (for showing progress)
-        self.status_label = ctk.CTkLabel(
-            main_frame,
-            text="",
-            font=("Segoe UI", 10),
-            text_color="gray"
-        )
+        self.status_label = ctk.CTkLabel(main_frame, text="", font=("Segoe UI", 10), text_color="gray")
         self.status_label.pack(pady=(0, 10))
 
         # Progress indicator (hidden initially)
-        self.progress_label = ctk.CTkLabel(
-            main_frame,
-            text="",
-            font=("Segoe UI", 10, "bold")
-        )
+        self.progress_label = ctk.CTkLabel(main_frame, text="", font=("Segoe UI", 10, "bold"))
         self.progress_label.pack(pady=(0, 10))
 
         # Buttons frame
@@ -151,7 +131,7 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
             command=self._start_oauth_flow,
             width=150,
             height=35,
-            font=("Segoe UI", 12, "bold")
+            font=("Segoe UI", 12, "bold"),
         )
         self.connect_button.pack(side="left", padx=5)
 
@@ -162,7 +142,7 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
             width=100,
             height=35,
             fg_color="gray",
-            hover_color="darkgray"
+            hover_color="darkgray",
         )
         self.cancel_button.pack(side="left", padx=5)
 
@@ -173,7 +153,7 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
             font=("Segoe UI", 9),
             text_color="gray",
             wraplength=450,
-            justify="center"
+            justify="center",
         )
         info_label.pack(side="bottom", pady=(10, 0))
 
@@ -185,6 +165,7 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
 
         # Create calendar service
         from config_and_logger import config
+
         self.calendar_service = HiNotesCalendarService(config, self.access_token)
 
         # Check if already connected
@@ -223,11 +204,7 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
         self.progress_label.configure(text="⏳ Checking connection")
 
         # Start polling in background thread
-        self.poll_thread = threading.Thread(
-            target=self._poll_connection_status,
-            args=(provider,),
-            daemon=True
-        )
+        self.poll_thread = threading.Thread(target=self._poll_connection_status, args=(provider,), daemon=True)
         self.poll_thread.start()
 
         # Start progress animation
@@ -244,9 +221,7 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
         poll_interval = 2.0  # 2 seconds
 
         success, email = self.calendar_service.wait_for_oauth_completion(
-            provider,
-            timeout_seconds=timeout_seconds,
-            poll_interval=poll_interval
+            provider, timeout_seconds=timeout_seconds, poll_interval=poll_interval
         )
 
         # Update UI on main thread
@@ -353,7 +328,7 @@ class CalendarConnectionManager:
         self.access_token = access_token
         self.calendar_service = HiNotesCalendarService(config, access_token)
 
-    def is_connected(self, provider: str = 'microsoft') -> Tuple[bool, Optional[str]]:
+    def is_connected(self, provider: str = "microsoft") -> Tuple[bool, Optional[str]]:
         """
         Check if calendar is connected.
 
@@ -374,7 +349,7 @@ class CalendarConnectionManager:
         """
         connected = {}
 
-        for provider in ['microsoft', 'google']:
+        for provider in ["microsoft", "google"]:
             is_connected, email = self.is_connected(provider)
             if is_connected and email:
                 connected[provider] = email
@@ -392,7 +367,7 @@ class CalendarConnectionManager:
         dialog = CalendarOAuthDialog(parent, self.access_token, callback)
         return dialog
 
-    def disconnect(self, provider: str = 'microsoft') -> bool:
+    def disconnect(self, provider: str = "microsoft") -> bool:
         """
         Disconnect calendar provider.
 
@@ -404,7 +379,7 @@ class CalendarConnectionManager:
         """
         return self.calendar_service.disconnect(provider)
 
-    def get_events(self, start_date: datetime, end_date: datetime, provider: str = 'microsoft'):
+    def get_events(self, start_date: datetime, end_date: datetime, provider: str = "microsoft"):
         """
         Get calendar events for date range.
 
@@ -418,8 +393,9 @@ class CalendarConnectionManager:
         """
         return self.calendar_service.get_events(start_date, end_date, provider)
 
-    def find_event_for_recording(self, recording_time: datetime, duration_seconds: int = None,
-                                  provider: str = 'microsoft') -> Optional:
+    def find_event_for_recording(
+        self, recording_time: datetime, duration_seconds: int = None, provider: str = "microsoft"
+    ) -> Optional:
         """
         Find calendar event matching a recording.
 
@@ -431,15 +407,11 @@ class CalendarConnectionManager:
         Returns:
             CalendarEvent if found, None otherwise
         """
-        return self.calendar_service.find_event_for_recording(
-            recording_time,
-            duration_seconds,
-            provider
-        )
+        return self.calendar_service.find_event_for_recording(recording_time, duration_seconds, provider)
 
 
 # Example usage for testing
-if __name__ == '__main__':
+if __name__ == "__main__":
     import tkinter as tk
 
     def on_connect_success(provider: str, email: str):

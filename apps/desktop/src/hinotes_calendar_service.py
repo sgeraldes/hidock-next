@@ -32,16 +32,16 @@ API Endpoints:
 """
 
 import json
-import webbrowser
 import time
+import webbrowser
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
-import requests
 from urllib.parse import urlencode
 
-from config_and_logger import logger
+import requests
 
+from config_and_logger import logger
 
 # HiNotes Backend API Configuration
 HINOTES_API_BASE = "https://hinotes.hidock.com"
@@ -64,49 +64,49 @@ class CalendarEvent:
     def to_dict(self) -> Dict:
         """Convert event to dictionary for storage."""
         return {
-            'title': self.title,
-            'start_time': self.start_time.isoformat() if self.start_time else None,
-            'end_time': self.end_time.isoformat() if self.end_time else None,
-            'location': self.location,
-            'owner': self.owner,
-            'status': self.status,
-            'meeting_way': self.meeting_way,
-            'event_id': self.event_id,
+            "title": self.title,
+            "start_time": self.start_time.isoformat() if self.start_time else None,
+            "end_time": self.end_time.isoformat() if self.end_time else None,
+            "location": self.location,
+            "owner": self.owner,
+            "status": self.status,
+            "meeting_way": self.meeting_way,
+            "event_id": self.event_id,
         }
 
     @classmethod
-    def from_hinotes_api(cls, event_data: Dict) -> 'CalendarEvent':
+    def from_hinotes_api(cls, event_data: Dict) -> "CalendarEvent":
         """Create CalendarEvent from HiNotes API response format."""
-        calendar_event = event_data.get('calendarEvent', {})
+        calendar_event = event_data.get("calendarEvent", {})
 
         # Parse datetime strings from backend format: "2025-12-05 14:00:00.0"
         start_time = None
         end_time = None
 
-        if calendar_event.get('startTime'):
+        if calendar_event.get("startTime"):
             try:
                 # Remove trailing .0 and parse
-                start_str = calendar_event['startTime'].rsplit('.', 1)[0]
-                start_time = datetime.strptime(start_str, '%Y-%m-%d %H:%M:%S')
+                start_str = calendar_event["startTime"].rsplit(".", 1)[0]
+                start_time = datetime.strptime(start_str, "%Y-%m-%d %H:%M:%S")
             except Exception as e:
                 logger.warning("HiNotesCalendar", "parse_start_time", f"Error parsing start time: {e}")
 
-        if calendar_event.get('endTime'):
+        if calendar_event.get("endTime"):
             try:
-                end_str = calendar_event['endTime'].rsplit('.', 1)[0]
-                end_time = datetime.strptime(end_str, '%Y-%m-%d %H:%M:%S')
+                end_str = calendar_event["endTime"].rsplit(".", 1)[0]
+                end_time = datetime.strptime(end_str, "%Y-%m-%d %H:%M:%S")
             except Exception as e:
                 logger.warning("HiNotesCalendar", "parse_end_time", f"Error parsing end time: {e}")
 
         return cls(
-            title=calendar_event.get('title', 'No Title'),
+            title=calendar_event.get("title", "No Title"),
             start_time=start_time,
             end_time=end_time,
-            location=calendar_event.get('location', ''),
-            owner=calendar_event.get('owner', ''),
-            status=calendar_event.get('status', ''),
-            meeting_way=calendar_event.get('meetingWay', ''),
-            event_id=calendar_event.get('id', ''),
+            location=calendar_event.get("location", ""),
+            owner=calendar_event.get("owner", ""),
+            status=calendar_event.get("status", ""),
+            meeting_way=calendar_event.get("meetingWay", ""),
+            event_id=calendar_event.get("id", ""),
         )
 
 
@@ -136,10 +136,12 @@ class HiNotesCalendarService:
         self.config = config
         self.access_token = access_token
         self.session = requests.Session()
-        self.session.headers.update({
-            'AccessToken': access_token,
-            'Content-Type': 'application/json',
-        })
+        self.session.headers.update(
+            {
+                "AccessToken": access_token,
+                "Content-Type": "application/json",
+            }
+        )
 
     def _make_api_request(self, method: str, endpoint: str, **kwargs) -> Optional[Dict]:
         """
@@ -163,8 +165,8 @@ class HiNotesCalendarService:
             data = response.json()
 
             # Check for API-level errors
-            if data.get('code') != 200:
-                error_msg = data.get('msg', 'Unknown error')
+            if data.get("code") != 200:
+                error_msg = data.get("msg", "Unknown error")
                 logger.error("HiNotesCalendar", "api_request", f"API error: {error_msg}")
                 return None
 
@@ -177,7 +179,7 @@ class HiNotesCalendarService:
             logger.error("HiNotesCalendar", "api_request", f"JSON decode error: {e}")
             return None
 
-    def get_oauth_url(self, provider: str = 'microsoft') -> str:
+    def get_oauth_url(self, provider: str = "microsoft") -> str:
         """
         Get OAuth2 authorization URL for user to visit in browser.
 
@@ -187,24 +189,24 @@ class HiNotesCalendarService:
         Returns:
             Full OAuth2 authorization URL
         """
-        if provider == 'microsoft':
+        if provider == "microsoft":
             params = {
-                'client_id': self.MICROSOFT_CLIENT_ID,
-                'response_type': 'code',
-                'redirect_uri': f'{HINOTES_API_BASE}/auth',
-                'scope': self.MICROSOFT_SCOPES,
-                'response_mode': 'query',
+                "client_id": self.MICROSOFT_CLIENT_ID,
+                "response_type": "code",
+                "redirect_uri": f"{HINOTES_API_BASE}/auth",
+                "scope": self.MICROSOFT_SCOPES,
+                "response_mode": "query",
             }
             auth_url = f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?{urlencode(params)}"
 
-        elif provider == 'google':
+        elif provider == "google":
             params = {
-                'client_id': self.GOOGLE_CLIENT_ID,
-                'response_type': 'code',
-                'redirect_uri': f'{HINOTES_API_BASE}/auth',
-                'scope': self.GOOGLE_SCOPES,
-                'access_type': 'offline',
-                'prompt': 'consent',
+                "client_id": self.GOOGLE_CLIENT_ID,
+                "response_type": "code",
+                "redirect_uri": f"{HINOTES_API_BASE}/auth",
+                "scope": self.GOOGLE_SCOPES,
+                "access_type": "offline",
+                "prompt": "consent",
             }
             auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
 
@@ -213,7 +215,7 @@ class HiNotesCalendarService:
 
         return auth_url
 
-    def open_oauth_in_browser(self, provider: str = 'microsoft') -> bool:
+    def open_oauth_in_browser(self, provider: str = "microsoft") -> bool:
         """
         Open OAuth2 authorization URL in user's default browser.
 
@@ -233,7 +235,7 @@ class HiNotesCalendarService:
             logger.error("HiNotesCalendar", "open_oauth", f"Error opening browser: {e}")
             return False
 
-    def check_connection_status(self, provider: str = 'microsoft') -> Tuple[bool, Optional[str]]:
+    def check_connection_status(self, provider: str = "microsoft") -> Tuple[bool, Optional[str]]:
         """
         Check if calendar is connected for specified provider.
 
@@ -243,23 +245,22 @@ class HiNotesCalendarService:
         Returns:
             Tuple of (is_connected, user_email)
         """
-        payload = {
-            'calendarWay': 'microsoft' if provider == 'microsoft' else 'google'
-        }
+        payload = {"calendarWay": "microsoft" if provider == "microsoft" else "google"}
 
-        response = self._make_api_request('POST', f'/{HINOTES_API_VERSION}/calendar/status', json=payload)
+        response = self._make_api_request("POST", f"/{HINOTES_API_VERSION}/calendar/status", json=payload)
 
         if not response:
             return False, None
 
-        data = response.get('data', {})
-        is_connected = data.get('isConnect', False)
-        user_email = data.get('email', '')
+        data = response.get("data", {})
+        is_connected = data.get("isConnect", False)
+        user_email = data.get("email", "")
 
         return is_connected, user_email
 
-    def wait_for_oauth_completion(self, provider: str = 'microsoft', timeout_seconds: int = 120,
-                                    poll_interval: float = 2.0) -> Tuple[bool, Optional[str]]:
+    def wait_for_oauth_completion(
+        self, provider: str = "microsoft", timeout_seconds: int = 120, poll_interval: float = 2.0
+    ) -> Tuple[bool, Optional[str]]:
         """
         Poll backend until OAuth connection is established or timeout.
 
@@ -276,7 +277,9 @@ class HiNotesCalendarService:
         start_time = time.time()
         last_log_time = start_time
 
-        logger.info("HiNotesCalendar", "wait_oauth", f"Waiting for {provider} OAuth completion (timeout: {timeout_seconds}s)")
+        logger.info(
+            "HiNotesCalendar", "wait_oauth", f"Waiting for {provider} OAuth completion (timeout: {timeout_seconds}s)"
+        )
 
         while time.time() - start_time < timeout_seconds:
             is_connected, user_email = self.check_connection_status(provider)
@@ -296,7 +299,7 @@ class HiNotesCalendarService:
         logger.warning("HiNotesCalendar", "wait_oauth", f"OAuth timeout after {timeout_seconds}s")
         return False, None
 
-    def trigger_sync(self, provider: str = 'microsoft') -> bool:
+    def trigger_sync(self, provider: str = "microsoft") -> bool:
         """
         Trigger calendar sync on backend (fetches latest events from provider).
 
@@ -306,9 +309,13 @@ class HiNotesCalendarService:
         Returns:
             True if sync triggered successfully, False otherwise
         """
-        endpoint = f'/{HINOTES_API_VERSION}/calendar/microsoft/sync' if provider == 'microsoft' else f'/{HINOTES_API_VERSION}/calendar/google/sync'
+        endpoint = (
+            f"/{HINOTES_API_VERSION}/calendar/microsoft/sync"
+            if provider == "microsoft"
+            else f"/{HINOTES_API_VERSION}/calendar/google/sync"
+        )
 
-        response = self._make_api_request('POST', endpoint, json={})
+        response = self._make_api_request("POST", endpoint, json={})
 
         if response:
             logger.info("HiNotesCalendar", "trigger_sync", f"Calendar sync triggered for {provider}")
@@ -317,7 +324,7 @@ class HiNotesCalendarService:
             logger.error("HiNotesCalendar", "trigger_sync", f"Failed to trigger sync for {provider}")
             return False
 
-    def get_events(self, start_date: datetime, end_date: datetime, provider: str = 'microsoft') -> List[CalendarEvent]:
+    def get_events(self, start_date: datetime, end_date: datetime, provider: str = "microsoft") -> List[CalendarEvent]:
         """
         Fetch calendar events from backend for specified date range.
 
@@ -331,18 +338,18 @@ class HiNotesCalendarService:
         """
         # Format dates as YYYY-MM-DD
         payload = {
-            'startDate': start_date.strftime('%Y-%m-%d'),
-            'endDate': end_date.strftime('%Y-%m-%d'),
-            'calendarWay': 'microsoft' if provider == 'microsoft' else 'google',
+            "startDate": start_date.strftime("%Y-%m-%d"),
+            "endDate": end_date.strftime("%Y-%m-%d"),
+            "calendarWay": "microsoft" if provider == "microsoft" else "google",
         }
 
-        response = self._make_api_request('GET', f'/{HINOTES_API_VERSION}/calendar/event/list', params=payload)
+        response = self._make_api_request("GET", f"/{HINOTES_API_VERSION}/calendar/event/list", params=payload)
 
         if not response:
             return []
 
-        data = response.get('data', {})
-        events_by_date = data.get('calendarEventPageResult', {})
+        data = response.get("data", {})
+        events_by_date = data.get("calendarEventPageResult", {})
 
         # Parse date-grouped events
         all_events = []
@@ -358,11 +365,20 @@ class HiNotesCalendarService:
                 except Exception as e:
                     logger.warning("HiNotesCalendar", "parse_event", f"Error parsing event: {e}")
 
-        logger.info("HiNotesCalendar", "get_events", f"Retrieved {len(all_events)} events from {start_date.date()} to {end_date.date()}")
+        logger.info(
+            "HiNotesCalendar",
+            "get_events",
+            f"Retrieved {len(all_events)} events from {start_date.date()} to {end_date.date()}",
+        )
         return all_events
 
-    def find_event_for_recording(self, recording_time: datetime, duration_seconds: int = None,
-                                  provider: str = 'microsoft', tolerance_minutes: int = 30) -> Optional[CalendarEvent]:
+    def find_event_for_recording(
+        self,
+        recording_time: datetime,
+        duration_seconds: int = None,
+        provider: str = "microsoft",
+        tolerance_minutes: int = 30,
+    ) -> Optional[CalendarEvent]:
         """
         Find calendar event that matches a recording timestamp.
 
@@ -409,12 +425,15 @@ class HiNotesCalendarService:
                         best_match = event
 
         if best_match:
-            logger.info("HiNotesCalendar", "find_event",
-                       f"Found event '{best_match.title}' for recording at {recording_time} (score: {best_score:.2f})")
+            logger.info(
+                "HiNotesCalendar",
+                "find_event",
+                f"Found event '{best_match.title}' for recording at {recording_time} (score: {best_score:.2f})",
+            )
 
         return best_match
 
-    def disconnect(self, provider: str = 'microsoft') -> bool:
+    def disconnect(self, provider: str = "microsoft") -> bool:
         """
         Disconnect calendar integration (revoke backend tokens).
 
@@ -431,7 +450,7 @@ class HiNotesCalendarService:
 
 
 # Convenience function for quick testing
-def test_calendar_integration(access_token: str, provider: str = 'microsoft'):
+def test_calendar_integration(access_token: str, provider: str = "microsoft"):
     """
     Test calendar integration with HiNotes backend.
 
@@ -496,7 +515,7 @@ def test_calendar_integration(access_token: str, provider: str = 'microsoft'):
     print("\n=== Test Complete ===\n")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Example usage
     print("HiNotes Calendar Service")
     print("========================")

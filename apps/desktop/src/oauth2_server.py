@@ -22,12 +22,12 @@ Security:
 - 2-minute timeout to prevent hanging
 """
 
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse
-import threading
 import socket
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 from config_and_logger import logger
 
@@ -62,25 +62,25 @@ class OAuth2CallbackHandler(BaseHTTPRequestHandler):
             logger.info("OAuth2Server", "callback", f"Has 'error': {'error' in query_params}")
 
             # Handle favicon requests (ignore them)
-            if parsed_url.path == '/favicon.ico':
+            if parsed_url.path == "/favicon.ico":
                 logger.debug("OAuth2Server", "callback", "Ignoring favicon request")
                 self.send_response(404)
                 self.end_headers()
                 return
 
             # Check for authorization code
-            if 'code' in query_params:
-                OAuth2CallbackHandler.authorization_code = query_params['code'][0]
+            if "code" in query_params:
+                OAuth2CallbackHandler.authorization_code = query_params["code"][0]
 
                 # Optional: Capture state parameter for verification
-                if 'state' in query_params:
-                    OAuth2CallbackHandler.state = query_params['state'][0]
+                if "state" in query_params:
+                    OAuth2CallbackHandler.state = query_params["state"][0]
 
                 logger.info("OAuth2Server", "callback", "Authorization code received successfully")
 
                 # Send success response to browser
                 self.send_response(200)
-                self.send_header('Content-type', 'text/html; charset=utf-8')
+                self.send_header("Content-type", "text/html; charset=utf-8")
                 self.end_headers()
 
                 success_html = """
@@ -130,21 +130,24 @@ class OAuth2CallbackHandler(BaseHTTPRequestHandler):
                 </body>
                 </html>
                 """
-                self.wfile.write(success_html.encode('utf-8'))
+                self.wfile.write(success_html.encode("utf-8"))
 
             # Check for error
-            elif 'error' in query_params:
-                OAuth2CallbackHandler.error = query_params['error'][0]
+            elif "error" in query_params:
+                OAuth2CallbackHandler.error = query_params["error"][0]
 
-                if 'error_description' in query_params:
-                    OAuth2CallbackHandler.error_description = query_params['error_description'][0]
+                if "error_description" in query_params:
+                    OAuth2CallbackHandler.error_description = query_params["error_description"][0]
 
-                logger.error("OAuth2Server", "callback",
-                           f"OAuth error: {OAuth2CallbackHandler.error} - {OAuth2CallbackHandler.error_description}")
+                logger.error(
+                    "OAuth2Server",
+                    "callback",
+                    f"OAuth error: {OAuth2CallbackHandler.error} - {OAuth2CallbackHandler.error_description}",
+                )
 
                 # Send error response to browser
                 self.send_response(400)
-                self.send_header('Content-type', 'text/html; charset=utf-8')
+                self.send_header("Content-type", "text/html; charset=utf-8")
                 self.end_headers()
 
                 error_html = f"""
@@ -206,23 +209,26 @@ class OAuth2CallbackHandler(BaseHTTPRequestHandler):
                 </body>
                 </html>
                 """
-                self.wfile.write(error_html.encode('utf-8'))
+                self.wfile.write(error_html.encode("utf-8"))
 
             else:
                 # Unexpected callback (no code or error)
-                logger.warning("OAuth2Server", "callback",
-                             f"Received callback with no code or error. Path: {self.path}, Params: {query_params}")
+                logger.warning(
+                    "OAuth2Server",
+                    "callback",
+                    f"Received callback with no code or error. Path: {self.path}, Params: {query_params}",
+                )
                 self.send_response(400)
-                self.send_header('Content-type', 'text/plain')
+                self.send_header("Content-type", "text/plain")
                 self.end_headers()
-                self.wfile.write(b'Invalid callback parameters')
+                self.wfile.write(b"Invalid callback parameters")
 
         except Exception as e:
             logger.error("OAuth2Server", "callback", f"Error handling callback: {e}")
             self.send_response(500)
-            self.send_header('Content-type', 'text/plain')
+            self.send_header("Content-type", "text/plain")
             self.end_headers()
-            self.wfile.write(f"Server error: {e}".encode('utf-8'))
+            self.wfile.write(f"Server error: {e}".encode("utf-8"))
 
     def log_message(self, format, *args):
         """Override to suppress default HTTP server logs."""
@@ -268,7 +274,7 @@ class OAuth2LocalServer:
             try:
                 # Try to bind to the port
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.bind(('localhost', port))
+                sock.bind(("localhost", port))
                 sock.close()
                 logger.info("OAuth2Server", "port", f"Port {port} is available")
                 return port
@@ -290,7 +296,7 @@ class OAuth2LocalServer:
             OAuth2CallbackHandler.error_description = None
 
             # Create HTTP server
-            self.server = HTTPServer(('localhost', self.port), OAuth2CallbackHandler)
+            self.server = HTTPServer(("localhost", self.port), OAuth2CallbackHandler)
 
             # Start server in background thread
             self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -365,7 +371,7 @@ class OAuth2LocalServer:
 
 
 # Testing interface
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("=== OAuth2 Local Server Test ===\n")
 
     # Start server

@@ -21,15 +21,16 @@ Supports:
 """
 
 import webbrowser
-import requests
-from urllib.parse import urlencode
-from typing import Dict, Optional, Tuple
 from datetime import datetime, timedelta
+from typing import Dict, Optional, Tuple
+from urllib.parse import urlencode
+
+import requests
 
 from config_and_logger import logger
 from oauth2_pkce import generate_pkce_pair
-from oauth2_server import OAuth2LocalServer
 from oauth2_providers import get_provider_config
+from oauth2_server import OAuth2LocalServer
 
 
 class OAuth2Manager:
@@ -117,16 +118,12 @@ class OAuth2Manager:
 
             # Step 6: Exchange code for tokens
             logger.info("OAuth2Manager", "authorize", "Exchanging code for tokens")
-            tokens = self._exchange_code_for_tokens(
-                authorization_code,
-                code_verifier,
-                redirect_uri
-            )
+            tokens = self._exchange_code_for_tokens(authorization_code, code_verifier, redirect_uri)
 
             # Add calculated expiry timestamp
-            if 'expires_in' in tokens:
-                expiry_time = datetime.now() + timedelta(seconds=tokens['expires_in'])
-                tokens['expires_at'] = expiry_time.isoformat()
+            if "expires_in" in tokens:
+                expiry_time = datetime.now() + timedelta(seconds=tokens["expires_in"])
+                tokens["expires_at"] = expiry_time.isoformat()
 
             logger.info("OAuth2Manager", "authorize", "Authorization successful!")
             return tokens
@@ -156,21 +153,21 @@ class OAuth2Manager:
             Complete authorization URL
         """
         params = {
-            'client_id': self.config['client_id'],
-            'response_type': self.config['response_type'],
-            'redirect_uri': redirect_uri,
-            'scope': self.config['scope'],
-            'code_challenge': code_challenge,
-            'code_challenge_method': 'S256',
+            "client_id": self.config["client_id"],
+            "response_type": self.config["response_type"],
+            "redirect_uri": redirect_uri,
+            "scope": self.config["scope"],
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
         }
 
         # Add provider-specific parameters
-        if self.provider == 'microsoft':
-            params['response_mode'] = self.config.get('response_mode', 'query')
+        if self.provider == "microsoft":
+            params["response_mode"] = self.config.get("response_mode", "query")
 
-        elif self.provider == 'google':
-            params['access_type'] = self.config.get('access_type', 'offline')
-            params['prompt'] = self.config.get('prompt', 'consent')
+        elif self.provider == "google":
+            params["access_type"] = self.config.get("access_type", "offline")
+            params["prompt"] = self.config.get("prompt", "consent")
 
         auth_url = f"{self.config['auth_url']}?{urlencode(params)}"
 
@@ -192,23 +189,23 @@ class OAuth2Manager:
         Raises:
             Exception: If token exchange fails
         """
-        token_url = self.config['token_url']
+        token_url = self.config["token_url"]
 
         # Build token request
         data = {
-            'grant_type': 'authorization_code',
-            'code': code,
-            'redirect_uri': redirect_uri,
-            'client_id': self.config['client_id'],
-            'code_verifier': verifier,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": self.config["client_id"],
+            "code_verifier": verifier,
         }
 
         # Google requires client_secret even for desktop apps
-        if self.provider == 'google' and 'client_secret' in self.config:
-            data['client_secret'] = self.config['client_secret']
+        if self.provider == "google" and "client_secret" in self.config:
+            data["client_secret"] = self.config["client_secret"]
 
         headers = {
-            'Content-Type': 'application/x-www-form-urlencoded',
+            "Content-Type": "application/x-www-form-urlencoded",
         }
 
         logger.debug("OAuth2Manager", "token_exchange", f"POST {token_url}")
@@ -220,9 +217,12 @@ class OAuth2Manager:
             tokens = response.json()
 
             logger.info("OAuth2Manager", "token_exchange", "Token exchange successful")
-            logger.debug("OAuth2Manager", "token_exchange",
-                        f"Received: access_token ({len(tokens.get('access_token', ''))} chars), "
-                        f"refresh_token: {bool(tokens.get('refresh_token'))}")
+            logger.debug(
+                "OAuth2Manager",
+                "token_exchange",
+                f"Received: access_token ({len(tokens.get('access_token', ''))} chars), "
+                f"refresh_token: {bool(tokens.get('refresh_token'))}",
+            )
 
             return tokens
 
@@ -233,7 +233,7 @@ class OAuth2Manager:
             except:
                 pass
 
-            error_msg = error_data.get('error_description', error_data.get('error', str(e)))
+            error_msg = error_data.get("error_description", error_data.get("error", str(e)))
             logger.error("OAuth2Manager", "token_exchange", f"HTTP error: {error_msg}")
             raise Exception(f"Token exchange failed: {error_msg}")
 
@@ -254,20 +254,20 @@ class OAuth2Manager:
         Raises:
             Exception: If refresh fails
         """
-        token_url = self.config['token_url']
+        token_url = self.config["token_url"]
 
         data = {
-            'grant_type': 'refresh_token',
-            'refresh_token': refresh_token,
-            'client_id': self.config['client_id'],
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": self.config["client_id"],
         }
 
         # Google requires client_secret
-        if self.provider == 'google' and 'client_secret' in self.config:
-            data['client_secret'] = self.config['client_secret']
+        if self.provider == "google" and "client_secret" in self.config:
+            data["client_secret"] = self.config["client_secret"]
 
         headers = {
-            'Content-Type': 'application/x-www-form-urlencoded',
+            "Content-Type": "application/x-www-form-urlencoded",
         }
 
         logger.info("OAuth2Manager", "refresh", "Refreshing access token")
@@ -279,9 +279,9 @@ class OAuth2Manager:
             tokens = response.json()
 
             # Add calculated expiry
-            if 'expires_in' in tokens:
-                expiry_time = datetime.now() + timedelta(seconds=tokens['expires_in'])
-                tokens['expires_at'] = expiry_time.isoformat()
+            if "expires_in" in tokens:
+                expiry_time = datetime.now() + timedelta(seconds=tokens["expires_in"])
+                tokens["expires_at"] = expiry_time.isoformat()
 
             logger.info("OAuth2Manager", "refresh", "Token refreshed successfully")
             return tokens
@@ -292,8 +292,9 @@ class OAuth2Manager:
 
 
 # Testing interface
-if __name__ == '__main__':
+if __name__ == "__main__":
     import sys
+
     from oauth2_providers import get_available_providers
 
     print("=== OAuth2 Manager - Test ===\n")
@@ -330,14 +331,14 @@ if __name__ == '__main__':
     try:
         tokens = manager.authorize(timeout=120)
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("✓ AUTHORIZATION SUCCESSFUL!")
-        print("="*60 + "\n")
+        print("=" * 60 + "\n")
 
         print("Tokens received:")
         print(f"  Access Token: {tokens['access_token'][:30]}...{tokens['access_token'][-10:]}")
 
-        if 'refresh_token' in tokens:
+        if "refresh_token" in tokens:
             print(f"  Refresh Token: {tokens['refresh_token'][:30]}...{tokens['refresh_token'][-10:]}")
         else:
             print(f"  Refresh Token: Not provided")
@@ -347,7 +348,7 @@ if __name__ == '__main__':
         print(f"  Token Type: {tokens.get('token_type', 'N/A')}")
         print(f"  Scope: {tokens.get('scope', 'N/A')}")
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("\nYou can now use the access_token to make API calls!")
 
     except TimeoutError:

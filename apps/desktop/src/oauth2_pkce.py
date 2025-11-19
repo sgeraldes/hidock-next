@@ -49,7 +49,7 @@ def generate_code_verifier(length: int = 64) -> str:
     random_bytes = secrets.token_bytes(num_bytes)
 
     # Base64url encode (URL-safe, no padding)
-    verifier = base64.urlsafe_b64encode(random_bytes).decode('utf-8').rstrip('=')
+    verifier = base64.urlsafe_b64encode(random_bytes).decode("utf-8").rstrip("=")
 
     # Ensure exactly the requested length
     return verifier[:length]
@@ -69,10 +69,10 @@ def generate_code_challenge(code_verifier: str) -> str:
         code_challenge = BASE64URL(SHA256(ASCII(code_verifier)))
     """
     # SHA256 hash of the verifier
-    digest = hashlib.sha256(code_verifier.encode('ascii')).digest()
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
 
     # Base64url encode (URL-safe, no padding)
-    challenge = base64.urlsafe_b64encode(digest).decode('utf-8').rstrip('=')
+    challenge = base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
 
     return challenge
 
@@ -112,7 +112,7 @@ def verify_pkce(code_verifier: str, code_challenge: str) -> bool:
 
 
 # Example usage and testing
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("=== OAuth2 PKCE Generator ===\n")
 
     # Generate PKCE pair

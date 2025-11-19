@@ -35,7 +35,7 @@ max-branches = 15
 line-length = 120
 target-version = "py312"
 select = ["E", "F", "I"]
-ignore = ["E203", "W503"]
+ignore = []
 
 # ---------------------------------------------------------------------------
 # PEP 621 project metadata (enables editable install without invoking custom

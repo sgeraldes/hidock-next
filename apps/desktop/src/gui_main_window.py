@@ -35,10 +35,14 @@ import numpy as np
 # import usb.core  # Commented out - not used in current implementation
 from PIL import Image, ImageTk, UnidentifiedImageError
 
+from async_calendar_mixin import AsyncCalendarMixin
+from audio_metadata_mixin import AudioMetadataMixin
 from audio_player_enhanced import EnhancedAudioPlayer
 
 # from audio_processing_advanced import AudioEnhancer  # Future: audio enhancement
 from audio_visualization import AudioVisualizationWidget
+from calendar_filter_engine import CalendarFilterEngine
+from calendar_search_widget import CalendarSearchWidget
 
 # Import Logger class for type hints if any
 from config_and_logger import Logger, load_config, logger
@@ -48,7 +52,6 @@ from constants import DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID
 
 # from ctk_custom_widgets import CTkBanner  # Commented out - not used
 from desktop_device_adapter import DesktopDeviceAdapter
-from toast_notification import ToastManager
 from device_interface import DeviceManager
 from file_operations_manager import FileOperationsManager
 from gui_actions_device import DeviceActionsMixin
@@ -56,16 +59,13 @@ from gui_actions_file import FileActionsMixin
 from gui_auxiliary import AuxiliaryMixin
 from gui_event_handlers import EventHandlersMixin
 from gui_treeview import TreeViewMixin
-from async_calendar_mixin import AsyncCalendarMixin
-from audio_metadata_mixin import AudioMetadataMixin
-from calendar_search_widget import CalendarSearchWidget
-from calendar_filter_engine import CalendarFilterEngine
 from status_filter_widget import StatusFilterWidget
-from unified_filter_widget import UnifiedFilterWidget
+from toast_notification import ToastManager
 
 # from settings_window import SettingsDialog  # Commented out - not used directly
 # from storage_management import StorageMonitor, StorageOptimizer  # Future: storage features
 from transcription_module import process_audio_file_for_insights
+from unified_filter_widget import UnifiedFilterWidget
 
 
 class HiDockToolGUI(
@@ -252,7 +252,7 @@ class HiDockToolGUI(
 
         self._menu_image_references = []
         self._load_icons()
-        
+
         # Initialize toast notification manager
         self.toast_manager = ToastManager(self)
         self.create_widgets()
@@ -261,7 +261,7 @@ class HiDockToolGUI(
 
         # Initialize async calendar system early
         self.after(25, self._ensure_async_calendar_initialized)
-        
+
         # Show cached files immediately if available (offline mode)
         self.after(50, self._show_cached_files_on_startup)
         # Update menu states to show correct initial button states (orange Connect button when disconnected)
@@ -276,75 +276,75 @@ class HiDockToolGUI(
         monitors = []
         try:
             import platform
+
             system = platform.system().lower()
-            
+
             if system == "windows":
                 try:
                     import win32api
-                    
+
                     # Try multiple approaches for monitor enumeration
                     try:
                         # Method 1: Try GetSystemMetrics for multi-monitor support
                         import win32con
-                        
+
                         # Get virtual screen bounds
                         left = win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)
                         top = win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN)
                         width = win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN)
                         height = win32api.GetSystemMetrics(win32con.SM_CYVIRTUALSCREEN)
-                        
+
                         # Add virtual desktop as one large monitor
-                        monitors.append({
-                            'left': left,
-                            'top': top,
-                            'right': left + width,
-                            'bottom': top + height,
-                            'width': width,
-                            'height': height
-                        })
-                        
+                        monitors.append(
+                            {
+                                "left": left,
+                                "top": top,
+                                "right": left + width,
+                                "bottom": top + height,
+                                "width": width,
+                                "height": height,
+                            }
+                        )
+
                         logger.debug("GUI", "_get_monitor_info", f"Virtual desktop: {left}, {top}, {width}x{height}")
-                        
+
                     except Exception as e2:
                         logger.debug("GUI", "_get_monitor_info", f"GetSystemMetrics failed: {e2}, using fallback")
                         raise e2
-                    
+
                 except ImportError:
                     logger.debug("GUI", "_get_monitor_info", "win32api not available, using tkinter fallback")
                     # Fallback to tkinter basic info
-                    monitors.append({
-                        'left': 0,
-                        'top': 0,
-                        'right': self.winfo_screenwidth(),
-                        'bottom': self.winfo_screenheight(),
-                        'width': self.winfo_screenwidth(),
-                        'height': self.winfo_screenheight()
-                    })
-                    
+                    monitors.append(
+                        {
+                            "left": 0,
+                            "top": 0,
+                            "right": self.winfo_screenwidth(),
+                            "bottom": self.winfo_screenheight(),
+                            "width": self.winfo_screenwidth(),
+                            "height": self.winfo_screenheight(),
+                        }
+                    )
+
             else:
                 # For macOS and Linux, use tkinter basic info as fallback
                 # TODO: Add proper multi-monitor support for macOS/Linux if needed
-                monitors.append({
-                    'left': 0,
-                    'top': 0,
-                    'right': self.winfo_screenwidth(),
-                    'bottom': self.winfo_screenheight(),
-                    'width': self.winfo_screenwidth(),
-                    'height': self.winfo_screenheight()
-                })
-                
+                monitors.append(
+                    {
+                        "left": 0,
+                        "top": 0,
+                        "right": self.winfo_screenwidth(),
+                        "bottom": self.winfo_screenheight(),
+                        "width": self.winfo_screenwidth(),
+                        "height": self.winfo_screenheight(),
+                    }
+                )
+
         except Exception as e:
             logger.error("GUI", "_get_monitor_info", f"Error getting monitor info: {e}")
             # Safe fallback
-            monitors.append({
-                'left': 0,
-                'top': 0,
-                'right': 1920,
-                'bottom': 1080,
-                'width': 1920,
-                'height': 1080
-            })
-            
+            monitors.append({"left": 0, "top": 0, "right": 1920, "bottom": 1080, "width": 1920, "height": 1080})
+
         return monitors
 
     def _validate_window_geometry(self, geometry_string):
@@ -371,7 +371,7 @@ class HiDockToolGUI(
 
             # Handle the special tkinter format like "798x305+-1062+424"
             # Split on 'x' first, then extract positions
-            parts = geometry_string.split('x')
+            parts = geometry_string.split("x")
             if len(parts) != 2:
                 logger.warning(
                     "GUI",
@@ -379,27 +379,27 @@ class HiDockToolGUI(
                     f"Invalid geometry format: {geometry_string}. Using default.",
                 )
                 return "950x850+100+100"  # Default fallback
-            
+
             try:
                 width = int(parts[0])
-                
+
                 # Extract height and position part
                 height_and_pos = parts[1]
-                height_match = re.match(r'(\d+)(.*)', height_and_pos)
+                height_match = re.match(r"(\d+)(.*)", height_and_pos)
                 if not height_match:
                     raise ValueError("Could not parse height")
-                    
+
                 height = int(height_match.group(1))
                 positions_str = height_match.group(2)
-                
+
                 # Extract x and y positions
-                pos_matches = re.findall(r'([-+]\d+)', positions_str)
+                pos_matches = re.findall(r"([-+]\d+)", positions_str)
                 if len(pos_matches) != 2:
                     raise ValueError(f"Expected 2 position values, got {len(pos_matches)}")
-                
+
                 x = int(pos_matches[0])
                 y = int(pos_matches[1])
-                
+
             except (ValueError, IndexError) as e:
                 logger.warning(
                     "GUI",
@@ -422,20 +422,22 @@ class HiDockToolGUI(
             )
 
             # Check if window intersects with any monitor
-            window_rect = {'left': x, 'top': y, 'right': x + width, 'bottom': y + height}
+            window_rect = {"left": x, "top": y, "right": x + width, "bottom": y + height}
             min_visible_pixels = 100  # Minimum pixels that should be visible
-            
+
             is_visible_on_any_monitor = False
             for monitor in monitors:
                 # Calculate intersection area
-                intersection_left = max(window_rect['left'], monitor['left'])
-                intersection_top = max(window_rect['top'], monitor['top'])
-                intersection_right = min(window_rect['right'], monitor['right'])
-                intersection_bottom = min(window_rect['bottom'], monitor['bottom'])
-                
+                intersection_left = max(window_rect["left"], monitor["left"])
+                intersection_top = max(window_rect["top"], monitor["top"])
+                intersection_right = min(window_rect["right"], monitor["right"])
+                intersection_bottom = min(window_rect["bottom"], monitor["bottom"])
+
                 # Check if there's a meaningful intersection
-                if (intersection_right - intersection_left >= min_visible_pixels and 
-                    intersection_bottom - intersection_top >= min_visible_pixels):
+                if (
+                    intersection_right - intersection_left >= min_visible_pixels
+                    and intersection_bottom - intersection_top >= min_visible_pixels
+                ):
                     is_visible_on_any_monitor = True
                     logger.debug(
                         "GUI",
@@ -451,14 +453,23 @@ class HiDockToolGUI(
                     "_validate_window_geometry",
                     f"Window at {x}, {y} is not visible on any monitor. Repositioning.",
                 )
-                
+
                 # Find the primary monitor (usually the one containing 0,0)
-                primary_monitor = next((m for m in monitors if m['left'] <= 0 <= m['right'] and m['top'] <= 0 <= m['bottom']), monitors[0] if monitors else None)
-                
+                primary_monitor = next(
+                    (m for m in monitors if m["left"] <= 0 <= m["right"] and m["top"] <= 0 <= m["bottom"]),
+                    monitors[0] if monitors else None,
+                )
+
                 if primary_monitor:
                     # Position window on primary monitor with some offset from edges
-                    x = max(primary_monitor['left'] + 50, min(primary_monitor['right'] - width - 50, primary_monitor['left'] + 100))
-                    y = max(primary_monitor['top'] + 50, min(primary_monitor['bottom'] - height - 50, primary_monitor['top'] + 100))
+                    x = max(
+                        primary_monitor["left"] + 50,
+                        min(primary_monitor["right"] - width - 50, primary_monitor["left"] + 100),
+                    )
+                    y = max(
+                        primary_monitor["top"] + 50,
+                        min(primary_monitor["bottom"] - height - 50, primary_monitor["top"] + 100),
+                    )
                     logger.info(
                         "GUI",
                         "_validate_window_geometry",
@@ -517,8 +528,8 @@ class HiDockToolGUI(
     def _get_calendar_tolerance_minutes(self):
         """Get calendar tolerance minutes from configuration."""
         config = load_config()
-        return config.get('calendar_tolerance_minutes', 20)  # Default to 20 minutes
-    
+        return config.get("calendar_tolerance_minutes", 20)  # Default to 20 minutes
+
     def _initialize_vars_from_config(self):
         """
         Initializes customtkinter (CTk) Variables from the loaded configuration.
@@ -554,7 +565,7 @@ class HiDockToolGUI(
         self.suppress_console_output_var = ctk.BooleanVar(value=get_conf("suppress_console_output", False))
         self.suppress_gui_log_output_var = ctk.BooleanVar(value=get_conf("suppress_gui_log_output", False))
         self.gui_log_filter_level_var = ctk.StringVar(value=get_conf("gui_log_filter_level", "DEBUG"))
-        
+
         # File logging variables
         self.enable_file_logging_var = ctk.BooleanVar(value=get_conf("enable_file_logging", False))
         self.enable_console_logging_var = ctk.BooleanVar(value=get_conf("enable_console_logging", True))
@@ -633,10 +644,10 @@ class HiDockToolGUI(
 
         # Selection mode (default to single selection)
         self.single_selection_mode_var = ctk.BooleanVar(value=get_conf("single_selection_mode", True))
-        
+
         # Calendar performance settings
         self.calendar_chunking_period_var = ctk.StringVar(value=get_conf("calendar_chunking_period", "1 Week"))
-        
+
         # Initialize calendar search and filtering components
         self._initialize_calendar_search()
 
@@ -645,14 +656,14 @@ class HiDockToolGUI(
         try:
             # Initialize the filter engine
             self.calendar_filter_engine = CalendarFilterEngine()
-            
+
             # Initialize TreeView filtering (will be set up after TreeView is created)
             self.calendar_search_widget = None  # Will be created in _create_files_panel
             self.status_filter_widget = None  # Will be created in _create_files_panel
             self.unified_filter_widget = None  # Will replace separate widgets
-            
+
             logger.info("GUI", "init_calendar_search", "Calendar search components initialized")
-            
+
         except Exception as e:
             logger.error("GUI", "init_calendar_search", f"Error initializing calendar search: {e}")
             # Set to None on error to prevent further issues
@@ -663,35 +674,29 @@ class HiDockToolGUI(
         try:
             # Create the search widget
             self.calendar_search_widget = CalendarSearchWidget(
-                parent_frame,
-                search_callback=self._on_calendar_search,
-                fg_color="transparent",
-                border_width=0
+                parent_frame, search_callback=self._on_calendar_search, fg_color="transparent", border_width=0
             )
             self.calendar_search_widget.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
-            
+
             logger.debug("GUI", "create_search_widget", "Calendar search widget created")
-            
+
         except Exception as e:
             logger.error("GUI", "create_search_widget", f"Error creating calendar search widget: {e}")
-    
+
     def _create_status_filter_widget(self, parent_frame):
         """Create the status filter widget and integrate it with filtering."""
         try:
             # Create the status filter widget
             self.status_filter_widget = StatusFilterWidget(
-                parent_frame,
-                filter_callback=self._on_status_filter_changed,
-                fg_color="transparent",
-                border_width=0
+                parent_frame, filter_callback=self._on_status_filter_changed, fg_color="transparent", border_width=0
             )
             self.status_filter_widget.grid(row=2, column=0, sticky="ew", padx=5, pady=(0, 5))
-            
+
             logger.debug("GUI", "create_status_filter_widget", "Status filter widget created")
-            
+
         except Exception as e:
             logger.error("GUI", "create_status_filter_widget", f"Error creating status filter widget: {e}")
-    
+
     def _create_unified_filter_widget(self, parent_frame):
         """Create the unified filter widget to replace separate search and status filters."""
         try:
@@ -701,54 +706,54 @@ class HiDockToolGUI(
                 calendar_callback=self._on_calendar_search,
                 status_callback=self._on_status_filter_changed,
                 fg_color="transparent",
-                border_width=0
+                border_width=0,
             )
             self.unified_filter_widget.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 5))
-            
+
             logger.debug("GUI", "create_unified_filter_widget", "Unified filter widget created")
-            
+
         except Exception as e:
             logger.error("GUI", "create_unified_filter_widget", f"Error creating unified filter widget: {e}")
-    
+
     def _on_calendar_search(self, filters):
         """Handle calendar search/filter changes."""
         try:
             logger.debug("GUI", "calendar_search", f"Search filters changed: {filters}")
-            
+
             # Apply the filters using TreeView mixin
             self.apply_calendar_filters(filters)
-            
+
         except Exception as e:
             logger.error("GUI", "calendar_search", f"Error handling calendar search: {e}")
-    
+
     def _on_status_filter_changed(self, filter_criteria):
         """Handle status filter changes."""
         try:
             logger.debug("GUI", "status_filter", f"Status filter changed: {filter_criteria}")
-            
+
             # Apply the status filter to the TreeView
             self.apply_status_filter(filter_criteria)
-            
+
         except Exception as e:
             logger.error("GUI", "status_filter", f"Error handling status filter change: {e}")
-    
+
     def _create_file_tree_frame_with_search_support(self, parent_frame):
         """Create the file tree frame and set up search integration."""
         try:
             # Create the normal tree frame (row=2 because of unified filter widget)
             self._create_file_tree_frame_at_row(parent_frame, row=2)
-            
+
             # Initialize calendar filtering in TreeView
             self.initialize_calendar_filtering()
-            
+
             # Set the filter engine in TreeView
             self.set_calendar_filter_engine(self.calendar_filter_engine)
-            
+
             logger.debug("GUI", "create_tree_with_search", "File tree with search support created")
-            
+
         except Exception as e:
             logger.error("GUI", "create_tree_with_search", f"Error creating tree with search: {e}")
-    
+
     def _create_file_tree_frame_at_row(self, parent_frame, row=1):
         """Create file tree frame at specified row (modified version of _create_file_tree_frame)."""
         tree_frame = ctk.CTkFrame(parent_frame, fg_color="transparent", border_width=0)
@@ -832,7 +837,7 @@ class HiDockToolGUI(
         self.file_tree.bind("<ButtonPress-1>", self._on_file_button1_press)
         self.file_tree.bind("<B1-Motion>", self._on_file_b1_motion)
         self.file_tree.bind("<ButtonRelease-1>", self._on_file_button1_release)
-        
+
         # Set up keyboard shortcuts for search
         self._setup_calendar_search_shortcuts()
 
@@ -842,37 +847,39 @@ class HiDockToolGUI(
             # Ctrl+F to focus search
             self.bind("<Control-f>", lambda event: self._focus_calendar_search())
             self.bind("<Control-F>", lambda event: self._focus_calendar_search())
-            
+
             # Escape to clear search when search widget is focused
             self.bind("<Escape>", lambda event: self._clear_calendar_search_if_focused())
-            
+
             logger.debug("GUI", "setup_search_shortcuts", "Calendar search keyboard shortcuts set up")
-            
+
         except Exception as e:
             logger.error("GUI", "setup_search_shortcuts", f"Error setting up search shortcuts: {e}")
-    
+
     def _focus_calendar_search(self):
         """Focus the calendar search entry."""
         try:
-            if hasattr(self, 'calendar_search_widget') and self.calendar_search_widget:
+            if hasattr(self, "calendar_search_widget") and self.calendar_search_widget:
                 self.calendar_search_widget.focus_search()
                 return "break"  # Prevent default behavior
         except Exception as e:
             logger.error("GUI", "focus_search", f"Error focusing search: {e}")
         return None
-    
+
     def _clear_calendar_search_if_focused(self):
         """Clear calendar search if the search widget is currently focused."""
         try:
-            if (hasattr(self, 'calendar_search_widget') and 
-                self.calendar_search_widget and 
-                self.calendar_search_widget.search_entry.winfo_exists() and
-                str(self.focus_get()) == str(self.calendar_search_widget.search_entry)):
-                
+            if (
+                hasattr(self, "calendar_search_widget")
+                and self.calendar_search_widget
+                and self.calendar_search_widget.search_entry.winfo_exists()
+                and str(self.focus_get()) == str(self.calendar_search_widget.search_entry)
+            ):
+
                 # Only clear if search widget is focused
                 self.calendar_search_widget._clear_search()
                 return "break"  # Prevent default behavior
-                
+
         except Exception as e:
             logger.error("GUI", "clear_search_if_focused", f"Error in search clear: {e}")
         return None
@@ -1102,7 +1109,7 @@ class HiDockToolGUI(
         # Column visibility submenu
         self.columns_menu = tkinter.Menu(self.view_menu, tearoff=0)
         self.view_menu.add_cascade(label="Columns", menu=self.columns_menu)
-        
+
         # Initialize column visibility variables and add column visibility toggles
         self.column_visibility_vars = {}
         for col_id, col_name in self.original_tree_headings.items():
@@ -1110,15 +1117,15 @@ class HiDockToolGUI(
                 # Determine if column is currently visible - strip whitespace from split
                 displayed_cols = [col.strip() for col in self.treeview_columns_display_order_str.split(",")]
                 is_visible = col_id in displayed_cols
-                
+
                 # Create variable to track column visibility
                 var = tkinter.BooleanVar(value=is_visible)
                 self.column_visibility_vars[col_id] = var
-                
+
                 # Fix lambda closure bug by using default parameter to capture current value
                 def make_toggle_command(column_id):
                     return lambda: self._toggle_column_visibility(column_id)
-                
+
                 self.columns_menu.add_checkbutton(
                     label=col_name,
                     variable=var,
@@ -1400,7 +1407,7 @@ class HiDockToolGUI(
             image=self.icons.get("delete"),
         )
         self.toolbar_delete_button.pack(side="left", padx=toolbar_button_padx, pady=toolbar_button_pady)
-        
+
         # Add Cancel Operations button
         self.toolbar_cancel_button = ctk.CTkButton(
             self.toolbar_frame,
@@ -1412,7 +1419,7 @@ class HiDockToolGUI(
             hover_color="red",
         )
         self.toolbar_cancel_button.pack(side="left", padx=(20, 2), pady=toolbar_button_pady)
-        
+
         self.toolbar_settings_button = ctk.CTkButton(
             self.toolbar_frame,
             text="Settings",
@@ -1584,13 +1591,14 @@ class HiDockToolGUI(
             )
         except (AttributeError, tkinter.TclError):
             file_counts_text = "Files: N/A"
-        
+
         # Get calendar status text - check both async calendar and live Outlook integration
         calendar_status_text = "Calendar: Not Available"
         try:
             # Try to get status from simple_outlook_integration (live calendar)
             try:
                 from simple_outlook_integration import create_simple_outlook_integration
+
                 calendar_integration = create_simple_outlook_integration()
                 if calendar_integration.is_available():
                     methods_list = ", ".join(calendar_integration.available_methods)
@@ -1600,7 +1608,7 @@ class HiDockToolGUI(
                     calendar_status_text = f"Calendar: Not Available - {error_msg}"
             except ImportError:
                 # Fall back to async calendar status if simple_outlook_integration is not available
-                if hasattr(self, 'get_calendar_status_text_for_gui'):
+                if hasattr(self, "get_calendar_status_text_for_gui"):
                     calendar_status_text = self.get_calendar_status_text_for_gui()
         except Exception as e:
             logger.debug("GUI", "_update_gui_with_status_info", f"Error getting calendar status: {e}")
@@ -1609,11 +1617,11 @@ class HiDockToolGUI(
             self.status_storage_label_header.configure(text=storage_text)
         if hasattr(self, "status_file_counts_label_header") and self.status_file_counts_label_header.winfo_exists():
             self.status_file_counts_label_header.configure(text=file_counts_text)
-        
+
         # Update calendar status indicator
         if hasattr(self, "calendar_status_label_header") and self.calendar_status_label_header.winfo_exists():
             self.calendar_status_label_header.configure(text=calendar_status_text)
-        
+
         if hasattr(self, "download_dir_button_header") and self.download_dir_button_header.winfo_exists():
             self.download_dir_button_header.configure(text=f"Dir: {os.path.basename(self.download_directory)}")
 
@@ -1645,8 +1653,12 @@ class HiDockToolGUI(
         if hasattr(self, "view_menu"):
             self.view_menu.entryconfig("Refresh File List", state="normal" if is_connected else "disabled")
             # Enable "Check Selected Files for Meetings" if files are selected and calendar is available
-            can_check_selected = has_selection and hasattr(self, '_calendar_cache_manager') and self._calendar_cache_manager
-            self.view_menu.entryconfig("Check Selected Files for Meetings", state="normal" if can_check_selected else "disabled")
+            can_check_selected = (
+                has_selection and hasattr(self, "_calendar_cache_manager") and self._calendar_cache_manager
+            )
+            self.view_menu.entryconfig(
+                "Check Selected Files for Meetings", state="normal" if can_check_selected else "disabled"
+            )
         can_play_selected = num_selected == 1
         if can_play_selected:
             file_iid = self.file_tree.selection()[0]
@@ -1704,20 +1716,11 @@ class HiDockToolGUI(
 
             # Check if there are active operations to cancel
             all_active_operations = self.file_operations_manager.get_all_active_operations()
-            active_operations = [
-                op for op in all_active_operations
-                if op.status.value in ["pending", "in_progress"]
-            ]
-            
+            active_operations = [op for op in all_active_operations if op.status.value in ["pending", "in_progress"]]
+
             # Separate by operation type
-            active_downloads = [
-                op for op in active_operations
-                if op.operation_type.value == "download"
-            ]
-            active_deletions = [
-                op for op in active_operations
-                if op.operation_type.value == "delete"
-            ]
+            active_downloads = [op for op in active_operations if op.operation_type.value == "download"]
+            active_deletions = [op for op in active_operations if op.operation_type.value == "delete"]
 
             # Check if selected files have active downloads
             selected_filenames = (
@@ -1742,12 +1745,10 @@ class HiDockToolGUI(
                 "🛑 Cancel ALL Operations",
                 state="normal" if active_operations else "disabled",
             )
-            
+
             # Update Cancel toolbar button
             if hasattr(self, "toolbar_cancel_button"):
-                self.toolbar_cancel_button.configure(
-                    state="normal" if active_operations else "disabled"
-                )
+                self.toolbar_cancel_button.configure(state="normal" if active_operations else "disabled")
 
             # Update playback controls based on audio player state
             is_playing = hasattr(self, "audio_player") and self.audio_player.state.value in ["playing", "paused"]
@@ -1883,10 +1884,12 @@ class HiDockToolGUI(
                     can_delete = has_selection and not self.is_long_operation_active
                     if can_delete and self.is_audio_playing and self.current_playing_filename_for_replay:
                         # Check if any selected files are currently playing
-                        selected_filenames = [self.file_tree.item(iid)["values"][1] for iid in self.file_tree.selection()]
+                        selected_filenames = [
+                            self.file_tree.item(iid)["values"][1] for iid in self.file_tree.selection()
+                        ]
                         if self.current_playing_filename_for_replay in selected_filenames:
                             can_delete = False  # Can't delete currently playing file
-                    
+
                     self.toolbar_delete_button.configure(
                         text="Delete",
                         command=self.delete_selected_files_gui,
@@ -1934,7 +1937,7 @@ class HiDockToolGUI(
             heading_bg_candidate_2 = self.apply_appearance_mode_theme_color(
                 ctk.ThemeManager.theme["CTkFrame"].get("border_color", frame_bg)
             )
-            
+
             # Fix for light theme: Ensure heading has proper contrast
             if current_mode == "Light":
                 # Use a darker gray for light mode headers
@@ -1950,7 +1953,7 @@ class HiDockToolGUI(
                 default_heading_fg = button_text
                 active_heading_bg = button_hover
                 active_heading_fg = button_text
-            
+
             tree_body_bg_color, tree_body_text_color = frame_bg, label_text_color
             tree_selected_bg_color, tree_selected_text_color = button_fg, button_text
         except KeyError as e:
@@ -2078,7 +2081,7 @@ class HiDockToolGUI(
         try:
             # Enter offline mode since we're not connected
             self.offline_mode_manager.enter_offline_mode()
-            
+
             cached_files = self.file_operations_manager.metadata_cache.get_all_metadata()
             if cached_files:
                 logger.info(
@@ -2087,28 +2090,42 @@ class HiDockToolGUI(
                     f"Showing {len(cached_files)} cached files on startup",
                 )
 
-        # Convert cached files to GUI format
+                # Convert cached files to GUI format
                 files_dict = self._convert_cached_files_to_gui_format(cached_files)
-                
+
                 # Enhance files with meeting metadata from calendar integration (synchronous for cached files)
                 try:
                     files_dict = self.enhance_files_with_meeting_data_sync(files_dict)
-                    logger.debug("GUI", "_show_cached_files_on_startup", f"Enhanced {len(files_dict)} cached files with meeting data")
+                    logger.debug(
+                        "GUI",
+                        "_show_cached_files_on_startup",
+                        f"Enhanced {len(files_dict)} cached files with meeting data",
+                    )
                 except Exception as e:
-                    logger.warning("GUI", "_show_cached_files_on_startup", f"Failed to enhance cached files with meeting data: {e}")
-                
+                    logger.warning(
+                        "GUI", "_show_cached_files_on_startup", f"Failed to enhance cached files with meeting data: {e}"
+                    )
+
                 # Enhance files with audio metadata (transcription, AI analysis, user edits)
                 try:
                     files_dict = self.enhance_files_with_audio_metadata(files_dict)
-                    logger.debug("GUI", "_show_cached_files_on_startup", f"Enhanced {len(files_dict)} cached files with audio metadata")
+                    logger.debug(
+                        "GUI",
+                        "_show_cached_files_on_startup",
+                        f"Enhanced {len(files_dict)} cached files with audio metadata",
+                    )
                 except Exception as e:
-                    logger.warning("GUI", "_show_cached_files_on_startup", f"Failed to enhance cached files with audio metadata: {e}")
+                    logger.warning(
+                        "GUI",
+                        "_show_cached_files_on_startup",
+                        f"Failed to enhance cached files with audio metadata: {e}",
+                    )
 
                 # Sort and display with filtering support
                 sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
-                
+
                 # Use filtering-aware update method if available
-                if hasattr(self, 'update_files_data_for_filtering'):
+                if hasattr(self, "update_files_data_for_filtering"):
                     self.update_files_data_for_filtering(sorted_files)
                 else:
                     self._populate_treeview_from_data(sorted_files)
@@ -2117,7 +2134,7 @@ class HiDockToolGUI(
                 offline_stats = self.offline_mode_manager.get_offline_statistics()
                 downloaded_count = offline_stats["downloaded_files"]
                 availability_percent = offline_stats["offline_availability_percent"]
-                
+
                 self.update_status_bar(
                     connection_status="Status: Disconnected",
                     progress_text=f"Showing {len(cached_files)} cached files ({downloaded_count} playable, {availability_percent:.0f}% available offline)",
@@ -2136,7 +2153,7 @@ class HiDockToolGUI(
         for i, f_info in enumerate(cached_files):
             # Use offline mode manager to determine proper local file path
             local_path = self.offline_mode_manager.get_offline_file_path(f_info.filename)
-            
+
             # Determine status: Downloaded if local file exists, On Device if cached but not downloaded
             if local_path and os.path.exists(local_path):
                 gui_status = "Downloaded"
@@ -2158,7 +2175,7 @@ class HiDockToolGUI(
                     "checksum": f_info.checksum,
                 }
             )
-        
+
         # Use offline mode manager to update status indicators properly
         files_dict = self.offline_mode_manager.update_offline_status_indicators(files_dict)
         return files_dict
@@ -2187,7 +2204,7 @@ class HiDockToolGUI(
         self._create_log_panel(self.main_content_frame)
         self._create_audio_visualizer_panel(self.main_content_frame)
         self._update_log_text_area_tag_colors()
-        
+
         # Set up GUI log callback for auto-show functionality
         self._setup_gui_log_callback()
 
@@ -2197,7 +2214,7 @@ class HiDockToolGUI(
     def _setup_gui_log_callback(self):
         """Set up GUI log callback to auto-show log panel on ERROR/CRITICAL messages."""
         try:
-            if hasattr(logger, 'add_gui_callback'):
+            if hasattr(logger, "add_gui_callback"):
                 # Register callback with the logger to auto-show on high-severity messages
                 logger.add_gui_callback(self._on_gui_log_message_callback)
                 logger.info("GUI", "_setup_gui_log_callback", "GUI log auto-show callback registered")
@@ -2208,39 +2225,42 @@ class HiDockToolGUI(
 
     def _on_gui_log_message_callback(self, log_level, module, function, message, formatted_message):
         """Callback triggered when a log message is emitted to GUI.
-        
+
         This callback auto-shows the log panel when ERROR or CRITICAL messages appear,
         providing emergency visibility without cluttering normal UI.
-        
+
         Args:
             log_level (str): Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
             module (str): Module name where log originated
-            function (str): Function name where log originated  
+            function (str): Function name where log originated
             message (str): Original log message
             formatted_message (str): Formatted message for display
         """
         try:
             # Auto-show log panel for high-severity messages
-            if log_level in ['ERROR', 'CRITICAL']:
+            if log_level in ["ERROR", "CRITICAL"]:
                 # Ensure we're on the main thread for GUI operations
                 def auto_show_logs():
                     try:
                         # Only show if logs are currently hidden
                         if not self.logs_visible_var.get():
-                            logger.info("GUI", "_on_gui_log_message_callback", 
-                                       f"Auto-showing log panel due to {log_level} message")
+                            logger.info(
+                                "GUI",
+                                "_on_gui_log_message_callback",
+                                f"Auto-showing log panel due to {log_level} message",
+                            )
                             self.logs_visible_var.set(True)
                             self.toggle_logs()
                     except Exception as e:
                         # Avoid recursive logging errors by using basic print
                         print(f"Error auto-showing logs: {e}")
-                
+
                 # Schedule on main thread if we're not already on it
-                if hasattr(self, 'after'):
+                if hasattr(self, "after"):
                     self.after(0, auto_show_logs)
                 else:
                     auto_show_logs()
-                    
+
         except Exception as e:
             # Avoid recursive logging errors during callback handling
             print(f"Error in GUI log callback: {e}")
@@ -2277,7 +2297,7 @@ class HiDockToolGUI(
         # self.disconnected_indicator.pack(side="left", padx=10, pady=2)
         self.status_file_counts_label_header = ctk.CTkLabel(files_header_frame, text="Files: 0 / 0", anchor="w")
         self.status_file_counts_label_header.pack(side="left", padx=10, pady=2)
-        
+
         # Calendar status indicator
         self.calendar_status_label_header = ctk.CTkLabel(files_header_frame, text="Calendar: Not Available", anchor="w")
         self.calendar_status_label_header.pack(side="left", padx=10, pady=2)
@@ -2322,14 +2342,14 @@ class HiDockToolGUI(
             fg_color="green" if self.single_selection_mode_var.get() else "blue",
         )
         self.selection_mode_toggle_button.pack(side="right", padx=(2, 2), pady=2)
-        
+
         # Create unified filter widget instead of separate widgets
         self._create_unified_filter_widget(files_frame)
-        
+
         # Note: Keep the old methods for backward compatibility, but don't call them
         # self._create_calendar_search_widget(files_frame)
         # self._create_status_filter_widget(files_frame)
-        
+
         self._create_file_tree_frame_with_search_support(files_frame)
         # Apply initial selection mode and button visibility
         self._update_selection_buttons_visibility()
@@ -3349,7 +3369,9 @@ You can dismiss this warning and continue using the application with limited aud
                 self.after(0, self._update_waveform_with_data, y, sr, filename)
 
             except Exception as load_error:
-                logger.debug("WaveformLoader", "_load_waveform_background", f"Error loading audio waveform: {load_error}")
+                logger.debug(
+                    "WaveformLoader", "_load_waveform_background", f"Error loading audio waveform: {load_error}"
+                )
                 self.after(0, self._handle_waveform_load_error, filename, str(load_error))
 
         except Exception as e:
@@ -3563,62 +3585,79 @@ You can dismiss this warning and continue using the application with limited aud
 
     def _on_async_calendar_update_complete(self, enhanced_files):
         """Called when async calendar enhancement completes to update the GUI.
-        
+
         Args:
             enhanced_files: List of file dictionaries with updated meeting_display_text
         """
         try:
-            logger.info("CalendarSync", "_on_async_calendar_update_complete", 
-                       f"Updating GUI with {len(enhanced_files)} enhanced files")
-            
+            logger.info(
+                "CalendarSync",
+                "_on_async_calendar_update_complete",
+                f"Updating GUI with {len(enhanced_files)} enhanced files",
+            )
+
             # Update displayed_files_details with new meeting data
             files_updated = 0
             for enhanced_file in enhanced_files:
                 filename = enhanced_file.get("name")
                 if not filename:
                     continue
-                    
+
                 # Find matching file in displayed_files_details
                 for i, displayed_file in enumerate(self.displayed_files_details):
                     if displayed_file.get("name") == filename:
                         # Update the meeting_display_text field
                         old_text = displayed_file.get("meeting_display_text", "None")
                         new_text = enhanced_file.get("meeting_display_text", "None")
-                        
+
                         # Don't update with temporary sync statuses - only update with actual meeting data or empty string
-                        if new_text in ['Syncing...', 'Refreshing...', 'Processing...']:
-                            logger.debug("CalendarSync", "_on_async_calendar_update_complete",
-                                       f"Skipping temporary sync status '{new_text}' for {filename}")
+                        if new_text in ["Syncing...", "Refreshing...", "Processing..."]:
+                            logger.debug(
+                                "CalendarSync",
+                                "_on_async_calendar_update_complete",
+                                f"Skipping temporary sync status '{new_text}' for {filename}",
+                            )
                             continue
-                        
+
                         if old_text != new_text:
                             self.displayed_files_details[i]["meeting_display_text"] = new_text
                             files_updated += 1
-                            
+
                             # Update the GUI TreeView for this specific file
                             try:
                                 if self.file_tree.exists(filename):
                                     # Update the Meeting column in the TreeView
                                     self.file_tree.set(filename, "meeting", new_text)
-                                    logger.debug("CalendarSync", "_on_async_calendar_update_complete",
-                                               f"Updated TreeView for {filename}: '{old_text}' -> '{new_text}'")
+                                    logger.debug(
+                                        "CalendarSync",
+                                        "_on_async_calendar_update_complete",
+                                        f"Updated TreeView for {filename}: '{old_text}' -> '{new_text}'",
+                                    )
                             except Exception as tree_error:
-                                logger.warning("CalendarSync", "_on_async_calendar_update_complete",
-                                              f"Failed to update TreeView for {filename}: {tree_error}")
+                                logger.warning(
+                                    "CalendarSync",
+                                    "_on_async_calendar_update_complete",
+                                    f"Failed to update TreeView for {filename}: {tree_error}",
+                                )
                         break
-            
+
             if files_updated > 0:
-                logger.info("CalendarSync", "_on_async_calendar_update_complete", 
-                           f"Successfully updated {files_updated} files with new meeting data")
+                logger.info(
+                    "CalendarSync",
+                    "_on_async_calendar_update_complete",
+                    f"Successfully updated {files_updated} files with new meeting data",
+                )
                 # Optionally update status bar to show completion
                 self.update_status_bar(progress_text=f"Updated {files_updated} files with meeting data")
             else:
-                logger.debug("CalendarSync", "_on_async_calendar_update_complete",
-                           "No files needed meeting data updates")
-                
+                logger.debug(
+                    "CalendarSync", "_on_async_calendar_update_complete", "No files needed meeting data updates"
+                )
+
         except Exception as e:
-            logger.error("CalendarSync", "_on_async_calendar_update_complete", 
-                        f"Error updating GUI with calendar data: {e}")
+            logger.error(
+                "CalendarSync", "_on_async_calendar_update_complete", f"Error updating GUI with calendar data: {e}"
+            )
 
     def on_closing(self):
         """
@@ -3691,15 +3730,15 @@ You can dismiss this warning and continue using the application with limited aud
         )
         if self.device_manager.device_interface.is_connected():
             self.device_manager.device_interface.disconnect()
-        
+
         # Shutdown calendar system to save cache
         try:
-            if hasattr(self, 'shutdown_async_calendar'):
+            if hasattr(self, "shutdown_async_calendar"):
                 self.shutdown_async_calendar()
                 logger.info("GUI", "on_closing", "Calendar system shutdown complete")
         except Exception as e:
             logger.warning("GUI", "on_closing", f"Error during calendar shutdown: {e}")
-        
+
         if self.current_playing_temp_file and os.path.exists(self.current_playing_temp_file):
             try:
                 os.remove(self.current_playing_temp_file)
@@ -3711,18 +3750,18 @@ You can dismiss this warning and continue using the application with limited aud
                 )
         # Dismiss any active toast notifications
         try:
-            if hasattr(self, 'toast_manager'):
+            if hasattr(self, "toast_manager"):
                 self.toast_manager.dismiss_all()
         except Exception:
             pass  # Ignore errors during cleanup
-        
+
         # Stop all pending callbacks and updates before destroying
         try:
             self.update_idletasks()  # Process any pending events
             self.quit()  # Stop the mainloop
         except Exception:
             pass  # Ignore errors during cleanup
-        
+
         self.destroy()
         logger.info("GUI", "on_closing", "Application shutdown complete.")
         sys.exit(0)
@@ -3734,7 +3773,7 @@ You can dismiss this warning and continue using the application with limited aud
             # Cancel any existing timer to avoid excessive saves
             if self._geometry_save_timer:
                 self.after_cancel(self._geometry_save_timer)
-            
+
             # Schedule geometry save after a short delay to batch multiple events
             self._geometry_save_timer = self.after(500, self._save_window_geometry)
 
@@ -3743,6 +3782,7 @@ You can dismiss this warning and continue using the application with limited aud
         try:
             current_geometry = self.geometry()
             from config_and_logger import update_config_settings
+
             update_config_settings({"window_geometry": current_geometry})
             logger.debug(
                 "GUI",
@@ -3758,76 +3798,101 @@ You can dismiss this warning and continue using the application with limited aud
         finally:
             # Clear the timer reference
             self._geometry_save_timer = None
-    
+
     def _enhance_selected_files_with_live_calendar_data(self, selected_files, calendar_integration):
         """Enhanced selected files using live calendar integration instead of cache only.
-        
+
         Args:
             selected_files: List of file details to enhance
             calendar_integration: Live calendar integration instance
-            
+
         Returns:
             List of enhanced files with live meeting data
         """
         try:
             from datetime import datetime
+
             enhanced_files = []
             meetings_found = 0
-            
-            logger.info("GUI", "_enhance_selected_files_with_live_calendar_data", 
-                       f"Starting live calendar enhancement for {len(selected_files)} files")
-            
+
+            logger.info(
+                "GUI",
+                "_enhance_selected_files_with_live_calendar_data",
+                f"Starting live calendar enhancement for {len(selected_files)} files",
+            )
+
             for file_data in selected_files:
                 try:
                     enhanced_file = file_data.copy()
-                    filename = file_data['name']
-                    
+                    filename = file_data["name"]
+
                     # Parse file creation datetime
                     file_datetime = self._parse_file_datetime_from_gui(file_data)
                     if not file_datetime:
-                        logger.debug("GUI", "_enhance_selected_files_with_live_calendar_data",
-                                   f"Could not parse datetime for {filename}")
+                        logger.debug(
+                            "GUI",
+                            "_enhance_selected_files_with_live_calendar_data",
+                            f"Could not parse datetime for {filename}",
+                        )
                         enhanced_file.update(self._create_empty_meeting_fields_gui())
                         enhanced_files.append(enhanced_file)
                         continue
-                    
-                    logger.debug("GUI", "_enhance_selected_files_with_live_calendar_data",
-                               f"Checking {filename} with datetime {file_datetime} for meetings")
-                    
+
+                    logger.debug(
+                        "GUI",
+                        "_enhance_selected_files_with_live_calendar_data",
+                        f"Checking {filename} with datetime {file_datetime} for meetings",
+                    )
+
                     # Get meetings for this specific date using live calendar
                     meetings = calendar_integration.get_meetings_for_date(file_datetime)
-                    
+
                     # Find best match using the calendar integration
-                    meeting = calendar_integration.find_meeting_for_recording(file_datetime, tolerance_minutes=self._get_calendar_tolerance_minutes())
-                    
+                    meeting = calendar_integration.find_meeting_for_recording(
+                        file_datetime, tolerance_minutes=self._get_calendar_tolerance_minutes()
+                    )
+
                     if meeting:
-                        logger.info("GUI", "_enhance_selected_files_with_live_calendar_data",
-                                   f"Found meeting '{meeting.subject}' for {filename} at {file_datetime}")
+                        logger.info(
+                            "GUI",
+                            "_enhance_selected_files_with_live_calendar_data",
+                            f"Found meeting '{meeting.subject}' for {filename} at {file_datetime}",
+                        )
                         enhanced_file.update(self._create_meeting_fields_from_simple_meeting(meeting))
                         meetings_found += 1
                     else:
-                        logger.debug("GUI", "_enhance_selected_files_with_live_calendar_data",
-                                   f"No meeting found for {filename} at {file_datetime}")
+                        logger.debug(
+                            "GUI",
+                            "_enhance_selected_files_with_live_calendar_data",
+                            f"No meeting found for {filename} at {file_datetime}",
+                        )
                         enhanced_file.update(self._create_empty_meeting_fields_gui())
-                    
+
                     enhanced_files.append(enhanced_file)
-                    
+
                 except Exception as e:
-                    logger.warning("GUI", "_enhance_selected_files_with_live_calendar_data",
-                                 f"Error enhancing {file_data.get('name', 'unknown')}: {e}")
+                    logger.warning(
+                        "GUI",
+                        "_enhance_selected_files_with_live_calendar_data",
+                        f"Error enhancing {file_data.get('name', 'unknown')}: {e}",
+                    )
                     # Add file without meeting data on error
                     enhanced_file = file_data.copy()
                     enhanced_file.update(self._create_empty_meeting_fields_gui())
                     enhanced_files.append(enhanced_file)
-            
-            logger.info("GUI", "_enhance_selected_files_with_live_calendar_data",
-                       f"Completed live enhancement: {meetings_found} files with meetings out of {len(enhanced_files)} total")
-            
+
+            logger.info(
+                "GUI",
+                "_enhance_selected_files_with_live_calendar_data",
+                f"Completed live enhancement: {meetings_found} files with meetings out of {len(enhanced_files)} total",
+            )
+
             return enhanced_files
-            
+
         except Exception as e:
-            logger.error("GUI", "_enhance_selected_files_with_live_calendar_data",
-                        f"Error in live calendar enhancement: {e}")
+            logger.error(
+                "GUI", "_enhance_selected_files_with_live_calendar_data", f"Error in live calendar enhancement: {e}"
+            )
             # Return files with empty meeting fields on error
             enhanced_files = []
             for file_data in selected_files:
@@ -3835,22 +3900,22 @@ You can dismiss this warning and continue using the application with limited aud
                 enhanced_file.update(self._create_empty_meeting_fields_gui())
                 enhanced_files.append(enhanced_file)
             return enhanced_files
-    
+
     def _parse_file_datetime_from_gui(self, file_data):
         """Parse datetime from GUI file data format."""
         try:
             from datetime import datetime
-            
+
             # Try the 'time' field first (datetime object)
-            if 'time' in file_data and file_data['time']:
-                if isinstance(file_data['time'], datetime):
-                    return file_data['time']
-            
+            if "time" in file_data and file_data["time"]:
+                if isinstance(file_data["time"], datetime):
+                    return file_data["time"]
+
             # Fall back to combining createDate and createTime
-            create_date = file_data.get('createDate', '')
-            create_time = file_data.get('createTime', '')
-            
-            if create_date and create_time and create_date != '---' and create_time != '---':
+            create_date = file_data.get("createDate", "")
+            create_time = file_data.get("createTime", "")
+
+            if create_date and create_time and create_date != "---" and create_time != "---":
                 datetime_str = f"{create_date} {create_time}"
                 # Handle different date formats
                 for fmt in ["%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"]:
@@ -3858,34 +3923,37 @@ You can dismiss this warning and continue using the application with limited aud
                         return datetime.strptime(datetime_str, fmt)
                     except ValueError:
                         continue
-            
+
             return None
-            
+
         except Exception as e:
-            logger.debug("GUI", "_parse_file_datetime_from_gui", 
-                        f"Error parsing datetime for {file_data.get('name', 'unknown')}: {e}")
+            logger.debug(
+                "GUI",
+                "_parse_file_datetime_from_gui",
+                f"Error parsing datetime for {file_data.get('name', 'unknown')}: {e}",
+            )
             return None
-    
+
     def _create_meeting_fields_from_simple_meeting(self, meeting):
         """Create meeting fields from a SimpleMeeting object."""
         try:
             # Clean and format subject and organizer for display
-            subject = meeting.subject if meeting.subject else 'No Subject'
-            organizer = meeting.organizer if meeting.organizer else 'Unknown Organizer'
-            
+            subject = meeting.subject if meeting.subject else "No Subject"
+            organizer = meeting.organizer if meeting.organizer else "Unknown Organizer"
+
             # Clean up organizer (remove email domain and format name)
-            if '@' in organizer:
-                organizer = organizer.split('@')[0].replace('.', ' ').title()
-            
+            if "@" in organizer:
+                organizer = organizer.split("@")[0].replace(".", " ").title()
+
             # Create combined display text: "Subject - Organizer"
             meeting_display_text = subject
-            if organizer and organizer != 'Unknown Organizer':
+            if organizer and organizer != "Unknown Organizer":
                 meeting_display_text += f" - {organizer}"
-            
+
             # Truncate for display if too long
             if len(meeting_display_text) > 60:
                 meeting_display_text = meeting_display_text[:57] + "..."
-            
+
             # Format attendees
             attendee_count = len(meeting.attendees)
             if attendee_count > 1:
@@ -3894,16 +3962,18 @@ You can dismiss this warning and continue using the application with limited aud
                 attendees_display = "1 attendee"
             else:
                 attendees_display = "No attendees"
-            
+
             # Determine meeting type
             meeting_type = "In-person" if meeting.location else "Virtual"
             if meeting.location:
                 location_lower = meeting.location.lower()
                 # Use proper URL parsing for security
                 from urllib.parse import urlparse
+
                 try:
                     # Check if location contains URLs and parse them
                     import re
+
                     urls = re.findall(r'https?://[^\s<>"\']+', location_lower)
                     for url in urls:
                         parsed = urlparse(url)
@@ -3926,46 +3996,52 @@ You can dismiss this warning and continue using the application with limited aud
                         meeting_type = "Teams"
                     elif "zoom meeting" in location_lower:
                         meeting_type = "Zoom"
-            
+
             return {
-                'has_meeting': True,
-                'meeting_subject': subject,
-                'meeting_organizer': organizer,
-                'meeting_attendees_display': attendees_display,
-                'meeting_attendees_count': attendee_count,
-                'meeting_location': meeting.location or '',
-                'meeting_type': meeting_type,
-                'meeting_start_time': meeting.start_time,
-                'meeting_end_time': meeting.end_time,
-                'meeting_duration_minutes': meeting.duration_minutes,
-                'meeting_time_display': meeting.start_time.strftime("%H:%M") if meeting.start_time else '',
-                'meeting_date_display': meeting.start_time.strftime("%Y-%m-%d") if meeting.start_time else '',
-                'meeting_display_text': meeting_display_text,  # For treeview column display
-                'meeting_confidence_score': 1.0,  # Live data has high confidence
+                "has_meeting": True,
+                "meeting_subject": subject,
+                "meeting_organizer": organizer,
+                "meeting_attendees_display": attendees_display,
+                "meeting_attendees_count": attendee_count,
+                "meeting_location": meeting.location or "",
+                "meeting_type": meeting_type,
+                "meeting_start_time": meeting.start_time,
+                "meeting_end_time": meeting.end_time,
+                "meeting_duration_minutes": meeting.duration_minutes,
+                "meeting_time_display": meeting.start_time.strftime("%H:%M") if meeting.start_time else "",
+                "meeting_date_display": meeting.start_time.strftime("%Y-%m-%d") if meeting.start_time else "",
+                "meeting_display_text": meeting_display_text,  # For treeview column display
+                "meeting_confidence_score": 1.0,  # Live data has high confidence
             }
         except Exception as e:
             logger.warning("GUI", "_create_meeting_fields_from_simple_meeting", f"Error creating meeting fields: {e}")
             return self._create_empty_meeting_fields_gui()
-    
+
     def _enhance_files_with_batch_calendar_data_sync(self, selected_files):
         """Synchronous batch calendar enhancement for selected files.
-        
+
         This bridges the gap between the GUI selection logic and the AsyncCalendarMixin
         batch processing functionality.
         """
         try:
             # Ensure async calendar is initialized
-            if hasattr(self, '_ensure_async_calendar_initialized'):
+            if hasattr(self, "_ensure_async_calendar_initialized"):
                 self._ensure_async_calendar_initialized()
-            
+
             # Use the batch processing from AsyncCalendarMixin if available
-            if hasattr(self, '_enhance_files_with_batch_calendar_data'):
-                logger.info("GUI", "_enhance_files_with_batch_calendar_data_sync", 
-                          f"Using AsyncCalendarMixin batch processing for {len(selected_files)} files")
+            if hasattr(self, "_enhance_files_with_batch_calendar_data"):
+                logger.info(
+                    "GUI",
+                    "_enhance_files_with_batch_calendar_data_sync",
+                    f"Using AsyncCalendarMixin batch processing for {len(selected_files)} files",
+                )
                 return self._enhance_files_with_batch_calendar_data(selected_files)
             else:
-                logger.warning("GUI", "_enhance_files_with_batch_calendar_data_sync", 
-                             "Batch processing not available, returning files with empty meeting fields")
+                logger.warning(
+                    "GUI",
+                    "_enhance_files_with_batch_calendar_data_sync",
+                    "Batch processing not available, returning files with empty meeting fields",
+                )
                 # Fallback: return files with empty meeting fields
                 enhanced_files = []
                 for file_data in selected_files:
@@ -3973,10 +4049,11 @@ You can dismiss this warning and continue using the application with limited aud
                     enhanced_file.update(self._create_empty_meeting_fields_gui())
                     enhanced_files.append(enhanced_file)
                 return enhanced_files
-                
+
         except Exception as e:
-            logger.error("GUI", "_enhance_files_with_batch_calendar_data_sync", 
-                        f"Error in batch calendar enhancement: {e}")
+            logger.error(
+                "GUI", "_enhance_files_with_batch_calendar_data_sync", f"Error in batch calendar enhancement: {e}"
+            )
             # Return files with empty meeting fields on error
             enhanced_files = []
             for file_data in selected_files:
@@ -3984,24 +4061,24 @@ You can dismiss this warning and continue using the application with limited aud
                 enhanced_file.update(self._create_empty_meeting_fields_gui())
                 enhanced_files.append(enhanced_file)
             return enhanced_files
-    
+
     def _create_empty_meeting_fields_gui(self):
         """Create empty meeting fields for GUI display."""
         return {
-            'has_meeting': False,
-            'meeting_subject': '',
-            'meeting_organizer': '',
-            'meeting_attendees_display': '',
-            'meeting_attendees_count': 0,
-            'meeting_location': '',
-            'meeting_type': '',
-            'meeting_start_time': None,
-            'meeting_end_time': None,
-            'meeting_duration_minutes': 0,
-            'meeting_time_display': '',
-            'meeting_date_display': '',
-            'meeting_display_text': '',  # Empty instead of "No Meeting" for clean display
-            'meeting_confidence_score': 0.0,
+            "has_meeting": False,
+            "meeting_subject": "",
+            "meeting_organizer": "",
+            "meeting_attendees_display": "",
+            "meeting_attendees_count": 0,
+            "meeting_location": "",
+            "meeting_type": "",
+            "meeting_start_time": None,
+            "meeting_end_time": None,
+            "meeting_duration_minutes": 0,
+            "meeting_time_display": "",
+            "meeting_date_display": "",
+            "meeting_display_text": "",  # Empty instead of "No Meeting" for clean display
+            "meeting_confidence_score": 0.0,
         }
 
     def _process_selected_audio(self, file_iid):
@@ -4068,380 +4145,464 @@ You can dismiss this warning and continue using the application with limited aud
 
     def refresh_unlinked_files_only(self):
         """Refresh calendar data for files that have no linked meetings."""
-        if not hasattr(self, 'displayed_files_details') or not self.displayed_files_details:
+        if not hasattr(self, "displayed_files_details") or not self.displayed_files_details:
             messagebox.showinfo(
-                "No Files", 
-                "No files are currently displayed. Please connect to device and load files first."
+                "No Files", "No files are currently displayed. Please connect to device and load files first."
             )
             return
-        
+
         # Find files that have no meeting linked by checking both GUI display AND cache
         unlinked_files = []
         for file_detail in self.displayed_files_details:
-            meeting_text = file_detail.get('meeting_display_text', '')
-            
+            meeting_text = file_detail.get("meeting_display_text", "")
+
             # First check GUI display
-            if meeting_text and meeting_text.strip() not in ['', 'None', '—', '-']:
+            if meeting_text and meeting_text.strip() not in ["", "None", "—", "-"]:
                 continue  # File has meeting in GUI, skip it
-            
+
             # For files that appear unlinked in GUI, double-check the cache
-            filename = file_detail.get('name')
-            if filename and hasattr(self, '_calendar_cache_manager') and self._calendar_cache_manager:
+            filename = file_detail.get("name")
+            if filename and hasattr(self, "_calendar_cache_manager") and self._calendar_cache_manager:
                 try:
                     # Parse file datetime for cache lookup
                     file_datetime = self._parse_file_datetime_for_calendar(file_detail)
                     if file_datetime:
-                        cached_meeting = self._calendar_cache_manager.get_cached_meeting_for_file(filename, file_datetime)
+                        cached_meeting = self._calendar_cache_manager.get_cached_meeting_for_file(
+                            filename, file_datetime
+                        )
                         if cached_meeting and cached_meeting.subject:
                             # File has cached meeting but GUI is out of sync - skip bulk refresh
-                            logger.debug("GUI", "refresh_unlinked_files", 
-                                       f"Skipping {filename} - has cached meeting: {cached_meeting.subject}")
+                            logger.debug(
+                                "GUI",
+                                "refresh_unlinked_files",
+                                f"Skipping {filename} - has cached meeting: {cached_meeting.subject}",
+                            )
                             continue
                 except Exception as e:
-                    logger.debug("GUI", "refresh_unlinked_files", 
-                               f"Error checking cache for {filename}: {e}")
-            
+                    logger.debug("GUI", "refresh_unlinked_files", f"Error checking cache for {filename}: {e}")
+
             # File is truly unlinked (no GUI display AND no cache)
             unlinked_files.append(file_detail)
-        
+
         if not unlinked_files:
             messagebox.showinfo(
-                "No Unlinked Files", 
-                f"All {len(self.displayed_files_details)} files already have meeting data linked. No files need refreshing."
+                "No Unlinked Files",
+                f"All {len(self.displayed_files_details)} files already have meeting data linked. No files need refreshing.",
             )
             return
-        
+
         # Ask for confirmation
         response = messagebox.askyesno(
             "Refresh Unlinked Files",
             f"Found {len(unlinked_files)} files without linked meetings out of {len(self.displayed_files_details)} total files.\n\n"
             "This will search the calendar for meetings that match these files. This may take a few minutes.\n\n"
-            "Do you want to proceed?"
+            "Do you want to proceed?",
         )
-        
+
         if not response:
             return
-        
-        logger.info("GUI", "refresh_unlinked_files", f"Starting calendar refresh for {len(unlinked_files)} unlinked files")
-        
+
+        logger.info(
+            "GUI", "refresh_unlinked_files", f"Starting calendar refresh for {len(unlinked_files)} unlinked files"
+        )
+
         # Use the same LIVE calendar processing as individual refresh for better results
         try:
             # Show progress overlay
             self._show_calendar_refresh_overlay(
-                len(unlinked_files), 
-                f"Refreshing {len(unlinked_files)} Files Without Meetings"
+                len(unlinked_files), f"Refreshing {len(unlinked_files)} Files Without Meetings"
             )
-            
+
             # Process unlinked files using the same method as individual file checking
             # This uses live calendar data instead of cached data for better accuracy
             def process_unlinked_files():
                 try:
                     # Skip cache clearing - SimpleOutlookIntegration doesn't have cache methods
                     # and attempting to clear non-existent cache was preventing meetings from being found
-                    logger.debug("GUI", "refresh_unlinked_files", "Skipping cache clearing to maintain meeting detection")
-                    
+                    logger.debug(
+                        "GUI", "refresh_unlinked_files", "Skipping cache clearing to maintain meeting detection"
+                    )
+
                     enhanced_files = []
                     files_processed = 0
                     meetings_found = 0
-                    
-                    logger.info("GUI", "refresh_unlinked_files", f"Starting to process {len(unlinked_files)} unlinked files in background thread")
-                    
+
+                    logger.info(
+                        "GUI",
+                        "refresh_unlinked_files",
+                        f"Starting to process {len(unlinked_files)} unlinked files in background thread",
+                    )
+
                     # Update initial progress
                     self.after(0, self._update_refresh_progress, f"Starting to process {len(unlinked_files)} files...")
-                    
+
                     for i, file_detail in enumerate(unlinked_files):
                         try:
-                            filename = file_detail.get('name', 'unknown')
-                            logger.debug("GUI", "refresh_unlinked_files", f"Processing file {i+1}/{len(unlinked_files)}: {filename}")
-                            
+                            filename = file_detail.get("name", "unknown")
+                            logger.debug(
+                                "GUI",
+                                "refresh_unlinked_files",
+                                f"Processing file {i+1}/{len(unlinked_files)}: {filename}",
+                            )
+
                             # Use the same datetime parsing and meeting lookup as individual refresh
                             file_datetime = self._parse_file_datetime_for_calendar(file_detail)
                             if file_datetime:
-                                logger.debug("GUI", "refresh_unlinked_files", f"Parsed datetime for {filename}: {file_datetime}")
-                                
+                                logger.debug(
+                                    "GUI", "refresh_unlinked_files", f"Parsed datetime for {filename}: {file_datetime}"
+                                )
+
                                 # Use live calendar lookup (same as individual refresh)
                                 meeting = self._find_meeting_for_file_live(filename, file_datetime)
-                                
+
                                 enhanced_file = file_detail.copy()
                                 if meeting:
                                     enhanced_file["meeting_display_text"] = meeting
                                     meetings_found += 1
-                                    logger.info("GUI", "refresh_unlinked_files", 
-                                               f"Found meeting for {filename}: {meeting}")
-                                    
+                                    logger.info(
+                                        "GUI", "refresh_unlinked_files", f"Found meeting for {filename}: {meeting}"
+                                    )
+
                                     # Cache the meeting (same as individual refresh does)
                                     try:
-                                        if hasattr(self, '_calendar_integration') and self._calendar_integration:
+                                        if hasattr(self, "_calendar_integration") and self._calendar_integration:
                                             # Get the meeting object again to cache it properly
-                                            meeting_obj = self._calendar_integration.find_meeting_for_recording(file_datetime, tolerance_minutes=self._get_calendar_tolerance_minutes())
-                                            if meeting_obj and hasattr(self, '_calendar_cache_manager') and self._calendar_cache_manager:
-                                                self._calendar_cache_manager.cache_meeting_for_file(filename, file_datetime, meeting_obj)
-                                                logger.debug("GUI", "refresh_unlinked_files", f"Cached meeting for {filename}")
+                                            meeting_obj = self._calendar_integration.find_meeting_for_recording(
+                                                file_datetime, tolerance_minutes=self._get_calendar_tolerance_minutes()
+                                            )
+                                            if (
+                                                meeting_obj
+                                                and hasattr(self, "_calendar_cache_manager")
+                                                and self._calendar_cache_manager
+                                            ):
+                                                self._calendar_cache_manager.cache_meeting_for_file(
+                                                    filename, file_datetime, meeting_obj
+                                                )
+                                                logger.debug(
+                                                    "GUI", "refresh_unlinked_files", f"Cached meeting for {filename}"
+                                                )
                                     except Exception as cache_error:
-                                        logger.warning("GUI", "refresh_unlinked_files", f"Failed to cache meeting for {filename}: {cache_error}")
+                                        logger.warning(
+                                            "GUI",
+                                            "refresh_unlinked_files",
+                                            f"Failed to cache meeting for {filename}: {cache_error}",
+                                        )
                                 else:
                                     enhanced_file["meeting_display_text"] = ""
                                     logger.debug("GUI", "refresh_unlinked_files", f"No meeting found for {filename}")
-                                    
+
                                     # Cache the "no meeting" result (same as individual refresh does)
                                     try:
-                                        if hasattr(self, '_calendar_cache_manager') and self._calendar_cache_manager:
-                                            self._calendar_cache_manager.cache_no_meeting_for_file(filename, file_datetime)
-                                            logger.debug("GUI", "refresh_unlinked_files", f"Cached 'no meeting' for {filename}")
+                                        if hasattr(self, "_calendar_cache_manager") and self._calendar_cache_manager:
+                                            self._calendar_cache_manager.cache_no_meeting_for_file(
+                                                filename, file_datetime
+                                            )
+                                            logger.debug(
+                                                "GUI", "refresh_unlinked_files", f"Cached 'no meeting' for {filename}"
+                                            )
                                     except Exception as cache_error:
-                                        logger.warning("GUI", "refresh_unlinked_files", f"Failed to cache 'no meeting' for {filename}: {cache_error}")
-                                
+                                        logger.warning(
+                                            "GUI",
+                                            "refresh_unlinked_files",
+                                            f"Failed to cache 'no meeting' for {filename}: {cache_error}",
+                                        )
+
                                 enhanced_files.append(enhanced_file)
                             else:
-                                logger.warning("GUI", "refresh_unlinked_files", 
-                                             f"Could not parse datetime for {filename}")
+                                logger.warning(
+                                    "GUI", "refresh_unlinked_files", f"Could not parse datetime for {filename}"
+                                )
                                 enhanced_file = file_detail.copy()
                                 enhanced_file["meeting_display_text"] = ""
                                 enhanced_files.append(enhanced_file)
-                            
+
                             files_processed += 1
-                            
+
                             # Log and update GUI progress every 5 files for more responsive feedback
                             if (i + 1) % 5 == 0:
-                                logger.info("GUI", "refresh_unlinked_files", 
-                                          f"Progress: {i+1}/{len(unlinked_files)} files processed, {meetings_found} meetings found so far")
-                                
+                                logger.info(
+                                    "GUI",
+                                    "refresh_unlinked_files",
+                                    f"Progress: {i+1}/{len(unlinked_files)} files processed, {meetings_found} meetings found so far",
+                                )
+
                                 # Update GUI progress on main thread
-                                progress_text = f"Processed {i+1}/{len(unlinked_files)} files... Found {meetings_found} meetings"
+                                progress_text = (
+                                    f"Processed {i+1}/{len(unlinked_files)} files... Found {meetings_found} meetings"
+                                )
                                 self.after(0, self._update_refresh_progress, progress_text)
-                            
+
                         except Exception as e:
-                            logger.error("GUI", "refresh_unlinked_files", 
-                                         f"Error processing {file_detail.get('name', 'unknown')}: {e}")
+                            logger.error(
+                                "GUI",
+                                "refresh_unlinked_files",
+                                f"Error processing {file_detail.get('name', 'unknown')}: {e}",
+                            )
                             enhanced_file = file_detail.copy()
                             enhanced_file["meeting_display_text"] = ""
                             enhanced_files.append(enhanced_file)
-                    
-                    logger.info("GUI", "refresh_unlinked_files", 
-                               f"Completed processing {files_processed} files, found {meetings_found} meetings")
-                    
+
+                    logger.info(
+                        "GUI",
+                        "refresh_unlinked_files",
+                        f"Completed processing {files_processed} files, found {meetings_found} meetings",
+                    )
+
                     # Final progress update
                     final_progress = f"Completed! Processed {files_processed} files, found {meetings_found} meetings"
                     self.after(0, self._update_refresh_progress, final_progress)
-                    
+
                     # Force save cache to disk to ensure persistence
                     try:
-                        if hasattr(self, '_calendar_cache_manager') and self._calendar_cache_manager:
+                        if hasattr(self, "_calendar_cache_manager") and self._calendar_cache_manager:
                             self._calendar_cache_manager._save_caches()
                             logger.info("GUI", "refresh_unlinked_files", f"Saved {meetings_found} meetings to cache")
                     except Exception as e:
                         logger.warning("GUI", "refresh_unlinked_files", f"Failed to save cache: {e}")
-                    
+
                     # Call completion callback on main thread
                     self.after(0, self._on_unlinked_files_refresh_complete, enhanced_files)
-                    
+
                 except Exception as e:
                     logger.error("GUI", "refresh_unlinked_files", f"Error in background processing: {e}")
                     self.after(0, self._on_unlinked_files_refresh_error, str(e))
-            
+
             # Run processing in background thread to avoid blocking GUI
             import threading
+
             processing_thread = threading.Thread(target=process_unlinked_files, daemon=True)
             processing_thread.start()
-            
+
         except Exception as e:
             logger.error("GUI", "refresh_unlinked_files", f"Failed to start calendar refresh: {e}")
-            messagebox.showerror(
-                "Refresh Error",
-                f"Failed to start calendar refresh: {e}"
-            )
-    
+            messagebox.showerror("Refresh Error", f"Failed to start calendar refresh: {e}")
+
     def _parse_file_datetime_for_calendar(self, file_detail):
         """Parse datetime from file detail using the same logic as individual refresh."""
         try:
             # Try to use the existing 'time' field first (same as individual processing)
-            if 'time' in file_detail and file_detail['time']:
-                if isinstance(file_detail['time'], datetime):
-                    return file_detail['time']
-            
+            if "time" in file_detail and file_detail["time"]:
+                if isinstance(file_detail["time"], datetime):
+                    return file_detail["time"]
+
             # Fallback: parse from createDate and createTime
-            create_date = file_detail.get('createDate', '')
-            create_time = file_detail.get('createTime', '')
-            
-            if create_date and create_time and create_date != '---' and create_time != '---':
+            create_date = file_detail.get("createDate", "")
+            create_time = file_detail.get("createTime", "")
+
+            if create_date and create_time and create_date != "---" and create_time != "---":
                 datetime_str = f"{create_date} {create_time}"
                 try:
                     parsed_dt = datetime.strptime(datetime_str, "%Y/%m/%d %H:%M:%S")
                     return parsed_dt
                 except ValueError:
                     pass
-            
+
             # Last resort: try to parse from filename
-            filename = file_detail.get('name', '')
+            filename = file_detail.get("name", "")
             if filename:
                 import re
+
                 # Parse format: 2025Aug13-132542-Rec11.hda
-                match = re.match(r'(\d{4})(\w{3})(\d{2})-(\d{2})(\d{2})(\d{2})', filename)
+                match = re.match(r"(\d{4})(\w{3})(\d{2})-(\d{2})(\d{2})(\d{2})", filename)
                 if match:
                     year, month_name, day, hour, minute, second = match.groups()
                     month_map = {
-                        'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
-                        'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
+                        "Jan": 1,
+                        "Feb": 2,
+                        "Mar": 3,
+                        "Apr": 4,
+                        "May": 5,
+                        "Jun": 6,
+                        "Jul": 7,
+                        "Aug": 8,
+                        "Sep": 9,
+                        "Oct": 10,
+                        "Nov": 11,
+                        "Dec": 12,
                     }
                     if month_name in month_map:
-                        return datetime(int(year), month_map[month_name], int(day), 
-                                      int(hour), int(minute), int(second))
-            
+                        return datetime(int(year), month_map[month_name], int(day), int(hour), int(minute), int(second))
+
             return None
-            
+
         except Exception as e:
-            logger.warning("GUI", "_parse_file_datetime_for_calendar", 
-                         f"Error parsing datetime for {file_detail.get('name')}: {e}")
+            logger.warning(
+                "GUI", "_parse_file_datetime_for_calendar", f"Error parsing datetime for {file_detail.get('name')}: {e}"
+            )
             return None
-    
+
     def _find_meeting_for_file_live(self, filename, file_datetime):
         """Find meeting for file using live calendar data (same method as individual refresh)."""
         try:
             # Use the same calendar integration as the individual file check
-            if hasattr(self, '_calendar_integration') and self._calendar_integration:
+            if hasattr(self, "_calendar_integration") and self._calendar_integration:
                 calendar_integration = self._calendar_integration
-                logger.debug("GUI", "_find_meeting_for_file_live", 
-                           f"Looking for meeting for {filename} at {file_datetime}")
-                
-                if hasattr(calendar_integration, 'find_meeting_for_recording'):
+                logger.debug(
+                    "GUI", "_find_meeting_for_file_live", f"Looking for meeting for {filename} at {file_datetime}"
+                )
+
+                if hasattr(calendar_integration, "find_meeting_for_recording"):
                     # Use the same parameters as individual refresh (using config tolerance)
-                    meeting = calendar_integration.find_meeting_for_recording(file_datetime, tolerance_minutes=self._get_calendar_tolerance_minutes())
-                    
-                    logger.debug("GUI", "_find_meeting_for_file_live", 
-                               f"Meeting result for {filename}: {meeting.subject if meeting else 'None'}")
-                    
-                    if meeting and hasattr(meeting, 'subject'):
+                    meeting = calendar_integration.find_meeting_for_recording(
+                        file_datetime, tolerance_minutes=self._get_calendar_tolerance_minutes()
+                    )
+
+                    logger.debug(
+                        "GUI",
+                        "_find_meeting_for_file_live",
+                        f"Meeting result for {filename}: {meeting.subject if meeting else 'None'}",
+                    )
+
+                    if meeting and hasattr(meeting, "subject"):
                         # Return the meeting subject (same as individual processing)
                         return meeting.subject
                 else:
-                    logger.warning("GUI", "_find_meeting_for_file_live", 
-                                 f"Calendar integration has no find_meeting_for_recording method")
+                    logger.warning(
+                        "GUI",
+                        "_find_meeting_for_file_live",
+                        f"Calendar integration has no find_meeting_for_recording method",
+                    )
             else:
-                logger.warning("GUI", "_find_meeting_for_file_live", 
-                             f"No calendar integration available for {filename}")
-            
+                logger.warning(
+                    "GUI", "_find_meeting_for_file_live", f"No calendar integration available for {filename}"
+                )
+
             return None
-            
+
         except Exception as e:
-            logger.error("GUI", "_find_meeting_for_file_live", 
-                         f"Error finding meeting for {filename}: {e}")
+            logger.error("GUI", "_find_meeting_for_file_live", f"Error finding meeting for {filename}: {e}")
             return None
-    
+
     def _normalize_meeting_title(self, meeting_title):
         """Normalize meeting title to provide consistent formatting between different calendar methods."""
         if not meeting_title:
             return meeting_title
-        
-        # The individual refresh seems to return cleaner titles like "Sync Sebastián:Daniela" 
+
+        # The individual refresh seems to return cleaner titles like "Sync Sebastián:Daniela"
         # while cached data might include attendee info like "Sync Sebastián:Daniela - Daniela del Pilar..."
         # For consistency, we'll keep the cleaner format but log when we detect differences
-        
+
         try:
             title = str(meeting_title).strip()
-            
-            # If title contains " - " followed by what looks like attendee names, 
+
+            # If title contains " - " followed by what looks like attendee names,
             # consider using just the first part for consistency
             if " - " in title:
                 main_part = title.split(" - ")[0].strip()
                 attendee_part = title.split(" - ", 1)[1].strip()
-                
+
                 # Log this for debugging the format differences
-                logger.debug("GUI", "_normalize_meeting_title", 
-                           f"Meeting title contains attendee info: '{title}' -> main: '{main_part}', attendees: '{attendee_part}'")
-                
+                logger.debug(
+                    "GUI",
+                    "_normalize_meeting_title",
+                    f"Meeting title contains attendee info: '{title}' -> main: '{main_part}', attendees: '{attendee_part}'",
+                )
+
                 # For now, return the full title to maintain existing behavior
                 # but this method can be enhanced later for more consistent formatting
                 return title
-            
+
             return title
-            
+
         except Exception as e:
             logger.warning("GUI", "_normalize_meeting_title", f"Error normalizing meeting title '{meeting_title}': {e}")
             return str(meeting_title)
-    
+
     def _on_unlinked_files_refresh_error(self, error_message):
         """Handle errors during unlinked files refresh."""
         self._hide_calendar_refresh_overlay()
-        messagebox.showerror(
-            "Refresh Error",
-            f"An error occurred while refreshing unlinked files:\n\n{error_message}"
-        )
-    
+        messagebox.showerror("Refresh Error", f"An error occurred while refreshing unlinked files:\n\n{error_message}")
+
     def _on_unlinked_files_refresh_complete(self, enhanced_files):
         """Callback when unlinked files calendar refresh completes."""
         try:
-            logger.info("GUI", "_on_unlinked_files_refresh_complete", 
-                       f"Completed calendar refresh for {len(enhanced_files)} unlinked files")
-            
+            logger.info(
+                "GUI",
+                "_on_unlinked_files_refresh_complete",
+                f"Completed calendar refresh for {len(enhanced_files)} unlinked files",
+            )
+
             # Update the displayed files with new meeting data
             files_updated = 0
             for enhanced_file in enhanced_files:
                 filename = enhanced_file.get("name")
                 if not filename:
                     continue
-                    
+
                 # Find matching file in displayed_files_details
                 for i, displayed_file in enumerate(self.displayed_files_details):
                     if displayed_file.get("name") == filename:
                         old_text = displayed_file.get("meeting_display_text", "")
                         new_text = enhanced_file.get("meeting_display_text", "")
-                        
+
                         # Only update if we found new meeting data
-                        if new_text and new_text not in ['', 'None', '—', '-'] and old_text != new_text:
+                        if new_text and new_text not in ["", "None", "—", "-"] and old_text != new_text:
                             self.displayed_files_details[i]["meeting_display_text"] = new_text
                             files_updated += 1
-                            
+
                             # Update the GUI TreeView for this specific file
                             try:
-                                if hasattr(self, 'file_tree') and self.file_tree.exists(filename):
+                                if hasattr(self, "file_tree") and self.file_tree.exists(filename):
                                     self.file_tree.set(filename, "meeting", new_text)
-                                    logger.debug("GUI", "_on_unlinked_files_refresh_complete",
-                                               f"Updated TreeView for {filename}: '{old_text}' -> '{new_text}'")
+                                    logger.debug(
+                                        "GUI",
+                                        "_on_unlinked_files_refresh_complete",
+                                        f"Updated TreeView for {filename}: '{old_text}' -> '{new_text}'",
+                                    )
                             except Exception as tree_error:
-                                logger.warning("GUI", "_on_unlinked_files_refresh_complete",
-                                              f"Failed to update TreeView for {filename}: {tree_error}")
+                                logger.warning(
+                                    "GUI",
+                                    "_on_unlinked_files_refresh_complete",
+                                    f"Failed to update TreeView for {filename}: {tree_error}",
+                                )
                         break
-            
+
             # Hide the overlay and show results
             self._hide_calendar_refresh_overlay()
-            
+
             if files_updated > 0:
                 messagebox.showinfo(
                     "Refresh Complete",
                     f"Successfully found meetings for {files_updated} files that were previously unlinked.\n\n"
-                    f"Updated {files_updated} out of {len(enhanced_files)} files checked."
+                    f"Updated {files_updated} out of {len(enhanced_files)} files checked.",
                 )
-                logger.info("GUI", "_on_unlinked_files_refresh_complete", 
-                           f"Successfully updated {files_updated} files with new meeting data")
+                logger.info(
+                    "GUI",
+                    "_on_unlinked_files_refresh_complete",
+                    f"Successfully updated {files_updated} files with new meeting data",
+                )
             else:
                 messagebox.showinfo(
                     "Refresh Complete",
                     f"Checked {len(enhanced_files)} files but no new meeting matches were found.\n\n"
                     "This could mean:\n"
                     "• The files don't have corresponding calendar meetings\n"
-                    "• The meeting times don't match file timestamps\n" 
-                    "• Calendar integration needs configuration"
+                    "• The meeting times don't match file timestamps\n"
+                    "• Calendar integration needs configuration",
                 )
-                logger.info("GUI", "_on_unlinked_files_refresh_complete",
-                           "Calendar refresh completed but no new meetings were found")
-                
+                logger.info(
+                    "GUI",
+                    "_on_unlinked_files_refresh_complete",
+                    "Calendar refresh completed but no new meetings were found",
+                )
+
         except Exception as e:
-            logger.error("GUI", "_on_unlinked_files_refresh_complete", 
-                        f"Error updating GUI with unlinked files calendar data: {e}")
-            messagebox.showerror(
-                "Update Error",
-                f"Error updating files with calendar data: {e}"
+            logger.error(
+                "GUI",
+                "_on_unlinked_files_refresh_complete",
+                f"Error updating GUI with unlinked files calendar data: {e}",
             )
+            messagebox.showerror("Update Error", f"Error updating files with calendar data: {e}")
 
     def _toggle_column_visibility(self, column_id):
         """Toggle the visibility of a specific column."""
         if column_id == "num":  # Don't allow hiding the # column
             return
-        
+
         # Get current displayed columns
         current_columns = list(self.file_tree["displaycolumns"])
         is_visible = column_id in current_columns
-        
+
         if is_visible:
             # Hide column
             current_columns.remove(column_id)
@@ -4449,7 +4610,7 @@ You can dismiss this warning and continue using the application with limited aud
             # Show column - insert in proper order based on original_tree_headings
             all_columns = list(self.original_tree_headings.keys())
             insert_index = len(current_columns)  # Default to end
-            
+
             # Find proper insertion position to maintain order
             for i, col in enumerate(all_columns):
                 if col == column_id:
@@ -4457,50 +4618,49 @@ You can dismiss this warning and continue using the application with limited aud
                     preceding_displayed = [c for c in all_columns[:i] if c in current_columns]
                     insert_index = len(preceding_displayed)
                     break
-            
+
             current_columns.insert(insert_index, column_id)
-        
+
         # Update tree displaycolumns
         self.file_tree.configure(displaycolumns=current_columns)
-        
+
         # Update the checkbox variable to reflect the new state
         if column_id in self.column_visibility_vars:
             self.column_visibility_vars[column_id].set(not is_visible)
-        
+
         # Save column configuration
         from config_and_logger import update_config_settings
+
         update_config_settings({"treeview_columns_display_order": ",".join(current_columns)})
-        
+
         logger.info("GUI", "_toggle_column_visibility", f"Column '{column_id}' visibility toggled to {not is_visible}")
 
     def force_refresh_calendar_gui(self):
         """Force refresh calendar data from the GUI with visual feedback."""
         try:
             # Check if async calendar is available
-            if not hasattr(self, '_calendar_cache_manager') or not self._calendar_cache_manager:
+            if not hasattr(self, "_calendar_cache_manager") or not self._calendar_cache_manager:
                 messagebox.showinfo(
-                    "Calendar Not Available", 
+                    "Calendar Not Available",
                     "Calendar integration is not available or not properly configured.",
-                    parent=self
+                    parent=self,
                 )
                 return
-            
+
             # Get current files before starting refresh
             current_files = []
-            if hasattr(self, 'displayed_files_details') and self.displayed_files_details:
+            if hasattr(self, "displayed_files_details") and self.displayed_files_details:
                 current_files = list(self.displayed_files_details)
-            
+
             if not current_files:
                 messagebox.showinfo(
-                    "No Files to Refresh", 
-                    "No files are currently displayed to refresh calendar data for.",
-                    parent=self
+                    "No Files to Refresh", "No files are currently displayed to refresh calendar data for.", parent=self
                 )
                 return
-            
+
             # Show visual overlay and disable the refresh button
             self._show_calendar_refresh_overlay(len(current_files))
-            
+
             # Prepare files for refresh (remove calendar data but preserve audio metadata)
             clean_files = []
             for f in current_files:
@@ -4508,94 +4668,107 @@ You can dismiss this warning and continue using the application with limited aud
                 # Remove only calendar meeting fields to force fresh lookup
                 # but preserve audio metadata fields (audio_*)
                 for key in list(clean_file.keys()):
-                    if (key.startswith('meeting_') or key == 'has_meeting') and not key.startswith('audio_'):
+                    if (key.startswith("meeting_") or key == "has_meeting") and not key.startswith("audio_"):
                         del clean_file[key]
                 clean_files.append(clean_file)
-            
+
             # Immediately show "Refreshing..." in the Meeting column for all files
             self._set_calendar_refresh_status_for_all_files("Refreshing...")
-            
+
             # Show initial status
             self.update_status_bar(progress_text=f"Starting calendar refresh for {len(current_files)} files...")
-            
+
             # Use the correct method from AsyncCalendarMixin
             def refresh_callback(enhanced_files=None):
                 """Called when calendar refresh is complete."""
                 try:
                     # Always hide the overlay first
                     self._hide_calendar_refresh_overlay()
-                    
+
                     if enhanced_files:
                         # Use the enhanced files returned from the async operation
                         self.update_status_bar(progress_text="Finalizing calendar refresh...")
-                        
+
                         # CRITICAL: Clear any "Syncing..." or "Refreshing..." status for files without meetings
                         for file_data in enhanced_files:
                             # If no meeting found, ensure display text is empty, not "Syncing..."
-                            if not file_data.get('has_meeting', False):
-                                display_text = file_data.get('meeting_display_text', '')
-                                if display_text in ['Syncing...', 'Refreshing...', 'Processing...']:
-                                    file_data['meeting_display_text'] = ''
-                                    logger.debug("GUI", "force_refresh_callback", 
-                                               f"Cleared '{display_text}' for {file_data.get('name', 'unknown')}")
-                        
+                            if not file_data.get("has_meeting", False):
+                                display_text = file_data.get("meeting_display_text", "")
+                                if display_text in ["Syncing...", "Refreshing...", "Processing..."]:
+                                    file_data["meeting_display_text"] = ""
+                                    logger.debug(
+                                        "GUI",
+                                        "force_refresh_callback",
+                                        f"Cleared '{display_text}' for {file_data.get('name', 'unknown')}",
+                                    )
+
                         # Re-apply audio metadata after calendar enhancement
-                        if hasattr(self, 'enhance_files_with_audio_metadata'):
+                        if hasattr(self, "enhance_files_with_audio_metadata"):
                             try:
                                 enhanced_files = self.enhance_files_with_audio_metadata(enhanced_files)
-                                logger.debug("GUI", "force_refresh_calendar_gui", "Re-applied audio metadata after calendar refresh")
+                                logger.debug(
+                                    "GUI",
+                                    "force_refresh_calendar_gui",
+                                    "Re-applied audio metadata after calendar refresh",
+                                )
                             except Exception as e:
-                                logger.warning("GUI", "force_refresh_calendar_gui", f"Could not re-apply audio metadata: {e}")
-                        
+                                logger.warning(
+                                    "GUI", "force_refresh_calendar_gui", f"Could not re-apply audio metadata: {e}"
+                                )
+
                         # Update the TreeView with refreshed data (filtering-aware)
-                        if hasattr(self, 'update_files_data_for_filtering'):
+                        if hasattr(self, "update_files_data_for_filtering"):
                             self.update_files_data_for_filtering(enhanced_files)
                         else:
                             self._populate_treeview_from_data(enhanced_files)
-                        
+
                         # Also update the stored displayed_files_details for consistency
                         self.displayed_files_details = enhanced_files
-                        
+
                         # Count files with meetings found
-                        files_with_meetings = sum(1 for f in enhanced_files if f.get('has_meeting', False))
-                        
-                        self.update_status_bar(progress_text=f"Calendar refresh completed - {files_with_meetings} files with meetings found")
-                        
+                        files_with_meetings = sum(1 for f in enhanced_files if f.get("has_meeting", False))
+
+                        self.update_status_bar(
+                            progress_text=f"Calendar refresh completed - {files_with_meetings} files with meetings found"
+                        )
+
                         # Show success message after a brief delay to let user see the results
-                        self.after(500, lambda: messagebox.showinfo(
-                            "Calendar Refresh Complete",
-                            f"Calendar data refreshed successfully!\n\nFound meetings for {files_with_meetings} out of {len(enhanced_files)} displayed files.",
-                            parent=self
-                        ))
-                        
-                        logger.info("GUI", "force_refresh_calendar_gui", 
-                                  f"Updated {len(enhanced_files)} displayed files after calendar refresh, {files_with_meetings} with meetings")
+                        self.after(
+                            500,
+                            lambda: messagebox.showinfo(
+                                "Calendar Refresh Complete",
+                                f"Calendar data refreshed successfully!\n\nFound meetings for {files_with_meetings} out of {len(enhanced_files)} displayed files.",
+                                parent=self,
+                            ),
+                        )
+
+                        logger.info(
+                            "GUI",
+                            "force_refresh_calendar_gui",
+                            f"Updated {len(enhanced_files)} displayed files after calendar refresh, {files_with_meetings} with meetings",
+                        )
                     else:
                         # No files returned - clear any remaining "Refreshing..." status
                         self._clear_calendar_refresh_status_for_all_files()
                         self.update_status_bar(progress_text="Calendar refresh completed")
                         messagebox.showinfo(
-                            "Calendar Refresh",
-                            "Calendar refresh has been completed successfully.",
-                            parent=self
+                            "Calendar Refresh", "Calendar refresh has been completed successfully.", parent=self
                         )
-                        
+
                 except Exception as e:
                     # Always hide overlay on error too
                     self._hide_calendar_refresh_overlay()
                     self._clear_calendar_refresh_status_for_all_files()
-                    
+
                     logger.error("GUI", "force_refresh_calendar_gui", f"Error in refresh callback: {e}")
                     self.update_status_bar(progress_text="Calendar refresh completed with errors")
                     messagebox.showwarning(
-                        "Calendar Refresh Error",
-                        f"Calendar data refresh encountered an error: {str(e)}",
-                        parent=self
+                        "Calendar Refresh Error", f"Calendar data refresh encountered an error: {str(e)}", parent=self
                     )
-            
+
             # Pass the clean files to the refresh function!
             success = self.refresh_calendar_data_async(callback=refresh_callback, current_files=clean_files)
-            
+
             if not success:
                 # Hide overlay and show error if refresh couldn't be started
                 self._hide_calendar_refresh_overlay()
@@ -4603,9 +4776,9 @@ You can dismiss this warning and continue using the application with limited aud
                 messagebox.showerror(
                     "Calendar Refresh Error",
                     "Failed to queue calendar refresh. Calendar system may not be available.",
-                    parent=self
+                    parent=self,
                 )
-        
+
         except Exception as e:
             # Handle any unexpected errors
             try:
@@ -4613,92 +4786,76 @@ You can dismiss this warning and continue using the application with limited aud
                 self._clear_calendar_refresh_status_for_all_files()
             except:
                 pass  # Ignore errors during cleanup
-            
+
             logger.error("GUI", "force_refresh_calendar_gui", f"Unexpected error during calendar refresh: {e}")
             messagebox.showerror(
-                "Calendar Refresh Error",
-                f"An unexpected error occurred during calendar refresh: {str(e)}",
-                parent=self
+                "Calendar Refresh Error", f"An unexpected error occurred during calendar refresh: {str(e)}", parent=self
             )
-        
+
         logger.info("GUI", "force_refresh_calendar_gui", "Manual calendar refresh requested")
-    
+
     def _parse_file_datetime_for_calendar(self, file_data):
         """Parse file datetime from file data for calendar operations."""
         try:
             from datetime import datetime
-            
+
             # The device already provides a proper 'time' datetime object
-            if 'time' in file_data and file_data['time']:
-                if isinstance(file_data['time'], datetime):
-                    return file_data['time']
-            
+            if "time" in file_data and file_data["time"]:
+                if isinstance(file_data["time"], datetime):
+                    return file_data["time"]
+
             # Fallback: combine createDate and createTime
-            create_date = file_data.get('createDate', '')
-            create_time = file_data.get('createTime', '')
-            
-            if create_date and create_time and create_date != '---' and create_time != '---':
+            create_date = file_data.get("createDate", "")
+            create_time = file_data.get("createTime", "")
+
+            if create_date and create_time and create_date != "---" and create_time != "---":
                 datetime_str = f"{create_date} {create_time}"
                 try:
                     return datetime.strptime(datetime_str, "%Y/%m/%d %H:%M:%S")
                 except ValueError:
                     pass
-            
+
             return None
         except Exception as e:
             logger.warning("GUI", "_parse_file_datetime_for_calendar", f"Error parsing datetime: {e}")
             return None
-    
+
     def _show_calendar_refresh_overlay(self, file_count, title="Refreshing Calendar Data"):
         """Show visual overlay during calendar refresh."""
         try:
             import tkinter as tk
-            
+
             # Create overlay frame
-            self.calendar_refresh_overlay = tk.Frame(self, bg='#000000')
+            self.calendar_refresh_overlay = tk.Frame(self, bg="#000000")
             self.calendar_refresh_overlay.place(x=0, y=0, relwidth=1, relheight=1)
-            
+
             # Create content frame
-            content_frame = tk.Frame(self.calendar_refresh_overlay, bg='#2b2b2b', relief='raised', bd=2)
-            content_frame.place(relx=0.5, rely=0.5, anchor='center')
-            
+            content_frame = tk.Frame(self.calendar_refresh_overlay, bg="#2b2b2b", relief="raised", bd=2)
+            content_frame.place(relx=0.5, rely=0.5, anchor="center")
+
             # Title
-            title_label = tk.Label(
-                content_frame,
-                text=title,
-                font=('Arial', 16, 'bold'),
-                fg='white',
-                bg='#2b2b2b'
-            )
+            title_label = tk.Label(content_frame, text=title, font=("Arial", 16, "bold"), fg="white", bg="#2b2b2b")
             title_label.pack(pady=20, padx=40)
-            
+
             # Progress info
             self.refresh_progress_label = tk.Label(
-                content_frame,
-                text=f"Processing {file_count} files...",
-                font=('Arial', 12),
-                fg='#cccccc',
-                bg='#2b2b2b'
+                content_frame, text=f"Processing {file_count} files...", font=("Arial", 12), fg="#cccccc", bg="#2b2b2b"
             )
             self.refresh_progress_label.pack(pady=(0, 10))
-            
+
             # Animated dots
             self.refresh_dots_label = tk.Label(
-                content_frame,
-                text="...",
-                font=('Arial', 12),
-                fg='#4CAF50',
-                bg='#2b2b2b'
+                content_frame, text="...", font=("Arial", 12), fg="#4CAF50", bg="#2b2b2b"
             )
             self.refresh_dots_label.pack(pady=(0, 20))
-            
+
             # Start dots animation
             self._animate_refresh_dots()
-            
+
             # Disable the Force Refresh menu item to prevent multiple refreshes
             try:
                 for menu_item in self.menu_view_list:
-                    if hasattr(menu_item, 'entryconfig'):
+                    if hasattr(menu_item, "entryconfig"):
                         # Find the Force Refresh Calendar menu item
                         try:
                             menu_item.entryconfig("Force Refresh Calendar", state="disabled")
@@ -4706,116 +4863,119 @@ You can dismiss this warning and continue using the application with limited aud
                             pass
             except:
                 pass
-            
+
             # Bring overlay to front and update display
             self.calendar_refresh_overlay.lift()
             self.calendar_refresh_overlay.tkraise()
             self.update()
-            
-            logger.debug("GUI", "_show_calendar_refresh_overlay", f"Overlay shown for {file_count} files with title: {title}")
-            
+
+            logger.debug(
+                "GUI", "_show_calendar_refresh_overlay", f"Overlay shown for {file_count} files with title: {title}"
+            )
+
         except Exception as e:
             logger.error("GUI", "_show_calendar_refresh_overlay", f"Error showing overlay: {e}")
             import traceback
+
             traceback.print_exc()
-    
+
     def _hide_calendar_refresh_overlay(self):
         """Hide the calendar refresh overlay."""
         try:
-            if hasattr(self, 'calendar_refresh_overlay'):
+            if hasattr(self, "calendar_refresh_overlay"):
                 self.calendar_refresh_overlay.destroy()
-                delattr(self, 'calendar_refresh_overlay')
-            
+                delattr(self, "calendar_refresh_overlay")
+
             # Re-enable the Force Refresh menu item
             try:
                 for menu_item in self.menu_view_list:
-                    if hasattr(menu_item, 'entryconfig'):
+                    if hasattr(menu_item, "entryconfig"):
                         try:
                             menu_item.entryconfig("Force Refresh Calendar", state="normal")
                         except:
                             pass
             except:
                 pass
-            
+
         except Exception as e:
             logger.error("GUI", "_hide_calendar_refresh_overlay", f"Error hiding overlay: {e}")
-        
+
         # Ensure overlay is gone
-        if hasattr(self, 'calendar_refresh_overlay'):
+        if hasattr(self, "calendar_refresh_overlay"):
             try:
-                delattr(self, 'calendar_refresh_overlay')
+                delattr(self, "calendar_refresh_overlay")
             except:
                 pass
-    
+
     def _update_refresh_progress(self, progress_text):
         """Update the progress text in the calendar refresh overlay."""
         try:
-            if hasattr(self, 'refresh_progress_label') and self.refresh_progress_label:
+            if hasattr(self, "refresh_progress_label") and self.refresh_progress_label:
                 self.refresh_progress_label.configure(text=progress_text)
                 self.refresh_progress_label.update()
         except Exception as e:
             logger.debug("GUI", "_update_refresh_progress", f"Error updating progress: {e}")
-    
+
     def _animate_refresh_dots(self):
         """Animate the dots in the refresh overlay."""
         try:
-            if hasattr(self, 'refresh_dots_label') and self.refresh_dots_label.winfo_exists():
-                current_text = self.refresh_dots_label.cget('text')
-                if current_text == '...':
-                    new_text = '   '
-                elif current_text == '   ':
-                    new_text = '.  '
-                elif current_text == '.  ':
-                    new_text = '.. '
+            if hasattr(self, "refresh_dots_label") and self.refresh_dots_label.winfo_exists():
+                current_text = self.refresh_dots_label.cget("text")
+                if current_text == "...":
+                    new_text = "   "
+                elif current_text == "   ":
+                    new_text = ".  "
+                elif current_text == ".  ":
+                    new_text = ".. "
                 else:
-                    new_text = '...'
-                
+                    new_text = "..."
+
                 self.refresh_dots_label.config(text=new_text)
-                
+
                 # Schedule next animation frame
                 self.after(500, self._animate_refresh_dots)
         except:
             pass  # Animation will stop if overlay is destroyed
-    
+
     def _set_calendar_refresh_status_for_all_files(self, status_text):
         """Set refresh status in Meeting column for all displayed files."""
         try:
-            if not hasattr(self, 'displayed_files_details') or not self.displayed_files_details:
+            if not hasattr(self, "displayed_files_details") or not self.displayed_files_details:
                 return
-            
+
             # Update the data
             for file_data in self.displayed_files_details:
-                file_data['meeting_display_text'] = status_text
-                file_data['has_meeting'] = False
-            
+                file_data["meeting_display_text"] = status_text
+                file_data["has_meeting"] = False
+
             # Refresh the TreeView to show the status (filtering-aware)
-            if hasattr(self, 'update_files_data_for_filtering'):
+            if hasattr(self, "update_files_data_for_filtering"):
                 self.update_files_data_for_filtering(self.displayed_files_details)
             else:
                 self._populate_treeview_from_data(self.displayed_files_details)
-            
+
         except Exception as e:
             logger.error("GUI", "_set_calendar_refresh_status_for_all_files", f"Error setting refresh status: {e}")
-    
+
     def _clear_calendar_refresh_status_for_all_files(self):
         """Clear any remaining 'Refreshing...' or 'Syncing...' status from files."""
         try:
-            if not hasattr(self, 'displayed_files_details') or not self.displayed_files_details:
+            if not hasattr(self, "displayed_files_details") or not self.displayed_files_details:
                 return
-            
+
             # Clear any refresh-related status
             for file_data in self.displayed_files_details:
-                display_text = file_data.get('meeting_display_text', '')
-                if display_text in ['Refreshing...', 'Syncing...', 'Processing...']:
-                    file_data['meeting_display_text'] = ''
-                    file_data['has_meeting'] = False
-            
+                display_text = file_data.get("meeting_display_text", "")
+                if display_text in ["Refreshing...", "Syncing...", "Processing..."]:
+                    file_data["meeting_display_text"] = ""
+                    file_data["has_meeting"] = False
+
             # Refresh the TreeView (filtering-aware)
-            if hasattr(self, 'update_files_data_for_filtering'):
+            if hasattr(self, "update_files_data_for_filtering"):
                 self.update_files_data_for_filtering(self.displayed_files_details)
             else:
                 self._populate_treeview_from_data(self.displayed_files_details)
-            
+
         except Exception as e:
             logger.error("GUI", "_clear_calendar_refresh_status_for_all_files", f"Error clearing refresh status: {e}")
 
@@ -4826,98 +4986,95 @@ You can dismiss this warning and continue using the application with limited aud
             selected_iids = self.file_tree.selection()
             if not selected_iids:
                 messagebox.showinfo(
-                    "No Selection",
-                    "Please select one or more files to check for meetings.",
-                    parent=self
+                    "No Selection", "Please select one or more files to check for meetings.", parent=self
                 )
                 return
-            
+
             # Try to use live calendar integration
             try:
                 from simple_outlook_integration import create_simple_outlook_integration
+
                 calendar_integration = create_simple_outlook_integration()
-                
+
                 if not calendar_integration.is_available():
                     messagebox.showinfo(
-                        "Calendar Not Available", 
+                        "Calendar Not Available",
                         f"Calendar integration is not available: {calendar_integration.last_error or 'No calendar methods found'}\n\n"
                         f"Please ensure:\n"
                         f"• Outlook is installed and running\n"
                         f"• You are connected to your mail server\n"
                         f"• Calendar permissions are enabled",
-                        parent=self
+                        parent=self,
                     )
                     return
-                    
-                logger.info("GUI", "check_selected_files_for_meetings_gui", 
-                          f"Using calendar integration methods: {calendar_integration.available_methods}")
-                    
+
+                logger.info(
+                    "GUI",
+                    "check_selected_files_for_meetings_gui",
+                    f"Using calendar integration methods: {calendar_integration.available_methods}",
+                )
+
             except ImportError as e:
                 messagebox.showinfo(
-                    "Calendar Not Available", 
-                    f"Calendar integration module not available: {e}\n\n"
-                    f"This feature requires Outlook integration.",
-                    parent=self
+                    "Calendar Not Available",
+                    f"Calendar integration module not available: {e}\n\n" f"This feature requires Outlook integration.",
+                    parent=self,
                 )
                 return
-            
+
             # Get file details for selected files
             selected_files = []
             for iid in selected_iids:
-                file_detail = next(
-                    (f for f in self.displayed_files_details if f["name"] == iid),
-                    None
-                )
+                file_detail = next((f for f in self.displayed_files_details if f["name"] == iid), None)
                 if file_detail:
                     selected_files.append(file_detail.copy())
-            
+
             if not selected_files:
-                messagebox.showwarning(
-                    "Selection Error",
-                    "Could not find details for the selected files.",
-                    parent=self
-                )
+                messagebox.showwarning("Selection Error", "Could not find details for the selected files.", parent=self)
                 return
-            
+
             # Show visual overlay for selected files
             self._show_calendar_refresh_overlay(len(selected_files), "Checking Selected Files for Meetings")
-            
+
             # Set "Checking..." status for selected files
             for selected_file in selected_files:
                 filename = selected_file.get("name")
                 if filename and self.file_tree.exists(filename):
                     self.file_tree.set(filename, "meeting", "Checking...")
-            
+
             # Update display
             self.update()
-            
+
             # Show progress
             self.update_status_bar(
                 progress_text=f"Checking {len(selected_files)} selected files for meetings using live calendar data..."
             )
-            
+
             # Enhance selected files with LIVE meeting data - FORCE fresh lookup
             try:
-                logger.info("GUI", "check_selected_files_for_meetings_gui", 
-                          f"Performing LIVE calendar check for {len(selected_files)} selected files")
-                
+                logger.info(
+                    "GUI",
+                    "check_selected_files_for_meetings_gui",
+                    f"Performing LIVE calendar check for {len(selected_files)} selected files",
+                )
+
                 # Clear the calendar integration's internal cache to ensure fresh lookups
                 try:
                     calendar_integration.cached_meetings.clear()
                     logger.debug("GUI", "check_selected_files_live", "Cleared calendar integration internal cache")
                 except:
                     pass
-                
+
                 # Clear any existing calendar data to force fresh lookup
                 clean_files = []
                 for f in selected_files:
                     clean_file = f.copy()
                     # Remove ALL calendar meeting fields to force fresh lookup from COM
                     for key in list(clean_file.keys()):
-                        if key.startswith('meeting_') or key == 'has_meeting':
+                        if key.startswith("meeting_") or key == "has_meeting":
                             del clean_file[key]
                     clean_files.append(clean_file)
-                
+
                 # Use individual file processing to ensure we hit COM directly
                 enhanced_files = []
                 meetings_found = 0
@@ -4926,9 +5083,9 @@ You can dismiss this warning and continue using the application with limited aud
                         # Update progress
                         filename = clean_file.get("name", f"File {i+1}")
                         self.update_status_bar(progress_text=f"Checking {filename} ({i+1}/{len(clean_files)})...")
-                        
+
                         # Update the progress label in overlay if it exists with meeting count
-                        if hasattr(self, 'refresh_progress_label'):
+                        if hasattr(self, "refresh_progress_label"):
                             try:
                                 self.refresh_progress_label.config(
                                     text=f"Checking {filename}... ({i+1}/{len(clean_files)}) - {meetings_found} meetings found"
@@ -4936,79 +5093,104 @@ You can dismiss this warning and continue using the application with limited aud
                                 self.update()
                             except:
                                 pass
-                        
+
                         # Small delay to make progress visible and allow COM operations
                         import time
+
                         time.sleep(0.1)
-                        
+
                         # Get meeting data directly from calendar integration (bypasses cache)
                         file_datetime = self._parse_file_datetime_for_calendar(clean_file)
-                        logger.debug("GUI", "check_selected_files_live", f"Parsed datetime for {filename}: {file_datetime}")
-                        
+                        logger.debug(
+                            "GUI", "check_selected_files_live", f"Parsed datetime for {filename}: {file_datetime}"
+                        )
+
                         if file_datetime:
-                            logger.debug("GUI", "check_selected_files_live", f"Calling find_meeting_for_recording for {filename} at {file_datetime}")
-                            meeting = calendar_integration.find_meeting_for_recording(file_datetime, tolerance_minutes=self._get_calendar_tolerance_minutes())
-                            logger.debug("GUI", "check_selected_files_live", f"Meeting result for {filename}: {meeting.subject if meeting else 'None'}")
-                            
+                            logger.debug(
+                                "GUI",
+                                "check_selected_files_live",
+                                f"Calling find_meeting_for_recording for {filename} at {file_datetime}",
+                            )
+                            meeting = calendar_integration.find_meeting_for_recording(
+                                file_datetime, tolerance_minutes=self._get_calendar_tolerance_minutes()
+                            )
+                            logger.debug(
+                                "GUI",
+                                "check_selected_files_live",
+                                f"Meeting result for {filename}: {meeting.subject if meeting else 'None'}",
+                            )
+
                             if meeting:
                                 meetings_found += 1
-                                clean_file.update({
-                                    'has_meeting': True,
-                                    'meeting_subject': meeting.subject,
-                                    'meeting_display_text': meeting.subject,
-                                    'meeting_start_time': meeting.start_time,
-                                    'meeting_end_time': meeting.end_time,
-                                    'meeting_organizer': meeting.organizer or '',
-                                    'meeting_location': meeting.location or '',
-                                })
+                                clean_file.update(
+                                    {
+                                        "has_meeting": True,
+                                        "meeting_subject": meeting.subject,
+                                        "meeting_display_text": meeting.subject,
+                                        "meeting_start_time": meeting.start_time,
+                                        "meeting_end_time": meeting.end_time,
+                                        "meeting_organizer": meeting.organizer or "",
+                                        "meeting_location": meeting.location or "",
+                                    }
+                                )
                             else:
-                                clean_file.update({
-                                    'has_meeting': False,
-                                    'meeting_display_text': '',
-                                    'meeting_subject': '',
-                                })
+                                clean_file.update(
+                                    {
+                                        "has_meeting": False,
+                                        "meeting_display_text": "",
+                                        "meeting_subject": "",
+                                    }
+                                )
                         else:
-                            clean_file.update({
-                                'has_meeting': False,
-                                'meeting_display_text': '',
-                                'meeting_subject': '',
-                            })
-                        
+                            clean_file.update(
+                                {
+                                    "has_meeting": False,
+                                    "meeting_display_text": "",
+                                    "meeting_subject": "",
+                                }
+                            )
+
                         enhanced_files.append(clean_file)
-                        
+
                     except Exception as file_error:
-                        logger.warning("GUI", "check_selected_files_for_meetings_gui", 
-                                     f"Error checking {clean_file.get('name', 'unknown')}: {file_error}")
+                        logger.warning(
+                            "GUI",
+                            "check_selected_files_for_meetings_gui",
+                            f"Error checking {clean_file.get('name', 'unknown')}: {file_error}",
+                        )
                         # Add file with empty meeting data
-                        clean_file.update({
-                            'has_meeting': False,
-                            'meeting_display_text': '',
-                            'meeting_subject': '',
-                        })
+                        clean_file.update(
+                            {
+                                "has_meeting": False,
+                                "meeting_display_text": "",
+                                "meeting_subject": "",
+                            }
+                        )
                         enhanced_files.append(clean_file)
-                
+
                 # Hide the overlay first
                 self._hide_calendar_refresh_overlay()
-                
+
                 # CRITICAL FIX: Save the live meeting data to cache so it persists after restart
-                if hasattr(self, '_calendar_cache_manager') and self._calendar_cache_manager:
+                if hasattr(self, "_calendar_cache_manager") and self._calendar_cache_manager:
                     for enhanced_file in enhanced_files:
                         filename = enhanced_file.get("name")
                         has_meeting = enhanced_file.get("has_meeting", False)
-                        
+
                         if has_meeting:
                             # Create a simple meeting object to cache
                             try:
                                 from simple_outlook_integration import SimpleMeeting
+
                                 simple_meeting = SimpleMeeting(
                                     subject=enhanced_file.get("meeting_subject", ""),
                                     organizer=enhanced_file.get("meeting_organizer", ""),
                                     start_time=enhanced_file.get("meeting_start_time"),
                                     end_time=enhanced_file.get("meeting_end_time"),
                                     location=enhanced_file.get("meeting_location", ""),
-                                    attendees=[]  # Could be enhanced in future
+                                    attendees=[],  # Could be enhanced in future
                                 )
-                                
+
                                 # Get file datetime for caching
                                 file_datetime = self._parse_file_datetime_for_calendar(enhanced_file)
                                 if file_datetime:
@@ -5016,23 +5198,33 @@ You can dismiss this warning and continue using the application with limited aud
                                     self._calendar_cache_manager.cache_meeting_for_file(
                                         filename, file_datetime, simple_meeting
                                     )
-                                    logger.debug("GUI", "check_selected_files_live", 
-                                               f"Cached meeting data for {filename}: {simple_meeting.subject}")
-                                
+                                    logger.debug(
+                                        "GUI",
+                                        "check_selected_files_live",
+                                        f"Cached meeting data for {filename}: {simple_meeting.subject}",
+                                    )
+
                             except Exception as cache_error:
-                                logger.warning("GUI", "check_selected_files_live", 
-                                             f"Failed to cache meeting for {filename}: {cache_error}")
+                                logger.warning(
+                                    "GUI",
+                                    "check_selected_files_live",
+                                    f"Failed to cache meeting for {filename}: {cache_error}",
+                                )
                         else:
                             # Cache "no meeting" result
                             try:
                                 file_datetime = self._parse_file_datetime_for_calendar(enhanced_file)
                                 if file_datetime:
                                     self._calendar_cache_manager.cache_no_meeting_for_file(filename, file_datetime)
-                                    logger.debug("GUI", "check_selected_files_live", 
-                                               f"Cached 'no meeting' result for {filename}")
+                                    logger.debug(
+                                        "GUI", "check_selected_files_live", f"Cached 'no meeting' result for {filename}"
+                                    )
                             except Exception as cache_error:
-                                logger.warning("GUI", "check_selected_files_live", 
-                                             f"Failed to cache 'no meeting' for {filename}: {cache_error}")
+                                logger.warning(
+                                    "GUI",
+                                    "check_selected_files_live",
+                                    f"Failed to cache 'no meeting' for {filename}: {cache_error}",
+                                )
 
                 # Update only the selected files in the TreeView
                 files_with_meetings = 0
@@ -5040,60 +5232,62 @@ You can dismiss this warning and continue using the application with limited aud
                     filename = enhanced_file.get("name")
                     meeting_text = enhanced_file.get("meeting_display_text", "")
                     has_meeting = enhanced_file.get("has_meeting", False)
-                    
+
                     if has_meeting:
                         files_with_meetings += 1
-                    
+
                     # Update the specific file in the TreeView
                     if filename and self.file_tree.exists(filename):
                         self.file_tree.set(filename, "meeting", meeting_text)
-                        
+
                         # Also update the displayed_files_details for consistency
                         for i, displayed_file in enumerate(self.displayed_files_details):
                             if displayed_file.get("name") == filename:
                                 # Copy all meeting fields from enhanced file
                                 for key, value in enhanced_file.items():
-                                    if key.startswith('meeting_') or key == 'has_meeting':
+                                    if key.startswith("meeting_") or key == "has_meeting":
                                         self.displayed_files_details[i][key] = value
                                 break
-                
+
                 # Show results
                 self.update_status_bar(
                     progress_text=f"Meeting check completed - {files_with_meetings} of {len(selected_files)} files have meetings"
                 )
-                
+
                 # Show success message after a brief delay
-                self.after(300, lambda: messagebox.showinfo(
-                    "Meeting Check Complete",
-                    f"Checked {len(selected_files)} selected files using live calendar data.\n\n"
-                    f"Found meetings for {files_with_meetings} files.",
-                    parent=self
-                ))
-                
-                logger.info("GUI", "check_selected_files_for_meetings_gui", 
-                          f"Checked {len(selected_files)} files, found {files_with_meetings} with meetings")
-                
+                self.after(
+                    300,
+                    lambda: messagebox.showinfo(
+                        "Meeting Check Complete",
+                        f"Checked {len(selected_files)} selected files using live calendar data.\n\n"
+                        f"Found meetings for {files_with_meetings} files.",
+                        parent=self,
+                    ),
+                )
+
+                logger.info(
+                    "GUI",
+                    "check_selected_files_for_meetings_gui",
+                    f"Checked {len(selected_files)} files, found {files_with_meetings} with meetings",
+                )
+
             except Exception as e:
                 # Always hide overlay on error
                 self._hide_calendar_refresh_overlay()
-                
+
                 logger.error("GUI", "check_selected_files_for_meetings_gui", f"Error checking files for meetings: {e}")
                 messagebox.showerror(
-                    "Meeting Check Error",
-                    f"Failed to check selected files for meetings: {str(e)}",
-                    parent=self
+                    "Meeting Check Error", f"Failed to check selected files for meetings: {str(e)}", parent=self
                 )
-                
+
         except Exception as e:
             # Always hide overlay on error
             try:
                 self._hide_calendar_refresh_overlay()
             except:
                 pass
-                
+
             logger.error("GUI", "check_selected_files_for_meetings_gui", f"Error in meeting check: {e}")
             messagebox.showerror(
-                "Meeting Check Error",
-                f"Failed to check selected files for meetings: {str(e)}",
-                parent=self
+                "Meeting Check Error", f"Failed to check selected files for meetings: {str(e)}", parent=self
             )

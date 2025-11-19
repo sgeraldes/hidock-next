@@ -14,10 +14,11 @@ Endpoints:
 - GET /me/calendars - List calendars
 """
 
-import requests
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+
+import requests
 
 from config_and_logger import logger
 
@@ -46,18 +47,18 @@ class GraphCalendarEvent:
     def to_dict(self) -> Dict:
         """Convert to dictionary."""
         return {
-            'id': self.id,
-            'subject': self.subject,
-            'start_time': self.start_time.isoformat() if self.start_time else None,
-            'end_time': self.end_time.isoformat() if self.end_time else None,
-            'location': self.location,
-            'organizer': self.organizer,
-            'attendees': self.attendees,
-            'body': self.body,
-            'is_all_day': self.is_all_day,
-            'is_recurring': self.is_recurring,
-            'web_link': self.web_link,
-            'online_meeting_url': self.online_meeting_url,
+            "id": self.id,
+            "subject": self.subject,
+            "start_time": self.start_time.isoformat() if self.start_time else None,
+            "end_time": self.end_time.isoformat() if self.end_time else None,
+            "location": self.location,
+            "organizer": self.organizer,
+            "attendees": self.attendees,
+            "body": self.body,
+            "is_all_day": self.is_all_day,
+            "is_recurring": self.is_recurring,
+            "web_link": self.web_link,
+            "online_meeting_url": self.online_meeting_url,
         }
 
 
@@ -70,7 +71,7 @@ class MicrosoftGraphAPI:
         events = api.get_calendar_events(start_date, end_date)
     """
 
-    BASE_URL = 'https://graph.microsoft.com/v1.0'
+    BASE_URL = "https://graph.microsoft.com/v1.0"
 
     def __init__(self, access_token: str):
         """
@@ -81,16 +82,15 @@ class MicrosoftGraphAPI:
         """
         self.access_token = access_token
         self.session = requests.Session()
-        self.session.headers.update({
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/json',
-        })
+        self.session.headers.update(
+            {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            }
+        )
 
     def get_calendar_events(
-        self,
-        start_date: datetime,
-        end_date: datetime,
-        max_results: int = 100
+        self, start_date: datetime, end_date: datetime, max_results: int = 100
     ) -> List[GraphCalendarEvent]:
         """
         Get calendar events in date range.
@@ -112,22 +112,21 @@ class MicrosoftGraphAPI:
 
         # Format dates as ISO 8601 with timezone
         params = {
-            'startDateTime': start_date.isoformat(),
-            'endDateTime': end_date.isoformat(),
-            '$select': 'id,subject,start,end,location,organizer,attendees,bodyPreview,isAllDay,recurrence,webLink,onlineMeeting',
-            '$orderby': 'start/dateTime',
-            '$top': max_results,
+            "startDateTime": start_date.isoformat(),
+            "endDateTime": end_date.isoformat(),
+            "$select": "id,subject,start,end,location,organizer,attendees,bodyPreview,isAllDay,recurrence,webLink,onlineMeeting",
+            "$orderby": "start/dateTime",
+            "$top": max_results,
         }
 
-        logger.info("GraphAPI", "get_events",
-                   f"Fetching events from {start_date.date()} to {end_date.date()}")
+        logger.info("GraphAPI", "get_events", f"Fetching events from {start_date.date()} to {end_date.date()}")
 
         try:
             response = self.session.get(url, params=params, timeout=30)
             response.raise_for_status()
 
             data = response.json()
-            events_data = data.get('value', [])
+            events_data = data.get("value", [])
 
             logger.info("GraphAPI", "get_events", f"Retrieved {len(events_data)} events")
 
@@ -162,57 +161,57 @@ class MicrosoftGraphAPI:
         start_time = None
         end_time = None
 
-        if 'start' in event_data and event_data['start']:
-            start_str = event_data['start'].get('dateTime')
+        if "start" in event_data and event_data["start"]:
+            start_str = event_data["start"].get("dateTime")
             if start_str:
                 # Graph API returns datetime with timezone info
-                start_time = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+                start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
 
-        if 'end' in event_data and event_data['end']:
-            end_str = event_data['end'].get('dateTime')
+        if "end" in event_data and event_data["end"]:
+            end_str = event_data["end"].get("dateTime")
             if end_str:
-                end_time = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+                end_time = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
 
         # Parse organizer
         organizer = ""
-        if 'organizer' in event_data and event_data['organizer']:
-            email_address = event_data['organizer'].get('emailAddress', {})
-            organizer = email_address.get('address', '')
+        if "organizer" in event_data and event_data["organizer"]:
+            email_address = event_data["organizer"].get("emailAddress", {})
+            organizer = email_address.get("address", "")
 
         # Parse attendees
         attendees = []
-        if 'attendees' in event_data and event_data['attendees']:
-            for attendee in event_data['attendees']:
-                email_address = attendee.get('emailAddress', {})
-                email = email_address.get('address', '')
+        if "attendees" in event_data and event_data["attendees"]:
+            for attendee in event_data["attendees"]:
+                email_address = attendee.get("emailAddress", {})
+                email = email_address.get("address", "")
                 if email:
                     attendees.append(email)
 
         # Parse location
         location = ""
-        if 'location' in event_data and event_data['location']:
-            location = event_data['location'].get('displayName', '')
+        if "location" in event_data and event_data["location"]:
+            location = event_data["location"].get("displayName", "")
 
         # Parse online meeting URL
         online_meeting_url = ""
-        if 'onlineMeeting' in event_data and event_data['onlineMeeting']:
-            online_meeting_url = event_data['onlineMeeting'].get('joinUrl', '')
+        if "onlineMeeting" in event_data and event_data["onlineMeeting"]:
+            online_meeting_url = event_data["onlineMeeting"].get("joinUrl", "")
 
         # Check if recurring
-        is_recurring = bool(event_data.get('recurrence'))
+        is_recurring = bool(event_data.get("recurrence"))
 
         return GraphCalendarEvent(
-            id=event_data.get('id', ''),
-            subject=event_data.get('subject', 'No Subject'),
+            id=event_data.get("id", ""),
+            subject=event_data.get("subject", "No Subject"),
             start_time=start_time,
             end_time=end_time,
             location=location,
             organizer=organizer,
             attendees=attendees,
-            body=event_data.get('bodyPreview', ''),
-            is_all_day=event_data.get('isAllDay', False),
+            body=event_data.get("bodyPreview", ""),
+            is_all_day=event_data.get("isAllDay", False),
             is_recurring=is_recurring,
-            web_link=event_data.get('webLink', ''),
+            web_link=event_data.get("webLink", ""),
             online_meeting_url=online_meeting_url,
         )
 
@@ -226,7 +225,7 @@ class MicrosoftGraphAPI:
         url = f"{self.BASE_URL}/me"
 
         params = {
-            '$select': 'id,displayName,mail,userPrincipalName',
+            "$select": "id,displayName,mail,userPrincipalName",
         }
 
         try:
@@ -236,9 +235,9 @@ class MicrosoftGraphAPI:
             user_data = response.json()
 
             return {
-                'id': user_data.get('id', ''),
-                'name': user_data.get('displayName', ''),
-                'email': user_data.get('mail') or user_data.get('userPrincipalName', ''),
+                "id": user_data.get("id", ""),
+                "name": user_data.get("displayName", ""),
+                "email": user_data.get("mail") or user_data.get("userPrincipalName", ""),
             }
 
         except Exception as e:
@@ -246,10 +245,7 @@ class MicrosoftGraphAPI:
             return {}
 
     def find_event_for_recording(
-        self,
-        recording_time: datetime,
-        duration_seconds: Optional[int] = None,
-        tolerance_minutes: int = 30
+        self, recording_time: datetime, duration_seconds: Optional[int] = None, tolerance_minutes: int = 30
     ) -> Optional[GraphCalendarEvent]:
         """
         Find calendar event matching a recording timestamp.
@@ -296,14 +292,13 @@ class MicrosoftGraphAPI:
                         best_match = event
 
         if best_match:
-            logger.info("GraphAPI", "find_event",
-                       f"Found match: '{best_match.subject}' (score: {best_score:.2f})")
+            logger.info("GraphAPI", "find_event", f"Found match: '{best_match.subject}' (score: {best_score:.2f})")
 
         return best_match
 
 
 # Testing interface
-if __name__ == '__main__':
+if __name__ == "__main__":
     import sys
 
     print("=== Microsoft Graph API Test ===\n")

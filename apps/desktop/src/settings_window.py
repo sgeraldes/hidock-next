@@ -112,25 +112,25 @@ class SettingsDialog(ctk.CTkToplevel):
         min_width, min_height = 650, 600
         req_width = self.winfo_reqwidth() + 40  # Add padding
         req_height = self.winfo_reqheight() + 40
-        
+
         # Set size
         window_width = max(min_width, req_width)
         window_height = max(min_height, req_height)
-        
+
         # Center on parent window
         parent_x = self.parent_gui.winfo_x()
         parent_y = self.parent_gui.winfo_y()
         parent_width = self.parent_gui.winfo_width()
         parent_height = self.parent_gui.winfo_height()
-        
+
         # Calculate centered position
         x = parent_x + (parent_width - window_width) // 2
         y = parent_y + (parent_height - window_height) // 2
-        
+
         # Ensure window stays on screen (basic bounds check)
         x = max(0, x)
         y = max(0, y)
-        
+
         self.geometry(f"{window_width}x{window_height}+{x}+{y}")
         self.minsize(min_width, min_height)
         self.deiconify()  # Show window after positioning
@@ -419,7 +419,7 @@ class SettingsDialog(ctk.CTkToplevel):
             textvariable=self.local_vars["auto_refresh_interval_s_var"],
             width=60,
         ).pack(anchor="w", pady=(2, 10), padx=10)
-        
+
         # Calendar Settings Section
 
     def _populate_device_specific_tab(self, tab):
@@ -466,14 +466,14 @@ class SettingsDialog(ctk.CTkToplevel):
         """Populates the 'Logging' tab with relevant settings widgets."""
         scroll_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
         scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        
+
         # Console Logging Section
         ctk.CTkLabel(
             scroll_frame,
             text="Console Logging:",
             font=ctk.CTkFont(weight="bold"),
         ).pack(anchor="w", pady=(5, 2), padx=5)
-        
+
         self.console_enable_checkbox = ctk.CTkCheckBox(
             scroll_frame,
             text="Enable console logging",
@@ -481,7 +481,7 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._on_console_logging_enabled_changed,
         )
         self.console_enable_checkbox.pack(anchor="w", pady=(5, 5), padx=10)
-        
+
         console_level_frame = ctk.CTkFrame(scroll_frame)
         console_level_frame.pack(fill="x", pady=2, padx=10)
         ctk.CTkLabel(console_level_frame, text="Level:", width=80, anchor="w").pack(side="left", padx=(5, 5))
@@ -493,14 +493,14 @@ class SettingsDialog(ctk.CTkToplevel):
             width=120,
         )
         self.console_log_level_combo.pack(side="left", padx=(0, 5))
-        
+
         # GUI Logging Section
         ctk.CTkLabel(
             scroll_frame,
             text="GUI Logging:",
             font=ctk.CTkFont(weight="bold"),
         ).pack(anchor="w", pady=(20, 2), padx=5)
-        
+
         self.gui_enable_checkbox = ctk.CTkCheckBox(
             scroll_frame,
             text="Enable GUI logging",
@@ -508,7 +508,7 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._on_gui_logging_enabled_changed,
         )
         self.gui_enable_checkbox.pack(anchor="w", pady=(5, 5), padx=10)
-        
+
         gui_level_frame = ctk.CTkFrame(scroll_frame)
         gui_level_frame.pack(fill="x", pady=2, padx=10)
         ctk.CTkLabel(gui_level_frame, text="Level:", width=80, anchor="w").pack(side="left", padx=(5, 5))
@@ -520,7 +520,7 @@ class SettingsDialog(ctk.CTkToplevel):
             width=120,
         )
         self.gui_log_level_combo.pack(side="left", padx=(0, 5))
-        
+
         # Add info text about GUI logging behavior
         ctk.CTkLabel(
             scroll_frame,
@@ -528,14 +528,14 @@ class SettingsDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(size=10),
             text_color="gray70",
         ).pack(anchor="w", pady=(2, 10), padx=10)
-        
+
         # File Logging Section
         ctk.CTkLabel(
             scroll_frame,
             text="File Logging:",
             font=ctk.CTkFont(weight="bold"),
         ).pack(anchor="w", pady=(20, 2), padx=5)
-        
+
         self.file_enable_checkbox = ctk.CTkCheckBox(
             scroll_frame,
             text="Enable file logging",
@@ -543,7 +543,7 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._on_file_logging_enabled_changed,
         )
         self.file_enable_checkbox.pack(anchor="w", pady=(5, 5), padx=10)
-        
+
         file_level_frame = ctk.CTkFrame(scroll_frame)
         file_level_frame.pack(fill="x", pady=2, padx=10)
         ctk.CTkLabel(file_level_frame, text="Level:", width=80, anchor="w").pack(side="left", padx=(5, 5))
@@ -555,7 +555,7 @@ class SettingsDialog(ctk.CTkToplevel):
             width=120,
         )
         self.file_log_level_combo.pack(side="left", padx=(0, 5))
-        
+
         # File logging path
         log_path_frame = ctk.CTkFrame(scroll_frame)
         log_path_frame.pack(fill="x", pady=2, padx=10)
@@ -566,7 +566,7 @@ class SettingsDialog(ctk.CTkToplevel):
             width=200,
         )
         self.log_file_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        
+
         # File logging max size
         log_size_frame = ctk.CTkFrame(scroll_frame)
         log_size_frame.pack(fill="x", pady=2, padx=10)
@@ -577,7 +577,7 @@ class SettingsDialog(ctk.CTkToplevel):
             width=80,
         )
         self.log_file_max_size_entry.pack(side="left", padx=(0, 5))
-        
+
         # File logging backup count
         log_backup_frame = ctk.CTkFrame(scroll_frame)
         log_backup_frame.pack(fill="x", pady=2, padx=10)
@@ -588,7 +588,7 @@ class SettingsDialog(ctk.CTkToplevel):
             width=80,
         )
         self.log_file_backup_count_entry.pack(side="left", padx=(0, 5))
-        
+
         # Initialize control states
         self._on_console_logging_enabled_changed()
         self._on_gui_logging_enabled_changed()
@@ -1394,7 +1394,7 @@ class SettingsDialog(ctk.CTkToplevel):
         else:
             # Fallback to current directory if config path not available
             config_dir = os.getcwd()
-        
+
         key_file = os.path.join(config_dir, ".hidock_key.dat")
 
         try:
@@ -1643,28 +1643,29 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _on_appearance_change(self, value):
         """Handle appearance mode change with immediate save and apply."""
-        from config_and_logger import update_config_settings
         import customtkinter as ctk
+
+        from config_and_logger import update_config_settings
 
         # Save current window state
         current_x = self.winfo_x()
-        current_y = self.winfo_y() 
+        current_y = self.winfo_y()
         current_width = self.winfo_width()
         current_height = self.winfo_height()
-        
+
         # Temporarily remove transient to prevent position issues
         self.transient(None)
-        
+
         # Update the config and parent GUI
         update_config_settings({"appearance_mode": value})
         self.parent_gui.appearance_mode_var.set(value)
-        
+
         # Apply theme to CTk directly (affects this window too)
         ctk.set_appearance_mode(value)
-        
+
         # Update parent's theme
         self.parent_gui.apply_theme_and_color()
-        
+
         # Schedule restoration of window properties
         def restore_window():
             # Restore exact position and size
@@ -1675,48 +1676,49 @@ class SettingsDialog(ctk.CTkToplevel):
             self.lift()
             self.focus_force()
             self.grab_set()
-        
+
         # Use after to ensure theme changes are applied first
         self.after(50, restore_window)
 
     def _on_theme_change(self, value):
         """Handle color theme change with immediate save and apply."""
-        from config_and_logger import update_config_settings
         import customtkinter as ctk
+
+        from config_and_logger import update_config_settings
 
         # Save current window state
         current_x = self.winfo_x()
         current_y = self.winfo_y()
         current_width = self.winfo_width()
         current_height = self.winfo_height()
-        
+
         # Temporarily remove transient to prevent position issues
         self.transient(None)
-        
+
         # Update the config and parent GUI
         update_config_settings({"color_theme": value})
         self.parent_gui.color_theme_var.set(value)
-        
+
         # Apply the color theme
         try:
             ctk.set_default_color_theme(value)
         except:
             pass  # Theme might not exist or be already set
-            
+
         # Update parent's theme
         self.parent_gui.apply_theme_and_color()
-        
+
         # Schedule restoration of window properties
         def restore_window():
             # Restore exact position and size
             self.geometry(f"{current_width}x{current_height}+{current_x}+{current_y}")
             # Re-establish transient relationship
             self.transient(self.parent_gui)
-            # Ensure window stays on top and focused  
+            # Ensure window stays on top and focused
             self.lift()
             self.focus_force()
             self.grab_set()
-        
+
         # Use after to ensure theme changes are applied first
         self.after(50, restore_window)
 
@@ -1780,34 +1782,42 @@ class SettingsDialog(ctk.CTkToplevel):
                 return
 
             local_tk_var = self.local_vars[var_name]
-            
+
             # Handle calendar settings specially - they don't have corresponding parent_gui variables
             calendar_var_names = [
                 "calendar_tolerance_minutes_var",
-                "enable_calendar_integration_var", 
+                "enable_calendar_integration_var",
                 "calendar_cache_expiry_hours_var",
                 "auto_refresh_calendar_on_connect_var",
                 "include_organizer_in_display_var",
-                "max_meeting_display_length_var"
+                "max_meeting_display_length_var",
             ]
-            
+
             if var_name in calendar_var_names:
                 value = local_tk_var.get()
                 config_key = var_name.replace("_var", "")
-                
+
                 # Convert string values to int for numeric calendar settings
-                if var_name in ["calendar_tolerance_minutes_var", "calendar_cache_expiry_hours_var", "max_meeting_display_length_var"]:
+                if var_name in [
+                    "calendar_tolerance_minutes_var",
+                    "calendar_cache_expiry_hours_var",
+                    "max_meeting_display_length_var",
+                ]:
                     try:
                         value = int(str(value).strip())
                         logger.debug("SettingsDialog", "_save_single_setting", f"Converted {var_name} to int: {value}")
                     except (ValueError, AttributeError):
-                        logger.warning("SettingsDialog", "_save_single_setting", f"Invalid numeric value for {var_name}: {value}")
+                        logger.warning(
+                            "SettingsDialog", "_save_single_setting", f"Invalid numeric value for {var_name}: {value}"
+                        )
                         return  # Skip invalid values
-                
-                logger.info("SettingsDialog", "_save_single_setting", f"Saving calendar setting: {config_key} = {value}")
+
+                logger.info(
+                    "SettingsDialog", "_save_single_setting", f"Saving calendar setting: {config_key} = {value}"
+                )
                 update_config_settings({config_key: value})
                 return
-            
+
             if not hasattr(self.parent_gui, var_name):
                 logger.debug("SettingsDialog", "_save_single_setting", f"Skipping {var_name} - not in parent_gui")
                 return
@@ -1880,39 +1890,39 @@ class SettingsDialog(ctk.CTkToplevel):
 
         except Exception as e:
             logger.error("SettingsDialog", "_save_single_setting", f"Error saving {var_name}: {e}")
-    
+
     def _on_console_logging_enabled_changed(self):
         """Handle console logging enable/disable changes."""
         if not hasattr(self, "local_vars") or "enable_console_logging_var" not in self.local_vars:
             return
-        
+
         enabled = self.local_vars["enable_console_logging_var"].get()
-        
+
         # Enable/disable console logging level combo
         if hasattr(self, "console_log_level_combo"):
             self.console_log_level_combo.configure(state="readonly" if enabled else "disabled")
-    
+
     def _on_gui_logging_enabled_changed(self):
         """Handle GUI logging enable/disable changes."""
         if not hasattr(self, "local_vars") or "enable_gui_logging_var" not in self.local_vars:
             return
-        
+
         enabled = self.local_vars["enable_gui_logging_var"].get()
-        
+
         # Enable/disable GUI logging level combo
         if hasattr(self, "gui_log_level_combo"):
             self.gui_log_level_combo.configure(state="readonly" if enabled else "disabled")
-    
+
     def _on_file_logging_enabled_changed(self):
         """Handle file logging enable/disable changes."""
         if not hasattr(self, "local_vars") or "enable_file_logging_var" not in self.local_vars:
             return
-        
+
         enabled = self.local_vars["enable_file_logging_var"].get()
-        
+
         # Enable/disable file logging related fields
         state = "normal" if enabled else "disabled"
-        
+
         if hasattr(self, "log_file_path_entry"):
             self.log_file_path_entry.configure(state=state)
         if hasattr(self, "log_file_max_size_entry"):
@@ -1921,7 +1931,7 @@ class SettingsDialog(ctk.CTkToplevel):
             self.log_file_backup_count_entry.configure(state=state)
         if hasattr(self, "file_log_level_combo"):
             self.file_log_level_combo.configure(state="readonly" if enabled else "disabled")
-    
+
     def _populate_calendar_tab(self, tab):
         """Populates the 'Calendar Sync' tab with calendar integration settings."""
         scroll_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
@@ -1940,7 +1950,7 @@ class SettingsDialog(ctk.CTkToplevel):
             self.calendar_status_frame,
             text="⚠️  Not connected - Click below to connect your calendar",
             font=ctk.CTkFont(size=11),
-            text_color="gray70"
+            text_color="gray70",
         )
         self.calendar_status_label.pack(pady=10, padx=10)
 
@@ -1953,7 +1963,7 @@ class SettingsDialog(ctk.CTkToplevel):
             text="Connect Microsoft Outlook",
             command=lambda: self._connect_calendar_provider("microsoft"),
             width=200,
-            height=32
+            height=32,
         )
         self.connect_microsoft_btn.pack(side="left", padx=(0, 5))
 
@@ -1964,7 +1974,7 @@ class SettingsDialog(ctk.CTkToplevel):
             width=200,
             height=32,
             fg_color="gray30",
-            hover_color="gray40"
+            hover_color="gray40",
         )
         self.connect_google_btn.pack(side="left", padx=(0, 5))
 
@@ -1975,7 +1985,7 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._sync_calendar_manual,
             width=120,
             height=32,
-            state="disabled"
+            state="disabled",
         )
         self.sync_calendar_btn.pack(side="left")
 
@@ -1983,10 +1993,10 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             scroll_frame,
             text="💡 Connect your calendar to automatically match recordings with meetings.\n"
-                 "   Your browser will open for secure login. No passwords stored locally.",
+            "   Your browser will open for secure login. No passwords stored locally.",
             font=ctk.CTkFont(size=10),
             text_color="gray70",
-            justify="left"
+            justify="left",
         ).pack(anchor="w", pady=(0, 15), padx=10)
 
         # Separator
@@ -2000,16 +2010,18 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(scroll_frame, text="🔍 Meeting Detection:", font=ctk.CTkFont(weight="bold", size=14)).pack(
             anchor="w", pady=(10, 5), padx=5
         )
-        
+
         # Enable Calendar Integration (most important setting first)
         if "enable_calendar_integration_var" not in self.local_vars:
             from config_and_logger import load_config
+
             config = load_config()
-            current_value = config.get('enable_calendar_integration', True)
+            current_value = config.get("enable_calendar_integration", True)
             self.local_vars["enable_calendar_integration_var"] = ctk.BooleanVar(value=current_value)
-            self.local_vars["enable_calendar_integration_var"].trace_add("write", 
-                lambda *args: self._on_setting_change("enable_calendar_integration_var"))
-            
+            self.local_vars["enable_calendar_integration_var"].trace_add(
+                "write", lambda *args: self._on_setting_change("enable_calendar_integration_var")
+            )
+
         ctk.CTkCheckBox(
             scroll_frame,
             text="Enable calendar integration for meeting detection",
@@ -2018,28 +2030,32 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Time Tolerance
         ctk.CTkLabel(scroll_frame, text="Time Tolerance (minutes):").pack(anchor="w", pady=(5, 0), padx=10)
-        
+
         if "calendar_tolerance_minutes_var" not in self.local_vars:
             from config_and_logger import load_config
+
             config = load_config()
-            current_value = str(config.get('calendar_tolerance_minutes', 20))
+            current_value = str(config.get("calendar_tolerance_minutes", 20))
             self.local_vars["calendar_tolerance_minutes_var"] = ctk.StringVar(value=current_value)
-            self.local_vars["calendar_tolerance_minutes_var"].trace_add("write", 
-                lambda *args: self._on_setting_change("calendar_tolerance_minutes_var"))
-            
+            self.local_vars["calendar_tolerance_minutes_var"].trace_add(
+                "write", lambda *args: self._on_setting_change("calendar_tolerance_minutes_var")
+            )
+
         ctk.CTkEntry(scroll_frame, textvariable=self.local_vars["calendar_tolerance_minutes_var"], width=100).pack(
             anchor="w", pady=(2, 5), padx=10
         )
-        
+
         # Auto-refresh on connect
         if "auto_refresh_calendar_on_connect_var" not in self.local_vars:
             from config_and_logger import load_config
+
             config = load_config()
-            current_value = config.get('auto_refresh_calendar_on_connect', True)
+            current_value = config.get("auto_refresh_calendar_on_connect", True)
             self.local_vars["auto_refresh_calendar_on_connect_var"] = ctk.BooleanVar(value=current_value)
-            self.local_vars["auto_refresh_calendar_on_connect_var"].trace_add("write", 
-                lambda *args: self._on_setting_change("auto_refresh_calendar_on_connect_var"))
-            
+            self.local_vars["auto_refresh_calendar_on_connect_var"].trace_add(
+                "write", lambda *args: self._on_setting_change("auto_refresh_calendar_on_connect_var")
+            )
+
         ctk.CTkCheckBox(
             scroll_frame,
             text="Automatically check for meetings when connecting to device",
@@ -2047,15 +2063,13 @@ class SettingsDialog(ctk.CTkToplevel):
         ).pack(anchor="w", pady=(5, 15), padx=10)
 
         # ⚡ PERFORMANCE & OPTIMIZATION SECTION
-        ctk.CTkLabel(scroll_frame, text="⚡ Performance & Optimization:", font=ctk.CTkFont(weight="bold", size=14)).pack(
-            anchor="w", pady=(15, 5), padx=5
-        )
-        
+        ctk.CTkLabel(
+            scroll_frame, text="⚡ Performance & Optimization:", font=ctk.CTkFont(weight="bold", size=14)
+        ).pack(anchor="w", pady=(15, 5), padx=5)
+
         # Calendar Chunking Period (moved from Operation tab)
-        ctk.CTkLabel(scroll_frame, text="Calendar Chunking Period:").pack(
-            anchor="w", pady=(5, 0), padx=10
-        )
-        
+        ctk.CTkLabel(scroll_frame, text="Calendar Chunking Period:").pack(anchor="w", pady=(5, 0), padx=10)
+
         ctk.CTkComboBox(
             scroll_frame,
             variable=self.local_vars["calendar_chunking_period_var"],
@@ -2063,7 +2077,7 @@ class SettingsDialog(ctk.CTkToplevel):
             state="readonly",
             width=120,
         ).pack(anchor="w", pady=(2, 5), padx=10)
-        
+
         ctk.CTkLabel(
             scroll_frame,
             text="💡 Larger periods reduce Outlook API calls but may increase initial loading time",
@@ -2073,15 +2087,17 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Cache Expiry
         ctk.CTkLabel(scroll_frame, text="Cache Expiry (hours):").pack(anchor="w", pady=(5, 0), padx=10)
-        
+
         if "calendar_cache_expiry_hours_var" not in self.local_vars:
             from config_and_logger import load_config
+
             config = load_config()
-            current_value = str(config.get('calendar_cache_expiry_hours', 24))
+            current_value = str(config.get("calendar_cache_expiry_hours", 24))
             self.local_vars["calendar_cache_expiry_hours_var"] = ctk.StringVar(value=current_value)
-            self.local_vars["calendar_cache_expiry_hours_var"].trace_add("write", 
-                lambda *args: self._on_setting_change("calendar_cache_expiry_hours_var"))
-            
+            self.local_vars["calendar_cache_expiry_hours_var"].trace_add(
+                "write", lambda *args: self._on_setting_change("calendar_cache_expiry_hours_var")
+            )
+
         ctk.CTkEntry(scroll_frame, textvariable=self.local_vars["calendar_cache_expiry_hours_var"], width=100).pack(
             anchor="w", pady=(2, 15), padx=10
         )
@@ -2094,12 +2110,14 @@ class SettingsDialog(ctk.CTkToplevel):
         # Include organizer option
         if "include_organizer_in_display_var" not in self.local_vars:
             from config_and_logger import load_config
+
             config = load_config()
-            current_value = config.get('include_organizer_in_display', True)
+            current_value = config.get("include_organizer_in_display", True)
             self.local_vars["include_organizer_in_display_var"] = ctk.BooleanVar(value=current_value)
-            self.local_vars["include_organizer_in_display_var"].trace_add("write", 
-                lambda *args: self._on_setting_change("include_organizer_in_display_var"))
-            
+            self.local_vars["include_organizer_in_display_var"].trace_add(
+                "write", lambda *args: self._on_setting_change("include_organizer_in_display_var")
+            )
+
         ctk.CTkCheckBox(
             scroll_frame,
             text="Include meeting organizer in display text",
@@ -2108,22 +2126,24 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Max display length
         ctk.CTkLabel(scroll_frame, text="Max Display Length (characters):").pack(anchor="w", pady=(5, 0), padx=10)
-        
+
         if "max_meeting_display_length_var" not in self.local_vars:
             from config_and_logger import load_config
+
             config = load_config()
-            current_value = str(config.get('max_meeting_display_length', 45))
+            current_value = str(config.get("max_meeting_display_length", 45))
             self.local_vars["max_meeting_display_length_var"] = ctk.StringVar(value=current_value)
-            self.local_vars["max_meeting_display_length_var"].trace_add("write", 
-                lambda *args: self._on_setting_change("max_meeting_display_length_var"))
-            
+            self.local_vars["max_meeting_display_length_var"].trace_add(
+                "write", lambda *args: self._on_setting_change("max_meeting_display_length_var")
+            )
+
         ctk.CTkEntry(scroll_frame, textvariable=self.local_vars["max_meeting_display_length_var"], width=100).pack(
             anchor="w", pady=(2, 15), padx=10
         )
 
         # Bottom note
         ctk.CTkLabel(
-            scroll_frame, 
+            scroll_frame,
             text="ℹ️ All settings apply immediately to both bulk and individual refresh operations",
             font=ctk.CTkFont(size=11, slant="italic"),
             text_color="gray60",
@@ -2142,7 +2162,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
             # Get HiDock access token
             config = load_config()
-            access_token = config.get('hidock_access_token', '')
+            access_token = config.get("hidock_access_token", "")
 
             if not access_token:
                 messagebox.showwarning(
@@ -2150,14 +2170,15 @@ class SettingsDialog(ctk.CTkToplevel):
                     "HiDock access token not found.\n\n"
                     "Please login to your HiDock account first.\n\n"
                     "For now, you can manually set 'hidock_access_token' in config file.\n"
-                    "Automatic login flow coming soon!"
+                    "Automatic login flow coming soon!",
                 )
                 return
 
             # Callback when connection succeeds
             def on_connection_success(connected_provider: str, email: str):
-                logger.info("SettingsDialog", "calendar_connected",
-                           f"Successfully connected {connected_provider}: {email}")
+                logger.info(
+                    "SettingsDialog", "calendar_connected", f"Successfully connected {connected_provider}: {email}"
+                )
 
                 # Update status display
                 self._update_calendar_connection_status()
@@ -2170,16 +2191,10 @@ class SettingsDialog(ctk.CTkToplevel):
 
         except ImportError as e:
             logger.error("SettingsDialog", "connect_calendar", f"Import error: {e}")
-            messagebox.showerror(
-                "Module Not Found",
-                f"Calendar integration module not found.\n\nError: {e}"
-            )
+            messagebox.showerror("Module Not Found", f"Calendar integration module not found.\n\nError: {e}")
         except Exception as e:
             logger.error("SettingsDialog", "connect_calendar", f"Error: {e}")
-            messagebox.showerror(
-                "Connection Error",
-                f"Failed to open calendar connection dialog.\n\nError: {e}"
-            )
+            messagebox.showerror("Connection Error", f"Failed to open calendar connection dialog.\n\nError: {e}")
 
     def _update_calendar_connection_status(self):
         """Update the calendar connection status display."""
@@ -2188,13 +2203,10 @@ class SettingsDialog(ctk.CTkToplevel):
             from config_and_logger import load_config
 
             config = load_config()
-            access_token = config.get('hidock_access_token', '')
+            access_token = config.get("hidock_access_token", "")
 
             if not access_token:
-                self.calendar_status_label.configure(
-                    text="⚠️  HiDock access token not configured",
-                    text_color="orange"
-                )
+                self.calendar_status_label.configure(text="⚠️  HiDock access token not configured", text_color="orange")
                 return
 
             manager = CalendarConnectionManager(config, access_token)
@@ -2208,37 +2220,27 @@ class SettingsDialog(ctk.CTkToplevel):
                     status_parts.append(f"{provider_name}: {email}")
 
                 status_text = "✓ Connected: " + " | ".join(status_parts)
-                self.calendar_status_label.configure(
-                    text=status_text,
-                    text_color="green"
-                )
+                self.calendar_status_label.configure(text=status_text, text_color="green")
 
                 # Enable sync button
-                if hasattr(self, 'sync_calendar_btn'):
+                if hasattr(self, "sync_calendar_btn"):
                     self.sync_calendar_btn.configure(state="normal")
 
                 logger.info("SettingsDialog", "calendar_status", f"Connected: {connected_providers}")
             else:
                 self.calendar_status_label.configure(
-                    text="⚠️  Not connected - Click below to connect your calendar",
-                    text_color="gray70"
+                    text="⚠️  Not connected - Click below to connect your calendar", text_color="gray70"
                 )
 
                 # Disable sync button
-                if hasattr(self, 'sync_calendar_btn'):
+                if hasattr(self, "sync_calendar_btn"):
                     self.sync_calendar_btn.configure(state="disabled")
 
         except ImportError:
-            self.calendar_status_label.configure(
-                text="⚠️  Calendar module not available",
-                text_color="red"
-            )
+            self.calendar_status_label.configure(text="⚠️  Calendar module not available", text_color="red")
         except Exception as e:
             logger.error("SettingsDialog", "update_calendar_status", f"Error: {e}")
-            self.calendar_status_label.configure(
-                text=f"⚠️  Error checking status: {str(e)[:50]}",
-                text_color="red"
-            )
+            self.calendar_status_label.configure(text=f"⚠️  Error checking status: {str(e)[:50]}", text_color="red")
 
     def _sync_calendar_manual(self):
         """Manually trigger calendar sync for all connected providers."""
@@ -2247,7 +2249,7 @@ class SettingsDialog(ctk.CTkToplevel):
             from config_and_logger import load_config
 
             config = load_config()
-            access_token = config.get('hidock_access_token', '')
+            access_token = config.get("hidock_access_token", "")
 
             if not access_token:
                 messagebox.showwarning("No Access Token", "HiDock access token not found")
@@ -2269,8 +2271,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
             # Show results
             messagebox.showinfo(
-                "Calendar Sync",
-                "Sync triggered for connected calendars:\n\n" + "\n".join(sync_results)
+                "Calendar Sync", "Sync triggered for connected calendars:\n\n" + "\n".join(sync_results)
             )
 
         except Exception as e:
@@ -2288,11 +2289,11 @@ class SettingsDialog(ctk.CTkToplevel):
             True if sync triggered successfully
         """
         try:
-            from hinotes_calendar_service import HiNotesCalendarService
             from config_and_logger import load_config
+            from hinotes_calendar_service import HiNotesCalendarService
 
             config = load_config()
-            access_token = config.get('hidock_access_token', '')
+            access_token = config.get("hidock_access_token", "")
 
             if not access_token:
                 return False

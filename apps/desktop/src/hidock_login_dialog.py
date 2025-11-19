@@ -13,9 +13,10 @@ Features:
 - Success callback
 """
 
-import customtkinter as ctk
 import threading
-from typing import Optional, Callable
+from typing import Callable, Optional
+
+import customtkinter as ctk
 
 from config_and_logger import logger
 from hidock_auth_service import HiDockAuthService
@@ -66,35 +67,22 @@ class HiDockLoginDialog(ctk.CTkToplevel):
         main_frame.pack(fill="both", expand=True, padx=30, pady=30)
 
         # Title
-        title_label = ctk.CTkLabel(
-            main_frame,
-            text="Login to HiDock",
-            font=("Segoe UI", 20, "bold")
-        )
+        title_label = ctk.CTkLabel(main_frame, text="Login to HiDock", font=("Segoe UI", 20, "bold"))
         title_label.pack(pady=(0, 10))
 
         # Subtitle
         subtitle_label = ctk.CTkLabel(
-            main_frame,
-            text="Sign in with your HiDock account",
-            font=("Segoe UI", 11),
-            text_color="gray70"
+            main_frame, text="Sign in with your HiDock account", font=("Segoe UI", 11), text_color="gray70"
         )
         subtitle_label.pack(pady=(0, 25))
 
         # Username/Email field
-        ctk.CTkLabel(
-            main_frame,
-            text="Email or Username:",
-            font=("Segoe UI", 11),
-            anchor="w"
-        ).pack(fill="x", pady=(0, 5))
+        ctk.CTkLabel(main_frame, text="Email or Username:", font=("Segoe UI", 11), anchor="w").pack(
+            fill="x", pady=(0, 5)
+        )
 
         self.username_entry = ctk.CTkEntry(
-            main_frame,
-            height=35,
-            font=("Segoe UI", 11),
-            placeholder_text="your.email@example.com"
+            main_frame, height=35, font=("Segoe UI", 11), placeholder_text="your.email@example.com"
         )
         self.username_entry.pack(fill="x", pady=(0, 15))
 
@@ -102,12 +90,7 @@ class HiDockLoginDialog(ctk.CTkToplevel):
         password_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
         password_frame.pack(fill="x", pady=(0, 5))
 
-        ctk.CTkLabel(
-            password_frame,
-            text="Password:",
-            font=("Segoe UI", 11),
-            anchor="w"
-        ).pack(side="left")
+        ctk.CTkLabel(password_frame, text="Password:", font=("Segoe UI", 11), anchor="w").pack(side="left")
 
         self.show_password_var = ctk.BooleanVar(value=False)
         self.show_password_checkbox = ctk.CTkCheckBox(
@@ -116,36 +99,24 @@ class HiDockLoginDialog(ctk.CTkToplevel):
             variable=self.show_password_var,
             command=self._toggle_password_visibility,
             width=60,
-            font=("Segoe UI", 10)
+            font=("Segoe UI", 10),
         )
         self.show_password_checkbox.pack(side="right")
 
         self.password_entry = ctk.CTkEntry(
-            main_frame,
-            height=35,
-            font=("Segoe UI", 11),
-            show="●",
-            placeholder_text="Enter your password"
+            main_frame, height=35, font=("Segoe UI", 11), show="●", placeholder_text="Enter your password"
         )
         self.password_entry.pack(fill="x", pady=(0, 15))
 
         # Remember me checkbox
         self.remember_me_var = ctk.BooleanVar(value=True)
         self.remember_me_checkbox = ctk.CTkCheckBox(
-            main_frame,
-            text="Keep me logged in",
-            variable=self.remember_me_var,
-            font=("Segoe UI", 11)
+            main_frame, text="Keep me logged in", variable=self.remember_me_var, font=("Segoe UI", 11)
         )
         self.remember_me_checkbox.pack(anchor="w", pady=(0, 20))
 
         # Status/error label
-        self.status_label = ctk.CTkLabel(
-            main_frame,
-            text="",
-            font=("Segoe UI", 10),
-            wraplength=380
-        )
+        self.status_label = ctk.CTkLabel(main_frame, text="", font=("Segoe UI", 10), wraplength=380)
         self.status_label.pack(pady=(0, 15))
 
         # Buttons frame
@@ -153,12 +124,7 @@ class HiDockLoginDialog(ctk.CTkToplevel):
         button_frame.pack(fill="x", pady=(10, 0))
 
         self.login_button = ctk.CTkButton(
-            button_frame,
-            text="Login",
-            command=self._do_login,
-            width=140,
-            height=40,
-            font=("Segoe UI", 13, "bold")
+            button_frame, text="Login", command=self._do_login, width=140, height=40, font=("Segoe UI", 13, "bold")
         )
         self.login_button.pack(side="left", expand=True, padx=(0, 5))
 
@@ -169,7 +135,7 @@ class HiDockLoginDialog(ctk.CTkToplevel):
             width=100,
             height=40,
             fg_color="gray",
-            hover_color="darkgray"
+            hover_color="darkgray",
         )
         self.cancel_button.pack(side="left", expand=True, padx=(5, 0))
 
@@ -188,16 +154,13 @@ class HiDockLoginDialog(ctk.CTkToplevel):
         """Check if user is already logged in."""
         if self.auth_service.is_logged_in():
             user_info = self.auth_service.get_user_info()
-            username = user_info.get('email') or user_info.get('username', '')
+            username = user_info.get("email") or user_info.get("username", "")
 
             if username:
                 self.username_entry.insert(0, username)
                 self.password_entry.focus()
 
-                self.status_label.configure(
-                    text=f"Previously logged in as: {username}",
-                    text_color="gray70"
-                )
+                self.status_label.configure(text=f"Previously logged in as: {username}", text_color="gray70")
 
     def _do_login(self):
         """Initiate login process."""
@@ -209,18 +172,12 @@ class HiDockLoginDialog(ctk.CTkToplevel):
 
         # Validation
         if not username:
-            self.status_label.configure(
-                text="⚠️ Please enter your email or username",
-                text_color="orange"
-            )
+            self.status_label.configure(text="⚠️ Please enter your email or username", text_color="orange")
             self.username_entry.focus()
             return
 
         if not password:
-            self.status_label.configure(
-                text="⚠️ Please enter your password",
-                text_color="orange"
-            )
+            self.status_label.configure(text="⚠️ Please enter your password", text_color="orange")
             self.password_entry.focus()
             return
 
@@ -229,9 +186,7 @@ class HiDockLoginDialog(ctk.CTkToplevel):
         self._set_loading_state(True)
 
         login_thread = threading.Thread(
-            target=self._login_worker,
-            args=(username, password, self.remember_me_var.get()),
-            daemon=True
+            target=self._login_worker, args=(username, password, self.remember_me_var.get()), daemon=True
         )
         login_thread.start()
 
@@ -253,10 +208,7 @@ class HiDockLoginDialog(ctk.CTkToplevel):
         self._set_loading_state(False)
 
         if success:
-            self.status_label.configure(
-                text="✓ Login successful!",
-                text_color="green"
-            )
+            self.status_label.configure(text="✓ Login successful!", text_color="green")
 
             logger.info("HiDockLogin", "success", "Login successful")
 
@@ -271,39 +223,27 @@ class HiDockLoginDialog(ctk.CTkToplevel):
         else:
             # Show error message
             error_msg = error or "Login failed. Please try again."
-            self.status_label.configure(
-                text=f"✗ {error_msg}",
-                text_color="red"
-            )
+            self.status_label.configure(text=f"✗ {error_msg}", text_color="red")
 
             logger.warning("HiDockLogin", "failed", error_msg)
 
             # Re-enable password field for retry
-            self.password_entry.delete(0, 'end')
+            self.password_entry.delete(0, "end")
             self.password_entry.focus()
 
     def _set_loading_state(self, loading: bool):
         """Set UI to loading state."""
         if loading:
-            self.login_button.configure(
-                text="Logging in...",
-                state="disabled"
-            )
+            self.login_button.configure(text="Logging in...", state="disabled")
             self.cancel_button.configure(state="disabled")
             self.username_entry.configure(state="disabled")
             self.password_entry.configure(state="disabled")
             self.remember_me_checkbox.configure(state="disabled")
 
-            self.status_label.configure(
-                text="⏳ Authenticating...",
-                text_color="gray70"
-            )
+            self.status_label.configure(text="⏳ Authenticating...", text_color="gray70")
 
         else:
-            self.login_button.configure(
-                text="Login",
-                state="normal"
-            )
+            self.login_button.configure(text="Login", state="normal")
             self.cancel_button.configure(state="normal")
             self.username_entry.configure(state="normal")
             self.password_entry.configure(state="normal")
@@ -355,7 +295,7 @@ class HiDockAccountManager:
 
 
 # Example usage for testing
-if __name__ == '__main__':
+if __name__ == "__main__":
     import tkinter as tk
 
     def on_login_success(token: str, user_info: dict):
@@ -378,7 +318,7 @@ if __name__ == '__main__':
     def update_status():
         if manager.is_logged_in():
             user_info = manager.get_user_info()
-            email = user_info.get('email') or user_info.get('username', 'Unknown')
+            email = user_info.get("email") or user_info.get("username", "Unknown")
             status_label.configure(text=f"Logged in as: {email}", text_color="green")
             login_btn.configure(text="Logout", command=do_logout)
         else:

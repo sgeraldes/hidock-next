@@ -23,13 +23,15 @@ import json
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, Dict
+from typing import Dict, Optional, Tuple
+
 import requests
 
-from config_and_logger import logger, load_config, save_config
+from config_and_logger import load_config, logger, save_config
 
 try:
     from cryptography.fernet import Fernet
+
     ENCRYPTION_AVAILABLE = True
 except ImportError:
     ENCRYPTION_AVAILABLE = False
@@ -44,11 +46,13 @@ HIDOCK_API_VERSION = "v1"
 
 class AuthenticationError(Exception):
     """Raised when authentication fails."""
+
     pass
 
 
 class TokenExpiredError(Exception):
     """Raised when access token has expired."""
+
     pass
 
 
@@ -82,16 +86,16 @@ class HiDockAuthService:
         if not ENCRYPTION_AVAILABLE:
             return None
 
-        key_file = os.path.join(os.path.dirname(__file__), '.hidock_auth_key.dat')
+        key_file = os.path.join(os.path.dirname(__file__), ".hidock_auth_key.dat")
 
         try:
             if os.path.exists(key_file):
-                with open(key_file, 'rb') as f:
+                with open(key_file, "rb") as f:
                     return f.read()
             else:
                 # Generate new key
                 key = Fernet.generate_key()
-                with open(key_file, 'wb') as f:
+                with open(key_file, "wb") as f:
                     f.write(key)
                 logger.info("HiDockAuth", "encryption_key", "Generated new encryption key")
                 return key
@@ -126,7 +130,9 @@ class HiDockAuthService:
             # Might be plain text from old version
             return encrypted_token
 
-    def login(self, username: str, password: str, remember_me: bool = True) -> Tuple[bool, Optional[str], Optional[str]]:
+    def login(
+        self, username: str, password: str, remember_me: bool = True
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
         """
         Authenticate user with username and password.
 
@@ -151,11 +157,7 @@ class HiDockAuthService:
         # Format 3: {"user": "...", "pass": "..."}
         # Format 4: {"account": "...", "password": "..."}
 
-        payload = {
-            "username": username,  # or "email", "account", etc.
-            "password": password,
-            "rememberMe": remember_me
-        }
+        payload = {"username": username, "password": password, "rememberMe": remember_me}  # or "email", "account", etc.
 
         try:
             logger.info("HiDockAuth", "login", f"Attempting login for user: {username}")
@@ -164,9 +166,9 @@ class HiDockAuthService:
                 url,
                 json=payload,
                 headers={
-                    'Content-Type': 'application/json',
+                    "Content-Type": "application/json",
                 },
-                timeout=30
+                timeout=30,
             )
 
             # Parse response
@@ -186,17 +188,17 @@ class HiDockAuthService:
                 # Try common patterns
                 if isinstance(data, dict):
                     # Pattern 1: data.accessToken
-                    if 'accessToken' in data:
-                        access_token = data['accessToken']
+                    if "accessToken" in data:
+                        access_token = data["accessToken"]
                     # Pattern 2: data.data.accessToken
-                    elif 'data' in data and isinstance(data['data'], dict):
-                        if 'accessToken' in data['data']:
-                            access_token = data['data']['accessToken']
-                        elif 'token' in data['data']:
-                            access_token = data['data']['token']
+                    elif "data" in data and isinstance(data["data"], dict):
+                        if "accessToken" in data["data"]:
+                            access_token = data["data"]["accessToken"]
+                        elif "token" in data["data"]:
+                            access_token = data["data"]["token"]
                     # Pattern 3: data.token
-                    elif 'token' in data:
-                        access_token = data['token']
+                    elif "token" in data:
+                        access_token = data["token"]
 
                 if access_token:
                     logger.info("HiDockAuth", "login", f"Login successful for {username}")
@@ -247,14 +249,14 @@ class HiDockAuthService:
         """Extract user information from login response."""
         try:
             # Common patterns for user info in response
-            if 'data' in response_data and isinstance(response_data['data'], dict):
-                data = response_data['data']
+            if "data" in response_data and isinstance(response_data["data"], dict):
+                data = response_data["data"]
                 return {
-                    'user_id': data.get('userId') or data.get('id') or data.get('uid'),
-                    'email': data.get('email'),
-                    'username': data.get('username') or data.get('name'),
-                    'expires_in': data.get('expiresIn'),
-                    'refresh_token': data.get('refreshToken'),
+                    "user_id": data.get("userId") or data.get("id") or data.get("uid"),
+                    "email": data.get("email"),
+                    "username": data.get("username") or data.get("name"),
+                    "expires_in": data.get("expiresIn"),
+                    "refresh_token": data.get("refreshToken"),
                 }
             return None
         except Exception as e:
@@ -264,19 +266,19 @@ class HiDockAuthService:
     def _save_user_info(self, user_info: Dict):
         """Save user information to config."""
         try:
-            if user_info.get('user_id'):
-                self.config['hidock_user_id'] = user_info['user_id']
-            if user_info.get('email'):
-                self.config['hidock_user_email'] = user_info['email']
-            if user_info.get('username'):
-                self.config['hidock_username'] = user_info['username']
-            if user_info.get('refresh_token'):
-                encrypted_refresh = self._encrypt_token(user_info['refresh_token'])
-                self.config['hidock_refresh_token_encrypted'] = encrypted_refresh
-            if user_info.get('expires_in'):
+            if user_info.get("user_id"):
+                self.config["hidock_user_id"] = user_info["user_id"]
+            if user_info.get("email"):
+                self.config["hidock_user_email"] = user_info["email"]
+            if user_info.get("username"):
+                self.config["hidock_username"] = user_info["username"]
+            if user_info.get("refresh_token"):
+                encrypted_refresh = self._encrypt_token(user_info["refresh_token"])
+                self.config["hidock_refresh_token_encrypted"] = encrypted_refresh
+            if user_info.get("expires_in"):
                 # Calculate expiry timestamp
-                expiry_time = datetime.now() + timedelta(seconds=user_info['expires_in'])
-                self.config['hidock_token_expiry'] = expiry_time.isoformat()
+                expiry_time = datetime.now() + timedelta(seconds=user_info["expires_in"])
+                self.config["hidock_token_expiry"] = expiry_time.isoformat()
 
             save_config()
             logger.info("HiDockAuth", "save_user_info", "User info saved")
@@ -287,9 +289,9 @@ class HiDockAuthService:
         """Save access token to config (encrypted)."""
         try:
             encrypted_token = self._encrypt_token(access_token)
-            self.config['hidock_access_token_encrypted'] = encrypted_token
-            self.config['hidock_last_login_username'] = username
-            self.config['hidock_last_login_time'] = datetime.now().isoformat()
+            self.config["hidock_access_token_encrypted"] = encrypted_token
+            self.config["hidock_last_login_username"] = username
+            self.config["hidock_last_login_time"] = datetime.now().isoformat()
             save_config()
             logger.info("HiDockAuth", "save_token", "Token saved securely")
         except Exception as e:
@@ -303,12 +305,12 @@ class HiDockAuthService:
             Decrypted access token if available, None otherwise
         """
         try:
-            encrypted_token = self.config.get('hidock_access_token_encrypted', '')
+            encrypted_token = self.config.get("hidock_access_token_encrypted", "")
             if encrypted_token:
                 return self._decrypt_token(encrypted_token)
 
             # Fallback to plain text (for backwards compatibility)
-            return self.config.get('hidock_access_token', '')
+            return self.config.get("hidock_access_token", "")
         except Exception as e:
             logger.error("HiDockAuth", "get_stored_token", f"Error retrieving token: {e}")
             return None
@@ -320,7 +322,7 @@ class HiDockAuthService:
             return False
 
         # Check token expiry if available
-        expiry_str = self.config.get('hidock_token_expiry', '')
+        expiry_str = self.config.get("hidock_token_expiry", "")
         if expiry_str:
             try:
                 expiry_time = datetime.fromisoformat(expiry_str)
@@ -354,10 +356,7 @@ class HiDockAuthService:
 
         try:
             response = self.session.post(
-                url,
-                json={'calendarWay': 'microsoft'},
-                headers={'AccessToken': token},
-                timeout=10
+                url, json={"calendarWay": "microsoft"}, headers={"AccessToken": token}, timeout=10
             )
 
             if response.status_code == 200:
@@ -382,24 +381,20 @@ class HiDockAuthService:
             if token:
                 try:
                     url = f"{HIDOCK_API_BASE}{self.LOGOUT_ENDPOINT}"
-                    self.session.post(
-                        url,
-                        headers={'AccessToken': token},
-                        timeout=5
-                    )
+                    self.session.post(url, headers={"AccessToken": token}, timeout=5)
                 except:
                     pass  # Logout endpoint might not exist
 
             # Clear stored credentials
             keys_to_remove = [
-                'hidock_access_token',
-                'hidock_access_token_encrypted',
-                'hidock_refresh_token_encrypted',
-                'hidock_user_id',
-                'hidock_user_email',
-                'hidock_username',
-                'hidock_token_expiry',
-                'hidock_last_login_time',
+                "hidock_access_token",
+                "hidock_access_token_encrypted",
+                "hidock_refresh_token_encrypted",
+                "hidock_user_id",
+                "hidock_user_email",
+                "hidock_username",
+                "hidock_token_expiry",
+                "hidock_last_login_time",
             ]
 
             for key in keys_to_remove:
@@ -418,10 +413,10 @@ class HiDockAuthService:
             return None
 
         return {
-            'username': self.config.get('hidock_username', ''),
-            'email': self.config.get('hidock_user_email', ''),
-            'user_id': self.config.get('hidock_user_id', ''),
-            'last_login': self.config.get('hidock_last_login_time', ''),
+            "username": self.config.get("hidock_username", ""),
+            "email": self.config.get("hidock_user_email", ""),
+            "user_id": self.config.get("hidock_user_id", ""),
+            "last_login": self.config.get("hidock_last_login_time", ""),
         }
 
     def refresh_token(self) -> Tuple[bool, Optional[str]]:
@@ -431,7 +426,7 @@ class HiDockAuthService:
         Returns:
             Tuple of (success, new_access_token)
         """
-        refresh_token_encrypted = self.config.get('hidock_refresh_token_encrypted', '')
+        refresh_token_encrypted = self.config.get("hidock_refresh_token_encrypted", "")
         if not refresh_token_encrypted:
             logger.warning("HiDockAuth", "refresh_token", "No refresh token available")
             return False, None
@@ -441,25 +436,21 @@ class HiDockAuthService:
         url = f"{HIDOCK_API_BASE}{self.REFRESH_ENDPOINT}"
 
         try:
-            response = self.session.post(
-                url,
-                json={'refreshToken': refresh_token},
-                timeout=10
-            )
+            response = self.session.post(url, json={"refreshToken": refresh_token}, timeout=10)
 
             if response.status_code == 200:
                 data = response.json()
 
                 # Extract new access token
                 new_token = None
-                if 'accessToken' in data:
-                    new_token = data['accessToken']
-                elif 'data' in data and 'accessToken' in data['data']:
-                    new_token = data['data']['accessToken']
+                if "accessToken" in data:
+                    new_token = data["accessToken"]
+                elif "data" in data and "accessToken" in data["data"]:
+                    new_token = data["data"]["accessToken"]
 
                 if new_token:
                     # Save new token
-                    username = self.config.get('hidock_last_login_username', '')
+                    username = self.config.get("hidock_last_login_username", "")
                     self._save_token(new_token, username)
                     logger.info("HiDockAuth", "refresh_token", "Token refreshed successfully")
                     return True, new_token
@@ -498,7 +489,7 @@ def logout_user():
 
 
 # CLI testing interface
-if __name__ == '__main__':
+if __name__ == "__main__":
     import getpass
 
     print("=== HiDock Authentication Service - Test CLI ===\n")
@@ -529,7 +520,7 @@ if __name__ == '__main__':
 
         username = input("Username/Email: ").strip()
         password = getpass.getpass("Password: ")
-        remember = input("Remember me? [Y/n]: ").strip().lower() != 'n'
+        remember = input("Remember me? [Y/n]: ").strip().lower() != "n"
 
         print("\nAttempting login...")
         success, token, error = service.login(username, password, remember)

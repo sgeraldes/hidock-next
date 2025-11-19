@@ -6,7 +6,8 @@ Provides utilities for validating and listing available Gemini models.
 Can fetch models dynamically from Google API or use cached list.
 """
 
-from typing import List, Dict, Optional, Any
+from typing import Any, Dict, List, Optional
+
 from config_and_logger import logger
 
 # Cached list of known Gemini models (as of January 2025)
@@ -34,7 +35,6 @@ KNOWN_GEMINI_MODELS = {
         "description": "Most cost-efficient and fastest 2.5 model",
         "supports_audio": False,
     },
-
     # Stable 2.0 Models
     "gemini-2.0-flash": {
         "version": "2.0",
@@ -57,7 +57,6 @@ KNOWN_GEMINI_MODELS = {
         "description": "Cost-efficient 2.0 model",
         "supports_audio": False,
     },
-
     # Preview Models
     "gemini-2.5-flash-preview-09-2025": {
         "version": "2.5",
@@ -73,7 +72,6 @@ KNOWN_GEMINI_MODELS = {
         "description": "Latest preview Flash-Lite model",
         "supports_audio": False,
     },
-
     # Specialized Models
     "gemini-2.5-flash-image": {
         "version": "2.5",
@@ -82,7 +80,6 @@ KNOWN_GEMINI_MODELS = {
         "description": "Image generation and editing model",
         "supports_audio": False,
     },
-
     # Aliases
     "gemini-flash-latest": {
         "version": "latest",
@@ -94,10 +91,7 @@ KNOWN_GEMINI_MODELS = {
 }
 
 # Models with "models/" prefix also work
-KNOWN_GEMINI_MODELS_WITH_PREFIX = {
-    f"models/{name}": info
-    for name, info in KNOWN_GEMINI_MODELS.items()
-}
+KNOWN_GEMINI_MODELS_WITH_PREFIX = {f"models/{name}": info for name, info in KNOWN_GEMINI_MODELS.items()}
 
 
 def is_valid_model_name(model_name: str) -> bool:
@@ -115,9 +109,9 @@ def is_valid_model_name(model_name: str) -> bool:
 
     # Check with and without "models/" prefix
     return (
-        model_name in KNOWN_GEMINI_MODELS or
-        model_name in KNOWN_GEMINI_MODELS_WITH_PREFIX or
-        model_name.startswith("gemini-")  # Allow any gemini- prefixed model
+        model_name in KNOWN_GEMINI_MODELS
+        or model_name in KNOWN_GEMINI_MODELS_WITH_PREFIX
+        or model_name.startswith("gemini-")  # Allow any gemini- prefixed model
     )
 
 
@@ -142,10 +136,7 @@ def get_model_info(model_name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def list_available_models(
-    filter_audio_support: bool = False,
-    filter_status: Optional[str] = None
-) -> List[str]:
+def list_available_models(filter_audio_support: bool = False, filter_status: Optional[str] = None) -> List[str]:
     """
     List all available Gemini models.
 
@@ -197,17 +188,14 @@ def fetch_models_from_api(api_key: str) -> Optional[List[Dict[str, Any]]]:
             }
             models.append(model_info)
 
-        logger.info("GeminiModels", "fetch_models_from_api",
-                   f"Fetched {len(models)} models from API")
+        logger.info("GeminiModels", "fetch_models_from_api", f"Fetched {len(models)} models from API")
         return models
 
     except ImportError:
-        logger.error("GeminiModels", "fetch_models_from_api",
-                    "google-generativeai not installed")
+        logger.error("GeminiModels", "fetch_models_from_api", "google-generativeai not installed")
         return None
     except Exception as e:
-        logger.error("GeminiModels", "fetch_models_from_api",
-                    f"Error fetching models: {e}")
+        logger.error("GeminiModels", "fetch_models_from_api", f"Error fetching models: {e}")
         return None
 
 

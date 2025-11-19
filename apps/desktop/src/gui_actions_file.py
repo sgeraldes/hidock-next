@@ -110,9 +110,11 @@ class FileActionsMixin:
             else:
                 # Fallback for other operation types
                 display_text = f"{operation.operation_type.value.capitalize()} ({operation.progress:.0f}%)"
-                status_text = f"{operation.operation_type.value.capitalize()} {operation.filename}: {operation.progress:.0f}%"
+                status_text = (
+                    f"{operation.operation_type.value.capitalize()} {operation.filename}: {operation.progress:.0f}%"
+                )
                 tags = (operation.operation_type.value,)
-                
+
             self.update_status_bar(progress_text=status_text)
             self._update_file_status_in_treeview(
                 operation.filename,
@@ -130,16 +132,16 @@ class FileActionsMixin:
                 if cached_metadata:
                     cached_metadata.local_path = local_filepath
                     self.file_operations_manager.metadata_cache.set_metadata(cached_metadata)
-                
+
                 # Update the displayed file details
                 for file_detail in self.displayed_files_details:
                     if file_detail["name"] == operation.filename:
                         file_detail["local_path"] = local_filepath
                         file_detail["gui_status"] = "Downloaded"
                         break
-                
+
                 self._update_file_status_in_treeview(operation.filename, "Downloaded", ("downloaded_ok",))
-                
+
                 # Refresh the file status to ensure consistency
                 self._refresh_single_file_status(operation.filename)
             elif operation.operation_type.value == "delete":
@@ -147,16 +149,16 @@ class FileActionsMixin:
                 # The file_iid is the filename for our treeview implementation
                 self._remove_file_from_treeview(operation.filename)
                 # Note: _remove_file_from_treeview already removes from displayed_files_details
-                
+
                 # Remove from metadata cache
                 self.file_operations_manager.metadata_cache.remove_metadata(operation.filename)
-                
+
                 # Update file count in status bar
                 file_count = len(self.displayed_files_details)
                 self.update_status_bar(file_count=file_count)
-                
+
                 # NO NEED TO REFRESH! We've already removed the file from all local state.
-                # The old code called _schedule_post_deletion_refresh() which would fetch 
+                # The old code called _schedule_post_deletion_refresh() which would fetch
                 # the entire file list again after 2 seconds - causing the 30+ second delay
                 # for large file collections.
             else:
@@ -264,19 +266,15 @@ class FileActionsMixin:
             return
 
         # Check if audio metadata system is initialized
-        if not hasattr(self, '_audio_metadata_db'):
-            messagebox.showerror(
-                "System Error",
-                "Audio metadata system not initialized.",
-                parent=self
-            )
+        if not hasattr(self, "_audio_metadata_db"):
+            messagebox.showerror("System Error", "Audio metadata system not initialized.", parent=self)
             return
 
         # Check API key configuration
         provider = self.config.get("ai_api_provider", "gemini")
 
         # Get decrypted API key (supports encrypted keys from settings)
-        if hasattr(self, 'get_decrypted_api_key'):
+        if hasattr(self, "get_decrypted_api_key"):
             api_key = self.get_decrypted_api_key(provider)
         else:
             # Fallback: try direct key (unencrypted)
@@ -286,7 +284,7 @@ class FileActionsMixin:
             if messagebox.askyesno(
                 "API Key Required",
                 f"{provider.title()} API key not configured.\n\nWould you like to open settings to configure it?",
-                parent=self
+                parent=self,
             ):
                 self.open_settings_window()
             return
@@ -317,7 +315,7 @@ class FileActionsMixin:
             messagebox.showinfo(
                 "No Audio Files",
                 "No audio files selected or selected files are not in a supported format.",
-                parent=self
+                parent=self,
             )
             return
 
@@ -325,9 +323,8 @@ class FileActionsMixin:
         if files_need_download:
             if messagebox.askyesno(
                 "Download Required",
-                f"{len(files_need_download)} file(s) need to be downloaded before transcription.\n\n"
-                "Download now?",
-                parent=self
+                f"{len(files_need_download)} file(s) need to be downloaded before transcription.\n\n" "Download now?",
+                parent=self,
             ):
                 # Queue downloads (transcription needs to be manually triggered after)
                 for filename in files_need_download:
@@ -343,7 +340,7 @@ class FileActionsMixin:
                     "Downloads Started",
                     f"Downloading {len(files_need_download)} file(s).\n\n"
                     "Please wait for downloads to complete, then right-click and select 'Quick Transcribe' again.",
-                    parent=self
+                    parent=self,
                 )
                 return
 
@@ -355,14 +352,11 @@ class FileActionsMixin:
 
         if started_count > 0:
             # Just log the action - no intrusive dialog needed
-            logger.info("GUI", "quick_transcribe_selected_files",
-                       f"Started transcription for {started_count} file(s)")
+            logger.info("GUI", "quick_transcribe_selected_files", f"Started transcription for {started_count} file(s)")
         else:
             # Still show error dialog for failures
             messagebox.showerror(
-                "Transcription Failed",
-                "Could not start transcription. Please check logs for details.",
-                parent=self
+                "Transcription Failed", "Could not start transcription. Please check logs for details.", parent=self
             )
 
     def cancel_all_downloads_gui(self):
@@ -407,20 +401,20 @@ class FileActionsMixin:
                     parent=self,
                 )
                 return
-            
+
             # Open file with system default application
-            import sys
             import subprocess
-            
+            import sys
+
             if sys.platform == "win32":
                 os.startfile(local_filepath)
             elif sys.platform == "darwin":  # macOS
                 subprocess.call(["open", local_filepath])
             else:  # Linux
                 subprocess.call(["xdg-open", local_filepath])
-                
+
             logger.info("FileActionsMixin", "_open_file_locally", f"Opened file locally: {local_filepath}")
-            
+
         except Exception as e:
             logger.error("FileActionsMixin", "_open_file_locally", f"Error opening file {filename}: {e}")
             messagebox.showerror(
@@ -433,7 +427,7 @@ class FileActionsMixin:
         """Delete files from the HiDock device with comprehensive validation and error handling."""
         if not filenames:
             return
-            
+
         # Pre-deletion validation
         try:
             self._validate_device_for_deletion(filenames)
@@ -444,12 +438,12 @@ class FileActionsMixin:
                 parent=self,
             )
             return
-            
+
         count = len(filenames)
         file_list = "\n".join([f"• {name}" for name in filenames[:5]])
         if count > 5:
             file_list += f"\n... and {count - 5} more files"
-            
+
         # Enhanced confirmation with device status
         device_status = self._get_device_status_for_deletion()
         if not messagebox.askyesno(
@@ -461,7 +455,7 @@ class FileActionsMixin:
             parent=self,
         ):
             return
-            
+
         # Execute with proper error handling
         try:
             self.file_operations_manager.queue_batch_delete(filenames, self._update_operation_progress)
@@ -472,47 +466,47 @@ class FileActionsMixin:
                 f"Failed to delete files from device:\n\n{str(e)}",
                 parent=self,
             )
-    
+
     def _validate_device_for_deletion(self, filenames):
         """Validate device state and files before deletion."""
         # Check device connection
         if not self.device_manager.device_interface.is_connected():
             raise RuntimeError("Device is not connected. Please connect the device and try again.")
-            
+
         # Check for active recordings
         recording_files = []
         for filename in filenames:
             file_detail = next((f for f in self.displayed_files_details if f["name"] == filename), None)
             if file_detail and file_detail.get("is_recording"):
                 recording_files.append(filename)
-                
+
         if recording_files:
             raise RuntimeError(f"Cannot delete active recordings: {', '.join(recording_files[:3])}")
-            
+
         # Check for files currently being downloaded
         downloading_files = []
         for filename in filenames:
             if self.file_operations_manager.is_file_operation_active(filename, FileOperationType.DOWNLOAD):
                 downloading_files.append(filename)
-                
+
         if downloading_files:
             raise RuntimeError(f"Cannot delete files currently being downloaded: {', '.join(downloading_files[:3])}")
-    
+
     def _get_device_status_for_deletion(self):
         """Get device status information for deletion confirmation."""
         try:
-            if hasattr(self, 'device_manager') and self.device_manager.device_interface.is_connected():
+            if hasattr(self, "device_manager") and self.device_manager.device_interface.is_connected():
                 return "Connected and Ready"
             else:
                 return "Disconnected"
         except Exception:
             return "Status Unknown"
-        
+
     def _delete_local_copy(self, filenames):
         """Delete local copies of files with confirmation."""
         if not filenames:
             return
-            
+
         # Check for files that are currently in use and cannot be deleted
         locked_files = self._check_file_locks(filenames)
         if locked_files:
@@ -521,43 +515,47 @@ class FileActionsMixin:
             filenames = [f for f in filenames if f not in [lf[0] for lf in locked_files]]
             if not filenames:
                 return  # No files left to delete
-            
+
         # Comprehensive file handle release for any files to be deleted
         files_to_release = set(filenames)
         handles_released = False
-        
+
         for filename in files_to_release:
-            if hasattr(self, 'current_playing_filename_for_replay') and self.current_playing_filename_for_replay == filename:
+            if (
+                hasattr(self, "current_playing_filename_for_replay")
+                and self.current_playing_filename_for_replay == filename
+            ):
                 self.stop_audio_playback_gui()
                 handles_released = True
-                
+
         # Stop any ongoing waveform/spectrum analysis that might hold file handles
-        if hasattr(self, 'audio_visualization_widget'):
+        if hasattr(self, "audio_visualization_widget"):
             self.audio_visualization_widget.clear()
             self.audio_visualization_widget.stop_spectrum_analysis()
             handles_released = True
-            
+
         # Stop any ongoing transcription that might hold file handles
-        if hasattr(self, 'is_long_operation_active') and self.is_long_operation_active:
+        if hasattr(self, "is_long_operation_active") and self.is_long_operation_active:
             # Cancel transcription if active
-            if hasattr(self, '_cancel_transcription'):
+            if hasattr(self, "_cancel_transcription"):
                 self._cancel_transcription()
             handles_released = True
-            
+
         # Force garbage collection to release any remaining handles
         if handles_released:
             import gc
             import time
+
             gc.collect()
             time.sleep(0.5)  # Increased delay for comprehensive handle release
-            
+
         # Filter to only files that actually exist locally
         existing_files = []
         for filename in filenames:
             local_path = self._get_local_filepath(filename)
             if os.path.exists(local_path):
                 existing_files.append(filename)
-                
+
         if not existing_files:
             messagebox.showinfo(
                 "No Local Files",
@@ -565,12 +563,12 @@ class FileActionsMixin:
                 parent=self,
             )
             return
-            
+
         count = len(existing_files)
         file_list = "\n".join([f"• {name}" for name in existing_files[:5]])
         if count > 5:
             file_list += f"\n... and {count - 5} more files"
-            
+
         if not messagebox.askyesno(
             "Delete Local Copies",
             f"Are you sure you want to delete {count} local file(s)?\n\n"
@@ -579,57 +577,58 @@ class FileActionsMixin:
             parent=self,
         ):
             return
-            
+
         # Delete local files
         deleted_count = 0
         failed_files = []
         for filename in existing_files:
             try:
                 local_path = self._get_local_filepath(filename)
-                
+
                 # Remove read-only attribute if present (cross-platform)
                 if os.path.exists(local_path):
                     import stat
+
                     # Set read/write permissions for owner (works on Windows, macOS, Linux)
                     os.chmod(local_path, stat.S_IWRITE | stat.S_IREAD)
-                
+
                 os.remove(local_path)
                 deleted_count += 1
-                
+
                 # Update metadata cache
                 cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(filename)
                 if cached_metadata:
                     cached_metadata.local_path = None
                     self.file_operations_manager.metadata_cache.set_metadata(cached_metadata)
-                
+
                 # Update displayed file details
                 for file_detail in self.displayed_files_details:
                     if file_detail["name"] == filename:
                         file_detail["local_path"] = None
                         # Check if we're in offline mode to set appropriate status
-                        if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                        if hasattr(self, "offline_mode_manager") and self.offline_mode_manager.is_offline_mode:
                             file_detail["gui_status"] = "On Device (Offline)"
                         else:
                             file_detail["gui_status"] = "On Device"
                         break
-                        
+
                 # Update treeview with appropriate offline status
-                if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                if hasattr(self, "offline_mode_manager") and self.offline_mode_manager.is_offline_mode:
                     self._update_file_status_in_treeview(filename, "On Device (Offline)", ())
                 else:
                     self._update_file_status_in_treeview(filename, "On Device", ())
-                
+
             except Exception as e:
                 logger.error("FileActionsMixin", "_delete_local_copy", f"Error deleting {filename}: {e}")
                 failed_files.append((filename, str(e)))
-                
+
         # Show appropriate message based on results
         if failed_files:
             if deleted_count > 0:
                 error_details = "\n".join([f"• {name}: {error}" for name, error in failed_files[:3]])
                 if len(failed_files) > 3:
                     error_details += f"\n... and {len(failed_files) - 3} more errors"
-                    
+
                 messagebox.showwarning(
                     "Partial Success",
                     f"Successfully deleted {deleted_count} file(s).\n\nFailed to delete {len(failed_files)} file(s):\n{error_details}",
@@ -639,7 +638,7 @@ class FileActionsMixin:
                 error_details = "\n".join([f"• {name}: {error}" for name, error in failed_files[:3]])
                 if len(failed_files) > 3:
                     error_details += f"\n... and {len(failed_files) - 3} more errors"
-                    
+
                 messagebox.showerror(
                     "Deletion Failed",
                     f"Failed to delete {len(failed_files)} local file(s):\n\n{error_details}",
@@ -651,140 +650,153 @@ class FileActionsMixin:
                 f"Successfully deleted {deleted_count} local file(s).",
                 parent=self,
             )
-    
+
     def _check_file_locks(self, filenames):
         """Check for file locks that would prevent deletion."""
         locked_files = []
-        
+
         for filename in filenames:
             local_path = self._get_local_filepath(filename)
-            
+
             # If file is currently being played, stop playback automatically
-            if hasattr(self, 'current_playing_filename_for_replay') and self.current_playing_filename_for_replay == filename:
+            if (
+                hasattr(self, "current_playing_filename_for_replay")
+                and self.current_playing_filename_for_replay == filename
+            ):
                 logger.info("FileActionsMixin", "_check_file_locks", f"Stopping audio playback to delete {filename}")
                 self.stop_audio_playback_gui()
                 # Continue to check other locks after stopping playback
-                
+
             # Check if file is being downloaded
             if self.file_operations_manager.is_file_operation_active(filename, FileOperationType.DOWNLOAD):
                 locked_files.append((filename, "File is currently being downloaded"))
                 continue
-                
+
             # Check if file is locked by another process
             if self._is_file_locked(local_path):
                 locked_files.append((filename, "File is locked by another process"))
                 continue
-                
+
             # Check if file is being used by transcription
             if self._is_file_in_transcription(filename):
                 locked_files.append((filename, "File is being transcribed"))
                 continue
-                
+
         return locked_files
-    
+
     def _is_file_locked(self, file_path):
         """Check if a file is locked by another process."""
         if not os.path.exists(file_path):
             return False
-            
+
         try:
             # Try to open the file in exclusive mode with multiple attempts
             for attempt in range(3):
                 try:
-                    with open(file_path, 'r+b') as f:
+                    with open(file_path, "r+b") as f:
                         pass
                     return False  # File is not locked
                 except (IOError, OSError, PermissionError):
                     if attempt < 2:  # Not the last attempt
                         import time
+
                         time.sleep(0.2)  # Brief delay before retry
                         continue
                     return True  # File is locked after all attempts
         except Exception:
             # Any other exception means we can't access the file
             return True
-    
+
     def _is_file_in_transcription(self, filename):
         """Check if file is currently being transcribed."""
         # Check if there's an active transcription operation
-        return hasattr(self, 'is_long_operation_active') and self.is_long_operation_active
-    
+        return hasattr(self, "is_long_operation_active") and self.is_long_operation_active
+
     def _handle_locked_files(self, locked_files):
         """Handle files that are locked and cannot be deleted."""
         if not locked_files:
             return
-            
+
         error_details = "\n".join([f"• {name}: {reason}" for name, reason in locked_files[:5]])
         if len(locked_files) > 5:
             error_details += f"\n... and {len(locked_files) - 5} more files"
-            
+
         messagebox.showwarning(
             "Files Cannot Be Deleted",
             f"Cannot delete {len(locked_files)} file(s) because they are in use:\n\n{error_details}\n\n"
             "Please close any applications using these files and try again.",
             parent=self,
         )
-    
+
     def _delete_single_local_file_with_retry(self, filename, max_retries=3):
         """Delete a single local file with retry mechanism."""
         local_path = self._get_local_filepath(filename)
-        
+
         for attempt in range(max_retries):
             try:
                 # Remove read-only attribute if present (cross-platform)
                 if os.path.exists(local_path):
                     import stat
+
                     # Set read/write permissions for owner (works on Windows, macOS, Linux)
                     os.chmod(local_path, stat.S_IWRITE | stat.S_IREAD)
-                
+
                 os.remove(local_path)
-                
+
                 # Update metadata cache
                 cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(filename)
                 if cached_metadata:
                     cached_metadata.local_path = None
                     self.file_operations_manager.metadata_cache.set_metadata(cached_metadata)
-                
+
                 # Update displayed file details
                 for file_detail in self.displayed_files_details:
                     if file_detail["name"] == filename:
                         file_detail["local_path"] = None
                         # Check if we're in offline mode to set appropriate status
-                        if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                        if hasattr(self, "offline_mode_manager") and self.offline_mode_manager.is_offline_mode:
                             file_detail["gui_status"] = "On Device (Offline)"
                         else:
                             file_detail["gui_status"] = "On Device"
                         break
-                        
+
                 # Update treeview with appropriate offline status
-                if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                if hasattr(self, "offline_mode_manager") and self.offline_mode_manager.is_offline_mode:
                     self._update_file_status_in_treeview(filename, "On Device (Offline)", ())
                 else:
                     self._update_file_status_in_treeview(filename, "On Device", ())
-                
-                logger.info("FileActionsMixin", "_delete_single_local_file_with_retry", 
-                           f"Successfully deleted {filename} on attempt {attempt + 1}")
+
+                logger.info(
+                    "FileActionsMixin",
+                    "_delete_single_local_file_with_retry",
+                    f"Successfully deleted {filename} on attempt {attempt + 1}",
+                )
                 return True
-                
+
             except PermissionError as e:
                 self._last_deletion_error = f"Permission denied: {str(e)}"
                 if attempt < max_retries - 1:
                     import time
+
                     time.sleep(0.5)  # Brief delay before retry
                     continue
-                    
+
             except FileNotFoundError:
                 # File already deleted - consider this success
-                logger.info("FileActionsMixin", "_delete_single_local_file_with_retry", 
-                           f"File {filename} already deleted")
+                logger.info(
+                    "FileActionsMixin", "_delete_single_local_file_with_retry", f"File {filename} already deleted"
+                )
                 return True
-                
+
             except Exception as e:
                 self._last_deletion_error = str(e)
                 break
-                
-        logger.error("FileActionsMixin", "_delete_single_local_file_with_retry", 
-                    f"Failed to delete {filename} after {max_retries} attempts: {self._last_deletion_error}")
+
+        logger.error(
+            "FileActionsMixin",
+            "_delete_single_local_file_with_retry",
+            f"Failed to delete {filename} after {max_retries} attempts: {self._last_deletion_error}",
+        )
         return False
 
     def _refresh_single_file_status(self, filename):
@@ -794,11 +806,11 @@ class FileActionsMixin:
             cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(filename)
             if not cached_metadata:
                 return
-            
+
             # Check if file exists locally
             local_filepath = self._get_local_filepath(filename)
             file_exists = os.path.exists(local_filepath)
-            
+
             # Update the cached metadata if needed
             if file_exists and not cached_metadata.local_path:
                 cached_metadata.local_path = local_filepath
@@ -806,7 +818,7 @@ class FileActionsMixin:
             elif not file_exists and cached_metadata.local_path:
                 cached_metadata.local_path = None
                 self.file_operations_manager.metadata_cache.set_metadata(cached_metadata)
-            
+
             # Update the displayed file details
             for file_detail in self.displayed_files_details:
                 if file_detail["name"] == filename:
@@ -815,69 +827,80 @@ class FileActionsMixin:
                         file_detail["gui_status"] = "Downloaded"
                     else:
                         # Check if we're in offline mode to set appropriate status
-                        if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                        if hasattr(self, "offline_mode_manager") and self.offline_mode_manager.is_offline_mode:
                             file_detail["gui_status"] = "On Device (Offline)"
                         else:
                             file_detail["gui_status"] = "On Device"
                     break
-            
+
             # Update the treeview display
             if file_exists:
                 self._update_file_status_in_treeview(filename, "Downloaded", ("downloaded_ok",))
             else:
                 # Check if we're in offline mode to set appropriate status
-                if hasattr(self, 'offline_mode_manager') and self.offline_mode_manager.is_offline_mode:
+                if hasattr(self, "offline_mode_manager") and self.offline_mode_manager.is_offline_mode:
                     self._update_file_status_in_treeview(filename, "On Device (Offline)", ())
                 else:
                     self._update_file_status_in_treeview(filename, "On Device", ())
-                
+
         except Exception as e:
-            logger.error("FileActionsMixin", "_refresh_single_file_status", f"Error refreshing status for {filename}: {e}")
+            logger.error(
+                "FileActionsMixin", "_refresh_single_file_status", f"Error refreshing status for {filename}: {e}"
+            )
 
     def _schedule_post_deletion_refresh(self):
         """Schedule a file list refresh after all deletions are complete (batched refresh)."""
         # Cancel any existing refresh timer
-        if hasattr(self, '_deletion_refresh_timer'):
+        if hasattr(self, "_deletion_refresh_timer"):
             try:
                 self.after_cancel(self._deletion_refresh_timer)
             except:
                 pass  # Timer already executed or cancelled
-        
+
         # Schedule a new refresh with a short delay to batch multiple deletions
         self._deletion_refresh_timer = self.after(2000, self._perform_post_deletion_refresh)  # 2 second delay
-    
+
     def _perform_post_deletion_refresh(self):
         """Perform the actual file list refresh after batch deletions are complete."""
         try:
             # Check if there are any active delete operations still running
             active_operations = self.file_operations_manager.get_all_active_operations()
             active_deletes = [
-                op for op in active_operations 
-                if op.operation_type == FileOperationType.DELETE 
+                op
+                for op in active_operations
+                if op.operation_type == FileOperationType.DELETE
                 and op.status in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
             ]
-            
+
             if active_deletes:
                 # Still have active deletions, reschedule
-                logger.debug("FileActionsMixin", "_perform_post_deletion_refresh", 
-                           f"Still {len(active_deletes)} active deletions, rescheduling refresh")
+                logger.debug(
+                    "FileActionsMixin",
+                    "_perform_post_deletion_refresh",
+                    f"Still {len(active_deletes)} active deletions, rescheduling refresh",
+                )
                 self._deletion_refresh_timer = self.after(1000, self._perform_post_deletion_refresh)
                 return
-            
+
             # All deletions complete, perform refresh
-            logger.info("FileActionsMixin", "_perform_post_deletion_refresh", 
-                       "All deletions complete, refreshing file list")
+            logger.info(
+                "FileActionsMixin", "_perform_post_deletion_refresh", "All deletions complete, refreshing file list"
+            )
             self.refresh_file_list_gui()
-            
+
         except Exception as e:
-            logger.error("FileActionsMixin", "_perform_post_deletion_refresh", 
-                        f"Error during post-deletion refresh: {e}")
+            logger.error(
+                "FileActionsMixin", "_perform_post_deletion_refresh", f"Error during post-deletion refresh: {e}"
+            )
             # Fallback: still try to refresh even if there was an error
             try:
                 self.refresh_file_list_gui()
             except Exception as refresh_error:
-                logger.error("FileActionsMixin", "_perform_post_deletion_refresh", 
-                           f"Fallback refresh also failed: {refresh_error}")
+                logger.error(
+                    "FileActionsMixin",
+                    "_perform_post_deletion_refresh",
+                    f"Fallback refresh also failed: {refresh_error}",
+                )
 
     def cancel_selected_downloads_gui(self):
         """Cancels download operations for selected files."""
@@ -929,30 +952,31 @@ class FileActionsMixin:
 
             # Note: File list refresh is not needed for cancellations
             # Files remain on device, only local operation status changes
-    
+
     def cancel_all_operations_gui(self):
         """Cancels ALL active operations (downloads, deletions, etc.)."""
         active_operations = self.file_operations_manager.get_all_active_operations()
         pending_operations = [
-            op for op in active_operations
+            op
+            for op in active_operations
             if op.status in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
         ]
-        
+
         if not pending_operations:
             messagebox.showinfo("No Active Operations", "No active operations to cancel.", parent=self)
             return
-        
+
         # Count operations by type
         downloads = [op for op in pending_operations if op.operation_type == FileOperationType.DOWNLOAD]
         deletions = [op for op in pending_operations if op.operation_type == FileOperationType.DELETE]
-        
+
         # Build informative message
         message_parts = []
         if downloads:
             message_parts.append(f"{len(downloads)} download(s)")
         if deletions:
             message_parts.append(f"{len(deletions)} deletion(s)")
-        
+
         if messagebox.askyesno(
             "Cancel All Operations",
             f"Are you sure you want to cancel {' and '.join(message_parts)}?\n\n"
@@ -970,22 +994,23 @@ class FileActionsMixin:
                     else:
                         # For other operations, show "Cancelled" status
                         self._update_file_status_in_treeview(operation.filename, "Cancelled", ("cancelled",))
-            
+
             self.update_status_bar(progress_text=f"Cancelled {cancelled_count} operation(s).")
-    
+
     def cancel_active_deletions_gui(self):
         """Cancels all active deletion operations."""
         active_operations = self.file_operations_manager.get_all_active_operations()
         delete_operations = [
-            op for op in active_operations
+            op
+            for op in active_operations
             if op.operation_type == FileOperationType.DELETE
             and op.status in [FileOperationStatus.PENDING, FileOperationStatus.IN_PROGRESS]
         ]
-        
+
         if not delete_operations:
             messagebox.showinfo("No Deletions", "No active deletions to cancel.", parent=self)
             return
-        
+
         if messagebox.askyesno(
             "Cancel Deletions",
             f"Are you sure you want to cancel {len(delete_operations)} active deletion(s)?",
@@ -997,5 +1022,5 @@ class FileActionsMixin:
                     cancelled_count += 1
                     # Restore status to "On Device" since deletion was cancelled
                     self._update_file_status_in_treeview(operation.filename, "On Device", ())
-            
+
             self.update_status_bar(progress_text=f"Cancelled {cancelled_count} deletion(s).")
