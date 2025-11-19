@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef } from 'react';
 import type { AudioData } from '../types';
 import { MAX_FILE_SIZE_BYTES, SUPPORTED_AUDIO_TYPES, MAX_FILE_SIZE_MB } from '../constants';
 import { UploadCloudIcon, MicIcon, StopCircleIcon, AlertCircleIcon } from './IconComponents';

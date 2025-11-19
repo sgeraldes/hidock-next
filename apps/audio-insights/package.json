@@ -10,12 +10,14 @@
     "lint": "echo 'No linting configured for this project yet'"
   },
   "dependencies": {
+    "@google/genai": "*",
     "react": "*",
-    "react-dom": "*",
-    "@google/genai": "*"
+    "react-dom": "*"
   },
   "devDependencies": {
     "@types/node": "*",
+    "@types/react": "^19.2.6",
+    "@types/react-dom": "^19.2.3",
     "typescript": "*",
     "vite": "*"
   }

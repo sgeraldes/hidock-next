@@ -64,7 +64,7 @@ export const transcribeAudioWithGemini = async (
       model: GEMINI_MODELS.TEXT, // multimodal model
       contents: { parts: [audioPart, textPart] },
     });
-    return response.text;
+    return response.text || '';
   } catch (error) {
     console.error("Error transcribing audio with Gemini:", error);
     if (error instanceof Error) {
@@ -95,7 +95,7 @@ export const extractInsightsFromText = async (
       }
     });
 
-    let jsonStr = response.text.trim();
+    let jsonStr = (response.text || '').trim();
 
     // Remove Markdown code fences if present
     const fenceRegex = /^```(\w*)?\s*\n?(.*?)\n?\s*```$/s;
