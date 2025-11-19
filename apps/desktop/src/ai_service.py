@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
 from config_and_logger import logger
+from gemini_models import is_valid_model_name, normalize_model_name, validate_model_for_transcription
 
 # Provider-specific imports with fallbacks
 try:
@@ -103,12 +104,194 @@ class GeminiProvider(AIProvider):
             return False
 
         try:
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            # Use configured model or default to gemini-2.0-flash-exp
+            model_name = self.config.get("model", "gemini-2.0-flash-exp")
+
+            # Normalize legacy model names
+            model_name = normalize_model_name(model_name)
+
+            # Validate model name
+            if not is_valid_model_name(model_name):
+                logger.warning("GeminiProvider", "validate_api_key",
+                             f"Unknown model name: {model_name}, using default")
+                model_name = "gemini-2.0-flash-exp"
+
+            logger.info("GeminiProvider", "validate_api_key",
+                       f"Validating API key with model: {model_name}")
+
+            model = genai.GenerativeModel(model_name)
             response = model.generate_content("Test validation message")
             return bool(response and response.text)
         except Exception as e:
             logger.error("GeminiProvider", "validate_api_key", f"API validation failed: {e}")
             return False
+
+    def transcribe_and_analyze_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
+        """Transcribe and analyze audio in a single API call (more efficient)"""
+        if not self.is_available():
+            return self._mock_response("combined")
+
+        try:
+            # Get and validate model
+            model_name = self.config.get("model", "gemini-2.0-flash-exp")
+            model_name = normalize_model_name(model_name)
+
+            # Check if model supports audio transcription
+            is_valid, msg = validate_model_for_transcription(model_name)
+            if not is_valid:
+                logger.error("GeminiProvider", "transcribe_and_analyze", msg)
+                return {"success": False, "error": msg, "provider": "gemini"}
+
+            logger.info("GeminiProvider", "transcribe_and_analyze",
+                       f"Using model: {model_name}")
+
+            # Upload audio file to Gemini
+            logger.info("GeminiProvider", "transcribe_and_analyze",
+                       f"Uploading audio file: {audio_file_path}")
+
+            audio_file = genai.upload_file(audio_file_path)
+
+            logger.info("GeminiProvider", "transcribe_and_analyze",
+                       f"File uploaded successfully: {audio_file.uri}")
+
+            # Create model
+            model = genai.GenerativeModel(model_name)
+
+            # Combined prompt for transcription + analysis
+            prompt = """
+Transcribe this audio recording AND analyze it for meeting insights. Return your response in two sections:
+
+# TRANSCRIPTION SECTION
+Follow these guidelines:
+1. **Speaker Identification - CRITICAL**:
+   - LISTEN CAREFULLY for names mentioned in the conversation (e.g., when someone says "Hi, this is John" or "Thanks Maria" or people address each other by name)
+   - If you detect actual names, USE THEM as speaker labels (e.g., "John:", "Maria:", "Sebastián:", "Ceci:")
+   - Only use "Speaker 1:", "Speaker 2:" if NO names are mentioned in the entire recording
+   - Keep speaker labels consistent throughout the entire transcription
+   - If you learn a speaker's name later in the conversation, go back mentally and use that name for all their dialogue
+
+2. **Multiple Conversation Detection - CRITICAL**:
+   - Detect if this recording contains MULTIPLE SEPARATE CONVERSATIONS (e.g., different meetings merged into one file)
+   - Signs of conversation boundaries: long silences (>10s), topic shifts, participant changes, greetings/farewells
+   - If you detect multiple conversations, add a clear separator: "\n\n--- NEW CONVERSATION DETECTED [timestamp] ---\n\n"
+   - Reset participant introductions for each new conversation
+
+3. **Timestamps**: Include timestamps every 30 seconds in [MM:SS] format
+
+4. **Clarity**: Use proper punctuation and paragraph breaks
+
+5. **Filler Words**: Omit excessive filler words (um, uh, like) unless significant
+
+6. **Formatting**:
+   - Start each speaker's turn on a new line
+   - Use proper capitalization and punctuation
+   - Mark [inaudible] or [unclear] for uncertain parts
+
+Format:
+[00:00] Sebastián: [transcription if name detected]
+[00:30] Ceci: [transcription if name detected]
+OR
+[00:00] Speaker 1: [transcription if no names detected]
+[00:30] Speaker 2: [transcription if no names detected]
+
+# ANALYSIS SECTION
+Provide structured meeting insights in strict JSON format:
+{
+    "summary": "DETAILED multi-paragraph summary (at least 5-10 sentences) covering: main purpose, key discussions, decisions made, outcomes, and next steps. Be comprehensive and specific.",
+    "key_points": ["Specific decision or discussion point with full context and details", "Include who said what and why it matters", "Be thorough - include at least 5-10 key points for substantial conversations", ...],
+    "action_items": ["Task: detailed description with context (assigned to: [actual name] or Speaker X)", ...],
+    "topics": ["topic1", "topic2", "topic3", "topic4", "topic5"],
+    "sentiment": "professional/positive/concerned/negative/neutral",
+    "participants": ["Sebastián", "Ceci", ...] (use actual names if detected, otherwise ["Speaker 1", "Speaker 2", ...]),
+    "conversation_segments": [
+        {
+            "segment_number": 1,
+            "start_time": "00:00",
+            "end_time": "45:30",
+            "participants": ["Sebastián", "Carolina"],
+            "topic": "Nova Sonic bot demo and discussion",
+            "summary": "Brief summary of this conversation segment"
+        },
+        {
+            "segment_number": 2,
+            "start_time": "45:30",
+            "end_time": "66:00",
+            "participants": ["Ceci", "Jahaira"],
+            "topic": "Technical interview",
+            "summary": "Brief summary of this conversation segment"
+        }
+    ]
+}
+
+**CRITICAL REQUIREMENTS**:
+1. USE ACTUAL SPEAKER NAMES whenever they are mentioned in the audio - this is MANDATORY
+2. DETECT and MARK multiple conversations if present in the recording
+3. Make summary MUCH MORE DETAILED (5-10+ sentences minimum, not just 2-3 sentences)
+4. Include conversation_segments array to show conversation boundaries
+5. Use the SAME speaker labels (actual names or Speaker X) in both transcription and analysis
+6. Return transcription as plain text, then JSON analysis
+7. No markdown code blocks around the JSON
+            """
+
+            # Generate content with the uploaded audio file
+            response = model.generate_content([prompt, audio_file])
+
+            # Get response text
+            response_text = response.text.strip()
+
+            # Clean up: delete the uploaded file
+            genai.delete_file(audio_file.name)
+            logger.info("GeminiProvider", "transcribe_and_analyze",
+                       "Uploaded file deleted")
+
+            # Parse response: split into transcription and analysis
+            # Look for JSON in the response
+            json_start = response_text.find('{')
+            json_end = response_text.rfind('}') + 1
+
+            if json_start == -1 or json_end == 0:
+                logger.error("GeminiProvider", "transcribe_and_analyze",
+                           "Could not find JSON analysis in response")
+                return {"success": False, "error": "No JSON analysis found in response", "provider": "gemini"}
+
+            transcription_text = response_text[:json_start].strip()
+            analysis_json = response_text[json_start:json_end].strip()
+
+            # Parse analysis JSON
+            try:
+                analysis = json.loads(analysis_json)
+            except json.JSONDecodeError as e:
+                logger.error("GeminiProvider", "transcribe_and_analyze",
+                           f"JSON parse error: {e}")
+                # Return transcription only if analysis parsing fails
+                return {
+                    "success": True,
+                    "transcription": transcription_text,
+                    "language": language,
+                    "confidence": 0.9,
+                    "provider": "gemini",
+                    "analysis": None
+                }
+
+            return {
+                "success": True,
+                "transcription": transcription_text,
+                "language": language,
+                "confidence": 0.9,
+                "provider": "gemini",
+                "analysis": {
+                    "summary": analysis.get("summary", ""),
+                    "key_points": analysis.get("key_points", []),
+                    "action_items": analysis.get("action_items", []),
+                    "topics": analysis.get("topics", []),
+                    "sentiment": analysis.get("sentiment", "neutral"),
+                    "participants": analysis.get("participants", [])
+                }
+            }
+
+        except Exception as e:
+            logger.error("GeminiProvider", "transcribe_and_analyze", f"Error: {e}")
+            return {"success": False, "error": str(e), "provider": "gemini"}
 
     def transcribe_audio(self, audio_file_path: str, language: str = "auto") -> Dict[str, Any]:
         """Transcribe audio using Gemini"""
@@ -116,41 +299,67 @@ class GeminiProvider(AIProvider):
             return self._mock_response("transcription")
 
         try:
-            # Read audio file
-            with open(audio_file_path, "rb") as audio_file:
-                audio_data = audio_file.read()
+            # Get and validate model
+            model_name = self.config.get("model", "gemini-2.0-flash-exp")
+            model_name = normalize_model_name(model_name)
 
-            # Encode to base64
-            audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+            # Check if model supports audio transcription
+            is_valid, msg = validate_model_for_transcription(model_name)
+            if not is_valid:
+                logger.error("GeminiProvider", "transcribe_audio", msg)
+                return {"success": False, "error": msg, "provider": "gemini"}
+
+            logger.info("GeminiProvider", "transcribe_audio",
+                       f"Using model: {model_name}")
+
+            # Upload audio file to Gemini
+            logger.info("GeminiProvider", "transcribe_audio",
+                       f"Uploading audio file: {audio_file_path}")
+
+            audio_file = genai.upload_file(audio_file_path)
+
+            logger.info("GeminiProvider", "transcribe_audio",
+                       f"File uploaded successfully: {audio_file.uri}")
 
             # Create model
-            model = genai.GenerativeModel(self.config.get("model", "gemini-1.5-flash"))
+            model = genai.GenerativeModel(model_name)
 
-            # Create prompt
-            prompt = f"""
-            Please transcribe the following audio file. Return the result as a JSON object with this structure:
-            {{
-                "transcription": "the full transcribed text",
-                "language": "detected language code",
-                "confidence": 0.95
-            }}
+            # Create prompt with uploaded file reference
+            prompt = """
+Transcribe this audio recording with high accuracy. Follow these guidelines:
 
-            Audio data: data:audio/wav;base64,{audio_base64}
+1. **Speaker Identification**: If multiple speakers are detected, label them as "Speaker 1:", "Speaker 2:", etc.
+2. **Timestamps**: Include timestamps every 30 seconds in [MM:SS] format
+3. **Clarity**: Use proper punctuation and paragraph breaks for readability
+4. **Filler Words**: Omit excessive filler words (um, uh, like) unless they're significant to meaning
+5. **Formatting**:
+   - Start each speaker's turn on a new line
+   - Use proper capitalization and punctuation
+   - Indicate [inaudible] or [unclear] for parts you cannot transcribe confidently
+
+Return ONLY the transcribed text in this format:
+[00:00] Speaker 1: [transcription]
+[00:30] Speaker 2: [transcription]
+
+Do NOT include any JSON formatting or explanatory text.
             """
 
-            response = model.generate_content(prompt)
+            # Generate content with the uploaded audio file
+            response = model.generate_content([prompt, audio_file])
 
-            # Parse response
-            response_text = response.text.strip()
-            if response_text.startswith("```json"):
-                response_text = response_text[7:-3].strip()
+            # Get transcription text
+            transcription_text = response.text.strip()
 
-            result = json.loads(response_text)
+            # Clean up: delete the uploaded file
+            genai.delete_file(audio_file.name)
+            logger.info("GeminiProvider", "transcribe_audio",
+                       "Uploaded file deleted")
+
             return {
                 "success": True,
-                "transcription": result.get("transcription", ""),
-                "language": result.get("language", language),
-                "confidence": result.get("confidence", 0.9),
+                "transcription": transcription_text,
+                "language": language,
+                "confidence": 0.9,
                 "provider": "gemini",
             }
 
@@ -164,19 +373,39 @@ class GeminiProvider(AIProvider):
             return self._mock_response("analysis")
 
         try:
-            model = genai.GenerativeModel(self.config.get("model", "gemini-1.5-flash"))
+            # Get and normalize model
+            model_name = self.config.get("model", "gemini-2.0-flash-exp")
+            model_name = normalize_model_name(model_name)
+
+            logger.info("GeminiProvider", "analyze_text",
+                       f"Using model: {model_name}")
+
+            # Create model
+            model = genai.GenerativeModel(model_name)
 
             prompt = f"""
-            Analyze the following text and provide structured insights. Return as JSON:
-            {{
-                "summary": "concise summary",
-                "key_points": ["point 1", "point 2"],
-                "action_items": ["action 1", "action 2"],
-                "sentiment": "positive/negative/neutral",
-                "topics": ["topic1", "topic2"]
-            }}
+Analyze this meeting transcription and extract actionable insights.
 
-            Text to analyze: {text}
+**Instructions:**
+1. **Summary**: Write a 2-3 sentence executive summary highlighting the meeting's purpose and outcome
+2. **Key Points**: Extract 3-5 most important discussion points or decisions made
+3. **Action Items**: List specific tasks, assignments, or follow-ups mentioned (include who if specified)
+4. **Topics**: Identify main discussion topics or themes (3-5 keywords)
+5. **Sentiment**: Overall tone (professional/positive/concerned/negative/neutral)
+
+**Output Format (strict JSON):**
+{{
+    "summary": "2-3 sentence executive summary",
+    "key_points": ["Specific point with context", "Another key point", ...],
+    "action_items": ["Task: description (assigned to: person if known)", ...],
+    "topics": ["topic1", "topic2", "topic3"],
+    "sentiment": "one word: professional/positive/concerned/negative/neutral"
+}}
+
+**Text to analyze:**
+{text}
+
+Return ONLY valid JSON, no markdown formatting or explanatory text.
             """
 
             response = model.generate_content(prompt)
@@ -201,6 +430,22 @@ class GeminiProvider(AIProvider):
                 "language": "en",
                 "confidence": 0.95,
                 "provider": "gemini",
+            }
+        elif response_type == "combined":
+            return {
+                "success": True,
+                "transcription": "[00:00] Speaker 1: This is a mock transcription.\n[00:30] Speaker 2: This demonstrates the combined approach.",
+                "language": "en",
+                "confidence": 0.95,
+                "provider": "gemini",
+                "analysis": {
+                    "summary": "[Mock] Sample meeting discussion between two speakers.",
+                    "key_points": ["Mock point 1", "Mock point 2"],
+                    "action_items": ["Task: Mock action 1 (assigned to: Speaker 1)", "Task: Mock action 2"],
+                    "sentiment": "professional",
+                    "topics": ["testing", "mock data", "combined approach"],
+                    "participants": ["Speaker 1", "Speaker 2"]
+                },
             }
         else:
             return {
