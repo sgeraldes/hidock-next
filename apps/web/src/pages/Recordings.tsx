@@ -43,12 +43,12 @@ export const Recordings: React.FC = () => {
     sizeRange: 'all',
     status: 'all'
   });
-  
+
   // Check for navigation from Dashboard
   React.useEffect(() => {
     const sortPreference = sessionStorage.getItem('recordings-sort');
     const filterPreference = sessionStorage.getItem('recordings-filter');
-    
+
     if (sortPreference) {
       if (sortPreference === 'duration-desc') {
         setSortField('duration');
@@ -59,7 +59,7 @@ export const Recordings: React.FC = () => {
       }
       sessionStorage.removeItem('recordings-sort');
     }
-    
+
     if (filterPreference) {
       if (filterPreference === 'downloaded') {
         setFilters(prev => ({ ...prev, status: 'downloaded' }));
@@ -69,7 +69,7 @@ export const Recordings: React.FC = () => {
       sessionStorage.removeItem('recordings-filter');
     }
   }, []);
-  
+
   // Mobile-specific states
   const [selectionMode, setSelectionMode] = useState(false);
   const [activeRecording, setActiveRecording] = useState<string | null>(null);
@@ -77,7 +77,7 @@ export const Recordings: React.FC = () => {
   const [showActionButtons, setShowActionButtons] = useState(false);
   const [showSelectionBar, setShowSelectionBar] = useState(false);
   const [screenWidth, setScreenWidth] = useState(typeof window !== 'undefined' ? window.innerWidth : 1024);
-  
+
   // Detect mobile viewport and screen size
   React.useEffect(() => {
     const checkMobile = () => {
@@ -89,7 +89,7 @@ export const Recordings: React.FC = () => {
     window.addEventListener('resize', checkMobile);
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
-  
+
   // Animate action buttons in/out
   React.useEffect(() => {
     if (isMobile && activeRecording && !selectionMode) {
@@ -100,7 +100,7 @@ export const Recordings: React.FC = () => {
       setShowActionButtons(false);
     }
   }, [isMobile, activeRecording, selectionMode]);
-  
+
   // Animate selection bar in/out
   React.useEffect(() => {
     if (isMobile && selectionMode && selectedRecordings.length > 0) {
@@ -119,7 +119,7 @@ export const Recordings: React.FC = () => {
       setSelectedRecordings(filteredRecordings.map(r => r.id));
     }
   };
-  
+
   // Handle long press for mobile selection mode
   const handleLongPress = (recordingId: string) => {
     if (isMobile && !selectionMode) {
@@ -128,7 +128,7 @@ export const Recordings: React.FC = () => {
       setActiveRecording(null);
     }
   };
-  
+
   // Handle row click on mobile
   const handleRowClick = (recording: AudioRecording) => {
     if (isMobile) {
@@ -139,7 +139,7 @@ export const Recordings: React.FC = () => {
       }
     }
   };
-  
+
   // Exit selection mode when no items selected
   React.useEffect(() => {
     if (isMobile && selectionMode && selectedRecordings.length === 0) {
@@ -160,7 +160,7 @@ export const Recordings: React.FC = () => {
     if (sortField !== field) {
       return <ChevronsUpDown className="w-3 h-3 text-slate-500" />;
     }
-    return sortDirection === 'asc' 
+    return sortDirection === 'asc'
       ? <ChevronUp className="w-3 h-3 text-primary-400" />
       : <ChevronDown className="w-3 h-3 text-primary-400" />;
   };
@@ -186,12 +186,12 @@ export const Recordings: React.FC = () => {
 
       // Date range filter
       if (filters.dateRange !== 'all') {
-        const recordingDate = recording.dateCreated instanceof Date 
-          ? recording.dateCreated 
+        const recordingDate = recording.dateCreated instanceof Date
+          ? recording.dateCreated
           : new Date(recording.dateCreated);
         const now = new Date();
         const dayInMs = 24 * 60 * 60 * 1000;
-        
+
         switch (filters.dateRange) {
           case 'today':
             if (now.getTime() - recordingDate.getTime() > dayInMs) return false;
@@ -239,7 +239,7 @@ export const Recordings: React.FC = () => {
   const sortedRecordings = useMemo(() => {
     return [...filteredRecordings].sort((a, b) => {
       let compareValue = 0;
-      
+
       switch (sortField) {
         case 'name':
           compareValue = a.fileName.localeCompare(b.fileName);
@@ -250,16 +250,17 @@ export const Recordings: React.FC = () => {
         case 'size':
           compareValue = a.size - b.size;
           break;
-        case 'date':
+        case 'date': {
           const dateA = a.dateCreated instanceof Date ? a.dateCreated : new Date(a.dateCreated);
           const dateB = b.dateCreated instanceof Date ? b.dateCreated : new Date(b.dateCreated);
           compareValue = dateA.getTime() - dateB.getTime();
           break;
+        }
         case 'status':
           compareValue = a.status.localeCompare(b.status);
           break;
       }
-      
+
       return sortDirection === 'asc' ? compareValue : -compareValue;
     });
   }, [filteredRecordings, sortField, sortDirection]);
@@ -283,11 +284,11 @@ export const Recordings: React.FC = () => {
     if (filters.status !== 'all') count++;
     return count;
   }, [filters]);
-  
+
   // Responsive date formatting
   const formatResponsiveDate = (date: Date | string) => {
     const d = date instanceof Date ? date : new Date(date);
-    
+
     if (screenWidth < 360) {
       // Very small screens: MM/DD HH:MM
       const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -297,16 +298,16 @@ export const Recordings: React.FC = () => {
       return `${month}/${day} ${hours}:${minutes}`;
     } else if (screenWidth < 640) {
       // Small screens: MMM DD, HH:MM
-      return d.toLocaleDateString('en-US', { 
-        month: 'short', 
+      return d.toLocaleDateString('en-US', {
+        month: 'short',
         day: 'numeric',
         hour: '2-digit',
         minute: '2-digit'
       });
     } else if (screenWidth < 1024) {
       // Medium screens: MMM DD, YYYY HH:MM
-      return d.toLocaleDateString('en-US', { 
-        month: 'short', 
+      return d.toLocaleDateString('en-US', {
+        month: 'short',
         day: 'numeric',
         year: 'numeric',
         hour: '2-digit',
@@ -336,10 +337,10 @@ export const Recordings: React.FC = () => {
       try {
         // Update status to show loading
         updateRecording(recording.id, { status: 'downloading' });
-        
+
         // Get the audio URL before setting as playing
         await getAudioUrl(recording);
-        
+
         setPlayingRecording(recording);
         updateRecording(recording.id, { status: 'playing' });
       } catch (error) {
@@ -369,26 +370,26 @@ export const Recordings: React.FC = () => {
     try {
       // Import device service dynamically to avoid circular dependencies
       const { deviceService } = await import('@/services/deviceService');
-      
+
       // Check if device is connected
       if (!deviceService.isDeviceConnected()) {
         throw new Error('Device not connected. Please connect your HiDock device.');
       }
-      
+
       // Download with reasonable timeout (should be fast now without file list fetch)
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error('Download timeout after 30 seconds')), 30000);
       });
-      
+
       // Pass the filename and size directly - no more file list fetching!
       const audioUrl = await Promise.race([
         deviceService.getAudioBlobUrl(recording.id, recording.fileName, recording.size),
         timeoutPromise
       ]);
-      
+
       // Store the URL for future use
       setAudioUrls(prev => new Map(prev).set(recording.id, audioUrl));
-      
+
       return audioUrl;
     } catch (error) {
       console.error('Failed to get audio URL:', error);
@@ -400,10 +401,10 @@ export const Recordings: React.FC = () => {
     try {
       // Update status to show downloading
       updateRecording(recording.id, { status: 'downloading' });
-      
+
       // Get or create the audio URL (blob URL from device)
       const audioUrl = await getAudioUrl(recording);
-      
+
       // Create a download link for the blob URL
       const link = document.createElement('a');
       link.href = audioUrl;
@@ -411,7 +412,7 @@ export const Recordings: React.FC = () => {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      
+
       // Update status back to downloaded
       updateRecording(recording.id, { status: 'downloaded' });
     } catch (error) {
@@ -487,7 +488,7 @@ export const Recordings: React.FC = () => {
 
               {selectedRecordings.length > 0 && (
                 <>
-                  <button 
+                  <button
                     onClick={handleBulkDownload}
                     className="btn-primary flex items-center space-x-1 sm:space-x-2 text-sm sm:text-base"
                   >
@@ -701,7 +702,7 @@ export const Recordings: React.FC = () => {
             <Music className="w-16 h-16 text-slate-500 mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-slate-100 mb-2">No Recordings Found</h3>
             <p className="text-slate-400">
-              {recordings.length === 0 
+              {recordings.length === 0
                 ? "Connect your HiDock device to see your recordings here."
                 : activeFilterCount > 0
                 ? "No recordings match your current filters. Try adjusting or resetting them."
@@ -797,7 +798,7 @@ export const Recordings: React.FC = () => {
                   const handleTouchEnd = () => {
                     if (pressTimer) clearTimeout(pressTimer);
                   };
-                  
+
                   return screenWidth < 640 ? (
                     /* Mobile Compact Layout */
                     <div
@@ -824,7 +825,7 @@ export const Recordings: React.FC = () => {
                             className="mr-3 rounded border-slate-500 bg-slate-700 text-primary-600 focus:ring-primary-500"
                           />
                         )}
-                        
+
                         {/* Content */}
                         <div className="flex-1 min-w-0">
                           <div className="flex items-start justify-between">
@@ -923,8 +924,8 @@ export const Recordings: React.FC = () => {
                       <button
                         onClick={() => handlePlayRecording(recording)}
                         className={`p-1 hover:bg-slate-600 rounded transition-colors ${
-                          playingRecording?.id === recording.id 
-                            ? 'text-primary-400 bg-slate-700' 
+                          playingRecording?.id === recording.id
+                            ? 'text-primary-400 bg-slate-700'
                             : 'text-slate-400 hover:text-slate-200'
                         }`}
                         title={playingRecording?.id === recording.id ? "Stop" : "Play"}
@@ -988,19 +989,19 @@ export const Recordings: React.FC = () => {
         )}
         </div>
       </div>
-      
+
       {/* Mobile Floating Action Buttons */}
       {isMobile && activeRecording && !selectionMode && (
         <div className={`fixed bottom-20 left-1/2 -translate-x-1/2 z-50 transition-all duration-300 ease-out ${
-          showActionButtons 
-            ? 'opacity-100 translate-y-0 scale-100' 
+          showActionButtons
+            ? 'opacity-100 translate-y-0 scale-100'
             : 'opacity-0 translate-y-4 scale-95 pointer-events-none'
         }`}>
           <div className="bg-slate-800/95 backdrop-blur-sm border border-slate-600 rounded-full px-4 py-3 flex items-center space-x-4 shadow-2xl">
             {(() => {
               const recording = sortedRecordings.find(r => r.id === activeRecording);
               if (!recording) return null;
-              
+
               return (
                 <>
                   <button
@@ -1011,8 +1012,8 @@ export const Recordings: React.FC = () => {
                     className={`p-3 rounded-full transition-all duration-300 transform hover:scale-110 ${
                       showActionButtons ? 'opacity-100 scale-100' : 'opacity-0 scale-75'
                     } ${
-                      playingRecording?.id === recording.id 
-                        ? 'bg-primary-600 text-white shadow-lg shadow-primary-600/30' 
+                      playingRecording?.id === recording.id
+                        ? 'bg-primary-600 text-white shadow-lg shadow-primary-600/30'
                         : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                     }`}
                     disabled={recording.status === 'downloading'}
@@ -1025,7 +1026,7 @@ export const Recordings: React.FC = () => {
                       <Play className="w-5 h-5" />
                     )}
                   </button>
-                  
+
                   <button
                     onClick={() => handleDownloadRecording(recording)}
                     style={{
@@ -1042,7 +1043,7 @@ export const Recordings: React.FC = () => {
                       <Download className="w-5 h-5" />
                     )}
                   </button>
-                  
+
                   {recording.transcription && (
                     <button
                       style={{
@@ -1055,7 +1056,7 @@ export const Recordings: React.FC = () => {
                       <FileText className="w-5 h-5" />
                     </button>
                   )}
-                  
+
                   <button
                     style={{
                       transitionDelay: showActionButtons ? '200ms' : '0ms'
@@ -1072,12 +1073,12 @@ export const Recordings: React.FC = () => {
           </div>
         </div>
       )}
-      
+
       {/* Mobile Selection Action Bar */}
       {isMobile && selectionMode && selectedRecordings.length > 0 && (
         <div className={`fixed bottom-0 left-0 right-0 bg-slate-800 border-t border-slate-700 px-4 py-3 z-50 transition-all duration-300 ease-out ${
-          showSelectionBar 
-            ? 'opacity-100 translate-y-0' 
+          showSelectionBar
+            ? 'opacity-100 translate-y-0'
             : 'opacity-0 translate-y-full pointer-events-none'
         }`}>
           <div className="flex items-center justify-between">

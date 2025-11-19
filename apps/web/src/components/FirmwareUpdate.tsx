@@ -1,8 +1,8 @@
 import React, { useState, useCallback } from 'react';
-import { FirmwareService } from '../services/firmwareService';
+import { FirmwareService, FirmwareDevice, FirmwareMetadata } from '../services/firmwareService';
 
 interface FirmwareUpdateProps {
-  device: any; // HiDock USB device instance
+  device: FirmwareDevice;
   currentVersion: number;
   model: string;
 }
@@ -15,15 +15,15 @@ export const FirmwareUpdate: React.FC<FirmwareUpdateProps> = ({
   const [status, setStatus] = useState<'idle' | 'checking' | 'downloading' | 'uploading' | 'complete' | 'error'>('idle');
   const [progress, setProgress] = useState(0);
   const [errorMessage, setErrorMessage] = useState('');
-  const [updateInfo, setUpdateInfo] = useState<any>(null);
+  const [updateInfo, setUpdateInfo] = useState<FirmwareMetadata | null>(null);
 
   const checkForUpdate = useCallback(async () => {
     setStatus('checking');
     setErrorMessage('');
-    
+
     try {
       const metadata = await FirmwareService.checkFirmwareUpdate(currentVersion, model);
-      
+
       if (metadata) {
         setUpdateInfo(metadata);
         setStatus('idle');
@@ -33,7 +33,7 @@ export const FirmwareUpdate: React.FC<FirmwareUpdateProps> = ({
         setErrorMessage('Your device is already running the latest firmware');
         return false;
       }
-    } catch (error) {
+    } catch {
       setStatus('error');
       setErrorMessage('Failed to check for updates');
       return false;
@@ -111,7 +111,7 @@ export const FirmwareUpdate: React.FC<FirmwareUpdateProps> = ({
   return (
     <div className="firmware-update-container p-6 bg-white rounded-lg shadow-md">
       <h2 className="text-2xl font-bold mb-4">Firmware Update</h2>
-      
+
       <div className="device-info mb-4">
         <p className="text-gray-600">Model: {model}</p>
         <p className="text-gray-600">Current Version: {currentVersion}</p>
@@ -135,7 +135,7 @@ export const FirmwareUpdate: React.FC<FirmwareUpdateProps> = ({
       {(status === 'downloading' || status === 'uploading') && (
         <div className="progress-bar mb-4">
           <div className="w-full bg-gray-200 rounded-full h-2.5">
-            <div 
+            <div
               className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
               style={{ width: `${progress}%` }}
             />

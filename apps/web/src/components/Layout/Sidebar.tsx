@@ -49,7 +49,7 @@ export const Sidebar: React.FC = () => {
     const handleClickOutside = (e: MouseEvent) => {
       const sidebar = document.getElementById('expandable-sidebar');
       const hamburger = document.getElementById('sidebar-hamburger');
-      if (isExpanded && sidebar && !sidebar.contains(e.target as Node) && 
+      if (isExpanded && sidebar && !sidebar.contains(e.target as Node) &&
           hamburger && !hamburger.contains(e.target as Node)) {
         setIsExpanded(false);
       }
@@ -184,13 +184,13 @@ export const Sidebar: React.FC = () => {
   const expandedOverlay = isExpanded && !isLargeScreen && (
     <>
       {/* Backdrop */}
-      <div 
+      <div
         className="fixed inset-0 bg-black/50 z-[45] md:block xl:hidden"
         onClick={() => setIsExpanded(false)}
       />
-      
+
       {/* Expanded Sidebar */}
-      <aside 
+      <aside
         id="expandable-sidebar"
         className={`fixed left-0 top-16 h-[calc(100vh-4rem)] w-64 bg-slate-800 border-r border-slate-700 flex flex-col z-50 overflow-hidden transition-transform duration-300 ease-out md:block xl:hidden ${
           isExpanded ? 'translate-x-0' : '-translate-x-full'
@@ -236,7 +236,11 @@ export const Sidebar: React.FC = () => {
           <div className="space-y-3">
             <button
               onClick={() => {
-                isDeviceConnected ? disconnectDevice() : connectDevice();
+                if (isDeviceConnected) {
+                  disconnectDevice();
+                } else {
+                  connectDevice();
+                }
                 setIsExpanded(false);
               }}
               className={`w-full flex items-center justify-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${

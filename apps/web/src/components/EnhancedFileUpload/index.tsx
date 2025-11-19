@@ -91,7 +91,7 @@ export const EnhancedFileUpload: React.FC<EnhancedFileUploadProps> = ({
             return ERROR_MESSAGES.FILE_TOO_LARGE;
         }
 
-        if (!AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as any)) {
+        if (!AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as typeof AUDIO_CONFIG.SUPPORTED_FORMATS[number])) {
             return ERROR_MESSAGES.UNSUPPORTED_FORMAT;
         }
 
@@ -316,7 +316,7 @@ export const EnhancedFileUpload: React.FC<EnhancedFileUploadProps> = ({
 
         const files = Array.from(e.dataTransfer.files);
         const audioFiles = files.filter(file =>
-            AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as any)
+            AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as typeof AUDIO_CONFIG.SUPPORTED_FORMATS[number])
         );
 
         if (audioFiles.length === 0 && files.length > 0) {

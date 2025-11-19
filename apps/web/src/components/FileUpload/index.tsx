@@ -27,7 +27,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({
     }
 
     // Check file type
-    if (!AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as any)) {
+    if (!AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as typeof AUDIO_CONFIG.SUPPORTED_FORMATS[number])) {
       return ERROR_MESSAGES.UNSUPPORTED_FORMAT;
     }
 
@@ -107,7 +107,7 @@ export const FileUpload: React.FC<FileUploadProps> = ({
 
     const files = Array.from(e.dataTransfer.files);
     const audioFile = files.find(file =>
-      AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as any)
+      AUDIO_CONFIG.SUPPORTED_FORMATS.includes(file.type as typeof AUDIO_CONFIG.SUPPORTED_FORMATS[number])
     );
 
     if (audioFile) {

@@ -1,7 +1,7 @@
 // Firmware Update Service for HiDock devices
 // Based on analysis of HiNotes implementation
 
-interface FirmwareMetadata {
+export interface FirmwareMetadata {
   id: string;
   model: string;
   versionCode: string;  // e.g., "6.2.5"
@@ -12,6 +12,12 @@ interface FirmwareMetadata {
   remark: string;        // Changelog
   createTime: number;
   state: string;
+}
+
+// Device interface for firmware operations
+export interface FirmwareDevice {
+  requestFirmwareUpgrade(fileLength: number, versionNumber: number, timeout: number): Promise<{ result: string }>;
+  uploadFirmware(data: Uint8Array, timeout: number, onProgress?: (progress: number) => void): Promise<{ result: string }>;
 }
 
 // @ts-expect-error - Future use: API request structure for firmware checks
@@ -42,11 +48,11 @@ export class FirmwareService {
     });
 
     const result = await response.json();
-    
+
     if (result.error === 0 && result.data) {
       return result.data as FirmwareMetadata;
     }
-    
+
     return null; // No update available
   }
 
@@ -60,7 +66,7 @@ export class FirmwareService {
     // 1. Served from a different domain/CDN
     // 2. Requires special authentication
     // 3. Downloaded via WebSocket or WebRTC data channel
-    
+
     // Try potential firmware download patterns
     const possibleUrls = [
       `${FIRMWARE_API_BASE}/v2/device/firmware/binary/${fileName}`,
@@ -88,10 +94,11 @@ export class FirmwareService {
             let receivedLength = 0;
             const chunks: Uint8Array[] = [];
 
+            // eslint-disable-next-line no-constant-condition
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
-              
+
               chunks.push(value);
               receivedLength += value.length;
               onProgress(receivedLength / contentLength);
@@ -126,7 +133,7 @@ export class FirmwareService {
     const hashBuffer = await crypto.subtle.digest('MD5', data);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    
+
     return hashHex === expectedSignature;
   }
 
@@ -135,7 +142,7 @@ export class FirmwareService {
    * Using the jensen.js USB protocol
    */
   static async uploadFirmwareToDevice(
-    device: any, // HiDock USB device instance
+    device: FirmwareDevice,
     firmwareData: ArrayBuffer,
     metadata: FirmwareMetadata,
     onProgress?: (progress: number) => void
@@ -175,7 +182,7 @@ export class FirmwareService {
    * Complete firmware update flow
    */
   static async performFirmwareUpdate(
-    device: any,
+    device: FirmwareDevice,
     currentVersion: number,
     model: string,
     callbacks?: {
@@ -190,7 +197,7 @@ export class FirmwareService {
       // Step 1: Check for updates
       callbacks?.onCheckUpdate?.();
       const metadata = await this.checkFirmwareUpdate(currentVersion, model);
-      
+
       if (!metadata) {
         callbacks?.onComplete?.();
         return; // Already up to date
@@ -237,7 +244,7 @@ export class AlternativeFirmwareDownload {
   static async downloadViaWebSocket(fileName: string): Promise<ArrayBuffer> {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`wss://hinotes.hidock.com/firmware`);
-      
+
       ws.onopen = () => {
         // Send download request
         ws.send(JSON.stringify({
@@ -247,8 +254,8 @@ export class AlternativeFirmwareDownload {
         }));
       };
 
-      let chunks: Uint8Array[] = [];
-      
+      const chunks: Uint8Array[] = [];
+
       ws.onmessage = (event) => {
         if (event.data instanceof Blob) {
           event.data.arrayBuffer().then(buffer => {

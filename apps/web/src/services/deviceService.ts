@@ -1,5 +1,5 @@
 import { ERROR_MESSAGES, HIDOCK_COMMANDS, HIDOCK_DEVICE_CONFIG, HIDOCK_PRODUCT_IDS } from '@/constants';
-import type { AudioRecording, HiDockDevice, StorageInfo, DeviceSettings, MeetingInfo, RecordingInfo } from '@/types';
+import type { AudioRecording, HiDockDevice, StorageInfo, DeviceSettings, MeetingInfo, RecordingInfo, RecordingStatus } from '@/types';
 
 // Device service specific interfaces
 interface ConnectionStats {
@@ -36,6 +36,19 @@ interface PacketData {
     seqId: number;
     data: Uint8Array;
     isComplete: boolean;
+}
+
+interface CachedRecording {
+    id: string;
+    fileName: string;
+    size: number;
+    duration: number;
+    dateCreated: string | Date;
+    status: RecordingStatus;
+    checksum?: string;
+    localPath?: string;
+    transcription?: string;
+    formatVersion?: number;
 }
 
 // WebUSB type definitions for better TypeScript support
@@ -147,7 +160,7 @@ class DeviceService {
     // Enhanced connection management
     private connectionRetryCount = 0;
     private isAutoReconnecting = false;
-    
+
     // File list caching
     private cachedRecordings: AudioRecording[] | null = null;
     private cacheTimestamp: number = 0;
@@ -156,7 +169,7 @@ class DeviceService {
     private deviceSerialNumber: string | null = null;
     private cachedFileCount: number = -1;
     private cachedUsedSpace: number = -1;
-    
+
     // Persistent cache keys
     private readonly CACHE_KEY = 'hidock_recordings_cache';
     private readonly CACHE_META_KEY = 'hidock_cache_metadata';
@@ -234,7 +247,7 @@ class DeviceService {
             return connectedDevice;
         } catch (error) {
             console.error('Failed to request device:', error);
-            
+
             // Handle user cancellation separately
             if (error instanceof DOMException && error.name === 'NotFoundError') {
                 // User cancelled the device selection dialog
@@ -244,11 +257,11 @@ class DeviceService {
                     total: 100,
                     status: 'cancelled'
                 });
-                
+
                 // Don't throw an error for cancellation, just return null
                 return null;
             }
-            
+
             this.lastError = error instanceof Error ? error.message : 'Unknown error';
             this.incrementErrorCount('connectionLost');
 
@@ -356,7 +369,7 @@ class DeviceService {
 
         // Use the actual product name from the device, or determine based on product ID
         let model = this.device.productName || 'Unknown HiDock';
-        
+
         // Only use product ID-based naming as a fallback if no product name
         if (!this.device.productName) {
             switch (this.device.productId) {
@@ -407,7 +420,7 @@ class DeviceService {
                 this.device = null;
                 this.isConnected = false;
                 this.isAutoReconnecting = false; // Reset auto-reconnection flag on disconnect
-                
+
                 // Keep cache in memory and localStorage for when device reconnects
                 // Cache will be invalidated if storage info changes on next connection
 
@@ -492,14 +505,14 @@ class DeviceService {
         try {
             const metaStr = localStorage.getItem(this.CACHE_META_KEY);
             const cacheStr = localStorage.getItem(this.CACHE_KEY);
-            
+
             if (metaStr && cacheStr) {
                 const meta = JSON.parse(metaStr);
                 const cache = JSON.parse(cacheStr);
-                
+
                 // Restore cache if it's for the same device
                 if (meta.deviceSerialNumber && cache.recordings) {
-                    this.cachedRecordings = cache.recordings.map((rec: any) => ({
+                    this.cachedRecordings = cache.recordings.map((rec: CachedRecording): AudioRecording => ({
                         ...rec,
                         dateCreated: new Date(rec.dateCreated)
                     }));
@@ -507,7 +520,7 @@ class DeviceService {
                     this.cachedUsedSpace = meta.usedSpace;
                     this.deviceSerialNumber = meta.deviceSerialNumber;
                     this.cacheTimestamp = meta.timestamp;
-                    
+
                     console.log(`📦 Loaded cached recordings from localStorage: ${this.cachedRecordings?.length || 0} files`);
                 }
             }
@@ -518,7 +531,7 @@ class DeviceService {
             localStorage.removeItem(this.CACHE_META_KEY);
         }
     }
-    
+
     private saveCacheToStorage(): void {
         try {
             if (this.cachedRecordings && this.deviceSerialNumber) {
@@ -528,14 +541,14 @@ class DeviceService {
                     usedSpace: this.cachedUsedSpace,
                     timestamp: this.cacheTimestamp
                 };
-                
+
                 const cache = {
                     recordings: this.cachedRecordings
                 };
-                
+
                 localStorage.setItem(this.CACHE_META_KEY, JSON.stringify(meta));
                 localStorage.setItem(this.CACHE_KEY, JSON.stringify(cache));
-                
+
                 console.log(`💾 Saved ${this.cachedRecordings.length} recordings to localStorage cache`);
             }
         } catch (error) {
@@ -561,23 +574,23 @@ class DeviceService {
             try {
                 // Get current storage info to check if files have changed
                 const currentStorageInfo = await this.getStorageInfo();
-                
+
                 // Check if file count or used space has changed
-                const storageUnchanged = 
+                const storageUnchanged =
                     currentStorageInfo.fileCount === this.cachedFileCount &&
                     currentStorageInfo.usedSpace === this.cachedUsedSpace;
-                
+
                 if (storageUnchanged) {
                     console.log(`📋 Storage unchanged (${this.cachedFileCount} files, ${this.cachedUsedSpace} bytes used) - using cached file list`);
                     return this.cachedRecordings;
                 }
-                
+
                 console.log(`📋 Storage changed - File count: ${this.cachedFileCount} → ${currentStorageInfo.fileCount}, Used: ${this.cachedUsedSpace} → ${currentStorageInfo.usedSpace}`);
-                
+
                 // Update cached values for next check
                 this.cachedFileCount = currentStorageInfo.fileCount;
                 this.cachedUsedSpace = currentStorageInfo.usedSpace;
-                
+
                 // Also update the localStorage metadata so the change is persisted
                 try {
                     const meta = {
@@ -596,7 +609,7 @@ class DeviceService {
         }
 
         console.log('📋 Fetching fresh file list from device...');
-        
+
         try {
             this.updateProgress('get_recordings', {
                 operation: 'Getting file list',
@@ -606,10 +619,10 @@ class DeviceService {
             });
 
             const seqId = await this.sendCommand(HIDOCK_COMMANDS.GET_FILE_LIST);
-            
+
             // Collect streaming file list packets with incremental parsing
             const recordings = await this.receiveAndParseStreamingFileList(
-                seqId, 
+                seqId,
                 HIDOCK_COMMANDS.GET_FILE_LIST,
                 (fileCount: number, totalFiles: number, packetCount: number) => {
                     this.updateProgress('get_recordings', {
@@ -645,7 +658,7 @@ class DeviceService {
             this.cachedRecordings = recordings;
             this.cacheTimestamp = Date.now();
             this.deviceSerialNumber = this.device.serialNumber || null;
-            
+
             // Store the current file count and used space for cache validation
             // These values were already updated in the check above if we entered this code path
             // If not (first fetch), get them now
@@ -661,9 +674,9 @@ class DeviceService {
                     this.cachedUsedSpace = recordings.reduce((total, rec) => total + rec.size, 0);
                 }
             }
-            
+
             console.log(`📋 Cached ${recordings.length} files for device ${this.deviceSerialNumber} (${this.cachedFileCount} files, ${this.cachedUsedSpace} bytes used)`);
-            
+
             // Save cache to localStorage for persistence across browser refreshes
             this.saveCacheToStorage();
 
@@ -825,7 +838,7 @@ class DeviceService {
             // If fileName not provided, we need to get it (backward compatibility)
             let recordingFileName = fileName;
             let recordingSize = fileSize || 0;
-            
+
             if (!recordingFileName) {
                 console.warn(`⚠️ No filename provided, fetching file list (SLOW!)...`);
                 this.updateProgress(`download_${recordingId}`, {
@@ -834,7 +847,7 @@ class DeviceService {
                     total: 100,
                     status: 'in_progress'
                 });
-                
+
                 const recordings = await this.getRecordings();
                 const recording = recordings.find(r => r.id === recordingId);
                 if (!recording) {
@@ -843,7 +856,7 @@ class DeviceService {
                 recordingFileName = recording.fileName;
                 recordingSize = recording.size;
             }
-            
+
             console.log(`📥 Downloading: ${recordingFileName} (${recordingSize} bytes)`);
 
             this.updateProgress(`download_${recordingId}`, {
@@ -887,31 +900,31 @@ class DeviceService {
 
     private async downloadFileBlocks(fileName: string, fileSize: number, progressId: string): Promise<ArrayBuffer> {
         console.log(`📥 Starting single-block download for: ${fileName} (${fileSize} bytes) using jensen.js protocol`);
-        
+
         try {
             // Build command body following jensen.js format: 4-byte length (big-endian) + filename
             const body = new Uint8Array(4 + fileName.length);
             const view = new DataView(body.buffer);
-            
+
             // Big-endian file size (total length to download)
             view.setUint32(0, fileSize, false); // Big-endian file size
-            
+
             // Add filename
             const encoder = new TextEncoder();
             const filenameBytes = encoder.encode(fileName);
             body.set(filenameBytes, 4);
-            
+
             console.log(`📥 Sending GET_FILE_BLOCK command: length=${fileSize}, filename="${fileName}"`);
-            
+
             // Send GET_FILE_BLOCK command
             const seqId = await this.sendCommand(HIDOCK_COMMANDS.GET_FILE_BLOCK, body);
-            
+
             // Receive the file data in streaming fashion (jensen.js style)
             const fileData = await this.receiveFileDataStream(seqId, fileSize, progressId);
-            
+
             console.log(`✅ Download completed: ${fileData.byteLength} bytes`);
             return fileData;
-            
+
         } catch (error) {
             console.error(`Failed to download file:`, error);
             throw new Error(`Download failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -966,7 +979,7 @@ class DeviceService {
                     console.log(`📥 Download complete: received ${totalReceived}/${expectedSize} bytes in ${chunkCount} chunks`);
                     break;
                 }
-                
+
             } catch (error) {
                 console.error(`Failed to receive chunk ${chunkCount}:`, error);
                 throw new Error(`File transfer failed at chunk ${chunkCount}: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -1232,8 +1245,8 @@ class DeviceService {
 
     // @ts-expect-error - Future use: legacy streaming packet receiver
     private async _receiveAllStreamingPackets(
-        initialSeqId: number, 
-        streamingCmdId: number, 
+        initialSeqId: number,
+        streamingCmdId: number,
         onProgress?: (packetCount: number, totalBytes: number) => void,
         timeoutMs = 10000
     ): Promise<Uint8Array> {
@@ -1272,7 +1285,7 @@ class DeviceService {
                         if (packet.cmdId === streamingCmdId) {
                             console.debug(`Got streaming packet: CMD ${packet.cmdId}, Seq ${packet.seqId}, Data length: ${packet.data.length}`);
                             allData.push(packet.data);
-                            
+
                             // Report progress
                             if (onProgress) {
                                 const totalBytes = allData.reduce((sum, data) => sum + data.length, 0);
@@ -1283,7 +1296,7 @@ class DeviceService {
                             console.debug(`Got initial response: CMD ${packet.cmdId}, Seq ${packet.seqId}`);
                             if (allData.length === 0) {
                                 allData.push(packet.data);
-                                
+
                                 // Report progress for initial packet
                                 if (onProgress) {
                                     onProgress(1, packet.data.length);
@@ -1298,7 +1311,7 @@ class DeviceService {
                 // If we have data and haven't received new packets recently, consider stopping
                 if (allData.length > 0) {
                     await this.delay(100);
-                    
+
                     // Simple heuristic: stop after collecting data for a reasonable time
                     const timeSinceStart = Date.now() - startTime;
                     if (timeSinceStart > 3000) { // Stop after 3 seconds if we have data
@@ -1380,49 +1393,49 @@ class DeviceService {
                         // Check if this is a streaming packet for our command
                         if (packet.cmdId === streamingCmdId || packet.seqId === initialSeqId) {
                             packetCount++;
-                            
+
                             // Combine with any leftover data from previous packet
                             const currentData = new Uint8Array(partialPacketBuffer.length + packet.data.length);
                             currentData.set(partialPacketBuffer);
                             currentData.set(packet.data, partialPacketBuffer.length);
-                            
+
                             // Parse files from this packet data
                             const { parsedFiles, remainingBuffer, headerTotal } = this.parsePartialFileList(currentData, totalFilesFromHeader);
-                            
+
                             // Update total if we found it in header
                             if (headerTotal > 0 && totalFilesFromHeader === 0) {
                                 totalFilesFromHeader = headerTotal;
                             }
-                            
+
                             // Add newly parsed files
                             recordings.push(...parsedFiles);
-                            
+
                             // Emit new files for streaming display in smaller batches
                             if (onNewFiles && parsedFiles.length > 0) {
                                 console.log(`🔥 DEVICE: Processing ${parsedFiles.length} new files in smaller batches at ${new Date().toLocaleTimeString()}`);
-                                
+
                                 // Stream files in batches of 10 to make updates more granular
                                 const batchSize = 10;
                                 for (let i = 0; i < parsedFiles.length; i += batchSize) {
                                     const batch = parsedFiles.slice(i, i + batchSize);
                                     console.log(`📦 DEVICE: Emitting batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(parsedFiles.length/batchSize)} with ${batch.length} files at ${new Date().toLocaleTimeString()}`);
                                     onNewFiles(batch);
-                                    
+
                                     // Small delay between batches to make streaming visible
                                     if (i + batchSize < parsedFiles.length) {
                                         await this.delay(200); // 200ms between 10-file batches
                                     }
                                 }
                             }
-                            
+
                             // Store remaining partial data for next packet
                             partialPacketBuffer = remainingBuffer;
-                            
+
                             // Report progress
                             if (onProgress) {
                                 onProgress(recordings.length, totalFilesFromHeader, packetCount);
                             }
-                            
+
                             console.debug(`Packet ${packetCount}: +${parsedFiles.length} files (total: ${recordings.length}${totalFilesFromHeader ? `/${totalFilesFromHeader}` : ''})`);
                         }
                     }
@@ -1431,7 +1444,7 @@ class DeviceService {
                 // Stop condition: if we have files and haven't received new packets recently
                 if (recordings.length > 0) {
                     await this.delay(100);
-                    
+
                     const timeSinceStart = Date.now() - startTime;
                     if (timeSinceStart > 3000) { // Stop after 3s if we have data
                         console.debug(`Stopping stream after 3s with ${recordings.length} files from ${packetCount} packets`);
@@ -1462,29 +1475,29 @@ class DeviceService {
     async getAudioBlobUrl(recordingId: string, fileName?: string, fileSize?: number): Promise<string> {
         try {
             console.log(`🎵 Getting audio: ${fileName || recordingId}`);
-            
+
             // Simple progress callback
             const progressCallback = (progress: DeviceOperationProgress) => {
                 if (progress.status === 'error') {
                     console.error(`❌ Download error: ${progress.message}`);
                 }
             };
-            
+
             // Download the audio data with progress tracking - NOW WITH FILENAME!
             const audioData = await this.downloadRecording(recordingId, progressCallback, fileName, fileSize);
-            
+
             console.log(`✅ Downloaded ${audioData.byteLength} bytes`);
-            
+
             // Create blob from ArrayBuffer
             // HiDock files are typically WAV format
             const audioBlob = new Blob([audioData], { type: 'audio/wav' });
-            
+
             // Create object URL for playback
             const audioUrl = URL.createObjectURL(audioBlob);
-            
+
             console.log(`✅ DEVICE: Created audio blob URL for ${recordingId}: ${audioUrl.slice(0, 50)}...`);
             return audioUrl;
-            
+
         } catch (error) {
             console.error(`❌ DEVICE: Failed to get audio blob URL for ${recordingId}:`, error);
             throw new Error(`Failed to load audio: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -1520,7 +1533,7 @@ class DeviceService {
         // Parse files until we run out of complete records or data
         while (offset < data.length) {
             const startOffset = offset;
-            
+
             try {
                 // Check if we have minimum data for a file record
                 if (offset + 4 > data.length) break;
@@ -1562,7 +1575,7 @@ class DeviceService {
                 // Skip 6 bytes
                 offset += 6;
 
-                // Skip signature (16 bytes)  
+                // Skip signature (16 bytes)
                 offset += 16;
 
                 // Calculate duration and create recording
@@ -1593,7 +1606,7 @@ class DeviceService {
 
         // Return remaining unparsed data
         const remainingBuffer = offset < data.length ? data.slice(offset) : new Uint8Array(0);
-        
+
         return {
             parsedFiles: recordings,
             remainingBuffer,
@@ -1741,7 +1754,7 @@ class DeviceService {
                 const freeMiB = view.getUint32(0, false);
                 const capacityMiB = view.getUint32(4, false);
                 const statusRaw = view.getUint32(8, false); // Status information
-                
+
                 console.log(`📊 Storage raw values: free=${freeMiB} MiB, capacity=${capacityMiB} MiB, status=0x${statusRaw.toString(16)}`);
 
                 // Convert MiB to bytes (1 MiB = 1024 * 1024 bytes)
@@ -1749,7 +1762,7 @@ class DeviceService {
                 const totalCapacity = capacityMiB * 1024 * 1024;
                 const freeSpace = freeMiB * 1024 * 1024;
                 const usedSpace = totalCapacity - freeSpace;
-                
+
                 // Get file count separately
                 let fileCount = 0;
                 try {
@@ -1820,7 +1833,7 @@ class DeviceService {
             console.log('🔄 Auto-reconnection already in progress, skipping...');
             return null;
         }
-        
+
         // Don't try to auto-reconnect if already connected
         if (this.isConnected) {
             console.log('🔗 Already connected, skipping auto-reconnection');
@@ -1830,13 +1843,13 @@ class DeviceService {
             }
             return null;
         }
-        
+
         this.isAutoReconnecting = true;
-        
+
         try {
             console.log('🔍 Checking for previously paired devices...');
             const devices = await navigator.usb.getDevices();
-            
+
             for (const device of devices) {
                 if (this.isHiDockDevice(device)) {
                     console.log(`🔌 Found paired HiDock device: ${device.productName}`);
@@ -1850,7 +1863,7 @@ class DeviceService {
                     }
                 }
             }
-            
+
             console.log('📭 No paired HiDock devices found');
             return null;
         } catch (error) {
@@ -1860,19 +1873,19 @@ class DeviceService {
             this.isAutoReconnecting = false;
         }
     }
-    
+
     // Helper method to get current device info with storage
     async getCurrentDeviceInfo(): Promise<HiDockDevice> {
         if (!this.device || !this.isConnected) {
             throw new Error('Device not connected');
         }
-        
+
         const deviceInfo = await this.getDeviceInfo();
         const storageInfo = await this.getStorageInfo();
-        
+
         // Use the actual product name from the device, or determine based on product ID
         let model = this.device.productName || 'Unknown HiDock';
-        
+
         // Only use product ID-based naming as a fallback if no product name
         if (!this.device.productName) {
             switch (this.device.productId) {
@@ -1889,7 +1902,7 @@ class DeviceService {
                     model = `HiDock Device (PID: ${this.device.productId.toString(16)})`;
             }
         }
-        
+
         return {
             id: this.device.serialNumber || 'unknown',
             name: model,  // Use the model as the name
@@ -1900,7 +1913,7 @@ class DeviceService {
             storageInfo,
         };
     }
-    
+
     private isHiDockDevice(device: USBDevice): boolean {
         // Check if device is a HiDock based on vendor/product ID
         const isKnownVendor = device.vendorId === 0x10D6 || device.vendorId === 0x1a86;
@@ -2200,7 +2213,7 @@ class DeviceService {
 
         try {
             let body: number[] = [];
-            
+
             if (meetings.length === 0) {
                 // Send empty schedule (52 zeros)
                 body = new Array(52).fill(0);
@@ -2210,18 +2223,18 @@ class DeviceService {
                     // Date format: YYYYMMDDHHMMSS (14 bytes as BCD)
                     const startStr = this.formatDateForDevice(meeting.startDate);
                     const endStr = this.formatDateForDevice(meeting.endDate);
-                    
+
                     // Convert to BCD format
                     const startBCD = this.toBCD(startStr);
                     const endBCD = this.toBCD(endStr);
-                    
+
                     // Add padding
                     startBCD.push(0);
                     endBCD.push(0);
-                    
+
                     // Platform-specific keyboard shortcuts (34 bytes)
                     const shortcuts = this.getPlatformShortcuts(meeting.platform, meeting.os || 'Windows');
-                    
+
                     // Combine: start(8) + end(8) + reserved(2) + shortcuts(34) = 52 bytes per meeting
                     body = body.concat([...startBCD, ...endBCD, 0, 0, ...shortcuts]);
                 }
@@ -2253,7 +2266,7 @@ class DeviceService {
             if (response.data.length >= 7) {
                 // Parse BCD time format
                 const timeStr = this.fromBCD(response.data.slice(0, 7));
-                
+
                 if (timeStr === '00000000000000') {
                     return new Date(); // Device time not set
                 }
