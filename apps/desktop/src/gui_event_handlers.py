@@ -5,6 +5,7 @@ Event Handlers Mixin for the HiDock Explorer Tool GUI.
 This module provides the `EventHandlersMixin` class, which contains methods
 for handling GUI events such as button clicks, key presses, and selection changes.
 """
+
 import os
 import subprocess
 import sys

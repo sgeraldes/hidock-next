@@ -129,12 +129,12 @@ if __name__ == "__main__":
     print("Microsoft Configuration:")
     if is_provider_configured("microsoft"):
         config = MICROSOFT_CONFIG
-        print(f"  ✓ Configured")
+        print("  ✓ Configured")
         print(f"  Client ID: {config['client_id'][:20]}...{config['client_id'][-10:]}")
         print(f"  Scopes: {config['scope']}")
         print(f"  Auth URL: {config['auth_url']}")
     else:
-        print(f"  ✗ Not configured (missing client_id)")
+        print("  ✗ Not configured (missing client_id)")
 
     print()
 
@@ -142,11 +142,11 @@ if __name__ == "__main__":
     print("Google Configuration:")
     if is_provider_configured("google"):
         config = GOOGLE_CONFIG
-        print(f"  ✓ Configured")
+        print("  ✓ Configured")
         print(f"  Client ID: {config['client_id'][:20]}...{config['client_id'][-10:]}")
         print(f"  Scopes: {config['scope']}")
     else:
-        print(f"  ✗ Not configured (missing client_id)")
+        print("  ✗ Not configured (missing client_id)")
 
     print()
 

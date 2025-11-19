@@ -875,7 +875,6 @@ class HiDockToolGUI(
                 and self.calendar_search_widget.search_entry.winfo_exists()
                 and str(self.focus_get()) == str(self.calendar_search_widget.search_entry)
             ):
-
                 # Only clear if search widget is focused
                 self.calendar_search_widget._clear_search()
                 return "break"  # Prevent default behavior
@@ -3810,8 +3809,6 @@ You can dismiss this warning and continue using the application with limited aud
             List of enhanced files with live meeting data
         """
         try:
-            from datetime import datetime
-
             enhanced_files = []
             meetings_found = 0
 
@@ -4460,7 +4457,7 @@ You can dismiss this warning and continue using the application with limited aud
                     logger.warning(
                         "GUI",
                         "_find_meeting_for_file_live",
-                        f"Calendar integration has no find_meeting_for_recording method",
+                        "Calendar integration has no find_meeting_for_recording method",
                     )
             else:
                 logger.warning(

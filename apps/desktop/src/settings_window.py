@@ -2187,7 +2187,7 @@ class SettingsDialog(ctk.CTkToplevel):
                 self._trigger_calendar_sync(connected_provider)
 
             # Show OAuth dialog
-            dialog = CalendarOAuthDialog(self, access_token, callback=on_connection_success)
+            CalendarOAuthDialog(self, access_token, callback=on_connection_success)
 
         except ImportError as e:
             logger.error("SettingsDialog", "connect_calendar", f"Import error: {e}")

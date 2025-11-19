@@ -22,7 +22,7 @@ Supports:
 
 import webbrowser
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 from urllib.parse import urlencode
 
 import requests
@@ -341,7 +341,7 @@ if __name__ == "__main__":
         if "refresh_token" in tokens:
             print(f"  Refresh Token: {tokens['refresh_token'][:30]}...{tokens['refresh_token'][-10:]}")
         else:
-            print(f"  Refresh Token: Not provided")
+            print("  Refresh Token: Not provided")
 
         print(f"  Expires In: {tokens.get('expires_in', 'N/A')} seconds")
         print(f"  Expires At: {tokens.get('expires_at', 'N/A')}")

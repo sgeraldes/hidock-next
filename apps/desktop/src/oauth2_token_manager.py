@@ -434,7 +434,7 @@ if __name__ == "__main__":
     print("2. Testing token retrieval...")
     loaded_tokens = manager.load_tokens("microsoft")
     if loaded_tokens:
-        print(f"   [OK] Tokens loaded successfully")
+        print("   [OK] Tokens loaded successfully")
         print(f"   Access token (first 20 chars): {loaded_tokens['access_token'][:20]}...")
         print(f"   Has refresh token: {bool(loaded_tokens.get('refresh_token'))}")
         print(f"   Expires at: {loaded_tokens.get('expires_at')}\n")
@@ -458,7 +458,7 @@ if __name__ == "__main__":
     print("5. Testing token info...")
     info = manager.get_token_info("microsoft")
     if info:
-        print(f"   [OK] Token info:")
+        print("   [OK] Token info:")
         for key, value in info.items():
             print(f"     {key}: {value}")
         print()

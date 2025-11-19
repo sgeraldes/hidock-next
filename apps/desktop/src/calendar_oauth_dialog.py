@@ -200,7 +200,7 @@ class CalendarOAuthDialog(ctk.CTkToplevel):
         self.is_polling = True
 
         # Update UI to show polling state
-        self.status_label.configure(text=f"Waiting for you to complete login in browser...")
+        self.status_label.configure(text="Waiting for you to complete login in browser...")
         self.progress_label.configure(text="⏳ Checking connection")
 
         # Start polling in background thread
@@ -412,7 +412,6 @@ class CalendarConnectionManager:
 
 # Example usage for testing
 if __name__ == "__main__":
-    import tkinter as tk
 
     def on_connect_success(provider: str, email: str):
         print(f"✓ Connected to {provider}: {email}")

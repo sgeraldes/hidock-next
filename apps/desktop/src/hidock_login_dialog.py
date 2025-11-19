@@ -296,10 +296,9 @@ class HiDockAccountManager:
 
 # Example usage for testing
 if __name__ == "__main__":
-    import tkinter as tk
 
     def on_login_success(token: str, user_info: dict):
-        print(f"\n✓ Login successful!")
+        print("\n✓ Login successful!")
         print(f"Token: {token[:20]}...{token[-20:]}")
         print(f"User: {user_info}")
 

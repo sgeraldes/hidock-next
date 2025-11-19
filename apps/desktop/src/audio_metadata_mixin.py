@@ -11,9 +11,9 @@ Integrates audio metadata database with the GUI display, handling:
 import os
 import threading
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from audio_metadata_db import AudioMetadata, AudioMetadataDB, ProcessingStatus, get_audio_metadata_db
+from audio_metadata_db import AudioMetadata, ProcessingStatus, get_audio_metadata_db
 from config_and_logger import logger
 
 

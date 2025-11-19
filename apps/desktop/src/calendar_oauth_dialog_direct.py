@@ -15,7 +15,6 @@ Features:
 """
 
 import threading
-from datetime import datetime
 from typing import Callable, Optional
 
 import customtkinter as ctk
@@ -219,7 +218,7 @@ class DirectCalendarOAuthDialog(ctk.CTkToplevel):
         self.cancel_button.configure(state="disabled")
 
         # Update status
-        self.status_label.configure(text=f"Starting OAuth flow...", text_color="gray")
+        self.status_label.configure(text="Starting OAuth flow...", text_color="gray")
         self.progress_label.configure(text="Opening browser...")
 
         # Start OAuth flow in background thread

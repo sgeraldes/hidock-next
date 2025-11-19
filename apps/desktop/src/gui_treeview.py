@@ -2,11 +2,12 @@
 """
 TreeView Mixin for the HiDock Explorer Tool GUI.
 """
+
 import time
 import tkinter
 from datetime import datetime
 from tkinter import ttk
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import customtkinter as ctk
 

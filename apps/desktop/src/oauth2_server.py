@@ -53,7 +53,7 @@ class OAuth2CallbackHandler(BaseHTTPRequestHandler):
             query_params = parse_qs(parsed_url.query)
 
             # LOG EVERYTHING for debugging
-            logger.info("OAuth2Server", "callback", f"=== CALLBACK RECEIVED ===")
+            logger.info("OAuth2Server", "callback", "=== CALLBACK RECEIVED ===")
             logger.info("OAuth2Server", "callback", f"Path: {parsed_url.path}")
             logger.info("OAuth2Server", "callback", f"Full URL path: {self.path}")
             logger.info("OAuth2Server", "callback", f"Query string: {parsed_url.query}")

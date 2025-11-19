@@ -19,9 +19,7 @@ Architecture:
 The access token is used for all HiNotes API calls (calendar, etc.).
 """
 
-import json
 import os
-import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
@@ -526,7 +524,7 @@ if __name__ == "__main__":
         success, token, error = service.login(username, password, remember)
 
         if success:
-            print(f"\n✓ Login successful!")
+            print("\n✓ Login successful!")
             print(f"Access token: {token[:20]}...{token[-20:]}")
 
             user_info = service.get_user_info()

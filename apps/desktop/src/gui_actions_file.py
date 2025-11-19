@@ -5,10 +5,9 @@ File Actions Mixin for the HiDock Explorer Tool GUI.
 This module provides the `FileActionsMixin` class, which contains methods
 for handling file operations such as downloading, deleting, and transcribing.
 """
+
 import json
 import os
-import subprocess
-import sys
 import threading
 
 # import time  # Commented out - not used in current implementation
