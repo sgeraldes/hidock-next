@@ -32,6 +32,7 @@ repos:
         name: bandit (security)
         args: ["-q", "-r", "apps/desktop", "hidock_shims", "--exclude", "apps/desktop/tests", "--skip", "B101,B404,B607,B108"]
         additional_dependencies: ["bandit[toml]"]
+        pass_filenames: false
   - repo: local
     hooks:
       - id: pytest-fast
