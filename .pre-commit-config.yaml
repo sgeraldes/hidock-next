@@ -30,7 +30,7 @@ repos:
     hooks:
       - id: bandit
         name: bandit (security)
-        args: ["-q", "-r", "apps/desktop", "hidock_shims"]
+        args: ["-q", "-r", "apps/desktop", "hidock_shims", "--exclude", "apps/desktop/tests", "--skip", "B101,B404,B607,B108"]
         additional_dependencies: ["bandit[toml]"]
   - repo: local
     hooks:

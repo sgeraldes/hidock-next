@@ -758,7 +758,7 @@ class OpenRouterProvider(AIProvider):
                 "max_tokens": self.config.get("max_tokens", 4000),
             }
 
-            response = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=data)
+            response = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=data, timeout=30)
             response.raise_for_status()
 
             result = response.json()
@@ -975,7 +975,7 @@ class LMStudioProvider(AIProvider):
                 "max_tokens": self.config.get("max_tokens", 4000),
             }
 
-            response = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=data)
+            response = requests.post(f"{self.base_url}/chat/completions", headers=headers, json=data, timeout=30)
             response.raise_for_status()
 
             result = response.json()
