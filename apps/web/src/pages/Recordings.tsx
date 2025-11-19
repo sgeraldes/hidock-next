@@ -1,5 +1,5 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Music, Download, Play, Pause, Trash2, FileText, ChevronUp, ChevronDown, ChevronsUpDown, Search, Filter, X, Clock, HardDrive } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { Music, Download, Play, Pause, Trash2, FileText, ChevronUp, ChevronDown, ChevronsUpDown, Search, Filter, X } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { AudioPlayer } from '@/components/AudioPlayer';
 import { formatBytes, formatDuration, formatDate } from '@/utils/formatters';
@@ -786,7 +786,7 @@ export const Recordings: React.FC = () => {
               <div className={isMobile ? "" : "divide-y divide-slate-700"}>
                 {sortedRecordings.map((recording) => {
                   // Handle long press for mobile
-                  let pressTimer: NodeJS.Timeout;
+                  let pressTimer: ReturnType<typeof setTimeout>;
                   const handleTouchStart = () => {
                     if (isMobile) {
                       pressTimer = setTimeout(() => {
@@ -975,8 +975,6 @@ export const Recordings: React.FC = () => {
                         title={recording.fileName}
                         onEnded={handleRecordingEnded}
                         onPause={() => updateRecording(recording.id, { status: 'downloaded' })}
-                        autoPlay={true}
-                        showAdvancedControls={true}
                       />
                     </div>
                   )}

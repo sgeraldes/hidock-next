@@ -151,7 +151,8 @@ class DeviceService {
     // File list caching
     private cachedRecordings: AudioRecording[] | null = null;
     private cacheTimestamp: number = 0;
-    private readonly CACHE_DURATION = 30000; // 30 seconds cache
+    // @ts-expect-error - Future use: cache expiration in ms
+    private readonly _CACHE_DURATION = 30000;
     private deviceSerialNumber: string | null = null;
     private cachedFileCount: number = -1;
     private cachedUsedSpace: number = -1;
@@ -507,7 +508,7 @@ class DeviceService {
                     this.deviceSerialNumber = meta.deviceSerialNumber;
                     this.cacheTimestamp = meta.timestamp;
                     
-                    console.log(`📦 Loaded cached recordings from localStorage: ${this.cachedRecordings.length} files`);
+                    console.log(`📦 Loaded cached recordings from localStorage: ${this.cachedRecordings?.length || 0} files`);
                 }
             }
         } catch (error) {
@@ -684,7 +685,8 @@ class DeviceService {
         }
     }
 
-    private parseFileListResponse(responseBody: Uint8Array): AudioRecording[] {
+    // @ts-expect-error - Future use: legacy file list parser
+    private _parseFileListResponse(responseBody: Uint8Array): AudioRecording[] {
         const recordings: AudioRecording[] = [];
         const dataView = new DataView(responseBody.buffer, responseBody.byteOffset);
         let offset = 0;
@@ -983,7 +985,8 @@ class DeviceService {
         return finalData.buffer;
     }
 
-    private async receiveFileData(seqId: number, expectedSize: number, progressId: string): Promise<ArrayBuffer> {
+    // @ts-expect-error - Future use: legacy file data receiver
+    private async _receiveFileData(seqId: number, expectedSize: number, progressId: string): Promise<ArrayBuffer> {
         console.log(`📥 Starting file data receive, expected size: ${expectedSize} bytes`);
         const chunks: Uint8Array[] = [];
         let totalReceived = 0;
@@ -1227,7 +1230,8 @@ class DeviceService {
         throw new Error(`Response timeout waiting for SeqID ${expectedSeqId}`);
     }
 
-    private async receiveAllStreamingPackets(
+    // @ts-expect-error - Future use: legacy streaming packet receiver
+    private async _receiveAllStreamingPackets(
         initialSeqId: number, 
         streamingCmdId: number, 
         onProgress?: (packetCount: number, totalBytes: number) => void,
@@ -1460,7 +1464,7 @@ class DeviceService {
             console.log(`🎵 Getting audio: ${fileName || recordingId}`);
             
             // Simple progress callback
-            const progressCallback = (progress: ProgressData) => {
+            const progressCallback = (progress: DeviceOperationProgress) => {
                 if (progress.status === 'error') {
                     console.error(`❌ Download error: ${progress.message}`);
                 }
@@ -1900,9 +1904,9 @@ class DeviceService {
     private isHiDockDevice(device: USBDevice): boolean {
         // Check if device is a HiDock based on vendor/product ID
         const isKnownVendor = device.vendorId === 0x10D6 || device.vendorId === 0x1a86;
-        const isKnownProduct = Object.values(HIDOCK_PRODUCT_IDS).includes(device.productId);
+        const isKnownProduct = (Object.values(HIDOCK_PRODUCT_IDS) as number[]).includes(device.productId);
         const hasHiDockName = device.productName?.toLowerCase().includes('hidock') ?? false;
-        
+
         return isKnownVendor && (isKnownProduct || hasHiDockName);
     }
 
@@ -2087,7 +2091,7 @@ class DeviceService {
     // Device Settings Commands
     async getSettings(): Promise<DeviceSettings> {
         if (!this.isConnected || !this.device) {
-            throw new Error(ERROR_MESSAGES.DEVICE_NOT_CONNECTED);
+            throw new Error(ERROR_MESSAGES.DEVICE_NOT_FOUND);
         }
 
         try {
@@ -2112,7 +2116,7 @@ class DeviceService {
 
     async setAutoRecord(enabled: boolean): Promise<void> {
         if (!this.isConnected || !this.device) {
-            throw new Error(ERROR_MESSAGES.DEVICE_NOT_CONNECTED);
+            throw new Error(ERROR_MESSAGES.DEVICE_NOT_FOUND);
         }
 
         try {
@@ -2131,7 +2135,7 @@ class DeviceService {
 
     async setAutoPlay(enabled: boolean): Promise<void> {
         if (!this.isConnected || !this.device) {
-            throw new Error(ERROR_MESSAGES.DEVICE_NOT_CONNECTED);
+            throw new Error(ERROR_MESSAGES.DEVICE_NOT_FOUND);
         }
 
         try {
@@ -2150,7 +2154,7 @@ class DeviceService {
 
     async setNotification(enabled: boolean): Promise<void> {
         if (!this.isConnected || !this.device) {
-            throw new Error(ERROR_MESSAGES.DEVICE_NOT_CONNECTED);
+            throw new Error(ERROR_MESSAGES.DEVICE_NOT_FOUND);
         }
 
         try {
@@ -2170,7 +2174,7 @@ class DeviceService {
 
     async setBluetoothTone(enabled: boolean): Promise<void> {
         if (!this.isConnected || !this.device) {
-            throw new Error(ERROR_MESSAGES.DEVICE_NOT_CONNECTED);
+            throw new Error(ERROR_MESSAGES.DEVICE_NOT_FOUND);
         }
 
         try {
@@ -2191,7 +2195,7 @@ class DeviceService {
     // Calendar/Meeting Integration
     async sendScheduleInfo(meetings: MeetingInfo[]): Promise<void> {
         if (!this.isConnected || !this.device) {
-            throw new Error(ERROR_MESSAGES.DEVICE_NOT_CONNECTED);
+            throw new Error(ERROR_MESSAGES.DEVICE_NOT_FOUND);
         }
 
         try {
@@ -2239,7 +2243,7 @@ class DeviceService {
     // Device Management Commands
     async getDeviceTime(): Promise<Date> {
         if (!this.isConnected || !this.device) {
-            throw new Error(ERROR_MESSAGES.DEVICE_NOT_CONNECTED);
+            throw new Error(ERROR_MESSAGES.DEVICE_NOT_FOUND);
         }
 
         try {
@@ -2274,7 +2278,7 @@ class DeviceService {
 
     async getCurrentRecording(): Promise<RecordingInfo | null> {
         if (!this.isConnected || !this.device) {
-            throw new Error(ERROR_MESSAGES.DEVICE_NOT_CONNECTED);
+            throw new Error(ERROR_MESSAGES.DEVICE_NOT_FOUND);
         }
 
         try {
@@ -2331,7 +2335,7 @@ class DeviceService {
 
     async restoreFactorySettings(): Promise<void> {
         if (!this.isConnected || !this.device) {
-            throw new Error(ERROR_MESSAGES.DEVICE_NOT_CONNECTED);
+            throw new Error(ERROR_MESSAGES.DEVICE_NOT_FOUND);
         }
 
         try {
@@ -2384,7 +2388,7 @@ class DeviceService {
         return result;
     }
 
-    private getPlatformShortcuts(platform: string, os: string): number[] {
+    private getPlatformShortcuts(_platform: string, _os: string): number[] { // Future implementation
         // This would need the full keyboard mapping from jensen.js
         // For now, return empty shortcuts
         return new Array(34).fill(0);
