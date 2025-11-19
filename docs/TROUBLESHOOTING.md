@@ -414,24 +414,143 @@ You can choose option 3 (continue anyway) but Python dependency installation (e.
 
 ---
 
+## Collecting Logs and Reporting Issues
+
+### Log File Locations
+
+The desktop app automatically logs to files by default:
+
+**Log file location:**
+```
+apps/desktop/logs/test_hidock.log
+```
+
+**Log rotation:** Logs are automatically rotated when they exceed 10MB, keeping the last 5 backups.
+
+### Default Logging Configuration
+
+By default, the app logs:
+- **File logs:** INFO level and above (INFO, WARNING, ERROR, CRITICAL)
+- **Console logs:** ERROR level and above only
+- **GUI logs:** Disabled by default
+
+### How to Collect Logs for Bug Reports
+
+1. **Clear or backup existing logs** (recommended for fresh logs):
+   ```bash
+   # Windows
+   del apps\desktop\logs\test_hidock.log
+   # Or backup:
+   move apps\desktop\logs\test_hidock.log apps\desktop\logs\test_hidock.log.backup
+
+   # macOS/Linux
+   rm apps/desktop/logs/test_hidock.log
+   # Or backup:
+   mv apps/desktop/logs/test_hidock.log apps/desktop/logs/test_hidock.log.backup
+   ```
+
+2. **Run the app** and reproduce the issue:
+   ```bash
+   python apps/desktop/main.py
+   ```
+
+3. **Collect the log file:**
+   - The log file will be at `apps/desktop/logs/test_hidock.log`
+   - Attach this file to your GitHub issue
+
+### Enabling DEBUG Level Logging
+
+For more detailed debugging information, you can enable DEBUG level logging:
+
+1. **Locate the config file:**
+   ```
+   apps/desktop/config/hidock_config.json
+   ```
+   (This file is created after the first run of the app)
+
+2. **Edit the logging levels:**
+   ```json
+   {
+     "console_log_level": "DEBUG",  // Change from "ERROR" to see console output
+     "file_log_level": "DEBUG",     // Change from "INFO" for more detailed file logs
+     "gui_log_level": "DEBUG"       // Optional: enable GUI log pane
+   }
+   ```
+
+3. **Enable GUI log pane (optional):**
+   ```json
+   {
+     "enable_gui_logging": true,    // Shows logs in the GUI
+     "logs_pane_visible": true      // Makes log pane visible at startup
+   }
+   ```
+
+4. **Restart the app** for changes to take effect
+
+### Alternative: Command Line Debug Mode
+
+You can also temporarily enable debug logging without editing the config:
+
+```python
+# Edit apps/desktop/main.py and add after imports:
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+### Log Levels Explained
+
+- **DEBUG:** Detailed information for diagnosing problems (very verbose)
+- **INFO:** General informational messages about app operation
+- **WARNING:** Warning messages about potential issues
+- **ERROR:** Error messages when something goes wrong
+- **CRITICAL:** Critical errors that may cause the app to stop
+
+---
+
 ## Getting Help
 
 If these solutions don't resolve your issue:
 
 1. **Check existing issues:** [GitHub Issues](https://github.com/sgeraldes/hidock-next/issues)
-2. **Enable debug logging:**
 
-   ```python
-   # In config_and_logger.py, set:
-   logging.basicConfig(level=logging.DEBUG)
+2. **Create a detailed bug report** including:
+   - **Operating system and version** (e.g., "macOS Sequoia 15.6.1", "Windows 11", "Ubuntu 22.04")
+   - **Python version** (`python --version`)
+   - **Node.js version** if using web app (`node --version`)
+   - **Device model and firmware** (visible in app when connected, or from device settings)
+   - **Complete error messages** (copy/paste, don't screenshot if possible)
+   - **Steps to reproduce** the issue
+   - **Log files** (see "Collecting Logs" section above)
+   - **What you expected** to happen
+   - **What actually happened**
+
+3. **Example bug report template:**
+   ```markdown
+   ### Environment
+   - OS: macOS Sequoia 15.6.1
+   - Python: 3.11.14
+   - Device: HiDock P1
+   - Firmware: 1.2.26
+   - App version: v1.0-RC1
+
+   ### Steps to Reproduce
+   1. Connect P1 device to Mac via USB-C
+   2. Launch app with `python apps/desktop/main.py`
+   3. Click "Connect" button
+
+   ### Expected Behavior
+   App should detect and connect to the P1 device
+
+   ### Actual Behavior
+   App displays "No HiDock device found"
+
+   ### Logs
+   [Attach apps/desktop/logs/test_hidock.log or paste relevant sections]
+
+   ### Additional Context
+   - Device is visible in macOS System Report
+   - Device works with official HiDock software
    ```
-
-3. **Create detailed bug report with:**
-   - Operating system and version
-   - Python/Node.js versions
-   - Complete error messages
-   - Steps to reproduce
-   - Debug logs
 
 ## Common Error Messages
 
