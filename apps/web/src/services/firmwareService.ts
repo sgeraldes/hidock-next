@@ -14,7 +14,8 @@ interface FirmwareMetadata {
   state: string;
 }
 
-interface FirmwareCheckRequest {
+// @ts-expect-error - Future use: API request structure for firmware checks
+interface _FirmwareCheckRequest {
   version: string | number;
   model: string;
 }

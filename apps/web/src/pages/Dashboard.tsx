@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
 import { useDeviceConnection } from '@/hooks/useDeviceConnection';
-import { formatBytes, formatDuration, formatBytesToDecimalGB } from '@/utils/formatters';
+import { formatDuration, formatBytesToDecimalGB } from '@/utils/formatters';
 
 export const Dashboard: React.FC = () => {
   const navigate = useNavigate();

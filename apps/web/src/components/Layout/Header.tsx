@@ -14,7 +14,7 @@ import {
   MessageSquare
 } from 'lucide-react';
 import { useAppStore } from '@/store/useAppStore';
-import { formatBytes, formatDuration as _formatDuration, formatBytesToDecimalGB } from '@/utils/formatters'; // _formatDuration: Future use - duration display
+import { formatDuration as _formatDuration, formatBytesToDecimalGB } from '@/utils/formatters'; // _formatDuration: Future use - duration display
 
 export const Header: React.FC = () => {
   const { device, isDeviceConnected, recordings, selectedRecordings } = useAppStore();
