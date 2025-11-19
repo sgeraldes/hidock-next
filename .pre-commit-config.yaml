@@ -33,6 +33,12 @@ repos:
         args: ["-q", "-r", "apps/desktop/src", "hidock_shims", "--skip", "B101,B105,B110,B112,B311,B324,B403,B404,B603,B606,B607,B608,B108"]
         additional_dependencies: ["bandit[toml]"]
         pass_filenames: false
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        name: detect-secrets (secret scanning)
+        args: ['--baseline', '.secrets.baseline', '--exclude-files', '\.secrets\.baseline$|\.git/|\.venv|node_modules/|package-lock\.json']
   - repo: local
     hooks:
       - id: pytest-fast

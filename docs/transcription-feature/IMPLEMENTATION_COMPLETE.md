@@ -80,7 +80,7 @@ All implementation tasks have been completed successfully. The quick transcripti
 ## How to Test
 
 ### Prerequisites
-1. ⚠️ **IMPORTANT**: If you shared your API key publicly (e.g., `AIzaSyB5i6xAv7WQsazcoTIkQdfjQ3J8d6-NZU8`), **REVOKE IT IMMEDIATELY** at https://aistudio.google.com/app/apikey
+1. ⚠️ **IMPORTANT**: Never share your API key publicly. If you have, **REVOKE IT IMMEDIATELY** at https://aistudio.google.com/app/apikey
 2. Create a new Gemini API key at https://aistudio.google.com/app/apikey
 3. Configure the new key in the app:
    - Option A: Settings dialog → "Gemini API Key" field
