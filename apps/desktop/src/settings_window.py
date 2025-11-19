@@ -1927,6 +1927,75 @@ class SettingsDialog(ctk.CTkToplevel):
         scroll_frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
         scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
+        # 📅 CALENDAR CONNECTION SECTION (NEW - HiNotes Backend)
+        ctk.CTkLabel(scroll_frame, text="📅 Calendar Connection:", font=ctk.CTkFont(weight="bold", size=14)).pack(
+            anchor="w", pady=(10, 5), padx=5
+        )
+
+        # Connection status frame
+        self.calendar_status_frame = ctk.CTkFrame(scroll_frame)
+        self.calendar_status_frame.pack(fill="x", pady=(5, 10), padx=10)
+
+        self.calendar_status_label = ctk.CTkLabel(
+            self.calendar_status_frame,
+            text="⚠️  Not connected - Click below to connect your calendar",
+            font=ctk.CTkFont(size=11),
+            text_color="gray70"
+        )
+        self.calendar_status_label.pack(pady=10, padx=10)
+
+        # Connect buttons frame
+        connect_buttons_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        connect_buttons_frame.pack(fill="x", pady=(0, 5), padx=10)
+
+        self.connect_microsoft_btn = ctk.CTkButton(
+            connect_buttons_frame,
+            text="Connect Microsoft Outlook",
+            command=lambda: self._connect_calendar_provider("microsoft"),
+            width=200,
+            height=32
+        )
+        self.connect_microsoft_btn.pack(side="left", padx=(0, 5))
+
+        self.connect_google_btn = ctk.CTkButton(
+            connect_buttons_frame,
+            text="Connect Google Calendar",
+            command=lambda: self._connect_calendar_provider("google"),
+            width=200,
+            height=32,
+            fg_color="gray30",
+            hover_color="gray40"
+        )
+        self.connect_google_btn.pack(side="left", padx=(0, 5))
+
+        # Sync button (initially disabled)
+        self.sync_calendar_btn = ctk.CTkButton(
+            connect_buttons_frame,
+            text="↻ Sync Now",
+            command=self._sync_calendar_manual,
+            width=120,
+            height=32,
+            state="disabled"
+        )
+        self.sync_calendar_btn.pack(side="left")
+
+        # Info label
+        ctk.CTkLabel(
+            scroll_frame,
+            text="💡 Connect your calendar to automatically match recordings with meetings.\n"
+                 "   Your browser will open for secure login. No passwords stored locally.",
+            font=ctk.CTkFont(size=10),
+            text_color="gray70",
+            justify="left"
+        ).pack(anchor="w", pady=(0, 15), padx=10)
+
+        # Separator
+        separator = ctk.CTkFrame(scroll_frame, height=2, fg_color="gray30")
+        separator.pack(fill="x", pady=(10, 15), padx=10)
+
+        # Check connection status on load
+        self.after(500, self._update_calendar_connection_status)
+
         # 🔍 MEETING DETECTION SECTION
         ctk.CTkLabel(scroll_frame, text="🔍 Meeting Detection:", font=ctk.CTkFont(weight="bold", size=14)).pack(
             anchor="w", pady=(10, 5), padx=5
@@ -2059,3 +2128,185 @@ class SettingsDialog(ctk.CTkToplevel):
             font=ctk.CTkFont(size=11, slant="italic"),
             text_color="gray60",
         ).pack(anchor="w", pady=(15, 10), padx=5)
+
+    def _connect_calendar_provider(self, provider: str):
+        """
+        Open OAuth dialog to connect calendar provider.
+
+        Args:
+            provider: 'microsoft' or 'google'
+        """
+        try:
+            from calendar_oauth_dialog import CalendarOAuthDialog
+            from config_and_logger import load_config
+
+            # Get HiDock access token
+            config = load_config()
+            access_token = config.get('hidock_access_token', '')
+
+            if not access_token:
+                messagebox.showwarning(
+                    "Access Token Required",
+                    "HiDock access token not found.\n\n"
+                    "Please login to your HiDock account first.\n\n"
+                    "For now, you can manually set 'hidock_access_token' in config file.\n"
+                    "Automatic login flow coming soon!"
+                )
+                return
+
+            # Callback when connection succeeds
+            def on_connection_success(connected_provider: str, email: str):
+                logger.info("SettingsDialog", "calendar_connected",
+                           f"Successfully connected {connected_provider}: {email}")
+
+                # Update status display
+                self._update_calendar_connection_status()
+
+                # Trigger initial sync
+                self._trigger_calendar_sync(connected_provider)
+
+            # Show OAuth dialog
+            dialog = CalendarOAuthDialog(self, access_token, callback=on_connection_success)
+
+        except ImportError as e:
+            logger.error("SettingsDialog", "connect_calendar", f"Import error: {e}")
+            messagebox.showerror(
+                "Module Not Found",
+                f"Calendar integration module not found.\n\nError: {e}"
+            )
+        except Exception as e:
+            logger.error("SettingsDialog", "connect_calendar", f"Error: {e}")
+            messagebox.showerror(
+                "Connection Error",
+                f"Failed to open calendar connection dialog.\n\nError: {e}"
+            )
+
+    def _update_calendar_connection_status(self):
+        """Update the calendar connection status display."""
+        try:
+            from calendar_oauth_dialog import CalendarConnectionManager
+            from config_and_logger import load_config
+
+            config = load_config()
+            access_token = config.get('hidock_access_token', '')
+
+            if not access_token:
+                self.calendar_status_label.configure(
+                    text="⚠️  HiDock access token not configured",
+                    text_color="orange"
+                )
+                return
+
+            manager = CalendarConnectionManager(config, access_token)
+            connected_providers = manager.get_connected_providers()
+
+            if connected_providers:
+                # Show connected providers
+                status_parts = []
+                for provider, email in connected_providers.items():
+                    provider_name = "Microsoft" if provider == "microsoft" else "Google"
+                    status_parts.append(f"{provider_name}: {email}")
+
+                status_text = "✓ Connected: " + " | ".join(status_parts)
+                self.calendar_status_label.configure(
+                    text=status_text,
+                    text_color="green"
+                )
+
+                # Enable sync button
+                if hasattr(self, 'sync_calendar_btn'):
+                    self.sync_calendar_btn.configure(state="normal")
+
+                logger.info("SettingsDialog", "calendar_status", f"Connected: {connected_providers}")
+            else:
+                self.calendar_status_label.configure(
+                    text="⚠️  Not connected - Click below to connect your calendar",
+                    text_color="gray70"
+                )
+
+                # Disable sync button
+                if hasattr(self, 'sync_calendar_btn'):
+                    self.sync_calendar_btn.configure(state="disabled")
+
+        except ImportError:
+            self.calendar_status_label.configure(
+                text="⚠️  Calendar module not available",
+                text_color="red"
+            )
+        except Exception as e:
+            logger.error("SettingsDialog", "update_calendar_status", f"Error: {e}")
+            self.calendar_status_label.configure(
+                text=f"⚠️  Error checking status: {str(e)[:50]}",
+                text_color="red"
+            )
+
+    def _sync_calendar_manual(self):
+        """Manually trigger calendar sync for all connected providers."""
+        try:
+            from calendar_oauth_dialog import CalendarConnectionManager
+            from config_and_logger import load_config
+
+            config = load_config()
+            access_token = config.get('hidock_access_token', '')
+
+            if not access_token:
+                messagebox.showwarning("No Access Token", "HiDock access token not found")
+                return
+
+            manager = CalendarConnectionManager(config, access_token)
+            connected_providers = manager.get_connected_providers()
+
+            if not connected_providers:
+                messagebox.showinfo("Not Connected", "No calendar providers connected")
+                return
+
+            # Trigger sync for each connected provider
+            sync_results = []
+            for provider in connected_providers.keys():
+                success = self._trigger_calendar_sync(provider)
+                provider_name = "Microsoft" if provider == "microsoft" else "Google"
+                sync_results.append(f"{provider_name}: {'✓' if success else '✗'}")
+
+            # Show results
+            messagebox.showinfo(
+                "Calendar Sync",
+                "Sync triggered for connected calendars:\n\n" + "\n".join(sync_results)
+            )
+
+        except Exception as e:
+            logger.error("SettingsDialog", "sync_calendar", f"Error: {e}")
+            messagebox.showerror("Sync Error", f"Failed to sync calendar:\n\n{e}")
+
+    def _trigger_calendar_sync(self, provider: str) -> bool:
+        """
+        Trigger calendar sync for specified provider.
+
+        Args:
+            provider: 'microsoft' or 'google'
+
+        Returns:
+            True if sync triggered successfully
+        """
+        try:
+            from hinotes_calendar_service import HiNotesCalendarService
+            from config_and_logger import load_config
+
+            config = load_config()
+            access_token = config.get('hidock_access_token', '')
+
+            if not access_token:
+                return False
+
+            service = HiNotesCalendarService(config, access_token)
+            success = service.trigger_sync(provider)
+
+            if success:
+                logger.info("SettingsDialog", "trigger_sync", f"Sync triggered for {provider}")
+            else:
+                logger.warning("SettingsDialog", "trigger_sync", f"Sync failed for {provider}")
+
+            return success
+
+        except Exception as e:
+            logger.error("SettingsDialog", "trigger_sync", f"Error: {e}")
+            return False

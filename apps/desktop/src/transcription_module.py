@@ -88,7 +88,9 @@ def _call_gemini_api(payload: Dict[str, Any], api_key: str = "") -> Optional[Dic
         return None
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        # Use model from payload config if provided, otherwise use gemini-2.0-flash-exp
+        model_name = payload.get("model", "gemini-2.0-flash-exp")
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(payload.get("contents"), generation_config=payload.get("generationConfig"))
         return response.to_dict()
     except Exception as e:
@@ -315,48 +317,119 @@ async def process_audio_file_for_insights(
         temp_audio_file = None
 
         if ext in [".hta", ".hda"]:
-            # Convert HTA/HDA to transcription-optimized format (MP3)
-            from hta_converter import convert_hta_for_transcription
+            # HDA files are just WAV files with a different extension
+            # Create a temporary .wav copy for transcription
+            import shutil
+            import tempfile
 
-            temp_audio_file = convert_hta_for_transcription(audio_file_path)
-            if temp_audio_file:
-                audio_file_path = temp_audio_file
-                ext = os.path.splitext(temp_audio_file)[1].lower()
+            temp_fd, temp_wav_path = tempfile.mkstemp(suffix=".wav", prefix="hda_")
+            os.close(temp_fd)
+
+            try:
+                # Copy HDA to WAV (it's already WAV format, just different extension)
+                shutil.copy2(audio_file_path, temp_wav_path)
+                temp_audio_file = temp_wav_path
+                audio_file_path = temp_wav_path
+                ext = ".wav"
                 logger.info(
                     "TranscriptionModule",
                     "process_audio_file",
-                    f"Converted HDA/HTA file to transcription format: {temp_audio_file}",
+                    f"Created WAV copy of HDA file: {temp_wav_path}",
                 )
-            else:
+            except Exception as copy_error:
                 logger.error(
                     "TranscriptionModule",
                     "process_audio_file",
-                    "Failed to convert HDA/HTA file for transcription",
+                    f"Failed to copy HDA file to WAV: {copy_error}",
                 )
-                return {"error": "Failed to convert HDA/HTA file to transcription format"}
+                if os.path.exists(temp_wav_path):
+                    os.remove(temp_wav_path)
+                return {"error": f"Failed to prepare HDA file: {copy_error}"}
 
     except Exception as e:
         logger.error("TranscriptionModule", "process_audio_file", f"File preparation error: {e}")
         return {"error": f"Error preparing audio file: {e}"}
 
     try:
-        # --- Step 1: Transcribe Audio ---
-        transcription_result = await transcribe_audio(audio_file_path, provider, api_key, config, language)
-        full_transcription = transcription_result.get("transcription", "")
-
-        # --- Step 2: Extract Insights ---
-        if full_transcription and not full_transcription.startswith("Transcription failed"):
-            meeting_insights = await extract_meeting_insights(full_transcription, provider, api_key, config)
-        else:
-            logger.warning(
+        # Configure the AI service provider
+        if not ai_service.configure_provider(provider, api_key, config):
+            logger.error(
                 "TranscriptionModule",
                 "process_audio_file",
-                "Skipping insights due to transcription failure.",
+                f"Failed to configure provider: {provider}",
             )
-            meeting_insights = {"summary": "N/A - Transcription failed"}  # Provide failure context
+            return {"error": f"Failed to configure provider: {provider}"}
+
+        # Use combined transcription + analysis for Gemini (more efficient)
+        if provider == "gemini":
+            logger.info(
+                "TranscriptionModule",
+                "process_audio_file",
+                "Using combined transcription + analysis (single API call)",
+            )
+
+            gemini_provider = ai_service.get_provider("gemini")
+            if gemini_provider and hasattr(gemini_provider, 'transcribe_and_analyze_audio'):
+                result = gemini_provider.transcribe_and_analyze_audio(audio_file_path, language)
+
+                if result.get("success"):
+                    full_transcription = result.get("transcription", "")
+                    analysis = result.get("analysis", {})
+
+                    # Map the combined analysis to our insights structure
+                    meeting_insights = {
+                        "summary": analysis.get("summary", "N/A"),
+                        "category": "Meeting" if analysis.get("topics") else "N/A",
+                        "overall_sentiment_meeting": analysis.get("sentiment", "N/A"),
+                        "action_items": analysis.get("action_items", []),
+                        "project_context": ", ".join(analysis.get("topics", [])) if analysis.get("topics") else "N/A",
+                        "participants": analysis.get("participants", []),
+                        "conversation_segments": analysis.get("conversation_segments", []),
+                    }
+                else:
+                    logger.error(
+                        "TranscriptionModule",
+                        "process_audio_file",
+                        f"Combined processing failed: {result.get('error')}",
+                    )
+                    return {"error": result.get("error", "Unknown error")}
+            else:
+                # Fallback to two-step process if combined method not available
+                logger.warning(
+                    "TranscriptionModule",
+                    "process_audio_file",
+                    "Combined method not available, falling back to two-step process",
+                )
+                transcription_result = await transcribe_audio(audio_file_path, provider, api_key, config, language)
+                full_transcription = transcription_result.get("transcription", "")
+
+                if full_transcription and not full_transcription.startswith("Transcription failed"):
+                    meeting_insights = await extract_meeting_insights(full_transcription, provider, api_key, config)
+                else:
+                    meeting_insights = {"summary": "N/A - Transcription failed"}
+        else:
+            # Two-step process for other providers (OpenAI, etc.)
+            logger.info(
+                "TranscriptionModule",
+                "process_audio_file",
+                "Using two-step process (transcription then analysis)",
+            )
+
+            transcription_result = await transcribe_audio(audio_file_path, provider, api_key, config, language)
+            full_transcription = transcription_result.get("transcription", "")
+
+            if full_transcription and not full_transcription.startswith("Transcription failed"):
+                meeting_insights = await extract_meeting_insights(full_transcription, provider, api_key, config)
+            else:
+                logger.warning(
+                    "TranscriptionModule",
+                    "process_audio_file",
+                    "Skipping insights due to transcription failure.",
+                )
+                meeting_insights = {"summary": "N/A - Transcription failed"}
     except Exception as e:
         logger.error("TranscriptionModule", "process_audio_file", f"Error during processing: {e}")
-        return {"error": f"Error preparing audio file: {e}"}
+        return {"error": f"Error during processing: {e}"}
 
     # --- Step 3: Enrich with local data ---
     if meeting_insights.get("meeting_details", {}).get("duration_minutes") == 0:

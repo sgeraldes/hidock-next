@@ -142,6 +142,17 @@ class EventHandlersMixin:
         Manages item selection, deselection, and sets up for potential drag-selection.
         Handles Ctrl and Shift modifiers for selection behavior.
         """
+        # Check if click is on transcription column
+        region = self.file_tree.identify_region(event.x, event.y)
+        if region == "cell":
+            column = self.file_tree.identify_column(event.x)
+            # Transcription column is #9 (1-indexed in identify_column)
+            if column == "#9":
+                row_id = self.file_tree.identify_row(event.y)
+                if row_id:
+                    self._on_transcription_column_click(row_id)
+                    return "break"
+
         # Skip custom logic in single selection mode
         if self.single_selection_mode_var.get():
             return
@@ -193,6 +204,60 @@ class EventHandlersMixin:
                 f"Toggled ON item: {item_iid} (Modifier: {'Ctrl' if ctrl_pressed else 'None'})",
             )
         return "break"
+
+    def _on_transcription_column_click(self, file_iid: str):
+        """
+        Handle clicks on transcription column.
+
+        Opens transcription in notepad if available, or shows appropriate error message.
+
+        Args:
+            file_iid (str): The file ID/name in the treeview
+        """
+        try:
+            from audio_metadata_db import ProcessingStatus
+
+            # Get file metadata
+            file_detail = next((f for f in self.displayed_files_details if f["name"] == file_iid), None)
+            if not file_detail:
+                logger.debug("EventHandlers", "_on_transcription_column_click",
+                           f"File detail not found for {file_iid}")
+                return
+
+            # Get transcription status from database
+            if not hasattr(self, '_audio_metadata_db') or not self._audio_metadata_db:
+                logger.debug("EventHandlers", "_on_transcription_column_click",
+                           "AudioMetadataDB not initialized")
+                return
+
+            metadata = self._audio_metadata_db.get_metadata(file_iid)
+            if not metadata:
+                logger.debug("EventHandlers", "_on_transcription_column_click",
+                           f"No metadata found for {file_iid}")
+                return
+
+            # Handle based on status
+            if metadata.processing_status in [ProcessingStatus.COMPLETED,
+                                             ProcessingStatus.TRANSCRIBED,
+                                             ProcessingStatus.AI_ANALYZED]:
+                # Transcription is available - open in notepad
+                self.open_transcription_in_notepad(file_iid)
+            elif metadata.processing_status == ProcessingStatus.ERROR:
+                # Show error details
+                error_msg = metadata.processing_error or "Unknown error occurred during transcription"
+                messagebox.showerror(
+                    "Transcription Error",
+                    f"Transcription failed for {file_iid}\n\nError: {error_msg}",
+                    parent=self
+                )
+            else:
+                # Still processing or not yet started
+                logger.debug("EventHandlers", "_on_transcription_column_click",
+                           f"Transcription not ready for {file_iid}, status: {metadata.processing_status}")
+
+        except Exception as e:
+            logger.error("EventHandlers", "_on_transcription_column_click",
+                       f"Error handling transcription column click: {e}")
 
     def _on_file_b1_motion(self, event):  # Identical to original logic
         """
@@ -414,14 +479,32 @@ class EventHandlersMixin:
                 image=self.menu_icons.get("download"),
                 compound="left",
             )
+
+        # Add Quick Transcribe option for audio files (always shown if file is audio)
+        if is_playable and status not in ["Recording", "Downloading", "Queued"]:
+            context_menu.add_separator()
             context_menu.add_command(
-                label="Transcribe (Gemini)",
-                command=lambda: self._transcribe_selected_audio_gemini(item_iid),
+                label="Quick Transcribe",
+                command=lambda: self._quick_transcribe_selected_files()
             )
-        context_menu.add_command(
-            label="Process Audio",
-            command=lambda: self._process_selected_audio(item_iid),
-        )
+
+            # Add View Transcription option if transcription exists
+            if hasattr(self, '_audio_metadata_db') and self._audio_metadata_db:
+                from audio_metadata_db import ProcessingStatus
+                metadata = self._audio_metadata_db.get_metadata(item_iid)
+                if metadata and metadata.transcription_text and metadata.processing_status in [
+                    ProcessingStatus.COMPLETED,
+                    ProcessingStatus.TRANSCRIBED,
+                    ProcessingStatus.AI_ANALYZED
+                ]:
+                    context_menu.add_command(
+                        label="View Transcription",
+                        command=lambda: self.open_transcription_in_notepad(item_iid)
+                    )
+                    context_menu.add_command(
+                        label="Delete Transcription",
+                        command=lambda: self._delete_transcription(item_iid)
+                    )
 
         if status in ["Downloading", "Queued"] or "Preparing Playback" in status or self.active_operation_name:
             context_menu.add_command(

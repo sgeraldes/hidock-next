@@ -159,26 +159,31 @@ class AudioMetadataMixin:
     def _get_meeting_column_display(self, metadata: AudioMetadata) -> str:
         """Get text to display in the meeting column of TreeView."""
         # Priority system for meeting column display:
-        # 1. Processing status messages (Transcribing..., Analyzing...)
-        # 2. User title (if set)
-        # 3. AI summary (first line)
-        # 4. Calendar meeting info (from calendar cache - keep existing)
-        # 5. Blank
-        
-        if metadata.processing_status == ProcessingStatus.TRANSCRIBING:
-            return "Transcribing..."
-        elif metadata.processing_status == ProcessingStatus.AI_ANALYZING:
-            return "Analyzing..."
-        elif metadata.processing_status == ProcessingStatus.ERROR:
-            return "Processing Error"
-        elif metadata.user_title:
+        # 1. User title (if set)
+        # 2. Short AI-generated meeting subject (5-8 words max)
+        # 3. Calendar meeting info (from calendar cache - keep existing)
+        # 4. Blank
+        #
+        # NOTE: Processing status (Transcribing..., Analyzing..., etc.) should NOT appear here
+        # They belong in the Transcription column instead
+
+        if metadata.user_title:
             return metadata.user_title
-        elif metadata.ai_summary:
-            # Use first line of AI summary, truncated
-            first_line = metadata.ai_summary.split('\n')[0]
-            return first_line[:45] + "..." if len(first_line) > 45 else first_line
+        elif metadata.ai_summary and metadata.processing_status in [ProcessingStatus.COMPLETED, ProcessingStatus.AI_ANALYZED]:
+            # Generate a short subject line from the AI summary (5-8 words max)
+            # Extract first sentence or first 40-50 characters
+            first_line = metadata.ai_summary.split('\n')[0].strip()
+            first_sentence = first_line.split('.')[0].strip()
+
+            # Truncate to approximately 5-8 words (40-50 characters)
+            words = first_sentence.split()
+            if len(words) <= 8:
+                return first_sentence
+            else:
+                return ' '.join(words[:8]) + '...'
         else:
-            # Return None to use existing calendar meeting display
+            # Return None to preserve existing calendar meeting display
+            # Do NOT show processing status messages here
             return None
     
     def start_audio_processing(self, filename: str) -> bool:
@@ -301,48 +306,93 @@ class AudioMetadataMixin:
                 if file_detail.get('name') == filename:
                     local_path = file_detail.get('local_path')
                     if local_path and os.path.exists(local_path):
+                        logger.debug("AudioMetadata", "_find_local_file",
+                                   f"Found local path from file details: {local_path}")
                         return local_path
-            
-            # Check common download locations
-            import os
-            download_dir = getattr(self, 'download_directory', os.path.expanduser("~/Downloads"))
+                    elif local_path:
+                        logger.debug("AudioMetadata", "_find_local_file",
+                                   f"Local path in details but file doesn't exist: {local_path}")
+
+            # Check download directory (primary location)
+            download_dir = getattr(self, 'download_directory', None)
+            if not download_dir:
+                # Fallback to config
+                download_dir = self.config.get('download_directory', os.path.expanduser("~/Downloads"))
+
+            # Make download_dir absolute if it's relative
+            if not os.path.isabs(download_dir):
+                # Relative to app root
+                app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                download_dir = os.path.abspath(os.path.join(app_root, download_dir))
+
+            logger.debug("AudioMetadata", "_find_local_file",
+                       f"Checking download directory: {download_dir}")
+
             potential_path = os.path.join(download_dir, filename)
             if os.path.exists(potential_path):
+                logger.debug("AudioMetadata", "_find_local_file",
+                           f"Found file in download directory: {potential_path}")
                 return potential_path
-            
+
+            logger.warning("AudioMetadata", "_find_local_file",
+                         f"File not found. Checked: {potential_path}")
             return None
-            
+
         except Exception as e:
-            logger.warning("AudioMetadata", "_find_local_file", 
-                         f"Error finding local file for {filename}: {e}")
+            logger.error("AudioMetadata", "_find_local_file",
+                       f"Error finding local file for {filename}: {e}")
             return None
     
     def _transcribe_audio_file(self, file_path: str) -> Optional[Dict[str, Any]]:
         """Transcribe audio file using the transcription module."""
         try:
-            # Import transcription module
+            # Import transcription module and asyncio
+            import asyncio
             from transcription_module import process_audio_file_for_insights
-            
+
             logger.info("AudioMetadata", "_transcribe", f"Starting transcription of {file_path}")
-            
-            # Process the audio file
-            result = process_audio_file_for_insights(file_path)
-            
+
+            # Get API key, provider, and model from config
+            provider = self.config.get("ai_api_provider", "gemini")
+            model = self.config.get("ai_model", "gemini-2.0-flash-exp")
+
+            # Get decrypted API key (supports encrypted keys from settings)
+            if hasattr(self, 'get_decrypted_api_key'):
+                api_key = self.get_decrypted_api_key(provider)
+            else:
+                # Fallback: try direct key (unencrypted)
+                api_key = self.config.get("gemini_api_key", "")
+
+            if not api_key:
+                logger.error("AudioMetadata", "_transcribe",
+                           f"No API key configured for provider: {provider}")
+                return None
+
+            # Process the audio file (async function needs asyncio.run)
+            # Pass model in config dict
+            provider_config = {"model": model}
+            result = asyncio.run(process_audio_file_for_insights(
+                file_path,
+                provider=provider,
+                api_key=api_key,
+                config=provider_config
+            ))
+
             if result and 'transcription' in result:
                 transcription_text = result['transcription']
-                
+
                 return {
                     'text': transcription_text,
                     'confidence': result.get('transcription_confidence'),
                     'language': result.get('language', 'en')
                 }
             else:
-                logger.warning("AudioMetadata", "_transcribe", 
+                logger.warning("AudioMetadata", "_transcribe",
                              f"No transcription result for {file_path}")
                 return None
-                
+
         except Exception as e:
-            logger.error("AudioMetadata", "_transcribe", 
+            logger.error("AudioMetadata", "_transcribe",
                        f"Error transcribing {file_path}: {e}")
             return None
     
@@ -350,27 +400,49 @@ class AudioMetadataMixin:
         """Analyze transcription using AI service."""
         try:
             # Import AI service
-            from ai_service import process_audio_insights
-            
-            logger.info("AudioMetadata", "_analyze_ai", 
+            from ai_service import ai_service
+
+            logger.info("AudioMetadata", "_analyze_ai",
                        f"Starting AI analysis of transcription ({len(transcription_text)} chars)")
-            
+
+            # Get provider and API key
+            provider = self.config.get("ai_api_provider", "gemini")
+            model = self.config.get("ai_model", "gemini-2.5-flash")  # Use Flash to avoid rate limits
+
+            # Get decrypted API key
+            if hasattr(self, 'get_decrypted_api_key'):
+                api_key = self.get_decrypted_api_key(provider)
+            else:
+                api_key = self.config.get("gemini_api_key", "")
+
+            if not api_key:
+                logger.error("AudioMetadata", "_analyze_ai", "No API key configured")
+                return None
+
+            # Configure provider
+            provider_config = {"model": model}
+            if not ai_service.configure_provider(provider, api_key, provider_config):
+                logger.error("AudioMetadata", "_analyze_ai", f"Failed to configure {provider}")
+                return None
+
             # Analyze with AI
-            result = process_audio_insights(transcription_text)
-            
-            if result:
+            result = ai_service.analyze_text(provider, transcription_text, "meeting_insights")
+
+            if result.get("success"):
+                analysis = result.get("analysis", {})
                 return {
-                    'summary': result.get('summary', ''),
-                    'participants': result.get('participants', []),
-                    'action_items': result.get('action_items', []),
-                    'topics': result.get('topics', []),
-                    'sentiment': result.get('sentiment', ''),
-                    'key_quotes': result.get('key_quotes', [])
+                    'summary': analysis.get('summary', ''),
+                    'participants': [],  # Not provided by default analyze
+                    'action_items': analysis.get('action_items', []),
+                    'topics': analysis.get('topics', []),
+                    'sentiment': analysis.get('sentiment', ''),
+                    'key_quotes': []  # Not provided by default analyze
                 }
             else:
-                logger.warning("AudioMetadata", "_analyze_ai", "No AI analysis result")
+                logger.warning("AudioMetadata", "_analyze_ai",
+                             f"AI analysis failed: {result.get('error')}")
                 return None
-                
+
         except Exception as e:
             logger.error("AudioMetadata", "_analyze_ai", f"Error in AI analysis: {e}")
             return None
@@ -576,6 +648,221 @@ class AudioMetadataMixin:
     def _show_transcription_viewer(self, filename: str):
         """Show transcription in a viewer window."""
         # TODO: Implement transcription viewer
-        logger.info("AudioMetadata", "show_transcription", 
+        logger.info("AudioMetadata", "show_transcription",
                    f"Transcription viewer requested for {filename}")
         pass
+
+    def export_transcription_to_file(self, filename: str) -> Optional[str]:
+        """Export transcription from database to .txt file for viewing.
+
+        Args:
+            filename: Audio filename
+
+        Returns:
+            Path to exported .txt file, or None if export failed
+        """
+        self._ensure_audio_metadata_initialized()
+
+        try:
+            # Get metadata from database
+            metadata = self._audio_metadata_db.get_metadata(filename)
+            if not metadata or not metadata.transcription_text:
+                logger.warning("AudioMetadata", "export_transcription",
+                             f"No transcription found for {filename}")
+                return None
+
+            # Determine output path (same location as audio file)
+            audio_path = self._find_local_file_path(filename)
+            if not audio_path:
+                # Fallback to download directory
+                download_dir = getattr(self, 'download_directory', os.path.expanduser("~/Downloads"))
+                audio_path = os.path.join(download_dir, filename)
+
+            # Generate .txt filename
+            base_path = os.path.splitext(audio_path)[0]
+            txt_path = f"{base_path}_transcription.txt"
+
+            # Check if file already exists and is up-to-date
+            if os.path.exists(txt_path):
+                txt_mtime = os.path.getmtime(txt_path)
+                db_mtime = metadata.updated_at.timestamp()
+                if txt_mtime >= db_mtime:
+                    # File is up-to-date
+                    logger.debug("AudioMetadata", "export_transcription",
+                               f"Using existing transcription file: {txt_path}")
+                    return txt_path
+
+            # Write transcription to file
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                # Header
+                f.write("=" * 60 + "\n")
+                f.write("AUDIO TRANSCRIPTION\n")
+                f.write("=" * 60 + "\n\n")
+                f.write(f"File: {filename}\n")
+                f.write(f"Date: {metadata.date_created.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Duration: {int(metadata.duration_seconds // 60)}m {int(metadata.duration_seconds % 60)}s\n")
+
+                if metadata.transcription_language:
+                    f.write(f"Language: {metadata.transcription_language}\n")
+
+                if metadata.transcription_confidence:
+                    f.write(f"Confidence: {metadata.transcription_confidence:.1%}\n")
+
+                f.write(f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("\n" + "=" * 60 + "\n\n")
+
+                # Transcription text
+                f.write(metadata.transcription_text)
+
+                # Optional: Add AI summary if available
+                if metadata.ai_summary:
+                    f.write("\n\n" + "=" * 60 + "\n")
+                    f.write("AI SUMMARY\n")
+                    f.write("=" * 60 + "\n\n")
+                    f.write(metadata.ai_summary)
+
+                # Optional: Add action items if available
+                if metadata.ai_action_items or metadata.user_action_items:
+                    f.write("\n\n" + "=" * 60 + "\n")
+                    f.write("ACTION ITEMS\n")
+                    f.write("=" * 60 + "\n\n")
+
+                    action_items = metadata.user_action_items or metadata.ai_action_items
+                    for i, item in enumerate(action_items, 1):
+                        f.write(f"{i}. {item}\n")
+
+            logger.info("AudioMetadata", "export_transcription",
+                       f"Exported transcription to {txt_path}")
+            return txt_path
+
+        except Exception as e:
+            logger.error("AudioMetadata", "export_transcription",
+                       f"Error exporting transcription for {filename}: {e}")
+            return None
+
+    def open_transcription_in_notepad(self, filename: str) -> bool:
+        """Open transcription file in Windows Notepad.
+
+        Args:
+            filename: Audio filename
+
+        Returns:
+            True if opened successfully, False otherwise
+        """
+        import sys
+        import subprocess
+        from tkinter import messagebox
+
+        try:
+            # Export transcription to file
+            txt_path = self.export_transcription_to_file(filename)
+
+            if not txt_path:
+                messagebox.showerror(
+                    "No Transcription",
+                    f"No transcription available for {filename}.\n\n"
+                    "Please transcribe the file first by right-clicking and selecting 'Quick Transcribe'.",
+                    parent=self
+                )
+                return False
+
+            # Open in notepad (Windows only for now)
+            if sys.platform == "win32":
+                subprocess.Popen(["notepad.exe", txt_path])
+                logger.info("AudioMetadata", "open_transcription",
+                           f"Opened transcription in notepad: {txt_path}")
+                return True
+            else:
+                # For other platforms, open with default text editor
+                import platform
+                if platform.system() == "Darwin":  # macOS
+                    subprocess.Popen(["open", "-e", txt_path])
+                else:  # Linux
+                    subprocess.Popen(["xdg-open", txt_path])
+
+                logger.info("AudioMetadata", "open_transcription",
+                           f"Opened transcription: {txt_path}")
+                return True
+
+        except Exception as e:
+            logger.error("AudioMetadata", "open_transcription",
+                       f"Error opening transcription for {filename}: {e}")
+            messagebox.showerror(
+                "Error Opening Transcription",
+                f"Could not open transcription for {filename}.\n\nError: {str(e)}",
+                parent=self
+            )
+            return False
+
+    def _delete_transcription(self, filename: str) -> bool:
+        """Delete transcription and analysis data for a file.
+
+        Args:
+            filename: Audio filename
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        from tkinter import messagebox
+
+        try:
+            # Confirm deletion
+            result = messagebox.askyesno(
+                "Delete Transcription",
+                f"Delete transcription and AI analysis for {filename}?\n\n"
+                "This will remove all transcription text, summaries, and insights.\n"
+                "This action cannot be undone.",
+                parent=self
+            )
+
+            if not result:
+                return False
+
+            # Delete from database
+            self._ensure_audio_metadata_initialized()
+            success = self._audio_metadata_db.delete_metadata(filename)
+
+            if success:
+                logger.info("AudioMetadata", "delete_transcription",
+                           f"Deleted transcription for {filename}")
+
+                # Delete exported text file if it exists
+                local_path = self._find_local_file_path(filename)
+                if local_path:
+                    base_path = os.path.splitext(local_path)[0]
+                    txt_path = f"{base_path}_transcription.txt"
+                    if os.path.exists(txt_path):
+                        try:
+                            os.remove(txt_path)
+                            logger.info("AudioMetadata", "delete_transcription",
+                                       f"Deleted text file: {txt_path}")
+                        except Exception as e:
+                            logger.warning("AudioMetadata", "delete_transcription",
+                                         f"Could not delete text file: {e}")
+
+                # Refresh display
+                self.after(0, self._refresh_file_display_for_metadata_change, filename)
+
+                messagebox.showinfo(
+                    "Transcription Deleted",
+                    f"Transcription and analysis data deleted for {filename}.",
+                    parent=self
+                )
+                return True
+            else:
+                messagebox.showerror(
+                    "Delete Failed",
+                    f"Could not delete transcription for {filename}.",
+                    parent=self
+                )
+                return False
+
+        except Exception as e:
+            logger.error("AudioMetadata", "delete_transcription",
+                       f"Error deleting transcription for {filename}: {e}")
+            messagebox.showerror(
+                "Error",
+                f"Error deleting transcription for {filename}.\n\nError: {str(e)}",
+                parent=self
+            )
+            return False

@@ -288,10 +288,10 @@ class AudioProcessor:
                 return data, audio.frame_rate
 
             else:
-                logger.error(
+                logger.debug(
                     "AudioProcessor",
                     "extract_waveform_data",
-                    "No audio processing library available",
+                    "No audio processing library available for non-WAV files (pydub not installed)",
                 )
                 return np.array([]), 0
 

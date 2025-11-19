@@ -26,7 +26,7 @@ class TreeViewMixin:
         tree_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
-        columns = ("num", "name", "datetime", "size", "duration", "meeting", "version", "status")
+        columns = ("num", "name", "datetime", "size", "duration", "meeting", "version", "status", "transcription")
         # Set initial selectmode based on configuration
         initial_selectmode = "browse" if self.single_selection_mode_var.get() else "extended"
         self.file_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode=initial_selectmode)
@@ -79,6 +79,8 @@ class TreeViewMixin:
                 self.file_tree.column(col, width=200, minwidth=150, anchor="w")
             elif col == "version":
                 self.file_tree.column(col, width=70, minwidth=50, anchor="center")
+            elif col == "transcription":
+                self.file_tree.column(col, width=100, minwidth=80, anchor="w")
             else:
                 self.file_tree.column(col, width=100, minwidth=80, anchor="w")
         self.file_tree.grid(row=0, column=0, sticky="nsew")
@@ -212,6 +214,9 @@ class TreeViewMixin:
             # Get meeting information
             meeting_text = file_info.get("meeting_display_text", "")
 
+            # Get transcription status
+            transcription_display = self._format_transcription_status(file_info)
+
             values = (
                 file_info.get("original_index", i + 1),
                 file_info["name"],
@@ -221,6 +226,7 @@ class TreeViewMixin:
                 meeting_text,
                 version_str,
                 status_text,
+                transcription_display,
             )
             self.file_tree.insert("", "end", iid=file_info["name"], values=values, tags=tags)
         if selected_iids:
@@ -836,3 +842,40 @@ class TreeViewMixin:
         """Check if a status filter is currently active."""
         criteria = self.get_status_filter_criteria()
         return criteria.get('status_filter', 'all') != 'all'
+
+    def _format_transcription_status(self, file_info: Dict[str, Any]) -> str:
+        """Format transcription status for display in tree view column."""
+        filename = file_info.get("name")
+        if not filename:
+            return "-"
+
+        # Check if audio metadata system is available
+        if not hasattr(self, '_audio_metadata_db') or not self._audio_metadata_db:
+            return "-"
+
+        try:
+            # Get metadata from database
+            from audio_metadata_db import ProcessingStatus
+            metadata = self._audio_metadata_db.get_metadata(filename)
+
+            if not metadata:
+                return "-"
+
+            # Map status to display text
+            if metadata.processing_status == ProcessingStatus.COMPLETED:
+                return "📄 View"
+            elif metadata.processing_status in [ProcessingStatus.TRANSCRIBED, ProcessingStatus.AI_ANALYZED]:
+                return "📄 View"
+            elif metadata.processing_status == ProcessingStatus.TRANSCRIBING:
+                return "⏳ Transcribing..."
+            elif metadata.processing_status == ProcessingStatus.AI_ANALYZING:
+                return "⏳ Analyzing..."
+            elif metadata.processing_status == ProcessingStatus.ERROR:
+                return "❌ Error"
+            else:
+                return "-"
+
+        except Exception as e:
+            logger.debug("TreeView", "_format_transcription_status",
+                        f"Error formatting transcription status for {filename}: {e}")
+            return "-"

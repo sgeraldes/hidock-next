@@ -256,6 +256,115 @@ class FileActionsMixin:
 
             self.update_status_bar(progress_text=f"Transcription complete for {original_filename}.")
 
+    def _quick_transcribe_selected_files(self):
+        """Start transcription for selected file(s) using audio metadata system."""
+        selected_iids = self.file_tree.selection()
+        if not selected_iids:
+            messagebox.showinfo("No Selection", "Please select files to transcribe.", parent=self)
+            return
+
+        # Check if audio metadata system is initialized
+        if not hasattr(self, '_audio_metadata_db'):
+            messagebox.showerror(
+                "System Error",
+                "Audio metadata system not initialized.",
+                parent=self
+            )
+            return
+
+        # Check API key configuration
+        provider = self.config.get("ai_api_provider", "gemini")
+
+        # Get decrypted API key (supports encrypted keys from settings)
+        if hasattr(self, 'get_decrypted_api_key'):
+            api_key = self.get_decrypted_api_key(provider)
+        else:
+            # Fallback: try direct key (unencrypted)
+            api_key = self.config.get("gemini_api_key", "")
+
+        if not api_key:
+            if messagebox.askyesno(
+                "API Key Required",
+                f"{provider.title()} API key not configured.\n\nWould you like to open settings to configure it?",
+                parent=self
+            ):
+                self.open_settings_window()
+            return
+
+        # Get filenames and check their status
+        files_to_transcribe = []
+        files_need_download = []
+
+        for iid in selected_iids:
+            file_detail = next((f for f in self.displayed_files_details if f["name"] == iid), None)
+            if not file_detail:
+                continue
+
+            filename = file_detail["name"]
+
+            # Check if file is audio format
+            if not filename.lower().endswith((".wav", ".hda", ".mp3", ".m4a")):
+                continue
+
+            # Check if file is downloaded
+            local_path = self._get_local_filepath(filename)
+            if os.path.exists(local_path):
+                files_to_transcribe.append(filename)
+            else:
+                files_need_download.append(filename)
+
+        if not files_to_transcribe and not files_need_download:
+            messagebox.showinfo(
+                "No Audio Files",
+                "No audio files selected or selected files are not in a supported format.",
+                parent=self
+            )
+            return
+
+        # Offer to download if needed
+        if files_need_download:
+            if messagebox.askyesno(
+                "Download Required",
+                f"{len(files_need_download)} file(s) need to be downloaded before transcription.\n\n"
+                "Download now?",
+                parent=self
+            ):
+                # Queue downloads (transcription needs to be manually triggered after)
+                for filename in files_need_download:
+                    iid = filename  # In this app, iid is the filename
+                    if iid not in self.file_tree.get_children():
+                        continue
+                    # Queue download using existing infrastructure
+                    self.file_tree.selection_set(iid)
+
+                self.download_selected_files_gui()
+
+                messagebox.showinfo(
+                    "Downloads Started",
+                    f"Downloading {len(files_need_download)} file(s).\n\n"
+                    "Please wait for downloads to complete, then right-click and select 'Quick Transcribe' again.",
+                    parent=self
+                )
+                return
+
+        # Start transcription for ready files
+        started_count = 0
+        for filename in files_to_transcribe:
+            if self.start_audio_processing(filename):
+                started_count += 1
+
+        if started_count > 0:
+            # Just log the action - no intrusive dialog needed
+            logger.info("GUI", "quick_transcribe_selected_files",
+                       f"Started transcription for {started_count} file(s)")
+        else:
+            # Still show error dialog for failures
+            messagebox.showerror(
+                "Transcription Failed",
+                "Could not start transcription. Please check logs for details.",
+                parent=self
+            )
+
     def cancel_all_downloads_gui(self):
         """Cancels all active download operations."""
         active_operations = self.file_operations_manager.get_all_active_operations()

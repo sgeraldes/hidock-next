@@ -202,6 +202,7 @@ class HiDockToolGUI(
             "meeting": "Meeting",
             "version": "Version",
             "status": "Status",
+            "transcription": "Transcription",
         }
         self.icons = {}
         self.menu_icons = {}
@@ -754,7 +755,7 @@ class HiDockToolGUI(
         tree_frame.grid(row=row, column=0, sticky="nsew", padx=5, pady=5)
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
-        columns = ("num", "name", "datetime", "size", "duration", "meeting", "version", "status")
+        columns = ("num", "name", "datetime", "size", "duration", "meeting", "version", "status", "transcription")
         # Set initial selectmode based on configuration
         initial_selectmode = "browse" if self.single_selection_mode_var.get() else "extended"
         self.file_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode=initial_selectmode)
@@ -807,6 +808,8 @@ class HiDockToolGUI(
                 self.file_tree.column(col, width=200, minwidth=150, anchor="w")
             elif col == "version":
                 self.file_tree.column(col, width=70, minwidth=50, anchor="center")
+            elif col == "transcription":
+                self.file_tree.column(col, width=100, minwidth=80, anchor="w")
             else:
                 self.file_tree.column(col, width=100, minwidth=80, anchor="w")
         self.file_tree.grid(row=0, column=0, sticky="nsew")
@@ -3346,7 +3349,7 @@ You can dismiss this warning and continue using the application with limited aud
                 self.after(0, self._update_waveform_with_data, y, sr, filename)
 
             except Exception as load_error:
-                logger.error("WaveformLoader", "_load_waveform_background", f"Error loading audio: {load_error}")
+                logger.debug("WaveformLoader", "_load_waveform_background", f"Error loading audio waveform: {load_error}")
                 self.after(0, self._handle_waveform_load_error, filename, str(load_error))
 
         except Exception as e:
