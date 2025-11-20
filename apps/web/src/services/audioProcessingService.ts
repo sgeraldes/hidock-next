@@ -10,6 +10,8 @@
  * Requirements: 9.3, 3.1, 3.2
  */
 
+import FFT from 'fft.js';
+
 export interface ProcessingOptions {
     noiseReduction?: {
         enabled: boolean;
@@ -547,38 +549,26 @@ export class AudioProcessingService {
     }
 
     /**
-     * Simple FFT implementation (for demonstration - use a proper library in production)
+     * Optimized FFT implementation using fft.js library
+     * Complexity: O(n log n) instead of O(n²)
      */
     private simpleFFT(data: Float32Array): Float32Array {
         const N = data.length;
-        const result = new Float32Array(N * 2); // Real and imaginary parts
 
-        // Copy real parts
-        for (let i = 0; i < N; i++) {
-            result[i * 2] = data[i];
-            result[i * 2 + 1] = 0;
-        }
+        // fft.js requires power-of-2 size, so use the actual size
+        const fft = new FFT(N);
 
-        // Simple DFT (very inefficient - use proper FFT in production)
-        const output = new Float32Array(N * 2);
-        for (let k = 0; k < N; k++) {
-            let realSum = 0;
-            let imagSum = 0;
+        // Convert Float32Array to regular array for fft.js
+        const input = Array.from(data);
 
-            for (let n = 0; n < N; n++) {
-                const angle = -2 * Math.PI * k * n / N;
-                const cos = Math.cos(angle);
-                const sin = Math.sin(angle);
+        // Create output arrays for complex numbers
+        const out = fft.createComplexArray();
 
-                realSum += result[n * 2] * cos - result[n * 2 + 1] * sin;
-                imagSum += result[n * 2] * sin + result[n * 2 + 1] * cos;
-            }
+        // Perform FFT - transforms real input to complex output
+        fft.realTransform(out, input);
 
-            output[k * 2] = realSum;
-            output[k * 2 + 1] = imagSum;
-        }
-
-        return output;
+        // Convert to interleaved format (real, imag, real, imag, ...)
+        return new Float32Array(out);
     }
 
     /**
