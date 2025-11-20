@@ -44,6 +44,9 @@ reference/
 audio/
 .kiro/
 .claude/
+.code-review/
+.working-plans/
+.analysis/
 
 # AI Assistant project intelligence (keep rules but not project-specific data)
 .amazonq/project-intelligence/
@@ -55,6 +58,7 @@ audio/
 *.mp4
 *.mov
 *.avi
+*.ics
 
 # Database files and dumps
 *.sql
