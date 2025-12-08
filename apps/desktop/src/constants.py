@@ -15,13 +15,39 @@ ease of modification.
 DEFAULT_VENDOR_ID = 0x10D6  # Actions Semiconductor
 
 # All known HiDock device PIDs (no hierarchy - all devices are equal)
+# Source: Official HiDock HiNotes jensen.js (December 2025)
 HIDOCK_PRODUCT_IDS = [
-    0xAF0C,  # H1
-    0xAF0D,  # H1E (older PID)
+    # Original product IDs
+    0xAF0C,  # H1 (45068 decimal)
+    0xAF0D,  # H1E (45069 decimal, older PID)
     0xB00D,  # H1E (newer PID)
-    0xAF0E,  # P1 (older PID)
+    0xAF0E,  # P1 (45070 decimal, older PID)
     0xB00E,  # P1 (newer PID)
+    0xAF0F,  # P1 mini (45071 decimal)
+    # Alternative product IDs
+    0x0100,  # H1 alt (256 decimal)
+    0x0101,  # H1E alt (257 decimal)
+    0x0102,  # H1 alt (258 decimal)
+    0x0103,  # H1E alt (259 decimal)
+    0x2040,  # P1 alt (8256 decimal)
+    0x2041,  # P1 mini alt (8257 decimal)
 ]
+
+# Product ID to model name mapping
+PRODUCT_ID_MODEL_MAP = {
+    0xAF0C: "hidock-h1",
+    0x0100: "hidock-h1",
+    0x0102: "hidock-h1",
+    0xAF0D: "hidock-h1e",
+    0xB00D: "hidock-h1e",
+    0x0101: "hidock-h1e",
+    0x0103: "hidock-h1e",
+    0xAF0E: "hidock-p1",
+    0xB00E: "hidock-p1",
+    0x2040: "hidock-p1",
+    0xAF0F: "hidock-p1-mini",
+    0x2041: "hidock-p1-mini",
+}
 
 # Default PID only used if auto-discovery fails and no config exists
 # Using first in list arbitrarily - all devices are equally valid
@@ -50,11 +76,37 @@ CMD_GET_RECORDING_FILE = 18         # Recording metadata
 CMD_RESTORE_FACTORY_SETTINGS = 19   # Factory reset
 CMD_SEND_MEETING_SCHEDULE_INFO = 20 # Calendar integration
 
+# --- New Commands from Official HiNotes (December 2025) ---
+CMD_TRANSFER_FILE_PARTIAL = 21      # Partial file transfer
+CMD_REQUEST_TONE_UPDATE = 22        # Request tone update
+CMD_TONE_UPDATE = 23                # Apply tone update
+CMD_REQUEST_UAC_UPDATE = 24         # Request UAC (USB Audio Class) update
+CMD_UAC_UPDATE = 25                 # Apply UAC update
+
+# --- Realtime Commands (All devices - no device restrictions) ---
+CMD_REALTIME_READ_SETTING = 32      # Get realtime streaming settings
+CMD_REALTIME_CONTROL = 33           # Start/pause/stop realtime streaming
+CMD_REALTIME_TRANSFER = 34          # Get realtime audio data
+
+# --- Bluetooth Commands (P1 devices only: hidock-p1 and hidock-p1-mini) ---
+CMD_BLUETOOTH_SCAN = 4097           # Scan for Bluetooth devices
+CMD_BLUETOOTH_CMD = 4098            # Bluetooth command (connect/disconnect)
+CMD_BLUETOOTH_STATUS = 4099         # Get Bluetooth status
+CMD_GET_BATTERY_STATUS = 4100       # Get battery status (P1 only)
+CMD_BT_SCAN = 4101                  # Enhanced Bluetooth scan
+CMD_BT_DEV_LIST = 4102              # Get discovered device list
+CMD_BT_GET_PAIRED_DEV_LIST = 4103   # Get paired devices list
+CMD_BT_REMOVE_PAIRED_DEV = 4104     # Remove paired device
+
+# --- Factory/Debug Commands ---
+CMD_FACTORY_RESET = 61451           # Full factory reset
+CMD_BLUE_B_TIMEOUT = 61457          # Bluetooth timeout setting
+
 # Command 10 - Status: DOES NOT EXIST (causes device failure)
-# Command 14 - Status: SUPPORTED (returns empty response) 
+# Command 14 - Status: SUPPORTED (returns empty response)
 # Command 15 - Status: SUPPORTED (returns empty response)
 
-# --- THEORETICAL/STUB Extended Jensen Protocol Command IDs (21-50) ---
+# --- THEORETICAL/STUB Extended Jensen Protocol Command IDs ---
 # ⚠️  WARNING: These commands are THEORETICAL and likely DO NOT EXIST in actual firmware
 # ⚠️  They were created based on speculation, not actual reverse engineering evidence
 # ⚠️  DO NOT USE with real hardware - they are provided as STUBS for future development

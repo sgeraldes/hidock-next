@@ -10,6 +10,7 @@ export enum DeviceModel {
     H1 = 'hidock-h1',
     H1E = 'hidock-h1e',
     P1 = 'hidock-p1',
+    P1_MINI = 'hidock-p1-mini',
     UNKNOWN = 'unknown'
 }
 
@@ -348,7 +349,17 @@ export class DeviceManager {
                 channels: 'Stereo',
                 batteryLife: '30 hours',
                 connectivity: 'USB-C',
-                features: ['Auto-record', 'Bluetooth', 'Noise cancellation']
+                features: ['Auto-record', 'Bluetooth', 'Noise cancellation', 'Battery status']
+            },
+            [DeviceModel.P1_MINI]: {
+                maxStorage: '16GB',
+                audioFormat: 'WAV/HDA/MP3',
+                sampleRate: '48kHz',
+                bitDepth: '24-bit',
+                channels: 'Stereo',
+                batteryLife: '20 hours',
+                connectivity: 'USB-C',
+                features: ['Auto-record', 'Bluetooth', 'Compact design', 'Battery status']
             },
             [DeviceModel.UNKNOWN]: {
                 maxStorage: 'Unknown',
@@ -392,6 +403,12 @@ export class DeviceManager {
                 noiseCancellation: true,
                 bluetoothEnabled: true,
                 powerSaving: false
+            },
+            [DeviceModel.P1_MINI]: {
+                autoRecord: true,
+                audioQuality: 'high',
+                bluetoothEnabled: true,
+                powerSaving: true
             },
             [DeviceModel.UNKNOWN]: {
                 autoRecord: false,
@@ -502,12 +519,26 @@ export class DeviceManager {
 
 /**
  * Utility functions for device model detection
+ * Source: Official HiDock HiNotes jensen.js (December 2025)
  */
 export function detectDeviceModel(_vendorId: number, productId: number): DeviceModel {
     const modelMap: Record<number, DeviceModel> = {
-        0xAF0C: DeviceModel.H1,
-        0xAF0D: DeviceModel.H1E,
-        0xAF0E: DeviceModel.P1
+        // H1 devices
+        0xAF0C: DeviceModel.H1,   // 45068 decimal
+        0x0100: DeviceModel.H1,   // 256 decimal (alt)
+        0x0102: DeviceModel.H1,   // 258 decimal (alt)
+        // H1E devices
+        0xAF0D: DeviceModel.H1E,  // 45069 decimal
+        0xB00D: DeviceModel.H1E,  // newer PID
+        0x0101: DeviceModel.H1E,  // 257 decimal (alt)
+        0x0103: DeviceModel.H1E,  // 259 decimal (alt)
+        // P1 devices
+        0xAF0E: DeviceModel.P1,   // 45070 decimal
+        0xB00E: DeviceModel.P1,   // newer PID
+        0x2040: DeviceModel.P1,   // 8256 decimal (alt)
+        // P1 mini devices
+        0xAF0F: DeviceModel.P1_MINI,  // 45071 decimal
+        0x2041: DeviceModel.P1_MINI   // 8257 decimal (alt)
     };
 
     return modelMap[productId] || DeviceModel.UNKNOWN;
@@ -531,6 +562,13 @@ export function getModelCapabilities(model: DeviceModel): DeviceCapability[] {
             DeviceCapability.HEALTH_MONITORING
         ],
         [DeviceModel.P1]: [
+            DeviceCapability.FORMAT_STORAGE,
+            DeviceCapability.SETTINGS_MANAGEMENT,
+            DeviceCapability.HEALTH_MONITORING,
+            DeviceCapability.REAL_TIME_RECORDING,
+            DeviceCapability.AUDIO_PLAYBACK
+        ],
+        [DeviceModel.P1_MINI]: [
             DeviceCapability.FORMAT_STORAGE,
             DeviceCapability.SETTINGS_MANAGEMENT,
             DeviceCapability.HEALTH_MONITORING,

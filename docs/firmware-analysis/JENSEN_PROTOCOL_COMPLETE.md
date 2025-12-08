@@ -1,9 +1,9 @@
 # Jensen Protocol Complete Reference
 
-**Version:** 2.0 - Hardware Validated  
-**Date:** 2025-08-31  
-**Firmware Version:** 6.2.5 (Build 393733)  
-**Protocol Status:** Hardware tested and validated  
+**Version:** 3.0 - Updated with HiNotes December 2025 Commands
+**Date:** 2025-12-07
+**Firmware Version:** 6.2.5+ (Build 393733+)
+**Protocol Status:** Hardware tested and validated with official HiNotes commands  
 
 ## Protocol Overview
 
@@ -354,21 +354,82 @@ int stop_hidock_demo() {
 - **Development Safety Net**: Essential for building robust command discovery systems
 - **Regression Testing**: Safe commands for continuous integration testing
 
+### New Commands from Official HiNotes (December 2025)
+
+The following commands were discovered from the official HiNotes jensen.js implementation:
+
+#### Extended File Operations (Commands 21-25)
+```c
+Command 21: TRANSFER_FILE_PARTIAL  // Partial file transfer support
+Command 22: REQUEST_TONE_UPDATE    // Request tone update
+Command 23: TONE_UPDATE            // Apply tone update
+Command 24: REQUEST_UAC_UPDATE     // Request UAC (USB Audio Class) update
+Command 25: UAC_UPDATE             // Apply UAC update
+```
+
+#### Realtime Audio Streaming (Commands 32-34) - ALL DEVICES
+```c
+// These commands work on ALL HiDock devices (H1, H1E, P1, P1 Mini)
+Command 32: REALTIME_READ_SETTING  // Get realtime streaming settings
+Command 33: REALTIME_CONTROL       // Start/pause/stop realtime streaming
+Command 34: REALTIME_TRANSFER      // Get realtime audio data
+```
+
+**REALTIME_CONTROL (33) Parameters:**
+```c
+// Start realtime: [0,0,0,0,0,0,0,1]
+// Pause realtime: [0,0,0,1,0,0,0,1]
+// Stop realtime:  [0,0,0,2,0,0,0,1]
+```
+
+**REALTIME_TRANSFER (34) Response:**
+```c
+typedef struct {
+    uint32_t rest;      // Remaining bytes available
+    uint8_t data[];     // Audio data (16kHz 16-bit mono PCM)
+} realtime_data_t;
+```
+
+#### Bluetooth Commands (Commands 4097-4104) - P1 DEVICES ONLY
+```c
+// These commands ONLY work on P1 family devices (hidock-p1 and hidock-p1-mini)
+Command 4097: BLUETOOTH_SCAN       // Legacy Bluetooth scan
+Command 4098: BLUETOOTH_CMD        // Bluetooth connect/disconnect
+Command 4099: BLUETOOTH_STATUS     // Get Bluetooth connection status
+Command 4100: GET_BATTERY_STATUS   // Get battery level and charging state
+Command 4101: BT_SCAN              // Enhanced Bluetooth scan (with duration)
+Command 4102: BT_DEV_LIST          // Get discovered device list
+Command 4103: BT_GET_PAIRED_DEV_LIST // Get paired devices list
+Command 4104: BT_REMOVE_PAIRED_DEV // Remove paired device
+```
+
+**GET_BATTERY_STATUS (4100) Response:**
+```c
+typedef struct {
+    uint8_t status;         // 0=idle, 1=charging, 2=full
+    uint8_t battery_level;  // 0-100 percentage
+    uint32_t voltage;       // Optional: voltage reading
+} battery_status_t;
+```
+
+#### Factory/Debug Commands (High IDs)
+```c
+Command 61451: FACTORY_RESET       // Full factory reset
+Command 61457: BLUE_B_TIMEOUT      // Bluetooth timeout setting
+```
+
 ### Protocol Extensions (Future Implementation)
 
 Based on firmware analysis, the following extended commands are feasible:
 
-#### Hardware Monitoring (Commands 21-25)
+#### Hardware Monitoring (Commands 21-25) - REDEFINED
 ```c
-Command 21: GET_HARDWARE_INFO      // Detailed hardware specifications
-Command 22: GET_PERFORMANCE_METRICS // Real-time performance data
-Command 23: GET_AUDIO_DIAGNOSTICS  // Audio system status
-Command 24: GET_STORAGE_HEALTH     // Storage diagnostic information
-Command 25: GET_THERMAL_STATUS     // Temperature and thermal data
+// Note: Commands 21-25 are now used for firmware/audio updates
+// Hardware monitoring may use different command ranges
 ```
 
 #### Advanced Control (Commands 26-30)
-```c  
+```c
 Command 26: SET_AUDIO_PARAMETERS   // Direct audio hardware control
 Command 27: STORAGE_OPTIMIZATION   // Storage performance tuning
 Command 28: DEBUG_INTERFACE        // Development debugging access
@@ -476,7 +537,7 @@ This protocol foundation enables the development of advanced features that can u
 
 ---
 
-**Document Status**: ✅ **Complete** with hardware validation  
-**Last Updated**: 2025-08-31  
-**Next Update**: After extended protocol implementation  
-**Related**: [COMPLETE_FIRMWARE_ANALYSIS.md](COMPLETE_FIRMWARE_ANALYSIS.md)
+**Document Status**: ✅ **Complete** with hardware validation and HiNotes December 2025 commands
+**Last Updated**: 2025-12-07
+**Major Update**: Added realtime streaming (Cmd 32-34), Bluetooth (Cmd 4097-4104), Battery (Cmd 4100)
+**Related**: [COMPLETE_FIRMWARE_ANALYSIS.md](COMPLETE_FIRMWARE_ANALYSIS.md), [DEVICE_MODELS.md](../hardware-analysis/DEVICE_MODELS.md)
