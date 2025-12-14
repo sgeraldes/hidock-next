@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, Mic, RefreshCw, Settings2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Mic, RefreshCw, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { useAppStore } from '@/store/useAppStore'
 import { cn, formatTime, getWeekDates, isToday } from '@/lib/utils'
 import type { Meeting, Recording } from '@/types'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 
 // Extended meeting type that includes recording match info
 interface CalendarMeeting extends Meeting {
@@ -18,6 +24,21 @@ const HOUR_HEIGHT = 60 // pixels per hour
 const START_HOUR = 7 // 7 AM
 const END_HOUR = 21 // 9 PM
 const HOURS = Array.from({ length: END_HOUR - START_HOUR }, (_, i) => START_HOUR + i)
+
+// Calendar view types
+type CalendarViewType = 'day' | 'workweek' | 'week' | 'month'
+
+// Get dates for workweek (Mon-Fri)
+function getWorkweekDates(date: Date): Date[] {
+  const dates = getWeekDates(date)
+  // Return Mon-Fri (indices 1-5 from Sunday-based week)
+  return dates.slice(1, 6)
+}
+
+// Get single day
+function getDayDates(date: Date): Date[] {
+  return [new Date(date)]
+}
 
 // Get all dates for a month view (including padding from prev/next months)
 function getMonthDates(date: Date): Date[] {
@@ -181,6 +202,53 @@ function createPlaceholderMeetings(orphanRecordings: Recording[]): CalendarMeeti
   })
 }
 
+// Meeting tooltip content component
+function MeetingTooltipContent({ meeting }: { meeting: CalendarMeeting }) {
+  const startTime = new Date(meeting.start_time)
+  const endTime = new Date(meeting.end_time)
+  const duration = Math.round((endTime.getTime() - startTime.getTime()) / (1000 * 60))
+  const hours = Math.floor(duration / 60)
+  const mins = duration % 60
+  const durationStr = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
+
+  return (
+    <div className="space-y-2 max-w-[280px]">
+      <div className="font-semibold text-foreground">{meeting.subject}</div>
+      <div className="text-xs space-y-1">
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground">Time:</span>
+          <span>{formatTime(meeting.start_time)} - {formatTime(meeting.end_time)}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground">Duration:</span>
+          <span>{durationStr}</span>
+        </div>
+        {meeting.hasRecording && (
+          <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
+            <Mic className="h-3 w-3" />
+            <span>{meeting.isPlaceholder ? 'Recording (no calendar event)' : 'Has recording'}</span>
+          </div>
+        )}
+        {meeting.location && (
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground">Location:</span>
+            <span className="truncate">{meeting.location}</span>
+          </div>
+        )}
+        {meeting.organizer && (
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground">Organizer:</span>
+            <span className="truncate">{meeting.organizer}</span>
+          </div>
+        )}
+      </div>
+      <div className="text-xs text-muted-foreground pt-1 border-t">
+        Click for details
+      </div>
+    </div>
+  )
+}
+
 export function Calendar() {
   const navigate = useNavigate()
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -230,6 +298,21 @@ export function Calendar() {
       const lastDate = new Date(dates[dates.length - 1])
       lastDate.setHours(23, 59, 59, 999)
       endDate = lastDate.toISOString()
+    } else if (calendarView === 'day') {
+      // For day view
+      const dayStart = new Date(currentDate)
+      dayStart.setHours(0, 0, 0, 0)
+      const dayEnd = new Date(currentDate)
+      dayEnd.setHours(23, 59, 59, 999)
+      startDate = dayStart.toISOString()
+      endDate = dayEnd.toISOString()
+    } else if (calendarView === 'workweek') {
+      // For workweek view (Mon-Fri)
+      const dates = getWorkweekDates(currentDate)
+      startDate = dates[0].toISOString()
+      const lastDate = new Date(dates[dates.length - 1])
+      lastDate.setHours(23, 59, 59, 999)
+      endDate = lastDate.toISOString()
     } else {
       // For week view
       const dates = getWeekDates(currentDate)
@@ -252,6 +335,20 @@ export function Calendar() {
     }
   }, [])
 
+  // Get dates for current view
+  const viewDates = useMemo(() => {
+    switch (calendarView) {
+      case 'day':
+        return getDayDates(currentDate)
+      case 'workweek':
+        return getWorkweekDates(currentDate)
+      case 'week':
+        return getWeekDates(currentDate)
+      case 'month':
+        return getMonthDates(currentDate)
+    }
+  }, [currentDate, calendarView])
+
   const weekDates = useMemo(() => getWeekDates(currentDate), [currentDate])
   const monthDates = useMemo(() => getMonthDates(currentDate), [currentDate])
 
@@ -270,11 +367,11 @@ export function Calendar() {
     return [...calendarMeetings, ...placeholderMeetings]
   }, [calendarMeetings, placeholderMeetings])
 
-  // Group meetings by day
+  // Group meetings by day (for day/workweek/week views)
   const meetingsByDay = useMemo(() => {
     const grouped: Record<string, CalendarMeeting[]> = {}
 
-    for (const date of weekDates) {
+    for (const date of viewDates) {
       const key = date.toISOString().split('T')[0]
       grouped[key] = []
     }
@@ -293,7 +390,7 @@ export function Calendar() {
     }
 
     return grouped
-  }, [allMeetings, weekDates])
+  }, [allMeetings, viewDates])
 
   // Group meetings for month view
   const meetingsByMonth = useMemo(() => {
@@ -362,6 +459,7 @@ export function Calendar() {
   }
 
   return (
+    <TooltipProvider delayDuration={300}>
     <div className="flex flex-col h-full">
       {/* Header */}
       <header className="flex items-center justify-between border-b px-6 py-4 flex-shrink-0">
@@ -389,18 +487,65 @@ export function Calendar() {
         </div>
 
         <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
+          {/* Sync status - consolidated single indicator */}
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {calendarSyncing ? (
+              <span className="flex items-center gap-1">
+                <RefreshCw className="h-3 w-3 animate-spin" />
+                Syncing...
+              </span>
+            ) : (
+              <>
+                {lastSync && <span>Synced {formatLastSync()}</span>}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => syncCalendar()}
+                  className="h-6 px-2"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                </Button>
+              </>
+            )}
+            <Switch
+              id="auto-sync-header"
+              checked={autoSyncEnabled}
+              onCheckedChange={handleAutoSyncToggle}
+              className="scale-75"
+            />
+          </div>
+
+          {/* View mode buttons */}
+          <div className="flex items-center border rounded-md overflow-hidden">
             <Button
-              variant={calendarView === 'week' ? 'default' : 'outline'}
+              variant={calendarView === 'day' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setCalendarView('day')}
+              className="rounded-none border-0"
+            >
+              Day
+            </Button>
+            <Button
+              variant={calendarView === 'workweek' ? 'default' : 'ghost'}
+              size="sm"
+              onClick={() => setCalendarView('workweek')}
+              className="rounded-none border-0 border-l"
+            >
+              Work
+            </Button>
+            <Button
+              variant={calendarView === 'week' ? 'default' : 'ghost'}
               size="sm"
               onClick={() => setCalendarView('week')}
+              className="rounded-none border-0 border-l"
             >
               Week
             </Button>
             <Button
-              variant={calendarView === 'month' ? 'default' : 'outline'}
+              variant={calendarView === 'month' ? 'default' : 'ghost'}
               size="sm"
               onClick={() => setCalendarView('month')}
+              className="rounded-none border-0 border-l"
             >
               Month
             </Button>
@@ -487,52 +632,14 @@ export function Calendar() {
             </div>
           </div>
 
-          {/* Footer with sync info and auto-sync toggle */}
-          <div className="flex items-center justify-between px-4 py-2 border-t text-xs text-muted-foreground flex-shrink-0">
-            <div className="flex items-center gap-4">
-              <span>
-                {calendarSyncing ? (
-                  <span className="flex items-center gap-1">
-                    <RefreshCw className="h-3 w-3 animate-spin" />
-                    Syncing...
-                  </span>
-                ) : lastSync ? (
-                  `Synced ${formatLastSync()}`
-                ) : (
-                  'Not synced'
-                )}
-              </span>
-              <div className="flex items-center gap-2">
-                <Switch
-                  id="auto-sync-month"
-                  checked={autoSyncEnabled}
-                  onCheckedChange={handleAutoSyncToggle}
-                  className="scale-75"
-                />
-                <label htmlFor="auto-sync-month" className="cursor-pointer">
-                  Auto-sync
-                </label>
-              </div>
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => syncCalendar()}
-              disabled={calendarSyncing}
-              className="h-6 text-xs"
-            >
-              <RefreshCw className={cn('h-3 w-3 mr-1', calendarSyncing && 'animate-spin')} />
-              Sync Now
-            </Button>
-          </div>
         </div>
       ) : (
-        /* Week View */
+        /* Day/Workweek/Week View */
         <div className="flex-1 flex flex-col min-h-0">
-          {/* Day Headers */}
+          {/* Day Headers - properly aligned with time column */}
           <div className="flex border-b flex-shrink-0">
-            <div className="w-16 flex-shrink-0" /> {/* Time column spacer */}
-            {weekDates.map((date) => {
+            <div className="w-14 flex-shrink-0 border-r" /> {/* Time column spacer - matches time labels width */}
+            {viewDates.map((date) => {
               const key = date.toISOString().split('T')[0]
               const today = isToday(date)
 
@@ -540,16 +647,16 @@ export function Calendar() {
                 <div
                   key={key}
                   className={cn(
-                    'flex-1 text-center py-3 border-l',
+                    'flex-1 text-center py-3 border-l first:border-l-0',
                     today && 'bg-primary/5'
                   )}
                 >
-                  <div className="text-xs font-medium text-muted-foreground">
-                    {date.toLocaleDateString('en-US', { weekday: 'short' })}
+                  <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    {date.toLocaleDateString('en-US', { weekday: calendarView === 'day' ? 'long' : 'short' })}
                   </div>
                   <div
                     className={cn(
-                      'text-xl font-bold mt-1',
+                      'text-xl font-semibold mt-1',
                       today && 'bg-primary text-primary-foreground rounded-full w-8 h-8 flex items-center justify-center mx-auto'
                     )}
                   >
@@ -564,14 +671,14 @@ export function Calendar() {
           <div ref={scrollContainerRef} className="flex-1 overflow-auto">
             <div className="flex min-h-full">
               {/* Time Labels */}
-              <div className="w-16 flex-shrink-0 border-r">
+              <div className="w-14 flex-shrink-0 border-r bg-background">
                 {HOURS.map((hour) => (
                   <div
                     key={hour}
                     className="relative"
                     style={{ height: HOUR_HEIGHT }}
                   >
-                    <span className="absolute -top-2 right-2 text-xs text-muted-foreground">
+                    <span className="absolute -top-2 right-2 text-xs text-muted-foreground font-medium">
                       {hour === 12 ? '12 PM' : hour > 12 ? `${hour - 12} PM` : `${hour} AM`}
                     </span>
                   </div>
@@ -579,7 +686,7 @@ export function Calendar() {
               </div>
 
               {/* Day Columns */}
-              {weekDates.map((date) => {
+              {viewDates.map((date) => {
                 const key = date.toISOString().split('T')[0]
                 const dayMeetings = meetingsByDay[key] || []
                 const today = isToday(date)
@@ -588,7 +695,7 @@ export function Calendar() {
                   <div
                     key={key}
                     className={cn(
-                      'flex-1 border-l relative',
+                      'flex-1 border-l first:border-l-0 relative',
                       today && 'bg-primary/5'
                     )}
                   >
@@ -596,7 +703,7 @@ export function Calendar() {
                     {HOURS.map((hour) => (
                       <div
                         key={hour}
-                        className="border-b border-dashed border-border/50"
+                        className="border-b border-border/30"
                         style={{ height: HOUR_HEIGHT }}
                       />
                     ))}
@@ -604,7 +711,7 @@ export function Calendar() {
                     {/* Current Time Indicator */}
                     {today && (
                       <div
-                        className="absolute left-0 right-0 border-t-2 border-red-500 z-10"
+                        className="absolute left-0 right-0 border-t-2 border-red-500 z-20 pointer-events-none"
                         style={{
                           top: Math.max(0, (new Date().getHours() + new Date().getMinutes() / 60 - START_HOUR) * HOUR_HEIGHT)
                         }}
@@ -626,46 +733,64 @@ export function Calendar() {
                       const leftPercent = meeting.column * columnWidth
                       const widthPercent = columnWidth
 
+                      // Determine how many lines of text we can show
+                      const canShowTime = height > 35
+                      const canShowMultiline = height > 60
+
                       return (
-                        <button
-                          key={meeting.id}
-                          onClick={() => handleMeetingClick(meeting)}
-                          className={cn(
-                            'absolute rounded-md px-2 py-1 text-xs overflow-hidden transition-colors',
-                            'hover:ring-2 hover:ring-ring',
-                            // Green for meetings with recordings
-                            meeting.hasRecording && !meeting.isPlaceholder && 'bg-green-100 border-l-4 border-green-500 dark:bg-green-900/50',
-                            // Placeholder meetings (from orphan recordings) - distinct orange/amber style
-                            meeting.isPlaceholder && 'bg-amber-100 border-l-4 border-amber-500 dark:bg-amber-900/50 border-dashed',
-                            // Grey/faint for meetings without recordings
-                            !meeting.hasRecording && !meeting.isPlaceholder && 'bg-gray-100/50 border-l-4 border-gray-300 dark:bg-gray-800/30 dark:border-gray-600 opacity-50'
-                          )}
-                          style={{
-                            top,
-                            height,
-                            minHeight: 20,
-                            left: `calc(${leftPercent}% + 2px)`,
-                            width: `calc(${widthPercent}% - 4px)`
-                          }}
-                        >
-                          <div className="flex items-center gap-1">
-                            <span className={cn(
-                              'font-medium truncate',
-                              !meeting.hasRecording && !meeting.isPlaceholder && 'text-muted-foreground'
-                            )}>
-                              {meeting.subject}
-                            </span>
-                            {meeting.hasRecording && <Mic className={cn(
-                              'h-3 w-3 flex-shrink-0',
-                              meeting.isPlaceholder ? 'text-amber-600' : 'text-green-600'
-                            )} />}
-                          </div>
-                          {height > 30 && (
-                            <div className="text-muted-foreground truncate">
-                              {formatTime(meeting.start_time)} - {formatTime(meeting.end_time)}
-                            </div>
-                          )}
-                        </button>
+                        <Tooltip key={meeting.id}>
+                          <TooltipTrigger asChild>
+                            <button
+                              onClick={() => handleMeetingClick(meeting)}
+                              className={cn(
+                                'absolute rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left',
+                                'hover:ring-2 hover:ring-ring hover:z-30 hover:shadow-lg',
+                                // High contrast colors for better readability
+                                // Green for meetings WITH recordings - strong visibility
+                                meeting.hasRecording && !meeting.isPlaceholder &&
+                                  'bg-emerald-500 text-white border-l-4 border-emerald-700 shadow-sm',
+                                // Amber for placeholder meetings (orphan recordings)
+                                meeting.isPlaceholder &&
+                                  'bg-amber-500 text-white border-l-4 border-amber-700 shadow-sm',
+                                // Muted but visible for meetings WITHOUT recordings
+                                !meeting.hasRecording && !meeting.isPlaceholder &&
+                                  'bg-slate-200 text-slate-700 border-l-4 border-slate-400 dark:bg-slate-700 dark:text-slate-200 dark:border-slate-500'
+                              )}
+                              style={{
+                                top,
+                                height,
+                                minHeight: 24,
+                                left: `calc(${leftPercent}% + 2px)`,
+                                width: `calc(${widthPercent}% - 4px)`
+                              }}
+                            >
+                              <div className="flex items-start gap-1 h-full">
+                                <div className="flex-1 min-w-0">
+                                  <div className={cn(
+                                    'font-semibold leading-tight',
+                                    canShowMultiline ? 'line-clamp-2' : 'truncate'
+                                  )}>
+                                    {meeting.subject}
+                                  </div>
+                                  {canShowTime && (
+                                    <div className={cn(
+                                      'text-[10px] mt-0.5 opacity-80',
+                                      canShowMultiline ? '' : 'truncate'
+                                    )}>
+                                      {formatTime(meeting.start_time)} - {formatTime(meeting.end_time)}
+                                    </div>
+                                  )}
+                                </div>
+                                {meeting.hasRecording && (
+                                  <Mic className="h-3 w-3 flex-shrink-0 mt-0.5 opacity-90" />
+                                )}
+                              </div>
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" align="start">
+                            <MeetingTooltipContent meeting={meeting} />
+                          </TooltipContent>
+                        </Tooltip>
                       )
                     })}
                   </div>
@@ -674,46 +799,9 @@ export function Calendar() {
             </div>
           </div>
 
-          {/* Footer with sync info and auto-sync toggle */}
-          <div className="flex items-center justify-between px-4 py-2 border-t text-xs text-muted-foreground flex-shrink-0">
-            <div className="flex items-center gap-4">
-              <span>
-                {calendarSyncing ? (
-                  <span className="flex items-center gap-1">
-                    <RefreshCw className="h-3 w-3 animate-spin" />
-                    Syncing...
-                  </span>
-                ) : lastSync ? (
-                  `Synced ${formatLastSync()}`
-                ) : (
-                  'Not synced'
-                )}
-              </span>
-              <div className="flex items-center gap-2">
-                <Switch
-                  id="auto-sync"
-                  checked={autoSyncEnabled}
-                  onCheckedChange={handleAutoSyncToggle}
-                  className="scale-75"
-                />
-                <label htmlFor="auto-sync" className="cursor-pointer">
-                  Auto-sync
-                </label>
-              </div>
-            </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => syncCalendar()}
-              disabled={calendarSyncing}
-              className="h-6 text-xs"
-            >
-              <RefreshCw className={cn('h-3 w-3 mr-1', calendarSyncing && 'animate-spin')} />
-              Sync Now
-            </Button>
-          </div>
         </div>
       )}
     </div>
+    </TooltipProvider>
   )
 }

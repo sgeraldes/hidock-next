@@ -18,7 +18,7 @@ interface AppState {
 
   // UI State
   currentDate: Date
-  calendarView: 'week' | 'month'
+  calendarView: 'day' | 'workweek' | 'week' | 'month'
   sidebarOpen: boolean
   selectedMeetingId: string | null
 
@@ -35,7 +35,7 @@ interface AppState {
   loadRecordings: () => Promise<void>
 
   setCurrentDate: (date: Date) => void
-  setCalendarView: (view: 'week' | 'month') => void
+  setCalendarView: (view: 'day' | 'workweek' | 'week' | 'month') => void
   toggleSidebar: () => void
   setSelectedMeetingId: (id: string | null) => void
 
@@ -158,9 +158,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 }))
 
 // Helper functions
-function getViewStartDate(date: Date, view: 'week' | 'month'): Date {
+function getViewStartDate(date: Date, view: 'day' | 'workweek' | 'week' | 'month'): Date {
   const start = new Date(date)
-  if (view === 'week') {
+  if (view === 'day') {
+    // Just the current day
+  } else if (view === 'workweek' || view === 'week') {
     const day = start.getDay()
     const diff = start.getDate() - day + (day === 0 ? -6 : 1) // Monday start
     start.setDate(diff)
@@ -171,9 +173,15 @@ function getViewStartDate(date: Date, view: 'week' | 'month'): Date {
   return start
 }
 
-function getViewEndDate(date: Date, view: 'week' | 'month'): Date {
+function getViewEndDate(date: Date, view: 'day' | 'workweek' | 'week' | 'month'): Date {
   const end = new Date(date)
-  if (view === 'week') {
+  if (view === 'day') {
+    // Just the current day
+  } else if (view === 'workweek') {
+    const start = getViewStartDate(date, view)
+    end.setTime(start.getTime())
+    end.setDate(end.getDate() + 4) // Mon-Fri
+  } else if (view === 'week') {
     const start = getViewStartDate(date, view)
     end.setTime(start.getTime())
     end.setDate(end.getDate() + 6)
