@@ -14,7 +14,10 @@ import type {
   GetProjectsResponse,
   CreateProjectRequest,
   UpdateProjectRequest,
-  TagMeetingRequest
+  TagMeetingRequest,
+  OutputTemplate,
+  GenerateOutputRequest,
+  GenerateOutputResponse
 } from '../main/types/api'
 import type { Contact, ContactWithMeetings, Project, ProjectWithMeetings } from '../main/types/database'
 
@@ -134,6 +137,14 @@ export interface ElectronAPI {
     add: (originalFilename: string, localFilename: string, filePath: string, fileSize?: number) => Promise<string>
     remove: (originalFilename: string) => Promise<boolean>
     getFilenames: () => Promise<string[]>
+  }
+
+  // Outputs - document generation
+  outputs: {
+    getTemplates: () => Promise<Result<OutputTemplate[]>>
+    generate: (request: GenerateOutputRequest) => Promise<Result<GenerateOutputResponse>>
+    copyToClipboard: (content: string) => Promise<Result<void>>
+    saveToFile: (content: string, suggestedName?: string) => Promise<Result<string>>
   }
 
   // RAG Chatbot (extended with Result pattern)
@@ -271,6 +282,13 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke('db:add-synced-file', originalFilename, localFilename, filePath, fileSize),
     remove: (originalFilename) => ipcRenderer.invoke('db:remove-synced-file', originalFilename),
     getFilenames: () => ipcRenderer.invoke('db:get-synced-filenames')
+  },
+
+  outputs: {
+    getTemplates: () => ipcRenderer.invoke('outputs:getTemplates'),
+    generate: (request) => ipcRenderer.invoke('outputs:generate', request),
+    copyToClipboard: (content) => ipcRenderer.invoke('outputs:copyToClipboard', content),
+    saveToFile: (content, suggestedName) => ipcRenderer.invoke('outputs:saveToFile', content, suggestedName)
   },
 
   rag: {
