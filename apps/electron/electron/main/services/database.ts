@@ -5,7 +5,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -118,6 +118,45 @@ CREATE TABLE IF NOT EXISTS synced_files (
     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Contacts extracted from meeting attendees
+CREATE TABLE IF NOT EXISTS contacts (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE,
+    notes TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    meeting_count INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- User-created projects for organizing meetings
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Junction table: Meeting-Contact relationship
+CREATE TABLE IF NOT EXISTS meeting_contacts (
+    meeting_id TEXT NOT NULL,
+    contact_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'attendee',
+    PRIMARY KEY (meeting_id, contact_id),
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
+
+-- Junction table: Meeting-Project relationship
+CREATE TABLE IF NOT EXISTS meeting_projects (
+    meeting_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    PRIMARY KEY (meeting_id, project_id),
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_meetings_start_time ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_recordings_date ON recordings(date_recorded);
@@ -127,7 +166,35 @@ CREATE INDEX IF NOT EXISTS idx_transcripts_recording ON transcripts(recording_id
 CREATE INDEX IF NOT EXISTS idx_embeddings_transcript ON embeddings(transcript_id);
 CREATE INDEX IF NOT EXISTS idx_queue_status ON transcription_queue(status);
 CREATE INDEX IF NOT EXISTS idx_synced_original ON synced_files(original_filename);
+CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);
+CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name);
+CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
+CREATE INDEX IF NOT EXISTS idx_meeting_contacts_meeting ON meeting_contacts(meeting_id);
+CREATE INDEX IF NOT EXISTS idx_meeting_contacts_contact ON meeting_contacts(contact_id);
+CREATE INDEX IF NOT EXISTS idx_meeting_projects_meeting ON meeting_projects(meeting_id);
+CREATE INDEX IF NOT EXISTS idx_meeting_projects_project ON meeting_projects(project_id);
 `
+
+// Migration functions for schema upgrades
+const MIGRATIONS: Record<number, () => void> = {
+  2: () => {
+    // v2: Add contacts, projects, and junction tables
+    // These are idempotent (CREATE TABLE IF NOT EXISTS), so safe to re-run
+    console.log('Running migration to schema v2: Adding contacts and projects tables')
+  }
+}
+
+function runMigrations(currentVersion: number): void {
+  for (let v = currentVersion + 1; v <= SCHEMA_VERSION; v++) {
+    const migration = MIGRATIONS[v]
+    if (migration) {
+      console.log(`Running migration to v${v}...`)
+      migration()
+    }
+    // Record the migration
+    getDatabase().run('INSERT OR REPLACE INTO schema_version (version) VALUES (?)', [v])
+  }
+}
 
 export async function initializeDatabase(): Promise<void> {
   dbPath = getDatabasePath()
@@ -144,19 +211,28 @@ export async function initializeDatabase(): Promise<void> {
       db = new SQL.Database()
     }
 
-    // Run schema
+    // Run schema (all CREATE IF NOT EXISTS statements are idempotent)
     db.run(SCHEMA)
 
-    // Check and update schema version
+    // Check current schema version and run migrations if needed
     const versionResult = db.exec('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    if (versionResult.length === 0 || versionResult[0].values.length === 0) {
+    const currentVersion =
+      versionResult.length > 0 && versionResult[0].values.length > 0
+        ? (versionResult[0].values[0][0] as number)
+        : 0
+
+    if (currentVersion < SCHEMA_VERSION) {
+      runMigrations(currentVersion)
+      console.log(`Database migrated from v${currentVersion} to v${SCHEMA_VERSION}`)
+    } else if (currentVersion === 0) {
+      // Fresh database, insert initial version
       db.run('INSERT INTO schema_version (version) VALUES (?)', [SCHEMA_VERSION])
     }
 
     // Save to disk
     saveDatabase()
 
-    console.log(`Database initialized at ${dbPath}`)
+    console.log(`Database initialized at ${dbPath} (schema v${SCHEMA_VERSION})`)
   } catch (error) {
     console.error('Failed to initialize database:', error)
     throw error
@@ -570,4 +646,264 @@ export function removeSyncedFile(originalFilename: string): void {
 export function getSyncedFilenames(): Set<string> {
   const files = queryAll<{ original_filename: string }>('SELECT original_filename FROM synced_files')
   return new Set(files.map((f) => f.original_filename))
+}
+
+// =============================================================================
+// Contact queries
+// =============================================================================
+
+export interface Contact {
+  id: string
+  name: string
+  email: string | null
+  notes: string | null
+  first_seen_at: string
+  last_seen_at: string
+  meeting_count: number
+  created_at: string
+}
+
+export type ContactRole = 'organizer' | 'attendee'
+
+export interface MeetingContact {
+  meeting_id: string
+  contact_id: string
+  role: ContactRole
+}
+
+export function getContacts(search?: string, limit = 100, offset = 0): { contacts: Contact[]; total: number } {
+  let countSql = 'SELECT COUNT(*) as count FROM contacts'
+  let sql = 'SELECT * FROM contacts'
+  const params: unknown[] = []
+
+  if (search) {
+    const searchClause = ' WHERE name LIKE ? OR email LIKE ?'
+    countSql += searchClause
+    sql += searchClause
+    params.push(`%${search}%`, `%${search}%`)
+  }
+
+  sql += ' ORDER BY meeting_count DESC, last_seen_at DESC LIMIT ? OFFSET ?'
+
+  const countResult = queryOne<{ count: number }>(countSql, params)
+  const contacts = queryAll<Contact>(sql, [...params, limit, offset])
+
+  return { contacts, total: countResult?.count ?? 0 }
+}
+
+export function getContactById(id: string): Contact | undefined {
+  return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])
+}
+
+export function getContactByEmail(email: string): Contact | undefined {
+  return queryOne<Contact>('SELECT * FROM contacts WHERE email = ?', [email])
+}
+
+export function upsertContact(contact: Omit<Contact, 'created_at'>): Contact {
+  const existing = contact.email ? getContactByEmail(contact.email) : undefined
+
+  if (existing) {
+    // Update existing contact
+    run(
+      `UPDATE contacts SET
+        name = COALESCE(?, name),
+        last_seen_at = ?,
+        meeting_count = meeting_count + 1
+      WHERE id = ?`,
+      [contact.name, contact.last_seen_at, existing.id]
+    )
+    return { ...existing, name: contact.name, last_seen_at: contact.last_seen_at, meeting_count: existing.meeting_count + 1 }
+  } else {
+    // Insert new contact
+    run(
+      `INSERT INTO contacts (id, name, email, notes, first_seen_at, last_seen_at, meeting_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        contact.id,
+        contact.name,
+        contact.email,
+        contact.notes,
+        contact.first_seen_at,
+        contact.last_seen_at,
+        contact.meeting_count
+      ]
+    )
+    return { ...contact, created_at: new Date().toISOString() }
+  }
+}
+
+export function updateContactNotes(id: string, notes: string | null): void {
+  run('UPDATE contacts SET notes = ? WHERE id = ?', [notes, id])
+}
+
+export function getMeetingsForContact(contactId: string): Meeting[] {
+  return queryAll<Meeting>(
+    `SELECT m.* FROM meetings m
+     JOIN meeting_contacts mc ON m.id = mc.meeting_id
+     WHERE mc.contact_id = ?
+     ORDER BY m.start_time DESC`,
+    [contactId]
+  )
+}
+
+export function getContactsForMeeting(meetingId: string): Contact[] {
+  return queryAll<Contact>(
+    `SELECT c.* FROM contacts c
+     JOIN meeting_contacts mc ON c.id = mc.contact_id
+     WHERE mc.meeting_id = ?`,
+    [meetingId]
+  )
+}
+
+export function linkContactToMeeting(meetingId: string, contactId: string, role: ContactRole): void {
+  run(
+    'INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
+    [meetingId, contactId, role]
+  )
+}
+
+// =============================================================================
+// Project queries
+// =============================================================================
+
+export interface Project {
+  id: string
+  name: string
+  description: string | null
+  created_at: string
+}
+
+export interface MeetingProject {
+  meeting_id: string
+  project_id: string
+}
+
+export function getProjects(search?: string, limit = 100, offset = 0): { projects: Project[]; total: number } {
+  let countSql = 'SELECT COUNT(*) as count FROM projects'
+  let sql = 'SELECT * FROM projects'
+  const params: unknown[] = []
+
+  if (search) {
+    const searchClause = ' WHERE name LIKE ? OR description LIKE ?'
+    countSql += searchClause
+    sql += searchClause
+    params.push(`%${search}%`, `%${search}%`)
+  }
+
+  sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+
+  const countResult = queryOne<{ count: number }>(countSql, params)
+  const projects = queryAll<Project>(sql, [...params, limit, offset])
+
+  return { projects, total: countResult?.count ?? 0 }
+}
+
+export function getProjectById(id: string): Project | undefined {
+  return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [id])
+}
+
+export function createProject(project: Omit<Project, 'created_at'>): Project {
+  run(
+    'INSERT INTO projects (id, name, description) VALUES (?, ?, ?)',
+    [project.id, project.name, project.description]
+  )
+  return { ...project, created_at: new Date().toISOString() }
+}
+
+export function updateProject(id: string, name?: string, description?: string): void {
+  const updates: string[] = []
+  const params: unknown[] = []
+
+  if (name !== undefined) {
+    updates.push('name = ?')
+    params.push(name)
+  }
+  if (description !== undefined) {
+    updates.push('description = ?')
+    params.push(description)
+  }
+
+  if (updates.length > 0) {
+    params.push(id)
+    run(`UPDATE projects SET ${updates.join(', ')} WHERE id = ?`, params)
+  }
+}
+
+export function deleteProject(id: string): void {
+  // Junction table entries will be cascade deleted due to FK constraint
+  run('DELETE FROM projects WHERE id = ?', [id])
+}
+
+export function getMeetingsForProject(projectId: string): Meeting[] {
+  return queryAll<Meeting>(
+    `SELECT m.* FROM meetings m
+     JOIN meeting_projects mp ON m.id = mp.meeting_id
+     WHERE mp.project_id = ?
+     ORDER BY m.start_time DESC`,
+    [projectId]
+  )
+}
+
+export function getProjectsForMeeting(meetingId: string): Project[] {
+  return queryAll<Project>(
+    `SELECT p.* FROM projects p
+     JOIN meeting_projects mp ON p.id = mp.project_id
+     WHERE mp.meeting_id = ?`,
+    [meetingId]
+  )
+}
+
+export function tagMeetingToProject(meetingId: string, projectId: string): void {
+  run(
+    'INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)',
+    [meetingId, projectId]
+  )
+}
+
+export function untagMeetingFromProject(meetingId: string, projectId: string): void {
+  run('DELETE FROM meeting_projects WHERE meeting_id = ? AND project_id = ?', [meetingId, projectId])
+}
+
+// =============================================================================
+// Contact extraction from meeting attendees
+// =============================================================================
+
+export function extractContactsFromMeeting(meeting: Meeting): void {
+  // Extract organizer as contact
+  if (meeting.organizer_email) {
+    const organizerContact = upsertContact({
+      id: crypto.randomUUID(),
+      name: meeting.organizer_name || meeting.organizer_email,
+      email: meeting.organizer_email,
+      notes: null,
+      first_seen_at: meeting.start_time,
+      last_seen_at: meeting.start_time,
+      meeting_count: 1
+    })
+    linkContactToMeeting(meeting.id, organizerContact.id, 'organizer')
+  }
+
+  // Extract attendees as contacts
+  if (meeting.attendees) {
+    try {
+      const attendees = JSON.parse(meeting.attendees) as Array<{ name?: string; email?: string }>
+      for (const attendee of attendees) {
+        if (attendee.email) {
+          const attendeeContact = upsertContact({
+            id: crypto.randomUUID(),
+            name: attendee.name || attendee.email,
+            email: attendee.email,
+            notes: null,
+            first_seen_at: meeting.start_time,
+            last_seen_at: meeting.start_time,
+            meeting_count: 1
+          })
+          linkContactToMeeting(meeting.id, attendeeContact.id, 'attendee')
+        }
+      }
+    } catch {
+      // Invalid JSON, skip attendee extraction
+      console.warn(`Failed to parse attendees JSON for meeting ${meeting.id}`)
+    }
+  }
 }

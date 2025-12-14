@@ -5,6 +5,8 @@ import { registerStorageHandlers } from './storage-handlers'
 import { registerRecordingHandlers } from './recording-handlers'
 import { registerRAGHandlers } from './rag-handlers'
 import { registerAppHandlers } from './app-handlers'
+import { registerContactsHandlers } from './contacts-handlers'
+import { registerProjectsHandlers } from './projects-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -15,6 +17,8 @@ export function registerIpcHandlers(): void {
   registerRecordingHandlers()
   registerRAGHandlers()
   registerAppHandlers()
+  registerContactsHandlers()
+  registerProjectsHandlers()
 
   console.log('All IPC handlers registered')
 }

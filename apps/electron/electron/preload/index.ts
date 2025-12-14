@@ -1,5 +1,23 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+// Import types from api.ts for proper typing
+import type {
+  Result,
+  RAGFilter,
+  RAGChatRequest,
+  RAGChatResponse,
+  RAGStatus,
+  GetContactsRequest,
+  GetContactsResponse,
+  UpdateContactRequest,
+  GetProjectsRequest,
+  GetProjectsResponse,
+  CreateProjectRequest,
+  UpdateProjectRequest,
+  TagMeetingRequest
+} from '../main/types/api'
+import type { Contact, ContactWithMeetings, Project, ProjectWithMeetings } from '../main/types/database'
+
 // Type definitions for the API
 export interface ElectronAPI {
   // App
@@ -26,6 +44,26 @@ export interface ElectronAPI {
     getAll: (startDate?: string, endDate?: string) => Promise<any[]>
     getById: (id: string) => Promise<any>
     getDetails: (id: string) => Promise<any>
+  }
+
+  // Contacts
+  contacts: {
+    getAll: (request?: GetContactsRequest) => Promise<Result<GetContactsResponse>>
+    getById: (id: string) => Promise<Result<ContactWithMeetings>>
+    update: (request: UpdateContactRequest) => Promise<Result<Contact>>
+    getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
+  }
+
+  // Projects
+  projects: {
+    getAll: (request?: GetProjectsRequest) => Promise<Result<GetProjectsResponse>>
+    getById: (id: string) => Promise<Result<ProjectWithMeetings>>
+    create: (request: CreateProjectRequest) => Promise<Result<Project>>
+    update: (request: UpdateProjectRequest) => Promise<Result<Project>>
+    delete: (id: string) => Promise<Result<void>>
+    tagMeeting: (request: TagMeetingRequest) => Promise<Result<void>>
+    untagMeeting: (request: TagMeetingRequest) => Promise<Result<void>>
+    getForMeeting: (meetingId: string) => Promise<Result<Project[]>>
   }
 
   // Database - Recordings
@@ -98,15 +136,11 @@ export interface ElectronAPI {
     getFilenames: () => Promise<string[]>
   }
 
-  // RAG Chatbot
+  // RAG Chatbot (extended with Result pattern)
   rag: {
-    status: () => Promise<{
-      ollamaAvailable: boolean
-      documentCount: number
-      meetingCount: number
-      ready: boolean
-    }>
-    chat: (sessionId: string, message: string, meetingFilter?: string) => Promise<{
+    status: () => Promise<Result<RAGStatus>>
+    chat: (request: RAGChatRequest) => Promise<Result<RAGChatResponse>>
+    chatLegacy: (sessionId: string, message: string, meetingFilter?: string) => Promise<{
       answer: string
       sources: Array<{
         content: string
@@ -117,9 +151,9 @@ export interface ElectronAPI {
       }>
       error?: string
     }>
-    summarizeMeeting: (meetingId: string) => Promise<string | null>
-    findActionItems: (meetingId?: string) => Promise<string | null>
-    clearSession: (sessionId: string) => Promise<boolean>
+    summarizeMeeting: (meetingId: string) => Promise<Result<string>>
+    findActionItems: (meetingId?: string) => Promise<Result<string>>
+    clearSession: (sessionId: string) => Promise<Result<void>>
     stats: () => Promise<{
       documentCount: number
       meetingCount: number
@@ -168,6 +202,24 @@ const electronAPI: ElectronAPI = {
     getAll: (startDate, endDate) => ipcRenderer.invoke('db:get-meetings', startDate, endDate),
     getById: (id) => ipcRenderer.invoke('db:get-meeting', id),
     getDetails: (id) => ipcRenderer.invoke('db:get-meeting-details', id)
+  },
+
+  contacts: {
+    getAll: (request) => ipcRenderer.invoke('contacts:getAll', request),
+    getById: (id) => ipcRenderer.invoke('contacts:getById', id),
+    update: (request) => ipcRenderer.invoke('contacts:update', request),
+    getForMeeting: (meetingId) => ipcRenderer.invoke('contacts:getForMeeting', meetingId)
+  },
+
+  projects: {
+    getAll: (request) => ipcRenderer.invoke('projects:getAll', request),
+    getById: (id) => ipcRenderer.invoke('projects:getById', id),
+    create: (request) => ipcRenderer.invoke('projects:create', request),
+    update: (request) => ipcRenderer.invoke('projects:update', request),
+    delete: (id) => ipcRenderer.invoke('projects:delete', { id }),
+    tagMeeting: (request) => ipcRenderer.invoke('projects:tagMeeting', request),
+    untagMeeting: (request) => ipcRenderer.invoke('projects:untagMeeting', request),
+    getForMeeting: (meetingId) => ipcRenderer.invoke('projects:getForMeeting', meetingId)
   },
 
   recordings: {
@@ -223,8 +275,9 @@ const electronAPI: ElectronAPI = {
 
   rag: {
     status: () => ipcRenderer.invoke('rag:status'),
-    chat: (sessionId, message, meetingFilter) =>
-      ipcRenderer.invoke('rag:chat', { sessionId, message, meetingFilter }),
+    chat: (request) => ipcRenderer.invoke('rag:chat', request),
+    chatLegacy: (sessionId, message, meetingFilter) =>
+      ipcRenderer.invoke('rag:chat-legacy', { sessionId, message, meetingFilter }),
     summarizeMeeting: (meetingId) => ipcRenderer.invoke('rag:summarize-meeting', meetingId),
     findActionItems: (meetingId) => ipcRenderer.invoke('rag:find-action-items', meetingId),
     clearSession: (sessionId) => ipcRenderer.invoke('rag:clear-session', sessionId),
