@@ -11,7 +11,7 @@ import { Settings } from '@/pages/Settings'
 import { Contacts } from '@/pages/Contacts'
 import { Projects } from '@/pages/Projects'
 import { Outputs } from '@/pages/Outputs'
-import { Toaster } from '@/components/ui/toaster'
+import { ToastProvider } from '@/components/ui/toaster'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 
 function App(): React.ReactElement {
@@ -27,7 +27,7 @@ function App(): React.ReactElement {
   }, [])
 
   return (
-    <>
+    <ToastProvider>
       <Layout>
         <Routes>
           <Route path="/" element={<Navigate to="/calendar" replace />} />
@@ -43,8 +43,7 @@ function App(): React.ReactElement {
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </Layout>
-      <Toaster />
-    </>
+    </ToastProvider>
   )
 }
 
