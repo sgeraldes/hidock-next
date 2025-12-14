@@ -10,7 +10,10 @@ import {
   ChevronLeft,
   ChevronRight,
   RefreshCw,
-  RotateCcw
+  RotateCcw,
+  Users,
+  Folder,
+  FileText
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
@@ -26,6 +29,9 @@ const navigation = [
   { name: 'Search', href: '/search', icon: Search },
   { name: 'Device', href: '/device', icon: Usb },
   { name: 'Recordings', href: '/recordings', icon: Mic },
+  { name: 'Contacts', href: '/contacts', icon: Users },
+  { name: 'Projects', href: '/projects', icon: Folder },
+  { name: 'Outputs', href: '/outputs', icon: FileText },
   { name: 'Settings', href: '/settings', icon: Settings }
 ]
 

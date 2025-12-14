@@ -8,6 +8,9 @@ import { Search } from '@/pages/Search'
 import { Device } from '@/pages/Device'
 import { Recordings } from '@/pages/Recordings'
 import { Settings } from '@/pages/Settings'
+import { Contacts } from '@/pages/Contacts'
+import { Projects } from '@/pages/Projects'
+import { Outputs } from '@/pages/Outputs'
 import { Toaster } from '@/components/ui/toaster'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 
@@ -34,6 +37,9 @@ function App(): React.ReactElement {
           <Route path="/search" element={<Search />} />
           <Route path="/device" element={<Device />} />
           <Route path="/recordings" element={<Recordings />} />
+          <Route path="/contacts" element={<Contacts />} />
+          <Route path="/projects" element={<Projects />} />
+          <Route path="/outputs" element={<Outputs />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </Layout>
