@@ -13,11 +13,18 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 
+// Duration match status
+type DurationMatch = 'shorter' | 'longer' | 'matched' | 'no_recording'
+
 // Extended meeting type that includes recording match info
 interface CalendarMeeting extends Meeting {
   hasRecording: boolean
   isPlaceholder: boolean // True for auto-generated meetings from orphan recordings
   matchedRecordingId?: string
+  recordingDurationSeconds?: number
+  durationMatch?: DurationMatch
+  durationDifferenceMinutes?: number // Positive = recording longer, negative = shorter
+  hasConflicts?: boolean // Multiple possible meetings for this recording
 }
 
 const HOUR_HEIGHT = 60 // pixels per hour
@@ -147,6 +154,7 @@ function matchRecordingsToMeetings(
   for (const meeting of meetings) {
     const meetingStart = new Date(meeting.start_time).getTime()
     const meetingEnd = new Date(meeting.end_time).getTime()
+    const meetingDurationSeconds = (meetingEnd - meetingStart) / 1000
     // 15 minute buffer on each side
     const bufferMs = 15 * 60 * 1000
 
@@ -157,19 +165,51 @@ function matchRecordingsToMeetings(
       return recTime >= meetingStart - bufferMs && recTime <= meetingEnd + bufferMs
     })
 
+    // Check if this meeting has multiple possible recordings (conflicts)
+    const conflictingRecordings = recordings.filter((rec) => {
+      const recTime = new Date(rec.date_recorded).getTime()
+      return recTime >= meetingStart - bufferMs && recTime <= meetingEnd + bufferMs
+    })
+
     if (matchingRecording) {
       matchedRecordingIds.add(matchingRecording.id)
+
+      // Calculate duration match
+      let durationMatch: DurationMatch = 'no_recording'
+      let durationDifferenceMinutes = 0
+
+      if (matchingRecording.duration_seconds) {
+        const recordingDuration = matchingRecording.duration_seconds
+        const diffSeconds = recordingDuration - meetingDurationSeconds
+
+        durationDifferenceMinutes = Math.round(diffSeconds / 60)
+
+        // 5 minute tolerance
+        if (Math.abs(diffSeconds) < 300) {
+          durationMatch = 'matched'
+        } else if (diffSeconds < 0) {
+          durationMatch = 'shorter'
+        } else {
+          durationMatch = 'longer'
+        }
+      }
+
       calendarMeetings.push({
         ...meeting,
         hasRecording: true,
         isPlaceholder: false,
-        matchedRecordingId: matchingRecording.id
+        matchedRecordingId: matchingRecording.id,
+        recordingDurationSeconds: matchingRecording.duration_seconds,
+        durationMatch,
+        durationDifferenceMinutes,
+        hasConflicts: conflictingRecordings.length > 1
       })
     } else {
       calendarMeetings.push({
         ...meeting,
         hasRecording: false,
-        isPlaceholder: false
+        isPlaceholder: false,
+        durationMatch: 'no_recording'
       })
     }
   }
@@ -202,14 +242,18 @@ function createPlaceholderMeetings(orphanRecordings: Recording[]): CalendarMeeti
   })
 }
 
+// Format duration
+function formatDuration(seconds: number): string {
+  const hours = Math.floor(seconds / 3600)
+  const mins = Math.round((seconds % 3600) / 60)
+  return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
+}
+
 // Meeting tooltip content component
 function MeetingTooltipContent({ meeting }: { meeting: CalendarMeeting }) {
   const startTime = new Date(meeting.start_time)
   const endTime = new Date(meeting.end_time)
-  const duration = Math.round((endTime.getTime() - startTime.getTime()) / (1000 * 60))
-  const hours = Math.floor(duration / 60)
-  const mins = duration % 60
-  const durationStr = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`
+  const meetingDurationSeconds = (endTime.getTime() - startTime.getTime()) / 1000
 
   return (
     <div className="space-y-2 max-w-[280px]">
@@ -220,15 +264,45 @@ function MeetingTooltipContent({ meeting }: { meeting: CalendarMeeting }) {
           <span>{formatTime(meeting.start_time)} - {formatTime(meeting.end_time)}</span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-muted-foreground">Duration:</span>
-          <span>{durationStr}</span>
+          <span className="text-muted-foreground">Scheduled:</span>
+          <span>{formatDuration(meetingDurationSeconds)}</span>
         </div>
+
+        {/* Recording info with duration comparison */}
         {meeting.hasRecording && (
-          <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
-            <Mic className="h-3 w-3" />
-            <span>{meeting.isPlaceholder ? 'Recording (no calendar event)' : 'Has recording'}</span>
-          </div>
+          <>
+            <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
+              <Mic className="h-3 w-3" />
+              <span>
+                {meeting.isPlaceholder
+                  ? 'Recording (no calendar event)'
+                  : meeting.recordingDurationSeconds
+                    ? `Recording: ${formatDuration(meeting.recordingDurationSeconds)}`
+                    : 'Has recording'}
+              </span>
+            </div>
+
+            {/* Duration mismatch indicator */}
+            {meeting.durationMatch === 'shorter' && (
+              <div className="flex items-center gap-2 text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 px-2 py-1 rounded">
+                <span>Recording {Math.abs(meeting.durationDifferenceMinutes || 0)}m shorter than meeting</span>
+              </div>
+            )}
+            {meeting.durationMatch === 'longer' && (
+              <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 px-2 py-1 rounded">
+                <span>Recording {Math.abs(meeting.durationDifferenceMinutes || 0)}m longer than meeting</span>
+              </div>
+            )}
+
+            {/* Conflict indicator */}
+            {meeting.hasConflicts && (
+              <div className="flex items-center gap-2 text-orange-600 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/20 px-2 py-1 rounded">
+                <span>Multiple possible meetings - click to verify</span>
+              </div>
+            )}
+          </>
         )}
+
         {meeting.location && (
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground">Location:</span>
@@ -737,55 +811,91 @@ export function Calendar() {
                       const canShowTime = height > 35
                       const canShowMultiline = height > 60
 
+                      // Calculate recording duration extension (if recording is longer)
+                      const recordingExtensionHeight = meeting.durationMatch === 'longer' && meeting.recordingDurationSeconds
+                        ? Math.min((Math.abs(meeting.durationDifferenceMinutes || 0) / 60) * HOUR_HEIGHT, 60)
+                        : 0
+
+                      // Calculate recording fill percentage (for shorter recordings)
+                      const recordingFillPercent = meeting.durationMatch === 'shorter' && meeting.recordingDurationSeconds && height > 0
+                        ? Math.max(20, ((meeting.recordingDurationSeconds / 60) / (height / HOUR_HEIGHT * 60)) * 100)
+                        : 100
+
                       return (
                         <Tooltip key={meeting.id}>
                           <TooltipTrigger asChild>
-                            <button
-                              onClick={() => handleMeetingClick(meeting)}
-                              className={cn(
-                                'absolute rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left',
-                                'hover:ring-2 hover:ring-ring hover:z-30 hover:shadow-lg',
-                                // High contrast colors for better readability
-                                // Green for meetings WITH recordings - strong visibility
-                                meeting.hasRecording && !meeting.isPlaceholder &&
-                                  'bg-emerald-500 text-white border-l-4 border-emerald-700 shadow-sm',
-                                // Amber for placeholder meetings (orphan recordings)
-                                meeting.isPlaceholder &&
-                                  'bg-amber-500 text-white border-l-4 border-amber-700 shadow-sm',
-                                // Muted but visible for meetings WITHOUT recordings
-                                !meeting.hasRecording && !meeting.isPlaceholder &&
-                                  'bg-slate-200 text-slate-700 border-l-4 border-slate-400 dark:bg-slate-700 dark:text-slate-200 dark:border-slate-500'
-                              )}
-                              style={{
-                                top,
-                                height,
-                                minHeight: 24,
-                                left: `calc(${leftPercent}% + 2px)`,
-                                width: `calc(${widthPercent}% - 4px)`
-                              }}
-                            >
-                              <div className="flex items-start gap-1 h-full">
-                                <div className="flex-1 min-w-0">
-                                  <div className={cn(
-                                    'font-semibold leading-tight',
-                                    canShowMultiline ? 'line-clamp-2' : 'truncate'
-                                  )}>
-                                    {meeting.subject}
-                                  </div>
-                                  {canShowTime && (
+                            <div className="absolute" style={{
+                              top,
+                              left: `calc(${leftPercent}% + 2px)`,
+                              width: `calc(${widthPercent}% - 4px)`
+                            }}>
+                              {/* Main meeting block */}
+                              <button
+                                onClick={() => handleMeetingClick(meeting)}
+                                className={cn(
+                                  'w-full rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left relative',
+                                  'hover:ring-2 hover:ring-ring hover:z-30 hover:shadow-lg',
+                                  // High contrast colors for better readability
+                                  // Green for meetings WITH recordings - strong visibility
+                                  meeting.hasRecording && !meeting.isPlaceholder &&
+                                    'bg-emerald-500 text-white border-l-4 border-emerald-700 shadow-sm',
+                                  // Amber for placeholder meetings (orphan recordings)
+                                  meeting.isPlaceholder &&
+                                    'bg-amber-500 text-white border-l-4 border-amber-700 shadow-sm',
+                                  // Muted but visible for meetings WITHOUT recordings
+                                  !meeting.hasRecording && !meeting.isPlaceholder &&
+                                    'bg-slate-200 text-slate-700 border-l-4 border-slate-400 dark:bg-slate-700 dark:text-slate-200 dark:border-slate-500',
+                                  // Conflict warning
+                                  meeting.hasConflicts && 'ring-2 ring-orange-400'
+                                )}
+                                style={{
+                                  height,
+                                  minHeight: 24,
+                                }}
+                              >
+                                {/* Recording shorter indicator - diagonal stripes on unfilled portion */}
+                                {meeting.durationMatch === 'shorter' && meeting.hasRecording && !meeting.isPlaceholder && (
+                                  <div
+                                    className="absolute bottom-0 left-0 right-0 bg-emerald-700/30 pointer-events-none"
+                                    style={{
+                                      height: `${100 - recordingFillPercent}%`,
+                                      backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 3px, rgba(255,255,255,0.2) 3px, rgba(255,255,255,0.2) 6px)'
+                                    }}
+                                  />
+                                )}
+
+                                <div className="flex items-start gap-1 h-full relative z-10">
+                                  <div className="flex-1 min-w-0">
                                     <div className={cn(
-                                      'text-[10px] mt-0.5 opacity-80',
-                                      canShowMultiline ? '' : 'truncate'
+                                      'font-semibold leading-tight',
+                                      canShowMultiline ? 'line-clamp-2' : 'truncate'
                                     )}>
-                                      {formatTime(meeting.start_time)} - {formatTime(meeting.end_time)}
+                                      {meeting.subject}
                                     </div>
+                                    {canShowTime && (
+                                      <div className={cn(
+                                        'text-[10px] mt-0.5 opacity-80',
+                                        canShowMultiline ? '' : 'truncate'
+                                      )}>
+                                        {formatTime(meeting.start_time)} - {formatTime(meeting.end_time)}
+                                      </div>
+                                    )}
+                                  </div>
+                                  {meeting.hasRecording && (
+                                    <Mic className="h-3 w-3 flex-shrink-0 mt-0.5 opacity-90" />
                                   )}
                                 </div>
-                                {meeting.hasRecording && (
-                                  <Mic className="h-3 w-3 flex-shrink-0 mt-0.5 opacity-90" />
-                                )}
-                              </div>
-                            </button>
+                              </button>
+
+                              {/* Recording extension indicator (dashed area below meeting) */}
+                              {recordingExtensionHeight > 0 && (
+                                <div
+                                  className="w-full border-l-4 border-dashed border-emerald-400 bg-emerald-200/50 dark:bg-emerald-900/30 rounded-b-md"
+                                  style={{ height: recordingExtensionHeight }}
+                                  title={`Recording extends ${Math.abs(meeting.durationDifferenceMinutes || 0)}m beyond meeting`}
+                                />
+                              )}
+                            </div>
                           </TooltipTrigger>
                           <TooltipContent side="right" align="start">
                             <MeetingTooltipContent meeting={meeting} />

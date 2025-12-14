@@ -5,7 +5,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -157,6 +157,23 @@ CREATE TABLE IF NOT EXISTS meeting_projects (
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
+-- Recording-Meeting candidates: tracks all possible meetings a recording could match
+-- Allows AI to select the best match and user to override
+CREATE TABLE IF NOT EXISTS recording_meeting_candidates (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    meeting_id TEXT NOT NULL,
+    confidence_score REAL DEFAULT 0,
+    match_reason TEXT,
+    is_selected INTEGER DEFAULT 0,
+    is_ai_selected INTEGER DEFAULT 0,
+    is_user_confirmed INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+    UNIQUE(recording_id, meeting_id)
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_meetings_start_time ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_recordings_date ON recordings(date_recorded);
@@ -173,6 +190,9 @@ CREATE INDEX IF NOT EXISTS idx_meeting_contacts_meeting ON meeting_contacts(meet
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_contact ON meeting_contacts(contact_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_meeting ON meeting_projects(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_project ON meeting_projects(project_id);
+CREATE INDEX IF NOT EXISTS idx_recording_candidates_recording ON recording_meeting_candidates(recording_id);
+CREATE INDEX IF NOT EXISTS idx_recording_candidates_meeting ON recording_meeting_candidates(meeting_id);
+CREATE INDEX IF NOT EXISTS idx_recording_candidates_selected ON recording_meeting_candidates(is_selected);
 `
 
 // Migration functions for schema upgrades
@@ -181,6 +201,11 @@ const MIGRATIONS: Record<number, () => void> = {
     // v2: Add contacts, projects, and junction tables
     // These are idempotent (CREATE TABLE IF NOT EXISTS), so safe to re-run
     console.log('Running migration to schema v2: Adding contacts and projects tables')
+  },
+  3: () => {
+    // v3: Add recording-meeting candidates table for AI-powered matching
+    console.log('Running migration to schema v3: Adding recording_meeting_candidates table')
+    // The table is created in the schema, this just logs the migration
   }
 }
 
@@ -905,5 +930,158 @@ export function extractContactsFromMeeting(meeting: Meeting): void {
       // Invalid JSON, skip attendee extraction
       console.warn(`Failed to parse attendees JSON for meeting ${meeting.id}`)
     }
+  }
+}
+
+// =============================================================================
+// Recording-Meeting Candidate queries (AI-powered matching)
+// =============================================================================
+
+export interface RecordingMeetingCandidate {
+  id: string
+  recording_id: string
+  meeting_id: string
+  confidence_score: number
+  match_reason: string | null
+  is_selected: boolean
+  is_ai_selected: boolean
+  is_user_confirmed: boolean
+  created_at: string
+}
+
+/**
+ * Find all meetings that overlap with a recording's time window
+ * Uses a buffer of 30 minutes before and after the recording
+ */
+export function findCandidateMeetingsForRecording(recordingId: string): Meeting[] {
+  const recording = getRecordingById(recordingId)
+  if (!recording) return []
+
+  const recStart = new Date(recording.date_recorded)
+  const durationMs = (recording.duration_seconds || 30 * 60) * 1000
+  const recEnd = new Date(recStart.getTime() + durationMs)
+
+  // Buffer: 30 min before recording start, 30 min after recording end
+  const bufferMs = 30 * 60 * 1000
+  const windowStart = new Date(recStart.getTime() - bufferMs).toISOString()
+  const windowEnd = new Date(recEnd.getTime() + bufferMs).toISOString()
+
+  // Find meetings that overlap with this time window
+  return queryAll<Meeting>(
+    `SELECT * FROM meetings
+     WHERE (start_time <= ? AND end_time >= ?)
+        OR (start_time >= ? AND start_time <= ?)
+        OR (end_time >= ? AND end_time <= ?)
+     ORDER BY start_time`,
+    [windowEnd, windowStart, windowStart, windowEnd, windowStart, windowEnd]
+  )
+}
+
+/**
+ * Add a candidate meeting for a recording
+ */
+export function addRecordingMeetingCandidate(
+  recordingId: string,
+  meetingId: string,
+  confidenceScore: number,
+  matchReason: string,
+  isAiSelected: boolean = false
+): string {
+  const id = crypto.randomUUID()
+  run(
+    `INSERT OR REPLACE INTO recording_meeting_candidates
+      (id, recording_id, meeting_id, confidence_score, match_reason, is_selected, is_ai_selected)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [id, recordingId, meetingId, confidenceScore, matchReason, isAiSelected ? 1 : 0, isAiSelected ? 1 : 0]
+  )
+
+  // If AI selected, also update the recording's meeting_id
+  if (isAiSelected) {
+    linkRecordingToMeeting(recordingId, meetingId, confidenceScore, 'ai_transcript_match')
+  }
+
+  return id
+}
+
+/**
+ * Get all candidate meetings for a recording
+ */
+export function getCandidatesForRecording(recordingId: string): Array<RecordingMeetingCandidate & { meeting: Meeting }> {
+  const candidates = queryAll<RecordingMeetingCandidate>(
+    `SELECT * FROM recording_meeting_candidates WHERE recording_id = ? ORDER BY confidence_score DESC`,
+    [recordingId]
+  )
+
+  return candidates.map(c => ({
+    ...c,
+    is_selected: !!c.is_selected,
+    is_ai_selected: !!c.is_ai_selected,
+    is_user_confirmed: !!c.is_user_confirmed,
+    meeting: getMeetingById(c.meeting_id)!
+  })).filter(c => c.meeting)
+}
+
+/**
+ * User selects a different meeting for a recording (override AI selection)
+ */
+export function selectMeetingForRecording(recordingId: string, meetingId: string): void {
+  // Clear previous selection
+  run('UPDATE recording_meeting_candidates SET is_selected = 0 WHERE recording_id = ?', [recordingId])
+
+  // Set new selection
+  run(
+    `UPDATE recording_meeting_candidates SET is_selected = 1, is_user_confirmed = 1 WHERE recording_id = ? AND meeting_id = ?`,
+    [recordingId, meetingId]
+  )
+
+  // Update the recording's meeting_id
+  linkRecordingToMeeting(recordingId, meetingId, 1.0, 'user_override')
+}
+
+/**
+ * Get recording with its matched meeting and duration comparison
+ */
+export interface RecordingWithMeetingMatch extends Recording {
+  meeting?: Meeting
+  duration_match: 'shorter' | 'longer' | 'matched' | 'no_meeting'
+  duration_difference_seconds: number
+  has_conflicts: boolean
+  conflict_count: number
+}
+
+export function getRecordingWithMatchInfo(recordingId: string): RecordingWithMeetingMatch | undefined {
+  const recording = getRecordingById(recordingId)
+  if (!recording) return undefined
+
+  const meeting = recording.meeting_id ? getMeetingById(recording.meeting_id) : undefined
+  const candidates = getCandidatesForRecording(recordingId)
+
+  let durationMatch: 'shorter' | 'longer' | 'matched' | 'no_meeting' = 'no_meeting'
+  let durationDifference = 0
+
+  if (meeting && recording.duration_seconds) {
+    const meetingStart = new Date(meeting.start_time).getTime()
+    const meetingEnd = new Date(meeting.end_time).getTime()
+    const meetingDurationSeconds = (meetingEnd - meetingStart) / 1000
+
+    durationDifference = recording.duration_seconds - meetingDurationSeconds
+
+    // 5 minute tolerance
+    if (Math.abs(durationDifference) < 300) {
+      durationMatch = 'matched'
+    } else if (durationDifference < 0) {
+      durationMatch = 'shorter'
+    } else {
+      durationMatch = 'longer'
+    }
+  }
+
+  return {
+    ...recording,
+    meeting,
+    duration_match: durationMatch,
+    duration_difference_seconds: durationDifference,
+    has_conflicts: candidates.length > 1,
+    conflict_count: candidates.length
   }
 }

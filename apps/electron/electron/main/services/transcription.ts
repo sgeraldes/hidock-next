@@ -9,7 +9,11 @@ import {
   getQueueItems,
   updateQueueItem,
   getMeetingById,
-  type Transcript
+  findCandidateMeetingsForRecording,
+  addRecordingMeetingCandidate,
+  linkRecordingToMeeting,
+  type Transcript,
+  type Meeting
 } from './database'
 import { BrowserWindow } from 'electron'
 import { getVectorStore } from './vector-store'
@@ -128,11 +132,29 @@ async function transcribeRecording(recordingId: string): Promise<void> {
   const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
   const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.0-flash-exp' })
 
-  // First, transcribe the audio
+  // Find candidate meetings for this recording's time window
+  const candidateMeetings = findCandidateMeetingsForRecording(recordingId)
+  console.log(`Found ${candidateMeetings.length} candidate meetings for recording ${recordingId}`)
+
+  // Build meeting context for better transcription
+  let meetingContext = ''
+  if (candidateMeetings.length > 0) {
+    meetingContext = `\n\nPOSSIBLE MEETING CONTEXT (use this to improve transcription accuracy):
+${candidateMeetings.map((m, i) => `
+Meeting ${i + 1}: "${m.subject}"
+  Time: ${new Date(m.start_time).toLocaleString()} - ${new Date(m.end_time).toLocaleString()}
+  ${m.organizer_name ? `Organizer: ${m.organizer_name}` : ''}
+  ${m.location ? `Location: ${m.location}` : ''}
+  ${m.description ? `Description: ${m.description.slice(0, 200)}...` : ''}
+`).join('\n')}`
+  }
+
+  // First, transcribe the audio with meeting context
   const transcriptionPrompt = `Transcribe this audio recording.
 The audio may be in Spanish or English - transcribe in the original language.
 Provide a clean, accurate transcription of all speech.
 If there are multiple speakers, try to indicate speaker changes with "Speaker 1:", "Speaker 2:", etc.
+${meetingContext}
 Return ONLY the transcription, no additional commentary.`
 
   const transcriptionResult = await model.generateContent([
@@ -147,12 +169,36 @@ Return ONLY the transcription, no additional commentary.`
 
   const fullText = transcriptionResult.response.text()
 
+  // Build meeting selection prompt if there are multiple candidates
+  let meetingSelectionSection = ''
+  if (candidateMeetings.length > 1) {
+    meetingSelectionSection = `
+5. IMPORTANT - Meeting Selection: Based on the transcript content, determine which meeting this recording most likely belongs to.
+   Analyze mentions of topics, people, projects, or context clues to select the best match.
+
+   Available meetings:
+${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).join('\n')}
+
+   Include in your response:
+   "selected_meeting_id": "the meeting ID that best matches",
+   "meeting_confidence": 0.0 to 1.0 (how confident you are),
+   "selection_reason": "why you selected this meeting"`
+  } else if (candidateMeetings.length === 1) {
+    meetingSelectionSection = `
+5. Meeting Match: This recording appears to be from the meeting "${candidateMeetings[0].subject}".
+   Verify this makes sense based on the content.
+   "selected_meeting_id": "${candidateMeetings[0].id}",
+   "meeting_confidence": 0.0 to 1.0,
+   "selection_reason": "your reasoning"`
+  }
+
   // Now analyze the transcription for summary, action items, etc.
   const analysisPrompt = `Analyze this meeting transcript and provide:
 1. A brief summary (2-3 sentences)
 2. A list of action items mentioned (as a JSON array of strings)
 3. Key topics discussed (as a JSON array of strings)
 4. Key points or decisions made (as a JSON array of strings)
+${meetingSelectionSection}
 
 Transcript:
 ${fullText}
@@ -163,7 +209,10 @@ Respond in JSON format:
   "action_items": ["...", "..."],
   "topics": ["...", "..."],
   "key_points": ["...", "..."],
-  "language": "es" or "en"
+  "language": "es" or "en"${candidateMeetings.length > 0 ? `,
+  "selected_meeting_id": "...",
+  "meeting_confidence": 0.0,
+  "selection_reason": "..."` : ''}
 }`
 
   const analysisResult = await model.generateContent(analysisPrompt)
@@ -176,6 +225,9 @@ Respond in JSON format:
     topics?: string[]
     key_points?: string[]
     language?: string
+    selected_meeting_id?: string
+    meeting_confidence?: number
+    selection_reason?: string
   } = {}
 
   try {
@@ -187,6 +239,32 @@ Respond in JSON format:
   } catch (e) {
     console.warn('Failed to parse analysis JSON:', e)
     analysis = { summary: 'Analysis failed', language: 'unknown' }
+  }
+
+  // Process AI meeting selection
+  if (candidateMeetings.length > 0) {
+    // Add all candidates to the database
+    for (const meeting of candidateMeetings) {
+      const isSelected = analysis.selected_meeting_id === meeting.id
+      const confidence = isSelected ? (analysis.meeting_confidence || 0.5) : 0.1
+      const reason = isSelected ? (analysis.selection_reason || 'Time overlap') : 'Time overlap only'
+
+      addRecordingMeetingCandidate(recordingId, meeting.id, confidence, reason, isSelected)
+    }
+
+    // If AI selected a meeting, link it
+    if (analysis.selected_meeting_id) {
+      const selectedMeeting = candidateMeetings.find(m => m.id === analysis.selected_meeting_id)
+      if (selectedMeeting) {
+        linkRecordingToMeeting(
+          recordingId,
+          selectedMeeting.id,
+          analysis.meeting_confidence || 0.5,
+          'ai_transcript_match'
+        )
+        console.log(`AI matched recording to meeting: "${selectedMeeting.subject}" (confidence: ${analysis.meeting_confidence})`)
+      }
+    }
   }
 
   // Count words
