@@ -1,5 +1,15 @@
 // Database types matching SQLite schema
 
+// =============================================================================
+// Re-export store types
+// =============================================================================
+
+export * from './stores'
+
+// =============================================================================
+// Existing Types
+// =============================================================================
+
 export interface Meeting {
   id: string
   subject: string
@@ -145,6 +155,119 @@ export interface AppConfig {
   }
 }
 
+// =============================================================================
+// New Types (Phase 0 - Meeting Intelligence Platform)
+// =============================================================================
+
+/**
+ * Contact extracted from meeting attendees
+ */
+export interface Contact {
+  id: string
+  name: string
+  email: string | null
+  notes: string | null
+  first_seen_at: string
+  last_seen_at: string
+  meeting_count: number
+  created_at: string
+}
+
+/**
+ * Role a contact has in a meeting
+ */
+export type ContactRole = 'organizer' | 'attendee'
+
+/**
+ * Junction table: Meeting-Contact relationship
+ */
+export interface MeetingContact {
+  meeting_id: string
+  contact_id: string
+  role: ContactRole
+}
+
+/**
+ * User-created project for organizing meetings
+ */
+export interface Project {
+  id: string
+  name: string
+  description: string | null
+  created_at: string
+}
+
+/**
+ * Junction table: Meeting-Project relationship
+ */
+export interface MeetingProject {
+  meeting_id: string
+  project_id: string
+}
+
+/**
+ * Contact with associated meetings
+ */
+export interface ContactWithMeetings {
+  contact: Contact
+  meetings: Meeting[]
+  totalMeetingTimeMinutes: number
+}
+
+/**
+ * Project with associated meetings and extracted topics
+ */
+export interface ProjectWithMeetings {
+  project: Project
+  meetings: Meeting[]
+  topics: string[] // Extracted from transcripts.topics JSON
+}
+
+/**
+ * Meeting with contact and project associations
+ */
+export interface MeetingWithAssociations extends Meeting {
+  contacts: Contact[]
+  projects: Project[]
+  recording?: RecordingWithTranscript
+}
+
+// =============================================================================
+// Output Types
+// =============================================================================
+
+/**
+ * Available output template identifiers
+ */
+export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items'
+
+/**
+ * Output template definition
+ */
+export interface OutputTemplate {
+  id: OutputTemplateId
+  name: string
+  description: string
+}
+
+// =============================================================================
+// RAG Filter Types
+// =============================================================================
+
+/**
+ * Discriminated union for RAG query filtering
+ */
+export type RAGFilter =
+  | { type: 'none' }
+  | { type: 'meeting'; meetingId: string }
+  | { type: 'contact'; contactId: string }
+  | { type: 'project'; projectId: string }
+  | { type: 'dateRange'; startDate: string; endDate: string }
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
 // Helper to parse attendees JSON
 export function parseAttendees(attendeesJson?: string): MeetingAttendee[] {
   if (!attendeesJson) return []
@@ -163,4 +286,9 @@ export function parseJsonArray<T>(json?: string): T[] {
   } catch {
     return []
   }
+}
+
+// Helper to serialize array to JSON string
+export function serializeJsonArray<T>(array: T[]): string {
+  return JSON.stringify(array)
 }
