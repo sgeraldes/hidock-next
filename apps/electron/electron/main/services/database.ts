@@ -832,11 +832,36 @@ export function upsertMeeting(meeting: Omit<Meeting, 'created_at' | 'updated_at'
 /**
  * Extract contacts from meeting attendees and organizer.
  * Internal version using runNoSave - must be called within a transaction.
+ * Uses batch lookup to avoid N+1 query problem.
  */
 function extractContactsFromMeetingDataInternal(meeting: Omit<Meeting, 'created_at' | 'updated_at'>): void {
+  // Collect all emails for batch lookup
+  const emailsToLookup: string[] = []
+
+  if (meeting.organizer_email) {
+    emailsToLookup.push(meeting.organizer_email)
+  }
+
+  let attendees: Array<{ name?: string; email?: string }> = []
+  if (meeting.attendees) {
+    try {
+      attendees = JSON.parse(meeting.attendees)
+      for (const attendee of attendees) {
+        if (attendee.email) {
+          emailsToLookup.push(attendee.email)
+        }
+      }
+    } catch (e) {
+      // Invalid JSON, skip attendees
+    }
+  }
+
+  // Single batch query for all contacts
+  const existingContacts = getContactsByEmails(emailsToLookup)
+
   // Handle organizer
   if (meeting.organizer_email || meeting.organizer_name) {
-    const existing = meeting.organizer_email ? getContactByEmail(meeting.organizer_email) : undefined
+    const existing = meeting.organizer_email ? existingContacts.get(meeting.organizer_email) : undefined
     let contactId
 
     if (existing) {
@@ -852,31 +877,24 @@ function extractContactsFromMeetingDataInternal(meeting: Omit<Meeting, 'created_
       [meeting.id, contactId, 'organizer'])
   }
 
-  // Handle attendees
-  if (meeting.attendees) {
-    try {
-      const attendees = JSON.parse(meeting.attendees)
-      for (const attendee of attendees) {
-        if (!attendee.email && !attendee.name) continue
+  // Handle attendees (already parsed above)
+  for (const attendee of attendees) {
+    if (!attendee.email && !attendee.name) continue
 
-        const existing = attendee.email ? getContactByEmail(attendee.email) : undefined
-        let contactId
+    const existing = attendee.email ? existingContacts.get(attendee.email) : undefined
+    let contactId
 
-        if (existing) {
-          runNoSave(`UPDATE contacts SET name = COALESCE(?, name), last_seen_at = MAX(last_seen_at, ?) WHERE id = ?`,
-            [attendee.name, meeting.start_time, existing.id])
-          contactId = existing.id
-        } else {
-          contactId = crypto.randomUUID()
-          runNoSave(`INSERT INTO contacts (id, name, email, first_seen_at, last_seen_at, meeting_count) VALUES (?, ?, ?, ?, ?, 1)`,
-            [contactId, attendee.name || attendee.email || 'Unknown', attendee.email || null, meeting.start_time, meeting.start_time])
-        }
-        runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
-          [meeting.id, contactId, 'attendee'])
-      }
-    } catch (e) {
-      // Invalid JSON, skip
+    if (existing) {
+      runNoSave(`UPDATE contacts SET name = COALESCE(?, name), last_seen_at = MAX(last_seen_at, ?) WHERE id = ?`,
+        [attendee.name, meeting.start_time, existing.id])
+      contactId = existing.id
+    } else {
+      contactId = crypto.randomUUID()
+      runNoSave(`INSERT INTO contacts (id, name, email, first_seen_at, last_seen_at, meeting_count) VALUES (?, ?, ?, ?, ?, 1)`,
+        [contactId, attendee.name || attendee.email || 'Unknown', attendee.email || null, meeting.start_time, meeting.start_time])
     }
+    runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
+      [meeting.id, contactId, 'attendee'])
   }
 }
 
@@ -1439,6 +1457,38 @@ export function getContactByEmail(email: string): Contact | undefined {
   return queryOne<Contact>('SELECT * FROM contacts WHERE email = ?', [email])
 }
 
+/**
+ * Batch get contacts by emails - avoids N+1 query problem.
+ * Returns a Map of email -> Contact for quick lookup.
+ */
+export function getContactsByEmails(emails: string[]): Map<string, Contact> {
+  if (emails.length === 0) return new Map()
+
+  // Remove duplicates and nulls
+  const uniqueEmails = [...new Set(emails.filter(Boolean))]
+  if (uniqueEmails.length === 0) return new Map()
+
+  const results = new Map<string, Contact>()
+  const chunkSize = 100
+
+  for (let i = 0; i < uniqueEmails.length; i += chunkSize) {
+    const chunk = uniqueEmails.slice(i, i + chunkSize)
+    const placeholders = chunk.map(() => '?').join(',')
+    const contacts = queryAll<Contact>(
+      `SELECT * FROM contacts WHERE email IN (${placeholders})`,
+      chunk
+    )
+
+    for (const contact of contacts) {
+      if (contact.email) {
+        results.set(contact.email, contact)
+      }
+    }
+  }
+
+  return results
+}
+
 export function upsertContact(contact: Omit<Contact, 'created_at'>): Contact {
   const existing = contact.email ? getContactByEmail(contact.email) : undefined
 
@@ -1603,50 +1653,6 @@ export function tagMeetingToProject(meetingId: string, projectId: string): void 
 
 export function untagMeetingFromProject(meetingId: string, projectId: string): void {
   run('DELETE FROM meeting_projects WHERE meeting_id = ? AND project_id = ?', [meetingId, projectId])
-}
-
-// =============================================================================
-// Contact extraction from meeting attendees
-// =============================================================================
-
-export function extractContactsFromMeeting(meeting: Meeting): void {
-  // Extract organizer as contact
-  if (meeting.organizer_email) {
-    const organizerContact = upsertContact({
-      id: crypto.randomUUID(),
-      name: meeting.organizer_name || meeting.organizer_email,
-      email: meeting.organizer_email,
-      notes: null,
-      first_seen_at: meeting.start_time,
-      last_seen_at: meeting.start_time,
-      meeting_count: 1
-    })
-    linkContactToMeeting(meeting.id, organizerContact.id, 'organizer')
-  }
-
-  // Extract attendees as contacts
-  if (meeting.attendees) {
-    try {
-      const attendees = JSON.parse(meeting.attendees) as Array<{ name?: string; email?: string }>
-      for (const attendee of attendees) {
-        if (attendee.email) {
-          const attendeeContact = upsertContact({
-            id: crypto.randomUUID(),
-            name: attendee.name || attendee.email,
-            email: attendee.email,
-            notes: null,
-            first_seen_at: meeting.start_time,
-            last_seen_at: meeting.start_time,
-            meeting_count: 1
-          })
-          linkContactToMeeting(meeting.id, attendeeContact.id, 'attendee')
-        }
-      }
-    } catch {
-      // Invalid JSON, skip attendee extraction
-      console.warn(`Failed to parse attendees JSON for meeting ${meeting.id}`)
-    }
-  }
 }
 
 // =============================================================================
