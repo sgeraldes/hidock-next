@@ -1,6 +1,47 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync } from 'fs'
-import { join, basename, extname } from 'path'
+import { join, basename, extname, resolve, normalize } from 'path'
 import { getConfig, getDataPath } from './config'
+
+/**
+ * Validate that a path stays within the allowed base directory.
+ * Prevents path traversal attacks (e.g., "../../../etc/passwd").
+ */
+export function validatePath(basePath: string, userPath: string): string {
+  // Normalize and resolve the paths
+  const normalizedBase = normalize(resolve(basePath))
+  const resolvedPath = normalize(resolve(basePath, userPath))
+
+  // Check if the resolved path starts with the base path
+  if (!resolvedPath.startsWith(normalizedBase)) {
+    throw new Error(`Invalid path: path traversal detected. Path must stay within ${normalizedBase}`)
+  }
+
+  return resolvedPath
+}
+
+/**
+ * Validate a filename to prevent path traversal and invalid characters.
+ */
+export function validateFilename(filename: string): string {
+  if (!filename || typeof filename !== 'string') {
+    throw new Error('Invalid filename: filename is required')
+  }
+
+  // Remove any path separators and dangerous characters
+  const sanitized = filename.replace(/[\\/:*?"<>|]/g, '')
+
+  // Check for path traversal attempts
+  if (filename.includes('..') || filename !== sanitized || !sanitized.length) {
+    throw new Error('Invalid filename: contains illegal characters or path traversal attempt')
+  }
+
+  // Limit filename length
+  if (sanitized.length > 255) {
+    throw new Error('Invalid filename: exceeds maximum length of 255 characters')
+  }
+
+  return sanitized
+}
 
 export interface StorageInfo {
   dataPath: string
@@ -54,6 +95,9 @@ export async function saveRecording(
 ): Promise<string> {
   const recordingsPath = getRecordingsPath()
 
+  // Validate input filename to prevent any path traversal in the source
+  validateFilename(basename(filename))
+
   // Generate a clean filename with date prefix
   const date = new Date()
   const datePrefix = date.toISOString().split('T')[0]
@@ -64,10 +108,15 @@ export async function saveRecording(
     ? '-' + meetingSubject.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50)
     : ''
 
-  const ext = extname(filename) || '.wav'
+  // Convert .hda to .wav since HDA files are actually WAV format
+  let ext = extname(filename) || '.wav'
+  if (ext.toLowerCase() === '.hda') {
+    ext = '.wav'
+  }
   const cleanFilename = `${datePrefix}_${timePrefix}${subjectPart}${ext}`
 
-  const filePath = join(recordingsPath, cleanFilename)
+  // Validate the final path stays within recordings directory
+  const filePath = validatePath(recordingsPath, cleanFilename)
 
   writeFileSync(filePath, data)
 
@@ -81,10 +130,15 @@ export async function saveTranscript(
 ): Promise<string> {
   const transcriptsPath = getTranscriptsPath()
 
-  // Use same base name as recording
-  const baseName = basename(recordingFilename, extname(recordingFilename))
-  const filename = `${baseName}.${format}`
-  const filePath = join(transcriptsPath, filename)
+  // Extract just the filename without any path components
+  const rawBaseName = basename(recordingFilename, extname(recordingFilename))
+
+  // Validate the base name to prevent path traversal
+  const safeName = validateFilename(rawBaseName)
+  const filename = `${safeName}.${format}`
+
+  // Validate the final path stays within transcripts directory
+  const filePath = validatePath(transcriptsPath, filename)
 
   writeFileSync(filePath, transcript, 'utf-8')
 
@@ -93,7 +147,10 @@ export async function saveTranscript(
 
 export function readTranscript(filename: string): string | null {
   const transcriptsPath = getTranscriptsPath()
-  const filePath = join(transcriptsPath, filename)
+
+  // Validate filename to prevent path traversal
+  const validFilename = validateFilename(filename)
+  const filePath = validatePath(transcriptsPath, validFilename)
 
   if (existsSync(filePath)) {
     return readFileSync(filePath, 'utf-8')
@@ -167,6 +224,21 @@ export function getStorageInfo(): StorageInfo {
 
 export function deleteRecording(filePath: string): boolean {
   try {
+    // Validate that the path is within allowed directories
+    const recordingsPath = getRecordingsPath()
+    const transcriptsPath = getTranscriptsPath()
+
+    // Normalize the path for comparison
+    const normalizedPath = normalize(resolve(filePath))
+    const normalizedRecordings = normalize(resolve(recordingsPath))
+    const normalizedTranscripts = normalize(resolve(transcriptsPath))
+
+    // Only allow deletion of files within recordings or transcripts directories
+    if (!normalizedPath.startsWith(normalizedRecordings) && !normalizedPath.startsWith(normalizedTranscripts)) {
+      console.error('Attempted to delete file outside allowed directories:', filePath)
+      return false
+    }
+
     if (existsSync(filePath)) {
       unlinkSync(filePath)
       return true
@@ -180,6 +252,21 @@ export function deleteRecording(filePath: string): boolean {
 
 export function readRecordingFile(filePath: string): Buffer | null {
   try {
+    // Validate that the path is within allowed directories
+    const recordingsPath = getRecordingsPath()
+    const transcriptsPath = getTranscriptsPath()
+
+    // Normalize the path for comparison
+    const normalizedPath = normalize(resolve(filePath))
+    const normalizedRecordings = normalize(resolve(recordingsPath))
+    const normalizedTranscripts = normalize(resolve(transcriptsPath))
+
+    // Only allow reading files within recordings or transcripts directories
+    if (!normalizedPath.startsWith(normalizedRecordings) && !normalizedPath.startsWith(normalizedTranscripts)) {
+      console.error('Attempted to read file outside allowed directories:', filePath)
+      return null
+    }
+
     if (existsSync(filePath)) {
       return readFileSync(filePath)
     }

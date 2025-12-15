@@ -5,7 +5,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 3
+const SCHEMA_VERSION = 9
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS recordings (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,
     original_filename TEXT,
-    file_path TEXT NOT NULL,
+    file_path TEXT,
     file_size INTEGER,
     duration_seconds REAL,
     date_recorded TEXT NOT NULL,
@@ -40,6 +40,14 @@ CREATE TABLE IF NOT EXISTS recordings (
     correlation_method TEXT,
     status TEXT DEFAULT 'pending',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    -- Recording lifecycle columns (v6)
+    location TEXT DEFAULT 'device-only',
+    transcription_status TEXT DEFAULT 'none',
+    on_device INTEGER DEFAULT 1,
+    device_last_seen TEXT,
+    on_local INTEGER DEFAULT 0,
+    source TEXT DEFAULT 'hidock',
+    is_imported INTEGER DEFAULT 0,
     FOREIGN KEY (meeting_id) REFERENCES meetings(id)
 );
 
@@ -174,7 +182,20 @@ CREATE TABLE IF NOT EXISTS recording_meeting_candidates (
     UNIQUE(recording_id, meeting_id)
 );
 
+-- Device files cache - persists device file list for offline viewing
+CREATE TABLE IF NOT EXISTS device_files_cache (
+    id TEXT PRIMARY KEY,
+    filename TEXT NOT NULL UNIQUE,
+    file_size INTEGER,
+    duration_seconds REAL,
+    date_recorded TEXT NOT NULL,
+    cached_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for performance
+CREATE INDEX IF NOT EXISTS idx_device_cache_filename ON device_files_cache(filename);
+CREATE INDEX IF NOT EXISTS idx_device_cache_date ON device_files_cache(date_recorded);
+
 CREATE INDEX IF NOT EXISTS idx_meetings_start_time ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_recordings_date ON recordings(date_recorded);
 CREATE INDEX IF NOT EXISTS idx_recordings_meeting ON recordings(meeting_id);
@@ -206,6 +227,276 @@ const MIGRATIONS: Record<number, () => void> = {
     // v3: Add recording-meeting candidates table for AI-powered matching
     console.log('Running migration to schema v3: Adding recording_meeting_candidates table')
     // The table is created in the schema, this just logs the migration
+  },
+  6: () => {
+    // v6: Add recording lifecycle columns for unified recording management
+    console.log('Running migration to schema v6: Adding recording lifecycle columns')
+    const database = getDatabase()
+
+    // Add new columns to recordings table if they don't exist
+    // SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so we use try-catch
+    const columnsToAdd = [
+      "ALTER TABLE recordings ADD COLUMN location TEXT DEFAULT 'device-only'",
+      "ALTER TABLE recordings ADD COLUMN transcription_status TEXT DEFAULT 'none'",
+      "ALTER TABLE recordings ADD COLUMN on_device INTEGER DEFAULT 1",
+      "ALTER TABLE recordings ADD COLUMN device_last_seen TEXT",
+      "ALTER TABLE recordings ADD COLUMN on_local INTEGER DEFAULT 0",
+      "ALTER TABLE recordings ADD COLUMN source TEXT DEFAULT 'hidock'",
+      "ALTER TABLE recordings ADD COLUMN is_imported INTEGER DEFAULT 0"
+    ]
+
+    for (const sql of columnsToAdd) {
+      try {
+        database.run(sql)
+      } catch (e) {
+        // Column likely already exists, ignore
+        console.log(`Column may already exist: ${sql}`)
+      }
+    }
+
+    // Update existing recordings: if they have a file_path, mark them as on_local
+    try {
+      database.run(`
+        UPDATE recordings
+        SET on_local = 1,
+            location = CASE WHEN on_device = 1 THEN 'both' ELSE 'local-only' END
+        WHERE file_path IS NOT NULL AND file_path != ''
+      `)
+    } catch (e) {
+      console.warn('Failed to update existing recordings:', e)
+    }
+
+    console.log('Migration v6 complete: Recording lifecycle columns added')
+  },
+  7: () => {
+    // v7: Recalculate durations for HDA files using correct formula (file_size / 4)
+    // This fixes recordings that had incorrect duration calculated before
+    console.log('Running migration to schema v7: Recalculating HDA file durations')
+    const database = getDatabase()
+
+    try {
+      // Get all recordings with .hda extension and file_size available
+      const recordings = database.exec(`
+        SELECT id, filename, file_size, duration_seconds
+        FROM recordings
+        WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
+        AND file_size IS NOT NULL
+        AND file_size > 0
+      `)
+
+      if (recordings.length > 0 && recordings[0].values.length > 0) {
+        let updatedCount = 0
+        for (const row of recordings[0].values) {
+          const [id, filename, fileSize, oldDuration] = row as [string, string, number, number | null]
+
+          // Calculate correct duration: HDA version 1 format uses fileSize / 8000 seconds
+          // This formula was verified against real recordings (e.g., 15.7MB = 32m39s)
+          const newDuration = Math.round(fileSize / 8000)
+
+          // Only update if different (or was null/0)
+          if (oldDuration !== newDuration) {
+            database.run(
+              'UPDATE recordings SET duration_seconds = ? WHERE id = ?',
+              [newDuration, id]
+            )
+            updatedCount++
+            console.log(`[Migration v7] Updated ${filename}: ${oldDuration || 0}s -> ${newDuration}s`)
+          }
+        }
+        console.log(`[Migration v7] Updated durations for ${updatedCount} recordings`)
+      } else {
+        console.log('[Migration v7] No HDA recordings found to update')
+      }
+
+      // Also update device_files_cache if present
+      try {
+        const cachedFiles = database.exec(`
+          SELECT id, filename, file_size, duration_seconds
+          FROM device_files_cache
+          WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
+          AND file_size IS NOT NULL
+          AND file_size > 0
+        `)
+
+        if (cachedFiles.length > 0 && cachedFiles[0].values.length > 0) {
+          for (const row of cachedFiles[0].values) {
+            const [id, _filename, fileSize, oldDuration] = row as [string, string, number, number | null]
+            const newDuration = Math.round(fileSize / 8000)
+
+            if (oldDuration !== newDuration) {
+              database.run(
+                'UPDATE device_files_cache SET duration_seconds = ? WHERE id = ?',
+                [newDuration, id]
+              )
+            }
+          }
+          console.log('[Migration v7] Updated device_files_cache durations')
+        }
+      } catch (e) {
+        // device_files_cache may not exist
+        console.log('[Migration v7] device_files_cache not found or empty')
+      }
+    } catch (e) {
+      console.error('[Migration v7] Error recalculating durations:', e)
+    }
+
+    console.log('Migration v7 complete: HDA durations recalculated')
+  },
+  8: () => {
+    // v8: Fix HDA duration calculation formula - v7 used /4 which was wrong, correct formula is /8000
+    // This fixes recordings that got wrong duration from v7 migration
+    console.log('Running migration to schema v8: Fixing HDA duration formula (v7 was wrong)')
+    const database = getDatabase()
+
+    try {
+      // Get all recordings with .hda extension and file_size available
+      const recordings = database.exec(`
+        SELECT id, filename, file_size, duration_seconds
+        FROM recordings
+        WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
+        AND file_size IS NOT NULL
+        AND file_size > 0
+      `)
+
+      if (recordings.length > 0 && recordings[0].values.length > 0) {
+        let updatedCount = 0
+        for (const row of recordings[0].values) {
+          const [id, filename, fileSize, oldDuration] = row as [string, string, number, number | null]
+
+          // CORRECT formula: fileSize / 8000 gives seconds
+          // Verified: 15.7MB file = 1959 seconds = 32m39s
+          const newDuration = Math.round(fileSize / 8000)
+
+          // Update if different
+          if (oldDuration !== newDuration) {
+            database.run(
+              'UPDATE recordings SET duration_seconds = ? WHERE id = ?',
+              [newDuration, id]
+            )
+            updatedCount++
+            const oldMin = oldDuration ? Math.floor(oldDuration / 60) : 0
+            const oldSec = oldDuration ? Math.round(oldDuration % 60) : 0
+            const newMin = Math.floor(newDuration / 60)
+            const newSec = Math.round(newDuration % 60)
+            console.log(`[Migration v8] Fixed ${filename}: ${oldMin}m${oldSec}s -> ${newMin}m${newSec}s`)
+          }
+        }
+        console.log(`[Migration v8] Fixed durations for ${updatedCount} recordings`)
+      } else {
+        console.log('[Migration v8] No HDA recordings found to fix')
+      }
+
+      // Also fix device_files_cache
+      try {
+        const cachedFiles = database.exec(`
+          SELECT id, filename, file_size, duration_seconds
+          FROM device_files_cache
+          WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
+          AND file_size IS NOT NULL
+          AND file_size > 0
+        `)
+
+        if (cachedFiles.length > 0 && cachedFiles[0].values.length > 0) {
+          for (const row of cachedFiles[0].values) {
+            const [id, _filename, fileSize, oldDuration] = row as [string, string, number, number | null]
+            const newDuration = Math.round(fileSize / 8000)
+
+            if (oldDuration !== newDuration) {
+              database.run(
+                'UPDATE device_files_cache SET duration_seconds = ? WHERE id = ?',
+                [newDuration, id]
+              )
+            }
+          }
+          console.log('[Migration v8] Fixed device_files_cache durations')
+        }
+      } catch (e) {
+        console.log('[Migration v8] device_files_cache not found or empty')
+      }
+    } catch (e) {
+      console.error('[Migration v8] Error fixing durations:', e)
+    }
+
+    console.log('Migration v8 complete: HDA durations fixed with correct formula')
+  },
+  9: () => {
+    // v9: Force re-run HDA duration fix in case v8 didn't run due to version mismatch
+    // This ensures all HDA files have correct durations using fileSize / 8000
+    console.log('Running migration to schema v9: Ensuring HDA durations are correct')
+    const database = getDatabase()
+
+    try {
+      // Get all HDA recordings
+      const recordings = database.exec(`
+        SELECT id, filename, file_size, duration_seconds
+        FROM recordings
+        WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
+        AND file_size IS NOT NULL
+        AND file_size > 0
+      `)
+
+      if (recordings.length > 0 && recordings[0].values.length > 0) {
+        let updatedCount = 0
+        for (const row of recordings[0].values) {
+          const [id, filename, fileSize, oldDuration] = row as [string, string, number, number | null]
+
+          // CORRECT formula: fileSize / 8000 gives seconds
+          const newDuration = Math.round(fileSize / 8000)
+
+          // Update if different or if the old duration seems wildly wrong (> 6 hours for any file)
+          const needsUpdate = oldDuration !== newDuration || (oldDuration && oldDuration > 21600)
+
+          if (needsUpdate) {
+            database.run(
+              'UPDATE recordings SET duration_seconds = ? WHERE id = ?',
+              [newDuration, id]
+            )
+            updatedCount++
+            const oldMin = oldDuration ? Math.floor(oldDuration / 60) : 0
+            const oldSec = oldDuration ? Math.round(oldDuration % 60) : 0
+            const newMin = Math.floor(newDuration / 60)
+            const newSec = Math.round(newDuration % 60)
+            console.log(`[Migration v9] Fixed ${filename}: ${oldMin}m${oldSec}s -> ${newMin}m${newSec}s`)
+          }
+        }
+        console.log(`[Migration v9] Fixed durations for ${updatedCount} recordings`)
+      } else {
+        console.log('[Migration v9] No HDA recordings found')
+      }
+
+      // Also fix device_files_cache
+      try {
+        const cachedFiles = database.exec(`
+          SELECT id, filename, file_size, duration_seconds
+          FROM device_files_cache
+          WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
+          AND file_size IS NOT NULL
+          AND file_size > 0
+        `)
+
+        if (cachedFiles.length > 0 && cachedFiles[0].values.length > 0) {
+          for (const row of cachedFiles[0].values) {
+            const [id, _filename, fileSize, oldDuration] = row as [string, string, number, number | null]
+            const newDuration = Math.round(fileSize / 8000)
+            const needsUpdate = oldDuration !== newDuration || (oldDuration && oldDuration > 21600)
+
+            if (needsUpdate) {
+              database.run(
+                'UPDATE device_files_cache SET duration_seconds = ? WHERE id = ?',
+                [newDuration, id]
+              )
+            }
+          }
+          console.log('[Migration v9] Fixed device_files_cache durations')
+        }
+      } catch (e) {
+        console.log('[Migration v9] device_files_cache not found or empty')
+      }
+    } catch (e) {
+      console.error('[Migration v9] Error fixing durations:', e)
+    }
+
+    console.log('Migration v9 complete: HDA durations verified/fixed')
   }
 }
 
@@ -312,6 +603,30 @@ export function run(sql: string, params: unknown[] = []): void {
   saveDatabase()
 }
 
+// Internal run that doesn't auto-save (for use within transactions)
+function runNoSave(sql: string, params: unknown[] = []): void {
+  getDatabase().run(sql, params)
+}
+
+/**
+ * Execute a function within a database transaction.
+ * Automatically handles BEGIN/COMMIT/ROLLBACK and saves only on success.
+ * Use this for operations that must be atomic (all-or-nothing).
+ */
+export function runInTransaction<T>(fn: () => T): T {
+  const database = getDatabase()
+  database.run('BEGIN TRANSACTION')
+  try {
+    const result = fn()
+    database.run('COMMIT')
+    saveDatabase()
+    return result
+  } catch (error) {
+    database.run('ROLLBACK')
+    throw error
+  }
+}
+
 export function runMany(sql: string, items: unknown[][]): void {
   const stmt = getDatabase().prepare(sql)
   for (const item of items) {
@@ -321,6 +636,68 @@ export function runMany(sql: string, items: unknown[][]): void {
   }
   stmt.free()
   saveDatabase()
+}
+
+/**
+ * Batch upsert multiple meetings atomically.
+ * Used by calendar sync to ensure all-or-nothing behavior.
+ * If any meeting fails to upsert, the entire batch is rolled back.
+ */
+export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'updated_at'>[]): void {
+  if (meetings.length === 0) return
+
+  runInTransaction(() => {
+    for (const meeting of meetings) {
+      const existing = getMeetingById(meeting.id)
+
+      if (existing) {
+        runNoSave(
+          `UPDATE meetings SET
+            subject = ?, start_time = ?, end_time = ?, location = ?,
+            organizer_name = ?, organizer_email = ?, attendees = ?,
+            description = ?, is_recurring = ?, recurrence_rule = ?,
+            meeting_url = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?`,
+          [
+            meeting.subject,
+            meeting.start_time,
+            meeting.end_time,
+            meeting.location ?? null,
+            meeting.organizer_name ?? null,
+            meeting.organizer_email ?? null,
+            meeting.attendees ?? null,
+            meeting.description ?? null,
+            meeting.is_recurring,
+            meeting.recurrence_rule ?? null,
+            meeting.meeting_url ?? null,
+            meeting.id
+          ]
+        )
+      } else {
+        runNoSave(
+          `INSERT INTO meetings (id, subject, start_time, end_time, location, organizer_name,
+            organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            meeting.id,
+            meeting.subject,
+            meeting.start_time,
+            meeting.end_time,
+            meeting.location ?? null,
+            meeting.organizer_name ?? null,
+            meeting.organizer_email ?? null,
+            meeting.attendees ?? null,
+            meeting.description ?? null,
+            meeting.is_recurring,
+            meeting.recurrence_rule ?? null,
+            meeting.meeting_url ?? null
+          ]
+        )
+      }
+      // Extract contacts (uses runNoSave internally)
+      extractContactsFromMeetingDataInternal(meeting)
+    }
+  })
 }
 
 // Meeting queries
@@ -365,53 +742,141 @@ export function getMeetingById(id: string): Meeting | undefined {
   return queryOne<Meeting>('SELECT * FROM meetings WHERE id = ?', [id])
 }
 
-export function upsertMeeting(meeting: Omit<Meeting, 'created_at' | 'updated_at'>): void {
-  // Check if meeting exists
-  const existing = getMeetingById(meeting.id)
+/**
+ * Batch get meetings by IDs - avoids N+1 query problem
+ */
+export function getMeetingsByIds(meetingIds: string[]): Map<string, Meeting> {
+  if (meetingIds.length === 0) return new Map()
 
-  if (existing) {
-    run(
-      `UPDATE meetings SET
-        subject = ?, start_time = ?, end_time = ?, location = ?,
-        organizer_name = ?, organizer_email = ?, attendees = ?,
-        description = ?, is_recurring = ?, recurrence_rule = ?,
-        meeting_url = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?`,
-      [
-        meeting.subject,
-        meeting.start_time,
-        meeting.end_time,
-        meeting.location ?? null,
-        meeting.organizer_name ?? null,
-        meeting.organizer_email ?? null,
-        meeting.attendees ?? null,
-        meeting.description ?? null,
-        meeting.is_recurring,
-        meeting.recurrence_rule ?? null,
-        meeting.meeting_url ?? null,
-        meeting.id
-      ]
+  // Remove duplicates and nulls
+  const uniqueIds = [...new Set(meetingIds.filter(Boolean))]
+  if (uniqueIds.length === 0) return new Map()
+
+  const results = new Map<string, Meeting>()
+  const chunkSize = 100
+
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize)
+    const placeholders = chunk.map(() => '?').join(',')
+    const meetings = queryAll<Meeting>(
+      `SELECT * FROM meetings WHERE id IN (${placeholders})`,
+      chunk
     )
-  } else {
-    run(
-      `INSERT INTO meetings (id, subject, start_time, end_time, location, organizer_name,
-        organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        meeting.id,
-        meeting.subject,
-        meeting.start_time,
-        meeting.end_time,
-        meeting.location ?? null,
-        meeting.organizer_name ?? null,
-        meeting.organizer_email ?? null,
-        meeting.attendees ?? null,
-        meeting.description ?? null,
-        meeting.is_recurring,
-        meeting.recurrence_rule ?? null,
-        meeting.meeting_url ?? null
-      ]
-    )
+
+    for (const meeting of meetings) {
+      results.set(meeting.id, meeting)
+    }
+  }
+
+  return results
+}
+
+/**
+ * Upsert a meeting and its associated contacts atomically.
+ * All operations are wrapped in a single transaction for data integrity.
+ */
+export function upsertMeeting(meeting: Omit<Meeting, 'created_at' | 'updated_at'>): void {
+  runInTransaction(() => {
+    // Check if meeting exists
+    const existing = getMeetingById(meeting.id)
+
+    if (existing) {
+      runNoSave(
+        `UPDATE meetings SET
+          subject = ?, start_time = ?, end_time = ?, location = ?,
+          organizer_name = ?, organizer_email = ?, attendees = ?,
+          description = ?, is_recurring = ?, recurrence_rule = ?,
+          meeting_url = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`,
+        [
+          meeting.subject,
+          meeting.start_time,
+          meeting.end_time,
+          meeting.location ?? null,
+          meeting.organizer_name ?? null,
+          meeting.organizer_email ?? null,
+          meeting.attendees ?? null,
+          meeting.description ?? null,
+          meeting.is_recurring,
+          meeting.recurrence_rule ?? null,
+          meeting.meeting_url ?? null,
+          meeting.id
+        ]
+      )
+    } else {
+      runNoSave(
+        `INSERT INTO meetings (id, subject, start_time, end_time, location, organizer_name,
+          organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          meeting.id,
+          meeting.subject,
+          meeting.start_time,
+          meeting.end_time,
+          meeting.location ?? null,
+          meeting.organizer_name ?? null,
+          meeting.organizer_email ?? null,
+          meeting.attendees ?? null,
+          meeting.description ?? null,
+          meeting.is_recurring,
+          meeting.recurrence_rule ?? null,
+          meeting.meeting_url ?? null
+        ]
+      )
+    }
+    // Extract contacts from meeting attendees (uses runNoSave internally)
+    extractContactsFromMeetingDataInternal(meeting)
+  })
+}
+
+/**
+ * Extract contacts from meeting attendees and organizer.
+ * Internal version using runNoSave - must be called within a transaction.
+ */
+function extractContactsFromMeetingDataInternal(meeting: Omit<Meeting, 'created_at' | 'updated_at'>): void {
+  // Handle organizer
+  if (meeting.organizer_email || meeting.organizer_name) {
+    const existing = meeting.organizer_email ? getContactByEmail(meeting.organizer_email) : undefined
+    let contactId
+
+    if (existing) {
+      runNoSave(`UPDATE contacts SET name = COALESCE(?, name), last_seen_at = MAX(last_seen_at, ?) WHERE id = ?`,
+        [meeting.organizer_name, meeting.start_time, existing.id])
+      contactId = existing.id
+    } else {
+      contactId = crypto.randomUUID()
+      runNoSave(`INSERT INTO contacts (id, name, email, first_seen_at, last_seen_at, meeting_count) VALUES (?, ?, ?, ?, ?, 1)`,
+        [contactId, meeting.organizer_name || 'Unknown', meeting.organizer_email || null, meeting.start_time, meeting.start_time])
+    }
+    runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
+      [meeting.id, contactId, 'organizer'])
+  }
+
+  // Handle attendees
+  if (meeting.attendees) {
+    try {
+      const attendees = JSON.parse(meeting.attendees)
+      for (const attendee of attendees) {
+        if (!attendee.email && !attendee.name) continue
+
+        const existing = attendee.email ? getContactByEmail(attendee.email) : undefined
+        let contactId
+
+        if (existing) {
+          runNoSave(`UPDATE contacts SET name = COALESCE(?, name), last_seen_at = MAX(last_seen_at, ?) WHERE id = ?`,
+            [attendee.name, meeting.start_time, existing.id])
+          contactId = existing.id
+        } else {
+          contactId = crypto.randomUUID()
+          runNoSave(`INSERT INTO contacts (id, name, email, first_seen_at, last_seen_at, meeting_count) VALUES (?, ?, ?, ?, ?, 1)`,
+            [contactId, attendee.name || attendee.email || 'Unknown', attendee.email || null, meeting.start_time, meeting.start_time])
+        }
+        runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
+          [meeting.id, contactId, 'attendee'])
+      }
+    } catch (e) {
+      // Invalid JSON, skip
+    }
   }
 }
 
@@ -420,15 +885,23 @@ export interface Recording {
   id: string
   filename: string
   original_filename?: string
-  file_path: string
+  file_path: string | null  // NULL if not stored locally
   file_size?: number
   duration_seconds?: number
   date_recorded: string
   meeting_id?: string
   correlation_confidence?: number
   correlation_method?: string
-  status: string
+  status: string  // Legacy field for backwards compatibility
   created_at: string
+  // New lifecycle fields
+  location: 'device-only' | 'local-only' | 'both' | 'deleted'
+  transcription_status: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+  on_device: number
+  device_last_seen?: string
+  on_local: number
+  source: 'hidock' | 'import' | 'external'
+  is_imported: number
 }
 
 export function getRecordings(): Recording[] {
@@ -441,6 +914,134 @@ export function getRecordingById(id: string): Recording | undefined {
 
 export function getRecordingsForMeeting(meetingId: string): Recording[] {
   return queryAll<Recording>('SELECT * FROM recordings WHERE meeting_id = ?', [meetingId])
+}
+
+
+// Get recording by filename (canonical identifier)
+export function getRecordingByFilename(filename: string): Recording | undefined {
+  return queryOne<Recording>('SELECT * FROM recordings WHERE filename = ?', [filename])
+}
+
+// Update recording lifecycle state
+export function updateRecordingLifecycle(
+  id: string,
+  updates: Partial<Pick<Recording, 'location' | 'on_device' | 'on_local' | 'device_last_seen' | 'file_path' | 'transcription_status'>>
+): void {
+  const setClauses: string[] = []
+  const values: unknown[] = []
+
+  if (updates.location !== undefined) {
+    setClauses.push('location = ?')
+    values.push(updates.location)
+  }
+  if (updates.on_device !== undefined) {
+    setClauses.push('on_device = ?')
+    values.push(updates.on_device)
+  }
+  if (updates.on_local !== undefined) {
+    setClauses.push('on_local = ?')
+    values.push(updates.on_local)
+  }
+  if (updates.device_last_seen !== undefined) {
+    setClauses.push('device_last_seen = ?')
+    values.push(updates.device_last_seen)
+  }
+  if (updates.file_path !== undefined) {
+    setClauses.push('file_path = ?')
+    values.push(updates.file_path)
+  }
+  if (updates.transcription_status !== undefined) {
+    setClauses.push('transcription_status = ?')
+    values.push(updates.transcription_status)
+  }
+
+  if (setClauses.length > 0) {
+    values.push(id)
+    run(`UPDATE recordings SET ${setClauses.join(', ')} WHERE id = ?`, values)
+  }
+}
+
+// Upsert recording from device - creates or updates based on filename
+export function upsertRecordingFromDevice(deviceFile: {
+  filename: string
+  size: number
+  duration: number
+  dateCreated: Date
+}): Recording {
+  const existing = getRecordingByFilename(deviceFile.filename)
+  const now = new Date().toISOString()
+
+  if (existing) {
+    // Update device presence and refresh duration from device (may have been calculated incorrectly before)
+    const newLocation = existing.on_local ? 'both' : 'device-only'
+    run(
+      `UPDATE recordings SET on_device = 1, device_last_seen = ?, location = ?, file_size = ?, duration_seconds = ? WHERE id = ?`,
+      [now, newLocation, deviceFile.size, deviceFile.duration, existing.id]
+    )
+    return { ...existing, on_device: 1, device_last_seen: now, location: newLocation as Recording['location'], duration_seconds: deviceFile.duration }
+  } else {
+    // Create new recording entry
+    const id = crypto.randomUUID()
+    run(
+      `INSERT INTO recordings (id, filename, file_path, file_size, duration_seconds, date_recorded,
+        status, location, transcription_status, on_device, device_last_seen, on_local, source, is_imported)
+       VALUES (?, ?, NULL, ?, ?, ?, 'none', 'device-only', 'none', 1, ?, 0, 'hidock', 0)`,
+      [id, deviceFile.filename, deviceFile.size, deviceFile.duration, deviceFile.dateCreated.toISOString(), now]
+    )
+    return getRecordingById(id)!
+  }
+}
+
+// Mark recordings as no longer on device
+export function markRecordingsNotOnDevice(presentFilenames: string[]): void {
+  if (presentFilenames.length === 0) return
+
+  // Get all recordings marked as on_device
+  const onDevice = queryAll<Recording>('SELECT * FROM recordings WHERE on_device = 1')
+
+  for (const rec of onDevice) {
+    if (!presentFilenames.includes(rec.filename)) {
+      const newLocation = rec.on_local ? 'local-only' : 'deleted'
+      updateRecordingLifecycle(rec.id, {
+        on_device: 0,
+        location: newLocation as Recording['location']
+      })
+    }
+  }
+}
+
+// Get all recordings with unified view
+export function getAllRecordingsUnified(): Recording[] {
+  return queryAll<Recording>(`
+    SELECT * FROM recordings
+    ORDER BY date_recorded DESC
+  `)
+}
+
+// Mark recording as downloaded
+export function markRecordingDownloaded(filename: string, localPath: string): void {
+  const recording = getRecordingByFilename(filename)
+  if (recording) {
+    const newLocation = recording.on_device ? 'both' : 'local-only'
+    updateRecordingLifecycle(recording.id, {
+      file_path: localPath,
+      on_local: 1,
+      location: newLocation as Recording['location']
+    })
+  }
+}
+
+// Delete recording file from local storage (keeps metadata if transcribed)
+export function deleteRecordingLocal(id: string): void {
+  const recording = getRecordingById(id)
+  if (!recording) return
+
+  const newLocation = recording.on_device ? 'device-only' : 'deleted'
+  updateRecordingLifecycle(id, {
+    file_path: null,
+    on_local: 0,
+    location: newLocation as Recording['location']
+  })
 }
 
 export function insertRecording(recording: Omit<Recording, 'created_at'>): void {
@@ -503,6 +1104,32 @@ export function getTranscriptByRecordingId(recordingId: string): Transcript | un
   return queryOne<Transcript>('SELECT * FROM transcripts WHERE recording_id = ?', [recordingId])
 }
 
+/**
+ * Batch get transcripts by recording IDs - avoids N+1 query problem
+ */
+export function getTranscriptsByRecordingIds(recordingIds: string[]): Map<string, Transcript> {
+  if (recordingIds.length === 0) return new Map()
+
+  // SQLite has a limit on SQL query length, so batch in chunks of 100
+  const results = new Map<string, Transcript>()
+  const chunkSize = 100
+
+  for (let i = 0; i < recordingIds.length; i += chunkSize) {
+    const chunk = recordingIds.slice(i, i + chunkSize)
+    const placeholders = chunk.map(() => '?').join(',')
+    const transcripts = queryAll<Transcript>(
+      `SELECT * FROM transcripts WHERE recording_id IN (${placeholders})`,
+      chunk
+    )
+
+    for (const transcript of transcripts) {
+      results.set(transcript.recording_id, transcript)
+    }
+  }
+
+  return results
+}
+
 export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): void {
   run(
     `INSERT INTO transcripts (id, recording_id, full_text, language, summary, action_items,
@@ -526,11 +1153,24 @@ export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): vo
   )
 }
 
+/**
+ * Escape special LIKE pattern characters to prevent SQL injection via wildcards.
+ * In SQLite LIKE, % matches any sequence and _ matches any single character.
+ * We escape them with \ and specify ESCAPE '\' in the query.
+ */
+function escapeLikePattern(pattern: string): string {
+  return pattern
+    .replace(/\\/g, '\\\\')  // Escape backslash first
+    .replace(/%/g, '\\%')     // Escape percent
+    .replace(/_/g, '\\_')     // Escape underscore
+}
+
 // Full-text search (simple LIKE-based for sql.js)
 export function searchTranscripts(query: string): Transcript[] {
+  const escaped = escapeLikePattern(query)
   return queryAll<Transcript>(
-    `SELECT * FROM transcripts WHERE full_text LIKE ? OR summary LIKE ? OR topics LIKE ?`,
-    [`%${query}%`, `%${query}%`, `%${query}%`]
+    `SELECT * FROM transcripts WHERE full_text LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\' OR topics LIKE ? ESCAPE '\\'`,
+    [`%${escaped}%`, `%${escaped}%`, `%${escaped}%`]
   )
 }
 
@@ -674,6 +1314,80 @@ export function getSyncedFilenames(): Set<string> {
 }
 
 // =============================================================================
+// Device files cache queries - persist device file list for offline viewing
+// =============================================================================
+
+export interface DeviceCacheEntry {
+  id: string
+  filename: string
+  file_size?: number
+  duration_seconds?: number
+  date_recorded: string
+  cached_at: string
+}
+
+export function getDeviceFilesCache(): DeviceCacheEntry[] {
+  return queryAll<DeviceCacheEntry>('SELECT * FROM device_files_cache ORDER BY date_recorded DESC')
+}
+
+export function saveDeviceFilesCache(files: Array<{
+  filename: string
+  size?: number
+  file_size?: number
+  duration_seconds?: number
+  date_recorded: string
+}>): void {
+  // Clear existing cache
+  run('DELETE FROM device_files_cache')
+
+  // Insert new cache entries
+  for (const file of files) {
+    const id = `cache_${file.filename.replace(/[^a-zA-Z0-9]/g, '_')}`
+    // Accept both 'size' and 'file_size' for flexibility
+    const fileSize = file.size ?? file.file_size ?? null
+    run(
+      `INSERT OR REPLACE INTO device_files_cache (id, filename, file_size, duration_seconds, date_recorded)
+       VALUES (?, ?, ?, ?, ?)`,
+      [id, file.filename, fileSize, file.duration_seconds ?? null, file.date_recorded]
+    )
+  }
+}
+
+export function clearDeviceFilesCache(): void {
+  run('DELETE FROM device_files_cache')
+}
+
+/**
+ * Clear all meetings from the database atomically.
+ * Use this to force a complete re-sync from ICS source.
+ * Also clears recording→meeting links to prevent orphaned foreign keys.
+ */
+export function clearAllMeetings(): void {
+  runInTransaction(() => {
+    // Clear meeting-contact links (has ON DELETE CASCADE but explicit is safer)
+    runNoSave('DELETE FROM meeting_contacts')
+    // Clear recording-meeting candidates (has ON DELETE CASCADE)
+    runNoSave('DELETE FROM recording_meeting_candidates')
+    // Clear recording→meeting links to prevent orphaned FKs
+    // This preserves the recordings but removes their meeting association
+    runNoSave('UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL WHERE meeting_id IS NOT NULL')
+    // Finally clear meetings
+    runNoSave('DELETE FROM meetings')
+  })
+  console.log('[Database] Cleared all meetings and associated links')
+}
+
+/**
+ * Clear all cached data (meetings + device cache) to force fresh sync.
+ * Use when timezone or duration calculations have been fixed.
+ */
+export function clearAllCachedData(): void {
+  clearDeviceFilesCache()
+  clearAllMeetings()
+  console.log('[Database] Cleared all cached data (device files + meetings)')
+}
+
+// =============================================================================
 // Contact queries
 // =============================================================================
 
@@ -702,10 +1416,11 @@ export function getContacts(search?: string, limit = 100, offset = 0): { contact
   const params: unknown[] = []
 
   if (search) {
-    const searchClause = ' WHERE name LIKE ? OR email LIKE ?'
+    const escaped = escapeLikePattern(search)
+    const searchClause = " WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\'"
     countSql += searchClause
     sql += searchClause
-    params.push(`%${search}%`, `%${search}%`)
+    params.push(`%${escaped}%`, `%${escaped}%`)
   }
 
   sql += ' ORDER BY meeting_count DESC, last_seen_at DESC LIMIT ? OFFSET ?'
@@ -809,10 +1524,11 @@ export function getProjects(search?: string, limit = 100, offset = 0): { project
   const params: unknown[] = []
 
   if (search) {
-    const searchClause = ' WHERE name LIKE ? OR description LIKE ?'
+    const escaped = escapeLikePattern(search)
+    const searchClause = " WHERE name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'"
     countSql += searchClause
     sql += searchClause
-    params.push(`%${search}%`, `%${search}%`)
+    params.push(`%${escaped}%`, `%${escaped}%`)
   }
 
   sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
@@ -1084,4 +1800,107 @@ export function getRecordingWithMatchInfo(recordingId: string): RecordingWithMee
     has_conflicts: candidates.length > 1,
     conflict_count: candidates.length
   }
+}
+
+// =============================================================================
+// Recording-Meeting Linking Functions (UI Dialog Support)
+// =============================================================================
+
+export interface MeetingCandidateWithDetails {
+  id: string
+  recordingId: string
+  meetingId: string
+  subject: string
+  startTime: string
+  endTime: string
+  confidenceScore: number
+  matchReason: string | null
+  isAiSelected: boolean
+  isUserConfirmed: boolean
+}
+
+export function getCandidatesForRecordingWithDetails(recordingId: string): MeetingCandidateWithDetails[] {
+  if (!recordingId || typeof recordingId !== 'string') return []
+
+  const sql = `
+    SELECT c.id, c.recording_id, c.meeting_id, c.confidence_score, c.match_reason,
+      c.is_ai_selected, c.is_user_confirmed, m.subject, m.start_time, m.end_time
+    FROM recording_meeting_candidates c
+    JOIN meetings m ON m.id = c.meeting_id
+    WHERE c.recording_id = ?
+    ORDER BY c.confidence_score DESC LIMIT 20
+  `
+
+  try {
+    const rows = queryAll<{
+      id: string; recording_id: string; meeting_id: string; confidence_score: number
+      match_reason: string | null; is_ai_selected: number; is_user_confirmed: number
+      subject: string; start_time: string; end_time: string
+    }>(sql, [recordingId])
+
+    return rows.map(r => ({
+      id: r.id, recordingId: r.recording_id, meetingId: r.meeting_id,
+      subject: r.subject, startTime: r.start_time, endTime: r.end_time,
+      confidenceScore: r.confidence_score, matchReason: r.match_reason,
+      isAiSelected: r.is_ai_selected === 1, isUserConfirmed: r.is_user_confirmed === 1
+    }))
+  } catch (error) {
+    console.error('Failed to get candidates for recording:', error)
+    return []
+  }
+}
+
+export function getMeetingsNearDate(date: string): Meeting[] {
+  if (!date || typeof date !== 'string') return []
+  const targetDate = new Date(date)
+  if (isNaN(targetDate.getTime())) return []
+
+  const bufferMs = 12 * 60 * 60 * 1000
+  const startWindow = new Date(targetDate.getTime() - bufferMs)
+  const endWindow = new Date(targetDate.getTime() + bufferMs)
+
+  try {
+    return queryAll<Meeting>(
+      `SELECT * FROM meetings WHERE start_time >= ? AND start_time <= ?
+       ORDER BY ABS(JULIANDAY(start_time) - JULIANDAY(?)) LIMIT 20`,
+      [startWindow.toISOString(), endWindow.toISOString(), targetDate.toISOString()]
+    )
+  } catch (error) {
+    console.error('Failed to get meetings near date:', error)
+    return []
+  }
+}
+
+export function selectMeetingForRecordingByUser(recordingId: string, meetingId: string | null): void {
+  const db = getDatabase()
+  if (!recordingId || typeof recordingId !== 'string') throw new Error('Invalid recording ID')
+
+  try {
+    db.run('BEGIN TRANSACTION')
+    if (meetingId !== null && !getMeetingById(meetingId)) {
+      throw new Error(`Meeting ${meetingId} no longer exists`)
+    }
+    run('UPDATE recording_meeting_candidates SET is_selected = 0 WHERE recording_id = ?', [recordingId])
+
+    if (meetingId === null) {
+      run(`UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL,
+           correlation_method = 'user_standalone' WHERE id = ?`, [recordingId])
+    } else {
+      run(`UPDATE recording_meeting_candidates SET is_selected = 1, is_user_confirmed = 1
+           WHERE recording_id = ? AND meeting_id = ?`, [recordingId, meetingId])
+      linkRecordingToMeeting(recordingId, meetingId, 1.0, 'user_override')
+    }
+    db.run('COMMIT')
+    saveDatabase()
+  } catch (error) {
+    db.run('ROLLBACK')
+    throw error
+  }
+}
+
+export function resetStuckTranscriptions(): { recordingsReset: number; queueItemsReset: number } {
+  getDatabase().run("UPDATE recordings SET status = 'pending' WHERE status = 'transcribing'")
+  getDatabase().run("UPDATE transcription_queue SET status = 'pending' WHERE status = 'processing'")
+  console.log('[Database] Reset stuck transcriptions check complete')
+  return { recordingsReset: 0, queueItemsReset: 0 }
 }
