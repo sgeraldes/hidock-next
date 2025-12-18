@@ -381,104 +381,55 @@ export function Device() {
     setError(null)
 
     try {
-      // Filter out already synced files
-      const toSync = recordings.filter((rec) => !syncedFilenames.has(rec.filename))
-      if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Syncing ${toSync.length} files (${recordings.length - toSync.length} already synced)`)
+      // Use download service to determine which files need syncing (handles all reconciliation)
+      const filesToCheck = recordings.map(rec => ({
+        filename: rec.filename,
+        size: rec.size,
+        duration: rec.duration,
+        dateCreated: rec.dateCreated
+      }))
+
+      const filesWithStatus = await window.electronAPI.downloadService.getFilesToSync(filesToCheck)
+      const toSync = filesWithStatus.filter(f => !f.skipReason)
+
+      if (DEBUG_DEVICE_UI) {
+        console.log(`[Device.tsx] handleSyncAll: ${toSync.length} need sync, ${filesWithStatus.length - toSync.length} already synced`)
+        // Log skip reasons for debugging
+        for (const f of filesWithStatus.filter(f => f.skipReason)) {
+          console.log(`  Skipping ${f.filename}: ${f.skipReason}`)
+        }
+      }
 
       if (toSync.length === 0) {
-        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] All files already synced')
         toast({
           title: 'All synced',
           description: 'All recordings are already downloaded',
           variant: 'success'
         })
+        setSyncing(false)
         return
       }
 
-      // Update global store for sidebar indicator
-      setDeviceSyncState({
-        deviceSyncing: true,
-        deviceSyncProgress: { current: 0, total: toSync.length },
-        deviceFileProgress: 0
-      })
+      // Queue files to download service - DownloadController will handle actual downloads
+      const queuedIds = await window.electronAPI.downloadService.queueDownloads(
+        toSync.map(f => ({ filename: f.filename, size: f.size }))
+      )
 
-      // Show start toast
-      toast({
-        title: 'Sync started',
-        description: `Downloading ${toSync.length} recording${toSync.length !== 1 ? 's' : ''}...`,
-        variant: 'default'
-      })
-
-      let syncedCount = 0
-      let failedCount = 0
-
-      for (const recording of toSync) {
-        // Check connection before each download in case device was disconnected
-        if (!deviceService.isConnected()) {
-          setError('Device disconnected during sync.')
-          toast({
-            title: 'Sync interrupted',
-            description: 'Device disconnected during sync',
-            variant: 'error'
-          })
-          break
-        }
-        setDownloading(recording.id)
-
-        // Update global store with current file being downloaded
-        setDeviceSyncState({
-          deviceFileDownloading: recording.filename,
-          deviceSyncProgress: { current: syncedCount + failedCount, total: toSync.length },
-          deviceFileProgress: 0
-        })
-
-        try {
-          const downloadSuccess = await deviceService.downloadRecordingToFile(
-            recording.filename,
-            recording.size,
-            '' // Will be determined by storage service
-          )
-
-          // CRITICAL: Check return value - downloadRecordingToFile returns false on failure, doesn't throw
-          if (downloadSuccess) {
-            // Update synced filenames after successful download
-            setSyncedFilenames((prev) => new Set([...prev, recording.filename]))
-            syncedCount++
-          } else {
-            console.error(`[Device.tsx] handleSyncAll: Download failed for ${recording.filename} (returned false)`)
-            toast({
-              title: 'Download failed',
-              description: `Failed to download ${recording.filename}`,
-              variant: 'error'
-            })
-            failedCount++
-          }
-        } catch (downloadError) {
-          console.error(`[Device.tsx] handleSyncAll: Exception downloading ${recording.filename}:`, downloadError)
-          toast({
-            title: 'Download error',
-            description: `Error downloading ${recording.filename}: ${downloadError instanceof Error ? downloadError.message : 'Unknown error'}`,
-            variant: 'error'
-          })
-          failedCount++
-          // Continue with next file instead of stopping
-        }
-      }
-
-      // Show completion toast
-      if (failedCount === 0) {
+      if (queuedIds.length > 0) {
         toast({
-          title: 'Sync complete',
-          description: `Successfully downloaded ${syncedCount} recording${syncedCount !== 1 ? 's' : ''}`,
-          variant: 'success'
+          title: 'Sync started',
+          description: `Queued ${queuedIds.length} recording${queuedIds.length !== 1 ? 's' : ''} for download`,
+          variant: 'default'
         })
       } else {
         toast({
-          title: 'Sync completed with errors',
-          description: `Downloaded ${syncedCount}, failed ${failedCount}`,
-          variant: 'warning'
+          title: 'Nothing to sync',
+          description: 'All files are already queued or downloaded',
+          variant: 'default'
         })
+        setSyncing(false)
       }
+      // Note: setSyncing(false) is NOT called here for queued files - the DownloadController will manage sync state
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Sync failed')
       toast({
@@ -486,127 +437,52 @@ export function Device() {
         description: e instanceof Error ? e.message : 'Unknown error',
         variant: 'error'
       })
-    } finally {
       setSyncing(false)
-      setDownloading(null)
-      setDownloadProgress(null)
-      // Clear global sync state
-      clearDeviceSyncState()
     }
   }
 
   // Trigger auto-sync after connection (used by connection handler)
-  const triggerAutoSync = useCallback(async (recs: HiDockRecording[], syncedSet: Set<string>) => {
+  // Now uses centralized download service - just queues files, DownloadController handles the actual downloads
+  const triggerAutoSync = useCallback(async (recs: HiDockRecording[], _syncedSet: Set<string>) => {
     // Validate connection before starting
     if (!deviceService.isConnected()) {
       console.log('[Device.tsx] triggerAutoSync: Device not connected, skipping')
       return
     }
 
-    const toSync = recs.filter((rec) => !syncedSet.has(rec.filename))
+    // Use download service to determine which files need syncing (handles all reconciliation)
+    const filesToCheck = recs.map(rec => ({
+      filename: rec.filename,
+      size: rec.size,
+      duration: rec.duration,
+      dateCreated: rec.dateCreated
+    }))
+
+    const filesWithStatus = await window.electronAPI.downloadService.getFilesToSync(filesToCheck)
+    const toSync = filesWithStatus.filter(f => !f.skipReason)
+
     if (toSync.length === 0) {
       console.log('[Device.tsx] triggerAutoSync: All files already synced')
+      // Update local state from service
+      const stats = await window.electronAPI.downloadService.getStats()
+      console.log(`[Device.tsx] Download service stats: ${stats.totalSynced} synced, ${stats.pendingInQueue} pending`)
       return
     }
 
-    console.log(`[Device.tsx] triggerAutoSync: Starting auto-sync of ${toSync.length} files`)
+    console.log(`[Device.tsx] triggerAutoSync: Queueing ${toSync.length} files for download`)
     setSyncing(true)
-    setError(null)
 
     try {
-      // Update global store for sidebar indicator
-      setDeviceSyncState({
-        deviceSyncing: true,
-        deviceSyncProgress: { current: 0, total: toSync.length },
-        deviceFileProgress: 0
-      })
+      // Queue files to download service - DownloadController will handle actual downloads
+      const queuedIds = await window.electronAPI.downloadService.queueDownloads(
+        toSync.map(f => ({ filename: f.filename, size: f.size }))
+      )
 
-      // Show start toast
-      toast({
-        title: 'Auto-sync started',
-        description: `Downloading ${toSync.length} recording${toSync.length !== 1 ? 's' : ''}...`,
-        variant: 'default'
-      })
-
-      let syncedCount = 0
-      let failedCount = 0
-
-      for (const recording of toSync) {
-        // Check connection before each download
-        if (!deviceService.isConnected()) {
-          console.log('[Device.tsx] triggerAutoSync: Device disconnected during sync')
-          toast({
-            title: 'Sync interrupted',
-            description: 'Device disconnected during sync',
-            variant: 'error'
-          })
-          break
-        }
-        setDownloading(recording.id)
-
-        // Update global store with current file being downloaded
-        setDeviceSyncState({
-          deviceFileDownloading: recording.filename,
-          deviceSyncProgress: { current: syncedCount + failedCount, total: toSync.length },
-          deviceFileProgress: 0
-        })
-
-        // Add to global download queue so it shows in Recordings page too
-        addToDownloadQueue(recording.id, recording.filename, recording.size)
-
-        try {
-          const downloadSuccess = await deviceService.downloadRecordingToFile(
-            recording.filename,
-            recording.size,
-            '',
-            // Progress callback to update global queue
-            (received) => {
-              const percent = Math.round((received / recording.size) * 100)
-              updateDownloadProgress(recording.id, percent)
-            }
-          )
-
-          // CRITICAL: Check return value - downloadRecordingToFile returns false on failure, doesn't throw
-          if (downloadSuccess) {
-            // Update synced filenames after successful download
-            setSyncedFilenames((prev) => new Set([...prev, recording.filename]))
-            syncedCount++
-          } else {
-            console.error(`[Device.tsx] triggerAutoSync: Download failed for ${recording.filename} (returned false)`)
-            toast({
-              title: 'Download failed',
-              description: `Failed to download ${recording.filename}`,
-              variant: 'error'
-            })
-            failedCount++
-          }
-        } catch (downloadError) {
-          console.error(`[Device.tsx] triggerAutoSync: Exception downloading ${recording.filename}:`, downloadError)
-          toast({
-            title: 'Download error',
-            description: `Error downloading ${recording.filename}: ${downloadError instanceof Error ? downloadError.message : 'Unknown error'}`,
-            variant: 'error'
-          })
-          failedCount++
-          // Continue with next file instead of stopping
-        } finally {
-          // Remove from global download queue
-          removeFromDownloadQueue(recording.id)
-        }
-      }
-
-      // Show completion toast
-      if (failedCount === 0 && syncedCount > 0) {
+      if (queuedIds.length > 0) {
         toast({
-          title: 'Auto-sync complete',
-          description: `Successfully downloaded ${syncedCount} recording${syncedCount !== 1 ? 's' : ''}`,
-          variant: 'success'
-        })
-      } else if (failedCount > 0) {
-        toast({
-          title: 'Auto-sync completed with errors',
-          description: `Downloaded ${syncedCount}, failed ${failedCount}`,
-          variant: 'warning'
+          title: 'Auto-sync started',
+          description: `Queued ${queuedIds.length} recording${queuedIds.length !== 1 ? 's' : ''} for download`,
+          variant: 'default'
         })
       }
     } catch (e) {
@@ -616,14 +492,10 @@ export function Device() {
         description: e instanceof Error ? e.message : 'Unknown error',
         variant: 'error'
       })
-    } finally {
       setSyncing(false)
-      setDownloading(null)
-      setDownloadProgress(null)
-      // Clear global sync state
-      clearDeviceSyncState()
     }
-  }, [deviceService, setDeviceSyncState, clearDeviceSyncState])
+    // Note: setSyncing(false) is NOT called here - the DownloadController will manage sync state
+  }, [deviceService])
 
   const handleAutoRecordToggle = async (enabled: boolean) => {
     try {
