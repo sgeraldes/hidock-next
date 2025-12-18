@@ -30,7 +30,7 @@ interface LayoutProps {
 }
 
 const navigation = [
-  { name: 'Recordings', href: '/calendar', icon: Mic },
+  { name: 'Recordings', href: '/recordings', icon: Mic },
   { name: 'Chat', href: '/chat', icon: MessageSquare },
   { name: 'Search', href: '/search', icon: Search },
   { name: 'Device', href: '/device', icon: Usb },
