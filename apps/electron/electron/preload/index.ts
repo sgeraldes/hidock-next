@@ -46,6 +46,7 @@ export interface ElectronAPI {
   meetings: {
     getAll: (startDate?: string, endDate?: string) => Promise<any[]>
     getById: (id: string) => Promise<any>
+    getByIds: (ids: string[]) => Promise<Record<string, any>>
     getDetails: (id: string) => Promise<any>
   }
 
@@ -76,11 +77,24 @@ export interface ElectronAPI {
     getForMeeting: (meetingId: string) => Promise<any[]>
     updateStatus: (id: string, status: string) => Promise<any>
     linkToMeeting: (recordingId: string, meetingId: string, confidence: number, method: string) => Promise<any>
+    delete: (id: string) => Promise<boolean>
+    // Recording-Meeting linking dialog methods
+    getCandidates: (recordingId: string) => Promise<{ success: boolean; data: any[]; error?: string }>
+    getMeetingsNearDate: (date: string) => Promise<{ success: boolean; data: any[]; error?: string }>
+    selectMeeting: (recordingId: string, meetingId: string | null) => Promise<{ success: boolean; error?: string }>
+    // External file import
+    addExternal: () => Promise<{ success: boolean; recording?: any; error?: string }>
+    // Transcription
+    transcribe: (recordingId: string) => Promise<void>
+    addToQueue: (recordingId: string) => Promise<boolean>
+    processQueue: () => Promise<boolean>
+    getTranscriptionStatus: () => Promise<{ isProcessing: boolean; pendingCount: number; processingCount: number }>
   }
 
   // Database - Transcripts
   transcripts: {
     getByRecordingId: (recordingId: string) => Promise<any>
+    getByRecordingIds: (recordingIds: string[]) => Promise<Record<string, any>>
     search: (query: string) => Promise<any[]>
   }
 
@@ -99,6 +113,7 @@ export interface ElectronAPI {
   // Calendar
   calendar: {
     sync: () => Promise<any>
+    clearAndSync: () => Promise<any>
     getLastSync: () => Promise<string | null>
     setUrl: (url: string) => Promise<any>
     toggleAutoSync: (enabled: boolean) => Promise<any>
@@ -193,6 +208,46 @@ export interface ElectronAPI {
       embeddingDimensions: number
     }>>
   }
+
+  // Download Service - Centralized background download manager
+  downloadService: {
+    getState: () => Promise<{
+      queue: Array<{
+        id: string
+        filename: string
+        fileSize: number
+        progress: number
+        status: 'pending' | 'downloading' | 'completed' | 'failed'
+        error?: string
+      }>
+      session: {
+        id: string
+        totalFiles: number
+        completedFiles: number
+        failedFiles: number
+        status: 'active' | 'completed' | 'cancelled' | 'failed'
+      } | null
+      isProcessing: boolean
+      isPaused: boolean
+    }>
+    isFileSynced: (filename: string) => Promise<{ synced: boolean; reason: string }>
+    getFilesToSync: (files: Array<{ filename: string; size: number; duration: number; dateCreated: Date }>) => Promise<Array<{ filename: string; size: number; duration: number; dateCreated: Date; skipReason?: string }>>
+    queueDownloads: (files: Array<{ filename: string; size: number }>) => Promise<string[]>
+    startSession: (files: Array<{ filename: string; size: number }>) => Promise<{
+      id: string
+      totalFiles: number
+      completedFiles: number
+      failedFiles: number
+      status: 'active' | 'completed' | 'cancelled' | 'failed'
+    }>
+    processDownload: (filename: string, data: number[]) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    updateProgress: (filename: string, bytesReceived: number) => Promise<void>
+    markFailed: (filename: string, error: string) => Promise<void>
+    clearCompleted: () => Promise<void>
+    cancelAll: () => Promise<void>
+    getStats: () => Promise<{ totalSynced: number; pendingInQueue: number; failedInQueue: number }>
+    onStateUpdate: (callback: (state: any) => void) => () => void
+  }
 }
 
 // Expose the API to the renderer process
@@ -212,6 +267,7 @@ const electronAPI: ElectronAPI = {
   meetings: {
     getAll: (startDate, endDate) => ipcRenderer.invoke('db:get-meetings', startDate, endDate),
     getById: (id) => ipcRenderer.invoke('db:get-meeting', id),
+    getByIds: (ids) => ipcRenderer.invoke('db:get-meetings-by-ids', ids),
     getDetails: (id) => ipcRenderer.invoke('db:get-meeting-details', id)
   },
 
@@ -239,11 +295,24 @@ const electronAPI: ElectronAPI = {
     getForMeeting: (meetingId) => ipcRenderer.invoke('db:get-recordings-for-meeting', meetingId),
     updateStatus: (id, status) => ipcRenderer.invoke('db:update-recording-status', id, status),
     linkToMeeting: (recordingId, meetingId, confidence, method) =>
-      ipcRenderer.invoke('db:link-recording-to-meeting', recordingId, meetingId, confidence, method)
+      ipcRenderer.invoke('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
+    delete: (id) => ipcRenderer.invoke('recordings:delete', id),
+    // Recording-Meeting linking dialog methods
+    getCandidates: (recordingId) => ipcRenderer.invoke('recordings:getCandidates', recordingId),
+    getMeetingsNearDate: (date) => ipcRenderer.invoke('recordings:getMeetingsNearDate', date),
+    selectMeeting: (recordingId, meetingId) => ipcRenderer.invoke('recordings:selectMeeting', recordingId, meetingId),
+    // External file import
+    addExternal: () => ipcRenderer.invoke('recordings:addExternal'),
+    // Transcription
+    transcribe: (recordingId) => ipcRenderer.invoke('recordings:transcribe', recordingId),
+    addToQueue: (recordingId) => ipcRenderer.invoke('recordings:addToQueue', recordingId),
+    processQueue: () => ipcRenderer.invoke('recordings:processQueue'),
+    getTranscriptionStatus: () => ipcRenderer.invoke('recordings:getTranscriptionStatus')
   },
 
   transcripts: {
     getByRecordingId: (recordingId) => ipcRenderer.invoke('db:get-transcript', recordingId),
+    getByRecordingIds: (recordingIds) => ipcRenderer.invoke('db:get-transcripts-by-recording-ids', recordingIds),
     search: (query) => ipcRenderer.invoke('db:search-transcripts', query)
   },
 
@@ -259,6 +328,7 @@ const electronAPI: ElectronAPI = {
 
   calendar: {
     sync: () => ipcRenderer.invoke('calendar:sync'),
+    clearAndSync: () => ipcRenderer.invoke('calendar:clear-and-sync'),
     getLastSync: () => ipcRenderer.invoke('calendar:get-last-sync'),
     setUrl: (url) => ipcRenderer.invoke('calendar:set-url', url),
     toggleAutoSync: (enabled) => ipcRenderer.invoke('calendar:toggle-auto-sync', enabled),
@@ -284,6 +354,13 @@ const electronAPI: ElectronAPI = {
     getFilenames: () => ipcRenderer.invoke('db:get-synced-filenames')
   },
 
+  deviceCache: {
+    getAll: () => ipcRenderer.invoke('deviceCache:getAll'),
+    saveAll: (files) => ipcRenderer.invoke('deviceCache:saveAll', files),
+    clear: () => ipcRenderer.invoke('deviceCache:clear')
+  },
+
+
   outputs: {
     getTemplates: () => ipcRenderer.invoke('outputs:getTemplates'),
     generate: (request) => ipcRenderer.invoke('outputs:generate', request),
@@ -304,6 +381,28 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.invoke('rag:index-transcript', { transcript, metadata }),
     search: (query, limit) => ipcRenderer.invoke('rag:search', { query, limit }),
     getChunks: () => ipcRenderer.invoke('rag:get-chunks')
+  },
+
+  downloadService: {
+    getState: () => ipcRenderer.invoke('download-service:get-state'),
+    isFileSynced: (filename) => ipcRenderer.invoke('download-service:is-file-synced', filename),
+    getFilesToSync: (files) => ipcRenderer.invoke('download-service:get-files-to-sync', files),
+    queueDownloads: (files) => ipcRenderer.invoke('download-service:queue-downloads', files),
+    startSession: (files) => ipcRenderer.invoke('download-service:start-session', files),
+    processDownload: (filename, data) => ipcRenderer.invoke('download-service:process-download', filename, data),
+    updateProgress: (filename, bytesReceived) => ipcRenderer.invoke('download-service:update-progress', filename, bytesReceived),
+    markFailed: (filename, error) => ipcRenderer.invoke('download-service:mark-failed', filename, error),
+    clearCompleted: () => ipcRenderer.invoke('download-service:clear-completed'),
+    cancelAll: () => ipcRenderer.invoke('download-service:cancel-all'),
+    getStats: () => ipcRenderer.invoke('download-service:get-stats'),
+    onStateUpdate: (callback) => {
+      const handler = (_event: any, state: any) => callback(state)
+      ipcRenderer.on('download-service:state-update', handler)
+      // Return unsubscribe function
+      return () => {
+        ipcRenderer.removeListener('download-service:state-update', handler)
+      }
+    }
   }
 }
 

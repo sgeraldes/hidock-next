@@ -8,6 +8,7 @@ import { registerAppHandlers } from './app-handlers'
 import { registerContactsHandlers } from './contacts-handlers'
 import { registerProjectsHandlers } from './projects-handlers'
 import { registerOutputsHandlers } from './outputs-handlers'
+import { registerDownloadServiceHandlers } from '../services/download-service'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -21,6 +22,9 @@ export function registerIpcHandlers(): void {
   registerContactsHandlers()
   registerProjectsHandlers()
   registerOutputsHandlers()
+
+  // Register centralized service handlers
+  registerDownloadServiceHandlers()
 
   console.log('All IPC handlers registered')
 }
