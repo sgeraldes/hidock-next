@@ -15,6 +15,12 @@ export const useUIStore = create<UIStore>((set) => ({
   isGeneratingOutput: false,
   outputContent: null,
 
+  // Playback state (managed by OperationController)
+  currentlyPlayingId: null,
+  currentlyPlayingPath: null,
+  playbackCurrentTime: 0,
+  playbackDuration: 0,
+
   // Actions
   toggleSidebar: () => {
     set((state) => ({ sidebarOpen: !state.sidebarOpen }))
@@ -42,35 +48,23 @@ export const useUIStore = create<UIStore>((set) => ({
 
   clearOutput: () => {
     set({ outputContent: null, isGeneratingOutput: false })
+  },
+
+  // Playback actions (called by OperationController)
+  setCurrentlyPlaying: (recordingId: string | null, filePath: string | null) => {
+    set({ currentlyPlayingId: recordingId, currentlyPlayingPath: filePath })
+  },
+
+  setPlaybackProgress: (currentTime: number, duration: number) => {
+    set({ playbackCurrentTime: currentTime, playbackDuration: duration })
   }
 }))
 
-// Convenience hook for sidebar state
-export const useSidebar = () => {
-  return useUIStore((state) => ({
-    isOpen: state.sidebarOpen,
-    content: state.sidebarContent,
-    toggle: state.toggleSidebar,
-    setContent: state.setSidebarContent,
-    setOpen: state.setSidebarOpen
-  }))
-}
-
-// Convenience hook for meeting selection
-export const useSelectedMeeting = () => {
-  return useUIStore((state) => ({
-    meetingId: state.selectedMeetingId,
-    select: state.selectMeeting
-  }))
-}
-
-// Convenience hook for output generation
-export const useOutputGeneration = () => {
-  return useUIStore((state) => ({
-    isGenerating: state.isGeneratingOutput,
-    content: state.outputContent,
-    setGenerating: state.setGeneratingOutput,
-    setContent: state.setOutputContent,
-    clear: state.clearOutput
-  }))
-}
+// Note: When selecting multiple values from the store, use individual selectors
+// in your component to avoid infinite re-render issues. For example:
+//   const isGenerating = useUIStore((state) => state.isGeneratingOutput)
+//   const content = useUIStore((state) => state.outputContent)
+//
+// Combining selectors into objects can cause infinite loops because a new object
+// is created on each render. Use `useShallow` from 'zustand/react/shallow' if you
+// need to select multiple values at once.

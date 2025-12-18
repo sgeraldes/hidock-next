@@ -23,7 +23,7 @@ import { useAppStore } from '@/store/useAppStore'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
 import { getHiDockDeviceService, HiDockDeviceState, ConnectionStatus } from '@/services/hidock-device'
-import { DownloadController } from '@/components/DownloadController'
+import { OperationController } from '@/components/OperationController'
 
 interface LayoutProps {
   children: ReactNode
@@ -191,8 +191,8 @@ export function Layout({ children }: LayoutProps) {
 
   return (
     <div className="flex h-screen bg-background">
-      {/* Background download controller - never unmounts, handles all downloads */}
-      <DownloadController />
+      {/* Background operations controller - never unmounts, handles ALL operations */}
+      <OperationController />
 
       {/* Dark Sidebar */}
       <aside

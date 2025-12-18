@@ -115,6 +115,14 @@ export interface FilterStore {
 
 export type SidebarContent = 'calendar' | 'contact' | 'project' | 'chat' | 'none'
 
+export interface PlaybackState {
+  recordingId: string | null
+  filePath: string | null
+  isPlaying: boolean
+  currentTime: number
+  duration: number
+}
+
 export interface UIStore {
   // State
   sidebarOpen: boolean
@@ -122,6 +130,12 @@ export interface UIStore {
   selectedMeetingId: string | null
   isGeneratingOutput: boolean
   outputContent: string | null
+
+  // Playback state (managed by OperationController)
+  currentlyPlayingId: string | null
+  currentlyPlayingPath: string | null
+  playbackCurrentTime: number
+  playbackDuration: number
 
   // Actions
   toggleSidebar: () => void
@@ -131,6 +145,10 @@ export interface UIStore {
   setGeneratingOutput: (generating: boolean) => void
   setOutputContent: (content: string | null) => void
   clearOutput: () => void
+
+  // Playback actions
+  setCurrentlyPlaying: (recordingId: string | null, filePath: string | null) => void
+  setPlaybackProgress: (currentTime: number, duration: number) => void
 }
 
 // =============================================================================
@@ -280,5 +298,11 @@ export interface AppConfig {
     theme: 'light' | 'dark' | 'system'
     defaultView: 'week' | 'month'
     startOfWeek: number
+    calendarView: 'day' | 'workweek' | 'week' | 'month'
+    hideEmptyMeetings: boolean
+    showListView: boolean
+    officeHoursStart: number
+    officeHoursEnd: number
+    workDays: number[]
   }
 }
