@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Usb, Download, RefreshCw, HardDrive, Mic, Trash2, AlertCircle, Radio, Battery, Bluetooth, Play, Pause, Square, X, Terminal, ChevronDown, ChevronUp, Check } from 'lucide-react'
+import { flushSync } from 'react-dom'
+import { Usb, Download, RefreshCw, HardDrive, Mic, AlertCircle, Radio, Battery, Bluetooth, Play, Pause, Square, X, Terminal, ChevronDown, ChevronUp, Check, Copy } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
@@ -13,13 +14,18 @@ import {
   BatteryStatus,
   ActivityLogEntry
 } from '@/services/hidock-device'
-import { formatDuration } from '@/lib/utils'
 import { Progress } from '@/components/ui/progress'
+import { toast } from '@/components/ui/toaster'
+import { useAppStore } from '@/store/useAppStore'
 
 const CONNECTION_TIMEOUT_MS = 15000 // 15 second timeout
 const MAX_LOG_ENTRIES = 100 // Maximum activity log entries to keep
+const DEBUG_DEVICE_UI = false // Enable verbose UI logging
 
 export function Device() {
+  // Global store for sync state (shown in sidebar)
+  const { setDeviceSyncState, clearDeviceSyncState, addToDownloadQueue, updateDownloadProgress, removeFromDownloadQueue } = useAppStore()
+
   // Initialize state directly from service to avoid flash of wrong state
   const deviceService = getHiDockDeviceService()
   const [deviceState, setDeviceState] = useState<HiDockDeviceState>(() => deviceService.getState())
@@ -61,6 +67,10 @@ export function Device() {
   // Auto-connect configuration state
   const [autoConnectConfig, setAutoConnectConfig] = useState(() => deviceService.getAutoConnectConfig())
 
+  // Auto-download and auto-transcribe configuration state
+  const [autoDownload, setAutoDownload] = useState(true)
+  const [autoTranscribe, setAutoTranscribe] = useState(true)
+
   // Activity log state - initialize from service for persistence across page navigation
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>(() => deviceService.getActivityLog())
   const [logExpanded, setLogExpanded] = useState(true)
@@ -90,6 +100,9 @@ export function Device() {
 
   // Set up listeners
   useEffect(() => {
+    // Mounted flag to prevent state updates after unmount
+    let mounted = true
+
     // Sync connection status from service (deviceState is already initialized via useState)
     setConnectionStatus(deviceService.getConnectionStatus())
 
@@ -97,58 +110,129 @@ export function Device() {
     const loadSyncedFilenames = async () => {
       try {
         const filenames = await window.electronAPI.syncedFiles.getFilenames()
-        setSyncedFilenames(new Set(filenames))
-        console.log(`[Device.tsx] Loaded ${filenames.length} synced filenames`)
+        if (mounted) {
+          setSyncedFilenames(new Set(filenames))
+          if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Loaded ${filenames.length} synced filenames`)
+        }
       } catch (e) {
         console.error('[Device.tsx] Failed to load synced filenames:', e)
       }
     }
     loadSyncedFilenames()
 
+    // Load auto-download and auto-transcribe settings from config
+    const loadConfigSettings = async () => {
+      try {
+        const config = await window.electronAPI.config.get()
+        if (mounted) {
+          if (config?.device?.autoDownload !== undefined) {
+            setAutoDownload(config.device.autoDownload)
+          }
+          if (config?.transcription?.autoTranscribe !== undefined) {
+            setAutoTranscribe(config.transcription.autoTranscribe)
+          }
+        }
+      } catch (e) {
+        console.error('[Device.tsx] Failed to load config settings:', e)
+      }
+    }
+    loadConfigSettings()
+
     // Load additional data if already connected
     const loadInitialData = async () => {
-      console.log('[Device.tsx] loadInitialData called, isConnected:', deviceService.isConnected())
+      if (DEBUG_DEVICE_UI) console.log('[Device.tsx] loadInitialData called, isConnected:', deviceService.isConnected())
       if (deviceService.isConnected()) {
-        console.log('[Device.tsx] Device already connected, loading recordings...')
+        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device already connected, loading recordings...')
         try {
           const recs = await deviceService.listRecordings()
-          console.log(`[Device.tsx] loadInitialData got ${recs.length} recordings`)
-          setRecordings(recs)
-          if (deviceService.isP1Device()) {
-            console.log('[Device.tsx] P1 device detected, loading battery status...')
+          if (mounted) {
+            if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] loadInitialData got ${recs.length} recordings`)
+            setRecordings(recs)
+          }
+          if (mounted && deviceService.isP1Device()) {
+            if (DEBUG_DEVICE_UI) console.log('[Device.tsx] P1 device detected, loading battery status...')
             const status = await deviceService.getBatteryStatus()
-            setBatteryStatus(status)
+            if (mounted) {
+              setBatteryStatus(status)
+            }
           }
         } catch (e) {
           console.error('[Device.tsx] Failed to load initial data:', e)
         }
       } else {
-        console.log('[Device.tsx] Device not connected, skipping initial data load')
+        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device not connected, skipping initial data load')
       }
     }
     loadInitialData()
 
     // Subscribe to state changes for real-time UI updates
     const unsubscribeState = deviceService.onStateChange((state) => {
-      setDeviceState(state)
+      if (mounted) setDeviceState(state)
     })
 
     // Subscribe to connection changes
-    const unsubscribe = deviceService.onConnectionChange((connected) => {
-      console.log('[Device.tsx] Connection change:', connected)
+    const unsubscribe = deviceService.onConnectionChange(async (connected) => {
+      if (!mounted) return
+      if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Connection change:', connected)
       setConnecting(false)
       clearConnectionTimers() // Clear timers on connection change
       if (connected) {
-        console.log('[Device.tsx] Device connected, loading recordings...')
+        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device connected, loading recordings...')
         setError(null) // Clear any previous errors
-        loadRecordings()
+
+        // Load recordings and then trigger auto-download if enabled
+        setLoadingRecordings(true)
+        setLoadingProgress(null)
+        try {
+          const recs = await deviceService.listRecordings((filesLoaded, expectedFiles) => {
+            setLoadingProgress({ filesLoaded, expectedFiles })
+          })
+          if (mounted) {
+            if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Received ${recs.length} recordings`)
+            setRecordings(recs)
+
+            // Auto-download if enabled - check config directly since state might not be updated yet
+            const config = await window.electronAPI.config.get()
+            const shouldAutoDownload = config?.device?.autoDownload ?? true
+            if (shouldAutoDownload && recs.length > 0) {
+              // Get synced filenames to filter
+              const syncedFiles = await window.electronAPI.syncedFiles.getFilenames()
+              const syncedSet = new Set(syncedFiles)
+              const toSync = recs.filter((rec) => !syncedSet.has(rec.filename))
+
+              if (toSync.length > 0) {
+                if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Auto-download: Starting sync of ${toSync.length} files`)
+                // Delay slightly to let UI settle
+                setTimeout(() => {
+                  // Trigger sync by setting recordings and calling handleSyncAll equivalent
+                  if (mounted && deviceService.isConnected()) {
+                    // Set state and trigger sync
+                    setSyncedFilenames(syncedSet)
+                    // We need to trigger the sync - use a flag or call a function
+                    triggerAutoSync(recs, syncedSet)
+                  }
+                }, 500)
+              } else {
+                if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Auto-download: All files already synced')
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[Device.tsx] Failed to load recordings:', e)
+        } finally {
+          if (mounted) {
+            setLoadingRecordings(false)
+            setLoadingProgress(null)
+          }
+        }
+
         // Load P1-specific data
         if (deviceService.isP1Device()) {
-          console.log('[Device.tsx] P1 device, loading battery status...')
+          if (DEBUG_DEVICE_UI) console.log('[Device.tsx] P1 device, loading battery status...')
           loadBatteryStatus()
         }
       } else {
-        console.log('[Device.tsx] Device disconnected, clearing state...')
+        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device disconnected, clearing state...')
         setRecordings([])
         setBatteryStatus(null)
         // Clean up realtime streaming
@@ -162,10 +246,15 @@ export function Device() {
     })
 
     const unsubscribeProgress = deviceService.onDownloadProgress((progress) => {
-      setDownloadProgress(progress)
+      if (mounted) {
+        setDownloadProgress(progress)
+        // Update global store for sidebar indicator
+        setDeviceSyncState({ deviceFileProgress: progress.percent })
+      }
     })
 
     const unsubscribeStatus = deviceService.onStatusChange((status) => {
+      if (!mounted) return
       setConnectionStatus(status)
       // Update connecting state based on status step
       const isConnecting = !['idle', 'ready', 'error'].includes(status.step)
@@ -180,28 +269,30 @@ export function Device() {
 
     // Subscribe to activity log
     const unsubscribeActivity = deviceService.onActivity((entry) => {
-      setActivityLog((prev) => {
-        const newLog = [...prev, entry]
-        // Keep only the last MAX_LOG_ENTRIES
-        if (newLog.length > MAX_LOG_ENTRIES) {
-          return newLog.slice(-MAX_LOG_ENTRIES)
-        }
-        return newLog
-      })
-      // Auto-scroll to bottom
-      if (logContainerRef.current) {
-        setTimeout(() => {
-          if (logContainerRef.current) {
-            logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
+      if (!mounted) return
+      // Use flushSync to force immediate state update (bypass React batching)
+      flushSync(() => {
+        setActivityLog((prev) => {
+          const newLog = [...prev, entry]
+          if (newLog.length > MAX_LOG_ENTRIES) {
+            return newLog.slice(-MAX_LOG_ENTRIES)
           }
-        }, 10)
-      }
+          return newLog
+        })
+      })
+      // Auto-scroll to bottom after state update
+      requestAnimationFrame(() => {
+        if (logContainerRef.current) {
+          logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
+        }
+      })
     })
 
     // NOTE: We do NOT start auto-connect here. Auto-connect is managed at the app level.
     // Starting it here would reset user's disconnect decision when navigating pages.
 
     return () => {
+      mounted = false  // Mark as unmounted to prevent state updates
       unsubscribeState()
       unsubscribe()
       unsubscribeProgress()
@@ -216,16 +307,15 @@ export function Device() {
   }, [clearConnectionTimers])
 
   const loadRecordings = useCallback(async (forceRefresh: boolean = false) => {
-    console.log('[Device.tsx] loadRecordings called, forceRefresh:', forceRefresh)
+    if (DEBUG_DEVICE_UI) console.log('[Device.tsx] loadRecordings called, forceRefresh:', forceRefresh)
     setLoadingRecordings(true)
     setLoadingProgress(null)
     try {
-      console.log('[Device.tsx] Calling deviceService.listRecordings...')
       const recs = await deviceService.listRecordings((filesLoaded, expectedFiles) => {
-        console.log(`[Device.tsx] Loading progress: ${filesLoaded}/${expectedFiles} files`)
+        // No need to log every progress update - this creates too much noise
         setLoadingProgress({ filesLoaded, expectedFiles })
       }, forceRefresh)
-      console.log(`[Device.tsx] Received ${recs.length} recordings:`, recs)
+      if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Received ${recs.length} recordings`)
       setRecordings(recs)
     } catch (e) {
       console.error('[Device.tsx] Failed to load recordings:', e)
@@ -293,76 +383,247 @@ export function Device() {
     try {
       // Filter out already synced files
       const toSync = recordings.filter((rec) => !syncedFilenames.has(rec.filename))
-      console.log(`[Device.tsx] Syncing ${toSync.length} files (${recordings.length - toSync.length} already synced)`)
+      if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Syncing ${toSync.length} files (${recordings.length - toSync.length} already synced)`)
 
       if (toSync.length === 0) {
-        console.log('[Device.tsx] All files already synced')
+        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] All files already synced')
+        toast({
+          title: 'All synced',
+          description: 'All recordings are already downloaded',
+          variant: 'success'
+        })
         return
       }
+
+      // Update global store for sidebar indicator
+      setDeviceSyncState({
+        deviceSyncing: true,
+        deviceSyncProgress: { current: 0, total: toSync.length },
+        deviceFileProgress: 0
+      })
+
+      // Show start toast
+      toast({
+        title: 'Sync started',
+        description: `Downloading ${toSync.length} recording${toSync.length !== 1 ? 's' : ''}...`,
+        variant: 'default'
+      })
+
+      let syncedCount = 0
+      let failedCount = 0
 
       for (const recording of toSync) {
         // Check connection before each download in case device was disconnected
         if (!deviceService.isConnected()) {
           setError('Device disconnected during sync.')
+          toast({
+            title: 'Sync interrupted',
+            description: 'Device disconnected during sync',
+            variant: 'error'
+          })
           break
         }
         setDownloading(recording.id)
-        await deviceService.downloadRecordingToFile(
-          recording.filename,
-          recording.size,
-          '' // Will be determined by storage service
-        )
-        // Update synced filenames after successful download
-        setSyncedFilenames((prev) => new Set([...prev, recording.filename]))
+
+        // Update global store with current file being downloaded
+        setDeviceSyncState({
+          deviceFileDownloading: recording.filename,
+          deviceSyncProgress: { current: syncedCount + failedCount, total: toSync.length },
+          deviceFileProgress: 0
+        })
+
+        try {
+          const downloadSuccess = await deviceService.downloadRecordingToFile(
+            recording.filename,
+            recording.size,
+            '' // Will be determined by storage service
+          )
+
+          // CRITICAL: Check return value - downloadRecordingToFile returns false on failure, doesn't throw
+          if (downloadSuccess) {
+            // Update synced filenames after successful download
+            setSyncedFilenames((prev) => new Set([...prev, recording.filename]))
+            syncedCount++
+          } else {
+            console.error(`[Device.tsx] handleSyncAll: Download failed for ${recording.filename} (returned false)`)
+            toast({
+              title: 'Download failed',
+              description: `Failed to download ${recording.filename}`,
+              variant: 'error'
+            })
+            failedCount++
+          }
+        } catch (downloadError) {
+          console.error(`[Device.tsx] handleSyncAll: Exception downloading ${recording.filename}:`, downloadError)
+          toast({
+            title: 'Download error',
+            description: `Error downloading ${recording.filename}: ${downloadError instanceof Error ? downloadError.message : 'Unknown error'}`,
+            variant: 'error'
+          })
+          failedCount++
+          // Continue with next file instead of stopping
+        }
+      }
+
+      // Show completion toast
+      if (failedCount === 0) {
+        toast({
+          title: 'Sync complete',
+          description: `Successfully downloaded ${syncedCount} recording${syncedCount !== 1 ? 's' : ''}`,
+          variant: 'success'
+        })
+      } else {
+        toast({
+          title: 'Sync completed with errors',
+          description: `Downloaded ${syncedCount}, failed ${failedCount}`,
+          variant: 'warning'
+        })
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Sync failed')
+      toast({
+        title: 'Sync failed',
+        description: e instanceof Error ? e.message : 'Unknown error',
+        variant: 'error'
+      })
     } finally {
       setSyncing(false)
       setDownloading(null)
       setDownloadProgress(null)
+      // Clear global sync state
+      clearDeviceSyncState()
     }
   }
 
-  const handleDownloadRecording = async (recording: HiDockRecording) => {
-    // Validate connection
+  // Trigger auto-sync after connection (used by connection handler)
+  const triggerAutoSync = useCallback(async (recs: HiDockRecording[], syncedSet: Set<string>) => {
+    // Validate connection before starting
     if (!deviceService.isConnected()) {
-      setError('Device not connected. Please connect your HiDock first.')
+      console.log('[Device.tsx] triggerAutoSync: Device not connected, skipping')
       return
     }
 
-    setDownloading(recording.id)
+    const toSync = recs.filter((rec) => !syncedSet.has(rec.filename))
+    if (toSync.length === 0) {
+      console.log('[Device.tsx] triggerAutoSync: All files already synced')
+      return
+    }
+
+    console.log(`[Device.tsx] triggerAutoSync: Starting auto-sync of ${toSync.length} files`)
+    setSyncing(true)
     setError(null)
 
     try {
-      await deviceService.downloadRecordingToFile(recording.filename, recording.size, '')
-      // Update synced filenames after successful download
-      setSyncedFilenames((prev) => new Set([...prev, recording.filename]))
+      // Update global store for sidebar indicator
+      setDeviceSyncState({
+        deviceSyncing: true,
+        deviceSyncProgress: { current: 0, total: toSync.length },
+        deviceFileProgress: 0
+      })
+
+      // Show start toast
+      toast({
+        title: 'Auto-sync started',
+        description: `Downloading ${toSync.length} recording${toSync.length !== 1 ? 's' : ''}...`,
+        variant: 'default'
+      })
+
+      let syncedCount = 0
+      let failedCount = 0
+
+      for (const recording of toSync) {
+        // Check connection before each download
+        if (!deviceService.isConnected()) {
+          console.log('[Device.tsx] triggerAutoSync: Device disconnected during sync')
+          toast({
+            title: 'Sync interrupted',
+            description: 'Device disconnected during sync',
+            variant: 'error'
+          })
+          break
+        }
+        setDownloading(recording.id)
+
+        // Update global store with current file being downloaded
+        setDeviceSyncState({
+          deviceFileDownloading: recording.filename,
+          deviceSyncProgress: { current: syncedCount + failedCount, total: toSync.length },
+          deviceFileProgress: 0
+        })
+
+        // Add to global download queue so it shows in Recordings page too
+        addToDownloadQueue(recording.id, recording.filename, recording.size)
+
+        try {
+          const downloadSuccess = await deviceService.downloadRecordingToFile(
+            recording.filename,
+            recording.size,
+            '',
+            // Progress callback to update global queue
+            (received) => {
+              const percent = Math.round((received / recording.size) * 100)
+              updateDownloadProgress(recording.id, percent)
+            }
+          )
+
+          // CRITICAL: Check return value - downloadRecordingToFile returns false on failure, doesn't throw
+          if (downloadSuccess) {
+            // Update synced filenames after successful download
+            setSyncedFilenames((prev) => new Set([...prev, recording.filename]))
+            syncedCount++
+          } else {
+            console.error(`[Device.tsx] triggerAutoSync: Download failed for ${recording.filename} (returned false)`)
+            toast({
+              title: 'Download failed',
+              description: `Failed to download ${recording.filename}`,
+              variant: 'error'
+            })
+            failedCount++
+          }
+        } catch (downloadError) {
+          console.error(`[Device.tsx] triggerAutoSync: Exception downloading ${recording.filename}:`, downloadError)
+          toast({
+            title: 'Download error',
+            description: `Error downloading ${recording.filename}: ${downloadError instanceof Error ? downloadError.message : 'Unknown error'}`,
+            variant: 'error'
+          })
+          failedCount++
+          // Continue with next file instead of stopping
+        } finally {
+          // Remove from global download queue
+          removeFromDownloadQueue(recording.id)
+        }
+      }
+
+      // Show completion toast
+      if (failedCount === 0 && syncedCount > 0) {
+        toast({
+          title: 'Auto-sync complete',
+          description: `Successfully downloaded ${syncedCount} recording${syncedCount !== 1 ? 's' : ''}`,
+          variant: 'success'
+        })
+      } else if (failedCount > 0) {
+        toast({
+          title: 'Auto-sync completed with errors',
+          description: `Downloaded ${syncedCount}, failed ${failedCount}`,
+          variant: 'warning'
+        })
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Download failed')
+      console.error('[Device.tsx] triggerAutoSync error:', e)
+      toast({
+        title: 'Auto-sync failed',
+        description: e instanceof Error ? e.message : 'Unknown error',
+        variant: 'error'
+      })
     } finally {
+      setSyncing(false)
       setDownloading(null)
       setDownloadProgress(null)
+      // Clear global sync state
+      clearDeviceSyncState()
     }
-  }
-
-  const handleDeleteRecording = async (recording: HiDockRecording) => {
-    // Validate connection
-    if (!deviceService.isConnected()) {
-      setError('Device not connected. Please connect your HiDock first.')
-      return
-    }
-
-    const confirmed = window.confirm(`Delete "${recording.filename}"?`)
-    if (!confirmed) return
-
-    try {
-      await deviceService.deleteRecording(recording.filename)
-      await loadRecordings()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Delete failed')
-    }
-  }
+  }, [deviceService, setDeviceSyncState, clearDeviceSyncState])
 
   const handleAutoRecordToggle = async (enabled: boolean) => {
     try {
@@ -378,6 +639,24 @@ export function Device() {
     // If enabling and not connected, start auto-connect
     if (enabled && !deviceState.connected) {
       deviceService.startAutoConnect()
+    }
+  }
+
+  const handleAutoDownloadToggle = async (enabled: boolean) => {
+    try {
+      await window.electronAPI.config.updateSection('device', { autoDownload: enabled })
+      setAutoDownload(enabled)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update auto-download setting')
+    }
+  }
+
+  const handleAutoTranscribeToggle = async (enabled: boolean) => {
+    try {
+      await window.electronAPI.config.updateSection('transcription', { autoTranscribe: enabled })
+      setAutoTranscribe(enabled)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to update auto-transcribe setting')
     }
   }
 
@@ -585,7 +864,7 @@ export function Device() {
                         <Usb className="h-4 w-4 mr-2" />
                         Connect Device
                       </Button>
-                      <div className="mt-6 pt-4 border-t">
+                      <div className="mt-6 pt-4 border-t space-y-3">
                         <div className="flex items-center justify-center gap-3">
                           <Label htmlFor="auto-connect" className="text-sm text-muted-foreground">
                             Auto-connect on startup
@@ -597,10 +876,30 @@ export function Device() {
                           />
                         </div>
                         {autoConnectConfig.enabled && (
-                          <p className="text-xs text-muted-foreground mt-2 text-center">
+                          <p className="text-xs text-muted-foreground mt-1 text-center">
                             Will automatically connect to previously authorized devices
                           </p>
                         )}
+                        <div className="flex items-center justify-center gap-3">
+                          <Label htmlFor="auto-download-disconnected" className="text-sm text-muted-foreground">
+                            Auto-download recordings
+                          </Label>
+                          <Switch
+                            id="auto-download-disconnected"
+                            checked={autoDownload}
+                            onCheckedChange={handleAutoDownloadToggle}
+                          />
+                        </div>
+                        <div className="flex items-center justify-center gap-3">
+                          <Label htmlFor="auto-transcribe-disconnected" className="text-sm text-muted-foreground">
+                            Auto-transcribe recordings
+                          </Label>
+                          <Switch
+                            id="auto-transcribe-disconnected"
+                            checked={autoTranscribe}
+                            onCheckedChange={handleAutoTranscribeToggle}
+                          />
+                        </div>
                       </div>
                     </>
                   )}
@@ -634,10 +933,13 @@ export function Device() {
                         deviceState.storage.capacity > 0 ? (
                           <>
                             <p className="text-2xl font-bold">
-                              {formatBytes(deviceState.storage.used)}
+                              {formatBytes(deviceState.storage.capacity - deviceState.storage.used)}
                             </p>
                             <p className="text-xs text-muted-foreground">
-                              of {formatBytes(deviceState.storage.capacity)} used
+                              free of {formatBytes(deviceState.storage.capacity)}
+                            </p>
+                            <p className="text-xs text-muted-foreground mt-1">
+                              {formatBytes(deviceState.storage.used)} used
                             </p>
                             <div className="mt-2 h-2 bg-muted rounded-full overflow-hidden">
                               <div
@@ -671,10 +973,10 @@ export function Device() {
                   </div>
 
                   {/* Settings */}
-                  {deviceState.settings && (
-                    <div className="p-4 border rounded-lg">
-                      <p className="font-medium mb-3">Device Settings</p>
-                      <div className="flex items-center justify-between">
+                  <div className="p-4 border rounded-lg">
+                    <p className="font-medium mb-3">Device Settings</p>
+                    {deviceState.settings && (
+                      <div className="flex items-center justify-between mb-3">
                         <Label htmlFor="auto-record">Auto-record meetings</Label>
                         <Switch
                           id="auto-record"
@@ -682,37 +984,104 @@ export function Device() {
                           onCheckedChange={handleAutoRecordToggle}
                         />
                       </div>
+                    )}
+                    <div className="flex items-center justify-between mb-3">
+                      <Label htmlFor="auto-connect-connected" className="text-sm">
+                        Auto-connect on startup
+                      </Label>
+                      <Switch
+                        id="auto-connect-connected"
+                        checked={autoConnectConfig.enabled}
+                        onCheckedChange={handleAutoConnectToggle}
+                      />
                     </div>
-                  )}
+                    <div className="flex items-center justify-between mb-3">
+                      <Label htmlFor="auto-download" className="text-sm">
+                        Auto-download recordings
+                      </Label>
+                      <Switch
+                        id="auto-download"
+                        checked={autoDownload}
+                        onCheckedChange={handleAutoDownloadToggle}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="auto-transcribe" className="text-sm">
+                        Auto-transcribe recordings
+                      </Label>
+                      <Switch
+                        id="auto-transcribe"
+                        checked={autoTranscribe}
+                        onCheckedChange={handleAutoTranscribeToggle}
+                      />
+                    </div>
+                  </div>
 
                   {/* Sync button */}
                   {(() => {
-                    const unsyncedCount = recordings.filter((r) => !syncedFilenames.has(r.filename)).length
-                    const allSynced = unsyncedCount === 0 && recordings.length > 0
+                    // Calculate unsynced count - use loaded recordings if available, otherwise estimate from device count
+                    const unsyncedCount = recordings.length > 0
+                      ? recordings.filter((r) => !syncedFilenames.has(r.filename)).length
+                      : Math.max(0, deviceState.recordingCount - syncedFilenames.size)
+                    const allSynced = unsyncedCount === 0 && (recordings.length > 0 || deviceState.recordingCount > 0)
+                    const isLoadingList = loadingRecordings && recordings.length === 0
+
                     return (
-                      <Button
-                        className="w-full"
-                        onClick={handleSyncAll}
-                        disabled={syncing || recordings.length === 0 || allSynced}
-                        variant={allSynced ? 'secondary' : 'default'}
-                      >
-                        {syncing ? (
-                          <>
-                            <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                            Syncing... {downloadProgress && `(${downloadProgress.percent.toFixed(0)}%)`}
-                          </>
-                        ) : allSynced ? (
-                          <>
-                            <Check className="h-4 w-4 mr-2" />
-                            All Recordings Synced
-                          </>
-                        ) : (
-                          <>
-                            <Download className="h-4 w-4 mr-2" />
-                            Sync {unsyncedCount} Recording{unsyncedCount !== 1 ? 's' : ''}
-                          </>
+                      <>
+                        {/* Show loading progress when fetching file list */}
+                        {loadingRecordings && loadingProgress && (
+                          <div className="mb-3 p-3 bg-muted/50 rounded-lg">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-sm text-muted-foreground">
+                                {loadingProgress.expectedFiles > 0
+                                  ? 'Loading file list...'
+                                  : 'Scanning device for recordings...'}
+                              </span>
+                              <span className="text-sm font-medium">
+                                {loadingProgress.expectedFiles > 0
+                                  ? `${loadingProgress.filesLoaded} / ${loadingProgress.expectedFiles}`
+                                  : loadingProgress.filesLoaded > 0
+                                    ? `${loadingProgress.filesLoaded} files found`
+                                    : 'Please wait...'}
+                              </span>
+                            </div>
+                            <Progress
+                              value={loadingProgress.expectedFiles > 0
+                                ? (loadingProgress.filesLoaded / loadingProgress.expectedFiles) * 100
+                                : undefined}
+                              className="h-2"
+                            />
+                          </div>
                         )}
-                      </Button>
+                        <Button
+                          className="w-full"
+                          onClick={handleSyncAll}
+                          disabled={syncing || (recordings.length === 0 && !isLoadingList && deviceState.recordingCount === 0) || allSynced || isLoadingList}
+                          variant={allSynced ? 'secondary' : 'default'}
+                        >
+                          {syncing ? (
+                            <>
+                              <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                              Syncing... {downloadProgress && `(${downloadProgress.percent.toFixed(0)}%)`}
+                            </>
+                          ) : isLoadingList ? (
+                            <>
+                              <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                              Loading File List...
+                            </>
+                          ) : allSynced ? (
+                            <>
+                              <Check className="h-4 w-4 mr-2" />
+                              All Recordings Synced
+                            </>
+                          ) : (
+                            <>
+                              <Download className="h-4 w-4 mr-2" />
+                              Sync {unsyncedCount} Recording{unsyncedCount !== 1 ? 's' : ''}
+                            </>
+                          )}
+                        </Button>
+                      </>
                     )
                   })()}
                 </div>
@@ -720,117 +1089,134 @@ export function Device() {
             </CardContent>
           </Card>
 
-          {/* Recordings list - always show when connected */}
+          {/* Activity Log - Show when connected for real-time feedback */}
           {deviceState.connected && (
             <Card>
-              <CardHeader>
+              <CardHeader className="pb-2">
                 <CardTitle className="flex items-center justify-between">
-                  <span>
-                    Recordings on Device
-                    {loadingRecordings && loadingProgress && (
-                      <span className="ml-2 text-sm font-normal text-muted-foreground">
-                        ({loadingProgress.filesLoaded}/{loadingProgress.expectedFiles} files)
-                      </span>
-                    )}
-                  </span>
-                  <Button variant="outline" size="sm" onClick={() => loadRecordings(true)} disabled={loadingRecordings} title="Refresh from device">
-                    <RefreshCw className={`h-4 w-4 ${loadingRecordings ? 'animate-spin' : ''}`} />
-                  </Button>
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2">
-                  {/* Show loading state during initialization or while loading recordings */}
-                  {(loadingRecordings || (recordings.length === 0 && connectionStatus.step !== 'ready')) && recordings.length === 0 && (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <RefreshCw className="h-8 w-8 animate-spin mx-auto mb-2" />
-                      <p>{loadingRecordings ? 'Loading file list from device...' : 'Initializing device...'}</p>
-                      {loadingProgress && (
-                        <div className="mt-3 max-w-md mx-auto space-y-2">
-                          <Progress
-                            value={loadingProgress.expectedFiles > 0
-                              ? (loadingProgress.filesLoaded / loadingProgress.expectedFiles) * 100
-                              : 0
-                            }
-                            className="h-2"
-                          />
-                          <p className="text-sm">
-                            {loadingProgress.filesLoaded} / {loadingProgress.expectedFiles} files
-                          </p>
-                        </div>
+                  <div className="flex items-center gap-2">
+                    <Terminal className="h-5 w-5" />
+                    Activity Log
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        // Format activity log for clipboard
+                        const logText = activityLog.map(entry => {
+                          const timestamp = entry.timestamp.toLocaleTimeString('en-US', {
+                            hour12: false,
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                            fractionalSecondDigits: 3
+                          })
+                          const typeLabel = entry.type === 'usb-out' ? '[OUT]'
+                            : entry.type === 'usb-in' ? '[IN]'
+                            : entry.type === 'error' ? '[ERR]'
+                            : entry.type === 'success' ? '[OK]'
+                            : '[INFO]'
+                          const details = entry.details ? ` - ${entry.details}` : ''
+                          return `${timestamp}\n${typeLabel}\n${entry.message}${details}`
+                        }).join('\n')
+                        navigator.clipboard.writeText(logText)
+                      }}
+                      disabled={activityLog.length === 0}
+                      title="Copy log to clipboard"
+                    >
+                      <Copy className="h-4 w-4 mr-1" />
+                      Copy
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        deviceService.clearActivityLog()
+                        setActivityLog([])
+                      }}
+                      disabled={activityLog.length === 0}
+                    >
+                      Clear
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setLogExpanded(!logExpanded)}
+                    >
+                      {logExpanded ? (
+                        <ChevronUp className="h-4 w-4" />
+                      ) : (
+                        <ChevronDown className="h-4 w-4" />
                       )}
-                    </div>
-                  )}
-                  {/* Show empty state when ready but no recordings */}
-                  {!loadingRecordings && recordings.length === 0 && connectionStatus.step === 'ready' && deviceState.recordingCount === 0 && (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <Mic className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                      <p>No recordings on device</p>
-                    </div>
-                  )}
-                  {recordings.map((rec) => {
-                    const isSynced = syncedFilenames.has(rec.filename)
-                    return (
-                      <div
-                        key={rec.id}
-                        className={`flex items-center justify-between p-3 border rounded-lg ${isSynced ? 'bg-green-50 dark:bg-green-950/30' : ''}`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <Mic className={`h-4 w-4 ${isSynced ? 'text-green-600' : 'text-muted-foreground'}`} />
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <p className="font-medium text-sm">{rec.filename}</p>
-                              {isSynced && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 rounded">
-                                  <Check className="h-3 w-3" />
-                                  Synced
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-xs text-muted-foreground">
-                              {formatBytes(rec.size)} • {formatDuration(rec.duration)}
-                            </p>
-                          </div>
+                    </Button>
+                  </div>
+                </CardTitle>
+                <CardDescription>
+                  Real-time USB communication and device operations
+                </CardDescription>
+              </CardHeader>
+              {logExpanded && (
+                <CardContent>
+                  <div
+                    ref={logContainerRef}
+                    className="bg-muted/50 rounded-lg p-2 font-mono text-xs max-h-64 overflow-y-auto"
+                  >
+                    {activityLog.length === 0 ? (
+                      <p className="text-muted-foreground text-center py-4">
+                        No activity yet. Device operations will appear here.
+                      </p>
+                    ) : (
+                      activityLog.map((entry, index) => (
+                        <div
+                          key={index}
+                          className={`flex items-start gap-2 py-1 border-b border-muted last:border-0 ${
+                            entry.type === 'error'
+                              ? 'text-red-500'
+                              : entry.type === 'success'
+                                ? 'text-green-500'
+                                : entry.type === 'usb-out'
+                                  ? 'text-blue-500'
+                                  : entry.type === 'usb-in'
+                                    ? 'text-purple-500'
+                                    : 'text-muted-foreground'
+                          }`}
+                        >
+                          <span className="text-muted-foreground/60 shrink-0">
+                            {entry.timestamp.toLocaleTimeString('en-US', {
+                              hour12: false,
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                              fractionalSecondDigits: 3
+                            })}
+                          </span>
+                          <span className="shrink-0 w-12">
+                            {entry.type === 'usb-out'
+                              ? '[OUT]'
+                              : entry.type === 'usb-in'
+                                ? '[IN]'
+                                : entry.type === 'error'
+                                  ? '[ERR]'
+                                  : entry.type === 'success'
+                                    ? '[OK]'
+                                    : '[INFO]'}
+                          </span>
+                          <span className="flex-1">
+                            {entry.message}
+                            {entry.details && (
+                              <span className="text-muted-foreground/80">
+                                {' '}
+                                - {entry.details}
+                              </span>
+                            )}
+                          </span>
                         </div>
-                        <div className="flex items-center gap-2">
-                          {downloading === rec.id && downloadProgress ? (
-                            <div className="text-xs text-muted-foreground">
-                              {downloadProgress.percent.toFixed(0)}%
-                            </div>
-                          ) : (
-                            <>
-                              {isSynced ? (
-                                <div className="h-9 w-9 flex items-center justify-center" title="Already synced">
-                                  <Check className="h-4 w-4 text-green-600" />
-                                </div>
-                              ) : (
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => handleDownloadRecording(rec)}
-                                  disabled={!!downloading}
-                                  title="Download to local storage"
-                                >
-                                  <Download className="h-4 w-4" />
-                                </Button>
-                              )}
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                onClick={() => handleDeleteRecording(rec)}
-                                disabled={!!downloading}
-                                title="Delete from device"
-                              >
-                                <Trash2 className="h-4 w-4 text-destructive" />
-                              </Button>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </CardContent>
+                      ))
+                    )}
+                  </div>
+                </CardContent>
+              )}
             </Card>
           )}
 
@@ -1023,132 +1409,34 @@ export function Device() {
             </>
           )}
 
-          {/* Activity Log */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Terminal className="h-5 w-5" />
-                  Activity Log
+          {/* Instructions - Only show when disconnected */}
+          {!deviceState.connected && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Getting Started</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <h3 className="font-medium">1. Connect your HiDock</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Plug in your HiDock device via USB cable and click "Connect Device"
+                  </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      deviceService.clearActivityLog()
-                      setActivityLog([])
-                    }}
-                    disabled={activityLog.length === 0}
-                  >
-                    Clear
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setLogExpanded(!logExpanded)}
-                  >
-                    {logExpanded ? (
-                      <ChevronUp className="h-4 w-4" />
-                    ) : (
-                      <ChevronDown className="h-4 w-4" />
-                    )}
-                  </Button>
+                <div className="space-y-2">
+                  <h3 className="font-medium">2. Sync recordings</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Download recordings to your computer for transcription and storage
+                  </p>
                 </div>
-              </CardTitle>
-              <CardDescription>
-                Real-time USB communication and device operations
-              </CardDescription>
-            </CardHeader>
-            {logExpanded && (
-              <CardContent>
-                <div
-                  ref={logContainerRef}
-                  className="bg-muted/50 rounded-lg p-2 font-mono text-xs max-h-64 overflow-y-auto"
-                >
-                  {activityLog.length === 0 ? (
-                    <p className="text-muted-foreground text-center py-4">
-                      No activity yet. Connect a device to see USB communication.
-                    </p>
-                  ) : (
-                    activityLog.map((entry, index) => (
-                      <div
-                        key={index}
-                        className={`flex items-start gap-2 py-1 border-b border-muted last:border-0 ${
-                          entry.type === 'error'
-                            ? 'text-red-500'
-                            : entry.type === 'success'
-                              ? 'text-green-500'
-                              : entry.type === 'usb-out'
-                                ? 'text-blue-500'
-                                : entry.type === 'usb-in'
-                                  ? 'text-purple-500'
-                                  : 'text-muted-foreground'
-                        }`}
-                      >
-                        <span className="text-muted-foreground/60 shrink-0">
-                          {entry.timestamp.toLocaleTimeString('en-US', {
-                            hour12: false,
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                            fractionalSecondDigits: 3
-                          })}
-                        </span>
-                        <span className="shrink-0 w-12">
-                          {entry.type === 'usb-out'
-                            ? '[OUT]'
-                            : entry.type === 'usb-in'
-                              ? '[IN]'
-                              : entry.type === 'error'
-                                ? '[ERR]'
-                                : entry.type === 'success'
-                                  ? '[OK]'
-                                  : '[INFO]'}
-                        </span>
-                        <span className="flex-1">
-                          {entry.message}
-                          {entry.details && (
-                            <span className="text-muted-foreground/80">
-                              {' '}
-                              - {entry.details}
-                            </span>
-                          )}
-                        </span>
-                      </div>
-                    ))
-                  )}
+                <div className="space-y-2">
+                  <h3 className="font-medium">3. Auto-transcribe</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Recordings are automatically transcribed and linked to calendar meetings
+                  </p>
                 </div>
               </CardContent>
-            )}
-          </Card>
-
-          {/* Instructions */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Getting Started</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <h3 className="font-medium">1. Connect your HiDock</h3>
-                <p className="text-sm text-muted-foreground">
-                  Plug in your HiDock device via USB cable and click "Connect Device"
-                </p>
-              </div>
-              <div className="space-y-2">
-                <h3 className="font-medium">2. Sync recordings</h3>
-                <p className="text-sm text-muted-foreground">
-                  Download recordings to your computer for transcription and storage
-                </p>
-              </div>
-              <div className="space-y-2">
-                <h3 className="font-medium">3. Auto-transcribe</h3>
-                <p className="text-sm text-muted-foreground">
-                  Recordings are automatically transcribed and linked to calendar meetings
-                </p>
-              </div>
-            </CardContent>
-          </Card>
+            </Card>
+          )}
         </div>
       </div>
     </div>
