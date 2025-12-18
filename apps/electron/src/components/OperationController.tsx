@@ -72,8 +72,8 @@ export function OperationController() {
   const {
     currentlyPlayingId,
     setCurrentlyPlaying,
-    playbackProgress,
-    setPlaybackProgress
+    setPlaybackProgress,
+    setIsPlaying
   } = useUIStore()
 
   // ==========================================================================
@@ -221,11 +221,13 @@ export function OperationController() {
     if (DEBUG) console.log(`[OperationController] Playing: ${recordingId}`)
 
     try {
-      // Stop current playback
+      // Stop current playback and reset state
       if (audioRef.current) {
         audioRef.current.pause()
         audioRef.current.src = ''
       }
+      setIsPlaying(false)
+      setPlaybackProgress(0, 0)
 
       // Load audio file
       const base64 = await window.electronAPI.storage.readRecording(filePath)
@@ -242,12 +244,21 @@ export function OperationController() {
             setPlaybackProgress(audioRef.current.currentTime, audioRef.current.duration)
           }
         })
+        audioRef.current.addEventListener('play', () => {
+          setIsPlaying(true)
+        })
+        audioRef.current.addEventListener('pause', () => {
+          setIsPlaying(false)
+        })
         audioRef.current.addEventListener('ended', () => {
+          setIsPlaying(false)
           setCurrentlyPlaying(null, null)
+          setPlaybackProgress(0, 0)
         })
         audioRef.current.addEventListener('error', (e) => {
           console.error('[OperationController] Audio error:', e)
           toast({ title: 'Playback error', description: 'Failed to play audio', variant: 'error' })
+          setIsPlaying(false)
           setCurrentlyPlaying(null, null)
         })
       }
@@ -256,15 +267,18 @@ export function OperationController() {
       const ext = filePath.split('.').pop()?.toLowerCase()
       const mimeType = ext === 'mp3' ? 'audio/mpeg' : ext === 'm4a' ? 'audio/mp4' : 'audio/wav'
 
+      // Set currently playing BEFORE loading to show loading state
+      setCurrentlyPlaying(recordingId, filePath)
+
       audioRef.current.src = `data:${mimeType};base64,${base64}`
       await audioRef.current.play()
-
-      setCurrentlyPlaying(recordingId, filePath)
     } catch (error) {
       console.error('[OperationController] Play error:', error)
       toast({ title: 'Playback error', description: 'Failed to play audio', variant: 'error' })
+      setIsPlaying(false)
+      setCurrentlyPlaying(null, null)
     }
-  }, [setCurrentlyPlaying, setPlaybackProgress])
+  }, [setCurrentlyPlaying, setPlaybackProgress, setIsPlaying])
 
   const pauseAudio = useCallback(() => {
     if (audioRef.current) {
@@ -283,8 +297,10 @@ export function OperationController() {
       audioRef.current.pause()
       audioRef.current.src = ''
     }
+    setIsPlaying(false)
     setCurrentlyPlaying(null, null)
-  }, [setCurrentlyPlaying])
+    setPlaybackProgress(0, 0)
+  }, [setCurrentlyPlaying, setIsPlaying, setPlaybackProgress])
 
   const seekAudio = useCallback((time: number) => {
     if (audioRef.current) {

@@ -131,11 +131,15 @@ export interface UIStore {
   isGeneratingOutput: boolean
   outputContent: string | null
 
+  // Recordings page view preference (persists across navigation)
+  recordingsCompactView: boolean
+
   // Playback state (managed by OperationController)
   currentlyPlayingId: string | null
   currentlyPlayingPath: string | null
   playbackCurrentTime: number
   playbackDuration: number
+  isPlaying: boolean
 
   // Actions
   toggleSidebar: () => void
@@ -146,9 +150,13 @@ export interface UIStore {
   setOutputContent: (content: string | null) => void
   clearOutput: () => void
 
+  // Recordings view actions
+  setRecordingsCompactView: (compact: boolean) => void
+
   // Playback actions
   setCurrentlyPlaying: (recordingId: string | null, filePath: string | null) => void
   setPlaybackProgress: (currentTime: number, duration: number) => void
+  setIsPlaying: (playing: boolean) => void
 }
 
 // =============================================================================

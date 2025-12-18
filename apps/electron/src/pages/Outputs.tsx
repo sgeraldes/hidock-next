@@ -1,7 +1,7 @@
 /**
- * Outputs Page
+ * Actionables Page
  *
- * Generate documents from meeting transcripts using templates.
+ * AI-suggested tasks and actionable items from your meetings and knowledge.
  */
 
 import { useEffect, useState } from 'react'
@@ -18,7 +18,6 @@ import {
   ListTodo
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
   SelectContent,
@@ -27,9 +26,10 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { useAppStore } from '@/store/useAppStore'
-import { useProjectsStore, useContactsStore, useOutputGeneration } from '@/store'
+import { useProjectsStore, useContactsStore } from '@/store'
+import { useUIStore } from '@/store/useUIStore'
 import { cn } from '@/lib/utils'
-import type { OutputTemplateId, Meeting, Project, Contact } from '@/types'
+import type { OutputTemplateId } from '@/types'
 
 interface OutputTemplate {
   id: OutputTemplateId
@@ -68,10 +68,16 @@ const TEMPLATES: OutputTemplate[] = [
 type ContextType = 'meeting' | 'project' | 'contact'
 
 export function Outputs() {
-  const { meetings, loadMeetings } = useAppStore()
-  const { projects, loadProjects } = useProjectsStore()
-  const { contacts, loadContacts } = useContactsStore()
-  const { isGenerating, content, setGenerating, setContent, clear } = useOutputGeneration()
+  const { meetings, loadMeetings, meetingsLoading } = useAppStore()
+  const { projects, loadProjects, loading: projectsLoading } = useProjectsStore()
+  const { contacts, loadContacts, loading: contactsLoading } = useContactsStore()
+
+  // Use individual selectors to avoid creating new objects on every render
+  const isGenerating = useUIStore((state) => state.isGeneratingOutput)
+  const content = useUIStore((state) => state.outputContent)
+  const setGenerating = useUIStore((state) => state.setGeneratingOutput)
+  const setContent = useUIStore((state) => state.setOutputContent)
+  const clear = useUIStore((state) => state.clearOutput)
 
   const [selectedTemplate, setSelectedTemplate] = useState<OutputTemplateId | null>(null)
   const [contextType, setContextType] = useState<ContextType>('meeting')
@@ -81,12 +87,24 @@ export function Outputs() {
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
 
-  // Load data on mount
+  const isLoading = meetingsLoading || projectsLoading || contactsLoading
+
+  // Load data on mount - use empty deps to avoid re-running
   useEffect(() => {
-    loadMeetings()
-    loadProjects()
-    loadContacts()
-  }, [loadMeetings, loadProjects, loadContacts])
+    const loadData = async () => {
+      try {
+        await Promise.all([
+          loadMeetings(),
+          loadProjects(),
+          loadContacts()
+        ])
+      } catch (err) {
+        console.error('Failed to load data for Actionables page:', err)
+      }
+    }
+    loadData()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleGenerate = async () => {
     if (!selectedTemplate) return
@@ -116,10 +134,12 @@ export function Outputs() {
       if (result.success) {
         setContent(result.data.content)
       } else {
-        setError(result.error.message)
+        // Handle error safely - result.error could have different structures
+        const errorMessage = result.error?.message || 'Failed to create actionable'
+        setError(errorMessage)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to generate output')
+      setError(err instanceof Error ? err.message : 'Failed to create actionable')
     } finally {
       setGenerating(false)
     }
@@ -147,8 +167,8 @@ export function Outputs() {
       const suggestedName = `${template?.name?.toLowerCase().replace(/\s+/g, '-') || 'output'}-${new Date().toISOString().slice(0, 10)}.md`
 
       const result = await window.electronAPI.outputs.saveToFile(content, suggestedName)
-      if (!result.success && result.error.code !== 'VALIDATION_ERROR') {
-        setError(result.error.message)
+      if (!result.success && result.error?.code !== 'VALIDATION_ERROR') {
+        setError(result.error?.message || 'Failed to save file')
       }
     } catch (err) {
       console.error('Failed to save:', err)
@@ -158,11 +178,11 @@ export function Outputs() {
   const getContextOptions = (): Array<{ id: string; label: string }> => {
     switch (contextType) {
       case 'meeting':
-        return meetings.map(m => ({ id: m.id, label: m.subject }))
+        return (meetings || []).map(m => ({ id: m.id, label: m.subject || 'Untitled' }))
       case 'project':
-        return projects.map(p => ({ id: p.id, label: p.name }))
+        return (projects || []).map(p => ({ id: p.id, label: p.name || 'Untitled' }))
       case 'contact':
-        return contacts.map(c => ({ id: c.id, label: c.name }))
+        return (contacts || []).map(c => ({ id: c.id, label: c.name || 'Unknown' }))
       default:
         return []
     }
@@ -202,9 +222,9 @@ export function Outputs() {
       {/* Configuration Panel */}
       <div className="w-96 border-r flex flex-col">
         <div className="p-4 border-b">
-          <h1 className="text-xl font-semibold">Generate Output</h1>
+          <h1 className="text-xl font-semibold">Actionables</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Create documents from your meeting transcripts
+            Things to do from your knowledge
           </p>
         </div>
 
@@ -260,14 +280,20 @@ export function Outputs() {
               {/* Context Value */}
               <Select value={getSelectedContextId()} onValueChange={setSelectedContextId}>
                 <SelectTrigger>
-                  <SelectValue placeholder={`Select a ${contextType}`} />
+                  <SelectValue placeholder={isLoading ? 'Loading...' : `Select a ${contextType}`} />
                 </SelectTrigger>
                 <SelectContent>
-                  {getContextOptions().map((option) => (
-                    <SelectItem key={option.id} value={option.id}>
-                      {option.label}
-                    </SelectItem>
-                  ))}
+                  {isLoading ? (
+                    <SelectItem value="_loading" disabled>Loading...</SelectItem>
+                  ) : getContextOptions().length === 0 ? (
+                    <SelectItem value="_empty" disabled>No {contextType}s available</SelectItem>
+                  ) : (
+                    getContextOptions().map((option) => (
+                      <SelectItem key={option.id} value={option.id}>
+                        {option.label}
+                      </SelectItem>
+                    ))
+                  )}
                 </SelectContent>
               </Select>
             </div>
@@ -282,12 +308,12 @@ export function Outputs() {
             {isGenerating ? (
               <>
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Generating...
+                Creating...
               </>
             ) : (
               <>
                 <FileText className="h-4 w-4 mr-2" />
-                Generate
+                Create Actionable
               </>
             )}
           </Button>
@@ -310,7 +336,7 @@ export function Outputs() {
             <div className="p-4 border-b flex items-center justify-between">
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <CheckCircle2 className="h-4 w-4 text-green-500" />
-                Generated successfully
+                Created successfully
               </div>
               <div className="flex items-center gap-2">
                 <Button variant="outline" size="sm" onClick={handleCopy}>
@@ -349,7 +375,7 @@ export function Outputs() {
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
               <Loader2 className="h-12 w-12 mx-auto mb-4 animate-spin text-primary" />
-              <p className="text-muted-foreground">Generating your document...</p>
+              <p className="text-muted-foreground">Creating your actionable...</p>
               <p className="text-xs text-muted-foreground mt-1">This may take a moment</p>
             </div>
           </div>
@@ -357,8 +383,8 @@ export function Outputs() {
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
             <div className="text-center">
               <FileText className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p>Select a template and context to generate output</p>
-              <p className="text-xs mt-1">Your generated document will appear here</p>
+              <p>Actionables will appear here based on your meetings and action items</p>
+              <p className="text-xs mt-1">Select a template and context above to create AI-suggested tasks from your knowledge</p>
             </div>
           </div>
         )}

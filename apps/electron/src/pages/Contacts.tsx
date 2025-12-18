@@ -1,7 +1,7 @@
 /**
- * Contacts Page
+ * People Page
  *
- * Displays contacts extracted from meetings with search, selection, and notes.
+ * Displays people extracted from meetings with search, selection, and notes.
  */
 
 import { useEffect, useState } from 'react'
@@ -59,34 +59,42 @@ export function Contacts() {
 
   return (
     <div className="flex h-full">
-      {/* Contact List */}
+      {/* People List */}
       <div className="w-80 border-r flex flex-col">
         {/* Header */}
         <div className="p-4 border-b space-y-3">
-          <h1 className="text-xl font-semibold">Contacts</h1>
+          <div>
+            <h1 className="text-xl font-semibold">People</h1>
+            <p className="text-xs text-muted-foreground mt-1">
+              Everyone mentioned in your knowledge base
+            </p>
+          </div>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Search contacts..."
+              placeholder="Search people..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-9"
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            {total} contacts found
+            {total} {total === 1 ? 'person' : 'people'} found
           </p>
         </div>
 
-        {/* Contact List */}
+        {/* People List */}
         <div className="flex-1 overflow-auto">
           {loading && contacts.length === 0 ? (
             <div className="p-4 text-center text-muted-foreground">
-              Loading contacts...
+              Loading people...
             </div>
           ) : contacts.length === 0 ? (
-            <div className="p-4 text-center text-muted-foreground">
-              No contacts found
+            <div className="p-4 text-center space-y-2">
+              <p className="text-muted-foreground">No people found</p>
+              <p className="text-xs text-muted-foreground">
+                People are automatically added from your conversations and meetings
+              </p>
             </div>
           ) : (
             <div className="divide-y">
@@ -103,11 +111,11 @@ export function Contacts() {
         </div>
       </div>
 
-      {/* Contact Detail */}
+      {/* Person Detail */}
       <div className="flex-1 flex flex-col">
         {selectedContact ? (
           <>
-            {/* Contact Header */}
+            {/* Person Header */}
             <div className="p-6 border-b">
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-4">
@@ -189,7 +197,7 @@ export function Contacts() {
                   <Textarea
                     value={notesValue}
                     onChange={(e) => setNotesValue(e.target.value)}
-                    placeholder="Add notes about this contact..."
+                    placeholder="Add notes about this person..."
                     className="min-h-[100px]"
                     autoFocus
                   />
@@ -238,7 +246,7 @@ export function Contacts() {
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
             <div className="text-center">
               <User className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p>Select a contact to view details</p>
+              <p>Select a person to view details</p>
             </div>
           </div>
         )}

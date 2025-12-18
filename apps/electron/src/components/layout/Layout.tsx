@@ -2,21 +2,23 @@ import { ReactNode, useEffect, useState, useRef } from 'react'
 import { useLocation, Link } from 'react-router-dom'
 import {
   MessageSquare,
-  Search,
   Settings,
-  Usb,
-  Mic,
   ChevronLeft,
   ChevronRight,
   RotateCcw,
   Users,
   Folder,
-  FileText,
   RefreshCw,
   Download,
   CheckCircle2,
   XCircle,
-  Loader2
+  Loader2,
+  BookOpen,
+  Bot,
+  Compass,
+  ListTodo,
+  Calendar,
+  CloudDownload
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
@@ -29,15 +31,41 @@ interface LayoutProps {
   children: ReactNode
 }
 
-const navigation = [
-  { name: 'Recordings', href: '/recordings', icon: Mic },
-  { name: 'Chat', href: '/chat', icon: MessageSquare },
-  { name: 'Search', href: '/search', icon: Search },
-  { name: 'Device', href: '/device', icon: Usb },
-  { name: 'Contacts', href: '/contacts', icon: Users },
-  { name: 'Projects', href: '/projects', icon: Folder },
-  { name: 'Outputs', href: '/outputs', icon: FileText },
-  { name: 'Settings', href: '/settings', icon: Settings }
+// Navigation structure with sections
+type NavigationSection = {
+  title: string
+  items: Array<{ name: string; href: string; icon: any }>
+}
+
+const navigationSections: NavigationSection[] = [
+  {
+    title: 'KNOWLEDGE',
+    items: [
+      { name: 'Library', href: '/library', icon: BookOpen },
+      { name: 'Assistant', href: '/assistant', icon: Bot },
+      { name: 'Explore', href: '/explore', icon: Compass }
+    ]
+  },
+  {
+    title: 'ORGANIZATION',
+    items: [
+      { name: 'People', href: '/people', icon: Users },
+      { name: 'Projects', href: '/projects', icon: Folder },
+      { name: 'Calendar', href: '/calendar', icon: Calendar }
+    ]
+  },
+  {
+    title: 'ACTIONS',
+    items: [
+      { name: 'Actionables', href: '/actionables', icon: ListTodo }
+    ]
+  },
+  {
+    title: 'DEVICE',
+    items: [
+      { name: 'Sync', href: '/sync', icon: CloudDownload }
+    ]
+  }
 ]
 
 export function Layout({ children }: LayoutProps) {
@@ -218,7 +246,7 @@ export function Layout({ children }: LayoutProps) {
 
         {/* Device Connection Status */}
         <Link
-          to="/device"
+          to="/sync"
           className={cn(
             'mx-2 mt-2 flex items-center gap-2 rounded-lg px-3 py-2 transition-colors',
             isConnected
@@ -258,25 +286,58 @@ export function Layout({ children }: LayoutProps) {
         </Link>
 
         {/* Navigation */}
-        <nav className="flex-1 p-2 space-y-1">
-          {navigation.map((item) => {
-            const isActive = location.pathname.startsWith(item.href)
-            return (
-              <Link
-                key={item.name}
-                to={item.href}
-                className={cn(
-                  'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors',
-                  isActive
-                    ? 'bg-slate-700 text-white font-medium'
-                    : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
-                )}
-              >
-                <item.icon className="h-5 w-5 flex-shrink-0" />
-                {sidebarOpen && <span>{item.name}</span>}
-              </Link>
-            )
-          })}
+        <nav className="flex-1 p-2 space-y-4 overflow-y-auto">
+          {navigationSections.map((section, sectionIdx) => (
+            <div key={section.title}>
+              {/* Section Header */}
+              {sidebarOpen && (
+                <div className="px-3 mb-2 text-[10px] font-semibold text-slate-500 tracking-wider">
+                  {section.title}
+                </div>
+              )}
+              {/* Section Items */}
+              <div className="space-y-1">
+                {section.items.map((item) => {
+                  const isActive = location.pathname.startsWith(item.href)
+                  return (
+                    <Link
+                      key={item.href}
+                      to={item.href}
+                      className={cn(
+                        'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors',
+                        isActive
+                          ? 'bg-slate-700 text-white font-medium'
+                          : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
+                      )}
+                    >
+                      <item.icon className="h-5 w-5 flex-shrink-0" />
+                      {sidebarOpen && <span>{item.name}</span>}
+                    </Link>
+                  )
+                })}
+              </div>
+              {/* Section Divider (except for last section) */}
+              {sectionIdx < navigationSections.length - 1 && (
+                <div className="mt-3 border-t border-slate-800" />
+              )}
+            </div>
+          ))}
+
+          {/* Settings at bottom - separate from sections */}
+          <div className="pt-2 border-t border-slate-800">
+            <Link
+              to="/settings"
+              className={cn(
+                'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors',
+                location.pathname.startsWith('/settings')
+                  ? 'bg-slate-700 text-white font-medium'
+                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
+              )}
+            >
+              <Settings className="h-5 w-5 flex-shrink-0" />
+              {sidebarOpen && <span>Settings</span>}
+            </Link>
+          </div>
         </nav>
 
         {/* Download Queue Indicator */}

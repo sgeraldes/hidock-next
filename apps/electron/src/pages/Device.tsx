@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { flushSync } from 'react-dom'
-import { Usb, Download, RefreshCw, HardDrive, Mic, AlertCircle, Radio, Battery, Bluetooth, Play, Pause, Square, X, Terminal, ChevronDown, ChevronUp, Check, Copy } from 'lucide-react'
+import { Usb, Download, RefreshCw, HardDrive, Mic, AlertCircle, Radio, Battery, Bluetooth, Play, Pause, Square, X, Terminal, ChevronDown, ChevronUp, Check, Copy, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
@@ -63,6 +63,9 @@ export function Device() {
 
   // Synced files tracking
   const [syncedFilenames, setSyncedFilenames] = useState<Set<string>>(new Set())
+
+  // Failed downloads tracking for retry button
+  const [failedDownloadCount, setFailedDownloadCount] = useState(0)
 
   // Auto-connect configuration state
   const [autoConnectConfig, setAutoConnectConfig] = useState(() => deviceService.getAutoConnectConfig())
@@ -137,6 +140,32 @@ export function Device() {
       }
     }
     loadConfigSettings()
+
+    // Load initial download service state to check for failed downloads
+    const loadDownloadServiceState = async () => {
+      try {
+        const state = await window.electronAPI.downloadService.getState()
+        if (mounted && state?.queue) {
+          const failedCount = state.queue.filter((item: { status: string }) => item.status === 'failed').length
+          setFailedDownloadCount(failedCount)
+        }
+      } catch (e) {
+        console.error('[Device.tsx] Failed to load download service state:', e)
+      }
+    }
+    loadDownloadServiceState()
+
+    // Listen for download service state updates
+    const unsubscribeDownloadService = window.electronAPI.downloadService.onStateUpdate((state: { queue: Array<{ status: string }> }) => {
+      if (!mounted) return
+      const failedCount = state.queue.filter((item) => item.status === 'failed').length
+      setFailedDownloadCount(failedCount)
+      // Also update syncing state when queue is empty or all complete
+      const pendingOrDownloading = state.queue.filter((item) => item.status === 'pending' || item.status === 'downloading').length
+      if (pendingOrDownloading === 0) {
+        setSyncing(false)
+      }
+    })
 
     // Load additional data if already connected
     const loadInitialData = async () => {
@@ -303,6 +332,8 @@ export function Device() {
       if (realtimeIntervalRef.current) {
         clearInterval(realtimeIntervalRef.current)
       }
+      // Clean up download service listener
+      unsubscribeDownloadService()
     }
   }, [clearConnectionTimers])
 
@@ -532,6 +563,28 @@ export function Device() {
     }
   }
 
+  const handleRetryFailed = async () => {
+    try {
+      const count = await window.electronAPI.downloadService.retryFailed()
+      if (count > 0) {
+        toast({
+          title: 'Retrying downloads',
+          description: `Re-queued ${count} failed download${count !== 1 ? 's' : ''}`,
+          variant: 'default'
+        })
+        setSyncing(true)
+      } else {
+        toast({
+          title: 'No failed downloads',
+          description: 'All downloads completed successfully',
+          variant: 'success'
+        })
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to retry downloads')
+    }
+  }
+
   // ==========================================
   // REALTIME STREAMING HANDLERS
   // ==========================================
@@ -666,8 +719,8 @@ export function Device() {
     <div className="flex flex-col h-full">
       {/* Header */}
       <header className="border-b px-6 py-4">
-        <h1 className="text-2xl font-bold">HiDock Device</h1>
-        <p className="text-sm text-muted-foreground">Connect and sync recordings from your HiDock</p>
+        <h1 className="text-2xl font-bold">Device Sync</h1>
+        <p className="text-sm text-muted-foreground">Manage your HiDock device and sync recordings</p>
       </header>
 
       {/* Content */}
@@ -730,7 +783,7 @@ export function Device() {
                   ) : (
                     <>
                       <p className="text-muted-foreground mb-4">
-                        Connect your HiDock device via USB to sync recordings
+                        Connect your HiDock device via USB to begin syncing recordings
                       </p>
                       <Button onClick={handleConnect} disabled={connecting}>
                         <Usb className="h-4 w-4 mr-2" />
@@ -953,6 +1006,18 @@ export function Device() {
                             </>
                           )}
                         </Button>
+                        {/* Retry Failed button - shows when there are failed downloads */}
+                        {failedDownloadCount > 0 && (
+                          <Button
+                            className="w-full mt-2"
+                            onClick={handleRetryFailed}
+                            variant="outline"
+                            disabled={syncing}
+                          >
+                            <RotateCcw className="h-4 w-4 mr-2" />
+                            Retry {failedDownloadCount} Failed Download{failedDownloadCount !== 1 ? 's' : ''}
+                          </Button>
+                        )}
                       </>
                     )
                   })()}
@@ -1285,25 +1350,25 @@ export function Device() {
           {!deviceState.connected && (
             <Card>
               <CardHeader>
-                <CardTitle>Getting Started</CardTitle>
+                <CardTitle>How Device Sync Works</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <h3 className="font-medium">1. Connect your HiDock</h3>
+                  <h3 className="font-medium">1. Connect your device</h3>
                   <p className="text-sm text-muted-foreground">
-                    Plug in your HiDock device via USB cable and click "Connect Device"
+                    Plug in your HiDock via USB and click "Connect Device" to establish a connection
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <h3 className="font-medium">2. Sync recordings</h3>
+                  <h3 className="font-medium">2. Sync automatically</h3>
                   <p className="text-sm text-muted-foreground">
-                    Download recordings to your computer for transcription and storage
+                    Enable auto-download to automatically sync new recordings when your device connects
                   </p>
                 </div>
                 <div className="space-y-2">
                   <h3 className="font-medium">3. Auto-transcribe</h3>
                   <p className="text-sm text-muted-foreground">
-                    Recordings are automatically transcribed and linked to calendar meetings
+                    Recordings are automatically transcribed and linked to your calendar meetings
                   </p>
                 </div>
               </CardContent>

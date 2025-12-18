@@ -15,11 +15,15 @@ export const useUIStore = create<UIStore>((set) => ({
   isGeneratingOutput: false,
   outputContent: null,
 
+  // Recordings page view preference (persists across navigation)
+  recordingsCompactView: true, // Default to list view (compact)
+
   // Playback state (managed by OperationController)
   currentlyPlayingId: null,
   currentlyPlayingPath: null,
   playbackCurrentTime: 0,
   playbackDuration: 0,
+  isPlaying: false,
 
   // Actions
   toggleSidebar: () => {
@@ -50,6 +54,11 @@ export const useUIStore = create<UIStore>((set) => ({
     set({ outputContent: null, isGeneratingOutput: false })
   },
 
+  // Recordings view actions
+  setRecordingsCompactView: (compact: boolean) => {
+    set({ recordingsCompactView: compact })
+  },
+
   // Playback actions (called by OperationController)
   setCurrentlyPlaying: (recordingId: string | null, filePath: string | null) => {
     set({ currentlyPlayingId: recordingId, currentlyPlayingPath: filePath })
@@ -57,6 +66,10 @@ export const useUIStore = create<UIStore>((set) => ({
 
   setPlaybackProgress: (currentTime: number, duration: number) => {
     set({ playbackCurrentTime: currentTime, playbackDuration: duration })
+  },
+
+  setIsPlaying: (playing: boolean) => {
+    set({ isPlaying: playing })
   }
 }))
 

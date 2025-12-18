@@ -21,7 +21,8 @@ import {
   AlertCircle,
   Zap,
   LayoutGrid,
-  List
+  List,
+  Trash2
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -77,9 +78,12 @@ export function Recordings() {
   const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set())
   const [locationFilter, setLocationFilter] = useState<LocationFilter>('all')
   const [searchQuery, setSearchQuery] = useState('')
-  const [compactView, setCompactView] = useState(false)
+  // View mode persisted in store across navigation
+  const compactView = useUIStore((state) => state.recordingsCompactView)
+  const setCompactView = useUIStore((state) => state.setRecordingsCompactView)
   const [bulkProcessing, setBulkProcessing] = useState(false)
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 })
+  const [deleting, setDeleting] = useState<string | null>(null)
 
   // Enrichment: Load transcripts and meetings for recordings
   const [transcripts, setTranscripts] = useState<Map<string, Transcript>>(new Map())
@@ -272,6 +276,40 @@ export function Recordings() {
     return { deviceOnly, needsTranscription }
   }, [filteredRecordings])
 
+  // Delete handlers
+  const handleDeleteFromDevice = async (recording: UnifiedRecording) => {
+    if (!deviceConnected) return
+    if (!window.confirm(`Delete "${recording.filename}" from device? This cannot be undone.`)) return
+
+    setDeleting(recording.id)
+    try {
+      await window.electronAPI.device.deleteFile(recording.deviceFilename)
+      await refresh(false)
+    } catch (e) {
+      console.error('Failed to delete from device:', e)
+    } finally {
+      setDeleting(null)
+    }
+  }
+
+  const handleDeleteLocal = async (recording: UnifiedRecording) => {
+    if (!hasLocalPath(recording)) return
+    const hasTranscript = transcripts.has(recording.id)
+    const message = hasTranscript
+      ? `Delete local file and transcript for "${recording.filename}"? The transcript data will be lost.`
+      : `Delete local file "${recording.filename}"?`
+    if (!window.confirm(message)) return
+
+    setDeleting(recording.id)
+    try {
+      await window.electronAPI.recordings.delete(recording.id)
+      await refresh(false)
+    } catch (e) {
+      console.error('Failed to delete local file:', e)
+    } finally {
+      setDeleting(null)
+    }
+  }
 
   // Status icon component
   const StatusIcon = ({ recording }: { recording: UnifiedRecording }) => {
@@ -343,8 +381,8 @@ export function Recordings() {
     return (
       <div className="flex flex-col h-full">
         <header className="border-b px-6 py-4">
-          <h1 className="text-2xl font-bold">Recordings</h1>
-          <p className="text-sm text-muted-foreground">All your recordings in one place</p>
+          <h1 className="text-2xl font-bold">Knowledge Library</h1>
+          <p className="text-sm text-muted-foreground">Your captured conversations and insights</p>
         </header>
         <div className="flex-1 flex items-center justify-center">
           <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -359,9 +397,9 @@ export function Recordings() {
       <header className="border-b px-6 py-4">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">Recordings</h1>
+            <h1 className="text-2xl font-bold">Knowledge Library</h1>
             <p className="text-sm text-muted-foreground">
-              {stats.total} recording{stats.total !== 1 ? 's' : ''}
+              {stats.total} capture{stats.total !== 1 ? 's' : ''}
               {stats.unsynced > 0 && (
                 <span className="ml-2 text-orange-600 dark:text-orange-400">
                   ({stats.unsynced} on device only)
@@ -375,7 +413,7 @@ export function Recordings() {
           <div className="flex items-center gap-2">
             <Button variant="outline" size="sm" onClick={handleAddRecording} title="Import audio file">
               <Plus className="h-4 w-4 mr-2" />
-              Add Recording
+              Add Capture
             </Button>
             <Button variant="outline" size="sm" onClick={openRecordingsFolder}>
               <FolderOpen className="h-4 w-4 mr-2" />
@@ -388,7 +426,7 @@ export function Recordings() {
                 size="sm"
                 onClick={handleBulkDownload}
                 disabled={downloadQueue.size > 0 || !deviceConnected}
-                title={`Download ${bulkCounts.deviceOnly} recordings from device`}
+                title={`Download ${bulkCounts.deviceOnly} captures from device`}
               >
                 {downloadQueue.size > 0 ? (
                   <>
@@ -409,7 +447,7 @@ export function Recordings() {
                 size="sm"
                 onClick={handleBulkProcess}
                 disabled={bulkProcessing}
-                title={`Queue ${bulkCounts.needsTranscription} recordings for transcription`}
+                title={`Queue ${bulkCounts.needsTranscription} captures for transcription`}
               >
                 {bulkProcessing ? (
                   <>
@@ -508,7 +546,7 @@ export function Recordings() {
           <div className="relative flex-1 max-w-xs">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Search recordings..."
+              placeholder="Search captures..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-9 h-8"
@@ -534,9 +572,9 @@ export function Recordings() {
                 <Mic className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
                 {recordings.length === 0 ? (
                   <>
-                    <h3 className="text-lg font-medium mb-2">No Recordings Yet</h3>
+                    <h3 className="text-lg font-medium mb-2">No Knowledge Captured Yet</h3>
                     <p className="text-muted-foreground mb-4">
-                      Connect your HiDock device and sync recordings to see them here,
+                      Connect your HiDock device to sync your captured conversations,
                       or import audio files from your computer.
                     </p>
                     <div className="flex gap-2 justify-center">
@@ -551,7 +589,7 @@ export function Recordings() {
                   </>
                 ) : (
                   <>
-                    <h3 className="text-lg font-medium mb-2">No Matching Recordings</h3>
+                    <h3 className="text-lg font-medium mb-2">No Matching Captures</h3>
                     <p className="text-muted-foreground">
                       Try changing your filter or search query.
                     </p>
@@ -628,6 +666,28 @@ export function Recordings() {
                             disabled={!canPlay}>
                             {currentlyPlayingId === recording.id ? <X className="h-3 w-3" /> : <Play className="h-3 w-3" />}
                           </Button>
+                          {/* Delete buttons - compact view */}
+                          {recording.location === 'device-only' && (
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive"
+                              onClick={() => handleDeleteFromDevice(recording)}
+                              disabled={!deviceConnected || deleting === recording.id}>
+                              {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                            </Button>
+                          )}
+                          {recording.location === 'local-only' && (
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-orange-500 hover:text-orange-600"
+                              onClick={() => handleDeleteLocal(recording)}
+                              disabled={deleting === recording.id}>
+                              {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                            </Button>
+                          )}
+                          {recording.location === 'both' && (
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-orange-500"
+                              onClick={() => handleDeleteLocal(recording)}
+                              disabled={deleting === recording.id}>
+                              {deleting === recording.id ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                            </Button>
+                          )}
                         </div>
                       </div>
                     )
@@ -718,9 +778,59 @@ export function Recordings() {
                                     size="icon"
                                     onClick={() => audioControls.play(recording.id, recording.localPath)}
                                     disabled={!canPlay}
-                                    title={canPlay ? 'Play recording' : 'Download to play'}
+                                    title={canPlay ? 'Play capture' : 'Download to play'}
                                   >
                                     <Play className="h-4 w-4" />
+                                  </Button>
+                                )}
+
+                                {/* Delete buttons based on location */}
+                                {recording.location === 'device-only' && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="text-destructive hover:text-destructive"
+                                    onClick={() => handleDeleteFromDevice(recording)}
+                                    disabled={!deviceConnected || deleting === recording.id}
+                                    title="Delete from device"
+                                  >
+                                    {deleting === recording.id ? (
+                                      <RefreshCw className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                )}
+                                {recording.location === 'local-only' && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="text-orange-500 hover:text-orange-600"
+                                    onClick={() => handleDeleteLocal(recording)}
+                                    disabled={deleting === recording.id}
+                                    title="Delete local file"
+                                  >
+                                    {deleting === recording.id ? (
+                                      <RefreshCw className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                )}
+                                {recording.location === 'both' && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="text-muted-foreground hover:text-orange-500"
+                                    onClick={() => handleDeleteLocal(recording)}
+                                    disabled={deleting === recording.id}
+                                    title="Delete local copy"
+                                  >
+                                    {deleting === recording.id ? (
+                                      <RefreshCw className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="h-4 w-4" />
+                                    )}
                                   </Button>
                                 )}
                               </div>
@@ -730,7 +840,7 @@ export function Recordings() {
                             {/* Audio Player */}
                             {currentlyPlayingId === recording.id && hasLocalPath(recording) && (
                               <AudioPlayer
-                                filePath={recording.localPath}
+                                filename={recording.filename}
                                 onClose={() => audioControls.stop()}
                               />
                             )}
@@ -849,7 +959,7 @@ export function Recordings() {
                             {/* Device-only notice */}
                             {isDeviceOnly(recording) && (
                               <p className="text-xs text-muted-foreground italic">
-                                Download this recording to play it and generate a transcript.
+                                Download this capture to play it and generate a transcript.
                               </p>
                             )}
                           </CardContent>

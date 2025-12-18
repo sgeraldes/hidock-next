@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatDateTime, formatDuration } from '@/lib/utils'
 import { parseAttendees, parseJsonArray } from '@/types'
 import { AudioPlayer } from '@/components/AudioPlayer'
+import { useAudioControls } from '@/components/OperationController'
+import { useUIStore } from '@/store/useUIStore'
 import type { MeetingDetails, MeetingAttendee } from '@/types'
 
 export function MeetingDetail() {
@@ -13,7 +15,10 @@ export function MeetingDetail() {
   const navigate = useNavigate()
   const [details, setDetails] = useState<MeetingDetails | null>(null)
   const [loading, setLoading] = useState(true)
-  const [playingRecordingId, setPlayingRecordingId] = useState<string | null>(null)
+
+  // Global playback state
+  const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
+  const audioControls = useAudioControls()
 
   useEffect(() => {
     if (id) {
@@ -168,11 +173,11 @@ export function MeetingDetail() {
                           <span className="text-xs px-2 py-1 rounded-full bg-secondary">
                             {recording.status}
                           </span>
-                          {playingRecordingId === recording.id ? (
+                          {currentlyPlayingId === recording.id ? (
                             <Button
                               variant="ghost"
                               size="icon"
-                              onClick={() => setPlayingRecordingId(null)}
+                              onClick={() => audioControls.stop()}
                             >
                               <X className="h-4 w-4" />
                             </Button>
@@ -180,7 +185,7 @@ export function MeetingDetail() {
                             <Button
                               variant="ghost"
                               size="icon"
-                              onClick={() => setPlayingRecordingId(recording.id)}
+                              onClick={() => recording.file_path && audioControls.play(recording.id, recording.file_path)}
                               disabled={!recording.file_path}
                               title={recording.file_path ? 'Play recording' : 'Recording not available locally'}
                             >
@@ -191,12 +196,11 @@ export function MeetingDetail() {
                       </div>
 
                       {/* Audio Player */}
-                      {playingRecordingId === recording.id && recording.file_path && (
+                      {currentlyPlayingId === recording.id && recording.file_path && (
                         <div className="my-3">
                           <AudioPlayer
-                            filePath={recording.file_path}
                             filename={recording.filename}
-                            onClose={() => setPlayingRecordingId(null)}
+                            onClose={() => audioControls.stop()}
                           />
                         </div>
                       )}

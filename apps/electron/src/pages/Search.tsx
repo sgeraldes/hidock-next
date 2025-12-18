@@ -51,9 +51,9 @@ export function Search() {
     <div className="flex flex-col h-full">
       {/* Header */}
       <header className="border-b px-6 py-4">
-        <h1 className="text-2xl font-bold">Search Transcripts</h1>
+        <h1 className="text-2xl font-bold">Explore Knowledge</h1>
         <p className="text-sm text-muted-foreground">
-          Search across all your meeting transcripts
+          Search, discover, and connect your knowledge
         </p>
       </header>
 
@@ -63,7 +63,7 @@ export function Search() {
           <div className="relative flex-1">
             <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Search for keywords, topics, or phrases..."
+              placeholder="Explore your knowledge base..."
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className="pl-10"
@@ -81,9 +81,9 @@ export function Search() {
           {!hasSearched ? (
             <div className="text-center py-12">
               <SearchIcon className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-              <h2 className="text-lg font-medium">Search your meetings</h2>
+              <h2 className="text-lg font-medium">Explore your knowledge</h2>
               <p className="text-muted-foreground mt-1">
-                Find specific topics, decisions, or mentions across all transcripts
+                Discover topics, decisions, and insights across all your meetings
               </p>
             </div>
           ) : results.length === 0 ? (

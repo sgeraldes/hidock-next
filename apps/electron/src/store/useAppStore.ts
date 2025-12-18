@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { getHiDockDeviceService } from '@/services/hidock-device'
 import type { Meeting, Recording, AppConfig, CalendarSyncResult } from '@/types'
 
 interface AppState {
@@ -14,13 +15,29 @@ interface AppState {
 
   // Recordings
   recordings: Recording[]
+  deviceRecordings: Recording[]
   recordingsLoading: boolean
+
+  // Unified recordings (persists across page navigation)
+  unifiedRecordings: any[] // UnifiedRecording[] - using any to avoid circular imports
+  unifiedRecordingsLoaded: boolean
+  unifiedRecordingsLoading: boolean
+  unifiedRecordingsError: string | null
 
   // UI State
   currentDate: Date
   calendarView: 'day' | 'workweek' | 'week' | 'month'
   sidebarOpen: boolean
   selectedMeetingId: string | null
+
+  // Device sync state (for sidebar indicator)
+  deviceSyncing: boolean
+  deviceSyncProgress: { current: number; total: number } | null
+  deviceFileDownloading: string | null
+  deviceFileProgress: number
+
+  // Download queue state (persists across page navigation)
+  downloadQueue: Map<string, { filename: string; progress: number; size: number }>
 
   // Actions
   setConfig: (config: AppConfig) => void
@@ -32,7 +49,16 @@ interface AppState {
   syncCalendar: () => Promise<CalendarSyncResult>
 
   setRecordings: (recordings: Recording[]) => void
+  setDeviceRecordings: (recordings: Recording[]) => void
+  loadAllRecordings: () => Promise<void> // Load both database and device recordings
   loadRecordings: () => Promise<void>
+
+  // Unified recordings actions (persists across page navigation)
+  setUnifiedRecordings: (recordings: any[]) => void
+  setUnifiedRecordingsLoading: (loading: boolean) => void
+  setUnifiedRecordingsError: (error: string | null) => void
+  markUnifiedRecordingsLoaded: () => void
+  invalidateUnifiedRecordings: () => void // Force reload on next access
 
   setCurrentDate: (date: Date) => void
   setCalendarView: (view: 'day' | 'workweek' | 'week' | 'month') => void
@@ -42,6 +68,22 @@ interface AppState {
   navigateWeek: (direction: 'prev' | 'next') => void
   navigateMonth: (direction: 'prev' | 'next') => void
   goToToday: () => void
+
+  // Device sync actions
+  setDeviceSyncState: (state: {
+    deviceSyncing?: boolean
+    deviceSyncProgress?: { current: number; total: number } | null
+    deviceFileDownloading?: string | null
+    deviceFileProgress?: number
+  }) => void
+  clearDeviceSyncState: () => void
+
+  // Download queue actions
+  addToDownloadQueue: (id: string, filename: string, size: number) => void
+  updateDownloadProgress: (id: string, progress: number) => void
+  removeFromDownloadQueue: (id: string) => void
+  isDownloading: (id: string) => boolean
+  getDownloadProgress: (id: string) => number | null
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -55,12 +97,28 @@ export const useAppStore = create<AppState>((set, get) => ({
   calendarSyncing: false,
 
   recordings: [],
+  deviceRecordings: [],
   recordingsLoading: false,
+
+  // Unified recordings initial state
+  unifiedRecordings: [],
+  unifiedRecordingsLoaded: false,
+  unifiedRecordingsLoading: false,
+  unifiedRecordingsError: null,
 
   currentDate: new Date(),
   calendarView: 'week',
   sidebarOpen: true,
   selectedMeetingId: null,
+
+  // Device sync initial state
+  deviceSyncing: false,
+  deviceSyncProgress: null,
+  deviceFileDownloading: null,
+  deviceFileProgress: 0,
+
+  // Download queue initial state
+  downloadQueue: new Map(),
 
   // Config actions
   setConfig: (config) => set({ config }),
@@ -122,6 +180,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Recording actions
   setRecordings: (recordings) => set({ recordings }),
+  setDeviceRecordings: (recordings) => set({ deviceRecordings: recordings }),
 
   loadRecordings: async () => {
     set({ recordingsLoading: true })
@@ -133,6 +192,25 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ recordingsLoading: false })
     }
   },
+
+  loadAllRecordings: async () => {
+    set({ recordingsLoading: true })
+    try {
+      // Load all recordings from database (includes device-only, local-only, both)
+      const recordings = await window.electronAPI.recordings.getAll()
+      set({ recordings, recordingsLoading: false })
+    } catch (error) {
+      console.error('Failed to load all recordings:', error)
+      set({ recordingsLoading: false })
+    }
+  },
+
+  // Unified recordings actions
+  setUnifiedRecordings: (recordings) => set({ unifiedRecordings: recordings }),
+  setUnifiedRecordingsLoading: (loading) => set({ unifiedRecordingsLoading: loading }),
+  setUnifiedRecordingsError: (error) => set({ unifiedRecordingsError: error }),
+  markUnifiedRecordingsLoaded: () => set({ unifiedRecordingsLoaded: true }),
+  invalidateUnifiedRecordings: () => set({ unifiedRecordingsLoaded: false }),
 
   // UI actions
   setCurrentDate: (date) => set({ currentDate: date }),
@@ -154,7 +232,50 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ currentDate: newDate })
   },
 
-  goToToday: () => set({ currentDate: new Date() })
+  goToToday: () => set({ currentDate: new Date() }),
+
+  // Device sync actions
+  setDeviceSyncState: (state) => set((prev) => ({
+    deviceSyncing: state.deviceSyncing ?? prev.deviceSyncing,
+    deviceSyncProgress: state.deviceSyncProgress !== undefined ? state.deviceSyncProgress : prev.deviceSyncProgress,
+    deviceFileDownloading: state.deviceFileDownloading !== undefined ? state.deviceFileDownloading : prev.deviceFileDownloading,
+    deviceFileProgress: state.deviceFileProgress ?? prev.deviceFileProgress,
+  })),
+
+  clearDeviceSyncState: () => set({
+    deviceSyncing: false,
+    deviceSyncProgress: null,
+    deviceFileDownloading: null,
+    deviceFileProgress: 0,
+  }),
+
+  // Download queue actions
+  addToDownloadQueue: (id, filename, size) => set((state) => {
+    const newQueue = new Map(state.downloadQueue)
+    newQueue.set(id, { filename, progress: 0, size })
+    return { downloadQueue: newQueue }
+  }),
+
+  updateDownloadProgress: (id, progress) => set((state) => {
+    const item = state.downloadQueue.get(id)
+    if (!item) return state
+    const newQueue = new Map(state.downloadQueue)
+    newQueue.set(id, { ...item, progress })
+    return { downloadQueue: newQueue }
+  }),
+
+  removeFromDownloadQueue: (id) => set((state) => {
+    const newQueue = new Map(state.downloadQueue)
+    newQueue.delete(id)
+    return { downloadQueue: newQueue }
+  }),
+
+  isDownloading: (id) => get().downloadQueue.has(id),
+
+  getDownloadProgress: (id) => {
+    const item = get().downloadQueue.get(id)
+    return item ? item.progress : null
+  },
 }))
 
 // Helper functions

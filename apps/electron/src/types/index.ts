@@ -152,6 +152,12 @@ export interface AppConfig {
     theme: 'light' | 'dark' | 'system'
     defaultView: 'week' | 'month'
     startOfWeek: number
+    calendarView: 'day' | 'workweek' | 'week' | 'month'
+    hideEmptyMeetings: boolean
+    showListView: boolean
+    officeHoursStart: number
+    officeHoursEnd: number
+    workDays: number[]
   }
 }
 
@@ -248,6 +254,35 @@ export interface OutputTemplate {
   id: OutputTemplateId
   name: string
   description: string
+}
+
+// =============================================================================
+// Recording-Meeting Linking Types
+// =============================================================================
+
+/**
+ * Meeting candidate for recording linking dialog
+ * Transformed from database snake_case to TypeScript camelCase
+ */
+export interface MeetingCandidate {
+  id: string
+  recordingId: string
+  meetingId: string
+  subject: string
+  startTime: string
+  endTime: string
+  confidenceScore: number
+  matchReason: string | null
+  isAiSelected: boolean
+  isUserConfirmed: boolean
+}
+
+/**
+ * Result type for IPC operations
+ */
+export interface RecordingLinkResult {
+  success: boolean
+  error?: string
 }
 
 // =============================================================================

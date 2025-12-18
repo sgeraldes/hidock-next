@@ -72,8 +72,13 @@ export function Chat() {
 
   const checkRAGStatus = async () => {
     try {
-      const ragStatus = await window.electronAPI.rag.status()
-      setStatus(ragStatus)
+      const result = await window.electronAPI.rag.status()
+      if (result.success) {
+        setStatus(result.data)
+      } else {
+        console.error('Failed to check RAG status:', result.error)
+        setStatus({ ollamaAvailable: false, documentCount: 0, meetingCount: 0, ready: false })
+      }
     } catch (error) {
       console.error('Failed to check RAG status:', error)
       setStatus({ ollamaAvailable: false, documentCount: 0, meetingCount: 0, ready: false })
@@ -126,15 +131,15 @@ export function Chat() {
     setMessages((prev) => [...prev, userMsg])
 
     try {
-      // Use the RAG service for response
-      const response = await window.electronAPI.rag.chat(sessionId, userMessage)
+      // Use the RAG service for response (legacy API that doesn't use Result pattern)
+      const response = await window.electronAPI.rag.chatLegacy(sessionId, userMessage)
 
       if (response.error) {
         const errorMsg = await window.electronAPI.chat.addMessage('assistant', response.error)
         setMessages((prev) => [...prev, errorMsg])
       } else {
         // Store sources for this message
-        if (response.sources.length > 0) {
+        if (response.sources && response.sources.length > 0) {
           setSources((prev) => new Map(prev).set(userMsg.id, response.sources))
         }
 
@@ -142,12 +147,12 @@ export function Chat() {
         const assistantMsg = await window.electronAPI.chat.addMessage(
           'assistant',
           response.answer,
-          JSON.stringify(response.sources)
+          JSON.stringify(response.sources || [])
         )
         setMessages((prev) => [...prev, assistantMsg])
 
         // Store sources for assistant message too
-        if (response.sources.length > 0) {
+        if (response.sources && response.sources.length > 0) {
           setSources((prev) => new Map(prev).set(assistantMsg.id, response.sources))
         }
       }
@@ -182,14 +187,14 @@ export function Chat() {
       <div className="flex flex-col h-full">
         <header className="flex items-center justify-between border-b px-6 py-4">
           <div>
-            <h1 className="text-2xl font-bold">Meeting Assistant</h1>
-            <p className="text-sm text-muted-foreground">Ask questions about your meetings</p>
+            <h1 className="text-2xl font-bold">Knowledge Assistant</h1>
+            <p className="text-sm text-muted-foreground">Knowledge-powered AI conversations</p>
           </div>
         </header>
         <div className="flex-1 flex items-center justify-center">
           <div className="flex flex-col items-center gap-4">
             <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-muted-foreground">Initializing chat...</p>
+            <p className="text-muted-foreground">Initializing Knowledge Assistant...</p>
           </div>
         </div>
       </div>
@@ -202,8 +207,8 @@ export function Chat() {
       <div className="flex flex-col h-full">
         <header className="flex items-center justify-between border-b px-6 py-4">
           <div>
-            <h1 className="text-2xl font-bold">Meeting Assistant</h1>
-            <p className="text-sm text-muted-foreground">Ask questions about your meetings</p>
+            <h1 className="text-2xl font-bold">Knowledge Assistant</h1>
+            <p className="text-sm text-muted-foreground">Knowledge-powered AI conversations</p>
           </div>
         </header>
         <div className="flex-1 flex items-center justify-center">
@@ -226,8 +231,8 @@ export function Chat() {
       {/* Header */}
       <header className="flex items-center justify-between border-b px-6 py-4">
         <div>
-          <h1 className="text-2xl font-bold">Meeting Assistant</h1>
-          <p className="text-sm text-muted-foreground">Ask questions about your meetings</p>
+          <h1 className="text-2xl font-bold">Knowledge Assistant</h1>
+          <p className="text-sm text-muted-foreground">Knowledge-powered AI conversations</p>
         </div>
         <div className="flex items-center gap-4">
           {/* Status indicator */}
@@ -281,11 +286,11 @@ export function Chat() {
               <span>
                 Ollama is not running. Start Ollama with{' '}
                 <code className="bg-yellow-100 dark:bg-yellow-800 px-1 rounded">ollama serve</code> to enable AI
-                chat.
+                conversations.
               </span>
             ) : (
               <span>
-                No meeting transcripts indexed yet. Record meetings with your HiDock device to start chatting.
+                No meeting transcripts indexed yet. Record meetings with your HiDock device to start conversations.
               </span>
             )}
           </div>
@@ -351,7 +356,7 @@ export function Chat() {
               <Bot className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
               <h2 className="text-lg font-medium">No conversations yet</h2>
               <p className="text-muted-foreground mt-1">
-                Ask me about your meetings, decisions, or action items
+                Ask me anything about your knowledge base
               </p>
               <div className="mt-6 space-y-2">
                 <p className="text-sm text-muted-foreground">Try asking:</p>
@@ -465,8 +470,8 @@ export function Chat() {
           <Input
             placeholder={
               status?.ready
-                ? 'Ask about your meetings...'
-                : 'Start Ollama and record meetings to enable chat...'
+                ? 'Ask about your knowledge base...'
+                : 'Start Ollama and record meetings to enable conversations...'
             }
             value={input}
             onChange={(e) => setInput(e.target.value)}
