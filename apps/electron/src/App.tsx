@@ -48,16 +48,16 @@ function App(): React.ReactElement {
       <Layout>
         <Routes>
           <Route path="/" element={<Navigate to="/library" replace />} />
-          <Route path="/calendar" element={<Calendar />} />
-          <Route path="/meeting/:id" element={<MeetingDetail />} />
-          <Route path="/assistant" element={<Chat />} />
-          <Route path="/explore" element={<Search />} />
-          <Route path="/sync" element={<Device />} />
-          <Route path="/library" element={<Recordings />} />
-          <Route path="/people" element={<Contacts />} />
-          <Route path="/projects" element={<Projects />} />
+          <Route path="/calendar" element={<ErrorBoundary><Calendar /></ErrorBoundary>} />
+          <Route path="/meeting/:id" element={<ErrorBoundary><MeetingDetail /></ErrorBoundary>} />
+          <Route path="/assistant" element={<ErrorBoundary><Chat /></ErrorBoundary>} />
+          <Route path="/explore" element={<ErrorBoundary><Search /></ErrorBoundary>} />
+          <Route path="/sync" element={<ErrorBoundary><Device /></ErrorBoundary>} />
+          <Route path="/library" element={<ErrorBoundary><Recordings /></ErrorBoundary>} />
+          <Route path="/people" element={<ErrorBoundary><Contacts /></ErrorBoundary>} />
+          <Route path="/projects" element={<ErrorBoundary><Projects /></ErrorBoundary>} />
           <Route path="/actionables" element={<ErrorBoundary><Outputs /></ErrorBoundary>} />
-          <Route path="/settings" element={<Settings />} />
+          <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
         </Routes>
       </Layout>
     </ToastProvider>

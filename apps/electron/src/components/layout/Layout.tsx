@@ -18,7 +18,8 @@ import {
   Compass,
   ListTodo,
   Calendar,
-  CloudDownload
+  CloudDownload,
+  LucideIcon
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
@@ -34,7 +35,7 @@ interface LayoutProps {
 // Navigation structure with sections
 type NavigationSection = {
   title: string
-  items: Array<{ name: string; href: string; icon: any }>
+  items: Array<{ name: string; href: string; icon: LucideIcon }>
 }
 
 const navigationSections: NavigationSection[] = [
