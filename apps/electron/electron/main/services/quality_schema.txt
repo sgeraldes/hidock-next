@@ -1,0 +1,14 @@
+
+-- Quality assessments for recordings (v10)
+CREATE TABLE IF NOT EXISTS quality_assessments (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL UNIQUE,
+    quality TEXT NOT NULL CHECK(quality IN ('high', 'medium', 'low')),
+    assessment_method TEXT NOT NULL CHECK(assessment_method IN ('auto', 'manual')),
+    confidence REAL DEFAULT 1.0,
+    reason TEXT,
+    assessed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    assessed_by TEXT,
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+);
+

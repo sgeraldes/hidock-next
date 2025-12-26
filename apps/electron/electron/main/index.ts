@@ -21,6 +21,8 @@ import {
 } from './services/transcription'
 import { getVectorStore } from './services/vector-store'
 import { getRAGService } from './services/rag'
+import { setMainWindowForEventBus } from './services/event-bus'
+import { getStoragePolicyService } from './services/storage-policy'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -84,6 +86,10 @@ async function initializeServices(): Promise<void> {
   const rag = getRAGService()
   await rag.initialize()
   console.log('RAG service initialized')
+
+  // Initialize storage policy service (subscribes to events)
+  const storagePolicy = getStoragePolicyService()
+  console.log('Storage policy service initialized')
 
   // Register IPC handlers
   registerIpcHandlers()
@@ -161,6 +167,7 @@ app.whenReady().then(async () => {
   if (mainWindow) {
     setWatcherMainWindow(mainWindow)
     setMainWindowForTranscription(mainWindow)
+    setMainWindowForEventBus(mainWindow)
   }
 
   // Start background services

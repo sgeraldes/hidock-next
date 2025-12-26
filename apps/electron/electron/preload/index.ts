@@ -402,6 +402,40 @@ const electronAPI: ElectronAPI = {
       return () => {
         ipcRenderer.removeListener('download-service:state-update', handler)
       }
+,
+
+  // Quality Assessment API
+  quality: {
+    get: (recordingId: string) => ipcRenderer.invoke('quality:get', recordingId),
+    set: (recordingId: string, quality: 'high' | 'medium' | 'low', reason?: string, assessedBy?: string) =>
+      ipcRenderer.invoke('quality:set', recordingId, quality, reason, assessedBy),
+    autoAssess: (recordingId: string) => ipcRenderer.invoke('quality:auto-assess', recordingId),
+    getByQuality: (quality: 'high' | 'medium' | 'low') => ipcRenderer.invoke('quality:get-by-quality', quality),
+    batchAutoAssess: (recordingIds: string[]) => ipcRenderer.invoke('quality:batch-auto-assess', recordingIds),
+    assessUnassessed: () => ipcRenderer.invoke('quality:assess-unassessed')
+  },
+
+  // Storage Policy API
+  storagePolicy: {
+    getByTier: (tier: 'hot' | 'warm' | 'cold' | 'archive') => ipcRenderer.invoke('storage:get-by-tier', tier),
+    getCleanupSuggestions: (minAgeOverride?: Partial<Record<'hot' | 'warm' | 'cold' | 'archive', number>>) =>
+      ipcRenderer.invoke('storage:get-cleanup-suggestions', minAgeOverride),
+    getCleanupSuggestionsForTier: (tier: 'hot' | 'warm' | 'cold' | 'archive', minAgeDays?: number) =>
+      ipcRenderer.invoke('storage:get-cleanup-suggestions-for-tier', tier, minAgeDays),
+    executeCleanup: (recordingIds: string[], archive?: boolean) =>
+      ipcRenderer.invoke('storage:execute-cleanup', recordingIds, archive),
+    getStats: () => ipcRenderer.invoke('storage:get-stats'),
+    initializeUntiered: () => ipcRenderer.invoke('storage:initialize-untiered'),
+    assignTier: (recordingId: string, quality: 'high' | 'medium' | 'low') =>
+      ipcRenderer.invoke('storage:assign-tier', recordingId, quality)
+  },
+
+  // Domain Event Listener
+  onDomainEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, domainEvent: any) => callback(domainEvent)
+    ipcRenderer.on('domain-event', handler)
+    return () => {
+      ipcRenderer.removeListener('domain-event', handler)
     }
   }
 }

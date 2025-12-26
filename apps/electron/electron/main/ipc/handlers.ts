@@ -1,4 +1,5 @@
 import { registerConfigHandlers } from './config-handlers'
+import { registerQualityHandlers } from './quality-handlers'
 import { registerDatabaseHandlers } from './database-handlers'
 import { registerCalendarHandlers } from './calendar-handlers'
 import { registerStorageHandlers } from './storage-handlers'
@@ -24,6 +25,7 @@ export function registerIpcHandlers(): void {
   registerOutputsHandlers()
 
   // Register centralized service handlers
+  registerQualityHandlers()
   registerDownloadServiceHandlers()
 
   console.log('All IPC handlers registered')

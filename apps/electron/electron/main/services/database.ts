@@ -5,7 +5,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 9
+const SCHEMA_VERSION = 10
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS recordings (
     on_local INTEGER DEFAULT 0,
     source TEXT DEFAULT 'hidock',
     is_imported INTEGER DEFAULT 0,
+    storage_tier TEXT DEFAULT NULL CHECK(storage_tier IN (NULL, 'hot', 'warm', 'cold', 'archive')),
     FOREIGN KEY (meeting_id) REFERENCES meetings(id)
 );
 
@@ -192,7 +193,22 @@ CREATE TABLE IF NOT EXISTS device_files_cache (
     cached_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- Indexes for performance
+
+
+-- Quality assessments for recordings (v10)
+CREATE TABLE IF NOT EXISTS quality_assessments (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL UNIQUE,
+    quality TEXT NOT NULL CHECK(quality IN ('high', 'medium', 'low')),
+    assessment_method TEXT NOT NULL CHECK(assessment_method IN ('auto', 'manual')),
+    confidence REAL DEFAULT 1.0,
+    reason TEXT,
+    assessed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    assessed_by TEXT,
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+);
+
+-- -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_device_cache_filename ON device_files_cache(filename);
 CREATE INDEX IF NOT EXISTS idx_device_cache_date ON device_files_cache(date_recorded);
 
@@ -214,6 +230,10 @@ CREATE INDEX IF NOT EXISTS idx_meeting_projects_project ON meeting_projects(proj
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_recording ON recording_meeting_candidates(recording_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_meeting ON recording_meeting_candidates(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_selected ON recording_meeting_candidates(is_selected);
+CREATE INDEX IF NOT EXISTS idx_quality_recording ON quality_assessments(recording_id);
+CREATE INDEX IF NOT EXISTS idx_quality_level ON quality_assessments(quality);
+CREATE INDEX IF NOT EXISTS idx_recordings_storage_tier ON recordings(storage_tier);
+
 `
 
 // Migration functions for schema upgrades
@@ -497,7 +517,30 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v9 complete: HDA durations verified/fixed')
+  },
+  10: () => {
+    // v10: Add quality_assessments table and storage_tier column for Phase 0 architecture
+    console.log('Running migration to schema v10: Adding quality assessment and storage policy support')
+    const database = getDatabase()
+
+    // Add storage_tier column to recordings table if it doesn't exist
+    try {
+      database.run(`
+        ALTER TABLE recordings 
+        ADD COLUMN storage_tier TEXT DEFAULT NULL 
+        CHECK(storage_tier IN (NULL, 'hot', 'warm', 'cold', 'archive'))
+      `)
+      console.log('[Migration v10] Added storage_tier column to recordings')
+    } catch (e) {
+      // Column likely already exists
+      console.log('[Migration v10] storage_tier column may already exist')
+    }
+
+    // quality_assessments table is created in the schema, this just logs the migration
+    console.log('[Migration v10] quality_assessments table added to schema')
+    console.log('Migration v10 complete: Quality assessment and storage policy tables created')
   }
+
 }
 
 function runMigrations(currentVersion: number): void {
@@ -1909,4 +1952,81 @@ export function resetStuckTranscriptions(): { recordingsReset: number; queueItem
   getDatabase().run("UPDATE transcription_queue SET status = 'pending' WHERE status = 'processing'")
   console.log('[Database] Reset stuck transcriptions check complete')
   return { recordingsReset: 0, queueItemsReset: 0 }
+}
+
+// =============================================================================
+// Quality Assessment queries (v10)
+// =============================================================================
+
+export interface QualityAssessment {
+  id: string
+  recording_id: string
+  quality: 'high' | 'medium' | 'low'
+  assessment_method: 'auto' | 'manual'
+  confidence: number
+  reason?: string
+  assessed_at: string
+  assessed_by?: string
+}
+
+export function getQualityAssessment(recordingId: string): QualityAssessment | undefined {
+  return queryOne<QualityAssessment>('SELECT * FROM quality_assessments WHERE recording_id = ?', [recordingId])
+}
+
+export function upsertQualityAssessment(assessment: Omit<QualityAssessment, 'assessed_at'>): void {
+  const existing = getQualityAssessment(assessment.recording_id)
+
+  if (existing) {
+    run(
+      `UPDATE quality_assessments SET
+        quality = ?, assessment_method = ?, confidence = ?, reason = ?, assessed_by = ?
+      WHERE recording_id = ?`,
+      [
+        assessment.quality,
+        assessment.assessment_method,
+        assessment.confidence,
+        assessment.reason ?? null,
+        assessment.assessed_by ?? null,
+        assessment.recording_id
+      ]
+    )
+  } else {
+    run(
+      `INSERT INTO quality_assessments (id, recording_id, quality, assessment_method, confidence, reason, assessed_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        assessment.id,
+        assessment.recording_id,
+        assessment.quality,
+        assessment.assessment_method,
+        assessment.confidence,
+        assessment.reason ?? null,
+        assessment.assessed_by ?? null
+      ]
+    )
+  }
+}
+
+export function getRecordingsByQuality(quality: 'high' | 'medium' | 'low'): Recording[] {
+  return queryAll<Recording>(
+    `SELECT r.* FROM recordings r
+     JOIN quality_assessments qa ON r.id = qa.recording_id
+     WHERE qa.quality = ?
+     ORDER BY r.date_recorded DESC`,
+    [quality]
+  )
+}
+
+export function updateRecordingStorageTier(
+  recordingId: string,
+  tier: 'hot' | 'warm' | 'cold' | 'archive' | null
+): void {
+  run('UPDATE recordings SET storage_tier = ? WHERE id = ?', [tier, recordingId])
+}
+
+export function getRecordingsByStorageTier(tier: 'hot' | 'warm' | 'cold' | 'archive'): Recording[] {
+  return queryAll<Recording>(
+    'SELECT * FROM recordings WHERE storage_tier = ? ORDER BY date_recorded DESC',
+    [tier]
+  )
 }
