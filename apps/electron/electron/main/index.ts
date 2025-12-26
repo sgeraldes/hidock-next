@@ -23,6 +23,7 @@ import { getVectorStore } from './services/vector-store'
 import { getRAGService } from './services/rag'
 import { setMainWindowForEventBus } from './services/event-bus'
 import { getStoragePolicyService } from './services/storage-policy'
+import { registerMigrationHandlers, setMainWindowForMigration } from './ipc/migration-handlers'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -94,6 +95,10 @@ async function initializeServices(): Promise<void> {
   // Register IPC handlers
   registerIpcHandlers()
   console.log('IPC handlers registered')
+
+  // Register migration handlers
+  registerMigrationHandlers()
+  console.log('Migration handlers registered')
 }
 
 app.whenReady().then(async () => {
@@ -168,6 +173,7 @@ app.whenReady().then(async () => {
     setWatcherMainWindow(mainWindow)
     setMainWindowForTranscription(mainWindow)
     setMainWindowForEventBus(mainWindow)
+    setMainWindowForMigration(mainWindow)
   }
 
   // Start background services

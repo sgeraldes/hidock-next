@@ -38,13 +38,17 @@ CREATE TABLE IF NOT EXISTS knowledge_captures (
     correlation_confidence REAL,
     correlation_method TEXT,
 
+    -- Source tracking (migration from recordings)
+    source_recording_id TEXT,
+
     -- Timestamps
     captured_at TEXT NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     deleted_at TEXT,
 
-    FOREIGN KEY (meeting_id) REFERENCES meetings(id)
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id),
+    FOREIGN KEY (source_recording_id) REFERENCES recordings(id)
 );
 
 -- =============================================================================
@@ -192,6 +196,7 @@ CREATE TABLE IF NOT EXISTS outputs (
 -- Knowledge captures indexes
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_captured_at ON knowledge_captures(captured_at);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_meeting_id ON knowledge_captures(meeting_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_captures_source_recording ON knowledge_captures(source_recording_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_quality ON knowledge_captures(quality_rating);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_storage_tier ON knowledge_captures(storage_tier);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_expires_at ON knowledge_captures(expires_at);
