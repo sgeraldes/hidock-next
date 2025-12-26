@@ -20,7 +20,6 @@ import type {
   GenerateOutputResponse
 } from '../main/types/api'
 import type { Contact, ContactWithMeetings, Project, ProjectWithMeetings } from '../main/types/database'
-import type { MigrationAPI } from './migration-types'
 
 // Type definitions for the API
 export interface ElectronAPI {
@@ -257,10 +256,6 @@ export interface ElectronAPI {
     clear: () => Promise<void>
   }
 
-  // Migration - Database schema migration to V11 (Knowledge Captures)
-  migration: MigrationAPI
-
-
   // Domain Events - Event-driven architecture
   onDomainEvent: (callback: (event: any) => void) => () => void
 }
@@ -375,20 +370,6 @@ const electronAPI: ElectronAPI = {
     clear: () => ipcRenderer.invoke('deviceCache:clear')
   },
 
-  migration: {
-    previewCleanup: () => ipcRenderer.invoke('migration:previewCleanup'),
-    runCleanup: () => ipcRenderer.invoke('migration:runCleanup'),
-    runV11: () => ipcRenderer.invoke('migration:runV11'),
-    rollbackV11: () => ipcRenderer.invoke('migration:rollbackV11'),
-    getStatus: () => ipcRenderer.invoke('migration:getStatus'),
-    onProgress: (callback) => {
-      const handler = (_event: any, progress: any) => callback(progress)
-      ipcRenderer.on('migration:progress', handler)
-      return () => {
-        ipcRenderer.removeListener('migration:progress', handler)
-      }
-    }
-  },
 
   outputs: {
     getTemplates: () => ipcRenderer.invoke('outputs:getTemplates'),

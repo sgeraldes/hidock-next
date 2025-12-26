@@ -21,6 +21,7 @@ import {
 } from './services/transcription'
 import { getVectorStore } from './services/vector-store'
 import { getRAGService } from './services/rag'
+import { registerMigrationHandlers, setMainWindowForMigration } from './ipc/migration-handlers'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -88,6 +89,10 @@ async function initializeServices(): Promise<void> {
   // Register IPC handlers
   registerIpcHandlers()
   console.log('IPC handlers registered')
+
+  // Register migration handlers
+  registerMigrationHandlers()
+  console.log('Migration handlers registered')
 }
 
 app.whenReady().then(async () => {
@@ -161,6 +166,7 @@ app.whenReady().then(async () => {
   if (mainWindow) {
     setWatcherMainWindow(mainWindow)
     setMainWindowForTranscription(mainWindow)
+    setMainWindowForMigration(mainWindow)
   }
 
   // Start background services

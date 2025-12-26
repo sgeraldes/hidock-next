@@ -1,0 +1,15 @@
+
+  migration: {
+    previewCleanup: () => ipcRenderer.invoke('migration:previewCleanup'),
+    runCleanup: () => ipcRenderer.invoke('migration:runCleanup'),
+    runV11: () => ipcRenderer.invoke('migration:runV11'),
+    rollbackV11: () => ipcRenderer.invoke('migration:rollbackV11'),
+    getStatus: () => ipcRenderer.invoke('migration:getStatus'),
+    onProgress: (callback) => {
+      const handler = (_event: any, progress: any) => callback(progress)
+      ipcRenderer.on('migration:progress', handler)
+      return () => {
+        ipcRenderer.removeListener('migration:progress', handler)
+      }
+    }
+  },
