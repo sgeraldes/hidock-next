@@ -6,6 +6,7 @@ import {
   getQualityAssessment,
   upsertQualityAssessment,
   getRecordingsByQuality,
+  getRecordingsByIds,
   type Recording,
   type QualityAssessment
 } from './database'
@@ -126,7 +127,80 @@ export class QualityAssessmentService {
     confidence: number
     reason: string
   } {
-    
+    const hasMeeting = !!recording.meeting_id
+    const hasTranscript = !!transcript
+    const duration = recording.duration_seconds || 0
+
+    let score = 0
+    let confidence = 0.7 // Default confidence for auto-assessment
+    const reasons: string[] = []
+
+    // Factor 1: Has transcript (40 points)
+    if (hasTranscript) {
+      score += 40
+      reasons.push('has transcript')
+
+      // Check transcript quality
+      if (transcript.word_count && transcript.word_count > 100) {
+        score += 10
+        reasons.push('substantial transcript')
+      }
+
+      if (transcript.summary) {
+        score += 5
+        reasons.push('has summary')
+      }
+    } else {
+      reasons.push('no transcript')
+    }
+
+    // Factor 2: Meeting correlation (30 points)
+    if (hasMeeting) {
+      score += 30
+      reasons.push('linked to meeting')
+
+      if (recording.correlation_confidence && recording.correlation_confidence > 0.8) {
+        score += 10
+        reasons.push('high meeting confidence')
+      }
+    } else {
+      reasons.push('no meeting link')
+    }
+
+    // Factor 3: Duration appropriateness (20 points)
+    if (duration >= 60 && duration <= 7200) {
+      // 1 min to 2 hours is reasonable for meetings
+      score += 20
+      reasons.push('appropriate duration')
+    } else if (duration < 60) {
+      reasons.push('very short recording')
+      confidence = 0.6
+    } else if (duration > 7200) {
+      reasons.push('very long recording')
+    }
+
+    // Factor 4: File integrity (10 points)
+    if (recording.file_size && recording.file_size > 1000) {
+      // Non-trivial file size
+      score += 10
+      reasons.push('valid file size')
+    } else {
+      reasons.push('suspicious file size')
+      confidence = 0.5
+    }
+
+    // Determine quality level from score
+    let level: QualityLevel
+    if (score >= 70) {
+      level = 'high'
+    } else if (score >= 40) {
+      level = 'medium'
+    } else {
+      level = 'low'
+    }
+
+    const reason = reasons.join(', ')
+    return { level, confidence, reason }
   }
 
   private inferQuality(recordingId: string): {
@@ -237,14 +311,15 @@ export class QualityAssessmentService {
    */
   async batchAutoAssess(recordingIds: string[]): Promise<QualityAssessment[]> {
     // Batch load all required data to avoid N+1 queries
-    const { getRecordingById, getTranscriptsByRecordingIds } = await import('./database')
-    
+    const { getRecordingsByIds, getTranscriptsByRecordingIds } = await import('./database')
+
+    const recordingsMap = getRecordingsByIds(recordingIds)
     const transcriptsMap = getTranscriptsByRecordingIds(recordingIds)
     const results: QualityAssessment[] = []
 
     for (const recordingId of recordingIds) {
       try {
-        const recording = getRecordingById(recordingId)
+        const recording = recordingsMap.get(recordingId)
         if (!recording) continue
 
         const transcript = transcriptsMap.get(recordingId)

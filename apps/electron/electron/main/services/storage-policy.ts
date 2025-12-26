@@ -120,48 +120,50 @@ export class StoragePolicyService {
     // Override retention days if provided
     const retentionDays = { ...TIER_RETENTION_DAYS, ...minAgeOverride }
 
-    // OPTIMIZED: Query all tiered recordings once instead of per-tier
-    const allRecordings = queryAll<Recording>(
-      'SELECT * FROM recordings WHERE storage_tier IS NOT NULL ORDER BY storage_tier, date_recorded DESC'
-    )
-
-    // Partition recordings by tier in memory
-    const recordingsByTier = new Map<StorageTier, Recording[]>()
-    for (const recording of allRecordings) {
-      const tier = recording.storage_tier as StorageTier
-      if (!recordingsByTier.has(tier)) {
-        recordingsByTier.set(tier, [])
-      }
-      recordingsByTier.get(tier)!.push(recording)
-    }
-
-    // Process each tier
     const tiers: StorageTier[] = ['archive', 'cold', 'warm', 'hot']
-    for (const tier of tiers) {
-      const recordings = recordingsByTier.get(tier) || []
-      const maxAge = retentionDays[tier]
 
+    for (const tier of tiers) {
+      const maxAge = retentionDays[tier]
+      const cutoffDate = new Date(now.getTime() - maxAge * 24 * 60 * 60 * 1000).toISOString()
+
+      // Indexed query with date filter - much faster than full table scan
+      const recordings = queryAll<Recording>(
+        `SELECT * FROM recordings 
+         WHERE storage_tier = ? AND date_recorded < ?
+         ORDER BY date_recorded ASC
+         LIMIT 1000`,
+        [tier, cutoffDate]
+      )
+
+      if (recordings.length === 0) continue
+
+      // Batch load quality assessments for this tier's recordings
+      const recordingIds = recordings.map((r) => r.id)
+      const placeholders = recordingIds.map(() => '?').join(',')
+      const qualities = queryAll<{ recording_id: string; quality: QualityLevel }>(
+        `SELECT recording_id, quality FROM quality_assessments WHERE recording_id IN (${placeholders})`,
+        recordingIds
+      )
+      const qualityMap = new Map(qualities.map((q) => [q.recording_id, q.quality]))
+
+      // Process recordings in memory
       for (const recording of recordings) {
         const recordedDate = new Date(recording.date_recorded)
         const ageMs = now.getTime() - recordedDate.getTime()
         const ageInDays = Math.floor(ageMs / (1000 * 60 * 60 * 24))
 
-        if (ageInDays > maxAge) {
-          const qualityAssessment = getQualityAssessment(recording.id)
-
-          suggestions.push({
-            recordingId: recording.id,
-            filename: recording.filename,
-            dateRecorded: recording.date_recorded,
-            tier,
-            quality: qualityAssessment?.quality,
-            ageInDays,
-            sizeBytes: recording.file_size,
-            reason: `Exceeds ${tier} tier retention (${maxAge} days) by ${ageInDays - maxAge} days`,
-            hasTranscript: recording.transcription_status === 'complete',
-            hasMeeting: !!recording.meeting_id
-          })
-        }
+        suggestions.push({
+          recordingId: recording.id,
+          filename: recording.filename,
+          dateRecorded: recording.date_recorded,
+          tier,
+          quality: qualityMap.get(recording.id),
+          ageInDays,
+          sizeBytes: recording.file_size,
+          reason: `Exceeds ${tier} tier retention (${maxAge} days) by ${ageInDays - maxAge} days`,
+          hasTranscript: recording.transcription_status === 'complete',
+          hasMeeting: !!recording.meeting_id
+        })
       }
     }
 
