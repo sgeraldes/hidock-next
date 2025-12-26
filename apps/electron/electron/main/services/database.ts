@@ -977,6 +977,19 @@ export function getRecordingsForMeeting(meetingId: string): Recording[] {
   return queryAll<Recording>('SELECT * FROM recordings WHERE meeting_id = ?', [meetingId])
 }
 
+// Batch get recordings by IDs (avoids N+1 queries)
+export function getRecordingsByIds(ids: string[]): Map<string, Recording> {
+  if (ids.length === 0) return new Map()
+  const placeholders = ids.map(() => '?').join(',')
+  const recordings = queryAll<Recording>(
+    `SELECT * FROM recordings WHERE id IN (${placeholders})`,
+    ids
+  )
+  const map = new Map<string, Recording>()
+  recordings.forEach(r => map.set(r.id, r))
+  return map
+}
+
 
 // Get recording by filename (canonical identifier)
 export function getRecordingByFilename(filename: string): Recording | undefined {

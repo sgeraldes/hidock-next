@@ -41,6 +41,38 @@ export interface RecordingCleanupSuggestedEvent extends DomainEvent {
 export type KnownDomainEvent = QualityAssessedEvent | StorageTierAssignedEvent | RecordingCleanupSuggestedEvent
 
 /**
+ * Sanitize event payload before broadcasting to renderer process
+ * Removes sensitive data and ensures safe transmission
+ */
+function sanitizeEventPayload<T extends DomainEvent>(event: T): T {
+  // Deep clone to avoid mutation
+  const sanitized = JSON.parse(JSON.stringify(event))
+
+  // Remove any potentially sensitive fields
+  if (sanitized.payload) {
+    // Remove internal system fields
+    delete sanitized.payload.internal
+    delete sanitized.payload.systemData
+
+    // Sanitize any error messages that might contain sensitive paths
+    if (sanitized.payload.reason && typeof sanitized.payload.reason === 'string') {
+      // Remove full file paths, keep only filenames
+      sanitized.payload.reason = sanitized.payload.reason.replace(/[A-Za-z]:[\\/][^\s]+/g, '[path]')
+    }
+
+    // Sanitize assessedBy to remove email addresses or usernames
+    if (sanitized.payload.assessedBy && typeof sanitized.payload.assessedBy === 'string') {
+      // If it looks like an email, replace with generic identifier
+      if (sanitized.payload.assessedBy.includes('@')) {
+        sanitized.payload.assessedBy = 'user'
+      }
+    }
+  }
+
+  return sanitized
+}
+
+/**
  * DomainEventBus - Event bus for domain events across the application
  * Supports both in-process EventEmitter and renderer process communication
  */
