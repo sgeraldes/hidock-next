@@ -9,6 +9,8 @@ import { registerAppHandlers } from './app-handlers'
 import { registerContactsHandlers } from './contacts-handlers'
 import { registerProjectsHandlers } from './projects-handlers'
 import { registerOutputsHandlers } from './outputs-handlers'
+import { registerQualityHandlers } from './quality-handlers'
+import { registerMigrationHandlers } from './migration-handlers'
 import { registerDownloadServiceHandlers } from '../services/download-service'
 
 export function registerIpcHandlers(): void {
@@ -23,6 +25,8 @@ export function registerIpcHandlers(): void {
   registerContactsHandlers()
   registerProjectsHandlers()
   registerOutputsHandlers()
+  registerQualityHandlers()
+  registerMigrationHandlers()
 
   // Register centralized service handlers
   registerQualityHandlers()
