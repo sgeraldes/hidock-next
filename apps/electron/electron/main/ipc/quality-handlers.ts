@@ -3,6 +3,17 @@ import { getQualityAssessmentService } from '../services/quality-assessment'
 import { getStoragePolicyService } from '../services/storage-policy'
 import type { QualityLevel, AssessmentMethod } from '../services/quality-assessment'
 import type { StorageTier, CleanupSuggestion } from '../services/storage-policy'
+import {
+  validateRecordingId,
+  validateRecordingIds,
+  validateQualityLevel,
+  validateStorageTier,
+  validateOptionalString,
+  validateBoolean,
+  validateNumber,
+  validateMinAgeOverride,
+  ValidationError
+} from './validation'
 
 /**
  * Register IPC handlers for quality assessment and storage policy operations
@@ -18,9 +29,10 @@ export function registerQualityHandlers(): void {
   /**
    * Get quality assessment for a recording
    */
-  ipcMain.handle('quality:get', async (_, recordingId: string) => {
+  ipcMain.handle('quality:get', async (_, recordingId: unknown) => {
     try {
-      const assessment = qualityService.getQuality(recordingId)
+      const validId = validateRecordingId(recordingId)
+      const assessment = qualityService.getQuality(validId)
       return { success: true, data: assessment }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
@@ -35,13 +47,23 @@ export function registerQualityHandlers(): void {
     'quality:set',
     async (
       _,
-      recordingId: string,
-      quality: QualityLevel,
-      reason?: string,
-      assessedBy?: string
+      recordingId: unknown,
+      quality: unknown,
+      reason?: unknown,
+      assessedBy?: unknown
     ) => {
       try {
-        const assessment = await qualityService.assessQuality(recordingId, quality, reason, assessedBy)
+        const validId = validateRecordingId(recordingId)
+        const validQuality = validateQualityLevel(quality)
+        const validReason = validateOptionalString(reason, 1000)
+        const validAssessedBy = validateOptionalString(assessedBy, 200)
+
+        const assessment = await qualityService.assessQuality(
+          validId,
+          validQuality,
+          validReason,
+          validAssessedBy
+        )
         return { success: true, data: assessment }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'
@@ -53,9 +75,10 @@ export function registerQualityHandlers(): void {
   /**
    * Auto-assess quality for a recording
    */
-  ipcMain.handle('quality:auto-assess', async (_, recordingId: string) => {
+  ipcMain.handle('quality:auto-assess', async (_, recordingId: unknown) => {
     try {
-      const assessment = await qualityService.autoAssess(recordingId)
+      const validId = validateRecordingId(recordingId)
+      const assessment = await qualityService.autoAssess(validId)
       return { success: true, data: assessment }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
@@ -66,9 +89,10 @@ export function registerQualityHandlers(): void {
   /**
    * Get all recordings with a specific quality level
    */
-  ipcMain.handle('quality:get-by-quality', async (_, quality: QualityLevel) => {
+  ipcMain.handle('quality:get-by-quality', async (_, quality: unknown) => {
     try {
-      const recordings = qualityService.getByQuality(quality)
+      const validQuality = validateQualityLevel(quality)
+      const recordings = qualityService.getByQuality(validQuality)
       return { success: true, data: recordings }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
@@ -79,9 +103,10 @@ export function registerQualityHandlers(): void {
   /**
    * Batch auto-assess multiple recordings
    */
-  ipcMain.handle('quality:batch-auto-assess', async (_, recordingIds: string[]) => {
+  ipcMain.handle('quality:batch-auto-assess', async (_, recordingIds: unknown) => {
     try {
-      const assessments = await qualityService.batchAutoAssess(recordingIds)
+      const validIds = validateRecordingIds(recordingIds)
+      const assessments = await qualityService.batchAutoAssess(validIds)
       return { success: true, data: assessments }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
@@ -109,7 +134,7 @@ export function registerQualityHandlers(): void {
   /**
    * Get recordings by storage tier
    */
-  ipcMain.handle('storage:get-by-tier', async (_, tier: StorageTier) => {
+  ipcMain.handle('storage:get-by-tier', async (_, tier: unknown) => {
     try {
       const recordings = storageService.getByTier(tier)
       return { success: true, data: recordings }
@@ -124,9 +149,10 @@ export function registerQualityHandlers(): void {
    */
   ipcMain.handle(
     'storage:get-cleanup-suggestions',
-    async (_, minAgeOverride?: Partial<Record<StorageTier, number>>) => {
+    async (_, minAgeOverride?: unknown) => {
       try {
-        const suggestions = storageService.getCleanupSuggestions(minAgeOverride)
+        const validOverride = validateMinAgeOverride(minAgeOverride)
+        const suggestions = storageService.getCleanupSuggestions(validOverride)
         return { success: true, data: suggestions }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'
@@ -140,9 +166,14 @@ export function registerQualityHandlers(): void {
    */
   ipcMain.handle(
     'storage:get-cleanup-suggestions-for-tier',
-    async (_, tier: StorageTier, minAgeDays?: number) => {
+    async (_, tier: unknown, minAgeDays?: unknown) => {
       try {
-        const suggestions = storageService.getCleanupSuggestionsForTier(tier, minAgeDays)
+        const validTier = validateStorageTier(tier)
+        const validMinAgeDays = minAgeDays !== undefined
+          ? validateNumber(minAgeDays, 0, 36500)
+          : undefined
+
+        const suggestions = storageService.getCleanupSuggestionsForTier(validTier, validMinAgeDays)
         return { success: true, data: suggestions }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'
@@ -156,9 +187,12 @@ export function registerQualityHandlers(): void {
    */
   ipcMain.handle(
     'storage:execute-cleanup',
-    async (_, recordingIds: string[], archive: boolean = false) => {
+    async (_, recordingIds: unknown, archive: unknown = false) => {
       try {
-        const result = await storageService.executeCleanup(recordingIds, archive)
+        const validIds = validateRecordingIds(recordingIds)
+        const validArchive = archive !== undefined ? validateBoolean(archive) : false
+
+        const result = await storageService.executeCleanup(validIds, validArchive)
         return { success: true, data: result }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'
@@ -196,9 +230,12 @@ export function registerQualityHandlers(): void {
   /**
    * Manually assign tier to a recording
    */
-  ipcMain.handle('storage:assign-tier', async (_, recordingId: string, quality: QualityLevel) => {
+  ipcMain.handle('storage:assign-tier', async (_, recordingId: unknown, quality: unknown) => {
     try {
-      storageService.assignTier(recordingId, quality)
+      const validId = validateRecordingId(recordingId)
+      const validQuality = validateQualityLevel(quality)
+
+      storageService.assignTier(validId, validQuality)
       return { success: true }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'

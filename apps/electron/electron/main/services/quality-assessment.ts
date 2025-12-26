@@ -1,3 +1,4 @@
+import type { Transcript } from './database'
 import { v4 as uuidv4 } from 'uuid'
 import {
   getRecordingById,
@@ -120,7 +121,30 @@ export class QualityAssessmentService {
    * - Duration (meetings should be reasonable length)
    * - File size (corruption indicator)
    */
+  private inferQualityFromData(recording: Recording, transcript?: Transcript): {
+    level: QualityLevel
+    confidence: number
+    reason: string
+  } {
+    
+  }
+
   private inferQuality(recordingId: string): {
+    level: QualityLevel
+    confidence: number
+    reason: string
+  } {
+    const recording = getRecordingById(recordingId)
+    if (!recording) {
+      return { level: 'low', confidence: 1.0, reason: 'Recording not found' }
+    }
+
+    const transcript = getTranscriptByRecordingId(recordingId)
+    return this.inferQualityFromData(recording, transcript)
+  }
+
+  // Legacy implementation - kept for backwards compatibility
+  private inferQualityOld(recordingId: string): {
     level: QualityLevel
     confidence: number
     reason: string
@@ -212,12 +236,47 @@ export class QualityAssessmentService {
    * Useful for initial import or re-assessment
    */
   async batchAutoAssess(recordingIds: string[]): Promise<QualityAssessment[]> {
+    // Batch load all required data to avoid N+1 queries
+    const { getRecordingById, getTranscriptsByRecordingIds } = await import('./database')
+    
+    const transcriptsMap = getTranscriptsByRecordingIds(recordingIds)
     const results: QualityAssessment[] = []
 
     for (const recordingId of recordingIds) {
       try {
-        const assessment = await this.autoAssess(recordingId)
-        results.push(assessment)
+        const recording = getRecordingById(recordingId)
+        if (!recording) continue
+
+        const transcript = transcriptsMap.get(recordingId)
+        const quality = this.inferQualityFromData(recording, transcript)
+
+        const assessment: Omit<QualityAssessment, 'assessed_at'> = {
+          id: uuidv4(),
+          recording_id: recordingId,
+          quality: quality.level,
+          assessment_method: 'auto',
+          confidence: quality.confidence,
+          reason: quality.reason,
+          assessed_by: 'system'
+        }
+
+        upsertQualityAssessment(assessment)
+
+        // Emit domain event
+        const event: QualityAssessedEvent = {
+          type: 'quality:assessed',
+          timestamp: new Date().toISOString(),
+          payload: {
+            recordingId,
+            quality: quality.level,
+            assessmentMethod: 'auto',
+            confidence: quality.confidence,
+            reason: quality.reason
+          }
+        }
+        getEventBus().emitDomainEvent(event)
+
+        results.push(getQualityAssessment(recordingId)!)
       } catch (error) {
         console.error(`Failed to assess recording ${recordingId}:`, error)
       }

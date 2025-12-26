@@ -120,11 +120,25 @@ export class StoragePolicyService {
     // Override retention days if provided
     const retentionDays = { ...TIER_RETENTION_DAYS, ...minAgeOverride }
 
-    // Check each tier
-    const tiers: StorageTier[] = ['archive', 'cold', 'warm', 'hot']
+    // OPTIMIZED: Query all tiered recordings once instead of per-tier
+    const allRecordings = queryAll<Recording>(
+      'SELECT * FROM recordings WHERE storage_tier IS NOT NULL ORDER BY storage_tier, date_recorded DESC'
+    )
 
+    // Partition recordings by tier in memory
+    const recordingsByTier = new Map<StorageTier, Recording[]>()
+    for (const recording of allRecordings) {
+      const tier = recording.storage_tier as StorageTier
+      if (!recordingsByTier.has(tier)) {
+        recordingsByTier.set(tier, [])
+      }
+      recordingsByTier.get(tier)!.push(recording)
+    }
+
+    // Process each tier
+    const tiers: StorageTier[] = ['archive', 'cold', 'warm', 'hot']
     for (const tier of tiers) {
-      const recordings = this.getByTier(tier)
+      const recordings = recordingsByTier.get(tier) || []
       const maxAge = retentionDays[tier]
 
       for (const recording of recordings) {
@@ -262,8 +276,23 @@ export class StoragePolicyService {
     const stats = []
     const now = new Date()
 
+    // OPTIMIZED: Query all tiered recordings once
+    const allRecordings = queryAll<Recording>(
+      'SELECT * FROM recordings WHERE storage_tier IS NOT NULL'
+    )
+
+    // Partition by tier in memory
+    const recordingsByTier = new Map<StorageTier, Recording[]>()
+    for (const recording of allRecordings) {
+      const tier = recording.storage_tier as StorageTier
+      if (!recordingsByTier.has(tier)) {
+        recordingsByTier.set(tier, [])
+      }
+      recordingsByTier.get(tier)!.push(recording)
+    }
+
     for (const tier of tiers) {
-      const recordings = this.getByTier(tier)
+      const recordings = recordingsByTier.get(tier) || []
       const totalSize = recordings.reduce((sum, r) => sum + (r.file_size || 0), 0)
 
       const ages = recordings.map((r) => {
