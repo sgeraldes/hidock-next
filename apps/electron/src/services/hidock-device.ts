@@ -152,6 +152,10 @@ class HiDockDeviceService {
   // Flag to prevent overlapping auto-connect attempts
   private autoConnectInProgress: boolean = false
 
+  // Synchronous flag to prevent duplicate initAutoConnect (set immediately before any async work)
+  // This handles React StrictMode double-invoking effects
+  private initAutoConnectStarted: boolean = false
+
   constructor() {
     this.jensen = getJensenDevice()
 
@@ -288,6 +292,14 @@ class HiDockDeviceService {
 
   // Initialize auto-connect on app startup
   async initAutoConnect(): Promise<void> {
+    // CRITICAL: Synchronous guard BEFORE any async work
+    // This prevents duplicate initialization from React StrictMode double-invoking effects
+    if (this.initAutoConnectStarted) {
+      if (DEBUG_DEVICE) console.log('[HiDockDevice] initAutoConnect: Already started (sync guard), skipping')
+      return
+    }
+    this.initAutoConnectStarted = true // Set immediately, before any await
+
     // Prevent duplicate initialization - check interval OR if already connected
     if (this.autoConnectInterval) {
       if (DEBUG_DEVICE) console.log('[HiDockDevice] initAutoConnect: Already initialized, skipping')

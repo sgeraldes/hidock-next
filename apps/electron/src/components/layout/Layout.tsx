@@ -211,8 +211,7 @@ export function Layout({ children }: LayoutProps) {
       }
     })
 
-    // Initialize auto-connect on app startup
-    deviceService.initAutoConnect()
+    // NOTE: initAutoConnect is called in App.tsx, not here, to avoid duplicate initialization
 
     return () => {
       unsubState()
