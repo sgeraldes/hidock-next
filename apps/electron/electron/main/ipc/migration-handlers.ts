@@ -43,20 +43,43 @@ interface VerificationResult {
 }
 
 // ============================================================================
-// P1 #009: Migration State Management with Locking
+// P2 #018: Migration State Management with Database Advisory Lock
 // ============================================================================
 
-let migrationInProgress = false
 const migrationLock = {
   acquire(): boolean {
-    if (migrationInProgress) {
+    const db = getDatabase()
+    try {
+      // Check for stale lock (> 1 hour old)
+      const stmt = db.prepare(`SELECT value FROM config WHERE key = 'migration_lock'`)
+      if (stmt.step()) {
+        const lockTime = parseInt(stmt.getAsObject().value as string, 10)
+        stmt.free()
+        if (Date.now() - lockTime > 3600000) {
+          // Lock is stale, remove it
+          db.run(`DELETE FROM config WHERE key = 'migration_lock'`)
+        } else {
+          return false // Lock is held by another process
+        }
+      } else {
+        stmt.free()
+      }
+
+      // Try to acquire lock
+      db.run(`INSERT INTO config (key, value) VALUES ('migration_lock', ?)`, [Date.now().toString()])
+      return true
+    } catch (error) {
+      // UNIQUE constraint violation means lock already held
       return false
     }
-    migrationInProgress = true
-    return true
   },
   release(): void {
-    migrationInProgress = false
+    const db = getDatabase()
+    try {
+      db.run(`DELETE FROM config WHERE key = 'migration_lock'`)
+    } catch (error) {
+      console.error('Failed to release migration lock:', error)
+    }
   }
 }
 
@@ -115,23 +138,24 @@ function loadV11Schema(): string {
 
 // ============================================================================
 // P1 #012: Backup and Restore Functions
+// P2-016: Use TEMP tables for auto-cleanup and security
 // ============================================================================
 
 function createMigrationBackup(): void {
   const db = getDatabase()
 
-  // Create backup tables (drop if they exist from previous failed migration)
+  // P2-016: Create backup tables as TEMP tables (auto-cleanup on connection close)
   db.run('DROP TABLE IF EXISTS _backup_recordings')
   db.run('DROP TABLE IF EXISTS _backup_transcripts')
 
   // Create backup tables with full schema
   db.run(`
-    CREATE TABLE _backup_recordings AS
+    CREATE TEMP TABLE _backup_recordings AS
     SELECT * FROM recordings WHERE 1=0
   `)
 
   db.run(`
-    CREATE TABLE _backup_transcripts AS
+    CREATE TEMP TABLE _backup_transcripts AS
     SELECT * FROM transcripts WHERE 1=0
   `)
 
@@ -151,19 +175,48 @@ function createMigrationBackup(): void {
   `)
 }
 
+// P2-017: Helper to check if backup tables exist
+function checkBackupExists(): boolean {
+  const db = getDatabase()
+  try {
+    const stmt = db.prepare(`
+      SELECT COUNT(*) as count FROM sqlite_master
+      WHERE type='table' AND name IN ('_backup_recordings', '_backup_transcripts')
+    `)
+    stmt.step()
+    const count = (stmt.getAsObject().count as number) || 0
+    stmt.free()
+    return count === 2 // Both tables must exist
+  } catch (error) {
+    console.error('Failed to check backup existence:', error)
+    return false
+  }
+}
+
+// P2-017: Helper to verify restoration succeeded
+function verifyRestoration(): boolean {
+  const db = getDatabase()
+  try {
+    const stmt = db.prepare(`
+      SELECT COUNT(*) as count FROM recordings
+      WHERE migration_status = 'migrated'
+    `)
+    stmt.step()
+    const count = (stmt.getAsObject().count as number) || 0
+    stmt.free()
+    return count === 0 // No recordings should still be marked as migrated
+  } catch (error) {
+    console.error('Failed to verify restoration:', error)
+    return false
+  }
+}
+
 function restoreFromBackup(): void {
   const db = getDatabase()
 
   try {
-    // Check if backup tables exist
-    const stmt = db.prepare(`
-      SELECT name FROM sqlite_master
-      WHERE type='table' AND name IN ('_backup_recordings', '_backup_transcripts')
-    `)
-    const hasBackup = stmt.step()
-    stmt.free()
-
-    if (!hasBackup) {
+    // P2-017: Verify backup exists before attempting restore
+    if (!checkBackupExists()) {
       console.log('No backup tables found, skipping restore')
       return
     }
@@ -179,6 +232,10 @@ function restoreFromBackup(): void {
       migrated_at = NULL
       WHERE id IN (SELECT id FROM _backup_recordings)
     `)
+
+    // P2-015: Restore transcripts from backup
+    db.run(`DELETE FROM transcripts WHERE recording_id IN (SELECT id FROM _backup_recordings)`)
+    db.run(`INSERT INTO transcripts SELECT * FROM _backup_transcripts`)
 
     console.log('Successfully restored from backup')
   } catch (error) {
