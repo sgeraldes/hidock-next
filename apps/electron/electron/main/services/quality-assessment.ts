@@ -7,6 +7,8 @@ import {
   upsertQualityAssessment,
   getRecordingsByQuality,
   getRecordingsByIds,
+  getTranscriptsByRecordingIds,
+  queryAll,
   getRecordingByIdAsync,
   getTranscriptByRecordingIdAsync,
   getQualityAssessmentAsync,
@@ -332,7 +334,7 @@ export class QualityAssessmentService {
    */
   async batchAutoAssess(recordingIds: string[]): Promise<QualityAssessment[]> {
     // Batch load all required data to avoid N+1 queries
-    const { getRecordingsByIds, getTranscriptsByRecordingIds } = await import('./database')
+    // imports moved to top of file
 
     const recordingsMap = getRecordingsByIds(recordingIds)
     const transcriptsMap = getTranscriptsByRecordingIds(recordingIds)
@@ -385,7 +387,7 @@ export class QualityAssessmentService {
    * Re-assess all recordings that don't have quality assessments
    */
   async assessUnassessed(): Promise<number> {
-    const { queryAll } = await import('./database')
+    // imports moved to top of file
 
     // Get all recordings without quality assessments
     const unassessed = queryAll<Recording>(`

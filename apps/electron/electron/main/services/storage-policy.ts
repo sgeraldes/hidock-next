@@ -7,7 +7,8 @@ import {
   updateRecordingStorageTierAsync,
   getQualityAssessmentAsync,
   type Recording,
-  queryAll
+  queryAll,
+  deleteRecordingLocal
 } from './database'
 import { getEventBus } from './event-bus'
 import type { StorageTierAssignedEvent, RecordingCleanupSuggestedEvent, QualityAssessedEvent } from './event-bus'
@@ -256,7 +257,7 @@ export class StoragePolicyService {
         } else {
           // Delete local file (implementation would call file-storage service)
           // For now, just mark as deleted
-          const { deleteRecordingLocal } = await import('./database')
+          // imports moved to top of file
           deleteRecordingLocal(recordingId)
           deleted.push(recordingId)
           console.log(`[StoragePolicy] Deleted local file for ${recordingId}`)

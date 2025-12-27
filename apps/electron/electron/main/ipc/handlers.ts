@@ -10,6 +10,7 @@ import { registerProjectsHandlers } from './projects-handlers'
 import { registerOutputsHandlers } from './outputs-handlers'
 import { registerQualityHandlers } from './quality-handlers'
 import { registerMigrationHandlers } from './migration-handlers'
+import { registerDeviceCacheHandlers } from './device-cache-handlers'
 import { registerDownloadServiceHandlers } from '../services/download-service'
 
 export function registerIpcHandlers(): void {
@@ -26,6 +27,7 @@ export function registerIpcHandlers(): void {
   registerOutputsHandlers()
   registerQualityHandlers()
   registerMigrationHandlers()
+  registerDeviceCacheHandlers()
   registerDownloadServiceHandlers()
 
   console.log('All IPC handlers registered')
