@@ -2,7 +2,6 @@ import { ipcMain, BrowserWindow } from 'electron'
 import { getDatabase, runInTransaction, saveDatabase } from '../services/database'
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { v4 as uuidv4 } from 'uuid'
 import { randomUUID } from 'crypto'
 
 // ============================================================================
@@ -148,27 +147,15 @@ function createMigrationBackup(): void {
   db.run('DROP TABLE IF EXISTS _backup_recordings')
   db.run('DROP TABLE IF EXISTS _backup_transcripts')
 
-  // Create backup tables with full schema
+  // P3-019: Create backup tables in single step (no double-copy)
   db.run(`
     CREATE TEMP TABLE _backup_recordings AS
-    SELECT * FROM recordings WHERE 1=0
-  `)
-
-  db.run(`
-    CREATE TEMP TABLE _backup_transcripts AS
-    SELECT * FROM transcripts WHERE 1=0
-  `)
-
-  // Backup all recordings that will be migrated
-  db.run(`
-    INSERT INTO _backup_recordings
     SELECT * FROM recordings
     WHERE migration_status IS NULL OR migration_status = 'pending'
   `)
 
-  // Backup all transcripts for recordings that will be migrated
   db.run(`
-    INSERT INTO _backup_transcripts
+    CREATE TEMP TABLE _backup_transcripts AS
     SELECT t.* FROM transcripts t
     INNER JOIN recordings r ON t.recording_id = r.id
     WHERE r.migration_status IS NULL OR r.migration_status = 'pending'
@@ -607,11 +594,15 @@ async function migrateToV11Impl(mainWindow: BrowserWindow | null): Promise<Migra
         WHERE id = ?
       `)
 
+      // P3-022: Time-based throttling for progress updates
+      let lastProgressUpdateTime = 0
+      const PROGRESS_UPDATE_INTERVAL_MS = 500
+
       let processed = 0
       while (migrateStmt.step()) {
         const row = migrateStmt.getAsObject()
         try {
-          const captureId = uuidv4()
+          const captureId = randomUUID()
           const now = new Date().toISOString()
           const title = `Recording: ${row.filename}`
 
@@ -644,7 +635,7 @@ async function migrateToV11Impl(mainWindow: BrowserWindow | null): Promise<Migra
                   }
 
                   if (content && content.trim()) {
-                    insertActionItemStmt.run([uuidv4(), captureId, content, now])
+                    insertActionItemStmt.run([randomUUID(), captureId, content, now])
                   }
                 }
               }
@@ -652,7 +643,7 @@ async function migrateToV11Impl(mainWindow: BrowserWindow | null): Promise<Migra
               // If action_items is not valid JSON, try to parse as plain text
               const actionItemsText = row.action_items as string
               if (actionItemsText.trim()) {
-                insertActionItemStmt.run([uuidv4(), captureId, actionItemsText, now])
+                insertActionItemStmt.run([randomUUID(), captureId, actionItemsText, now])
               }
             }
           }
@@ -662,8 +653,13 @@ async function migrateToV11Impl(mainWindow: BrowserWindow | null): Promise<Migra
           result.capturesCreated++
           processed++
 
-          // Emit progress every 10 records
-          if (processed % 10 === 0) {
+          // P3-022: Throttle progress updates to 500ms intervals
+          const currentTime = Date.now()
+          const isLastRecord = processed === totalCount
+          const shouldUpdate = currentTime - lastProgressUpdateTime >= PROGRESS_UPDATE_INTERVAL_MS
+
+          if (shouldUpdate || isLastRecord) {
+            lastProgressUpdateTime = currentTime
             const progress = Math.floor((processed / totalCount) * 60) + 20
             mainWindow?.webContents.send('migration:progress', {
               phase: 'migrating_data',
