@@ -335,13 +335,12 @@ class HiDockDeviceService {
 
     if (DEBUG_DEVICE) console.log(`[HiDockDevice] initAutoConnect: Config loaded=${this.configLoaded}, enabled=${this.autoConnectConfig.enabled}, connectOnStartup=${this.autoConnectConfig.connectOnStartup}`)
 
-    // Log the auto-connect decision to activity log for visibility
+    // Only log and start if enabled - don't spam log when disabled
     if (this.autoConnectConfig.enabled && this.autoConnectConfig.connectOnStartup) {
       this.logActivity('info', 'Auto-connect enabled', 'Attempting to connect to device on startup...')
       this.startAutoConnect()
-    } else {
-      this.logActivity('info', 'Auto-connect disabled', 'Enable in Settings > Device to auto-connect on startup')
     }
+    // Silent when disabled - no need to log this
   }
 
   stopAutoConnect(): void {
@@ -715,9 +714,9 @@ class HiDockDeviceService {
     onProgress?: (filesFound: number, expectedFiles: number) => void,
     forceRefresh: boolean = false
   ): Promise<HiDockRecording[]> {
-    if (DEBUG_DEVICE) console.log('[HiDockDevice] listRecordings called, connected:', this.isConnected(), 'initialized:', this.initializationComplete, 'forceRefresh:', forceRefresh)
+    console.log('[HiDockDevice] >>> listRecordings ENTRY, connected:', this.isConnected(), 'initialized:', this.initializationComplete, 'forceRefresh:', forceRefresh)
     if (!this.isConnected()) {
-      if (DEBUG_DEVICE) console.log('[HiDockDevice] listRecordings: Not connected, returning empty array')
+      console.log('[HiDockDevice] >>> listRecordings: NOT CONNECTED, returning []')
       this.logActivity('error', 'Cannot list files', 'Device not connected')
       return []
     }
@@ -725,7 +724,7 @@ class HiDockDeviceService {
     // CRITICAL: If a download is in progress, return cached data to prevent USB interference
     // This fixes the issue where navigating to Recordings page stops ongoing downloads
     if (this.jensen.isOperationInProgress()) {
-      if (DEBUG_DEVICE) console.log('[HiDockDevice] listRecordings: USB operation in progress, returning cached data')
+      console.log('[HiDockDevice] >>> listRecordings: OPERATION IN PROGRESS, returning cached')
       if (this.cachedRecordings !== null) {
         onProgress?.(this.cachedRecordings.length, this.cachedRecordings.length)
         return this.cachedRecordings
@@ -738,6 +737,7 @@ class HiDockDeviceService {
     // Wait for initialization to complete before listing files
     // This ensures recordingCount is populated for accurate progress reporting
     if (!this.initializationComplete) {
+      console.log('[HiDockDevice] >>> listRecordings: WAITING FOR INIT')
       this.logActivity('info', 'Waiting for initialization', 'File list request waiting for device init...')
       // Wait up to 60 seconds for initialization (initialization itself can take up to 60s with 4x15s timeouts)
       const maxWait = 60000
@@ -766,12 +766,13 @@ class HiDockDeviceService {
       expectedFileCount > 0
 
     if (cacheValid) {
-      if (DEBUG_DEVICE) console.log(`[HiDockDevice] listRecordings: Using cached recordings (${this.cachedRecordings!.length} files)`)
+      console.log(`[HiDockDevice] >>> listRecordings: CACHE HIT, returning ${this.cachedRecordings!.length} files`)
       // Don't log cache hits - they're too noisy when multiple components request data
       // Report instant progress
       onProgress?.(expectedFileCount, expectedFileCount)
       return this.cachedRecordings!
     }
+    console.log(`[HiDockDevice] >>> listRecordings: CACHE MISS, forceRefresh=${forceRefresh}, cached=${this.cachedRecordings?.length ?? 'null'}, cachedCount=${this.cachedRecordingCount}, expected=${expectedFileCount}`)
 
     // Prevent concurrent requests - use synchronous lock to prevent TOCTOU race
     // Check both the lock flag (set synchronously) and promise (set after lock)
@@ -823,28 +824,28 @@ class HiDockDeviceService {
     }
 
     this.logActivity('usb-out', 'CMD: List Files', `Requesting file list (${expectedFileCount} files expected)`)
-    if (DEBUG_DEVICE) console.log('[HiDockDevice] listRecordings: Calling jensen.listFiles(), expected:', expectedFileCount)
+    console.log('[HiDockDevice] >>> listRecordings: CALLING JENSEN.LISTFILES(), expected:', expectedFileCount)
 
     // Send initial progress immediately so UI shows 0/N
     onProgress?.(0, expectedFileCount)
 
     // Start interpolated progress animation during device wait
-    // Based on ~20 files/second observed rate for large lists, estimate total time
-    const estimatedTimeMs = Math.max(2000, (expectedFileCount / 20) * 1000)
+    // Based on ~15 files/second observed rate for large lists, estimate total time
+    // Use 1.5x multiplier so animation runs slightly slower than actual data arrival
+    const estimatedTimeMs = Math.max(3000, (expectedFileCount / 15) * 1000 * 1.5)
     let animationProgress = 0
     let animationCancelled = false
     const animationStartTime = Date.now()
 
-    // Animate progress from 0% to ~90% during the wait period using ease-out curve
-    // The real data will take over once it starts arriving
+    // Animate progress from 0% to 100% during the wait period using ease-out curve
+    // Real data takes over once it arrives - animation is just placeholder
     const animationInterval = setInterval(() => {
       if (animationCancelled) return
       const elapsed = Date.now() - animationStartTime
-      // Use ease-out curve: starts fast, slows as it approaches 90%
+      // Use ease-out curve: starts fast, slows as it approaches 100%
       const t = Math.min(1, elapsed / estimatedTimeMs)
       const easeOut = 1 - Math.pow(1 - t, 3) // Cubic ease-out
-      const targetProgress = easeOut * 0.9 // Cap at 90%
-      animationProgress = Math.floor(targetProgress * expectedFileCount)
+      animationProgress = Math.floor(easeOut * expectedFileCount)
       // Removed verbose animation progress logging
       onProgress?.(animationProgress, expectedFileCount)
     }, 50) // Update every 50ms for smoother animation
@@ -1061,19 +1062,37 @@ class HiDockDeviceService {
     this.logActivity('success', 'USB device connected', `Model: ${this.state.model}`)
     console.log(`[HiDockDevice] Connected to ${this.state.model}`)
 
-    // Initialize device - each step is non-fatal to allow partial functionality
-    // Check abort flag between steps to allow quick disconnect
-    // Each step has a timeout to prevent hanging on unresponsive devices
+    // Initialize device - track failures to detect unresponsive device
+    // Each step has a timeout to prevent hanging
     const INIT_STEP_TIMEOUT = 15000 // 15 seconds per step
+    let timeoutCount = 0
+    let successCount = 0
+    const MAX_TIMEOUTS_BEFORE_FAIL = 2 // Fail initialization if 2+ steps timeout
 
-    // Step 1: Get device info (non-fatal - some devices may not support)
+    // Step 1: Get device info (critical - if this times out, device is likely unresponsive)
     if (this.initAborted) return
     this.updateStatus('getting-info', 'Reading device information...', 20)
     try {
       await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, 'Get device info')
+      successCount++
     } catch (error) {
-      console.warn('[HiDockDevice] Failed to get device info (continuing):', error)
+      const isTimeout = error instanceof Error && error.message.includes('timed out')
+      if (isTimeout) timeoutCount++
+      console.warn('[HiDockDevice] Failed to get device info:', error)
       this.logActivity('error', 'Failed to get device info', error instanceof Error ? error.message : 'Unknown error')
+
+      // If first command times out, device is likely unresponsive - suggest reset
+      if (isTimeout) {
+        this.logActivity('warning', 'Device may be unresponsive', 'Try disconnecting and reconnecting your device')
+      }
+    }
+
+    // Check if we should abort due to too many timeouts
+    if (timeoutCount >= MAX_TIMEOUTS_BEFORE_FAIL) {
+      this.logActivity('error', 'Device initialization failed', 'Device is not responding. Please disconnect and reconnect your device.')
+      this.updateStatus('error', 'Device not responding - try reconnecting', 0)
+      this.initializationComplete = false
+      return
     }
 
     // Step 2: Get storage info (non-fatal)
@@ -1081,9 +1100,20 @@ class HiDockDeviceService {
     this.updateStatus('getting-storage', 'Reading storage information...', 40)
     try {
       await withTimeout(this.refreshStorageInfo(), INIT_STEP_TIMEOUT, 'Get storage info')
+      successCount++
     } catch (error) {
-      console.warn('[HiDockDevice] Failed to get storage info (continuing):', error)
+      const isTimeout = error instanceof Error && error.message.includes('timed out')
+      if (isTimeout) timeoutCount++
+      console.warn('[HiDockDevice] Failed to get storage info:', error)
       this.logActivity('error', 'Failed to get storage info', error instanceof Error ? error.message : 'Unknown error')
+    }
+
+    // Check if we should abort due to too many timeouts
+    if (timeoutCount >= MAX_TIMEOUTS_BEFORE_FAIL) {
+      this.logActivity('error', 'Device initialization failed', 'Device is not responding. Please disconnect and reconnect your device.')
+      this.updateStatus('error', 'Device not responding - try reconnecting', 0)
+      this.initializationComplete = false
+      return
     }
 
     // Step 3: Get settings (non-fatal)
@@ -1091,9 +1121,20 @@ class HiDockDeviceService {
     this.updateStatus('getting-settings', 'Loading device settings...', 70)
     try {
       await withTimeout(this.refreshSettings(), INIT_STEP_TIMEOUT, 'Get settings')
+      successCount++
     } catch (error) {
-      console.warn('[HiDockDevice] Failed to get settings (continuing):', error)
+      const isTimeout = error instanceof Error && error.message.includes('timed out')
+      if (isTimeout) timeoutCount++
+      console.warn('[HiDockDevice] Failed to get settings:', error)
       this.logActivity('error', 'Failed to get settings', error instanceof Error ? error.message : 'Unknown error')
+    }
+
+    // Check if we should abort due to too many timeouts
+    if (timeoutCount >= MAX_TIMEOUTS_BEFORE_FAIL) {
+      this.logActivity('error', 'Device initialization failed', 'Device is not responding. Please disconnect and reconnect your device.')
+      this.updateStatus('error', 'Device not responding - try reconnecting', 0)
+      this.initializationComplete = false
+      return
     }
 
     // Note: File count is now retrieved as part of refreshStorageInfo() to match web app behavior
@@ -1104,16 +1145,33 @@ class HiDockDeviceService {
     this.updateStatus('syncing-time', 'Syncing device time...', 90)
     try {
       await withTimeout(this.syncTime(), INIT_STEP_TIMEOUT, 'Sync time')
+      successCount++
     } catch (error) {
-      console.warn('[HiDockDevice] Failed to sync time (continuing):', error)
+      const isTimeout = error instanceof Error && error.message.includes('timed out')
+      if (isTimeout) timeoutCount++
+      console.warn('[HiDockDevice] Failed to sync time:', error)
       this.logActivity('error', 'Failed to sync time', error instanceof Error ? error.message : 'Unknown error')
     }
 
     // Done - only if not aborted
     if (this.initAborted) return
+
+    // Check final state - if we got at least some data, consider it a partial success
+    if (successCount === 0) {
+      this.logActivity('error', 'Device initialization failed', 'Could not communicate with device. Please disconnect and reconnect.')
+      this.updateStatus('error', 'Device not responding', 0)
+      this.initializationComplete = false
+      return
+    }
+
     this.initializationComplete = true  // Mark initialization as complete
-    this.updateStatus('ready', 'Device ready', 100)
-    this.logActivity('success', 'Device initialization complete')
+    if (timeoutCount > 0) {
+      this.updateStatus('ready', `Device ready (${timeoutCount} feature(s) unavailable)`, 100)
+      this.logActivity('warning', 'Device initialization complete with warnings', `${successCount}/4 features available`)
+    } else {
+      this.updateStatus('ready', 'Device ready', 100)
+      this.logActivity('success', 'Device initialization complete')
+    }
 
     // Notify listeners
     this.notifyConnectionChange(true)

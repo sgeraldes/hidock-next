@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { flushSync } from 'react-dom'
 import { Usb, Download, RefreshCw, HardDrive, Mic, AlertCircle, Radio, Battery, Bluetooth, Play, Pause, Square, X, Terminal, ChevronDown, ChevronUp, Check, Copy, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -37,7 +36,7 @@ function formatEta(seconds: number | null): string {
 }
 
 export function Device() {
-  // Global store for sync state (shown in sidebar)
+  // Global store for sync state (shown in sidebar) and device state (updated by OperationController)
   const {
     setDeviceSyncState,
     clearDeviceSyncState,
@@ -47,17 +46,15 @@ export function Device() {
     cancelDeviceSync,
     deviceSyncProgress,
     deviceSyncEta,
-    deviceSyncing: storeSyncing
+    deviceSyncing: storeSyncing,
+    deviceState,
+    connectionStatus,
+    activityLog
   } = useAppStore()
 
-  // Initialize state directly from service to avoid flash of wrong state
+  // Initialize service
   const deviceService = getHiDockDeviceService()
-  const [deviceState, setDeviceState] = useState<HiDockDeviceState>(() => deviceService.getState())
   const [connecting, setConnecting] = useState(false)
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>({
-    step: 'idle',
-    message: 'Not connected'
-  })
   const [recordings, setRecordings] = useState<HiDockRecording[]>([])
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
   const [downloading, setDownloading] = useState<string | null>(null)
@@ -98,8 +95,7 @@ export function Device() {
   const [autoDownload, setAutoDownload] = useState(true)
   const [autoTranscribe, setAutoTranscribe] = useState(true)
 
-  // Activity log state - initialize from service for persistence across page navigation
-  const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>(() => deviceService.getActivityLog())
+  // Activity log UI state
   const [logExpanded, setLogExpanded] = useState(true)
   const logContainerRef = useRef<HTMLDivElement>(null)
 
@@ -132,9 +128,6 @@ export function Device() {
   useEffect(() => {
     // Mounted flag to prevent state updates after unmount
     let mounted = true
-
-    // Sync connection status from service (deviceState is already initialized via useState)
-    setConnectionStatus(deviceService.getConnectionStatus())
 
     // Load synced filenames from database
     const loadSyncedFilenames = async () => {
@@ -234,11 +227,6 @@ export function Device() {
     }
     loadInitialData()
 
-    // Subscribe to state changes for real-time UI updates
-    const unsubscribeState = deviceService.onStateChange((state) => {
-      if (mounted) setDeviceState(state)
-    })
-
     // Subscribe to connection changes
     const unsubscribe = deviceService.onConnectionChange(async (connected) => {
       if (!mounted) return
@@ -299,51 +287,33 @@ export function Device() {
       }
     })
 
-    const unsubscribeStatus = deviceService.onStatusChange((status) => {
-      if (!mounted) return
-      setConnectionStatus(status)
-      // Update connecting state based on status step
-      const isConnecting = !['idle', 'ready', 'error'].includes(status.step)
-      setConnecting(isConnecting)
+    // Update connecting state based on connection status from store
+    const isConnecting = !['idle', 'ready', 'error'].includes(connectionStatus.step)
+    setConnecting(isConnecting)
 
-      // Show errors from connection status
-      if (status.step === 'error') {
-        setError(status.message)
-        clearConnectionTimers()
-      }
-    })
+    // Show errors from connection status
+    if (connectionStatus.step === 'error') {
+      setError(connectionStatus.message)
+      clearConnectionTimers()
+    }
 
-    // Subscribe to activity log
-    const unsubscribeActivity = deviceService.onActivity((entry) => {
-      if (!mounted) return
-      // Use flushSync to force immediate state update (bypass React batching)
-      flushSync(() => {
-        setActivityLog((prev) => {
-          const newLog = [...prev, entry]
-          if (newLog.length > MAX_LOG_ENTRIES) {
-            return newLog.slice(-MAX_LOG_ENTRIES)
-          }
-          return newLog
-        })
-      })
-      // Auto-scroll to bottom after state update
+    // Auto-scroll activity log to bottom when new entries are added
+    if (activityLog.length > 0) {
       requestAnimationFrame(() => {
         if (logContainerRef.current) {
           logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
         }
       })
-    })
+    }
+
 
     // NOTE: We do NOT start auto-connect here. Auto-connect is managed at the app level.
     // Starting it here would reset user's disconnect decision when navigating pages.
 
     return () => {
       mounted = false  // Mark as unmounted to prevent state updates
-      unsubscribeState()
       unsubscribe()
       unsubscribeProgress()
-      unsubscribeStatus()
-      unsubscribeActivity()
       clearConnectionTimers()
       // Clean up realtime interval
       if (realtimeIntervalRef.current) {
@@ -352,7 +322,7 @@ export function Device() {
       // Clean up download service listener
       unsubscribeDownloadService()
     }
-  }, [clearConnectionTimers])
+  }, [clearConnectionTimers, connectionStatus.step, connectionStatus.message, activityLog.length])
 
   const loadRecordings = useCallback(async (forceRefresh: boolean = false) => {
     if (DEBUG_DEVICE_UI) console.log('[Device.tsx] loadRecordings called, forceRefresh:', forceRefresh)
@@ -1174,7 +1144,6 @@ export function Device() {
                       size="sm"
                       onClick={() => {
                         deviceService.clearActivityLog()
-                        setActivityLog([])
                       }}
                       disabled={activityLog.length === 0}
                     >

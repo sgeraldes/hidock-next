@@ -291,14 +291,12 @@ export class JensenDevice {
   private operationLock: Promise<void> = Promise.resolve()
   private lockHolder: string | null = null
 
-  // Connection check polling timer (matches official jensen.js approach)
-  private connectionCheckTimer: ReturnType<typeof setTimeout> | null = null
-  // Flag to stop connection checking (matches official isStopConnectionCheck)
-  private isStopConnectionCheck: boolean = false
+  // USB disconnect event handler (for detecting device unplug via browser events)
+  private usbDisconnectHandler: ((event: USBConnectionEvent) => void) | null = null
   // USB connect event handler (for detecting device plug-in, matches official jensen.js)
   private usbConnectHandler: ((event: USBConnectionEvent) => void) | null = null
-  // Track if USB connect listener is set up
-  private usbConnectListenerActive = false
+  // Track if USB event listeners are set up
+  private usbListenersActive = false
 
   // Abort flag for cancelling operations (set by disconnect to break out of loops)
   private abortOperations = false
@@ -313,64 +311,61 @@ export class JensenDevice {
   onprogress?: (bytes: number) => void
 
   /**
-   * Start polling for device disconnect (matches official jensen.js D() function).
-   * This polls every 100ms checking if device.opened becomes false.
-   * More reliable than WebUSB disconnect events on some platforms.
+   * Handle USB disconnect events from the browser.
+   * This is called when the device is physically unplugged.
    */
-  private startConnectionCheck(): void {
-    // Stop any existing check first
-    this.stopConnectionCheck()
-    this.isStopConnectionCheck = false
+  private handleDisconnect(): void {
+    console.log('[Jensen] USB device physically disconnected (via event)')
 
-    const checkConnection = () => {
-      // Check if device.opened is false (matches official: t?.opened === false)
-      if (this.device?.opened === false) {
-        console.log('[Jensen] USB device physically disconnected (detected via polling)')
-        // Clear the timer
-        if (this.connectionCheckTimer) {
-          clearTimeout(this.connectionCheckTimer)
-          this.connectionCheckTimer = null
-        }
-        // Clean up state
-        this.device = null
-        this.sequenceId = 0
-        this.receiveBuffer = new Uint8Array(0)
-        this.operationLock = Promise.resolve()
-        this.lockHolder = null
-        // Notify listeners (matches official: this.ondisconnect && !this.isStopConnectionCheck && this.ondisconnect())
-        if (this.ondisconnect && !this.isStopConnectionCheck) {
-          this.ondisconnect()
-        }
-        return
-      }
-      // Continue polling every 100ms (matches official timeout)
-      this.connectionCheckTimer = setTimeout(checkConnection, 100)
+    // Clean up state
+    this.device = null
+    this.sequenceId = 0
+    this.receiveBuffer = new Uint8Array(0)
+    this.operationLock = Promise.resolve()
+    this.lockHolder = null
+
+    // Notify listeners
+    if (this.ondisconnect) {
+      this.ondisconnect()
     }
-
-    // Start polling
-    checkConnection()
-    if (DEBUG_PROTOCOL) console.log('[Jensen] Connection check polling started')
   }
 
   /**
-   * Stop the connection check polling.
+   * Set up USB disconnect event listener for instant disconnect detection.
+   * Uses native browser USB disconnect events instead of polling.
    */
-  private stopConnectionCheck(): void {
-    this.isStopConnectionCheck = true
-    if (this.connectionCheckTimer) {
-      clearTimeout(this.connectionCheckTimer)
-      this.connectionCheckTimer = null
-      if (DEBUG_PROTOCOL) console.log('[Jensen] Connection check polling stopped')
+  private setupUsbDisconnectListener(): void {
+    if (!this.device) return
+
+    // Create handler that triggers handleDisconnect on USB unplug
+    this.usbDisconnectHandler = (event: USBConnectionEvent) => {
+      if (event.device === this.device) {
+        this.handleDisconnect()
+      }
+    }
+
+    navigator.usb.addEventListener('disconnect', this.usbDisconnectHandler)
+    if (DEBUG_PROTOCOL) console.log('[Jensen] USB disconnect listener active')
+  }
+
+  /**
+   * Remove USB disconnect event listener (cleanup).
+   */
+  private removeUsbDisconnectListener(): void {
+    if (this.usbDisconnectHandler) {
+      navigator.usb.removeEventListener('disconnect', this.usbDisconnectHandler)
+      this.usbDisconnectHandler = null
+      if (DEBUG_PROTOCOL) console.log('[Jensen] USB disconnect listener removed')
     }
   }
 
   /**
    * Set up USB connect event listener for faster device detection.
    * Matches official jensen.js init() pattern: navigator.usb.onconnect = () => tryconnect()
-   * This allows immediate connection when a device is plugged in, rather than waiting for polling.
+   * This allows immediate connection when a device is plugged in.
    */
   setupUsbConnectListener(): void {
-    if (this.usbConnectListenerActive) {
+    if (this.usbListenersActive) {
       return // Already active
     }
 
@@ -390,7 +385,7 @@ export class JensenDevice {
     }
 
     navigator.usb.onconnect = this.usbConnectHandler
-    this.usbConnectListenerActive = true
+    this.usbListenersActive = true
     if (DEBUG_PROTOCOL) console.log('[Jensen] USB connect listener active')
   }
 
@@ -398,7 +393,7 @@ export class JensenDevice {
    * Remove USB connect event listener (cleanup).
    */
   removeUsbConnectListener(): void {
-    if (!this.usbConnectListenerActive) {
+    if (!this.usbListenersActive) {
       return
     }
 
@@ -406,7 +401,7 @@ export class JensenDevice {
       navigator.usb.onconnect = null
     }
     this.usbConnectHandler = null
-    this.usbConnectListenerActive = false
+    this.usbListenersActive = false
     if (DEBUG_PROTOCOL) console.log('[Jensen] USB connect listener removed')
   }
 
@@ -555,8 +550,8 @@ export class JensenDevice {
       this.versionNumber = null
       this.serialNumber = null
 
-      // Start polling for physical USB disconnection (matches official jensen.js D() function)
-      this.startConnectionCheck()
+      // Set up USB disconnect listener for instant detection
+      this.setupUsbDisconnectListener()
 
       this.onconnect?.()
       return true
@@ -640,8 +635,8 @@ export class JensenDevice {
       this.versionNumber = null
       this.serialNumber = null
 
-      // Start polling for physical USB disconnection (matches official jensen.js D() function)
-      this.startConnectionCheck()
+      // Set up USB disconnect listener for instant detection
+      this.setupUsbDisconnectListener()
 
       this.onconnect?.()
       return true
@@ -655,8 +650,8 @@ export class JensenDevice {
   }
 
   async disconnect(): Promise<void> {
-    // Stop connection check polling first
-    this.stopConnectionCheck()
+    // Remove USB disconnect listener first
+    this.removeUsbDisconnectListener()
 
     // CRITICAL: Set abort flag BEFORE waiting for lock
     // This allows download loops to break out immediately instead of continuing
@@ -692,10 +687,13 @@ export class JensenDevice {
       // Reset the operation lock to prevent stale locks from blocking future operations
       this.operationLock = Promise.resolve()
       this.lockHolder = null
-      // Reset abort flag for next connection
-      this.abortOperations = false
       this.ondisconnect?.()
     }
+
+    // ALWAYS reset abort flag after disconnect cleanup, even if device was null
+    // This fixes bug where tryConnect() calls disconnect() on first connection
+    // and abortOperations stays true because device was null
+    this.abortOperations = false
   }
 
   /**
@@ -1264,7 +1262,9 @@ export class JensenDevice {
   // List files - streams data from device
   // expectedFileCount is optional - if not provided, progress will show 0 as expected
   async listFiles(onProgress?: (bytesReceived: number, expectedFiles: number) => void, expectedFileCount?: number): Promise<FileInfo[]> {
+    console.log(`[Jensen] >>> listFiles ENTRY, expectedFileCount=${expectedFileCount}`)
     return this.withLock('listFiles', async () => {
+      console.log(`[Jensen] >>> listFiles GOT LOCK`)
       if (DEBUG_PROTOCOL) console.log('[Jensen] listFiles called, expectedFileCount:', expectedFileCount)
       if (!this.device) {
         console.error('[Jensen] listFiles: Device not connected')
@@ -1276,6 +1276,11 @@ export class JensenDevice {
         throw new Error('Device not opened')
       }
 
+      // CRITICAL: Clear receive buffer before file list operation
+      // This prevents leftover data from previous commands being misinterpreted
+      // as file list responses (which could cause immediate return with 0 files)
+      this.receiveBuffer = new Uint8Array(0)
+
       // Use provided count or 0 (progress will still work, just won't show expected total)
       let expectedFiles = expectedFileCount || 0
       if (DEBUG_PROTOCOL) console.log(`[Jensen] Fetching file list, expected files: ${expectedFiles}`)
@@ -1285,8 +1290,9 @@ export class JensenDevice {
       const seqId = this.sequenceId++
       const msg = new JensenMessage(CMD.GET_FILE_LIST)
       msg.sequence(seqId)
+      console.log(`[Jensen] >>> Sending GET_FILE_LIST command, seq=${seqId}`)
       await this.device.transferOut(1, msg.make() as unknown as BufferSource)
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] Sent GET_FILE_LIST command, seq=${seqId}`)
+      console.log(`[Jensen] >>> GET_FILE_LIST command sent, waiting for data...`)
 
       // Incremental parsing state
       const allFiles: FileInfo[] = []
@@ -1302,7 +1308,9 @@ export class JensenDevice {
       const overallTimeout = 120000 // 2 minutes max for large lists
       let lastDataTime = startTime
 
+      console.log(`[Jensen] >>> listFiles: ENTERING LOOP, abortOperations=${this.abortOperations}, startTime=${startTime}`)
       while (Date.now() - startTime < overallTimeout && !this.abortOperations) {
+        console.log(`[Jensen] >>> listFiles: LOOP ITERATION, elapsed=${Date.now() - startTime}ms`)
         // Check for abort request (disconnect called)
         if (this.abortOperations) {
           console.log(`[Jensen] listFiles: Aborted by disconnect request`)
@@ -1313,7 +1321,9 @@ export class JensenDevice {
           // Read data directly from USB
           // Note: WebUSB transferIn has implicit short timeout behavior
           const readSize = 4096 * 16 // 64KB buffer
+          console.log(`[Jensen] >>> listFiles: CALLING transferIn...`)
           const result = await this.device.transferIn(2, readSize)
+          console.log(`[Jensen] >>> listFiles: transferIn returned, status=${result.status}, dataLen=${result.data?.byteLength ?? 0}`)
 
           if (result.status === 'ok' && result.data && result.data.byteLength > 0) {
             lastDataTime = Date.now() // Update last data time
@@ -1336,10 +1346,20 @@ export class JensenDevice {
 
               // Accept packets that match our command OR sequence
               if (parsedMsg.id === CMD.GET_FILE_LIST || parsedMsg.sequence === seqId) {
+                // Log what we received for debugging
+                console.log(`[Jensen] listFiles: Received packet cmd=${parsedMsg.id}, seq=${parsedMsg.sequence}, bodyLen=${parsedMsg.body.length}, allFiles=${allFiles.length}, packetsReceived=${packetsReceived}`)
+
                 if (parsedMsg.body.length === 0) {
                   // Empty body signals end of transmission
-                  if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Empty body, end of file list. Total: ${allFiles.length} files`)
-                  return allFiles
+                  // BUT: Only treat as terminator if we've received actual data
+                  // Some devices send an empty ACK packet before the actual file list
+                  if (allFiles.length > 0 || packetsReceived > 0) {
+                    console.log(`[Jensen] listFiles: Empty body terminator (have data), returning ${allFiles.length} files`)
+                    return allFiles
+                  }
+                  // First packet with empty body - might be ACK, continue waiting for data
+                  console.log(`[Jensen] listFiles: Empty body on first packet (possible ACK), waiting for actual data...`)
+                  continue
                 }
 
                 packetsReceived++
@@ -1402,7 +1422,7 @@ export class JensenDevice {
         }
       }
 
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Completed with ${allFiles.length} files from ${packetsReceived} packets, ${totalBytesReceived} bytes`)
+      console.log(`[Jensen] listFiles: Loop exited - ${allFiles.length} files from ${packetsReceived} packets, ${totalBytesReceived} bytes, elapsed: ${Date.now() - startTime}ms`)
       return allFiles
     })
   }
@@ -1682,6 +1702,9 @@ export class JensenDevice {
   ): Promise<boolean> {
     return this.withLock(`downloadFile:${filename}`, async () => {
       if (!this.device || !this.device.opened) return false
+
+      // Clear receive buffer before download to prevent stale data issues
+      this.receiveBuffer = new Uint8Array(0)
 
       if (DEBUG_PROTOCOL) console.log(`[Jensen] downloadFile: Starting download of ${filename}, size=${fileSize}`)
 
