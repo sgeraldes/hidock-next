@@ -1,6 +1,6 @@
 import { create } from 'zustand'
-import { getHiDockDeviceService } from '@/services/hidock-device'
 import type { Meeting, Recording, AppConfig, CalendarSyncResult } from '@/types'
+import type { HiDockDeviceState, ConnectionStatus, ActivityLogEntry } from '@/services/hidock-device'
 
 interface AppState {
   // Config
@@ -29,6 +29,11 @@ interface AppState {
   calendarView: 'day' | 'workweek' | 'week' | 'month'
   sidebarOpen: boolean
   selectedMeetingId: string | null
+
+  // Device state (updated by OperationController)
+  deviceState: HiDockDeviceState
+  connectionStatus: ConnectionStatus
+  activityLog: ActivityLogEntry[]
 
   // Device sync state (for sidebar indicator)
   deviceSyncing: boolean
@@ -73,6 +78,12 @@ interface AppState {
   navigateWeek: (direction: 'prev' | 'next') => void
   navigateMonth: (direction: 'prev' | 'next') => void
   goToToday: () => void
+
+  // Device state actions (updated by OperationController)
+  setDeviceState: (state: HiDockDeviceState) => void
+  setConnectionStatus: (status: ConnectionStatus) => void
+  addActivityLogEntry: (entry: ActivityLogEntry) => void
+  clearActivityLog: () => void
 
   // Device sync actions
   setDeviceSyncState: (state: {
@@ -120,6 +131,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   calendarView: 'week',
   sidebarOpen: true,
   selectedMeetingId: null,
+
+  // Device state initial state
+  deviceState: {
+    connected: false,
+    model: 'unknown',
+    serialNumber: null,
+    firmwareVersion: null,
+    storage: null,
+    settings: null,
+    recordingCount: 0
+  },
+  connectionStatus: { step: 'idle', message: 'Not connected' },
+  activityLog: [],
 
   // Device sync initial state
   deviceSyncing: false,
@@ -247,6 +271,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   goToToday: () => set({ currentDate: new Date() }),
+
+  // Device state actions
+  setDeviceState: (deviceState) => set({ deviceState }),
+  setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
+  addActivityLogEntry: (entry) => set((state) => {
+    const MAX_LOG_ENTRIES = 100
+    const newLog = [...state.activityLog, entry]
+    return { activityLog: newLog.slice(-MAX_LOG_ENTRIES) }
+  }),
+  clearActivityLog: () => set({ activityLog: [] }),
 
   // Device sync actions
   setDeviceSyncState: (state) => set((prev) => ({

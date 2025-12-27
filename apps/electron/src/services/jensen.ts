@@ -300,6 +300,9 @@ export class JensenDevice {
   // Track if USB connect listener is set up
   private usbConnectListenerActive = false
 
+  // Abort flag for cancelling operations (set by disconnect to break out of loops)
+  private abortOperations = false
+
   versionCode: string | null = null
   versionNumber: number | null = null
   serialNumber: string | null = null
@@ -655,10 +658,16 @@ export class JensenDevice {
     // Stop connection check polling first
     this.stopConnectionCheck()
 
+    // CRITICAL: Set abort flag BEFORE waiting for lock
+    // This allows download loops to break out immediately instead of continuing
+    // to read from a disconnected device
+    this.abortOperations = true
+
     // Wait for any pending USB operations to complete before disconnecting
     // This prevents USB errors from calling releaseInterface while transferIn is active
+    // Operations should now exit quickly because abortOperations is set
     if (this.lockHolder) {
-      console.log(`[Jensen] Waiting for ${this.lockHolder} to complete before disconnect...`)
+      console.log(`[Jensen] Aborting ${this.lockHolder}, waiting for cleanup...`)
       await this.operationLock
     }
 
@@ -683,6 +692,8 @@ export class JensenDevice {
       // Reset the operation lock to prevent stale locks from blocking future operations
       this.operationLock = Promise.resolve()
       this.lockHolder = null
+      // Reset abort flag for next connection
+      this.abortOperations = false
       this.ondisconnect?.()
     }
   }
@@ -1291,7 +1302,13 @@ export class JensenDevice {
       const overallTimeout = 120000 // 2 minutes max for large lists
       let lastDataTime = startTime
 
-      while (Date.now() - startTime < overallTimeout) {
+      while (Date.now() - startTime < overallTimeout && !this.abortOperations) {
+        // Check for abort request (disconnect called)
+        if (this.abortOperations) {
+          console.log(`[Jensen] listFiles: Aborted by disconnect request`)
+          return allFiles // Return what we have
+        }
+
         try {
           // Read data directly from USB
           // Note: WebUSB transferIn has implicit short timeout behavior
@@ -1688,7 +1705,13 @@ export class JensenDevice {
       const overallTimeout = 300000 // 5 minutes max for large files
 
       let lastProgressLog = 0
-      while (received < fileSize && consecutiveTimeouts < maxTimeouts && Date.now() - startTime < overallTimeout) {
+      while (received < fileSize && consecutiveTimeouts < maxTimeouts && Date.now() - startTime < overallTimeout && !this.abortOperations) {
+        // Check for abort request (disconnect called)
+        if (this.abortOperations) {
+          console.log(`[Jensen] downloadFile: Aborted by disconnect request`)
+          return false
+        }
+
         // Read more data from USB
         const gotData = await this.readToBuffer()
 

@@ -1131,9 +1131,8 @@ export function Device() {
             </CardContent>
           </Card>
 
-          {/* Activity Log - Show when connected for real-time feedback */}
-          {deviceState.connected && (
-            <Card>
+          {/* Activity Log - Always visible, logs work offline too */}
+          <Card>
               <CardHeader className="pb-2">
                 <CardTitle className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -1260,7 +1259,6 @@ export function Device() {
                 </CardContent>
               )}
             </Card>
-          )}
 
           {/* Realtime Streaming - Available on ALL devices */}
           {deviceState.connected && (

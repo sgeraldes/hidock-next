@@ -57,6 +57,9 @@ export function OperationController() {
 
   // Global store actions
   const {
+    setDeviceState,
+    setConnectionStatus,
+    addActivityLogEntry,
     setDeviceSyncState,
     clearDeviceSyncState,
     addToDownloadQueue,
@@ -336,6 +339,52 @@ export function OperationController() {
   }, [config?.calendar?.icsUrl, config?.calendar?.syncEnabled, loadMeetings])
 
   // ==========================================================================
+  // Device State Subscriptions
+  // ==========================================================================
+
+  // Sync guard to prevent duplicate subscriptions
+  const deviceSubscriptionsInitialized = useRef(false)
+
+  useEffect(() => {
+    // Guard: Only subscribe once
+    if (deviceSubscriptionsInitialized.current) return
+    deviceSubscriptionsInitialized.current = true
+
+    if (DEBUG) console.log('[OperationController] Subscribing to device state')
+
+    // Get initial device state and update store
+    const initialState = deviceService.getState()
+    const initialStatus = deviceService.getConnectionStatus()
+    setDeviceState(initialState)
+    setConnectionStatus(initialStatus)
+
+    // Subscribe to device state changes
+    const unsubStateChange = deviceService.onStateChange((state) => {
+      if (DEBUG) console.log('[OperationController] Device state changed:', state)
+      setDeviceState(state)
+    })
+
+    // Subscribe to connection status changes
+    const unsubStatusChange = deviceService.onStatusChange((status) => {
+      if (DEBUG) console.log('[OperationController] Connection status changed:', status)
+      setConnectionStatus(status)
+    })
+
+    // Subscribe to activity log (for error reporting and debugging)
+    const unsubActivity = deviceService.onActivity((entry) => {
+      addActivityLogEntry(entry)
+    })
+
+    return () => {
+      if (DEBUG) console.log('[OperationController] Unsubscribing from device state')
+      unsubStateChange()
+      unsubStatusChange()
+      unsubActivity()
+      deviceSubscriptionsInitialized.current = false
+    }
+  }, [deviceService, setDeviceState, setConnectionStatus, addActivityLogEntry])
+
+  // ==========================================================================
   // Subscriptions and Initialization
   // ==========================================================================
 
@@ -358,7 +407,7 @@ export function OperationController() {
       }
     })
 
-    // Subscribe to device connection changes
+    // Subscribe to device connection changes (for download resumption)
     const unsubDevice = deviceService.onStateChange((deviceState) => {
       if (deviceState.connected && !isProcessingDownloads.current) {
         window.electronAPI.downloadService.getState().then((state) => {

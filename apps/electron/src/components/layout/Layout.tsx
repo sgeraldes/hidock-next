@@ -25,7 +25,6 @@ import { cn } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
-import { getHiDockDeviceService, HiDockDeviceState, ConnectionStatus } from '@/services/hidock-device'
 import { OperationController } from '@/components/OperationController'
 
 interface LayoutProps {
@@ -95,6 +94,8 @@ export function Layout({ children }: LayoutProps) {
     syncCalendar,
     lastCalendarSync,
     config,
+    deviceState,
+    connectionStatus,
     deviceSyncing,
     deviceSyncProgress,
     deviceFileDownloading,
@@ -102,10 +103,6 @@ export function Layout({ children }: LayoutProps) {
     deviceSyncEta,
     downloadQueue
   } = useAppStore()
-
-  // Device connection state
-  const [deviceState, setDeviceState] = useState<HiDockDeviceState | null>(null)
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>({ step: 'idle', message: 'Not connected' })
 
   // Track previous state for toast notifications
   const prevConnectedRef = useRef<boolean | null>(null)
@@ -126,99 +123,64 @@ export function Layout({ children }: LayoutProps) {
     loadRecordings()
   }, [])
 
-  // Subscribe to device state changes
+  // Toast notifications for device state changes (read from store)
   useEffect(() => {
-    const deviceService = getHiDockDeviceService()
-
-    // Get initial state
-    const initialState = deviceService.getState()
-    const initialStatus = deviceService.getConnectionStatus()
-    setDeviceState(initialState)
-    setConnectionStatus(initialStatus)
-
     // Initialize refs with current state (don't show toast on initial load)
-    prevConnectedRef.current = initialState.connected
-    prevStatusStepRef.current = initialStatus.step
-
-    // Subscribe to state changes
-    const unsubState = deviceService.onStateChange((state) => {
-      const wasConnected = prevConnectedRef.current
-      const isNowConnected = state.connected
-
-      // Show toast on connection state change
-      if (wasConnected !== null && wasConnected !== isNowConnected) {
-        if (isNowConnected) {
-          const modelName = state.model?.replace('hidock-', '').toUpperCase() || 'Device'
-          toast({
-            title: 'Device Connected',
-            description: `${modelName} is ready to use`,
-            variant: 'success'
-          })
-          hasShownInitialToast.current = true
-        } else {
-          // Only show disconnect toast if we had previously shown a connect toast
-          if (hasShownInitialToast.current) {
-            toast({
-              title: 'Device Disconnected',
-              description: 'HiDock has been disconnected',
-              variant: 'default'
-            })
-          }
-        }
-      }
-
-      prevConnectedRef.current = isNowConnected
-      setDeviceState(state)
-    })
-
-    const unsubStatus = deviceService.onStatusChange((status) => {
-      const prevStep = prevStatusStepRef.current
-
-      // Show toast on error state
-      if (status.step === 'error' && prevStep !== 'error') {
-        toast({
-          title: 'Connection Error',
-          description: status.message || 'Failed to connect to device',
-          variant: 'error'
-        })
-      }
-
-      prevStatusStepRef.current = status.step
-      setConnectionStatus(status)
-    })
-
-    // Subscribe to activity log for important events
-    const unsubActivity = deviceService.onActivity((entry) => {
-      // Show toast for critical errors that aren't already covered
-      if (entry.type === 'error') {
-        // Skip certain expected errors that would be noisy
-        const skipPatterns = [
-          'Cannot list files', // Not connected
-          'Failed to get card info', // Already handled in status
-          'Failed to get device info', // Already handled in status
-          'Failed to get settings' // Already handled in status
-          // NOTE: 'Download failed' removed from skip list - users should see download failures
-        ]
-        const shouldSkip = skipPatterns.some(pattern => entry.message.includes(pattern))
-
-        if (!shouldSkip) {
-          toast({
-            title: 'Error',
-            description: `${entry.message}${entry.details ? `: ${entry.details}` : ''}`,
-            variant: 'error'
-          })
-        }
-      }
-    })
-
-    // NOTE: initAutoConnect is called in App.tsx, not here, to avoid duplicate initialization
-
-    return () => {
-      unsubState()
-      unsubStatus()
-      unsubActivity()
+    if (prevConnectedRef.current === null) {
+      prevConnectedRef.current = deviceState.connected
+      prevStatusStepRef.current = connectionStatus.step
+      return
     }
-  }, [])
+
+    const wasConnected = prevConnectedRef.current
+    const isNowConnected = deviceState.connected
+
+    // Show toast on connection state change
+    if (wasConnected !== isNowConnected) {
+      if (isNowConnected) {
+        const modelName = deviceState.model?.replace('hidock-', '').toUpperCase() || 'Device'
+        toast({
+          title: 'Device Connected',
+          description: `${modelName} is ready to use`,
+          variant: 'success'
+        })
+        hasShownInitialToast.current = true
+      } else {
+        // Only show disconnect toast if we had previously shown a connect toast
+        if (hasShownInitialToast.current) {
+          toast({
+            title: 'Device Disconnected',
+            description: 'HiDock has been disconnected',
+            variant: 'default'
+          })
+        }
+      }
+    }
+
+    prevConnectedRef.current = isNowConnected
+  }, [deviceState.connected, deviceState.model])
+
+  // Toast notifications for connection errors (read from store)
+  useEffect(() => {
+    // Initialize ref with current state
+    if (prevStatusStepRef.current === null) {
+      prevStatusStepRef.current = connectionStatus.step
+      return
+    }
+
+    const prevStep = prevStatusStepRef.current
+
+    // Show toast on error state
+    if (connectionStatus.step === 'error' && prevStep !== 'error') {
+      toast({
+        title: 'Connection Error',
+        description: connectionStatus.message || 'Failed to connect to device',
+        variant: 'error'
+      })
+    }
+
+    prevStatusStepRef.current = connectionStatus.step
+  }, [connectionStatus.step, connectionStatus.message])
 
   // Initial calendar sync if URL is configured
   useEffect(() => {
@@ -228,9 +190,9 @@ export function Layout({ children }: LayoutProps) {
   }, [config?.calendar.icsUrl])
 
   // Determine device status display
-  const isConnected = deviceState?.connected ?? false
+  const isConnected = deviceState.connected
   const isConnecting = connectionStatus.step !== 'idle' && connectionStatus.step !== 'ready' && connectionStatus.step !== 'error'
-  const deviceModel = deviceState?.model?.replace('hidock-', '').toUpperCase() || 'Device'
+  const deviceModel = deviceState.model?.replace('hidock-', '').toUpperCase() || 'Device'
 
   return (
     <div className="flex h-screen bg-background">
@@ -286,7 +248,7 @@ export function Layout({ children }: LayoutProps) {
               )}>
                 {isConnected ? deviceModel : isConnecting ? 'Connecting...' : 'Disconnected'}
               </span>
-              {isConnected && deviceState?.recordingCount !== undefined && deviceState.recordingCount > 0 && (
+              {isConnected && deviceState.recordingCount > 0 && (
                 <span className="text-[10px] text-slate-500">
                   {deviceState.recordingCount} recordings
                 </span>
