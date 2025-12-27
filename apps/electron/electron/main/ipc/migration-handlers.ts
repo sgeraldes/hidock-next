@@ -751,18 +751,31 @@ async function rollbackV11MigrationImpl(): Promise<{ success: boolean; errors: s
   const result = { success: true, errors: [] as string[] }
 
   try {
+    // P2-017: Check backup exists BEFORE starting destructive operations
+    const hasBackup = checkBackupExists()
+
     // P1 #011: Wrap in transaction
     runInTransaction(() => {
       const db = getDatabase()
 
-      // P1 #012: Restore from backup if it exists
-      try {
-        restoreFromBackup()
-      } catch (error) {
+      // P2-017: Restore from backup if it exists (before dropping tables)
+      if (hasBackup) {
+        try {
+          restoreFromBackup()
+
+          // P2-017: Verify restoration succeeded
+          if (!verifyRestoration()) {
+            throw new Error('Restoration verification failed - some recordings still marked as migrated')
+          }
+        } catch (error) {
+          result.errors.push(`Failed to restore from backup: ${sanitizeError(error as Error)}`)
+          throw error // Abort transaction
+        }
+      } else {
         console.log('No backup to restore, proceeding with standard rollback')
       }
 
-      // Drop new tables
+      // Drop new tables (only after successful restore verification)
       db.run('DROP TABLE IF EXISTS outputs')
       db.run('DROP TABLE IF EXISTS follow_ups')
       db.run('DROP TABLE IF EXISTS decisions')
@@ -770,11 +783,13 @@ async function rollbackV11MigrationImpl(): Promise<{ success: boolean; errors: s
       db.run('DROP TABLE IF EXISTS audio_sources')
       db.run('DROP TABLE IF EXISTS knowledge_captures')
 
-      // Reset migration status
-      try {
-        db.run(`UPDATE recordings SET migration_status = 'pending', migrated_to_capture_id = NULL, migrated_at = NULL WHERE migration_status = 'migrated'`)
-      } catch {
-        // Columns might not exist if migration wasn't completed
+      // Reset migration status (only if backup didn't exist)
+      if (!hasBackup) {
+        try {
+          db.run(`UPDATE recordings SET migration_status = 'pending', migrated_to_capture_id = NULL, migrated_at = NULL WHERE migration_status = 'migrated'`)
+        } catch {
+          // Columns might not exist if migration wasn't completed
+        }
       }
 
       // Revert schema version

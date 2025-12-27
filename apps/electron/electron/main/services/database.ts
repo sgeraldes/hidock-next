@@ -5,7 +5,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 10
+const SCHEMA_VERSION = 11
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -539,6 +539,16 @@ const MIGRATIONS: Record<number, () => void> = {
     // quality_assessments table is created in the schema, this just logs the migration
     console.log('[Migration v10] quality_assessments table added to schema')
     console.log('Migration v10 complete: Quality assessment and storage policy tables created')
+  },
+  11: () => {
+    // v11: Knowledge Captures tables (handled by migration-handlers.ts for existing data)
+    // NOTE: The actual V11 migration (knowledge_captures, action_items, etc.)
+    // is handled by migration-handlers.ts and triggered via the migration UI.
+    // This migration just updates the version number for new databases.
+    // Existing databases with data need to run the manual migration from the UI.
+    console.log('Running migration to schema v11: Knowledge Captures architecture')
+    console.log('[Migration v11] Knowledge captures tables will be created by manual migration')
+    console.log('Migration v11 complete: Schema version updated to v11')
   }
 
 }
