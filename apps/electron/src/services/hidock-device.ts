@@ -17,6 +17,16 @@ import {
   BluetoothStatus
 } from './jensen'
 
+// Helper to wrap promises with timeout
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${operation} timed out after ${timeoutMs}ms`)), timeoutMs)
+    )
+  ])
+}
+
 export interface HiDockRecording {
   id: string
   filename: string
@@ -408,6 +418,26 @@ class HiDockDeviceService {
     await this.jensen.disconnect()
   }
 
+  // Reset device USB connection (for recovery from stuck state)
+  async resetDevice(): Promise<boolean> {
+    this.logActivity('info', 'Resetting USB device...')
+    try {
+      const success = await this.jensen.reset()
+      if (success) {
+        this.logActivity('success', 'Device reset successful')
+        // Re-initialize the device after reset
+        this.initializationComplete = false
+        await this.handleConnect()
+      } else {
+        this.logActivity('error', 'Device reset failed')
+      }
+      return success
+    } catch (error) {
+      this.logActivity('error', 'Device reset error', error instanceof Error ? error.message : 'Unknown error')
+      return false
+    }
+  }
+
   isConnected(): boolean {
     return this.state.connected && this.jensen.isConnected()
   }
@@ -522,6 +552,11 @@ class HiDockDeviceService {
         console.error('Activity listener error:', e)
       }
     }
+  }
+
+  // Public method to log activity from external components (for debugging flows)
+  log(type: ActivityLogEntry['type'], message: string, details?: string): void {
+    this.logActivity(type, message, details)
   }
 
   // Get all stored activity log entries (for persistence across page navigation)
@@ -675,20 +710,21 @@ class HiDockDeviceService {
     // Wait for initialization to complete before listing files
     // This ensures recordingCount is populated for accurate progress reporting
     if (!this.initializationComplete) {
-      if (DEBUG_DEVICE) console.log('[HiDockDevice] listRecordings: Waiting for initialization to complete...')
-      // Wait up to 30 seconds for initialization
-      const maxWait = 30000
+      this.logActivity('info', 'Waiting for initialization', 'File list request waiting for device init...')
+      // Wait up to 60 seconds for initialization (initialization itself can take up to 60s with 4x15s timeouts)
+      const maxWait = 60000
       const startWait = Date.now()
       while (!this.initializationComplete && Date.now() - startWait < maxWait) {
         await new Promise(resolve => setTimeout(resolve, 100))
         // Check if disconnected during wait
         if (!this.isConnected()) {
-          if (DEBUG_DEVICE) console.log('[HiDockDevice] listRecordings: Disconnected while waiting for init')
+          this.logActivity('error', 'List files aborted', 'Device disconnected while waiting for init')
           return []
         }
       }
       if (!this.initializationComplete) {
-        console.warn('[HiDockDevice] listRecordings: Timed out waiting for initialization, proceeding anyway')
+        this.logActivity('error', 'List files timeout', 'Timed out waiting for device initialization')
+        return []
       }
     }
 
@@ -977,12 +1013,14 @@ class HiDockDeviceService {
 
     // Initialize device - each step is non-fatal to allow partial functionality
     // Check abort flag between steps to allow quick disconnect
+    // Each step has a timeout to prevent hanging on unresponsive devices
+    const INIT_STEP_TIMEOUT = 15000 // 15 seconds per step
 
     // Step 1: Get device info (non-fatal - some devices may not support)
     if (this.initAborted) return
     this.updateStatus('getting-info', 'Reading device information...', 20)
     try {
-      await this.refreshDeviceInfo()
+      await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, 'Get device info')
     } catch (error) {
       console.warn('[HiDockDevice] Failed to get device info (continuing):', error)
       this.logActivity('error', 'Failed to get device info', error instanceof Error ? error.message : 'Unknown error')
@@ -992,18 +1030,20 @@ class HiDockDeviceService {
     if (this.initAborted) return
     this.updateStatus('getting-storage', 'Reading storage information...', 40)
     try {
-      await this.refreshStorageInfo()
+      await withTimeout(this.refreshStorageInfo(), INIT_STEP_TIMEOUT, 'Get storage info')
     } catch (error) {
       console.warn('[HiDockDevice] Failed to get storage info (continuing):', error)
+      this.logActivity('error', 'Failed to get storage info', error instanceof Error ? error.message : 'Unknown error')
     }
 
     // Step 3: Get settings (non-fatal)
     if (this.initAborted) return
     this.updateStatus('getting-settings', 'Loading device settings...', 70)
     try {
-      await this.refreshSettings()
+      await withTimeout(this.refreshSettings(), INIT_STEP_TIMEOUT, 'Get settings')
     } catch (error) {
       console.warn('[HiDockDevice] Failed to get settings (continuing):', error)
+      this.logActivity('error', 'Failed to get settings', error instanceof Error ? error.message : 'Unknown error')
     }
 
     // Note: File count is now retrieved as part of refreshStorageInfo() to match web app behavior
@@ -1013,9 +1053,10 @@ class HiDockDeviceService {
     if (this.initAborted) return
     this.updateStatus('syncing-time', 'Syncing device time...', 90)
     try {
-      await this.syncTime()
+      await withTimeout(this.syncTime(), INIT_STEP_TIMEOUT, 'Sync time')
     } catch (error) {
       console.warn('[HiDockDevice] Failed to sync time (continuing):', error)
+      this.logActivity('error', 'Failed to sync time', error instanceof Error ? error.message : 'Unknown error')
     }
 
     // Done - only if not aborted

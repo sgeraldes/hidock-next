@@ -22,9 +22,33 @@ const CONNECTION_TIMEOUT_MS = 15000 // 15 second timeout
 const MAX_LOG_ENTRIES = 100 // Maximum activity log entries to keep
 const DEBUG_DEVICE_UI = false // Enable verbose UI logging
 
+// Format ETA in human-readable form
+function formatEta(seconds: number | null): string {
+  if (seconds === null || seconds <= 0) return ''
+  if (seconds < 60) return `${seconds}s remaining`
+  if (seconds < 3600) {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return secs > 0 ? `${mins}m ${secs}s remaining` : `${mins}m remaining`
+  }
+  const hours = Math.floor(seconds / 3600)
+  const mins = Math.floor((seconds % 3600) / 60)
+  return mins > 0 ? `${hours}h ${mins}m remaining` : `${hours}h remaining`
+}
+
 export function Device() {
   // Global store for sync state (shown in sidebar)
-  const { setDeviceSyncState, clearDeviceSyncState, addToDownloadQueue, updateDownloadProgress, removeFromDownloadQueue } = useAppStore()
+  const {
+    setDeviceSyncState,
+    clearDeviceSyncState,
+    addToDownloadQueue,
+    updateDownloadProgress,
+    removeFromDownloadQueue,
+    cancelDeviceSync,
+    deviceSyncProgress,
+    deviceSyncEta,
+    deviceSyncing: storeSyncing
+  } = useAppStore()
 
   // Initialize state directly from service to avoid flash of wrong state
   const deviceService = getHiDockDeviceService()
@@ -79,6 +103,9 @@ export function Device() {
   const [logExpanded, setLogExpanded] = useState(true)
   const logContainerRef = useRef<HTMLDivElement>(null)
 
+  // Track if auto-sync has been triggered for this connection session (prevents duplicate triggers)
+  const autoSyncTriggeredRef = useRef(false)
+
   // Helper to clean up connection timers
   const clearConnectionTimers = useCallback(() => {
     if (connectionTimeoutRef.current) {
@@ -123,11 +150,23 @@ export function Device() {
     }
     loadSyncedFilenames()
 
-    // Load auto-download and auto-transcribe settings from config
+    // Load auto-download, auto-transcribe, and auto-connect settings from config
+    // IMPORTANT: This also updates autoConnectConfig because the service loads config async
+    // and the initial useState may read the default value before config is loaded
     const loadConfigSettings = async () => {
       try {
         const config = await window.electronAPI.config.get()
         if (mounted) {
+          // Auto-connect - must be loaded here because service loads async and
+          // useState may have captured the default before config loaded
+          if (config?.device?.autoConnect !== undefined) {
+            const isEnabled = config.device.autoConnect === true
+            setAutoConnectConfig({
+              enabled: isEnabled,
+              intervalMs: 5000,
+              connectOnStartup: isEnabled
+            })
+          }
           if (config?.device?.autoDownload !== undefined) {
             setAutoDownload(config.device.autoDownload)
           }
@@ -177,6 +216,7 @@ export function Device() {
           if (mounted) {
             if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] loadInitialData got ${recs.length} recordings`)
             setRecordings(recs)
+            // Auto-sync is handled by the dedicated useEffect that watches recordings state
           }
           if (mounted && deviceService.isP1Device()) {
             if (DEBUG_DEVICE_UI) console.log('[Device.tsx] P1 device detected, loading battery status...')
@@ -209,7 +249,7 @@ export function Device() {
         if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device connected, loading recordings...')
         setError(null) // Clear any previous errors
 
-        // Load recordings and then trigger auto-download if enabled
+        // Load recordings - auto-sync is handled by the dedicated useEffect that watches recordings state
         setLoadingRecordings(true)
         setLoadingProgress(null)
         try {
@@ -219,32 +259,7 @@ export function Device() {
           if (mounted) {
             if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Received ${recs.length} recordings`)
             setRecordings(recs)
-
-            // Auto-download if enabled - check config directly since state might not be updated yet
-            const config = await window.electronAPI.config.get()
-            const shouldAutoDownload = config?.device?.autoDownload ?? true
-            if (shouldAutoDownload && recs.length > 0) {
-              // Get synced filenames to filter
-              const syncedFiles = await window.electronAPI.syncedFiles.getFilenames()
-              const syncedSet = new Set(syncedFiles)
-              const toSync = recs.filter((rec) => !syncedSet.has(rec.filename))
-
-              if (toSync.length > 0) {
-                if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Auto-download: Starting sync of ${toSync.length} files`)
-                // Delay slightly to let UI settle
-                setTimeout(() => {
-                  // Trigger sync by setting recordings and calling handleSyncAll equivalent
-                  if (mounted && deviceService.isConnected()) {
-                    // Set state and trigger sync
-                    setSyncedFilenames(syncedSet)
-                    // We need to trigger the sync - use a flag or call a function
-                    triggerAutoSync(recs, syncedSet)
-                  }
-                }, 500)
-              } else {
-                if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Auto-download: All files already synced')
-              }
-            }
+            // Auto-sync is handled by the dedicated useEffect
           }
         } catch (e) {
           console.error('[Device.tsx] Failed to load recordings:', e)
@@ -264,6 +279,8 @@ export function Device() {
         if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device disconnected, clearing state...')
         setRecordings([])
         setBatteryStatus(null)
+        // Reset auto-sync flag so it triggers on reconnect
+        autoSyncTriggeredRef.current = false
         // Clean up realtime streaming
         if (realtimeIntervalRef.current) {
           clearInterval(realtimeIntervalRef.current)
@@ -401,6 +418,18 @@ export function Device() {
     await deviceService.disconnect()
   }
 
+  const handleResetDevice = async () => {
+    setError(null)
+    try {
+      const success = await deviceService.resetDevice()
+      if (!success) {
+        setError('Device reset failed. Try disconnecting and reconnecting the USB cable.')
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Device reset failed')
+    }
+  }
+
   const handleSyncAll = async () => {
     // Validate connection before starting
     if (!deviceService.isConnected()) {
@@ -475,9 +504,25 @@ export function Device() {
   // Trigger auto-sync after connection (used by connection handler)
   // Now uses centralized download service - just queues files, DownloadController handles the actual downloads
   const triggerAutoSync = useCallback(async (recs: HiDockRecording[], _syncedSet: Set<string>) => {
+    // Prevent duplicate auto-sync triggers (race condition between loadInitialData and onConnectionChange)
+    if (autoSyncTriggeredRef.current) {
+      deviceService.log('info', 'Auto-sync skipped', 'Already triggered for this session')
+      return
+    }
+
+    // Don't trigger auto-sync if we have no recordings (still loading)
+    if (recs.length === 0) {
+      deviceService.log('info', 'Auto-sync skipped', 'No recordings loaded yet')
+      return
+    }
+
+    autoSyncTriggeredRef.current = true
+    deviceService.log('info', 'Auto-sync triggered', `${recs.length} recordings to check`)
+
     // Validate connection before starting
     if (!deviceService.isConnected()) {
-      console.log('[Device.tsx] triggerAutoSync: Device not connected, skipping')
+      deviceService.log('error', 'Auto-sync aborted', 'Device not connected')
+      autoSyncTriggeredRef.current = false // Reset so it can try again
       return
     }
 
@@ -489,44 +534,81 @@ export function Device() {
       dateCreated: rec.dateCreated
     }))
 
-    const filesWithStatus = await window.electronAPI.downloadService.getFilesToSync(filesToCheck)
-    const toSync = filesWithStatus.filter(f => !f.skipReason)
-
-    if (toSync.length === 0) {
-      console.log('[Device.tsx] triggerAutoSync: All files already synced')
-      // Update local state from service
-      const stats = await window.electronAPI.downloadService.getStats()
-      console.log(`[Device.tsx] Download service stats: ${stats.totalSynced} synced, ${stats.pendingInQueue} pending`)
-      return
-    }
-
-    console.log(`[Device.tsx] triggerAutoSync: Queueing ${toSync.length} files for download`)
-    setSyncing(true)
-
     try {
+      deviceService.log('info', 'Checking sync status', `Querying download service for ${filesToCheck.length} files...`)
+      const filesWithStatus = await window.electronAPI.downloadService.getFilesToSync(filesToCheck)
+      const toSync = filesWithStatus.filter(f => !f.skipReason)
+
+      if (toSync.length === 0) {
+        deviceService.log('success', 'All files already synced', 'Nothing to download')
+        return
+      }
+
+      deviceService.log('info', 'Queueing downloads', `${toSync.length} files to sync`)
+      setSyncing(true)
+
       // Queue files to download service - DownloadController will handle actual downloads
       const queuedIds = await window.electronAPI.downloadService.queueDownloads(
         toSync.map(f => ({ filename: f.filename, size: f.size }))
       )
 
       if (queuedIds.length > 0) {
+        deviceService.log('success', 'Downloads queued', `${queuedIds.length} files queued for download`)
         toast({
           title: 'Auto-sync started',
           description: `Queued ${queuedIds.length} recording${queuedIds.length !== 1 ? 's' : ''} for download`,
           variant: 'default'
         })
+      } else {
+        deviceService.log('info', 'No files queued', 'All files already in queue or downloaded')
       }
     } catch (e) {
-      console.error('[Device.tsx] triggerAutoSync error:', e)
+      const errorMsg = e instanceof Error ? e.message : 'Unknown error'
+      deviceService.log('error', 'Auto-sync failed', errorMsg)
       toast({
         title: 'Auto-sync failed',
-        description: e instanceof Error ? e.message : 'Unknown error',
+        description: errorMsg,
         variant: 'error'
       })
       setSyncing(false)
     }
     // Note: setSyncing(false) is NOT called here - the DownloadController will manage sync state
   }, [deviceService])
+
+  // Effect to trigger auto-sync when recordings are actually loaded (handles race condition)
+  useEffect(() => {
+    // Only trigger if:
+    // 1. Device is connected
+    // 2. Recordings have been loaded (not empty)
+    // 3. Auto-sync hasn't been triggered yet this session
+    // 4. We're not currently syncing
+    if (deviceState.connected && recordings.length > 0 && !autoSyncTriggeredRef.current && !syncing && !storeSyncing) {
+      const checkAndTriggerAutoSync = async () => {
+        try {
+          const config = await window.electronAPI.config.get()
+          const shouldAutoDownload = config?.device?.autoDownload ?? true
+          if (shouldAutoDownload) {
+            deviceService.log('info', 'Auto-sync check (recordings loaded)', `${recordings.length} recordings available`)
+            const syncedFiles = await window.electronAPI.syncedFiles.getFilenames()
+            const syncedSet = new Set(syncedFiles)
+            const toSync = recordings.filter((rec) => !syncedSet.has(rec.filename))
+            if (toSync.length > 0) {
+              setSyncedFilenames(syncedSet)
+              triggerAutoSync(recordings, syncedSet)
+            } else {
+              deviceService.log('success', 'All files synced', 'No new recordings to download')
+              autoSyncTriggeredRef.current = true // Mark as handled
+            }
+          }
+        } catch (e) {
+          console.error('[Device.tsx] Auto-sync check error:', e)
+        }
+      }
+      // Small delay to let other state settle
+      const timer = setTimeout(checkAndTriggerAutoSync, 100)
+      return () => clearTimeout(timer)
+    }
+  }, [deviceState.connected, recordings, syncing, storeSyncing, deviceService, triggerAutoSync])
 
   const handleAutoRecordToggle = async (enabled: boolean) => {
     try {
@@ -842,9 +924,14 @@ export function Device() {
                         </p>
                       </div>
                     </div>
-                    <Button variant="outline" size="sm" onClick={handleDisconnect}>
-                      Disconnect
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button variant="outline" size="sm" onClick={handleResetDevice} title="Reset USB connection if device is unresponsive">
+                        <RotateCcw className="h-4 w-4" />
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={handleDisconnect}>
+                        Disconnect
+                      </Button>
+                    </div>
                   </div>
 
                   {/* Storage and Recording count */}
@@ -881,9 +968,15 @@ export function Device() {
                           </p>
                         )
                       ) : (
-                        <div className="flex items-center gap-2 text-muted-foreground">
-                          <RefreshCw className="h-4 w-4 animate-spin" />
-                          <span className="text-sm">Loading...</span>
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2 text-muted-foreground">
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                            <span className="text-sm">Loading...</span>
+                          </div>
+                          <Button variant="ghost" size="sm" onClick={handleResetDevice} className="text-xs">
+                            <RotateCcw className="h-3 w-3 mr-1" />
+                            Reset if stuck
+                          </Button>
                         </div>
                       )}
                     </div>
@@ -980,14 +1073,26 @@ export function Device() {
                         )}
                         <Button
                           className="w-full"
-                          onClick={handleSyncAll}
-                          disabled={syncing || (recordings.length === 0 && !isLoadingList && deviceState.recordingCount === 0) || allSynced || isLoadingList}
-                          variant={allSynced ? 'secondary' : 'default'}
+                          onClick={storeSyncing ? cancelDeviceSync : handleSyncAll}
+                          disabled={(!storeSyncing && (syncing || (recordings.length === 0 && !isLoadingList && deviceState.recordingCount === 0) || allSynced || isLoadingList))}
+                          variant={storeSyncing ? 'destructive' : (allSynced ? 'secondary' : 'default')}
                         >
-                          {syncing ? (
+                          {storeSyncing ? (
+                            <>
+                              <X className="h-4 w-4 mr-2" />
+                              {deviceSyncProgress ? (
+                                <span className="flex flex-col items-start text-left">
+                                  <span>Cancel Sync ({deviceSyncProgress.current}/{deviceSyncProgress.total})</span>
+                                  {deviceSyncEta && <span className="text-xs opacity-80">{formatEta(deviceSyncEta)}</span>}
+                                </span>
+                              ) : (
+                                'Cancel Sync'
+                              )}
+                            </>
+                          ) : syncing ? (
                             <>
                               <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                              Syncing... {downloadProgress && `(${downloadProgress.percent.toFixed(0)}%)`}
+                              Starting sync...
                             </>
                           ) : isLoadingList ? (
                             <>

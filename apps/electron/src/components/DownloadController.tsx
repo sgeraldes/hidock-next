@@ -49,8 +49,14 @@ export function DownloadController() {
     clearDeviceSyncState,
     addToDownloadQueue,
     updateDownloadProgress,
-    removeFromDownloadQueue
+    removeFromDownloadQueue,
+    deviceSyncing
   } = useAppStore()
+
+  // Track bytes for ETA calculation
+  const bytesDownloadedRef = useRef(0)
+  const totalBytesRef = useRef(0)
+  const startTimeRef = useRef(0)
 
   /**
    * Process a single download from the queue
@@ -141,6 +147,19 @@ export function DownloadController() {
   }, [deviceService, addToDownloadQueue, updateDownloadProgress, removeFromDownloadQueue])
 
   /**
+   * Calculate ETA based on elapsed time and progress
+   */
+  const calculateEta = useCallback((bytesDownloaded: number, totalBytes: number, startTime: number): number | null => {
+    if (bytesDownloaded === 0 || totalBytes === 0) return null
+    const elapsedMs = Date.now() - startTime
+    if (elapsedMs < 2000) return null // Wait at least 2 seconds for stable estimate
+    const bytesPerMs = bytesDownloaded / elapsedMs
+    const remainingBytes = totalBytes - bytesDownloaded
+    const remainingMs = remainingBytes / bytesPerMs
+    return Math.ceil(remainingMs / 1000) // Return seconds
+  }, [])
+
+  /**
    * Process all pending downloads in the queue
    */
   const processQueue = useCallback(async () => {
@@ -166,46 +185,72 @@ export function DownloadController() {
     isProcessingRef.current = true
     abortRef.current = false
 
+    // Calculate total bytes for ETA
+    const totalBytes = pendingItems.reduce((sum, item) => sum + item.fileSize, 0)
+    totalBytesRef.current = totalBytes
+    bytesDownloadedRef.current = 0
+    startTimeRef.current = Date.now()
+
     if (DEBUG_DOWNLOAD_CONTROLLER) {
-      console.log(`[DownloadController] Starting to process ${pendingItems.length} pending items`)
+      console.log(`[DownloadController] Starting to process ${pendingItems.length} pending items (${(totalBytes / 1024 / 1024).toFixed(1)} MB)`)
     }
 
-    // Update UI state
+    // Update UI state with totals
     setDeviceSyncState({
       deviceSyncing: true,
       deviceSyncProgress: { current: 0, total: pendingItems.length },
-      deviceFileProgress: 0
+      deviceFileProgress: 0,
+      deviceSyncStartTime: startTimeRef.current,
+      deviceSyncTotalBytes: totalBytes,
+      deviceSyncBytesDownloaded: 0,
+      deviceSyncEta: null
     })
 
     let completed = 0
     let failed = 0
 
     for (const item of pendingItems) {
-      if (abortRef.current) {
-        if (DEBUG_DOWNLOAD_CONTROLLER) console.log('[DownloadController] Aborted')
+      // Check for abort OR cancellation via store
+      if (abortRef.current || !useAppStore.getState().deviceSyncing) {
+        if (DEBUG_DOWNLOAD_CONTROLLER) console.log('[DownloadController] Cancelled')
         break
       }
 
-      // Update progress
+      // Update progress before download starts
       setDeviceSyncState({
         deviceFileDownloading: item.filename,
-        deviceSyncProgress: { current: completed + failed, total: pendingItems.length },
+        deviceSyncProgress: { current: completed, total: pendingItems.length },
         deviceFileProgress: 0
       })
 
       const success = await processDownload(item)
       if (success) {
         completed++
+        // Update bytes downloaded and calculate ETA
+        bytesDownloadedRef.current += item.fileSize
+        const eta = calculateEta(bytesDownloadedRef.current, totalBytesRef.current, startTimeRef.current)
+        setDeviceSyncState({
+          deviceSyncProgress: { current: completed, total: pendingItems.length },
+          deviceSyncBytesDownloaded: bytesDownloadedRef.current,
+          deviceSyncEta: eta
+        })
       } else {
         failed++
       }
     }
 
     isProcessingRef.current = false
+    const wasCancelled = !useAppStore.getState().deviceSyncing
     clearDeviceSyncState()
 
     // Show completion toast
-    if (completed > 0 || failed > 0) {
+    if (wasCancelled) {
+      toast({
+        title: 'Sync cancelled',
+        description: `Downloaded ${completed} file${completed !== 1 ? 's' : ''} before cancellation`,
+        variant: 'default'
+      })
+    } else if (completed > 0 || failed > 0) {
       if (failed === 0) {
         toast({
           title: 'Sync complete',
@@ -220,7 +265,7 @@ export function DownloadController() {
         })
       }
     }
-  }, [deviceService, processDownload, setDeviceSyncState, clearDeviceSyncState])
+  }, [deviceService, processDownload, setDeviceSyncState, clearDeviceSyncState, calculateEta])
 
   /**
    * Subscribe to download service state updates from main process

@@ -291,6 +291,11 @@ export class JensenDevice {
   private operationLock: Promise<void> = Promise.resolve()
   private lockHolder: string | null = null
 
+  // Connection check polling timer (matches official jensen.js approach)
+  private connectionCheckTimer: ReturnType<typeof setTimeout> | null = null
+  // Flag to stop connection checking (matches official isStopConnectionCheck)
+  private isStopConnectionCheck: boolean = false
+
   versionCode: string | null = null
   versionNumber: number | null = null
   serialNumber: string | null = null
@@ -299,6 +304,58 @@ export class JensenDevice {
   ondisconnect?: () => void
   onconnect?: () => void
   onprogress?: (bytes: number) => void
+
+  /**
+   * Start polling for device disconnect (matches official jensen.js D() function).
+   * This polls every 100ms checking if device.opened becomes false.
+   * More reliable than WebUSB disconnect events on some platforms.
+   */
+  private startConnectionCheck(): void {
+    // Stop any existing check first
+    this.stopConnectionCheck()
+    this.isStopConnectionCheck = false
+
+    const checkConnection = () => {
+      // Check if device.opened is false (matches official: t?.opened === false)
+      if (this.device?.opened === false) {
+        console.log('[Jensen] USB device physically disconnected (detected via polling)')
+        // Clear the timer
+        if (this.connectionCheckTimer) {
+          clearTimeout(this.connectionCheckTimer)
+          this.connectionCheckTimer = null
+        }
+        // Clean up state
+        this.device = null
+        this.sequenceId = 0
+        this.receiveBuffer = new Uint8Array(0)
+        this.operationLock = Promise.resolve()
+        this.lockHolder = null
+        // Notify listeners (matches official: this.ondisconnect && !this.isStopConnectionCheck && this.ondisconnect())
+        if (this.ondisconnect && !this.isStopConnectionCheck) {
+          this.ondisconnect()
+        }
+        return
+      }
+      // Continue polling every 100ms (matches official timeout)
+      this.connectionCheckTimer = setTimeout(checkConnection, 100)
+    }
+
+    // Start polling
+    checkConnection()
+    if (DEBUG_PROTOCOL) console.log('[Jensen] Connection check polling started')
+  }
+
+  /**
+   * Stop the connection check polling.
+   */
+  private stopConnectionCheck(): void {
+    this.isStopConnectionCheck = true
+    if (this.connectionCheckTimer) {
+      clearTimeout(this.connectionCheckTimer)
+      this.connectionCheckTimer = null
+      if (DEBUG_PROTOCOL) console.log('[Jensen] Connection check polling stopped')
+    }
+  }
 
   /**
    * Execute a USB operation with exclusive lock.
@@ -445,6 +502,9 @@ export class JensenDevice {
       this.versionNumber = null
       this.serialNumber = null
 
+      // Start polling for physical USB disconnection (matches official jensen.js D() function)
+      this.startConnectionCheck()
+
       this.onconnect?.()
       return true
     } catch (error) {
@@ -527,6 +587,9 @@ export class JensenDevice {
       this.versionNumber = null
       this.serialNumber = null
 
+      // Start polling for physical USB disconnection (matches official jensen.js D() function)
+      this.startConnectionCheck()
+
       this.onconnect?.()
       return true
     } catch {
@@ -539,6 +602,8 @@ export class JensenDevice {
   }
 
   async disconnect(): Promise<void> {
+    // Stop connection check polling first
+    this.stopConnectionCheck()
     if (this.device) {
       try {
         // Release interface before closing (critical for proper USB cleanup)
@@ -561,6 +626,45 @@ export class JensenDevice {
       this.operationLock = Promise.resolve()
       this.lockHolder = null
       this.ondisconnect?.()
+    }
+  }
+
+  /**
+   * Reset the USB device to recover from stuck state.
+   * This clears all pending transfers and re-initializes the connection.
+   */
+  async reset(): Promise<boolean> {
+    if (!this.device) return false
+
+    console.log('[Jensen] Resetting device...')
+    try {
+      // Clear internal state first
+      this.sequenceId = 0
+      this.receiveBuffer = new Uint8Array(0)
+      this.operationLock = Promise.resolve()
+      this.lockHolder = null
+
+      // Try to reset the USB device (clears pending transfers)
+      if (this.device.opened) {
+        try {
+          await this.device.reset()
+          console.log('[Jensen] Device reset successful')
+        } catch (e) {
+          console.warn('[Jensen] Device reset failed, trying close/reopen:', e)
+          // Fall back to close and reopen
+          try {
+            await this.device.releaseInterface(0)
+          } catch { /* ignore */ }
+          await this.device.close()
+          await this.device.open()
+          await this.device.selectConfiguration(1)
+          await this.device.claimInterface(0)
+        }
+      }
+      return true
+    } catch (error) {
+      console.error('[Jensen] Reset failed:', error)
+      return false
     }
   }
 

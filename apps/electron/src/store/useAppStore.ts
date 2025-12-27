@@ -35,6 +35,11 @@ interface AppState {
   deviceSyncProgress: { current: number; total: number } | null
   deviceFileDownloading: string | null
   deviceFileProgress: number
+  // ETA tracking
+  deviceSyncStartTime: number | null
+  deviceSyncBytesDownloaded: number
+  deviceSyncTotalBytes: number
+  deviceSyncEta: number | null // seconds remaining
 
   // Download queue state (persists across page navigation)
   downloadQueue: Map<string, { filename: string; progress: number; size: number }>
@@ -75,8 +80,13 @@ interface AppState {
     deviceSyncProgress?: { current: number; total: number } | null
     deviceFileDownloading?: string | null
     deviceFileProgress?: number
+    deviceSyncStartTime?: number | null
+    deviceSyncBytesDownloaded?: number
+    deviceSyncTotalBytes?: number
+    deviceSyncEta?: number | null
   }) => void
   clearDeviceSyncState: () => void
+  cancelDeviceSync: () => void
 
   // Download queue actions
   addToDownloadQueue: (id: string, filename: string, size: number) => void
@@ -116,6 +126,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   deviceSyncProgress: null,
   deviceFileDownloading: null,
   deviceFileProgress: 0,
+  deviceSyncStartTime: null,
+  deviceSyncBytesDownloaded: 0,
+  deviceSyncTotalBytes: 0,
+  deviceSyncEta: null,
 
   // Download queue initial state
   downloadQueue: new Map(),
@@ -240,6 +254,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     deviceSyncProgress: state.deviceSyncProgress !== undefined ? state.deviceSyncProgress : prev.deviceSyncProgress,
     deviceFileDownloading: state.deviceFileDownloading !== undefined ? state.deviceFileDownloading : prev.deviceFileDownloading,
     deviceFileProgress: state.deviceFileProgress ?? prev.deviceFileProgress,
+    deviceSyncStartTime: state.deviceSyncStartTime !== undefined ? state.deviceSyncStartTime : prev.deviceSyncStartTime,
+    deviceSyncBytesDownloaded: state.deviceSyncBytesDownloaded ?? prev.deviceSyncBytesDownloaded,
+    deviceSyncTotalBytes: state.deviceSyncTotalBytes ?? prev.deviceSyncTotalBytes,
+    deviceSyncEta: state.deviceSyncEta !== undefined ? state.deviceSyncEta : prev.deviceSyncEta,
   })),
 
   clearDeviceSyncState: () => set({
@@ -247,7 +265,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     deviceSyncProgress: null,
     deviceFileDownloading: null,
     deviceFileProgress: 0,
+    deviceSyncStartTime: null,
+    deviceSyncBytesDownloaded: 0,
+    deviceSyncTotalBytes: 0,
+    deviceSyncEta: null,
   }),
+
+  // Cancel is signaled via state - DownloadController checks this
+  cancelDeviceSync: () => set({ deviceSyncing: false }),
 
   // Download queue actions
   addToDownloadQueue: (id, filename, size) => set((state) => {

@@ -2,10 +2,12 @@ import { ipcMain } from 'electron'
 import {
   getMeetings,
   getMeetingById,
+  getMeetingsByIds,
   getRecordings,
   getRecordingById,
   getRecordingsForMeeting,
   getTranscriptByRecordingId,
+  getTranscriptsByRecordingIds,
   searchTranscripts,
   getChatHistory,
   addChatMessage,
@@ -33,6 +35,12 @@ export function registerDatabaseHandlers(): void {
 
   ipcMain.handle('db:get-meeting', async (_, id: string) => {
     return getMeetingById(id)
+  })
+
+  ipcMain.handle('db:get-meetings-by-ids', async (_, ids: string[]) => {
+    const meetingsMap = getMeetingsByIds(ids)
+    // Convert Map to object for IPC serialization
+    return Object.fromEntries(meetingsMap)
   })
 
   // Recordings
@@ -68,6 +76,12 @@ export function registerDatabaseHandlers(): void {
 
   ipcMain.handle('db:search-transcripts', async (_, query: string) => {
     return searchTranscripts(query)
+  })
+
+  ipcMain.handle('db:get-transcripts-by-recording-ids', async (_, recordingIds: string[]) => {
+    const transcriptsMap = getTranscriptsByRecordingIds(recordingIds)
+    // Convert Map to object for IPC serialization
+    return Object.fromEntries(transcriptsMap)
   })
 
   // Queue

@@ -32,6 +32,20 @@ interface LayoutProps {
   children: ReactNode
 }
 
+// Format ETA in human-readable form
+function formatEta(seconds: number | null): string {
+  if (seconds === null || seconds <= 0) return ''
+  if (seconds < 60) return `~${seconds}s`
+  if (seconds < 3600) {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return secs > 0 ? `~${mins}m ${secs}s` : `~${mins}m`
+  }
+  const hours = Math.floor(seconds / 3600)
+  const mins = Math.floor((seconds % 3600) / 60)
+  return mins > 0 ? `~${hours}h ${mins}m` : `~${hours}h`
+}
+
 // Navigation structure with sections
 type NavigationSection = {
   title: string
@@ -85,6 +99,7 @@ export function Layout({ children }: LayoutProps) {
     deviceSyncProgress,
     deviceFileDownloading,
     deviceFileProgress,
+    deviceSyncEta,
     downloadQueue
   } = useAppStore()
 
@@ -369,6 +384,9 @@ export function Layout({ children }: LayoutProps) {
                         style={{ width: `${(deviceSyncProgress.current / deviceSyncProgress.total) * 100}%` }}
                       />
                     </div>
+                    {deviceSyncEta && (
+                      <div className="text-[10px] text-slate-500 mt-1">{formatEta(deviceSyncEta)}</div>
+                    )}
                   </div>
                 )}
                 {/* Current file progress */}
