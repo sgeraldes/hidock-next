@@ -145,6 +145,12 @@ class HiDockDeviceService {
 
   // Lock to prevent concurrent listRecordings calls
   private listRecordingsPromise: Promise<HiDockRecording[]> | null = null
+  // Synchronous flag to prevent TOCTOU race in listRecordings
+  // (set immediately before async work, checked before promise is set)
+  private listRecordingsLock: boolean = false
+
+  // Flag to prevent overlapping auto-connect attempts
+  private autoConnectInProgress: boolean = false
 
   constructor() {
     this.jensen = getJensenDevice()
@@ -357,24 +363,34 @@ class HiDockDeviceService {
   private async tryConnectSilent(): Promise<boolean> {
     if (this.state.connected) return true
 
+    // Prevent overlapping auto-connect attempts (could happen if interval fires while previous attempt is slow)
+    if (this.autoConnectInProgress) {
+      return false
+    }
+
     // Don't try to connect if USB operations are in progress
     if (this.jensen.isOperationInProgress()) {
       this.logActivity('info', 'Auto-connect', 'Skipped - USB operation in progress')
       return false
     }
 
-    // Log the auto-connect attempt so users can see what's happening
-    this.logActivity('info', 'Auto-connect', 'Checking for authorized HiDock devices...')
+    this.autoConnectInProgress = true
+    try {
+      // Log the auto-connect attempt so users can see what's happening
+      this.logActivity('info', 'Auto-connect', 'Checking for authorized HiDock devices...')
 
-    const success = await this.jensen.tryConnect()
-    // Note: handleConnect() is called via the onconnect callback in jensen.ts
-    // We should NOT call it here to avoid duplicate initialization
-    if (success) {
-      this.updateStatus('opening', 'Device found, connecting...', 10)
-    } else {
-      this.logActivity('info', 'Auto-connect', 'No authorized device found. Click Connect to authorize.')
+      const success = await this.jensen.tryConnect()
+      // Note: handleConnect() is called via the onconnect callback in jensen.ts
+      // We should NOT call it here to avoid duplicate initialization
+      if (success) {
+        this.updateStatus('opening', 'Device found, connecting...', 10)
+      } else {
+        this.logActivity('info', 'Auto-connect', 'No authorized device found. Click Connect to authorize.')
+      }
+      return success
+    } finally {
+      this.autoConnectInProgress = false
     }
-    return success
   }
 
   // Try to connect to a previously authorized device (with UI feedback)
@@ -745,14 +761,30 @@ class HiDockDeviceService {
       return this.cachedRecordings!
     }
 
-    // Prevent concurrent requests - if already loading, wait for that request (with timeout)
-    if (this.listRecordingsPromise && !forceRefresh) {
+    // Prevent concurrent requests - use synchronous lock to prevent TOCTOU race
+    // Check both the lock flag (set synchronously) and promise (set after lock)
+    if ((this.listRecordingsLock || this.listRecordingsPromise) && !forceRefresh) {
       if (DEBUG_DEVICE) console.log('[HiDockDevice] listRecordings: Request already in progress, waiting...')
       // Don't log - this is just coordination between components
+      // Wait for the promise if it exists, or poll for it if lock is set but promise not yet
+      const waitForPromise = async (): Promise<HiDockRecording[]> => {
+        // Wait for promise to be set (if only lock is set)
+        let waitAttempts = 0
+        while (this.listRecordingsLock && !this.listRecordingsPromise && waitAttempts < 50) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+          waitAttempts++
+        }
+        if (this.listRecordingsPromise) {
+          return this.listRecordingsPromise
+        }
+        // Lock cleared without promise - something went wrong, return empty
+        return []
+      }
+
       try {
         // Wait max 2 minutes for existing request (matching overall timeout)
         const result = await Promise.race([
-          this.listRecordingsPromise,
+          waitForPromise(),
           new Promise<HiDockRecording[]>((_, reject) =>
             setTimeout(() => reject(new Error('Timed out waiting for existing request')), 120000)
           )
@@ -764,9 +796,14 @@ class HiDockDeviceService {
         // If timed out, clear the hung promise and let a new request start
         console.warn('[HiDockDevice] listRecordings: Existing request timed out, clearing and retrying')
         this.listRecordingsPromise = null
+        this.listRecordingsLock = false
         // Fall through to start a new request
       }
     }
+
+    // Set lock IMMEDIATELY (synchronously) before any async work
+    // This prevents the TOCTOU race where two callers both pass the check above
+    this.listRecordingsLock = true
 
     // Only log to console (DEBUG), not activity log - cache invalidation is internal detail
     if (!forceRefresh && this.cachedRecordings !== null && DEBUG_DEVICE) {
@@ -836,7 +873,8 @@ class HiDockDeviceService {
         this.logActivity('error', 'Failed to list files', error instanceof Error ? error.message : 'Unknown error')
         return []
       } finally {
-        // Clear the promise when done (success or error)
+        // Clear the lock and promise when done (success or error)
+        this.listRecordingsLock = false
         this.listRecordingsPromise = null
       }
     })()

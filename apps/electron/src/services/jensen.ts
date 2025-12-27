@@ -295,6 +295,10 @@ export class JensenDevice {
   private connectionCheckTimer: ReturnType<typeof setTimeout> | null = null
   // Flag to stop connection checking (matches official isStopConnectionCheck)
   private isStopConnectionCheck: boolean = false
+  // USB connect event handler (for detecting device plug-in, matches official jensen.js)
+  private usbConnectHandler: ((event: USBConnectionEvent) => void) | null = null
+  // Track if USB connect listener is set up
+  private usbConnectListenerActive = false
 
   versionCode: string | null = null
   versionNumber: number | null = null
@@ -355,6 +359,52 @@ export class JensenDevice {
       this.connectionCheckTimer = null
       if (DEBUG_PROTOCOL) console.log('[Jensen] Connection check polling stopped')
     }
+  }
+
+  /**
+   * Set up USB connect event listener for faster device detection.
+   * Matches official jensen.js init() pattern: navigator.usb.onconnect = () => tryconnect()
+   * This allows immediate connection when a device is plugged in, rather than waiting for polling.
+   */
+  setupUsbConnectListener(): void {
+    if (this.usbConnectListenerActive) {
+      return // Already active
+    }
+
+    if (!JensenDevice.isSupported()) {
+      console.warn('[Jensen] WebUSB not supported, cannot set up connect listener')
+      return
+    }
+
+    // Create handler that triggers tryConnect on USB plug-in
+    this.usbConnectHandler = (event: USBConnectionEvent) => {
+      const device = event.device
+      // Only react to HiDock devices
+      if (device.vendorId === USB_VENDOR_ID && device.productName?.includes('HiDock')) {
+        console.log('[Jensen] USB device connected event detected, triggering tryConnect')
+        this.tryConnect()
+      }
+    }
+
+    navigator.usb.onconnect = this.usbConnectHandler
+    this.usbConnectListenerActive = true
+    if (DEBUG_PROTOCOL) console.log('[Jensen] USB connect listener active')
+  }
+
+  /**
+   * Remove USB connect event listener (cleanup).
+   */
+  removeUsbConnectListener(): void {
+    if (!this.usbConnectListenerActive) {
+      return
+    }
+
+    if (navigator.usb) {
+      navigator.usb.onconnect = null
+    }
+    this.usbConnectHandler = null
+    this.usbConnectListenerActive = false
+    if (DEBUG_PROTOCOL) console.log('[Jensen] USB connect listener removed')
   }
 
   /**
@@ -604,6 +654,14 @@ export class JensenDevice {
   async disconnect(): Promise<void> {
     // Stop connection check polling first
     this.stopConnectionCheck()
+
+    // Wait for any pending USB operations to complete before disconnecting
+    // This prevents USB errors from calling releaseInterface while transferIn is active
+    if (this.lockHolder) {
+      console.log(`[Jensen] Waiting for ${this.lockHolder} to complete before disconnect...`)
+      await this.operationLock
+    }
+
     if (this.device) {
       try {
         // Release interface before closing (critical for proper USB cleanup)
@@ -1913,6 +1971,8 @@ let deviceInstance: JensenDevice | null = null
 export function getJensenDevice(): JensenDevice {
   if (!deviceInstance) {
     deviceInstance = new JensenDevice()
+    // Set up USB connect listener for faster device detection (matches official jensen.js init())
+    deviceInstance.setupUsbConnectListener()
   }
   return deviceInstance
 }
