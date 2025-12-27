@@ -7,6 +7,10 @@ import {
   upsertQualityAssessment,
   getRecordingsByQuality,
   getRecordingsByIds,
+  getRecordingByIdAsync,
+  getTranscriptByRecordingIdAsync,
+  getQualityAssessmentAsync,
+  upsertQualityAssessmentAsync,
   type Recording,
   type QualityAssessment
 } from './database'
@@ -30,7 +34,7 @@ export class QualityAssessmentService {
     reason?: string,
     assessedBy?: string
   ): Promise<QualityAssessment> {
-    const recording = getRecordingById(recordingId)
+    const recording = await getRecordingByIdAsync(recordingId)
     if (!recording) {
       throw new Error(`Recording not found: ${recordingId}`)
     }
@@ -45,7 +49,7 @@ export class QualityAssessmentService {
       assessed_by: assessedBy
     }
 
-    upsertQualityAssessment(assessment)
+    await upsertQualityAssessmentAsync(assessment)
 
     // Emit domain event
     const event: QualityAssessedEvent = {
@@ -61,7 +65,7 @@ export class QualityAssessmentService {
     }
     getEventBus().emitDomainEvent(event)
 
-    return getQualityAssessment(recordingId)!
+    return (await getQualityAssessmentAsync(recordingId))!
   }
 
   /**
@@ -83,7 +87,7 @@ export class QualityAssessmentService {
    * This is called when a recording is transcribed or manually triggered
    */
   async autoAssess(recordingId: string): Promise<QualityAssessment> {
-    const quality = this.inferQuality(recordingId)
+    const quality = await this.inferQualityAsync(recordingId)
 
     const assessment: Omit<QualityAssessment, 'assessed_at'> = {
       id: uuidv4(),
@@ -95,7 +99,7 @@ export class QualityAssessmentService {
       assessed_by: 'system'
     }
 
-    upsertQualityAssessment(assessment)
+    await upsertQualityAssessmentAsync(assessment)
 
     // Emit domain event
     const event: QualityAssessedEvent = {
@@ -111,7 +115,7 @@ export class QualityAssessmentService {
     }
     getEventBus().emitDomainEvent(event)
 
-    return getQualityAssessment(recordingId)!
+    return (await getQualityAssessmentAsync(recordingId))!
   }
 
   /**
@@ -201,6 +205,23 @@ export class QualityAssessmentService {
 
     const reason = reasons.join(', ')
     return { level, confidence, reason }
+  }
+
+  /**
+   * Async version of inferQuality - yields to event loop to prevent blocking
+   */
+  private async inferQualityAsync(recordingId: string): Promise<{
+    level: QualityLevel
+    confidence: number
+    reason: string
+  }> {
+    const recording = await getRecordingByIdAsync(recordingId)
+    if (!recording) {
+      return { level: 'low', confidence: 1.0, reason: 'Recording not found' }
+    }
+
+    const transcript = await getTranscriptByRecordingIdAsync(recordingId)
+    return this.inferQualityFromData(recording, transcript)
   }
 
   private inferQuality(recordingId: string): {

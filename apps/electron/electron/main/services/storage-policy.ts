@@ -3,6 +3,9 @@ import {
   getRecordingsByStorageTier,
   updateRecordingStorageTier,
   getQualityAssessment,
+  getRecordingByIdAsync,
+  updateRecordingStorageTierAsync,
+  getQualityAssessmentAsync,
   type Recording,
   queryAll
 } from './database'
@@ -62,16 +65,48 @@ export class StoragePolicyService {
     const eventBus = getEventBus()
 
     // When quality is assessed, automatically assign storage tier
-    eventBus.onDomainEvent<QualityAssessedEvent>('quality:assessed', (event) => {
+    eventBus.onDomainEvent<QualityAssessedEvent>('quality:assessed', async (event) => {
       const { recordingId, quality } = event.payload
-      this.assignTier(recordingId, quality)
+      await this.assignTierAsync(recordingId, quality)
     })
 
     console.log('[StoragePolicyService] Event subscriptions initialized')
   }
 
   /**
-   * Assign storage tier based on quality level
+   * Assign storage tier based on quality level (async version - prevents main thread blocking)
+   */
+  async assignTierAsync(recordingId: string, quality: QualityLevel): Promise<void> {
+    const recording = await getRecordingByIdAsync(recordingId)
+    if (!recording) {
+      console.error(`[StoragePolicy] Recording not found: ${recordingId}`)
+      return
+    }
+
+    const tier = STORAGE_POLICIES[quality]
+    const previousTier = recording.storage_tier
+
+    // Update database
+    await updateRecordingStorageTierAsync(recordingId, tier)
+
+    // Emit domain event
+    const event: StorageTierAssignedEvent = {
+      type: 'storage:tier-assigned',
+      timestamp: new Date().toISOString(),
+      payload: {
+        recordingId,
+        tier,
+        previousTier: previousTier || undefined,
+        reason: `Quality-based tier assignment: ${quality} -> ${tier}`
+      }
+    }
+    getEventBus().emitDomainEvent(event)
+
+    console.log(`[StoragePolicy] Assigned tier ${tier} to recording ${recordingId} (quality: ${quality})`)
+  }
+
+  /**
+   * Assign storage tier based on quality level (sync version - use assignTierAsync for non-blocking)
    */
   assignTier(recordingId: string, quality: QualityLevel): void {
     const recording = getRecordingById(recordingId)
@@ -329,14 +364,14 @@ export class StoragePolicyService {
 
     for (const recording of untiered) {
       // Check if quality assessment exists
-      const quality = getQualityAssessment(recording.id)
+      const quality = await getQualityAssessmentAsync(recording.id)
 
       if (quality) {
-        // Use quality-based tier
-        this.assignTier(recording.id, quality.quality)
+        // Use quality-based tier (async to prevent blocking)
+        await this.assignTierAsync(recording.id, quality.quality)
       } else {
         // Default to 'warm' tier for unassessed recordings
-        updateRecordingStorageTier(recording.id, 'warm')
+        await updateRecordingStorageTierAsync(recording.id, 'warm')
         console.log(`[StoragePolicy] Assigned default 'warm' tier to ${recording.id}`)
       }
     }
