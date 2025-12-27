@@ -11,6 +11,7 @@ import {
   type Recording
 } from './database'
 import { BrowserWindow } from 'electron'
+import { getConfig } from './config'
 
 const AUDIO_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.ogg', '.webm', '.hda']
 
@@ -147,9 +148,14 @@ async function processNewRecording(filePath: string): Promise<void> {
     // Try to correlate with a meeting
     correlateWithMeeting(recordingId, new Date(dateRecorded))
 
-    // Add to transcription queue
-    addToQueue(recordingId)
-    console.log('Recording added to transcription queue:', recordingId)
+    // Only add to transcription queue if auto-transcribe is enabled
+    const config = getConfig()
+    if (config.transcription.autoTranscribe) {
+      addToQueue(recordingId)
+      console.log('Recording added to transcription queue:', recordingId)
+    } else {
+      console.log('Auto-transcribe disabled, skipping queue for:', recordingId)
+    }
 
     // Notify renderer
     notifyRenderer('recording:new', { recording })

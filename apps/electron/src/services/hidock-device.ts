@@ -486,13 +486,12 @@ class HiDockDeviceService {
     }
 
     // Convert to the format expected by deviceCache.saveAll
+    // Must match CachedDeviceFile interface: { filename, size, duration, dateCreated }
     const cacheEntries = this.cachedRecordings.map(rec => ({
-      id: rec.id,
       filename: rec.filename,
-      size: rec.size,
-      duration_seconds: rec.duration,
-      date_recorded: rec.dateCreated?.toISOString() || new Date().toISOString(),
-      cached_at: new Date().toISOString()
+      size: rec.size ?? 0,
+      duration: rec.duration ?? 0,
+      dateCreated: rec.dateCreated?.toISOString() || new Date().toISOString()
     }))
 
     // Fire and forget - don't block disconnect
