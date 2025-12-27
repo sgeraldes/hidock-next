@@ -128,7 +128,7 @@ export interface ElectronAPI {
     openFolder: (folder: 'recordings' | 'transcripts' | 'data') => Promise<boolean>
     readRecording: (filePath: string) => Promise<string | null>
     deleteRecording: (filePath: string) => Promise<boolean>
-    saveRecording: (filename: string, data: number[]) => Promise<string>
+    saveRecording: (filename: string, data: number[], recordingDateIso?: string) => Promise<string>
   }
 
   // Synced files - tracking which device files have been downloaded
@@ -233,8 +233,8 @@ export interface ElectronAPI {
     }>
     isFileSynced: (filename: string) => Promise<{ synced: boolean; reason: string }>
     getFilesToSync: (files: Array<{ filename: string; size: number; duration: number; dateCreated: Date }>) => Promise<Array<{ filename: string; size: number; duration: number; dateCreated: Date; skipReason?: string }>>
-    queueDownloads: (files: Array<{ filename: string; size: number }>) => Promise<string[]>
-    startSession: (files: Array<{ filename: string; size: number }>) => Promise<{
+    queueDownloads: (files: Array<{ filename: string; size: number; dateCreated?: string }>) => Promise<string[]>
+    startSession: (files: Array<{ filename: string; size: number; dateCreated?: string }>) => Promise<{
       id: string
       totalFiles: number
       completedFiles: number
@@ -276,6 +276,45 @@ export interface ElectronAPI {
     getStats: () => Promise<any>
     initializeUntiered: () => Promise<any>
     assignTier: (recordingId: string, quality: 'high' | 'medium' | 'low') => Promise<any>
+  }
+
+  // Data Integrity Service - Health checks and repairs
+  integrity: {
+    runScan: () => Promise<{
+      scanStarted: string
+      scanCompleted: string
+      totalIssues: number
+      issuesByType: Record<string, number>
+      issuesBySeverity: Record<string, number>
+      issues: Array<{
+        id: string
+        type: string
+        severity: 'low' | 'medium' | 'high'
+        description: string
+        filePath?: string
+        filename?: string
+        recordingId?: string
+        suggestedAction: string
+        autoRepairable: boolean
+        details?: Record<string, unknown>
+      }>
+      autoRepairableCount: number
+    }>
+    getReport: () => Promise<any>
+    repairIssue: (issueId: string) => Promise<{
+      issueId: string
+      success: boolean
+      action: string
+      error?: string
+    }>
+    repairAll: () => Promise<Array<{
+      issueId: string
+      success: boolean
+      action: string
+      error?: string
+    }>>
+    runStartupChecks: () => Promise<{ issuesFound: number; issuesFixed: number }>
+    onProgress: (callback: (progress: { message: string; progress: number }) => void) => () => void
   }
 
   // Migration - Database schema migration to V11 (Knowledge Captures)
@@ -377,7 +416,7 @@ const electronAPI: ElectronAPI = {
     openFolder: (folder) => ipcRenderer.invoke('storage:open-folder', folder),
     readRecording: (filePath) => ipcRenderer.invoke('storage:read-recording', filePath),
     deleteRecording: (filePath) => ipcRenderer.invoke('storage:delete-recording', filePath),
-    saveRecording: (filename, data) => ipcRenderer.invoke('storage:save-recording', filename, data)
+    saveRecording: (filename, data, recordingDateIso) => ipcRenderer.invoke('storage:save-recording', filename, data, recordingDateIso)
   },
 
   syncedFiles: {
@@ -479,6 +518,22 @@ const electronAPI: ElectronAPI = {
     initializeUntiered: () => ipcRenderer.invoke('storage:initialize-untiered'),
     assignTier: (recordingId: string, quality: 'high' | 'medium' | 'low') =>
       ipcRenderer.invoke('storage:assign-tier', recordingId, quality)
+  },
+
+  // Data Integrity Service API
+  integrity: {
+    runScan: () => ipcRenderer.invoke('integrity:run-scan'),
+    getReport: () => ipcRenderer.invoke('integrity:get-report'),
+    repairIssue: (issueId: string) => ipcRenderer.invoke('integrity:repair-issue', issueId),
+    repairAll: () => ipcRenderer.invoke('integrity:repair-all'),
+    runStartupChecks: () => ipcRenderer.invoke('integrity:run-startup-checks'),
+    onProgress: (callback: (progress: { message: string; progress: number }) => void) => {
+      const handler = (_event: any, progress: { message: string; progress: number }) => callback(progress)
+      ipcRenderer.on('integrity:progress', handler)
+      return () => {
+        ipcRenderer.removeListener('integrity:progress', handler)
+      }
+    }
   },
 
   // Domain Event Listener

@@ -22,6 +22,68 @@ import {
   SaveRecordingSchema
 } from './validation'
 
+// Month name mapping for HiDock filename parsing
+const MONTH_NAMES: Record<string, number> = {
+  'Jan': 0, 'Feb': 1, 'Mar': 2, 'Apr': 3, 'May': 4, 'Jun': 5,
+  'Jul': 6, 'Aug': 7, 'Sep': 8, 'Oct': 9, 'Nov': 10, 'Dec': 11
+}
+
+/**
+ * Parse recording date from HiDock filename formats.
+ * Supports:
+ * - 2025Jul08-160405-Rec59.hda (YYYYMonDD-HHMMSS format)
+ * - HDA_20250708_160405.hda (HDA_YYYYMMDD_HHMMSS format)
+ * - 2025-07-08_1604.hda (YYYY-MM-DD_HHMM format)
+ */
+function parseHiDockFilenameDate(filename: string): Date | undefined {
+  // Format 1: 2025Jul08-160405-Rec59.hda (YYYYMonDD-HHMMSS)
+  const monthNameMatch = filename.match(/(\d{4})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{1,2})-(\d{2})(\d{2})(\d{2})/)
+  if (monthNameMatch) {
+    const [, year, monthName, day, hour, minute, second] = monthNameMatch
+    const month = MONTH_NAMES[monthName]
+    if (month !== undefined) {
+      return new Date(
+        parseInt(year),
+        month,
+        parseInt(day),
+        parseInt(hour),
+        parseInt(minute),
+        parseInt(second)
+      )
+    }
+  }
+
+  // Format 2: HDA_20250708_160405.hda or YYYYMMDDHHMMSS
+  const numericMatch = filename.match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})(\d{2})(\d{2})/)
+  if (numericMatch) {
+    const [, year, month, day, hour, minute, second] = numericMatch
+    return new Date(
+      parseInt(year),
+      parseInt(month) - 1,
+      parseInt(day),
+      parseInt(hour),
+      parseInt(minute),
+      parseInt(second)
+    )
+  }
+
+  // Format 3: 2025-07-08_1604.hda (YYYY-MM-DD_HHMM)
+  const shortMatch = filename.match(/(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})/)
+  if (shortMatch) {
+    const [, year, month, day, hour, minute] = shortMatch
+    return new Date(
+      parseInt(year),
+      parseInt(month) - 1,
+      parseInt(day),
+      parseInt(hour),
+      parseInt(minute),
+      0
+    )
+  }
+
+  return undefined
+}
+
 export function registerStorageHandlers(): void {
   // Get storage info
   ipcMain.handle('storage:get-info', async () => {
@@ -98,25 +160,34 @@ export function registerStorageHandlers(): void {
   })
 
   // Save recording from device and add to database/transcription queue
-  ipcMain.handle('storage:save-recording', async (_, filename: unknown, data: unknown) => {
+  // recordingDateIso is the original recording date from the device (optional)
+  ipcMain.handle('storage:save-recording', async (_, filename: unknown, data: unknown, recordingDateIso?: string) => {
     try {
       const result = SaveRecordingSchema.safeParse({ filename, data })
       if (!result.success) {
         return { success: false, error: result.error.issues[0]?.message || 'Invalid save recording request' }
       }
 
-      const buffer = Buffer.from(result.data.data)
-      const filePath = await saveRecording(result.data.filename, buffer)
-
-      // Parse date from filename if possible
-      const dateMatch = result.data.filename.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/)
-      let dateRecorded: string
-      if (dateMatch) {
-        const [, year, month, day, hour, minute, second] = dateMatch
-        dateRecorded = `${year}-${month}-${day}T${hour}:${minute}:${second}`
-      } else {
-        dateRecorded = new Date().toISOString()
+      // Parse the original recording date if provided
+      let originalDate: Date | undefined
+      if (recordingDateIso) {
+        originalDate = new Date(recordingDateIso)
+        if (isNaN(originalDate.getTime())) {
+          console.warn('Invalid recording date provided:', recordingDateIso)
+          originalDate = undefined
+        }
       }
+
+      // If no date was passed, try to parse from HiDock filename formats
+      if (!originalDate) {
+        originalDate = parseHiDockFilenameDate(result.data.filename)
+      }
+
+      const buffer = Buffer.from(result.data.data)
+      const filePath = await saveRecording(result.data.filename, buffer, undefined, originalDate)
+
+      // Use the parsed date or fall back to current time
+      const dateRecorded = originalDate?.toISOString() || new Date().toISOString()
 
       // Generate ID from filename
       const recordingId = `rec_${result.data.filename.replace(/[^a-zA-Z0-9]/g, '_')}`

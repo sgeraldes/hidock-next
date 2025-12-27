@@ -36,6 +36,7 @@ export interface DownloadQueueItem {
   error?: string
   startedAt?: Date
   completedAt?: Date
+  recordingDate?: Date // Original recording date from device
 }
 
 // Sync session state
@@ -129,7 +130,7 @@ class DownloadService {
   /**
    * Add files to download queue
    */
-  queueDownloads(files: Array<{ filename: string; size: number }>): string[] {
+  queueDownloads(files: Array<{ filename: string; size: number; dateCreated?: Date }>): string[] {
     const queuedIds: string[] = []
 
     for (const file of files) {
@@ -151,7 +152,8 @@ class DownloadService {
         filename: file.filename,
         fileSize: file.size,
         progress: 0,
-        status: 'pending'
+        status: 'pending',
+        recordingDate: file.dateCreated // Store the original recording date
       }
 
       this.state.queue.set(file.filename, item)
@@ -166,8 +168,8 @@ class DownloadService {
   /**
    * Start a sync session
    */
-  startSyncSession(files: Array<{ filename: string; size: number }>): SyncSession {
-    // Queue the files
+  startSyncSession(files: Array<{ filename: string; size: number; dateCreated?: Date }>): SyncSession {
+    // Queue the files (including recording dates for proper date preservation)
     this.queueDownloads(files)
 
     // Create session
@@ -205,8 +207,8 @@ class DownloadService {
       item.startedAt = new Date()
       this.emitStateUpdate()
 
-      // Save the file
-      const filePath = await saveRecording(filename, data)
+      // Save the file with the original recording date if available
+      const filePath = await saveRecording(filename, data, undefined, item.recordingDate)
 
       // Update database
       const wavFilename = filename.replace(/\.hda$/i, '.wav')
@@ -399,14 +401,24 @@ export function registerDownloadServiceHandlers(): void {
     return service.getFilesToSync(files)
   })
 
-  // Queue downloads
-  ipcMain.handle('download-service:queue-downloads', (_, files: Array<{ filename: string; size: number }>) => {
-    return service.queueDownloads(files)
+  // Queue downloads (with optional dateCreated for preserving original recording dates)
+  ipcMain.handle('download-service:queue-downloads', (_, files: Array<{ filename: string; size: number; dateCreated?: string }>) => {
+    // Convert ISO date strings back to Date objects
+    const filesWithDates = files.map(f => ({
+      ...f,
+      dateCreated: f.dateCreated ? new Date(f.dateCreated) : undefined
+    }))
+    return service.queueDownloads(filesWithDates)
   })
 
-  // Start sync session
-  ipcMain.handle('download-service:start-session', (_, files: Array<{ filename: string; size: number }>) => {
-    return service.startSyncSession(files)
+  // Start sync session (with optional dateCreated for preserving original recording dates)
+  ipcMain.handle('download-service:start-session', (_, files: Array<{ filename: string; size: number; dateCreated?: string }>) => {
+    // Convert ISO date strings back to Date objects
+    const filesWithDates = files.map(f => ({
+      ...f,
+      dateCreated: f.dateCreated ? new Date(f.dateCreated) : undefined
+    }))
+    return service.startSyncSession(filesWithDates)
   })
 
   // Process a completed download (data passed from renderer after USB transfer)

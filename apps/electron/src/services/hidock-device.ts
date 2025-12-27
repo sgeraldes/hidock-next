@@ -994,7 +994,8 @@ class HiDockDeviceService {
     filename: string,
     fileSize: number,
     _savePath?: string, // Not used, storage service determines path
-    onProgress?: (bytesReceived: number) => void
+    onProgress?: (bytesReceived: number) => void,
+    recordingDate?: Date // Original recording date from device
   ): Promise<boolean> {
     const chunks: Uint8Array[] = []
     let totalReceived = 0
@@ -1038,7 +1039,8 @@ class HiDockDeviceService {
     try {
       await window.electronAPI.storage.saveRecording(
         filename,
-        Array.from(combined) // Convert to array for IPC
+        Array.from(combined), // Convert to array for IPC
+        recordingDate?.toISOString() // Pass original recording date to preserve it
       )
       this.logActivity('success', 'File saved', filename)
       return true

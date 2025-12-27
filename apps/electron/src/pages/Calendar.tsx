@@ -436,7 +436,8 @@ export function Calendar() {
         (received) => {
           const percent = Math.round((received / recording.size) * 100)
           updateDownloadProgress(recording.id, percent)
-        }
+        },
+        recording.dateRecorded // Pass the original recording date from device
       )
       console.log(`[Calendar] Download ${success ? 'succeeded' : 'FAILED'}: ${recording.deviceFilename}`)
       if (success) {
@@ -579,7 +580,13 @@ export function Calendar() {
     setBulkDownloading(true)
     for (const rec of toDownload) {
       try {
-        await deviceService.downloadRecordingToFile(rec.deviceFilename, rec.size, '')
+        await deviceService.downloadRecordingToFile(
+          rec.deviceFilename,
+          rec.size,
+          '',
+          undefined, // No progress callback for bulk downloads
+          rec.dateRecorded // Pass the original recording date from device
+        )
       } catch (e) {
         console.error('Download failed:', rec.filename, e)
       }

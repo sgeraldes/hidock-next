@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, utimesSync } from 'fs'
 import { join, basename, extname, resolve, normalize } from 'path'
 import { getConfig, getDataPath } from './config'
 
@@ -91,17 +91,18 @@ export function getDatabasePath(): string {
 export async function saveRecording(
   filename: string,
   data: Buffer,
-  meetingSubject?: string
+  meetingSubject?: string,
+  originalDate?: Date
 ): Promise<string> {
   const recordingsPath = getRecordingsPath()
 
   // Validate input filename to prevent any path traversal in the source
   validateFilename(basename(filename))
 
-  // Generate a clean filename with date prefix
-  const date = new Date()
+  // Use the original recording date from device, or fall back to current date
+  const date = originalDate || new Date()
   const datePrefix = date.toISOString().split('T')[0]
-  const timePrefix = date.toTimeString().slice(0, 5).replace(':', '')
+  const timePrefix = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}`
 
   // Clean meeting subject for filename
   const subjectPart = meetingSubject
@@ -119,6 +120,16 @@ export async function saveRecording(
   const filePath = validatePath(recordingsPath, cleanFilename)
 
   writeFileSync(filePath, data)
+
+  // Set the file's modification time to the original recording date
+  // This ensures file explorer shows the correct date
+  if (originalDate) {
+    try {
+      utimesSync(filePath, originalDate, originalDate)
+    } catch (error) {
+      console.warn('Failed to set file modification time:', error)
+    }
+  }
 
   return filePath
 }
