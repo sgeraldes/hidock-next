@@ -21,6 +21,13 @@ import {
   startTranscriptionProcessor,
   stopTranscriptionProcessor
 } from '../services/transcription'
+import {
+  GetRecordingByIdSchema,
+  DeleteRecordingSchema,
+  LinkRecordingToMeetingSchema,
+  UnlinkRecordingFromMeetingSchema,
+  TranscribeRecordingSchema
+} from './validation'
 
 export interface RecordingWithTranscript extends Recording {
   transcript?: Transcript
@@ -29,72 +36,159 @@ export interface RecordingWithTranscript extends Recording {
 export function registerRecordingHandlers(): void {
   // Get all recordings
   ipcMain.handle('recordings:getAll', async (): Promise<Recording[]> => {
-    return getRecordings()
+    try {
+      return getRecordings()
+    } catch (error) {
+      console.error('recordings:getAll error:', error)
+      return []
+    }
   })
 
   // Get recording by ID
-  ipcMain.handle('recordings:getById', async (_, id: string): Promise<Recording | undefined> => {
-    return getRecordingById(id)
+  ipcMain.handle('recordings:getById', async (_, id: unknown): Promise<Recording | undefined> => {
+    try {
+      const result = GetRecordingByIdSchema.safeParse({ id })
+      if (!result.success) {
+        console.error('recordings:getById validation error:', result.error)
+        return undefined
+      }
+      return getRecordingById(result.data.id)
+    } catch (error) {
+      console.error('recordings:getById error:', error)
+      return undefined
+    }
   })
 
   // Get recordings for a specific meeting
   ipcMain.handle(
     'recordings:getForMeeting',
-    async (_, meetingId: string): Promise<RecordingWithTranscript[]> => {
-      const recordings = getRecordingsForMeeting(meetingId)
-      return recordings.map((recording) => ({
-        ...recording,
-        transcript: getTranscriptByRecordingId(recording.id)
-      }))
+    async (_, meetingId: unknown): Promise<RecordingWithTranscript[]> => {
+      try {
+        // Validate meeting ID (reuse GetRecordingByIdSchema since it's the same UUID format)
+        const result = GetRecordingByIdSchema.safeParse({ id: meetingId })
+        if (!result.success) {
+          console.error('recordings:getForMeeting validation error:', result.error)
+          return []
+        }
+
+        const recordings = getRecordingsForMeeting(result.data.id)
+        return recordings.map((recording) => ({
+          ...recording,
+          transcript: getTranscriptByRecordingId(recording.id)
+        }))
+      } catch (error) {
+        console.error('recordings:getForMeeting error:', error)
+        return []
+      }
     }
   )
 
   // Get all recordings with their transcripts
   ipcMain.handle('recordings:getAllWithTranscripts', async (): Promise<RecordingWithTranscript[]> => {
-    const recordings = getRecordings()
-    return recordings.map((recording) => ({
-      ...recording,
-      transcript: getTranscriptByRecordingId(recording.id)
-    }))
+    try {
+      const recordings = getRecordings()
+      return recordings.map((recording) => ({
+        ...recording,
+        transcript: getTranscriptByRecordingId(recording.id)
+      }))
+    } catch (error) {
+      console.error('recordings:getAllWithTranscripts error:', error)
+      return []
+    }
   })
 
   // Delete a recording
-  ipcMain.handle('recordings:delete', async (_, id: string): Promise<boolean> => {
-    const recording = getRecordingById(id)
-    if (recording) {
-      const deleted = deleteRecordingFile(recording.file_path)
-      if (deleted) {
-        updateRecordingStatus(id, 'deleted')
+  ipcMain.handle('recordings:delete', async (_, id: unknown): Promise<boolean> => {
+    try {
+      const result = DeleteRecordingSchema.safeParse({ id })
+      if (!result.success) {
+        console.error('recordings:delete validation error:', result.error)
+        return false
       }
-      return deleted
+
+      const recording = getRecordingById(result.data.id)
+      if (recording) {
+        const deleted = deleteRecordingFile(recording.file_path)
+        if (deleted) {
+          updateRecordingStatus(result.data.id, 'deleted')
+        }
+        return deleted
+      }
+      return false
+    } catch (error) {
+      console.error('recordings:delete error:', error)
+      return false
     }
-    return false
   })
 
   // Link recording to meeting manually
   ipcMain.handle(
     'recordings:linkToMeeting',
-    async (_, recordingId: string, meetingId: string): Promise<void> => {
-      linkRecordingToMeeting(recordingId, meetingId, 1.0, 'manual')
+    async (_, recordingId: unknown, meetingId: unknown): Promise<void> => {
+      try {
+        const result = LinkRecordingToMeetingSchema.safeParse({ recordingId, meetingId })
+        if (!result.success) {
+          console.error('recordings:linkToMeeting validation error:', result.error)
+          throw new Error(result.error.issues[0]?.message || 'Invalid request')
+        }
+
+        linkRecordingToMeeting(result.data.recordingId, result.data.meetingId, 1.0, 'manual')
+      } catch (error) {
+        console.error('recordings:linkToMeeting error:', error)
+        throw error
+      }
     }
   )
 
   // Unlink recording from meeting
-  ipcMain.handle('recordings:unlinkFromMeeting', async (_, recordingId: string): Promise<void> => {
-    linkRecordingToMeeting(recordingId, '', 0, '')
+  ipcMain.handle('recordings:unlinkFromMeeting', async (_, recordingId: unknown): Promise<void> => {
+    try {
+      const result = UnlinkRecordingFromMeetingSchema.safeParse({ recordingId })
+      if (!result.success) {
+        console.error('recordings:unlinkFromMeeting validation error:', result.error)
+        throw new Error(result.error.issues[0]?.message || 'Invalid request')
+      }
+
+      linkRecordingToMeeting(result.data.recordingId, '', 0, '')
+    } catch (error) {
+      console.error('recordings:unlinkFromMeeting error:', error)
+      throw error
+    }
   })
 
   // Get transcript for a recording
   ipcMain.handle(
     'recordings:getTranscript',
-    async (_, recordingId: string): Promise<Transcript | undefined> => {
-      return getTranscriptByRecordingId(recordingId)
+    async (_, recordingId: unknown): Promise<Transcript | undefined> => {
+      try {
+        const result = GetRecordingByIdSchema.safeParse({ id: recordingId })
+        if (!result.success) {
+          console.error('recordings:getTranscript validation error:', result.error)
+          return undefined
+        }
+
+        return getTranscriptByRecordingId(result.data.id)
+      } catch (error) {
+        console.error('recordings:getTranscript error:', error)
+        return undefined
+      }
     }
   )
 
   // Transcribe a recording manually
-  ipcMain.handle('recordings:transcribe', async (_, recordingId: string): Promise<void> => {
-    await transcribeManually(recordingId)
+  ipcMain.handle('recordings:transcribe', async (_, recordingId: unknown): Promise<void> => {
+    try {
+      const result = TranscribeRecordingSchema.safeParse({ recordingId })
+      if (!result.success) {
+        console.error('recordings:transcribe validation error:', result.error)
+        throw new Error(result.error.issues[0]?.message || 'Invalid request')
+      }
+
+      await transcribeManually(result.data.recordingId)
+    } catch (error) {
+      console.error('recordings:transcribe error:', error)
+      throw error
+    }
   })
 
   // Get watcher status

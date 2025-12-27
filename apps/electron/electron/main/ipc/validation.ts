@@ -1,8 +1,247 @@
 /**
- * Input validation utilities for IPC handlers
+ * Input validation schemas for IPC handlers
  * Prevents injection attacks and invalid data from reaching services
+ *
+ * MIGRATION NOTE: This file has been migrated from manual validation functions
+ * to Zod schemas for better type safety and consistency. Legacy functions are
+ * kept for backward compatibility but are deprecated.
  */
 
+import { z } from 'zod'
+
+// =============================================================================
+// Quality Assessment Schemas
+// =============================================================================
+
+/**
+ * Quality level enum
+ */
+export const QualityLevelSchema = z.enum(['high', 'medium', 'low'])
+
+/**
+ * Assessment method enum
+ */
+export const AssessmentMethodSchema = z.enum(['manual', 'auto', 'ai'])
+
+/**
+ * Set quality assessment request
+ */
+export const SetQualitySchema = z.object({
+  recordingId: z.string().uuid('Recording ID must be a valid UUID'),
+  quality: QualityLevelSchema,
+  reason: z.string().max(1000).optional(),
+  assessedBy: z.string().max(200).optional()
+})
+
+/**
+ * Get by quality level request
+ */
+export const GetByQualitySchema = z.object({
+  quality: QualityLevelSchema
+})
+
+/**
+ * Batch auto-assess request
+ */
+export const BatchAutoAssessSchema = z.object({
+  recordingIds: z.array(z.string().uuid()).min(1).max(1000)
+})
+
+// =============================================================================
+// Storage Policy Schemas
+// =============================================================================
+
+/**
+ * Storage tier enum
+ */
+export const StorageTierSchema = z.enum(['hot', 'warm', 'cold', 'archive'])
+
+/**
+ * Min age override object for cleanup
+ */
+export const MinAgeOverrideSchema = z.record(
+  StorageTierSchema,
+  z.number().int().nonnegative()
+).optional()
+
+/**
+ * Get by tier request
+ */
+export const GetByTierSchema = z.object({
+  tier: StorageTierSchema
+})
+
+/**
+ * Get cleanup suggestions request
+ */
+export const GetCleanupSuggestionsSchema = z.object({
+  minAgeOverride: MinAgeOverrideSchema
+})
+
+/**
+ * Get cleanup suggestions for tier request
+ */
+export const GetCleanupSuggestionsForTierSchema = z.object({
+  tier: StorageTierSchema,
+  minAgeDays: z.number().int().min(0).max(36500).optional()
+})
+
+/**
+ * Execute cleanup request
+ */
+export const ExecuteCleanupSchema = z.object({
+  recordingIds: z.array(z.string().uuid()).min(1).max(1000),
+  archive: z.boolean().default(false)
+})
+
+/**
+ * Assign tier request
+ */
+export const AssignTierSchema = z.object({
+  recordingId: z.string().uuid(),
+  quality: QualityLevelSchema
+})
+
+// =============================================================================
+// Recording Schemas
+// =============================================================================
+
+/**
+ * Recording ID validation
+ */
+export const RecordingIdSchema = z.string().uuid('Recording ID must be a valid UUID')
+
+/**
+ * Get recording by ID request
+ */
+export const GetRecordingByIdSchema = z.object({
+  id: RecordingIdSchema
+})
+
+/**
+ * Delete recording request
+ */
+export const DeleteRecordingSchema = z.object({
+  id: RecordingIdSchema
+})
+
+/**
+ * Link recording to meeting request
+ */
+export const LinkRecordingToMeetingSchema = z.object({
+  recordingId: RecordingIdSchema,
+  meetingId: z.string().uuid('Meeting ID must be a valid UUID')
+})
+
+/**
+ * Unlink recording from meeting request
+ */
+export const UnlinkRecordingFromMeetingSchema = z.object({
+  recordingId: RecordingIdSchema
+})
+
+/**
+ * Transcribe recording request
+ */
+export const TranscribeRecordingSchema = z.object({
+  recordingId: RecordingIdSchema
+})
+
+// =============================================================================
+// Storage Handlers Schemas
+// =============================================================================
+
+/**
+ * Open folder request
+ */
+export const OpenFolderSchema = z.object({
+  folder: z.enum(['recordings', 'transcripts', 'data'])
+})
+
+/**
+ * Read recording file request
+ */
+export const ReadRecordingFileSchema = z.object({
+  filePath: z.string().min(1).max(500)
+})
+
+/**
+ * Delete recording file request
+ */
+export const DeleteRecordingFileSchema = z.object({
+  filePath: z.string().min(1).max(500)
+})
+
+/**
+ * Save recording request
+ */
+export const SaveRecordingSchema = z.object({
+  filename: z.string().min(1).max(255),
+  data: z.array(z.number().int().min(0).max(255))
+})
+
+// =============================================================================
+// Calendar Schemas
+// =============================================================================
+
+/**
+ * Set ICS URL request
+ */
+export const SetIcsUrlSchema = z.object({
+  url: z.string().url('Must be a valid URL').max(2000)
+})
+
+/**
+ * Toggle auto-sync request
+ */
+export const ToggleAutoSyncSchema = z.object({
+  enabled: z.boolean()
+})
+
+/**
+ * Set sync interval request
+ */
+export const SetSyncIntervalSchema = z.object({
+  minutes: z.number().int().min(1).max(1440) // 1 minute to 24 hours
+})
+
+// =============================================================================
+// Type Exports
+// =============================================================================
+
+export type QualityLevel = z.infer<typeof QualityLevelSchema>
+export type AssessmentMethod = z.infer<typeof AssessmentMethodSchema>
+export type SetQuality = z.infer<typeof SetQualitySchema>
+export type GetByQuality = z.infer<typeof GetByQualitySchema>
+export type BatchAutoAssess = z.infer<typeof BatchAutoAssessSchema>
+export type StorageTier = z.infer<typeof StorageTierSchema>
+export type MinAgeOverride = z.infer<typeof MinAgeOverrideSchema>
+export type GetByTier = z.infer<typeof GetByTierSchema>
+export type GetCleanupSuggestions = z.infer<typeof GetCleanupSuggestionsSchema>
+export type GetCleanupSuggestionsForTier = z.infer<typeof GetCleanupSuggestionsForTierSchema>
+export type ExecuteCleanup = z.infer<typeof ExecuteCleanupSchema>
+export type AssignTier = z.infer<typeof AssignTierSchema>
+export type RecordingId = z.infer<typeof RecordingIdSchema>
+export type GetRecordingById = z.infer<typeof GetRecordingByIdSchema>
+export type DeleteRecording = z.infer<typeof DeleteRecordingSchema>
+export type LinkRecordingToMeeting = z.infer<typeof LinkRecordingToMeetingSchema>
+export type UnlinkRecordingFromMeeting = z.infer<typeof UnlinkRecordingFromMeetingSchema>
+export type TranscribeRecording = z.infer<typeof TranscribeRecordingSchema>
+export type OpenFolder = z.infer<typeof OpenFolderSchema>
+export type ReadRecordingFile = z.infer<typeof ReadRecordingFileSchema>
+export type DeleteRecordingFile = z.infer<typeof DeleteRecordingFileSchema>
+export type SaveRecording = z.infer<typeof SaveRecordingSchema>
+export type SetIcsUrl = z.infer<typeof SetIcsUrlSchema>
+export type ToggleAutoSync = z.infer<typeof ToggleAutoSyncSchema>
+export type SetSyncInterval = z.infer<typeof SetSyncIntervalSchema>
+
+// =============================================================================
+// Legacy Validation Functions (DEPRECATED - Use Zod schemas instead)
+// =============================================================================
+
+/**
+ * @deprecated Use SetQualitySchema.safeParse() instead
+ */
 export class ValidationError extends Error {
   constructor(message: string) {
     super(message)
@@ -11,132 +250,92 @@ export class ValidationError extends Error {
 }
 
 /**
- * Validate recording ID format (UUID)
+ * @deprecated Use RecordingIdSchema.safeParse() instead
  */
 export function validateRecordingId(id: unknown): string {
-  if (typeof id !== 'string' || !id) {
-    throw new ValidationError('Recording ID must be a non-empty string')
+  const result = RecordingIdSchema.safeParse(id)
+  if (!result.success) {
+    throw new ValidationError(result.error.issues[0]?.message || 'Invalid recording ID')
   }
-  // UUID format: 8-4-4-4-12 hex digits
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
-    throw new ValidationError('Recording ID must be a valid UUID')
-  }
-  return id
+  return result.data
 }
 
 /**
- * Validate array of recording IDs
+ * @deprecated Use BatchAutoAssessSchema.safeParse() instead
  */
 export function validateRecordingIds(ids: unknown): string[] {
-  if (!Array.isArray(ids)) {
-    throw new ValidationError('Recording IDs must be an array')
+  const result = z.array(z.string().uuid()).min(1).max(1000).safeParse(ids)
+  if (!result.success) {
+    throw new ValidationError(result.error.issues[0]?.message || 'Invalid recording IDs array')
   }
-  if (ids.length === 0) {
-    throw new ValidationError('Recording IDs array cannot be empty')
-  }
-  if (ids.length > 1000) {
-    throw new ValidationError('Too many recording IDs (max 1000)')
-  }
-  return ids.map((id, index) => {
-    try {
-      return validateRecordingId(id)
-    } catch (error) {
-      throw new ValidationError(`Invalid recording ID at index ${index}: ${error instanceof Error ? error.message : 'Unknown error'}`)
-    }
-  })
+  return result.data
 }
 
 /**
- * Validate quality level
+ * @deprecated Use QualityLevelSchema.safeParse() instead
  */
 export function validateQualityLevel(quality: unknown): 'high' | 'medium' | 'low' {
-  if (typeof quality !== 'string') {
-    throw new ValidationError('Quality level must be a string')
+  const result = QualityLevelSchema.safeParse(quality)
+  if (!result.success) {
+    throw new ValidationError(result.error.issues[0]?.message || 'Invalid quality level')
   }
-  if (!['high', 'medium', 'low'].includes(quality)) {
-    throw new ValidationError('Quality level must be one of: high, medium, low')
-  }
-  return quality as 'high' | 'medium' | 'low'
+  return result.data
 }
 
 /**
- * Validate storage tier
+ * @deprecated Use StorageTierSchema.safeParse() instead
  */
 export function validateStorageTier(tier: unknown): 'hot' | 'warm' | 'cold' | 'archive' {
-  if (typeof tier !== 'string') {
-    throw new ValidationError('Storage tier must be a string')
+  const result = StorageTierSchema.safeParse(tier)
+  if (!result.success) {
+    throw new ValidationError(result.error.issues[0]?.message || 'Invalid storage tier')
   }
-  if (!['hot', 'warm', 'cold', 'archive'].includes(tier)) {
-    throw new ValidationError('Storage tier must be one of: hot, warm, cold, archive')
-  }
-  return tier as 'hot' | 'warm' | 'cold' | 'archive'
+  return result.data
 }
 
 /**
- * Validate optional string parameter
+ * @deprecated Use z.string().max(n).optional().safeParse() instead
  */
 export function validateOptionalString(value: unknown, maxLength = 10000): string | undefined {
-  if (value === undefined || value === null) {
-    return undefined
+  const result = z.string().max(maxLength).optional().safeParse(value)
+  if (!result.success) {
+    throw new ValidationError(result.error.issues[0]?.message || 'Invalid string')
   }
-  if (typeof value !== 'string') {
-    throw new ValidationError('Value must be a string')
-  }
-  if (value.length > maxLength) {
-    throw new ValidationError(`String too long (max ${maxLength} characters)`)
-  }
-  return value
+  return result.data
 }
 
 /**
- * Validate boolean parameter
+ * @deprecated Use z.boolean().safeParse() instead
  */
 export function validateBoolean(value: unknown): boolean {
-  if (typeof value !== 'boolean') {
-    throw new ValidationError('Value must be a boolean')
+  const result = z.boolean().safeParse(value)
+  if (!result.success) {
+    throw new ValidationError(result.error.issues[0]?.message || 'Invalid boolean')
   }
-  return value
+  return result.data
 }
 
 /**
- * Validate number parameter
+ * @deprecated Use z.number().int().min(n).max(m).safeParse() instead
  */
 export function validateNumber(value: unknown, min?: number, max?: number): number {
-  if (typeof value !== 'number' || isNaN(value)) {
-    throw new ValidationError('Value must be a valid number')
+  let schema = z.number()
+  if (min !== undefined) schema = schema.min(min)
+  if (max !== undefined) schema = schema.max(max)
+  const result = schema.safeParse(value)
+  if (!result.success) {
+    throw new ValidationError(result.error.issues[0]?.message || 'Invalid number')
   }
-  if (min !== undefined && value < min) {
-    throw new ValidationError(`Value must be at least ${min}`)
-  }
-  if (max !== undefined && value > max) {
-    throw new ValidationError(`Value must be at most ${max}`)
-  }
-  return value
+  return result.data
 }
 
 /**
- * Validate min age override object
+ * @deprecated Use MinAgeOverrideSchema.safeParse() instead
  */
 export function validateMinAgeOverride(override: unknown): Partial<Record<'hot' | 'warm' | 'cold' | 'archive', number>> | undefined {
-  if (override === undefined || override === null) {
-    return undefined
+  const result = MinAgeOverrideSchema.safeParse(override)
+  if (!result.success) {
+    throw new ValidationError(result.error.issues[0]?.message || 'Invalid min age override')
   }
-  if (typeof override !== 'object' || Array.isArray(override)) {
-    throw new ValidationError('Min age override must be an object')
-  }
-
-  const result: Partial<Record<'hot' | 'warm' | 'cold' | 'archive', number>> = {}
-  const validTiers = ['hot', 'warm', 'cold', 'archive']
-
-  for (const [key, value] of Object.entries(override)) {
-    if (!validTiers.includes(key)) {
-      throw new ValidationError(`Invalid tier in override: ${key}`)
-    }
-    if (typeof value !== 'number' || isNaN(value) || value < 0) {
-      throw new ValidationError(`Min age for ${key} must be a non-negative number`)
-    }
-    result[key as 'hot' | 'warm' | 'cold' | 'archive'] = value
-  }
-
-  return result
+  return result.data
 }

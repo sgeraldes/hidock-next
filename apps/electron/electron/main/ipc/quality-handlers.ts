@@ -136,7 +136,8 @@ export function registerQualityHandlers(): void {
    */
   ipcMain.handle('storage:get-by-tier', async (_, tier: unknown) => {
     try {
-      const recordings = storageService.getByTier(tier)
+      const validTier = validateStorageTier(tier)
+      const recordings = storageService.getByTier(validTier)
       return { success: true, data: recordings }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'

@@ -1,6 +1,11 @@
 import { ipcMain } from 'electron'
 import { getConfig, updateConfig } from '../services/config'
 import { syncCalendar, getLastSyncTime, CalendarSyncResult } from '../services/calendar-sync'
+import {
+  SetIcsUrlSchema,
+  ToggleAutoSyncSchema,
+  SetSyncIntervalSchema
+} from './validation'
 
 let syncInterval: NodeJS.Timeout | null = null
 
@@ -26,36 +31,66 @@ export function registerCalendarHandlers(): void {
   })
 
   // Set ICS URL
-  ipcMain.handle('calendar:set-url', async (_, url: string) => {
-    await updateConfig('calendar', { icsUrl: url })
-    return getConfig().calendar
+  ipcMain.handle('calendar:set-url', async (_, url: unknown) => {
+    try {
+      const result = SetIcsUrlSchema.safeParse({ url })
+      if (!result.success) {
+        return { success: false, error: result.error.issues[0]?.message || 'Invalid URL' }
+      }
+
+      await updateConfig('calendar', { icsUrl: result.data.url })
+      return { success: true, data: getConfig().calendar }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      return { success: false, error: message }
+    }
   })
 
   // Toggle auto-sync
-  ipcMain.handle('calendar:toggle-auto-sync', async (_, enabled: boolean) => {
-    await updateConfig('calendar', { syncEnabled: enabled })
+  ipcMain.handle('calendar:toggle-auto-sync', async (_, enabled: unknown) => {
+    try {
+      const result = ToggleAutoSyncSchema.safeParse({ enabled })
+      if (!result.success) {
+        return { success: false, error: result.error.issues[0]?.message || 'Invalid enabled value' }
+      }
 
-    if (enabled) {
-      startAutoSync()
-    } else {
-      stopAutoSync()
+      await updateConfig('calendar', { syncEnabled: result.data.enabled })
+
+      if (result.data.enabled) {
+        startAutoSync()
+      } else {
+        stopAutoSync()
+      }
+
+      return { success: true, data: getConfig().calendar }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      return { success: false, error: message }
     }
-
-    return getConfig().calendar
   })
 
   // Set sync interval
-  ipcMain.handle('calendar:set-interval', async (_, minutes: number) => {
-    await updateConfig('calendar', { syncIntervalMinutes: minutes })
+  ipcMain.handle('calendar:set-interval', async (_, minutes: unknown) => {
+    try {
+      const result = SetSyncIntervalSchema.safeParse({ minutes })
+      if (!result.success) {
+        return { success: false, error: result.error.issues[0]?.message || 'Invalid interval' }
+      }
 
-    // Restart auto-sync with new interval
-    const config = getConfig()
-    if (config.calendar.syncEnabled) {
-      stopAutoSync()
-      startAutoSync()
+      await updateConfig('calendar', { syncIntervalMinutes: result.data.minutes })
+
+      // Restart auto-sync with new interval
+      const config = getConfig()
+      if (config.calendar.syncEnabled) {
+        stopAutoSync()
+        startAutoSync()
+      }
+
+      return { success: true, data: getConfig().calendar }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      return { success: false, error: message }
     }
-
-    return getConfig().calendar
   })
 
   // Get calendar settings
