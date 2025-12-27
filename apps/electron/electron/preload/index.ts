@@ -452,7 +452,8 @@ const electronAPI: ElectronAPI = {
       return () => {
         ipcRenderer.removeListener('download-service:state-update', handler)
       }
-,
+    }
+  },
 
   // Quality Assessment API
   quality: {
@@ -484,68 +485,6 @@ const electronAPI: ElectronAPI = {
   onDomainEvent: (callback: (event: any) => void) => {
     const handler = (_event: any, domainEvent: any) => callback(domainEvent)
     ipcRenderer.on('domain-event', handler)
-    return () => {
-      ipcRenderer.removeListener('domain-event', handler)
-    }
-  },
-
-  // Domain Events - Subscribe to backend events
-  onDomainEvent: (callback) => {
-    const handler = (_event: any, domainEvent: any) => callback(domainEvent)
-    ipcRenderer.on('domain-event', handler)
-    // Return unsubscribe function
-    return () => {
-      ipcRenderer.removeListener('domain-event', handler)
-    }
-  },
-
-  // Quality Assessment API implementation
-  quality: {
-    get: (recordingId) => ipcRenderer.invoke('quality:get', recordingId),
-    set: (recordingId, quality, reason, assessedBy) =>
-      ipcRenderer.invoke('quality:set', recordingId, quality, reason, assessedBy),
-    autoAssess: (recordingId) => ipcRenderer.invoke('quality:auto-assess', recordingId),
-    getByQuality: (quality) => ipcRenderer.invoke('quality:get-by-quality', quality),
-    batchAutoAssess: (recordingIds) => ipcRenderer.invoke('quality:batch-auto-assess', recordingIds),
-    assessUnassessed: () => ipcRenderer.invoke('quality:assess-unassessed')
-  },
-
-  // Storage Policy API implementation
-  storagePolicy: {
-    getByTier: (tier) => ipcRenderer.invoke('storage:get-by-tier', tier),
-    getCleanupSuggestions: (minAgeOverride) =>
-      ipcRenderer.invoke('storage:get-cleanup-suggestions', minAgeOverride),
-    getCleanupSuggestionsForTier: (tier, minAgeDays) =>
-      ipcRenderer.invoke('storage:get-cleanup-suggestions-for-tier', tier, minAgeDays),
-    executeCleanup: (recordingIds, archive) =>
-      ipcRenderer.invoke('storage:execute-cleanup', recordingIds, archive),
-    getStats: () => ipcRenderer.invoke('storage:get-stats'),
-    initializeUntiered: () => ipcRenderer.invoke('storage:initialize-untiered'),
-    assignTier: (recordingId, quality) =>
-      ipcRenderer.invoke('storage:assign-tier', recordingId, quality)
-  },
-
-  // Migration API implementation
-  migration: {
-    previewCleanup: () => ipcRenderer.invoke('migration:preview-cleanup'),
-    runCleanup: () => ipcRenderer.invoke('migration:run-cleanup'),
-    runV11: () => ipcRenderer.invoke('migration:run-v11'),
-    rollbackV11: () => ipcRenderer.invoke('migration:rollback-v11'),
-    getStatus: () => ipcRenderer.invoke('migration:get-status'),
-    onProgress: (callback) => {
-      const handler = (_event: any, progress: any) => callback(progress)
-      ipcRenderer.on('migration:progress', handler)
-      return () => {
-        ipcRenderer.removeListener('migration:progress', handler)
-      }
-    }
-  },
-
-  // Domain Events - Subscribe to backend events
-  onDomainEvent: (callback) => {
-    const handler = (_event: any, domainEvent: any) => callback(domainEvent)
-    ipcRenderer.on('domain-event', handler)
-    // Return unsubscribe function
     return () => {
       ipcRenderer.removeListener('domain-event', handler)
     }
