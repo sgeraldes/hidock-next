@@ -202,7 +202,7 @@ function registerTimezones(vcalendar: ICAL.Component): void {
         if (!existing) {
           const tz = new ICAL.Timezone(vtimezone)
           ICAL.TimezoneService.register(tzid, tz)
-          console.log(`[Calendar] Registered timezone: ${tzid}`)
+          // console.log(`[Calendar] Registered timezone: ${tzid}`)
         }
       }
     } catch (e) {
@@ -257,7 +257,7 @@ function safeToJSDate(icalTime: ICAL.Time | null | undefined, tzidHint?: string)
         const utcTime = localTimeAsUtc - (utcOffset * 1000)
         const jsDate = new Date(utcTime)
 
-        console.log(`[Calendar] Fallback timezone conversion: ${icalTime.year}-${icalTime.month}-${icalTime.day} ${icalTime.hour}:${icalTime.minute} (${tzidHint}, offset=${utcOffset}s) -> UTC: ${jsDate.toISOString()} (local: ${jsDate.toLocaleTimeString()})`)
+        // console.log(`[Calendar] Fallback timezone conversion: ${icalTime.year}-${icalTime.month}-${icalTime.day} ${icalTime.hour}:${icalTime.minute} (${tzidHint}, offset=${utcOffset}s) -> UTC: ${jsDate.toISOString()} (local: ${jsDate.toLocaleTimeString()})`)
 
         return jsDate
       }
@@ -308,7 +308,7 @@ function safeToJSDate(icalTime: ICAL.Time | null | undefined, tzidHint?: string)
       const utcTime = localTimeAsUtc - (utcOffset * 1000)
       const jsDate = new Date(utcTime)
 
-      console.debug(`[Calendar] Time conversion: ${icalTime.year}-${icalTime.month}-${icalTime.day} ${icalTime.hour}:${icalTime.minute} (${zone.tzid}, offset=${utcOffset}s) -> UTC: ${jsDate.toISOString()} (local: ${jsDate.toLocaleTimeString()})`)
+      // console.debug(`[Calendar] Time conversion: ${icalTime.year}-${icalTime.month}-${icalTime.day} ${icalTime.hour}:${icalTime.minute} (${zone.tzid}, offset=${utcOffset}s) -> UTC: ${jsDate.toISOString()} (local: ${jsDate.toLocaleTimeString()})`)
 
       return jsDate
     } catch (offsetError) {
