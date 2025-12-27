@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { useAppStore } from '@/store/useAppStore'
 import { formatBytes } from '@/lib/utils'
+import { HealthCheck } from '@/components/HealthCheck'
 import type { StorageInfo } from '@/types'
 
 export function Settings() {
@@ -276,6 +277,9 @@ export function Settings() {
               )}
             </CardContent>
           </Card>
+
+          {/* Health Check */}
+          <HealthCheck />
         </div>
       </div>
     </div>
