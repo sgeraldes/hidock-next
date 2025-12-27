@@ -232,7 +232,6 @@ CREATE INDEX IF NOT EXISTS idx_recording_candidates_meeting ON recording_meeting
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_selected ON recording_meeting_candidates(is_selected);
 CREATE INDEX IF NOT EXISTS idx_quality_recording ON quality_assessments(recording_id);
 CREATE INDEX IF NOT EXISTS idx_quality_level ON quality_assessments(quality);
-CREATE INDEX IF NOT EXISTS idx_recordings_storage_tier ON recordings(storage_tier);
 
 `
 
@@ -526,14 +525,22 @@ const MIGRATIONS: Record<number, () => void> = {
     // Add storage_tier column to recordings table if it doesn't exist
     try {
       database.run(`
-        ALTER TABLE recordings 
-        ADD COLUMN storage_tier TEXT DEFAULT NULL 
+        ALTER TABLE recordings
+        ADD COLUMN storage_tier TEXT DEFAULT NULL
         CHECK(storage_tier IN (NULL, 'hot', 'warm', 'cold', 'archive'))
       `)
       console.log('[Migration v10] Added storage_tier column to recordings')
     } catch (e) {
       // Column likely already exists
       console.log('[Migration v10] storage_tier column may already exist')
+    }
+
+    // Create index on storage_tier (must be done after column exists)
+    try {
+      database.run('CREATE INDEX IF NOT EXISTS idx_recordings_storage_tier ON recordings(storage_tier)')
+      console.log('[Migration v10] Created storage_tier index')
+    } catch (e) {
+      console.log('[Migration v10] storage_tier index may already exist')
     }
 
     // quality_assessments table is created in the schema, this just logs the migration
