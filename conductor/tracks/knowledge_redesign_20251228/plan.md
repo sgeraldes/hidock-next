@@ -55,7 +55,7 @@
 - [x] Task: Implement Actionables Backend [187920d]
     - [ ] Subtask: Create `actionables-handlers.ts`
     - [ ] Subtask: Implement logic to aggregate action items and generate suggestions
-- [ ] Task: Implement Output Generation Backend
+- [x] Task: Implement Output Generation Backend [f6bec9e]
     - [ ] Subtask: Create `output-service.ts`
     - [ ] Subtask: Define templates (Markdown) for Minutes, Reports, etc.
     - [ ] Subtask: Implement generation logic using LLM
