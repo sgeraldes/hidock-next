@@ -1398,6 +1398,17 @@ export function removeSyncedFile(originalFilename: string): void {
   run('DELETE FROM synced_files WHERE original_filename = ?', [originalFilename])
 }
 
+/**
+ * Clear all synced file records from the database.
+ * Used when cleaning up wrongly-named files for re-download.
+ */
+export function clearAllSyncedFiles(): number {
+  const countBefore = queryOne<{ count: number }>('SELECT COUNT(*) as count FROM synced_files')?.count ?? 0
+  run('DELETE FROM synced_files')
+  console.log(`Cleared ${countBefore} synced file records from database`)
+  return countBefore
+}
+
 // Get all synced filenames as a Set for quick lookup
 export function getSyncedFilenames(): Set<string> {
   const files = queryAll<{ original_filename: string }>('SELECT original_filename FROM synced_files')

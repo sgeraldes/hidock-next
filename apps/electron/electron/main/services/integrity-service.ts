@@ -179,6 +179,15 @@ class IntegrityService {
       console.error('[IntegrityService] Error resetting stuck transcriptions:', error)
     }
 
+    try {
+      // 3. Fix file dates that don't match filenames (bug from prior downloads)
+      const dateResult = this.fixFileDates()
+      issuesFound += dateResult.found
+      issuesFixed += dateResult.fixed
+    } catch (error) {
+      console.error('[IntegrityService] Error fixing file dates:', error)
+    }
+
     console.log(`[IntegrityService] Startup checks complete: ${issuesFound} issues found, ${issuesFixed} fixed`)
     return { issuesFound, issuesFixed }
   }
@@ -276,6 +285,76 @@ class IntegrityService {
     }
 
     return { found: totalFixed, fixed: totalFixed }
+  }
+
+  /**
+   * Fix file dates that don't match the filename.
+   * This repairs files downloaded with wrong dates (bug prior to date preservation fix).
+   * Updates both file mtime and database date_recorded.
+   */
+  fixFileDates(): { found: number; fixed: number } {
+    console.log('[IntegrityService] Checking for files with wrong dates...')
+    const recordingsPath = getRecordingsPath()
+
+    if (!existsSync(recordingsPath)) {
+      return { found: 0, fixed: 0 }
+    }
+
+    const files = readdirSync(recordingsPath)
+    const audioExtensions = ['.wav', '.mp3', '.m4a', '.ogg', '.webm']
+    const oneHourMs = 60 * 60 * 1000
+
+    let found = 0
+    let fixed = 0
+
+    for (const file of files) {
+      const ext = extname(file).toLowerCase()
+      if (!audioExtensions.includes(ext)) continue
+
+      const filePath = join(recordingsPath, file)
+      const filenameDate = parseHiDockFilenameDate(file)
+
+      if (!filenameDate) {
+        // Can't parse date from filename, skip
+        continue
+      }
+
+      try {
+        const stats = statSync(filePath)
+        const mtimeDiff = Math.abs(stats.mtime.getTime() - filenameDate.getTime())
+
+        // If mtime differs from filename date by more than 1 hour, fix it
+        if (mtimeDiff > oneHourMs) {
+          found++
+          console.log(`[IntegrityService] Fixing date for: ${file} (mtime was ${stats.mtime.toISOString()}, should be ${filenameDate.toISOString()})`)
+
+          try {
+            // 1. Fix the file's modification time
+            utimesSync(filePath, filenameDate, filenameDate)
+
+            // 2. Update the database if there's a recording entry
+            const hdaName = file.replace(/\.wav$/i, '.hda')
+            const recording = getRecordingByFilename(file) || getRecordingByFilename(hdaName)
+            if (recording) {
+              run(`UPDATE recordings SET date_recorded = ? WHERE id = ?`, [filenameDate.toISOString(), recording.id])
+            }
+
+            fixed++
+          } catch (error) {
+            console.error(`[IntegrityService] Failed to fix date for ${file}:`, error)
+          }
+        }
+      } catch {
+        // Skip files we can't stat
+      }
+    }
+
+    if (fixed > 0) {
+      saveDatabase()
+    }
+
+    console.log(`[IntegrityService] File dates: ${found} files with wrong dates, ${fixed} fixed`)
+    return { found, fixed }
   }
 
   /**
@@ -686,15 +765,18 @@ class IntegrityService {
    */
   async repairIssue(issueId: string): Promise<RepairResult> {
     if (!this.lastReport) {
+      console.error('[IntegrityService] repairIssue: No scan report available')
       return { issueId, success: false, action: 'none', error: 'No scan report available' }
     }
 
     const issue = this.lastReport.issues.find(i => i.id === issueId)
     if (!issue) {
+      console.error('[IntegrityService] repairIssue: Issue not found:', issueId)
       return { issueId, success: false, action: 'none', error: 'Issue not found' }
     }
 
     if (!issue.autoRepairable) {
+      console.error('[IntegrityService] repairIssue: Issue not auto-repairable:', issueId)
       return { issueId, success: false, action: 'none', error: 'Issue requires manual repair' }
     }
 
@@ -726,17 +808,23 @@ class IntegrityService {
    */
   async repairAllAuto(): Promise<RepairResult[]> {
     if (!this.lastReport) {
+      console.log('[IntegrityService] repairAllAuto: No report available')
       return []
     }
 
     const results: RepairResult[] = []
     const autoRepairable = this.lastReport.issues.filter(i => i.autoRepairable)
+    console.log(`[IntegrityService] repairAllAuto: Found ${autoRepairable.length} auto-repairable issues`)
 
     for (const issue of autoRepairable) {
+      console.log(`[IntegrityService] Repairing issue: ${issue.id} (type: ${issue.type}, recordingId: ${issue.recordingId})`)
       const result = await this.repairIssue(issue.id)
+      console.log(`[IntegrityService] Repair result:`, result.success ? 'SUCCESS' : `FAILED: ${result.error}`)
       results.push(result)
     }
 
+    const successCount = results.filter(r => r.success).length
+    console.log(`[IntegrityService] repairAllAuto complete: ${successCount}/${results.length} succeeded`)
     return results
   }
 
@@ -746,16 +834,23 @@ class IntegrityService {
 
   private repairOrphanedDownload(issue: IntegrityIssue): RepairResult {
     if (!issue.recordingId) {
+      console.error('[IntegrityService] repairOrphanedDownload: No recording ID for issue', issue.id)
       return { issueId: issue.id, success: false, action: 'repair', error: 'No recording ID' }
     }
 
-    // Reset the file_path and on_local flag
-    run(`UPDATE recordings SET file_path = NULL, on_local = 0, location =
-      CASE WHEN on_device = 1 THEN 'device-only' ELSE 'deleted' END
-      WHERE id = ?`, [issue.recordingId])
-    saveDatabase()
-
-    return { issueId: issue.id, success: true, action: 'Reset file path and local status' }
+    try {
+      // Delete the orphaned recording record - the file is already gone
+      // When device reconnects, a fresh record will be created with correct filename
+      console.log('[IntegrityService] Deleting orphaned recording:', issue.recordingId, issue.filename)
+      run(`DELETE FROM recordings WHERE id = ?`, [issue.recordingId])
+      saveDatabase()
+      console.log('[IntegrityService] Successfully deleted orphaned recording:', issue.recordingId)
+      return { issueId: issue.id, success: true, action: 'Deleted orphaned recording record' }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+      console.error('[IntegrityService] repairOrphanedDownload error:', errorMsg)
+      return { issueId: issue.id, success: false, action: 'repair', error: errorMsg }
+    }
   }
 
   private repairMissingFile(issue: IntegrityIssue): RepairResult {

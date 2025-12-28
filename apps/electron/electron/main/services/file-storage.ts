@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, utimesSync } from 'fs'
 import { join, basename, extname, resolve, normalize } from 'path'
-import { getConfig, getDataPath } from './config'
+import { getDataPath } from './config'
 
 /**
  * Validate that a path stays within the allowed base directory.
@@ -91,33 +91,39 @@ export function getDatabasePath(): string {
 export async function saveRecording(
   filename: string,
   data: Buffer,
-  meetingSubject?: string,
+  _meetingSubject?: string,
   originalDate?: Date
 ): Promise<string> {
   const recordingsPath = getRecordingsPath()
 
+  // Extract just the base filename without path
+  const baseFilename = basename(filename)
+
   // Validate input filename to prevent any path traversal in the source
-  validateFilename(basename(filename))
+  validateFilename(baseFilename)
 
-  // Use the original recording date from device, or fall back to current date
-  const date = originalDate || new Date()
-  const datePrefix = date.toISOString().split('T')[0]
-  const timePrefix = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}`
-
-  // Clean meeting subject for filename
-  const subjectPart = meetingSubject
-    ? '-' + meetingSubject.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50)
-    : ''
-
-  // Convert .hda to .wav since HDA files are actually WAV format
-  let ext = extname(filename) || '.wav'
-  if (ext.toLowerCase() === '.hda') {
-    ext = '.wav'
+  // Preserve the original device filename, just change .hda to .wav
+  // Device format: 2025Dec15-100105-Rec22.hda -> 2025Dec15-100105-Rec22.wav
+  let cleanFilename = baseFilename
+  const ext = extname(baseFilename).toLowerCase()
+  if (ext === '.hda') {
+    cleanFilename = baseFilename.slice(0, -4) + '.wav'
   }
-  const cleanFilename = `${datePrefix}_${timePrefix}${subjectPart}${ext}`
 
   // Validate the final path stays within recordings directory
-  const filePath = validatePath(recordingsPath, cleanFilename)
+  let filePath = validatePath(recordingsPath, cleanFilename)
+
+  // Handle filename collision - add suffix if file already exists
+  if (existsSync(filePath)) {
+    const nameWithoutExt = cleanFilename.slice(0, cleanFilename.lastIndexOf('.'))
+    const extension = cleanFilename.slice(cleanFilename.lastIndexOf('.'))
+    let counter = 1
+    while (existsSync(filePath)) {
+      cleanFilename = `${nameWithoutExt}-${counter}${extension}`
+      filePath = validatePath(recordingsPath, cleanFilename)
+      counter++
+    }
+  }
 
   writeFileSync(filePath, data)
 
@@ -259,6 +265,43 @@ export function deleteRecording(filePath: string): boolean {
     console.error('Error deleting recording:', error)
     return false
   }
+}
+
+/**
+ * Delete all downloaded recordings with wrong naming format.
+ * Wrong format: 2025-12-27_2252.wav (generated during download)
+ * Correct format: 2025Dec15-100105-Rec22.wav (preserved from device)
+ */
+export function deleteWronglyNamedRecordings(): { deleted: string[]; kept: string[] } {
+  const recordingsPath = getRecordingsPath()
+  const deleted: string[] = []
+  const kept: string[] = []
+
+  if (!existsSync(recordingsPath)) {
+    return { deleted, kept }
+  }
+
+  const files = readdirSync(recordingsPath)
+  // Wrong format pattern: YYYY-MM-DD_HHMM (e.g., 2025-12-27_2252)
+  const wrongFormatPattern = /^\d{4}-\d{2}-\d{2}_\d{4}/
+
+  for (const file of files) {
+    if (wrongFormatPattern.test(file)) {
+      const filePath = join(recordingsPath, file)
+      try {
+        unlinkSync(filePath)
+        deleted.push(file)
+        console.log(`Deleted wrongly-named file: ${file}`)
+      } catch (error) {
+        console.error(`Failed to delete ${file}:`, error)
+      }
+    } else {
+      kept.push(file)
+    }
+  }
+
+  console.log(`Cleanup complete: deleted ${deleted.length} files, kept ${kept.length} files`)
+  return { deleted, kept }
 }
 
 export function readRecordingFile(filePath: string): Buffer | null {

@@ -314,6 +314,17 @@ export interface ElectronAPI {
       error?: string
     }>>
     runStartupChecks: () => Promise<{ issuesFound: number; issuesFixed: number }>
+    cleanupWronglyNamed: () => Promise<{
+      deletedFiles: string[]
+      keptFiles: string[]
+      clearedDbRecords: number
+    }>
+    purgeMissingFiles: () => Promise<{
+      totalRecords: number
+      deleted: number
+      kept: number
+      deletedFiles: string[]
+    }>
     onProgress: (callback: (progress: { message: string; progress: number }) => void) => () => void
   }
 
@@ -527,6 +538,8 @@ const electronAPI: ElectronAPI = {
     repairIssue: (issueId: string) => ipcRenderer.invoke('integrity:repair-issue', issueId),
     repairAll: () => ipcRenderer.invoke('integrity:repair-all'),
     runStartupChecks: () => ipcRenderer.invoke('integrity:run-startup-checks'),
+    cleanupWronglyNamed: () => ipcRenderer.invoke('integrity:cleanup-wrongly-named'),
+    purgeMissingFiles: () => ipcRenderer.invoke('integrity:purge-missing-files'),
     onProgress: (callback: (progress: { message: string; progress: number }) => void) => {
       const handler = (_event: any, progress: { message: string; progress: number }) => callback(progress)
       ipcRenderer.on('integrity:progress', handler)

@@ -39,8 +39,12 @@ export function Settings() {
 
   const loadStorageInfo = async () => {
     try {
-      const info = await window.electronAPI.storage.getInfo()
-      setStorageInfo(info)
+      const result = await window.electronAPI.storage.getInfo()
+      if (result.success && result.data) {
+        setStorageInfo(result.data)
+      } else {
+        console.error('Failed to load storage info:', result.error)
+      }
     } catch (error) {
       console.error('Failed to load storage info:', error)
     }
@@ -259,19 +263,40 @@ export function Settings() {
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" size="sm" onClick={() => handleOpenFolder('recordings')}>
-                      <FolderOpen className="h-4 w-4 mr-2" />
-                      Recordings Folder
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => handleOpenFolder('transcripts')}>
-                      <FolderOpen className="h-4 w-4 mr-2" />
-                      Transcripts Folder
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={() => handleOpenFolder('data')}>
-                      <FolderOpen className="h-4 w-4 mr-2" />
-                      Data Folder
-                    </Button>
+                  <div className="space-y-3 text-sm">
+                    <div className="flex items-center justify-between p-2 bg-muted/50 rounded">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-muted-foreground text-xs">Recordings</p>
+                        <p className="font-mono text-xs truncate" title={storageInfo.recordingsPath}>
+                          {storageInfo.recordingsPath}
+                        </p>
+                      </div>
+                      <Button variant="ghost" size="sm" onClick={() => handleOpenFolder('recordings')}>
+                        <FolderOpen className="h-4 w-4" />
+                      </Button>
+                    </div>
+                    <div className="flex items-center justify-between p-2 bg-muted/50 rounded">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-muted-foreground text-xs">Transcripts</p>
+                        <p className="font-mono text-xs truncate" title={storageInfo.transcriptsPath}>
+                          {storageInfo.transcriptsPath}
+                        </p>
+                      </div>
+                      <Button variant="ghost" size="sm" onClick={() => handleOpenFolder('transcripts')}>
+                        <FolderOpen className="h-4 w-4" />
+                      </Button>
+                    </div>
+                    <div className="flex items-center justify-between p-2 bg-muted/50 rounded">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-muted-foreground text-xs">Data</p>
+                        <p className="font-mono text-xs truncate" title={storageInfo.dataPath}>
+                          {storageInfo.dataPath}
+                        </p>
+                      </div>
+                      <Button variant="ghost" size="sm" onClick={() => handleOpenFolder('data')}>
+                        <FolderOpen className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </div>
                 </>
               )}

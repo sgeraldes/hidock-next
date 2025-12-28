@@ -538,17 +538,6 @@ export function Recordings() {
                 <HardDrive className="h-3 w-3 inline mr-1" />
                 Downloaded ({stats.localOnly})
               </button>
-              <button
-                onClick={() => setLocationFilter('both')}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                  locationFilter === 'both'
-                    ? 'bg-primary text-primary-foreground'
-                    : 'hover:bg-muted'
-                }`}
-              >
-                <Check className="h-3 w-3 inline mr-1" />
-                Synced ({stats.both})
-              </button>
             </div>
           </div>
 

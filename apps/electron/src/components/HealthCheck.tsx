@@ -1,7 +1,14 @@
 import { useState } from 'react'
-import { AlertCircle, CheckCircle2, AlertTriangle, RefreshCw, Wrench, ChevronDown, ChevronUp } from 'lucide-react'
+import { AlertCircle, CheckCircle2, AlertTriangle, RefreshCw, Wrench, ChevronDown, ChevronUp, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { useAppStore } from '@/store/useAppStore'
+
+interface CleanupResult {
+  deletedFiles: string[]
+  keptFiles: string[]
+  clearedDbRecords: number
+}
 
 interface IntegrityIssue {
   id: string
@@ -33,11 +40,23 @@ interface RepairResult {
   error?: string
 }
 
+interface PurgeResult {
+  totalRecords: number
+  deleted: number
+  kept: number
+  deletedFiles: string[]
+}
+
 export function HealthCheck() {
+  const invalidateRecordings = useAppStore((state) => state.invalidateUnifiedRecordings)
   const [scanning, setScanning] = useState(false)
   const [repairing, setRepairing] = useState(false)
+  const [cleaning, setCleaning] = useState(false)
+  const [purging, setPurging] = useState(false)
   const [report, setReport] = useState<IntegrityReport | null>(null)
   const [repairResults, setRepairResults] = useState<RepairResult[]>([])
+  const [cleanupResult, setCleanupResult] = useState<CleanupResult | null>(null)
+  const [purgeResult, setPurgeResult] = useState<PurgeResult | null>(null)
   const [showDetails, setShowDetails] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -65,10 +84,50 @@ export function HealthCheck() {
       // Re-run scan to update the report
       const newReport = await window.electronAPI.integrity.runScan()
       setReport(newReport)
+      // Invalidate recordings cache so Library reloads with fresh data
+      invalidateRecordings()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to repair issues')
     } finally {
       setRepairing(false)
+    }
+  }
+
+  const cleanupWronglyNamed = async () => {
+    if (!confirm('This will DELETE all downloaded recordings with wrong filenames (format: YYYY-MM-DD_HHMM.wav) and clear sync records.\n\nAfter cleanup, reconnect your device to re-download files with correct names.\n\nAre you sure?')) {
+      return
+    }
+    setCleaning(true)
+    setError(null)
+    setCleanupResult(null)
+    try {
+      const result = await window.electronAPI.integrity.cleanupWronglyNamed()
+      setCleanupResult(result)
+      // Invalidate recordings cache so Library reloads with fresh data
+      invalidateRecordings()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to cleanup files')
+    } finally {
+      setCleaning(false)
+    }
+  }
+
+  const purgeMissingFiles = async () => {
+    if (!confirm('This will DELETE all database records where the audio file is missing or not downloaded.\n\nThis is a more aggressive cleanup than the Health Check repair.\n\nAre you sure?')) {
+      return
+    }
+    setPurging(true)
+    setError(null)
+    setPurgeResult(null)
+    try {
+      const result = await window.electronAPI.integrity.purgeMissingFiles()
+      setPurgeResult(result)
+      // Invalidate recordings cache so Library reloads with fresh data
+      invalidateRecordings()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to purge missing files')
+    } finally {
+      setPurging(false)
     }
   }
 
@@ -134,6 +193,23 @@ export function HealthCheck() {
             </div>
             <div className="text-green-600 dark:text-green-500">
               {repairResults.filter(r => r.success).length} of {repairResults.length} issues repaired successfully
+            </div>
+          </div>
+        )}
+
+        {/* Cleanup Results */}
+        {cleanupResult && (
+          <div className="p-3 bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-900 rounded-lg text-sm">
+            <div className="font-medium text-amber-700 dark:text-amber-400 mb-1">
+              Cleanup Complete
+            </div>
+            <div className="text-amber-600 dark:text-amber-500 space-y-1">
+              <div>Deleted {cleanupResult.deletedFiles.length} wrongly-named files</div>
+              <div>Cleared {cleanupResult.clearedDbRecords} sync records</div>
+              <div>Kept {cleanupResult.keptFiles.length} correctly-named files</div>
+            </div>
+            <div className="text-xs text-amber-500 dark:text-amber-400 mt-2">
+              Reconnect your device to re-download files with correct names
             </div>
           </div>
         )}
@@ -248,6 +324,56 @@ export function HealthCheck() {
             Run a health check to scan for data integrity issues
           </div>
         )}
+
+        {/* Purge Result */}
+        {purgeResult && (
+          <div className="p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 rounded-lg text-sm">
+            <div className="font-medium text-red-700 dark:text-red-400 mb-1">
+              Purge Complete
+            </div>
+            <div className="text-red-600 dark:text-red-500 space-y-1">
+              <div>Total records scanned: {purgeResult.totalRecords}</div>
+              <div>Deleted {purgeResult.deleted} orphaned records</div>
+              <div>Kept {purgeResult.kept} valid records</div>
+            </div>
+          </div>
+        )}
+
+        {/* Purge Section - Nuclear Option */}
+        <div className="pt-4 border-t">
+          <div className="text-sm font-medium mb-2 text-red-600 dark:text-red-400">Purge Orphaned Records</div>
+          <p className="text-xs text-muted-foreground mb-3">
+            Delete ALL database records where the audio file doesn't exist on disk.
+            Use this if Health Check finds no issues but the Library still shows deleted files.
+          </p>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={purgeMissingFiles}
+            disabled={purging || cleaning || scanning || repairing}
+          >
+            <Trash2 className={`h-4 w-4 mr-2 ${purging ? 'animate-pulse' : ''}`} />
+            {purging ? 'Purging...' : 'Purge Missing Files'}
+          </Button>
+        </div>
+
+        {/* Cleanup Section */}
+        <div className="pt-4 border-t">
+          <div className="text-sm font-medium mb-2">Reset Downloaded Recordings</div>
+          <p className="text-xs text-muted-foreground mb-3">
+            If your downloaded files have wrong names (e.g., 2025-12-27_2252.wav instead of 2025Dec15-100105-Rec22.wav),
+            use this to delete them and clear sync records. Then reconnect your device to re-download with correct names.
+          </p>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={cleanupWronglyNamed}
+            disabled={cleaning || scanning || repairing || purging}
+          >
+            <Trash2 className={`h-4 w-4 mr-2 ${cleaning ? 'animate-pulse' : ''}`} />
+            {cleaning ? 'Cleaning...' : 'Delete Wrongly-Named Files'}
+          </Button>
+        </div>
       </CardContent>
     </Card>
   )
