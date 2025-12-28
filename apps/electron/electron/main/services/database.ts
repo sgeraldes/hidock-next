@@ -1,5 +1,6 @@
 import initSqlJs, { Database as SqlJsDatabase } from 'sql.js'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { join } from 'path'
 import { getDatabasePath } from './file-storage'
 
 let db: SqlJsDatabase | null = null
@@ -49,7 +50,186 @@ CREATE TABLE IF NOT EXISTS recordings (
     source TEXT DEFAULT 'hidock',
     is_imported INTEGER DEFAULT 0,
     storage_tier TEXT DEFAULT NULL CHECK(storage_tier IN (NULL, 'hot', 'warm', 'cold', 'archive')),
+    -- Migration tracking columns (v11)
+    migrated_to_capture_id TEXT,
+    migration_status TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending',
+    migrated_at TEXT,
     FOREIGN KEY (meeting_id) REFERENCES meetings(id)
+);
+
+-- =============================================================================
+-- Core Knowledge Entity (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS knowledge_captures (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    summary TEXT,
+
+    -- Quality assessment
+    quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated',
+    quality_confidence REAL,
+    quality_assessed_at TEXT,
+
+    -- Storage tier and retention
+    storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot',
+    retention_days INTEGER,
+    expires_at TEXT,
+
+    -- Meeting correlation
+    meeting_id TEXT,
+    correlation_confidence REAL,
+    correlation_method TEXT,
+
+    -- Source tracking (migration from recordings)
+    source_recording_id TEXT,
+
+    -- Timestamps
+    captured_at TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TEXT,
+
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id),
+    FOREIGN KEY (source_recording_id) REFERENCES recordings(id)
+);
+
+-- =============================================================================
+-- Audio Sources - Multi-source tracking (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS audio_sources (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Source type and paths
+    source_type TEXT CHECK(source_type IN ('device', 'local', 'imported', 'cloud')) NOT NULL,
+    device_path TEXT,
+    local_path TEXT,
+    cloud_url TEXT,
+
+    -- File metadata
+    file_name TEXT NOT NULL,
+    file_size INTEGER,
+    duration_seconds REAL,
+    format TEXT,
+
+    -- Sync tracking
+    synced_from_device_at TEXT,
+    uploaded_to_cloud_at TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+);
+
+-- =============================================================================
+-- First-Class Action Items (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS action_items (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Action item content
+    content TEXT NOT NULL,
+    assignee TEXT,
+    due_date TEXT,
+
+    -- Priority and status
+    priority TEXT CHECK(priority IN ('low', 'medium', 'high', 'urgent')) DEFAULT 'medium',
+    status TEXT CHECK(status IN ('pending', 'in_progress', 'completed', 'cancelled')) DEFAULT 'pending',
+
+    -- Extraction metadata
+    extracted_from TEXT,
+    confidence REAL,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+);
+
+-- =============================================================================
+-- First-Class Decisions (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Decision content
+    content TEXT NOT NULL,
+    context TEXT,
+    participants TEXT,  -- JSON array of participant names/emails
+
+    -- Extraction metadata
+    extracted_from TEXT,
+    confidence REAL,
+    decided_at TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+);
+
+-- =============================================================================
+-- First-Class Follow-ups (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS follow_ups (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Follow-up content
+    content TEXT NOT NULL,
+    owner TEXT,
+    target_date TEXT,
+
+    -- Status and scheduling
+    status TEXT CHECK(status IN ('pending', 'scheduled', 'completed', 'cancelled')) DEFAULT 'pending',
+    scheduled_meeting_id TEXT,
+
+    -- Extraction metadata
+    extracted_from TEXT,
+    confidence REAL,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+    FOREIGN KEY (scheduled_meeting_id) REFERENCES meetings(id)
+);
+
+-- =============================================================================
+-- Generated Outputs (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS outputs (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Template information
+    template_id TEXT,
+    template_name TEXT NOT NULL,
+
+    -- Generated content
+    content TEXT NOT NULL,
+
+    -- Generation metadata
+    generated_at TEXT NOT NULL,
+    regenerated_count INTEGER DEFAULT 0,
+
+    -- Export tracking
+    exported_at TEXT,
+    export_format TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
 );
 
 -- Transcripts
@@ -218,8 +398,6 @@ CREATE TABLE IF NOT EXISTS device_files_cache (
     date_recorded TEXT NOT NULL,
     cached_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
-
-
 
 -- Quality assessments for recordings (v10)
 CREATE TABLE IF NOT EXISTS quality_assessments (
@@ -594,13 +772,51 @@ const MIGRATIONS: Record<number, () => void> = {
     console.log('Migration v10 complete: Quality assessment and storage policy tables created')
   },
   11: () => {
-    // v11: Knowledge Captures tables (handled by migration-handlers.ts for existing data)
-    // NOTE: The actual V11 migration (knowledge_captures, action_items, etc.)
-    // is handled by migration-handlers.ts and triggered via the migration UI.
-    // This migration just updates the version number for new databases.
-    // Existing databases with data need to run the manual migration from the UI.
+    // v11: Knowledge Captures tables
     console.log('Running migration to schema v11: Knowledge Captures architecture')
-    console.log('[Migration v11] Knowledge captures tables will be created by manual migration')
+    const database = getDatabase()
+
+    try {
+      // Check if recordings table needs migration columns (v11)
+      const tableInfo = database.exec("PRAGMA table_info(recordings)")
+      const hasMigrationStatus = tableInfo[0].values.some(col => col[1] === 'migration_status')
+
+      if (!hasMigrationStatus) {
+        console.log('[Migration v11] Migration columns not found in recordings, executing schema script...')
+        const schemaPath = join(__dirname, 'migrations/v11-knowledge-captures.sql')
+        if (existsSync(schemaPath)) {
+          const schemaSQL = readFileSync(schemaPath, 'utf-8')
+          
+          // Remove comments and split into statements
+          const statements = schemaSQL
+            .split('\n')
+            .filter(line => !line.trim().startsWith('--'))
+            .join('\n')
+            .split(';')
+            .map(s => s.trim())
+            .filter(s => s.length > 0)
+
+          for (const sql of statements) {
+            try {
+              database.run(sql)
+            } catch (e) {
+              // Ignore errors for already existing tables/columns
+              if (!(e as Error).message.includes('already exists') && !(e as Error).message.includes('duplicate column name')) {
+                console.warn(`[Migration v11] Statement warning: ${(e as Error).message}`)
+              }
+            }
+          }
+          console.log('[Migration v11] Schema script executed successfully')
+        } else {
+          console.error(`[Migration v11] Schema file not found at ${schemaPath}`)
+        }
+      } else {
+        console.log('[Migration v11] recordings table already has migration columns')
+      }
+    } catch (error) {
+      console.error('[Migration v11] Error during schema upgrade:', error)
+    }
+
     console.log('Migration v11 complete: Schema version updated to v11')
   },
   12: () => {
@@ -740,7 +956,7 @@ export function closeDatabase(): void {
 }
 
 // Generic query helpers
-export function queryAll<T>(sql: string, params: unknown[] = []): T[] {
+export function queryAll<T>(sql: string, params: any[] = []): T[] {
   const stmt = getDatabase().prepare(sql)
   stmt.bind(params)
 
@@ -754,18 +970,18 @@ export function queryAll<T>(sql: string, params: unknown[] = []): T[] {
   return results
 }
 
-export function queryOne<T>(sql: string, params: unknown[] = []): T | undefined {
+export function queryOne<T>(sql: string, params: any[] = []): T | undefined {
   const results = queryAll<T>(sql, params)
   return results[0]
 }
 
-export function run(sql: string, params: unknown[] = []): void {
+export function run(sql: string, params: any[] = []): void {
   getDatabase().run(sql, params)
   saveDatabase()
 }
 
 // Internal run that doesn't auto-save (for use within transactions)
-function runNoSave(sql: string, params: unknown[] = []): void {
+function runNoSave(sql: string, params: any[] = []): void {
   getDatabase().run(sql, params)
 }
 
@@ -788,7 +1004,7 @@ export function runInTransaction<T>(fn: () => T): T {
   }
 }
 
-export function runMany(sql: string, items: unknown[][]): void {
+export function runMany(sql: string, items: any[][]): void {
   const stmt = getDatabase().prepare(sql)
   for (const item of items) {
     stmt.bind(item)
@@ -1081,6 +1297,7 @@ export interface Recording {
   on_local: number
   source: 'hidock' | 'import' | 'external'
   is_imported: number
+  storage_tier?: 'hot' | 'warm' | 'cold' | 'archive' | null
 }
 
 export function getRecordings(): Recording[] {
