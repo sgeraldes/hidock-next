@@ -13,13 +13,24 @@ import {
   FileText,
   Plus,
   MessageSquare,
-  History
+  History,
+  Layers,
+  X,
+  BookOpen
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card } from '@/components/ui/card'
+import { 
+  Dialog, 
+  DialogContent, 
+  DialogHeader, 
+  DialogTitle, 
+  DialogTrigger 
+} from '@/components/ui/dialog'
+import { ContextPicker } from '@/components/ContextPicker'
 import { cn, formatDateTime } from '@/lib/utils'
-import type { Message, Conversation } from '@/types/knowledge'
+import type { Message, Conversation, KnowledgeCapture } from '@/types/knowledge'
 
 interface VectorChunk {
   id: string
@@ -52,6 +63,8 @@ export function Chat() {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
+  const [contextIds, setContextIds] = useState<string[]>([])
+  const [contextItems, setContextItems] = useState<KnowledgeCapture[]>([])
   
   // UI state
   const [input, setInput] = useState('')
@@ -63,6 +76,7 @@ export function Chat() {
   const [chunks, setChunks] = useState<VectorChunk[]>([])
   const [showChunks, setShowChunks] = useState(false)
   const [loadingChunks, setLoadingChunks] = useState(false)
+  const [pickerOpen, setPickerOpen] = useState(false)
   
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -114,13 +128,26 @@ export function Chat() {
   const handleSelectConversation = async (conv: Conversation) => {
     setActiveConversation(conv)
     try {
-      const msgs = await window.electronAPI.assistant.getMessages(conv.id)
-      setMessages(msgs)
+      const [msgs, ctxIds] = await Promise.all([
+        window.electronAPI.assistant.getMessages(conv.id),
+        window.electronAPI.assistant.getContext(conv.id)
+      ])
       
-      // Clear sources when switching conversation (or load them if we persist them)
+      setMessages(msgs)
+      setContextIds(ctxIds)
+      
+      // Load context metadata
+      if (ctxIds.length > 0) {
+        // Fetch knowledge captures by IDs
+        const items = await window.electronAPI.knowledge.getAll({ limit: 1000 })
+        setContextItems(items.filter(i => ctxIds.includes(i.id)))
+      } else {
+        setContextItems([])
+      }
+      
       setSources(new Map())
     } catch (error) {
-      console.error('Failed to load messages:', error)
+      console.error('Failed to load conversation details:', error)
     }
   }
 
@@ -146,9 +173,34 @@ export function Chat() {
       if (activeConversation?.id === id) {
         setActiveConversation(null)
         setMessages([])
+        setContextIds([])
+        setContextItems([])
       }
     } catch (error) {
       console.error('Failed to delete conversation:', error)
+    }
+  }
+
+  // Context management
+  const handleToggleContext = async (id: string) => {
+    if (!activeConversation) return
+
+    const isAttached = contextIds.includes(id)
+    try {
+      if (isAttached) {
+        await window.electronAPI.assistant.removeContext(activeConversation.id, id)
+        setContextIds(prev => prev.filter(ctxId => ctxId !== id))
+        setContextItems(prev => prev.filter(item => item.id !== id))
+      } else {
+        await window.electronAPI.assistant.addContext(activeConversation.id, id)
+        setContextIds(prev => [...prev, id])
+        
+        // Fetch and add metadata
+        const item = await window.electronAPI.knowledge.getById(id)
+        if (item) setContextItems(prev => [...prev, item])
+      }
+    } catch (error) {
+      console.error('Failed to toggle context:', error)
     }
   }
 
@@ -216,7 +268,7 @@ export function Chat() {
       setMessages((prev) => [...prev, userMsg])
 
       // Use the RAG service for response
-      // Note: sessionId here should probably match conversationId for better context tracking in RAG service
+      // Pre-process context for RAG if needed, or pass conversationId
       const response = await window.electronAPI.rag.chatLegacy(currentConv!.id, userMessageContent)
 
       if (response.error) {
@@ -356,9 +408,9 @@ export function Chat() {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
         <header className="flex items-center justify-between border-b px-6 py-4 h-[85px]">
-          <div>
+          <div className="min-w-0">
             <h1 className="text-2xl font-bold">Knowledge Assistant</h1>
-            <p className="text-sm text-muted-foreground truncate max-w-md">
+            <p className="text-sm text-muted-foreground truncate">
               {activeConversation ? activeConversation.title : 'Knowledge-powered AI conversations'}
             </p>
           </div>
@@ -366,31 +418,56 @@ export function Chat() {
             {status && (
               <div className="flex items-center gap-2 text-xs">
                 {status.ready ? (
-                  <div className="flex items-center gap-1.5 text-green-600 dark:text-green-400 bg-green-500/10 px-2 py-1 rounded-full border border-green-500/20">
+                  <div className="hidden sm:flex items-center gap-1.5 text-green-600 dark:text-green-400 bg-green-500/10 px-2 py-1 rounded-full border border-green-500/20">
                     <CheckCircle2 className="h-3.5 w-3.5" />
                     <span>{status.documentCount} chunks indexed</span>
                   </div>
                 ) : !status.ollamaAvailable ? (
-                  <div className="flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
+                  <div className="hidden sm:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
                     <AlertCircle className="h-3.5 w-3.5" />
                     <span>Ollama offline</span>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
+                  <div className="hidden sm:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
                     <Database className="h-3.5 w-3.5" />
                     <span>Empty knowledge base</span>
                   </div>
                 )}
               </div>
             )}
+            
+            {/* Context Picker */}
+            <Dialog open={pickerOpen} onOpenChange={setPickerOpen}>
+              <DialogTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-2 h-8" disabled={!activeConversation} title="Add Context">
+                  <Layers className="h-4 w-4" />
+                  <span className="hidden md:inline">Context</span>
+                  {contextIds.length > 0 && (
+                    <span className="bg-primary text-primary-foreground rounded-full w-4 h-4 flex items-center justify-center text-[10px]">
+                      {contextIds.length}
+                    </span>
+                  )}
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-[500px]">
+                <DialogHeader>
+                  <DialogTitle>Select Knowledge Context</DialogTitle>
+                </DialogHeader>
+                <ContextPicker 
+                  onSelect={handleToggleContext} 
+                  selectedIds={contextIds}
+                />
+              </DialogContent>
+            </Dialog>
+
             <Button
               variant={showChunks ? 'secondary' : 'outline'}
               size="sm"
               onClick={toggleChunksView}
-              className="h-8"
+              className="h-8 gap-2"
             >
-              <FileText className="h-4 w-4 mr-2" />
-              Chunks
+              <FileText className="h-4 w-4" />
+              <span className="hidden md:inline">Chunks</span>
             </Button>
           </div>
         </header>
@@ -440,6 +517,31 @@ export function Chat() {
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* Attached Context Bar */}
+        {contextItems.length > 0 && (
+          <div className="bg-muted/30 border-b px-6 py-2 flex flex-wrap gap-2 items-center">
+            <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mr-1">Context:</span>
+            {contextItems.map(item => (
+              <div key={item.id} className="flex items-center gap-1.5 bg-background border rounded-full pl-2 pr-1 py-0.5 text-[10px] shadow-sm animate-in fade-in zoom-in duration-200">
+                <BookOpen className="h-3 w-3 text-primary" />
+                <span className="max-w-[150px] truncate">{item.title}</span>
+                <button 
+                  onClick={() => handleToggleContext(item.id)}
+                  className="hover:bg-muted rounded-full p-0.5 transition-colors"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+            <button 
+              onClick={() => { setContextIds([]); setContextItems([]); /* TODO: Clear via IPC */ }}
+              className="text-[10px] text-muted-foreground hover:text-foreground underline underline-offset-2 ml-auto"
+            >
+              Clear all
+            </button>
           </div>
         )}
 
@@ -522,7 +624,6 @@ export function Chat() {
                                 <FileText className="h-3 w-3 text-muted-foreground" />
                                 <span className="max-w-[120px] truncate">{source.subject || 'Reference'}</span>
                               </div>
-                              {/* Source tooltip/popover logic can be added here */}
                             </div>
                           ))}
                         </div>

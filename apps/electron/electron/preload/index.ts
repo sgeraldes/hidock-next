@@ -104,6 +104,25 @@ export interface ElectronAPI {
     getItems: (status?: string) => Promise<any[]>
   }
 
+  // Knowledge Captures
+  knowledge: {
+    getAll: (options?: { limit?: number; offset?: number; status?: string }) => Promise<KnowledgeCapture[]>
+    getById: (id: string) => Promise<KnowledgeCapture | null>
+    update: (id: string, updates: Partial<KnowledgeCapture>) => Promise<{ success: boolean; error?: string }>
+  }
+
+  // Assistant
+  assistant: {
+    getConversations: () => Promise<Conversation[]>
+    createConversation: (title?: string) => Promise<Conversation>
+    deleteConversation: (id: string) => Promise<{ success: boolean; error?: string }>
+    getMessages: (conversationId: string) => Promise<Message[]>
+    addMessage: (conversationId: string, role: 'user' | 'assistant', content: string, sources?: string) => Promise<Message>
+    addContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
+    removeContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
+    getContext: (conversationId: string) => Promise<string[]>
+  }
+
   // Chat
   chat: {
     getHistory: (limit?: number) => Promise<any[]>
@@ -404,6 +423,23 @@ const electronAPI: ElectronAPI = {
 
   queue: {
     getItems: (status) => ipcRenderer.invoke('db:get-queue', status)
+  },
+
+  knowledge: {
+    getAll: (options) => ipcRenderer.invoke('knowledge:getAll', options),
+    getById: (id) => ipcRenderer.invoke('knowledge:getById', id),
+    update: (id, updates) => ipcRenderer.invoke('knowledge:update', id, updates)
+  },
+
+  assistant: {
+    getConversations: () => ipcRenderer.invoke('assistant:getConversations'),
+    createConversation: (title) => ipcRenderer.invoke('assistant:createConversation', title),
+    deleteConversation: (id) => ipcRenderer.invoke('assistant:deleteConversation', id),
+    getMessages: (conversationId) => ipcRenderer.invoke('assistant:getMessages', conversationId),
+    addMessage: (conversationId, role, content, sources) => ipcRenderer.invoke('assistant:addMessage', conversationId, role, content, sources),
+    addContext: (conversationId, knowledgeCaptureId) => ipcRenderer.invoke('assistant:addContext', conversationId, knowledgeCaptureId),
+    removeContext: (conversationId, knowledgeCaptureId) => ipcRenderer.invoke('assistant:removeContext', conversationId, knowledgeCaptureId),
+    getContext: (conversationId) => ipcRenderer.invoke('assistant:getContext', conversationId)
   },
 
   chat: {
