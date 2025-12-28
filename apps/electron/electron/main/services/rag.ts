@@ -327,7 +327,6 @@ ${transcript.substring(0, 8000)}`
   }>> {
     try {
       const db = getDatabase()
-      const vectorStore = getVectorStore()
       
       const escaped = query.replace(/'/g, "''")
       const likeQuery = `%${escaped}%`

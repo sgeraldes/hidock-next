@@ -1,5 +1,5 @@
 import { useCallback } from 'react'
-import { Play, Pause, Square, Volume2, VolumeX, X } from 'lucide-react'
+import { Play, Pause, Square, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
 import { useUIStore } from '@/store/useUIStore'

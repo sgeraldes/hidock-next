@@ -60,6 +60,25 @@ const electronAPI = {
   queue: {
     getItems: (status) => electron.ipcRenderer.invoke("db:get-queue", status)
   },
+  knowledge: {
+    getAll: (options) => electron.ipcRenderer.invoke("knowledge:getAll", options),
+    getById: (id) => electron.ipcRenderer.invoke("knowledge:getById", id),
+    update: (id, updates) => electron.ipcRenderer.invoke("knowledge:update", id, updates)
+  },
+  actionables: {
+    getAll: (options) => electron.ipcRenderer.invoke("actionables:getAll", options),
+    updateStatus: (id, status) => electron.ipcRenderer.invoke("actionables:updateStatus", id, status)
+  },
+  assistant: {
+    getConversations: () => electron.ipcRenderer.invoke("assistant:getConversations"),
+    createConversation: (title) => electron.ipcRenderer.invoke("assistant:createConversation", title),
+    deleteConversation: (id) => electron.ipcRenderer.invoke("assistant:deleteConversation", id),
+    getMessages: (conversationId) => electron.ipcRenderer.invoke("assistant:getMessages", conversationId),
+    addMessage: (conversationId, role, content, sources) => electron.ipcRenderer.invoke("assistant:addMessage", conversationId, role, content, sources),
+    addContext: (conversationId, knowledgeCaptureId) => electron.ipcRenderer.invoke("assistant:addContext", conversationId, knowledgeCaptureId),
+    removeContext: (conversationId, knowledgeCaptureId) => electron.ipcRenderer.invoke("assistant:removeContext", conversationId, knowledgeCaptureId),
+    getContext: (conversationId) => electron.ipcRenderer.invoke("assistant:getContext", conversationId)
+  },
   chat: {
     getHistory: (limit) => electron.ipcRenderer.invoke("db:get-chat-history", limit),
     addMessage: (role, content, sources) => electron.ipcRenderer.invoke("db:add-chat-message", role, content, sources),
@@ -79,7 +98,7 @@ const electronAPI = {
     openFolder: (folder) => electron.ipcRenderer.invoke("storage:open-folder", folder),
     readRecording: (filePath) => electron.ipcRenderer.invoke("storage:read-recording", filePath),
     deleteRecording: (filePath) => electron.ipcRenderer.invoke("storage:delete-recording", filePath),
-    saveRecording: (filename, data) => electron.ipcRenderer.invoke("storage:save-recording", filename, data)
+    saveRecording: (filename, data, recordingDateIso) => electron.ipcRenderer.invoke("storage:save-recording", filename, data, recordingDateIso)
   },
   syncedFiles: {
     isFileSynced: (originalFilename) => electron.ipcRenderer.invoke("db:is-file-synced", originalFilename),
@@ -164,6 +183,23 @@ const electronAPI = {
     getStats: () => electron.ipcRenderer.invoke("storage:get-stats"),
     initializeUntiered: () => electron.ipcRenderer.invoke("storage:initialize-untiered"),
     assignTier: (recordingId, quality) => electron.ipcRenderer.invoke("storage:assign-tier", recordingId, quality)
+  },
+  // Data Integrity Service API
+  integrity: {
+    runScan: () => electron.ipcRenderer.invoke("integrity:run-scan"),
+    getReport: () => electron.ipcRenderer.invoke("integrity:get-report"),
+    repairIssue: (issueId) => electron.ipcRenderer.invoke("integrity:repair-issue", issueId),
+    repairAll: () => electron.ipcRenderer.invoke("integrity:repair-all"),
+    runStartupChecks: () => electron.ipcRenderer.invoke("integrity:run-startup-checks"),
+    cleanupWronglyNamed: () => electron.ipcRenderer.invoke("integrity:cleanup-wrongly-named"),
+    purgeMissingFiles: () => electron.ipcRenderer.invoke("integrity:purge-missing-files"),
+    onProgress: (callback) => {
+      const handler = (_event, progress) => callback(progress);
+      electron.ipcRenderer.on("integrity:progress", handler);
+      return () => {
+        electron.ipcRenderer.removeListener("integrity:progress", handler);
+      };
+    }
   },
   // Domain Event Listener
   onDomainEvent: (callback) => {

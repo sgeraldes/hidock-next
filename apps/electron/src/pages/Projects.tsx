@@ -36,7 +36,12 @@ export function Projects() {
     try {
       const result = await window.electronAPI.projects.getAll({ search: searchQuery })
       if (result.success) {
-        setProjects(result.data.projects)
+        const mapped = result.data.projects.map((p: any) => ({
+          ...p,
+          status: p.status || 'active',
+          createdAt: p.created_at || p.createdAt || new Date().toISOString()
+        }))
+        setProjects(mapped)
       }
     } catch (error) {
       console.error('Failed to load projects:', error)
@@ -63,8 +68,14 @@ export function Projects() {
     try {
       const result = await window.electronAPI.projects.create({ name })
       if (result.success) {
-        setProjects(prev => [result.data, ...prev])
-        setActiveConversation(result.data)
+        const p = result.data as any
+        const mapped = {
+          ...p,
+          status: p.status || 'active',
+          createdAt: p.created_at || p.createdAt || new Date().toISOString()
+        }
+        setProjects(prev => [mapped, ...prev])
+        setActiveConversation(mapped)
       }
     } catch (error) {
       console.error('Failed to create project:', error)

@@ -87,7 +87,7 @@ export const useQualityStore = create<QualityStore>()(
       try {
         // Note: This assumes an electronAPI method exists for loading quality assessments
         // If not implemented yet, this will need to be added to the backend
-        const result = await window.electronAPI.recordings.getQualityAssessments?.()
+        const result = await (window.electronAPI.recordings as any).getQualityAssessments?.()
         if (result?.success) {
           const assessments = new Map<string, QualityAssessment>()
           result.data.forEach((item: any) => {
@@ -116,7 +116,7 @@ export const useQualityStore = create<QualityStore>()(
         // Persist to backend
         // Note: This assumes an electronAPI method exists for saving quality
         // If not implemented yet, this will need to be added to the backend
-        await window.electronAPI.recordings.setQuality?.(recordingId, rating, notes)
+        await (window.electronAPI.recordings as any).setQuality?.(recordingId, rating, notes)
       } catch (error) {
         console.error(`Failed to save quality assessment for ${recordingId}:`, error)
         // Optionally rollback on error

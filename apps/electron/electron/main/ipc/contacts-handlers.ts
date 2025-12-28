@@ -19,9 +19,7 @@ import {
   GetContactByIdRequestSchema,
   UpdateContactRequestSchema
 } from '../validation/contacts'
-import type { ContactWithMeetings } from '../types/database'
-import type { GetContactsResponse } from '../types/api'
-import type { Person } from '../../src/types/knowledge'
+import type { Person } from '@/types/knowledge'
 
 export function registerContactsHandlers(): void {
   /**

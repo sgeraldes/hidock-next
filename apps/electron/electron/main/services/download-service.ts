@@ -15,12 +15,11 @@
 
 import { BrowserWindow, ipcMain } from 'electron'
 import {
-  isFileSynced,
-  addSyncedFile,
-  getSyncedFilenames,
-  getRecordingByFilename,
   markRecordingDownloaded,
-  upsertRecordingFromDevice
+  addSyncedFile,
+  isFileSynced,
+  getRecordingByFilename,
+  getSyncedFilenames
 } from './database'
 import { saveRecording, getRecordingsPath } from './file-storage'
 import { existsSync } from 'fs'
@@ -64,9 +63,6 @@ class DownloadService {
     isProcessing: false,
     isPaused: false
   }
-
-  // Device download function - will be injected from renderer
-  private deviceDownloadFn: ((filename: string, fileSize: number, onProgress: (bytes: number) => void) => Promise<Buffer | null>) | null = null
 
   constructor() {
     console.log('[DownloadService] Initialized')

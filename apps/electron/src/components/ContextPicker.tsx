@@ -1,7 +1,5 @@
-
 import { useState, useEffect } from 'react'
 import { Check, Search, BookOpen, Clock } from 'lucide-react'
-import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { formatDateTime } from '@/lib/utils'
 import type { KnowledgeCapture } from '@/types/knowledge'

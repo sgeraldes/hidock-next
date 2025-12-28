@@ -36,7 +36,13 @@ export function People() {
         limit: 100 
       })
       if (result.success) {
-        setPeople(result.data.contacts)
+        const mappedPeople = result.data.contacts.map((c: any) => ({
+          ...c,
+          firstSeenAt: c.first_seen_at || c.firstSeenAt,
+          lastSeenAt: c.last_seen_at || c.lastSeenAt,
+          interactionCount: c.meeting_count || c.interactionCount || 0
+        }))
+        setPeople(mappedPeople)
       }
     } catch (error) {
       console.error('Failed to load people:', error)

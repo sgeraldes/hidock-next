@@ -2,7 +2,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { getOutputGeneratorService } from '../output-generator'
 import * as db from '../database'
-import * as ollama from '../ollama'
 
 // Mock dependencies
 vi.mock('../database', () => ({
@@ -39,8 +38,12 @@ describe('OutputGeneratorService', () => {
     })
     
     vi.mocked(db.getTranscriptByRecordingId).mockReturnValue({
-      full_text: 'Full transcript text'
-    })
+      id: 'trans-1',
+      recording_id: 'rec-1',
+      full_text: 'Full transcript text',
+      language: 'en',
+      created_at: new Date().toISOString()
+    } as any)
 
     const result = await generator.generate({
       templateId: 'meeting_minutes',

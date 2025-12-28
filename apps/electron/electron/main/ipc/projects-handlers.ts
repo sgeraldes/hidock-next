@@ -12,6 +12,7 @@ import {
   updateProject,
   deleteProject,
   getMeetingsForProject,
+  getProjectsForMeeting,
   tagMeetingToProject,
   untagMeetingFromProject,
   getMeetingById,
@@ -29,9 +30,7 @@ import {
   TagMeetingRequestSchema,
   UntagMeetingRequestSchema
 } from '../validation/projects'
-import type { ProjectWithMeetings } from '../types/database'
-import type { GetProjectsResponse } from '../types/api'
-import type { Project } from '../../src/types/knowledge'
+import type { Project } from '@/types/knowledge'
 import { randomUUID } from 'crypto'
 
 export function registerProjectsHandlers(): void {
@@ -122,7 +121,7 @@ export function registerProjectsHandlers(): void {
         }
 
         const id = randomUUID()
-        const project = createProject({
+        createProject({
           id,
           name: parsed.data.name,
           description: parsed.data.description ?? null
@@ -156,7 +155,7 @@ export function registerProjectsHandlers(): void {
           return error('NOT_FOUND', `Project with ID ${id} not found`)
         }
 
-        updateProject(id, name, description, status)
+        updateProject(id, name, description ?? undefined, status)
 
         const updatedProject = getProjectById(id)
         return success(mapToProject(updatedProject!))

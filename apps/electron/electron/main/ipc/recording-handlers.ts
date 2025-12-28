@@ -109,7 +109,7 @@ export function registerRecordingHandlers(): void {
       }
 
       const recording = getRecordingById(result.data.id)
-      if (recording) {
+      if (recording && recording.file_path) {
         const deleted = deleteRecordingFile(recording.file_path)
         if (deleted) {
           updateRecordingStatus(result.data.id, 'deleted')

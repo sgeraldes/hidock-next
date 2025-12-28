@@ -7,9 +7,9 @@ const fs = require("fs");
 const ICAL = require("ical.js");
 const zod = require("zod");
 const generativeAi = require("@google/generative-ai");
+const crypto$1 = require("crypto");
 const uuid = require("uuid");
 const events = require("events");
-const crypto$1 = require("crypto");
 const DEFAULT_CONFIG = {
   version: "1.0.0",
   storage: {
@@ -155,20 +155,34 @@ function getCachePath() {
 function getDatabasePath() {
   return path.join(getDataPath(), "data", "hidock.db");
 }
-async function saveRecording(filename, data, meetingSubject) {
+async function saveRecording(filename, data, _meetingSubject, originalDate) {
   const recordingsPath = getRecordingsPath();
-  validateFilename(path.basename(filename));
-  const date = /* @__PURE__ */ new Date();
-  const datePrefix = date.toISOString().split("T")[0];
-  const timePrefix = date.toTimeString().slice(0, 5).replace(":", "");
-  const subjectPart = "";
-  let ext = path.extname(filename) || ".wav";
-  if (ext.toLowerCase() === ".hda") {
-    ext = ".wav";
+  const baseFilename = path.basename(filename);
+  validateFilename(baseFilename);
+  let cleanFilename = baseFilename;
+  const ext = path.extname(baseFilename).toLowerCase();
+  if (ext === ".hda") {
+    cleanFilename = baseFilename.slice(0, -4) + ".wav";
   }
-  const cleanFilename = `${datePrefix}_${timePrefix}${subjectPart}${ext}`;
-  const filePath = validatePath(recordingsPath, cleanFilename);
+  let filePath = validatePath(recordingsPath, cleanFilename);
+  if (fs.existsSync(filePath)) {
+    const nameWithoutExt = cleanFilename.slice(0, cleanFilename.lastIndexOf("."));
+    const extension = cleanFilename.slice(cleanFilename.lastIndexOf("."));
+    let counter = 1;
+    while (fs.existsSync(filePath)) {
+      cleanFilename = `${nameWithoutExt}-${counter}${extension}`;
+      filePath = validatePath(recordingsPath, cleanFilename);
+      counter++;
+    }
+  }
   fs.writeFileSync(filePath, data);
+  if (originalDate) {
+    try {
+      fs.utimesSync(filePath, originalDate, originalDate);
+    } catch (error2) {
+      console.warn("Failed to set file modification time:", error2);
+    }
+  }
   return filePath;
 }
 function getRecordingFiles() {
@@ -241,6 +255,32 @@ function deleteRecording(filePath) {
     return false;
   }
 }
+function deleteWronglyNamedRecordings() {
+  const recordingsPath = getRecordingsPath();
+  const deleted = [];
+  const kept = [];
+  if (!fs.existsSync(recordingsPath)) {
+    return { deleted, kept };
+  }
+  const files = fs.readdirSync(recordingsPath);
+  const wrongFormatPattern = /^\d{4}-\d{2}-\d{2}_\d{4}/;
+  for (const file of files) {
+    if (wrongFormatPattern.test(file)) {
+      const filePath = path.join(recordingsPath, file);
+      try {
+        fs.unlinkSync(filePath);
+        deleted.push(file);
+        console.log(`Deleted wrongly-named file: ${file}`);
+      } catch (error2) {
+        console.error(`Failed to delete ${file}:`, error2);
+      }
+    } else {
+      kept.push(file);
+    }
+  }
+  console.log(`Cleanup complete: deleted ${deleted.length} files, kept ${kept.length} files`);
+  return { deleted, kept };
+}
 function readRecordingFile(filePath) {
   try {
     const recordingsPath = getRecordingsPath();
@@ -263,7 +303,7 @@ function readRecordingFile(filePath) {
 }
 let db = null;
 let dbPath = "";
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 15;
 const SCHEMA = `
 -- Calendar events from ICS
 CREATE TABLE IF NOT EXISTS meetings (
@@ -306,7 +346,188 @@ CREATE TABLE IF NOT EXISTS recordings (
     source TEXT DEFAULT 'hidock',
     is_imported INTEGER DEFAULT 0,
     storage_tier TEXT DEFAULT NULL CHECK(storage_tier IN (NULL, 'hot', 'warm', 'cold', 'archive')),
+    -- Migration tracking columns (v11)
+    migrated_to_capture_id TEXT,
+    migration_status TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending',
+    migrated_at TEXT,
     FOREIGN KEY (meeting_id) REFERENCES meetings(id)
+);
+
+-- =============================================================================
+-- Core Knowledge Entity (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS knowledge_captures (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    summary TEXT,
+    category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting',
+    status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready',
+
+    -- Quality assessment
+    quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated',
+    quality_confidence REAL,
+    quality_assessed_at TEXT,
+
+    -- Storage tier and retention
+    storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot',
+    retention_days INTEGER,
+    expires_at TEXT,
+
+    -- Meeting correlation
+    meeting_id TEXT,
+    correlation_confidence REAL,
+    correlation_method TEXT,
+
+    -- Source tracking (migration from recordings)
+    source_recording_id TEXT,
+
+    -- Timestamps
+    captured_at TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TEXT,
+
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id),
+    FOREIGN KEY (source_recording_id) REFERENCES recordings(id)
+);
+
+-- =============================================================================
+-- Audio Sources - Multi-source tracking (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS audio_sources (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Source type and paths
+    source_type TEXT CHECK(source_type IN ('device', 'local', 'imported', 'cloud')) NOT NULL,
+    device_path TEXT,
+    local_path TEXT,
+    cloud_url TEXT,
+
+    -- File metadata
+    file_name TEXT NOT NULL,
+    file_size INTEGER,
+    duration_seconds REAL,
+    format TEXT,
+
+    -- Sync tracking
+    synced_from_device_at TEXT,
+    uploaded_to_cloud_at TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+);
+
+-- =============================================================================
+-- First-Class Action Items (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS action_items (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Action item content
+    content TEXT NOT NULL,
+    assignee TEXT,
+    due_date TEXT,
+
+    -- Priority and status
+    priority TEXT CHECK(priority IN ('low', 'medium', 'high', 'urgent')) DEFAULT 'medium',
+    status TEXT CHECK(status IN ('pending', 'in_progress', 'completed', 'cancelled')) DEFAULT 'pending',
+
+    -- Extraction metadata
+    extracted_from TEXT,
+    confidence REAL,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+);
+
+-- =============================================================================
+-- First-Class Decisions (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Decision content
+    content TEXT NOT NULL,
+    context TEXT,
+    participants TEXT,  -- JSON array of participant names/emails
+
+    -- Extraction metadata
+    extracted_from TEXT,
+    confidence REAL,
+    decided_at TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+);
+
+-- =============================================================================
+-- First-Class Follow-ups (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS follow_ups (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Follow-up content
+    content TEXT NOT NULL,
+    owner TEXT,
+    target_date TEXT,
+
+    -- Status and scheduling
+    status TEXT CHECK(status IN ('pending', 'scheduled', 'completed', 'cancelled')) DEFAULT 'pending',
+    scheduled_meeting_id TEXT,
+
+    -- Extraction metadata
+    extracted_from TEXT,
+    confidence REAL,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+    FOREIGN KEY (scheduled_meeting_id) REFERENCES meetings(id)
+);
+
+-- =============================================================================
+-- Generated Outputs (v11)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS outputs (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT NOT NULL,
+
+    -- Template information
+    template_id TEXT,
+    template_name TEXT NOT NULL,
+
+    -- Generated content
+    content TEXT NOT NULL,
+
+    -- Generation metadata
+    generated_at TEXT NOT NULL,
+    regenerated_count INTEGER DEFAULT 0,
+
+    -- Export tracking
+    exported_at TEXT,
+    export_format TEXT,
+
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
 );
 
 -- Transcripts
@@ -359,13 +580,34 @@ CREATE TABLE IF NOT EXISTS transcription_queue (
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
 );
 
+-- Conversations (v12)
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Chat history
 CREATE TABLE IF NOT EXISTS chat_messages (
     id TEXT PRIMARY KEY,
+    conversation_id TEXT,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     sources TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
+-- Conversation context (v12)
+CREATE TABLE IF NOT EXISTS conversation_context (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    knowledge_capture_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+    UNIQUE(conversation_id, knowledge_capture_id)
 );
 
 -- Schema version tracking
@@ -384,12 +626,16 @@ CREATE TABLE IF NOT EXISTS synced_files (
     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- Contacts extracted from meeting attendees
+-- Contacts extracted from meeting attendees (renamed to People in UI)
 CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     email TEXT UNIQUE,
+    type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown',
+    role TEXT,
+    company TEXT,
     notes TEXT,
+    tags TEXT, -- JSON string of tags
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     meeting_count INTEGER DEFAULT 0,
@@ -401,6 +647,7 @@ CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
+    status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -450,8 +697,6 @@ CREATE TABLE IF NOT EXISTS device_files_cache (
     cached_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-
-
 -- Quality assessments for recordings (v10)
 CREATE TABLE IF NOT EXISTS quality_assessments (
     id TEXT PRIMARY KEY,
@@ -487,8 +732,34 @@ CREATE INDEX IF NOT EXISTS idx_meeting_projects_project ON meeting_projects(proj
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_recording ON recording_meeting_candidates(recording_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_meeting ON recording_meeting_candidates(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_selected ON recording_meeting_candidates(is_selected);
+CREATE INDEX IF NOT EXISTS idx_knowledge_captures_quality ON knowledge_captures(quality_rating);
+CREATE INDEX IF NOT EXISTS idx_knowledge_captures_status ON knowledge_captures(status);
+CREATE INDEX IF NOT EXISTS idx_knowledge_captures_category ON knowledge_captures(category);
 CREATE INDEX IF NOT EXISTS idx_quality_recording ON quality_assessments(recording_id);
 CREATE INDEX IF NOT EXISTS idx_quality_level ON quality_assessments(quality);
+
+-- Actionables (intent to create artifacts) (v15 - unified with v11 architecture)
+CREATE TABLE IF NOT EXISTS actionables (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    source_knowledge_id TEXT NOT NULL,
+    source_action_item_id TEXT,
+    suggested_template TEXT,
+    suggested_recipients TEXT, -- JSON array
+    status TEXT CHECK(status IN ('pending', 'in_progress', 'generated', 'shared', 'dismissed')) DEFAULT 'pending',
+    artifact_id TEXT, -- Links to outputs table
+    generated_at TEXT,
+    shared_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (source_knowledge_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+    FOREIGN KEY (artifact_id) REFERENCES outputs(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_actionables_source_knowledge ON actionables(source_knowledge_id);
+CREATE INDEX IF NOT EXISTS idx_actionables_status ON actionables(status);
 
 `;
 const MIGRATIONS = {
@@ -737,8 +1008,128 @@ const MIGRATIONS = {
   },
   11: () => {
     console.log("Running migration to schema v11: Knowledge Captures architecture");
-    console.log("[Migration v11] Knowledge captures tables will be created by manual migration");
+    const database = getDatabase();
+    try {
+      const recordingsInfo = database.exec("PRAGMA table_info(recordings)");
+      const hasMigrationStatus = recordingsInfo[0].values.some((col) => col[1] === "migration_status");
+      if (!hasMigrationStatus) {
+        console.log("[Migration v11] Migration columns not found in recordings, adding them...");
+        const columnsToAdd = [
+          "ALTER TABLE recordings ADD COLUMN migrated_to_capture_id TEXT",
+          "ALTER TABLE recordings ADD COLUMN migration_status TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'",
+          "ALTER TABLE recordings ADD COLUMN migrated_at TEXT"
+        ];
+        for (const sql of columnsToAdd) {
+          try {
+            database.run(sql);
+          } catch (e) {
+          }
+        }
+      }
+      const tableCheck = database.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_captures'");
+      const tableExists = tableCheck.length > 0 && tableCheck[0].values.length > 0;
+      if (!tableExists) {
+        console.log("[Migration v11] knowledge_captures table not found, executing full schema script...");
+        const schemaPath = path.join(__dirname, "migrations/v11-knowledge-captures.sql");
+        if (fs.existsSync(schemaPath)) {
+          const schemaSQL = fs.readFileSync(schemaPath, "utf-8");
+          const statements = schemaSQL.split("\n").filter((line) => !line.trim().startsWith("--")).join("\n").split(";").map((s) => s.trim()).filter((s) => s.length > 0);
+          for (const sql of statements) {
+            try {
+              database.run(sql);
+            } catch (e) {
+            }
+          }
+        }
+      } else {
+        const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)");
+        const existingCols = captureInfo[0].values.map((col) => col[1]);
+        const requiredColumns = [
+          { name: "category", def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
+          { name: "status", def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
+          { name: "quality_rating", def: "quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated'" },
+          { name: "quality_confidence", def: "quality_confidence REAL" },
+          { name: "quality_assessed_at", def: "quality_assessed_at TEXT" },
+          { name: "storage_tier", def: "storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot'" },
+          { name: "retention_days", def: "retention_days INTEGER" },
+          { name: "expires_at", def: "expires_at TEXT" },
+          { name: "meeting_id", def: "meeting_id TEXT REFERENCES meetings(id)" },
+          { name: "correlation_confidence", def: "correlation_confidence REAL" },
+          { name: "correlation_method", def: "correlation_method TEXT" },
+          { name: "source_recording_id", def: "source_recording_id TEXT REFERENCES recordings(id)" }
+        ];
+        for (const col of requiredColumns) {
+          if (!existingCols.includes(col.name)) {
+            console.log(`[Migration v11] Adding missing column ${col.name} to knowledge_captures`);
+            try {
+              database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`);
+            } catch (e) {
+              console.warn(`[Migration v11] Could not add column ${col.name}: ${e}`);
+            }
+          }
+        }
+      }
+      const indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_captures_status ON knowledge_captures(status)",
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_captures_category ON knowledge_captures(category)",
+        "CREATE INDEX IF NOT EXISTS idx_actionables_source_knowledge ON actionables(source_knowledge_id)",
+        "CREATE INDEX IF NOT EXISTS idx_actionables_status ON actionables(status)"
+      ];
+      for (const sql of indexes) {
+        try {
+          database.run(sql);
+        } catch (e) {
+          console.warn(`Index warning: ${e}`);
+        }
+      }
+    } catch (error2) {
+      console.error("[Migration v11] Error during schema upgrade:", error2);
+    }
     console.log("Migration v11 complete: Schema version updated to v11");
+  },
+  12: () => {
+    console.log("Running migration to schema v12: Adding conversations and conversation_context tables");
+    const database = getDatabase();
+    try {
+      database.run("ALTER TABLE chat_messages ADD COLUMN conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE");
+      console.log("[Migration v12] Added conversation_id column to chat_messages");
+    } catch (e) {
+      console.log("[Migration v12] conversation_id column may already exist");
+    }
+    console.log("Migration v12 complete: Conversation tables and columns created");
+  },
+  13: () => {
+    console.log("Running migration to schema v13: Adding fields to contacts table");
+    const database = getDatabase();
+    const columnsToAdd = [
+      "ALTER TABLE contacts ADD COLUMN type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown'",
+      "ALTER TABLE contacts ADD COLUMN role TEXT",
+      "ALTER TABLE contacts ADD COLUMN company TEXT",
+      "ALTER TABLE contacts ADD COLUMN tags TEXT"
+    ];
+    for (const sql of columnsToAdd) {
+      try {
+        database.run(sql);
+      } catch (e) {
+        console.log(`Column may already exist: ${sql}`);
+      }
+    }
+    console.log("Migration v13 complete: Contacts table enhanced");
+  },
+  14: () => {
+    console.log("Running migration to schema v14: Adding status to projects table");
+    const database = getDatabase();
+    try {
+      database.run("ALTER TABLE projects ADD COLUMN status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active'");
+      console.log("[Migration v14] Added status column to projects");
+    } catch (e) {
+      console.log("[Migration v14] status column may already exist");
+    }
+    console.log("Migration v14 complete: Projects table enhanced");
+  },
+  15: () => {
+    console.log("Running migration to schema v15: Actionables architecture");
+    console.log("Migration v15 complete: Actionables table created");
   }
 };
 function runMigrations(currentVersion) {
@@ -761,19 +1152,83 @@ async function initializeDatabase() {
     } else {
       db = new SQL.Database();
     }
-    db.run(SCHEMA);
-    const versionResult = db.exec("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
+    const database = getDatabase();
+    const statements = SCHEMA.split(";").map((s) => s.trim()).filter((s) => s.length > 0);
+    console.log("[Database] Phase 1: Ensuring core tables exist...");
+    for (const sql of statements) {
+      if (sql.toUpperCase().startsWith("CREATE TABLE")) {
+        try {
+          database.run(sql);
+        } catch (e) {
+          console.warn(`[Database] Table creation warning: ${e.message}`);
+        }
+      }
+    }
+    console.log("[Database] Phase 2: Aligning table structures...");
+    const recordingsInfo = database.exec("PRAGMA table_info(recordings)");
+    const recCols = recordingsInfo[0].values.map((col) => col[1]);
+    const recordingRepairs = [
+      { name: "migrated_to_capture_id", def: "TEXT" },
+      { name: "migration_status", def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
+      { name: "migrated_at", def: "TEXT" }
+    ];
+    for (const col of recordingRepairs) {
+      if (!recCols.includes(col.name)) {
+        console.log(`[Database] Repairing recordings: adding ${col.name}`);
+        try {
+          database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`);
+        } catch (e) {
+        }
+      }
+    }
+    const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)");
+    const capCols = captureInfo[0].values.map((col) => col[1]);
+    const knowledgeRepairs = [
+      { name: "category", def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
+      { name: "status", def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
+      { name: "quality_rating", def: "quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated'" },
+      { name: "quality_confidence", def: "quality_confidence REAL" },
+      { name: "quality_assessed_at", def: "quality_assessed_at TEXT" },
+      { name: "storage_tier", def: "storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot'" },
+      { name: "retention_days", def: "retention_days INTEGER" },
+      { name: "expires_at", def: "expires_at TEXT" },
+      { name: "meeting_id", def: "meeting_id TEXT REFERENCES meetings(id)" },
+      { name: "correlation_confidence", def: "correlation_confidence REAL" },
+      { name: "correlation_method", def: "correlation_method TEXT" },
+      { name: "source_recording_id", def: "source_recording_id TEXT REFERENCES recordings(id)" }
+    ];
+    for (const col of knowledgeRepairs) {
+      if (!capCols.includes(col.name)) {
+        console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`);
+        try {
+          database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`);
+        } catch (e) {
+        }
+      }
+    }
+    const versionResult = database.exec("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
     const currentVersion = versionResult.length > 0 && versionResult[0].values.length > 0 ? versionResult[0].values[0][0] : 0;
     if (currentVersion < SCHEMA_VERSION) {
+      console.log(`[Database] Phase 3: Migrating v${currentVersion} -> v${SCHEMA_VERSION}`);
       runMigrations(currentVersion);
-      console.log(`Database migrated from v${currentVersion} to v${SCHEMA_VERSION}`);
     } else if (currentVersion === 0) {
-      db.run("INSERT INTO schema_version (version) VALUES (?)", [SCHEMA_VERSION]);
+      database.run("INSERT INTO schema_version (version) VALUES (?)", [SCHEMA_VERSION]);
+    }
+    console.log("[Database] Phase 4: Finalizing schema and indexes...");
+    for (const sql of statements) {
+      try {
+        database.run(sql);
+      } catch (e) {
+        const msg = e.message;
+        if (!msg.includes("already exists") && !msg.includes("duplicate column name")) {
+          console.warn(`[Database] Schema statement warning: ${msg}`);
+        }
+      }
     }
     saveDatabase();
-    console.log(`Database initialized at ${dbPath} (schema v${SCHEMA_VERSION})`);
+    console.log(`[Database] Initialization complete (schema v${SCHEMA_VERSION})`);
   } catch (error2) {
-    console.error("Failed to initialize database:", error2);
+    console.error("[Database] FATAL initialization error:", error2);
     throw error2;
   }
 }
@@ -903,6 +1358,25 @@ function getMeetings(startDate, endDate) {
 }
 function getMeetingById(id) {
   return queryOne("SELECT * FROM meetings WHERE id = ?", [id]);
+}
+function getMeetingsByIds(meetingIds) {
+  if (meetingIds.length === 0) return /* @__PURE__ */ new Map();
+  const uniqueIds = [...new Set(meetingIds.filter(Boolean))];
+  if (uniqueIds.length === 0) return /* @__PURE__ */ new Map();
+  const results = /* @__PURE__ */ new Map();
+  const chunkSize = 100;
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize);
+    const placeholders = chunk.map(() => "?").join(",");
+    const meetings = queryAll(
+      `SELECT * FROM meetings WHERE id IN (${placeholders})`,
+      chunk
+    );
+    for (const meeting of meetings) {
+      results.set(meeting.id, meeting);
+    }
+  }
+  return results;
 }
 function extractContactsFromMeetingDataInternal(meeting) {
   const emailsToLookup = [];
@@ -1185,6 +1659,12 @@ function addSyncedFile(originalFilename, localFilename, filePath, fileSize) {
 function removeSyncedFile(originalFilename) {
   run("DELETE FROM synced_files WHERE original_filename = ?", [originalFilename]);
 }
+function clearAllSyncedFiles() {
+  const countBefore = queryOne("SELECT COUNT(*) as count FROM synced_files")?.count ?? 0;
+  run("DELETE FROM synced_files");
+  console.log(`Cleared ${countBefore} synced file records from database`);
+  return countBefore;
+}
 function getSyncedFilenames() {
   const files = queryAll("SELECT original_filename FROM synced_files");
   return new Set(files.map((f) => f.original_filename));
@@ -1195,10 +1675,10 @@ function getContacts(search, limit = 100, offset = 0) {
   const params = [];
   if (search) {
     const escaped = escapeLikePattern(search);
-    const searchClause = " WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\'";
+    const searchClause = " WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\'";
     countSql += searchClause;
     sql += searchClause;
-    params.push(`%${escaped}%`, `%${escaped}%`);
+    params.push(`%${escaped}%`, `%${escaped}%`, `%${escaped}%`, `%${escaped}%`);
   }
   sql += " ORDER BY meeting_count DESC, last_seen_at DESC LIMIT ? OFFSET ?";
   const countResult = queryOne(countSql, params);
@@ -1229,8 +1709,40 @@ function getContactsByEmails(emails) {
   }
   return results;
 }
-function updateContactNotes(id, notes) {
-  run("UPDATE contacts SET notes = ? WHERE id = ?", [notes, id]);
+function updateContact(id, updates) {
+  const fields = [];
+  const params = [];
+  if (updates.name !== void 0) {
+    fields.push("name = ?");
+    params.push(updates.name);
+  }
+  if (updates.email !== void 0) {
+    fields.push("email = ?");
+    params.push(updates.email);
+  }
+  if (updates.type !== void 0) {
+    fields.push("type = ?");
+    params.push(updates.type);
+  }
+  if (updates.role !== void 0) {
+    fields.push("role = ?");
+    params.push(updates.role);
+  }
+  if (updates.company !== void 0) {
+    fields.push("company = ?");
+    params.push(updates.company);
+  }
+  if (updates.notes !== void 0) {
+    fields.push("notes = ?");
+    params.push(updates.notes);
+  }
+  if (updates.tags !== void 0) {
+    fields.push("tags = ?");
+    params.push(updates.tags);
+  }
+  if (fields.length === 0) return;
+  params.push(id);
+  run(`UPDATE contacts SET ${fields.join(", ")} WHERE id = ?`, params);
 }
 function getMeetingsForContact(contactId) {
   return queryAll(
@@ -1275,7 +1787,7 @@ function createProject(project) {
   );
   return { ...project, created_at: (/* @__PURE__ */ new Date()).toISOString() };
 }
-function updateProject(id, name, description) {
+function updateProject(id, name, description, status) {
   const updates = [];
   const params = [];
   if (name !== void 0) {
@@ -1285,6 +1797,10 @@ function updateProject(id, name, description) {
   if (description !== void 0) {
     updates.push("description = ?");
     params.push(description);
+  }
+  if (status !== void 0) {
+    updates.push("status = ?");
+    params.push(status);
   }
   if (updates.length > 0) {
     params.push(id);
@@ -1350,6 +1866,53 @@ function addRecordingMeetingCandidate(recordingId, meetingId, confidenceScore, m
     linkRecordingToMeeting(recordingId, meetingId, confidenceScore, "ai_transcript_match");
   }
   return id;
+}
+function getCandidatesForRecordingWithDetails(recordingId) {
+  if (!recordingId || typeof recordingId !== "string") return [];
+  const sql = `
+    SELECT c.id, c.recording_id, c.meeting_id, c.confidence_score, c.match_reason,
+      c.is_ai_selected, c.is_user_confirmed, m.subject, m.start_time, m.end_time
+    FROM recording_meeting_candidates c
+    JOIN meetings m ON m.id = c.meeting_id
+    WHERE c.recording_id = ?
+    ORDER BY c.confidence_score DESC LIMIT 20
+  `;
+  try {
+    const rows = queryAll(sql, [recordingId]);
+    return rows.map((r) => ({
+      id: r.id,
+      recordingId: r.recording_id,
+      meetingId: r.meeting_id,
+      subject: r.subject,
+      startTime: r.start_time,
+      endTime: r.end_time,
+      confidenceScore: r.confidence_score,
+      matchReason: r.match_reason,
+      isAiSelected: r.is_ai_selected === 1,
+      isUserConfirmed: r.is_user_confirmed === 1
+    }));
+  } catch (error2) {
+    console.error("Failed to get candidates for recording:", error2);
+    return [];
+  }
+}
+function getMeetingsNearDate(date) {
+  if (!date || typeof date !== "string") return [];
+  const targetDate = new Date(date);
+  if (isNaN(targetDate.getTime())) return [];
+  const bufferMs = 12 * 60 * 60 * 1e3;
+  const startWindow = new Date(targetDate.getTime() - bufferMs);
+  const endWindow = new Date(targetDate.getTime() + bufferMs);
+  try {
+    return queryAll(
+      `SELECT * FROM meetings WHERE start_time >= ? AND start_time <= ?
+       ORDER BY ABS(JULIANDAY(start_time) - JULIANDAY(?)) LIMIT 20`,
+      [startWindow.toISOString(), endWindow.toISOString(), targetDate.toISOString()]
+    );
+  } catch (error2) {
+    console.error("Failed to get meetings near date:", error2);
+    return [];
+  }
 }
 function getQualityAssessment(recordingId) {
   return queryOne("SELECT * FROM quality_assessments WHERE recording_id = ?", [recordingId]);
@@ -1462,6 +2025,10 @@ function registerDatabaseHandlers() {
   electron.ipcMain.handle("db:get-meeting", async (_, id) => {
     return getMeetingById(id);
   });
+  electron.ipcMain.handle("db:get-meetings-by-ids", async (_, ids) => {
+    const meetingsMap = getMeetingsByIds(ids);
+    return Object.fromEntries(meetingsMap);
+  });
   electron.ipcMain.handle("db:get-recordings", async () => {
     return getRecordings();
   });
@@ -1487,6 +2054,10 @@ function registerDatabaseHandlers() {
   });
   electron.ipcMain.handle("db:search-transcripts", async (_, query) => {
     return searchTranscripts(query);
+  });
+  electron.ipcMain.handle("db:get-transcripts-by-recording-ids", async (_, recordingIds) => {
+    const transcriptsMap = getTranscriptsByRecordingIds(recordingIds);
+    return Object.fromEntries(transcriptsMap);
   });
   electron.ipcMain.handle("db:get-queue", async (_, status) => {
     return getQueueItems(status);
@@ -1634,9 +2205,6 @@ function validateCalendarUrl(url) {
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
       return { valid: false, error: "Only HTTP/HTTPS URLs are allowed for calendar sync" };
     }
-    if (parsed.protocol === "file:") {
-      return { valid: false, error: "File URLs are not allowed for calendar sync" };
-    }
     const hostname = parsed.hostname.toLowerCase();
     const isLocalhost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]" || hostname.endsWith(".local");
     if (isLocalhost) {
@@ -1697,11 +2265,8 @@ function registerTimezones(vcalendar) {
     try {
       const tzid = vtimezone.getFirstPropertyValue("tzid");
       if (tzid && typeof tzid === "string") {
-        const existing = ICAL.TimezoneService.get(tzid);
-        if (!existing) {
-          const tz = new ICAL.Timezone(vtimezone);
-          ICAL.TimezoneService.register(tzid, tz);
-        }
+        const tz = new ICAL.Timezone(vtimezone);
+        ICAL.TimezoneService.register(tzid, tz);
       }
     } catch (e) {
       console.warn("[Calendar] Failed to register timezone:", e);
@@ -1888,12 +2453,7 @@ async function parseICSAsync(icsData) {
         attendees.push({ name, email, status: partstat });
       }
     }
-    const rrule = vevent.getFirstPropertyValue("rrule");
-    const isRecurring = !!rrule;
-    let recurrenceRule;
-    if (rrule && typeof rrule.toString === "function") {
-      recurrenceRule = rrule.toString();
-    }
+    const isRecurring = !!vevent.getFirstProperty("rrule");
     let meetingUrl;
     const urlPatterns = [
       /https:\/\/teams\.microsoft\.com\/[^\s<>]+/i,
@@ -1909,57 +2469,8 @@ async function parseICSAsync(icsData) {
         break;
       }
     }
-    if (isRecurring && event.isRecurrenceException !== true) {
-      try {
-        const iterator = event.iterator();
-        const maxOccurrences = 100;
-        const futureLimit = /* @__PURE__ */ new Date();
-        futureLimit.setMonth(futureLimit.getMonth() + 6);
-        let count = 0;
-        let next = iterator.next();
-        while (next && count < maxOccurrences) {
-          const occurrenceDate = safeToJSDate(next, startTzid);
-          const pastLimit = /* @__PURE__ */ new Date();
-          pastLimit.setMonth(pastLimit.getMonth() - 1);
-          if (occurrenceDate && occurrenceDate >= pastLimit && occurrenceDate <= futureLimit) {
-            const duration = endDate.getTime() - startDate.getTime();
-            const occurrenceEnd = new Date(occurrenceDate.getTime() + duration);
-            meetings.push({
-              id: `${uid}_${occurrenceDate.toISOString()}`,
-              subject: summary,
-              start_time: occurrenceDate.toISOString(),
-              end_time: occurrenceEnd.toISOString(),
-              location,
-              organizer_name: organizerName,
-              organizer_email: organizerEmail,
-              attendees: attendees.length > 0 ? JSON.stringify(attendees) : void 0,
-              description,
-              is_recurring: 1,
-              recurrence_rule: recurrenceRule,
-              meeting_url: meetingUrl
-            });
-          }
-          next = iterator.next();
-          count++;
-        }
-      } catch (e) {
-        console.warn("Failed to expand recurring event:", e);
-        meetings.push({
-          id: uid,
-          subject: summary,
-          start_time: startDate.toISOString(),
-          end_time: endDate.toISOString(),
-          location,
-          organizer_name: organizerName,
-          organizer_email: organizerEmail,
-          attendees: attendees.length > 0 ? JSON.stringify(attendees) : void 0,
-          description,
-          is_recurring: 1,
-          recurrence_rule: recurrenceRule,
-          meeting_url: meetingUrl
-        });
-      }
-    } else {
+    if (isRecurring && event.isRecurrenceException === true) ;
+    else {
       meetings.push({
         id: uid,
         subject: summary,
@@ -2100,13 +2611,6 @@ function validateOptionalString(value, maxLength = 1e4) {
   }
   return result.data;
 }
-function validateBoolean(value) {
-  const result = zod.z.boolean().safeParse(value);
-  if (!result.success) {
-    throw new ValidationError(result.error.issues[0]?.message || "Invalid boolean");
-  }
-  return result.data;
-}
 function validateNumber(value, min, max) {
   let schema = zod.z.number();
   schema = schema.min(min);
@@ -2225,6 +2729,62 @@ function stopAutoSync() {
     console.log("Calendar auto-sync stopped");
   }
 }
+const MONTH_NAMES$1 = {
+  "Jan": 0,
+  "Feb": 1,
+  "Mar": 2,
+  "Apr": 3,
+  "May": 4,
+  "Jun": 5,
+  "Jul": 6,
+  "Aug": 7,
+  "Sep": 8,
+  "Oct": 9,
+  "Nov": 10,
+  "Dec": 11
+};
+function parseHiDockFilenameDate$1(filename) {
+  const monthNameMatch = filename.match(/(\d{4})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{1,2})-(\d{2})(\d{2})(\d{2})/);
+  if (monthNameMatch) {
+    const [, year, monthName, day, hour, minute, second] = monthNameMatch;
+    const month = MONTH_NAMES$1[monthName];
+    if (month !== void 0) {
+      return new Date(
+        parseInt(year),
+        month,
+        parseInt(day),
+        parseInt(hour),
+        parseInt(minute),
+        parseInt(second)
+      );
+    }
+  }
+  const numericMatch = filename.match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})(\d{2})(\d{2})/);
+  if (numericMatch) {
+    const [, year, month, day, hour, minute, second] = numericMatch;
+    return new Date(
+      parseInt(year),
+      parseInt(month) - 1,
+      parseInt(day),
+      parseInt(hour),
+      parseInt(minute),
+      parseInt(second)
+    );
+  }
+  const shortMatch = filename.match(/(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})/);
+  if (shortMatch) {
+    const [, year, month, day, hour, minute] = shortMatch;
+    return new Date(
+      parseInt(year),
+      parseInt(month) - 1,
+      parseInt(day),
+      parseInt(hour),
+      parseInt(minute),
+      0
+    );
+  }
+  return void 0;
+}
 function registerStorageHandlers() {
   electron.ipcMain.handle("storage:get-info", async () => {
     try {
@@ -2288,22 +2848,26 @@ function registerStorageHandlers() {
       return { success: false, error: message };
     }
   });
-  electron.ipcMain.handle("storage:save-recording", async (_, filename, data) => {
+  electron.ipcMain.handle("storage:save-recording", async (_, filename, data, recordingDateIso) => {
     try {
       const result = SaveRecordingSchema.safeParse({ filename, data });
       if (!result.success) {
         return { success: false, error: result.error.issues[0]?.message || "Invalid save recording request" };
       }
-      const buffer = Buffer.from(result.data.data);
-      const filePath = await saveRecording(result.data.filename, buffer);
-      const dateMatch = result.data.filename.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
-      let dateRecorded;
-      if (dateMatch) {
-        const [, year, month, day, hour, minute, second] = dateMatch;
-        dateRecorded = `${year}-${month}-${day}T${hour}:${minute}:${second}`;
-      } else {
-        dateRecorded = (/* @__PURE__ */ new Date()).toISOString();
+      let originalDate;
+      if (recordingDateIso) {
+        originalDate = new Date(recordingDateIso);
+        if (isNaN(originalDate.getTime())) {
+          console.warn("Invalid recording date provided:", recordingDateIso);
+          originalDate = void 0;
+        }
       }
+      if (!originalDate) {
+        originalDate = parseHiDockFilenameDate$1(result.data.filename);
+      }
+      const buffer = Buffer.from(result.data.data);
+      const filePath = await saveRecording(result.data.filename, buffer, void 0, originalDate);
+      const dateRecorded = originalDate?.toISOString() || (/* @__PURE__ */ new Date()).toISOString();
       const recordingId = `rec_${result.data.filename.replace(/[^a-zA-Z0-9]/g, "_")}`;
       const recording = {
         id: recordingId,
@@ -2317,7 +2881,13 @@ function registerStorageHandlers() {
         meeting_id: void 0,
         correlation_confidence: void 0,
         correlation_method: void 0,
-        status: "pending"
+        status: "pending",
+        location: "both",
+        on_device: 1,
+        on_local: 1,
+        transcription_status: "pending",
+        source: "hidock",
+        is_imported: 0
       };
       insertRecording(recording);
       const recordingDate = new Date(dateRecorded);
@@ -2437,13 +3007,24 @@ async function processNewRecording(filePath) {
       meeting_id: void 0,
       correlation_confidence: void 0,
       correlation_method: void 0,
-      status: "pending"
+      status: "pending",
+      location: "local-only",
+      on_device: 0,
+      on_local: 1,
+      transcription_status: "pending",
+      source: "hidock",
+      is_imported: 0
     };
     insertRecording(recording);
     console.log("Recording added to database:", recordingId);
     correlateWithMeeting(recordingId, new Date(dateRecorded));
-    addToQueue(recordingId);
-    console.log("Recording added to transcription queue:", recordingId);
+    const config2 = getConfig();
+    if (config2.transcription.autoTranscribe) {
+      addToQueue(recordingId);
+      console.log("Recording added to transcription queue:", recordingId);
+    } else {
+      console.log("Auto-transcribe disabled, skipping queue for:", recordingId);
+    }
     notifyRenderer$1("recording:new", { recording });
   } catch (error2) {
     console.error("Error processing recording:", error2);
@@ -2894,8 +3475,8 @@ async function processQueue() {
 }
 async function transcribeRecording(recordingId) {
   const recording = getRecordingById(recordingId);
-  if (!recording) {
-    throw new Error(`Recording not found: ${recordingId}`);
+  if (!recording || !recording.file_path) {
+    throw new Error(`Recording not found or no local file: ${recordingId}`);
   }
   if (!fs.existsSync(recording.file_path)) {
     throw new Error(`Recording file not found: ${recording.file_path}`);
@@ -3149,7 +3730,7 @@ function registerRecordingHandlers() {
         return false;
       }
       const recording = getRecordingById(result.data.id);
-      if (recording) {
+      if (recording && recording.file_path) {
         const deleted = deleteRecording(recording.file_path);
         if (deleted) {
           updateRecordingStatus(result.data.id, "deleted");
@@ -3247,7 +3828,38 @@ function registerRecordingHandlers() {
   electron.ipcMain.handle("recordings:scanFolder", async () => {
     return getRecordingFiles();
   });
+  electron.ipcMain.handle("recordings:getCandidates", async (_, recordingId) => {
+    try {
+      const result = GetRecordingByIdSchema.safeParse({ id: recordingId });
+      if (!result.success) {
+        console.error("recordings:getCandidates validation error:", result.error);
+        return [];
+      }
+      return getCandidatesForRecordingWithDetails(result.data.id);
+    } catch (error2) {
+      console.error("recordings:getCandidates error:", error2);
+      return [];
+    }
+  });
+  electron.ipcMain.handle("recordings:getMeetingsNearDate", async (_, dateStr) => {
+    try {
+      if (typeof dateStr !== "string") {
+        console.error("recordings:getMeetingsNearDate invalid date:", dateStr);
+        return [];
+      }
+      return getMeetingsNearDate(dateStr);
+    } catch (error2) {
+      console.error("recordings:getMeetingsNearDate error:", error2);
+      return [];
+    }
+  });
   console.log("Recording IPC handlers registered");
+}
+function success(data) {
+  return { success: true, data };
+}
+function error(code, message, details) {
+  return { success: false, error: { code, message, details } };
 }
 const SYSTEM_PROMPT = `You are a helpful meeting assistant that answers questions based on meeting transcripts.
 
@@ -3328,6 +3940,31 @@ class RAGService {
     } else {
       searchResults = await vectorStore.search(message, 5);
     }
+    const pinnedContextParts = [];
+    try {
+      const db2 = getDatabase();
+      if (db2) {
+        const contextRes = db2.exec("SELECT knowledge_capture_id FROM conversation_context WHERE conversation_id = ?", [sessionId]);
+        if (contextRes && contextRes.length > 0 && contextRes[0].values && contextRes[0].values.length > 0) {
+          const kcIds = contextRes[0].values.map((v) => v[0]);
+          for (const id of kcIds) {
+            const transcriptRes = db2.exec(`
+              SELECT t.full_text, k.title 
+              FROM transcripts t
+              JOIN knowledge_captures k ON k.source_recording_id = t.recording_id
+              WHERE k.id = ?
+            `, [id]);
+            if (transcriptRes && transcriptRes.length > 0 && transcriptRes[0].values && transcriptRes[0].values.length > 0) {
+              const [text, title] = transcriptRes[0].values[0];
+              pinnedContextParts.push(`[PINNED CONTEXT: ${title}]
+${text}`);
+            }
+          }
+        }
+      }
+    } catch (error2) {
+      console.error("Failed to fetch pinned context:", error2);
+    }
     const contextParts = [];
     const sources = [];
     for (const result of searchResults) {
@@ -3345,9 +3982,10 @@ ${doc.content}`);
         score
       });
     }
-    const contextText = contextParts.length > 0 ? `Here are relevant excerpts from meeting transcripts:
+    const allContextParts = [...pinnedContextParts, ...contextParts];
+    const contextText = allContextParts.length > 0 ? `Here are relevant excerpts from meeting transcripts and pinned knowledge base items:
 
-${contextParts.join("\n\n---\n\n")}` : "No relevant meeting transcripts found for this query.";
+${allContextParts.join("\n\n---\n\n")}` : "No relevant meeting transcripts found for this query.";
     const userMessage = `Context:
 ${contextText}
 
@@ -3436,6 +4074,52 @@ ${transcript.substring(0, 8e3)}`;
       sessionCount: this.contexts.size
     };
   }
+  /**
+   * Perform a global search across all entities
+   */
+  async globalSearch(query, limit = 5) {
+    try {
+      const db2 = getDatabase();
+      const escaped = query.replace(/'/g, "''");
+      const likeQuery = `%${escaped}%`;
+      const knowledgeRows = db2.exec(`
+        SELECT * FROM knowledge_captures 
+        WHERE title LIKE ? OR summary LIKE ?
+        LIMIT ?
+      `, [likeQuery, likeQuery, limit]);
+      const knowledge = knowledgeRows.length > 0 ? knowledgeRows[0].values.map((v) => ({
+        id: v[0],
+        title: v[1],
+        summary: v[2],
+        capturedAt: v[13]
+      })) : [];
+      const peopleRows = db2.exec(`
+        SELECT * FROM contacts 
+        WHERE name LIKE ? OR email LIKE ? OR company LIKE ? OR role LIKE ?
+        LIMIT ?
+      `, [likeQuery, likeQuery, likeQuery, likeQuery, limit]);
+      const people = peopleRows.length > 0 ? peopleRows[0].values.map((v) => ({
+        id: v[0],
+        name: v[1],
+        email: v[2],
+        type: v[3]
+      })) : [];
+      const projectRows = db2.exec(`
+        SELECT * FROM projects 
+        WHERE name LIKE ? OR description LIKE ?
+        LIMIT ?
+      `, [likeQuery, likeQuery, limit]);
+      const projects = projectRows.length > 0 ? projectRows[0].values.map((v) => ({
+        id: v[0],
+        name: v[1],
+        status: v[3]
+      })) : [];
+      return success({ knowledge, people, projects });
+    } catch (err) {
+      console.error("RAGService:globalSearch error:", err);
+      return error("DATABASE_ERROR", "Global search failed", err);
+    }
+  }
 }
 let ragInstance = null;
 function getRAGService() {
@@ -3443,12 +4127,6 @@ function getRAGService() {
     ragInstance = new RAGService();
   }
   return ragInstance;
-}
-function success(data) {
-  return { success: true, data };
-}
-function error(code, message, details) {
-  return { success: false, error: { code, message, details } };
 }
 const UUIDSchema = zod.z.string().uuid();
 const DateTimeSchema = zod.z.string().datetime({ offset: true }).or(zod.z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/));
@@ -3664,6 +4342,9 @@ function registerRAGHandlers() {
       embeddingDimensions: doc.embedding.length
     }));
   });
+  electron.ipcMain.handle("rag:globalSearch", async (_event, { query, limit }) => {
+    return rag.globalSearch(query, limit);
+  });
   console.log("RAG IPC handlers registered");
 }
 function registerAppHandlers() {
@@ -3694,7 +4375,11 @@ const GetContactByIdRequestSchema = zod.z.object({
 });
 const UpdateContactRequestSchema = zod.z.object({
   id: UUIDSchema,
-  notes: OptionalStringSchema
+  notes: OptionalStringSchema,
+  type: zod.z.enum(["team", "candidate", "customer", "external", "unknown"]).optional(),
+  role: OptionalStringSchema,
+  company: OptionalStringSchema,
+  tags: zod.z.array(zod.z.string()).optional()
 });
 const ContactRoleSchema = zod.z.enum(["organizer", "attendee"]);
 zod.z.object({
@@ -3722,7 +4407,10 @@ function registerContactsHandlers() {
         }
         const { search, limit, offset } = parsed.data;
         const result = getContacts(search, limit, offset);
-        return success(result);
+        return success({
+          contacts: result.contacts.map(mapToPerson),
+          total: result.total
+        });
       } catch (err) {
         console.error("contacts:getAll error:", err);
         return error("DATABASE_ERROR", "Failed to fetch contacts", err);
@@ -3749,7 +4437,7 @@ function registerContactsHandlers() {
           totalMeetingTimeMinutes += Math.round((end - start) / 6e4);
         }
         return success({
-          contact,
+          contact: mapToPerson(contact),
           meetings,
           totalMeetingTimeMinutes
         });
@@ -3767,13 +4455,18 @@ function registerContactsHandlers() {
         if (!parsed.success) {
           return error("VALIDATION_ERROR", "Invalid update request", parsed.error.format());
         }
-        const { id, notes } = parsed.data;
+        const { id, tags, ...otherUpdates } = parsed.data;
         const contact = getContactById(id);
         if (!contact) {
           return error("NOT_FOUND", `Contact with ID ${id} not found`);
         }
-        updateContactNotes(id, notes ?? null);
-        return success({ ...contact, notes: notes ?? null });
+        const updates = { ...otherUpdates };
+        if (tags) {
+          updates.tags = JSON.stringify(tags);
+        }
+        updateContact(id, updates);
+        const updatedContact = getContactById(id);
+        return success(mapToPerson(updatedContact));
       } catch (err) {
         console.error("contacts:update error:", err);
         return error("DATABASE_ERROR", "Failed to update contact", err);
@@ -3788,13 +4481,37 @@ function registerContactsHandlers() {
           return error("VALIDATION_ERROR", "Meeting ID must be a string");
         }
         const contacts = getContactsForMeeting(meetingId);
-        return success(contacts);
+        return success(contacts.map(mapToPerson));
       } catch (err) {
         console.error("contacts:getForMeeting error:", err);
         return error("DATABASE_ERROR", "Failed to fetch contacts for meeting", err);
       }
     }
   );
+}
+function mapToPerson(contact) {
+  let tags = [];
+  if (contact.tags) {
+    try {
+      tags = JSON.parse(contact.tags);
+    } catch {
+      tags = [];
+    }
+  }
+  return {
+    id: contact.id,
+    name: contact.name,
+    email: contact.email,
+    type: contact.type,
+    role: contact.role,
+    company: contact.company,
+    notes: contact.notes,
+    tags,
+    firstSeenAt: contact.first_seen_at,
+    lastSeenAt: contact.last_seen_at,
+    interactionCount: contact.meeting_count,
+    createdAt: contact.created_at
+  };
 }
 const GetProjectsRequestSchema = SearchPaginationSchema;
 const GetProjectByIdRequestSchema = zod.z.object({
@@ -3807,10 +4524,11 @@ const CreateProjectRequestSchema = zod.z.object({
 const UpdateProjectRequestSchema = zod.z.object({
   id: UUIDSchema,
   name: NonEmptyStringSchema.optional(),
-  description: OptionalStringSchema
+  description: OptionalStringSchema,
+  status: zod.z.enum(["active", "archived"]).optional()
 }).refine(
-  (data) => data.name !== void 0 || data.description !== void 0,
-  { message: "At least one field (name or description) must be provided" }
+  (data) => data.name !== void 0 || data.description !== void 0 || data.status !== void 0,
+  { message: "At least one field (name, description, or status) must be provided" }
 );
 const DeleteProjectRequestSchema = zod.z.object({
   id: UUIDSchema
@@ -3843,7 +4561,10 @@ function registerProjectsHandlers() {
         }
         const { search, limit, offset } = parsed.data;
         const result = getProjects(search, limit, offset);
-        return success(result);
+        return success({
+          projects: result.projects.map(mapToProject),
+          total: result.total
+        });
       } catch (err) {
         console.error("projects:getAll error:", err);
         return error("DATABASE_ERROR", "Failed to fetch projects", err);
@@ -3858,8 +4579,8 @@ function registerProjectsHandlers() {
         if (!parsed.success) {
           return error("VALIDATION_ERROR", "Invalid project ID", parsed.error.format());
         }
-        const project = getProjectById(parsed.data.id);
-        if (!project) {
+        const dbProject = getProjectById(parsed.data.id);
+        if (!dbProject) {
           return error("NOT_FOUND", `Project with ID ${parsed.data.id} not found`);
         }
         const meetings = getMeetingsForProject(parsed.data.id);
@@ -3878,7 +4599,7 @@ function registerProjectsHandlers() {
           }
         }
         return success({
-          project,
+          project: mapToProject(dbProject),
           meetings,
           topics: Array.from(topicsSet)
         });
@@ -3896,12 +4617,14 @@ function registerProjectsHandlers() {
         if (!parsed.success) {
           return error("VALIDATION_ERROR", "Invalid create request", parsed.error.format());
         }
-        const project = createProject({
-          id: crypto.randomUUID(),
+        const id = crypto$1.randomUUID();
+        createProject({
+          id,
           name: parsed.data.name,
           description: parsed.data.description ?? null
         });
-        return success(project);
+        const newProject = getProjectById(id);
+        return success(mapToProject(newProject));
       } catch (err) {
         console.error("projects:create error:", err);
         return error("DATABASE_ERROR", "Failed to create project", err);
@@ -3916,17 +4639,14 @@ function registerProjectsHandlers() {
         if (!parsed.success) {
           return error("VALIDATION_ERROR", "Invalid update request", parsed.error.format());
         }
-        const { id, name, description } = parsed.data;
+        const { id, name, description, status } = parsed.data;
         const project = getProjectById(id);
         if (!project) {
           return error("NOT_FOUND", `Project with ID ${id} not found`);
         }
-        updateProject(id, name, description);
-        return success({
-          ...project,
-          name: name ?? project.name,
-          description: description !== void 0 ? description : project.description
-        });
+        updateProject(id, name, description ?? void 0, status);
+        const updatedProject = getProjectById(id);
+        return success(mapToProject(updatedProject));
       } catch (err) {
         console.error("projects:update error:", err);
         return error("DATABASE_ERROR", "Failed to update project", err);
@@ -4003,13 +4723,22 @@ function registerProjectsHandlers() {
           return error("VALIDATION_ERROR", "Meeting ID must be a string");
         }
         const projects = getProjectsForMeeting(meetingId);
-        return success(projects);
+        return success(projects.map(mapToProject));
       } catch (err) {
         console.error("projects:getForMeeting error:", err);
         return error("DATABASE_ERROR", "Failed to fetch projects for meeting", err);
       }
     }
   );
+}
+function mapToProject(dbProject) {
+  return {
+    id: dbProject.id,
+    name: dbProject.name,
+    description: dbProject.description,
+    status: dbProject.status || "active",
+    createdAt: dbProject.created_at
+  };
 }
 const OUTPUT_TEMPLATES = {
   meeting_minutes: {
@@ -4208,6 +4937,20 @@ ${transcript.full_text}`);
         contact_email: contact.email || "",
         meeting_count: String(meetings.length)
       };
+    } else if (options.knowledgeCaptureId) {
+      const kc = queryOne("SELECT * FROM knowledge_captures WHERE id = ?", [options.knowledgeCaptureId]);
+      if (!kc) {
+        throw new Error(`Knowledge capture not found: ${options.knowledgeCaptureId}`);
+      }
+      const transcript = getTranscriptByRecordingId(kc.source_recording_id);
+      if (transcript?.full_text) {
+        transcripts.push(transcript.full_text);
+      }
+      contextInfo = {
+        capture_title: kc.title,
+        capture_date: new Date(kc.captured_at).toLocaleDateString(),
+        capture_summary: kc.summary || ""
+      };
     }
     if (transcripts.length === 0) {
       throw new Error("No transcripts available for the selected context");
@@ -4252,10 +4995,12 @@ const GenerateOutputRequestSchema = zod.z.object({
   templateId: OutputTemplateIdSchema,
   meetingId: UUIDSchema.optional(),
   projectId: UUIDSchema.optional(),
-  contactId: UUIDSchema.optional()
+  contactId: UUIDSchema.optional(),
+  knowledgeCaptureId: UUIDSchema.optional(),
+  actionableId: UUIDSchema.optional()
 }).refine(
-  (data) => data.meetingId || data.projectId || data.contactId,
-  { message: "At least one of meetingId, projectId, or contactId must be provided" }
+  (data) => data.meetingId || data.projectId || data.contactId || data.knowledgeCaptureId,
+  { message: "At least one context (meetingId, projectId, contactId, or knowledgeCaptureId) must be provided" }
 );
 function registerOutputsHandlers() {
   const generator = getOutputGeneratorService();
@@ -4280,6 +5025,24 @@ function registerOutputsHandlers() {
           return error("VALIDATION_ERROR", "Invalid generate request", parsed.error.format());
         }
         const result = await generator.generate(parsed.data);
+        if (parsed.data.actionableId) {
+          try {
+            const outputId = crypto$1.randomUUID();
+            const now = (/* @__PURE__ */ new Date()).toISOString();
+            runInTransaction(() => {
+              run(
+                "INSERT INTO outputs (id, knowledge_capture_id, template_id, template_name, content, generated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                [outputId, parsed.data.knowledgeCaptureId || "", parsed.data.templateId, parsed.data.templateId, result.content, now]
+              );
+              run(
+                "UPDATE actionables SET status = ?, artifact_id = ?, generated_at = ?, updated_at = ? WHERE id = ?",
+                ["generated", outputId, now, now, parsed.data.actionableId]
+              );
+            });
+          } catch (linkError) {
+            console.error("Failed to link output to actionable:", linkError);
+          }
+        }
         return success({
           content: result.content,
           templateId: result.templateId,
@@ -4368,7 +5131,7 @@ function sanitizeEventPayload(event) {
 }
 class DomainEventBus extends events.EventEmitter {
   mainWindow = null;
-  listenerCount = /* @__PURE__ */ new Map();
+  domainListenerCount = /* @__PURE__ */ new Map();
   MAX_LISTENERS_PER_EVENT = 20;
   constructor() {
     super();
@@ -4400,42 +5163,42 @@ class DomainEventBus extends events.EventEmitter {
    * Subscribe to a specific domain event type
    */
   onDomainEvent(eventType, handler) {
-    const currentCount = this.listenerCount.get(eventType) || 0;
+    const currentCount = this.domainListenerCount.get(eventType) || 0;
     if (currentCount >= this.MAX_LISTENERS_PER_EVENT) {
       console.warn(`[EventBus] Max listeners (${this.MAX_LISTENERS_PER_EVENT}) reached for event ${eventType}`);
       const listeners = this.listeners(eventType);
       if (listeners.length > 0) {
         this.off(eventType, listeners[0]);
-        this.listenerCount.set(eventType, currentCount - 1);
+        this.domainListenerCount.set(eventType, currentCount - 1);
       }
     }
     this.on(eventType, handler);
-    this.listenerCount.set(eventType, (this.listenerCount.get(eventType) || 0) + 1);
+    this.domainListenerCount.set(eventType, (this.domainListenerCount.get(eventType) || 0) + 1);
     return () => {
       this.off(eventType, handler);
-      const count = this.listenerCount.get(eventType) || 0;
-      this.listenerCount.set(eventType, Math.max(0, count - 1));
+      const count = this.domainListenerCount.get(eventType) || 0;
+      this.domainListenerCount.set(eventType, Math.max(0, count - 1));
     };
   }
   /**
    * Subscribe to all domain events
    */
   onAnyDomainEvent(handler) {
-    const currentCount = this.listenerCount.get("*") || 0;
+    const currentCount = this.domainListenerCount.get("*") || 0;
     if (currentCount >= this.MAX_LISTENERS_PER_EVENT) {
       console.warn(`[EventBus] Max listeners (${this.MAX_LISTENERS_PER_EVENT}) reached for wildcard events`);
       const listeners = this.listeners("*");
       if (listeners.length > 0) {
         this.off("*", listeners[0]);
-        this.listenerCount.set("*", currentCount - 1);
+        this.domainListenerCount.set("*", currentCount - 1);
       }
     }
     this.on("*", handler);
-    this.listenerCount.set("*", (this.listenerCount.get("*") || 0) + 1);
+    this.domainListenerCount.set("*", (this.domainListenerCount.get("*") || 0) + 1);
     return () => {
       this.off("*", handler);
-      const count = this.listenerCount.get("*") || 0;
-      this.listenerCount.set("*", Math.max(0, count - 1));
+      const count = this.domainListenerCount.get("*") || 0;
+      this.domainListenerCount.set("*", Math.max(0, count - 1));
     };
   }
 }
@@ -4602,78 +5365,6 @@ class QualityAssessmentService {
     const transcript = await getTranscriptByRecordingIdAsync(recordingId);
     return this.inferQualityFromData(recording, transcript);
   }
-  inferQuality(recordingId) {
-    const recording = getRecordingById(recordingId);
-    if (!recording) {
-      return { level: "low", confidence: 1, reason: "Recording not found" };
-    }
-    const transcript = getTranscriptByRecordingId(recordingId);
-    return this.inferQualityFromData(recording, transcript);
-  }
-  // Legacy implementation - kept for backwards compatibility
-  inferQualityOld(recordingId) {
-    const recording = getRecordingById(recordingId);
-    if (!recording) {
-      return { level: "low", confidence: 1, reason: "Recording not found" };
-    }
-    const transcript = getTranscriptByRecordingId(recordingId);
-    const hasMeeting = !!recording.meeting_id;
-    const hasTranscript = !!transcript;
-    const duration = recording.duration_seconds || 0;
-    let score = 0;
-    let confidence = 0.7;
-    const reasons = [];
-    if (hasTranscript) {
-      score += 40;
-      reasons.push("has transcript");
-      if (transcript.word_count && transcript.word_count > 100) {
-        score += 10;
-        reasons.push("substantial transcript");
-      }
-      if (transcript.summary) {
-        score += 5;
-        reasons.push("has summary");
-      }
-    } else {
-      reasons.push("no transcript");
-    }
-    if (hasMeeting) {
-      score += 30;
-      reasons.push("linked to meeting");
-      if (recording.correlation_confidence && recording.correlation_confidence > 0.8) {
-        score += 10;
-        reasons.push("high meeting confidence");
-      }
-    } else {
-      reasons.push("no meeting link");
-    }
-    if (duration >= 60 && duration <= 7200) {
-      score += 20;
-      reasons.push("appropriate duration");
-    } else if (duration < 60) {
-      reasons.push("very short recording");
-      confidence = 0.6;
-    } else if (duration > 7200) {
-      reasons.push("very long recording");
-    }
-    if (recording.file_size && recording.file_size > 1e3) {
-      score += 10;
-      reasons.push("valid file size");
-    } else {
-      reasons.push("suspicious file size");
-      confidence = 0.5;
-    }
-    let level;
-    if (score >= 70) {
-      level = "high";
-    } else if (score >= 40) {
-      level = "medium";
-    } else {
-      level = "low";
-    }
-    const reason = reasons.join(", ");
-    return { level, confidence, reason };
-  }
   /**
    * Batch auto-assess multiple recordings
    * Useful for initial import or re-assessment
@@ -4740,23 +5431,20 @@ function getQualityAssessmentService() {
   }
   return qualityAssessmentServiceInstance;
 }
+const TIER_RETENTION_DAYS = {
+  hot: 30,
+  // Keep locally for 30 days
+  warm: 90,
+  // Keep for 90 days
+  cold: 180,
+  // Keep for 180 days
+  archive: 365
+  // Keep indefinitely (or until manual cleanup)
+};
 const STORAGE_POLICIES = {
   high: "hot",
-  // High-quality: keep readily accessible
   medium: "warm",
-  // Medium-quality: accessible but can be slower
   low: "cold"
-  // Low-quality: archive or cleanup candidate
-};
-const TIER_RETENTION_DAYS = {
-  hot: 365,
-  // Keep high-quality for 1 year
-  warm: 180,
-  // Medium-quality for 6 months
-  cold: 90,
-  // Low-quality for 3 months
-  archive: 30
-  // Archive for 1 month before suggesting deletion
 };
 class StoragePolicyService {
   constructor() {
@@ -4860,17 +5548,21 @@ class StoragePolicyService {
         const recordedDate = new Date(recording.date_recorded);
         const ageMs = now.getTime() - recordedDate.getTime();
         const ageInDays = Math.floor(ageMs / (1e3 * 60 * 60 * 24));
+        const quality = qualityMap.get(recording.id);
         suggestions.push({
           recordingId: recording.id,
           filename: recording.filename,
           dateRecorded: recording.date_recorded,
-          tier,
-          quality: qualityMap.get(recording.id),
+          currentTier: tier,
+          suggestedTier: this.getNextLowerTier(tier),
+          quality,
           ageInDays,
-          sizeBytes: recording.file_size,
+          sizeBytes: recording.file_size ?? null,
           reason: `Exceeds ${tier} tier retention (${maxAge} days) by ${ageInDays - maxAge} days`,
           hasTranscript: recording.transcription_status === "complete",
-          hasMeeting: !!recording.meeting_id
+          hasMeeting: !!recording.meeting_id,
+          actionableId: recording.actionable_id
+          // If linked
         });
       }
     }
@@ -4883,16 +5575,12 @@ class StoragePolicyService {
   getCleanupSuggestionsForTier(tier, minAgeDays) {
     const override = minAgeDays ? { [tier]: minAgeDays } : void 0;
     const allSuggestions = this.getCleanupSuggestions(override);
-    return allSuggestions.filter((s) => s.tier === tier);
+    return allSuggestions.filter((s) => s.currentTier === tier);
   }
   /**
    * Execute cleanup for a list of recording IDs
-   * This will:
-   * - Delete local files
-   * - Update recording location to 'deleted' or 'device-only'
-   * - Optionally archive tier to next lower tier instead of deletion
    */
-  async executeCleanup(recordingIds, archive = false) {
+  async executeCleanup(recordingIds) {
     const deleted = [];
     const archived = [];
     const failed = [];
@@ -4903,8 +5591,9 @@ class StoragePolicyService {
           failed.push({ id: recordingId, reason: "Recording not found" });
           continue;
         }
-        if (archive) {
-          const currentTier = recording.storage_tier;
+        const quality = await getQualityAssessmentAsync(recording.id);
+        if (quality) {
+          const currentTier = recording.storage_tier || "hot";
           const nextTier = this.getNextLowerTier(currentTier);
           if (nextTier) {
             updateRecordingStorageTier(recordingId, nextTier);
@@ -5126,11 +5815,10 @@ function registerQualityHandlers() {
   );
   electron.ipcMain.handle(
     "storage:execute-cleanup",
-    async (_, recordingIds, archive = false) => {
+    async (_, recordingIds) => {
       try {
         const validIds = validateRecordingIds(recordingIds);
-        const validArchive = archive !== void 0 ? validateBoolean(archive) : false;
-        const result = await storageService.executeCleanup(validIds, validArchive);
+        const result = await storageService.executeCleanup(validIds);
         return { success: true, data: result };
       } catch (error2) {
         const message = error2 instanceof Error ? error2.message : "Unknown error";
@@ -5230,17 +5918,30 @@ function createMigrationBackup() {
   const db2 = getDatabase();
   db2.run("DROP TABLE IF EXISTS _backup_recordings");
   db2.run("DROP TABLE IF EXISTS _backup_transcripts");
-  db2.run(`
-    CREATE TEMP TABLE _backup_recordings AS
-    SELECT * FROM recordings
-    WHERE migration_status IS NULL OR migration_status = 'pending'
-  `);
-  db2.run(`
-    CREATE TEMP TABLE _backup_transcripts AS
-    SELECT t.* FROM transcripts t
-    INNER JOIN recordings r ON t.recording_id = r.id
-    WHERE r.migration_status IS NULL OR r.migration_status = 'pending'
-  `);
+  let hasMigrationStatus = false;
+  try {
+    const stmt = db2.prepare("SELECT migration_status FROM recordings LIMIT 1");
+    stmt.free();
+    hasMigrationStatus = true;
+  } catch (e) {
+    hasMigrationStatus = false;
+  }
+  if (hasMigrationStatus) {
+    db2.run(`
+      CREATE TEMP TABLE _backup_recordings AS
+      SELECT * FROM recordings
+      WHERE migration_status IS NULL OR migration_status = 'pending'
+    `);
+    db2.run(`
+      CREATE TEMP TABLE _backup_transcripts AS
+      SELECT t.* FROM transcripts t
+      INNER JOIN recordings r ON t.recording_id = r.id
+      WHERE r.migration_status IS NULL OR r.migration_status = 'pending'
+    `);
+  } else {
+    db2.run(`CREATE TEMP TABLE _backup_recordings AS SELECT * FROM recordings`);
+    db2.run(`CREATE TEMP TABLE _backup_transcripts AS SELECT * FROM transcripts`);
+  }
 }
 function checkBackupExists() {
   const db2 = getDatabase();
@@ -5523,9 +6224,10 @@ async function migrateToV11Impl(mainWindow2) {
         progress: 10
       });
       const schemaSQL = loadV11Schema();
-      const statements = schemaSQL.split(";").map((s) => s.trim()).filter((s) => s.length > 0 && !s.startsWith("--"));
+      const cleanSQL = schemaSQL.split("\n").filter((line) => !line.trim().startsWith("--")).join("\n");
+      const statements = cleanSQL.split(";").map((s) => s.trim()).filter((s) => s.length > 0);
       for (const stmt of statements) {
-        if (stmt.trim()) {
+        if (stmt) {
           try {
             db2.run(stmt);
           } catch (error2) {
@@ -5907,8 +6609,6 @@ class DownloadService {
     isProcessing: false,
     isPaused: false
   };
-  // Device download function - will be injected from renderer
-  deviceDownloadFn = null;
   constructor() {
     console.log("[DownloadService] Initialized");
   }
@@ -5974,7 +6674,9 @@ class DownloadService {
         filename: file.filename,
         fileSize: file.size,
         progress: 0,
-        status: "pending"
+        status: "pending",
+        recordingDate: file.dateCreated
+        // Store the original recording date
       };
       this.state.queue.set(file.filename, item);
       queuedIds.push(file.filename);
@@ -6014,7 +6716,7 @@ class DownloadService {
       item.status = "downloading";
       item.startedAt = /* @__PURE__ */ new Date();
       this.emitStateUpdate();
-      const filePath = await saveRecording(filename, data);
+      const filePath = await saveRecording(filename, data, void 0, item.recordingDate);
       const wavFilename = filename.replace(/\.hda$/i, ".wav");
       addSyncedFile(filename, path.basename(filePath), filePath, data.length);
       markRecordingDownloaded(filename, filePath);
@@ -6156,10 +6858,18 @@ function registerDownloadServiceHandlers() {
     return service.getFilesToSync(files);
   });
   electron.ipcMain.handle("download-service:queue-downloads", (_, files) => {
-    return service.queueDownloads(files);
+    const filesWithDates = files.map((f) => ({
+      ...f,
+      dateCreated: f.dateCreated ? new Date(f.dateCreated) : void 0
+    }));
+    return service.queueDownloads(filesWithDates);
   });
   electron.ipcMain.handle("download-service:start-session", (_, files) => {
-    return service.startSyncSession(files);
+    const filesWithDates = files.map((f) => ({
+      ...f,
+      dateCreated: f.dateCreated ? new Date(f.dateCreated) : void 0
+    }));
+    return service.startSyncSession(filesWithDates);
   });
   electron.ipcMain.handle("download-service:process-download", async (_, filename, data) => {
     const buffer = Buffer.from(data);
@@ -6182,6 +6892,1060 @@ function registerDownloadServiceHandlers() {
   });
   console.log("[DownloadService] IPC handlers registered");
 }
+const MONTH_NAMES = {
+  "Jan": 0,
+  "Feb": 1,
+  "Mar": 2,
+  "Apr": 3,
+  "May": 4,
+  "Jun": 5,
+  "Jul": 6,
+  "Aug": 7,
+  "Sep": 8,
+  "Oct": 9,
+  "Nov": 10,
+  "Dec": 11
+};
+function parseHiDockFilenameDate(filename) {
+  const monthNameMatch = filename.match(/(\d{4})(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(\d{1,2})-(\d{2})(\d{2})(\d{2})/);
+  if (monthNameMatch) {
+    const [, year, monthName, day, hour, minute, second] = monthNameMatch;
+    const month = MONTH_NAMES[monthName];
+    if (month !== void 0) {
+      return new Date(
+        parseInt(year),
+        month,
+        parseInt(day),
+        parseInt(hour),
+        parseInt(minute),
+        parseInt(second)
+      );
+    }
+  }
+  const savedMatch = filename.match(/(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})/);
+  if (savedMatch) {
+    const [, year, month, day, hour, minute] = savedMatch;
+    return new Date(
+      parseInt(year),
+      parseInt(month) - 1,
+      parseInt(day),
+      parseInt(hour),
+      parseInt(minute),
+      0
+    );
+  }
+  const numericMatch = filename.match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})(\d{2})(\d{2})/);
+  if (numericMatch) {
+    const [, year, month, day, hour, minute, second] = numericMatch;
+    return new Date(
+      parseInt(year),
+      parseInt(month) - 1,
+      parseInt(day),
+      parseInt(hour),
+      parseInt(minute),
+      parseInt(second)
+    );
+  }
+  return void 0;
+}
+function generateCorrectFilename(originalFilename, recordingDate) {
+  const datePrefix = recordingDate.toISOString().split("T")[0];
+  const timePrefix = `${String(recordingDate.getHours()).padStart(2, "0")}${String(recordingDate.getMinutes()).padStart(2, "0")}`;
+  const ext = path.extname(originalFilename);
+  const base = path.basename(originalFilename, ext);
+  const suffixMatch = base.match(/-([^-]+)$/);
+  const suffix = suffixMatch ? `-${suffixMatch[1]}` : "";
+  return `${datePrefix}_${timePrefix}${suffix}${ext === ".hda" ? ".wav" : ext}`;
+}
+class IntegrityService {
+  lastReport = null;
+  /**
+   * Run all startup integrity checks
+   * Called when the app initializes
+   */
+  async runStartupChecks() {
+    console.log("[IntegrityService] Running startup integrity checks...");
+    let issuesFound = 0;
+    let issuesFixed = 0;
+    try {
+      const orphanedResult = this.resetOrphanedDownloads();
+      issuesFound += orphanedResult.found;
+      issuesFixed += orphanedResult.fixed;
+    } catch (error2) {
+      console.error("[IntegrityService] Error resetting orphaned downloads:", error2);
+    }
+    try {
+      const transcriptionResult = this.resetStuckTranscriptions();
+      issuesFound += transcriptionResult.found;
+      issuesFixed += transcriptionResult.fixed;
+    } catch (error2) {
+      console.error("[IntegrityService] Error resetting stuck transcriptions:", error2);
+    }
+    try {
+      const dateResult = this.fixFileDates();
+      issuesFound += dateResult.found;
+      issuesFixed += dateResult.fixed;
+    } catch (error2) {
+      console.error("[IntegrityService] Error fixing file dates:", error2);
+    }
+    console.log(`[IntegrityService] Startup checks complete: ${issuesFound} issues found, ${issuesFixed} fixed`);
+    return { issuesFound, issuesFixed };
+  }
+  /**
+   * Reset downloads that are stuck in 'downloading' status
+   * This happens when the app crashes during a download
+   */
+  resetOrphanedDownloads() {
+    console.log("[IntegrityService] Checking for orphaned downloads...");
+    const stuckRecordings = queryAll(`
+      SELECT * FROM recordings
+      WHERE on_local = 0
+        AND file_path IS NOT NULL
+        AND file_path != ''
+    `);
+    let fixed = 0;
+    for (const rec of stuckRecordings) {
+      if (!rec.file_path) continue;
+      if (fs.existsSync(rec.file_path)) {
+        console.log(`[IntegrityService] Fixing on_local flag for: ${rec.filename}`);
+        try {
+          run(`UPDATE recordings SET on_local = 1, location = 'both' WHERE id = ?`, [rec.id]);
+          fixed++;
+        } catch (error2) {
+          console.error(`[IntegrityService] Failed to fix on_local for ${rec.filename}:`, error2);
+        }
+      } else {
+        console.log(`[IntegrityService] Resetting orphaned download: ${rec.filename}`);
+        try {
+          run(`UPDATE recordings SET file_path = NULL, on_local = 0, location = 'device-only' WHERE id = ?`, [rec.id]);
+          fixed++;
+        } catch (error2) {
+          console.warn(`[IntegrityService] Could not set NULL, trying empty string: ${error2}`);
+          try {
+            run(`UPDATE recordings SET file_path = '', on_local = 0, location = 'device-only' WHERE id = ?`, [rec.id]);
+            fixed++;
+          } catch (innerError) {
+            console.error(`[IntegrityService] Failed to reset recording ${rec.filename}:`, innerError);
+          }
+        }
+      }
+    }
+    if (fixed > 0) {
+      saveDatabase();
+    }
+    console.log(`[IntegrityService] Orphaned downloads: ${stuckRecordings.length} checked, ${fixed} fixed`);
+    return { found: stuckRecordings.length, fixed };
+  }
+  /**
+   * Reset transcriptions stuck in 'processing' or 'transcribing' status
+   */
+  resetStuckTranscriptions() {
+    console.log("[IntegrityService] Checking for stuck transcriptions...");
+    const db2 = getDatabase();
+    const stuckRecordings = queryAll(`
+      SELECT id FROM recordings WHERE status = 'transcribing'
+    `);
+    if (stuckRecordings.length > 0) {
+      db2.run(`UPDATE recordings SET status = 'pending' WHERE status = 'transcribing'`);
+    }
+    const stuckQueue = queryAll(`
+      SELECT id FROM transcription_queue WHERE status = 'processing'
+    `);
+    if (stuckQueue.length > 0) {
+      db2.run(`UPDATE transcription_queue SET status = 'pending' WHERE status = 'processing'`);
+    }
+    const totalFixed = stuckRecordings.length + stuckQueue.length;
+    if (totalFixed > 0) {
+      saveDatabase();
+      console.log(`[IntegrityService] Reset ${stuckRecordings.length} recordings and ${stuckQueue.length} queue items`);
+    }
+    return { found: totalFixed, fixed: totalFixed };
+  }
+  /**
+   * Fix file dates that don't match the filename.
+   * This repairs files downloaded with wrong dates (bug prior to date preservation fix).
+   * Updates both file mtime and database date_recorded.
+   */
+  fixFileDates() {
+    console.log("[IntegrityService] Checking for files with wrong dates...");
+    const recordingsPath = getRecordingsPath();
+    if (!fs.existsSync(recordingsPath)) {
+      return { found: 0, fixed: 0 };
+    }
+    const files = fs.readdirSync(recordingsPath);
+    const audioExtensions = [".wav", ".mp3", ".m4a", ".ogg", ".webm"];
+    const oneHourMs = 60 * 60 * 1e3;
+    let found = 0;
+    let fixed = 0;
+    for (const file of files) {
+      const ext = path.extname(file).toLowerCase();
+      if (!audioExtensions.includes(ext)) continue;
+      const filePath = path.join(recordingsPath, file);
+      const filenameDate = parseHiDockFilenameDate(file);
+      if (!filenameDate) {
+        continue;
+      }
+      try {
+        const stats = fs.statSync(filePath);
+        const mtimeDiff = Math.abs(stats.mtime.getTime() - filenameDate.getTime());
+        if (mtimeDiff > oneHourMs) {
+          found++;
+          console.log(`[IntegrityService] Fixing date for: ${file} (mtime was ${stats.mtime.toISOString()}, should be ${filenameDate.toISOString()})`);
+          try {
+            fs.utimesSync(filePath, filenameDate, filenameDate);
+            const hdaName = file.replace(/\.wav$/i, ".hda");
+            const recording = getRecordingByFilename(file) || getRecordingByFilename(hdaName);
+            if (recording) {
+              run(`UPDATE recordings SET date_recorded = ? WHERE id = ?`, [filenameDate.toISOString(), recording.id]);
+            }
+            fixed++;
+          } catch (error2) {
+            console.error(`[IntegrityService] Failed to fix date for ${file}:`, error2);
+          }
+        }
+      } catch {
+      }
+    }
+    if (fixed > 0) {
+      saveDatabase();
+    }
+    console.log(`[IntegrityService] File dates: ${found} files with wrong dates, ${fixed} fixed`);
+    return { found, fixed };
+  }
+  /**
+   * Run a full integrity scan
+   * Returns a detailed report of all issues found
+   */
+  async runFullScan() {
+    console.log("[IntegrityService] Starting full integrity scan...");
+    const startTime = /* @__PURE__ */ new Date();
+    const issues = [];
+    issues.push(...this.findOrphanedDownloads());
+    issues.push(...this.findMissingFiles());
+    issues.push(...this.findOrphanedFiles());
+    issues.push(...this.findDateMismatches());
+    issues.push(...this.findSizeMismatches());
+    issues.push(...this.findIncompleteDownloads());
+    const endTime = /* @__PURE__ */ new Date();
+    const issuesByType = {};
+    const issuesBySeverity = {};
+    let autoRepairableCount = 0;
+    for (const issue of issues) {
+      issuesByType[issue.type] = (issuesByType[issue.type] || 0) + 1;
+      issuesBySeverity[issue.severity] = (issuesBySeverity[issue.severity] || 0) + 1;
+      if (issue.autoRepairable) autoRepairableCount++;
+    }
+    const report = {
+      scanStarted: startTime.toISOString(),
+      scanCompleted: endTime.toISOString(),
+      totalIssues: issues.length,
+      issuesByType,
+      issuesBySeverity,
+      issues,
+      autoRepairableCount
+    };
+    this.lastReport = report;
+    console.log(`[IntegrityService] Scan complete: ${issues.length} issues found`);
+    return report;
+  }
+  /**
+   * Find downloads stuck in downloading state
+   */
+  findOrphanedDownloads() {
+    const issues = [];
+    const recordings = queryAll(`
+      SELECT * FROM recordings
+      WHERE file_path IS NOT NULL AND file_path != ''
+    `);
+    for (const rec of recordings) {
+      if (rec.file_path && !fs.existsSync(rec.file_path)) {
+        issues.push({
+          id: `orphaned_download_${rec.id}`,
+          type: "orphaned_download",
+          severity: "medium",
+          description: `Recording "${rec.filename}" has file_path set but file does not exist`,
+          filename: rec.filename,
+          filePath: rec.file_path,
+          recordingId: rec.id,
+          suggestedAction: "repair",
+          autoRepairable: true,
+          details: {
+            expected_path: rec.file_path,
+            on_local: rec.on_local,
+            location: rec.location
+          }
+        });
+      }
+    }
+    return issues;
+  }
+  /**
+   * Find files that are in the database but missing from disk
+   */
+  findMissingFiles() {
+    const issues = [];
+    const syncedFiles = queryAll("SELECT * FROM synced_files");
+    for (const sf of syncedFiles) {
+      if (!fs.existsSync(sf.file_path)) {
+        issues.push({
+          id: `missing_file_synced_${sf.id}`,
+          type: "missing_file",
+          severity: "medium",
+          description: `Synced file "${sf.local_filename}" is missing from disk`,
+          filename: sf.original_filename,
+          filePath: sf.file_path,
+          suggestedAction: "repair",
+          autoRepairable: true,
+          details: {
+            synced_at: sf.synced_at,
+            expected_size: sf.file_size
+          }
+        });
+      }
+    }
+    return issues;
+  }
+  /**
+   * Find files on disk that aren't tracked in the database
+   */
+  findOrphanedFiles() {
+    const issues = [];
+    const recordingsPath = getRecordingsPath();
+    if (!fs.existsSync(recordingsPath)) {
+      return issues;
+    }
+    const files = fs.readdirSync(recordingsPath);
+    const audioExtensions = [".wav", ".mp3", ".m4a", ".ogg", ".webm", ".hda"];
+    for (const file of files) {
+      const ext = path.extname(file).toLowerCase();
+      if (!audioExtensions.includes(ext)) continue;
+      const filePath = path.join(recordingsPath, file);
+      const synced = getSyncedFile(file);
+      if (synced) continue;
+      const hdaName = file.replace(/\.wav$/i, ".hda");
+      const recording = getRecordingByFilename(file) || getRecordingByFilename(hdaName);
+      if (!recording) {
+        const stats = fs.statSync(filePath);
+        issues.push({
+          id: `orphaned_file_${file}`,
+          type: "orphaned_file",
+          severity: "low",
+          description: `File "${file}" exists on disk but is not tracked in database`,
+          filename: file,
+          filePath,
+          suggestedAction: "repair",
+          autoRepairable: true,
+          details: {
+            size: stats.size,
+            modified: stats.mtime.toISOString()
+          }
+        });
+      }
+    }
+    return issues;
+  }
+  /**
+   * Find recordings with suspicious dates (e.g., year 2000, far future dates)
+   * Also detects files where the filename date doesn't match the file mtime
+   */
+  findDateMismatches() {
+    const issues = [];
+    const now = /* @__PURE__ */ new Date();
+    const minValidDate = /* @__PURE__ */ new Date("2020-01-01");
+    const maxValidDate = new Date(now.getTime() + 24 * 60 * 60 * 1e3);
+    const recordings = queryAll("SELECT * FROM recordings");
+    for (const rec of recordings) {
+      const dateRecorded = new Date(rec.date_recorded);
+      if (isNaN(dateRecorded.getTime())) {
+        issues.push({
+          id: `date_invalid_${rec.id}`,
+          type: "date_mismatch",
+          severity: "high",
+          description: `Recording "${rec.filename}" has invalid date: ${rec.date_recorded}`,
+          filename: rec.filename,
+          recordingId: rec.id,
+          suggestedAction: "manual",
+          autoRepairable: false,
+          details: { raw_date: rec.date_recorded }
+        });
+        continue;
+      }
+      if (dateRecorded < minValidDate) {
+        issues.push({
+          id: `date_too_old_${rec.id}`,
+          type: "date_mismatch",
+          severity: "medium",
+          description: `Recording "${rec.filename}" has suspicious old date: ${dateRecorded.toISOString()}`,
+          filename: rec.filename,
+          recordingId: rec.id,
+          suggestedAction: "repair",
+          autoRepairable: true,
+          details: {
+            recorded_date: dateRecorded.toISOString(),
+            suggested_date: rec.created_at
+            // Use created_at as fallback
+          }
+        });
+      } else if (dateRecorded > maxValidDate) {
+        issues.push({
+          id: `date_future_${rec.id}`,
+          type: "date_mismatch",
+          severity: "medium",
+          description: `Recording "${rec.filename}" has future date: ${dateRecorded.toISOString()}`,
+          filename: rec.filename,
+          recordingId: rec.id,
+          suggestedAction: "repair",
+          autoRepairable: true,
+          details: {
+            recorded_date: dateRecorded.toISOString(),
+            suggested_date: now.toISOString()
+          }
+        });
+      }
+    }
+    const recordingsPath = getRecordingsPath();
+    if (fs.existsSync(recordingsPath)) {
+      const files = fs.readdirSync(recordingsPath);
+      const audioExtensions = [".wav", ".mp3", ".m4a", ".ogg", ".webm"];
+      for (const file of files) {
+        const ext = path.extname(file).toLowerCase();
+        if (!audioExtensions.includes(ext)) continue;
+        const filePath = path.join(recordingsPath, file);
+        const filenameDate = parseHiDockFilenameDate(file);
+        if (!filenameDate) {
+          continue;
+        }
+        try {
+          const stats = fs.statSync(filePath);
+          const mtimeDiff = Math.abs(stats.mtime.getTime() - filenameDate.getTime());
+          const oneHourMs = 60 * 60 * 1e3;
+          const oneDayMs = 24 * 60 * 60 * 1e3;
+          if (mtimeDiff > oneDayMs) {
+            issues.push({
+              id: `file_mtime_mismatch_${file}`,
+              type: "date_mismatch",
+              severity: "high",
+              description: `File "${file}" has mtime (${stats.mtime.toISOString()}) that doesn't match filename date (${filenameDate.toISOString()})`,
+              filename: file,
+              filePath,
+              suggestedAction: "repair",
+              autoRepairable: true,
+              details: {
+                file_mtime: stats.mtime.toISOString(),
+                filename_date: filenameDate.toISOString(),
+                difference_hours: Math.round(mtimeDiff / oneHourMs),
+                correct_filename: generateCorrectFilename(file, filenameDate)
+              }
+            });
+          } else if (mtimeDiff > oneHourMs) {
+            issues.push({
+              id: `file_mtime_minor_${file}`,
+              type: "date_mismatch",
+              severity: "low",
+              description: `File "${file}" has minor time mismatch (${Math.round(mtimeDiff / 6e4)} minutes)`,
+              filename: file,
+              filePath,
+              suggestedAction: "repair",
+              autoRepairable: true,
+              details: {
+                file_mtime: stats.mtime.toISOString(),
+                filename_date: filenameDate.toISOString(),
+                difference_minutes: Math.round(mtimeDiff / 6e4)
+              }
+            });
+          }
+        } catch {
+        }
+      }
+    }
+    return issues;
+  }
+  /**
+   * Find files where database size doesn't match actual file size
+   */
+  findSizeMismatches() {
+    const issues = [];
+    const recordings = queryAll(`
+      SELECT * FROM recordings
+      WHERE file_path IS NOT NULL AND file_size IS NOT NULL
+    `);
+    for (const rec of recordings) {
+      if (!rec.file_path || !fs.existsSync(rec.file_path)) continue;
+      try {
+        const stats = fs.statSync(rec.file_path);
+        const sizeDiff = Math.abs(stats.size - (rec.file_size || 0));
+        const tolerance = (rec.file_size || 0) * 0.05;
+        if (sizeDiff > tolerance && sizeDiff > 1024) {
+          issues.push({
+            id: `size_mismatch_${rec.id}`,
+            type: "size_mismatch",
+            severity: "low",
+            description: `Recording "${rec.filename}" size mismatch: DB=${rec.file_size}, Disk=${stats.size}`,
+            filename: rec.filename,
+            filePath: rec.file_path,
+            recordingId: rec.id,
+            suggestedAction: "repair",
+            autoRepairable: true,
+            details: {
+              db_size: rec.file_size,
+              disk_size: stats.size,
+              difference: sizeDiff
+            }
+          });
+        }
+      } catch {
+      }
+    }
+    return issues;
+  }
+  /**
+   * Find downloads that may be incomplete (very small files, 0 bytes, etc.)
+   */
+  findIncompleteDownloads() {
+    const issues = [];
+    const recordingsPath = getRecordingsPath();
+    if (!fs.existsSync(recordingsPath)) return issues;
+    const files = fs.readdirSync(recordingsPath);
+    const audioExtensions = [".wav", ".mp3", ".m4a"];
+    for (const file of files) {
+      const ext = path.extname(file).toLowerCase();
+      if (!audioExtensions.includes(ext)) continue;
+      const filePath = path.join(recordingsPath, file);
+      try {
+        const stats = fs.statSync(filePath);
+        if (stats.size < 1024) {
+          issues.push({
+            id: `incomplete_${file}`,
+            type: "incomplete_download",
+            severity: "high",
+            description: `File "${file}" appears incomplete (${stats.size} bytes)`,
+            filename: file,
+            filePath,
+            suggestedAction: "delete",
+            autoRepairable: true,
+            details: {
+              size: stats.size,
+              modified: stats.mtime.toISOString()
+            }
+          });
+        }
+      } catch {
+      }
+    }
+    return issues;
+  }
+  /**
+   * Repair a specific issue
+   */
+  async repairIssue(issueId) {
+    if (!this.lastReport) {
+      console.error("[IntegrityService] repairIssue: No scan report available");
+      return { issueId, success: false, action: "none", error: "No scan report available" };
+    }
+    const issue = this.lastReport.issues.find((i) => i.id === issueId);
+    if (!issue) {
+      console.error("[IntegrityService] repairIssue: Issue not found:", issueId);
+      return { issueId, success: false, action: "none", error: "Issue not found" };
+    }
+    if (!issue.autoRepairable) {
+      console.error("[IntegrityService] repairIssue: Issue not auto-repairable:", issueId);
+      return { issueId, success: false, action: "none", error: "Issue requires manual repair" };
+    }
+    try {
+      switch (issue.type) {
+        case "orphaned_download":
+          return this.repairOrphanedDownload(issue);
+        case "missing_file":
+          return this.repairMissingFile(issue);
+        case "orphaned_file":
+          return this.repairOrphanedFile(issue);
+        case "date_mismatch":
+          return this.repairDateMismatch(issue);
+        case "size_mismatch":
+          return this.repairSizeMismatch(issue);
+        case "incomplete_download":
+          return this.repairIncompleteDownload(issue);
+        default:
+          return { issueId, success: false, action: "none", error: "Unknown issue type" };
+      }
+    } catch (error2) {
+      const errorMsg = error2 instanceof Error ? error2.message : "Unknown error";
+      return { issueId, success: false, action: "repair", error: errorMsg };
+    }
+  }
+  /**
+   * Repair all auto-repairable issues
+   */
+  async repairAllAuto() {
+    if (!this.lastReport) {
+      console.log("[IntegrityService] repairAllAuto: No report available");
+      return [];
+    }
+    const results = [];
+    const autoRepairable = this.lastReport.issues.filter((i) => i.autoRepairable);
+    console.log(`[IntegrityService] repairAllAuto: Found ${autoRepairable.length} auto-repairable issues`);
+    for (const issue of autoRepairable) {
+      console.log(`[IntegrityService] Repairing issue: ${issue.id} (type: ${issue.type}, recordingId: ${issue.recordingId})`);
+      const result = await this.repairIssue(issue.id);
+      console.log(`[IntegrityService] Repair result:`, result.success ? "SUCCESS" : `FAILED: ${result.error}`);
+      results.push(result);
+    }
+    const successCount = results.filter((r) => r.success).length;
+    console.log(`[IntegrityService] repairAllAuto complete: ${successCount}/${results.length} succeeded`);
+    return results;
+  }
+  // ==========================================================================
+  // Repair Methods
+  // ==========================================================================
+  repairOrphanedDownload(issue) {
+    if (!issue.recordingId) {
+      console.error("[IntegrityService] repairOrphanedDownload: No recording ID for issue", issue.id);
+      return { issueId: issue.id, success: false, action: "repair", error: "No recording ID" };
+    }
+    try {
+      console.log("[IntegrityService] Deleting orphaned recording:", issue.recordingId, issue.filename);
+      run(`DELETE FROM recordings WHERE id = ?`, [issue.recordingId]);
+      saveDatabase();
+      console.log("[IntegrityService] Successfully deleted orphaned recording:", issue.recordingId);
+      return { issueId: issue.id, success: true, action: "Deleted orphaned recording record" };
+    } catch (error2) {
+      const errorMsg = error2 instanceof Error ? error2.message : "Unknown error";
+      console.error("[IntegrityService] repairOrphanedDownload error:", errorMsg);
+      return { issueId: issue.id, success: false, action: "repair", error: errorMsg };
+    }
+  }
+  repairMissingFile(issue) {
+    if (!issue.filename) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No filename" };
+    }
+    removeSyncedFile(issue.filename);
+    const recording = getRecordingByFilename(issue.filename);
+    if (recording) {
+      run(`UPDATE recordings SET file_path = NULL, on_local = 0, location =
+        CASE WHEN on_device = 1 THEN 'device-only' ELSE 'deleted' END
+        WHERE id = ?`, [recording.id]);
+    }
+    saveDatabase();
+    return { issueId: issue.id, success: true, action: "Removed missing file from database tracking" };
+  }
+  repairOrphanedFile(issue) {
+    if (!issue.filename || !issue.filePath) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No filename or path" };
+    }
+    const stats = fs.statSync(issue.filePath);
+    addSyncedFile(issue.filename, issue.filename, issue.filePath, stats.size);
+    saveDatabase();
+    return { issueId: issue.id, success: true, action: "Added orphaned file to database" };
+  }
+  repairDateMismatch(issue) {
+    if (issue.id.startsWith("file_mtime_")) {
+      if (!issue.filePath || !issue.details?.filename_date) {
+        return { issueId: issue.id, success: false, action: "repair", error: "No file path or filename date" };
+      }
+      try {
+        const correctDate = new Date(issue.details.filename_date);
+        fs.utimesSync(issue.filePath, correctDate, correctDate);
+        if (issue.filename) {
+          const recording = getRecordingByFilename(issue.filename);
+          if (recording) {
+            run(`UPDATE recordings SET date_recorded = ? WHERE id = ?`, [correctDate.toISOString(), recording.id]);
+            saveDatabase();
+          }
+        }
+        return { issueId: issue.id, success: true, action: `Fixed file mtime to ${correctDate.toISOString()}` };
+      } catch (error2) {
+        const errorMsg = error2 instanceof Error ? error2.message : "Unknown error";
+        return { issueId: issue.id, success: false, action: "repair", error: errorMsg };
+      }
+    }
+    if (!issue.recordingId || !issue.details?.suggested_date) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No recording ID or suggested date" };
+    }
+    const suggestedDate = issue.details.suggested_date;
+    run(`UPDATE recordings SET date_recorded = ? WHERE id = ?`, [suggestedDate, issue.recordingId]);
+    saveDatabase();
+    return { issueId: issue.id, success: true, action: `Updated date to ${suggestedDate}` };
+  }
+  repairSizeMismatch(issue) {
+    if (!issue.recordingId || !issue.details?.disk_size) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No recording ID or disk size" };
+    }
+    const diskSize = issue.details.disk_size;
+    run(`UPDATE recordings SET file_size = ? WHERE id = ?`, [diskSize, issue.recordingId]);
+    saveDatabase();
+    return { issueId: issue.id, success: true, action: `Updated size to ${diskSize} bytes` };
+  }
+  repairIncompleteDownload(issue) {
+    if (!issue.filePath || !issue.filename) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No file path" };
+    }
+    try {
+      fs.unlinkSync(issue.filePath);
+    } catch {
+    }
+    removeSyncedFile(issue.filename);
+    const recording = getRecordingByFilename(issue.filename);
+    if (recording) {
+      run(`UPDATE recordings SET file_path = NULL, on_local = 0, location =
+        CASE WHEN on_device = 1 THEN 'device-only' ELSE 'deleted' END
+        WHERE id = ?`, [recording.id]);
+    }
+    saveDatabase();
+    return { issueId: issue.id, success: true, action: "Deleted incomplete file and reset tracking" };
+  }
+  /**
+   * Get the last scan report
+   */
+  getLastReport() {
+    return this.lastReport;
+  }
+}
+let integrityServiceInstance = null;
+function getIntegrityService() {
+  if (!integrityServiceInstance) {
+    integrityServiceInstance = new IntegrityService();
+  }
+  return integrityServiceInstance;
+}
+function registerIntegrityHandlers() {
+  const service = getIntegrityService();
+  electron.ipcMain.handle("integrity:run-scan", async () => {
+    return service.runFullScan();
+  });
+  electron.ipcMain.handle("integrity:get-report", () => {
+    return service.getLastReport();
+  });
+  electron.ipcMain.handle("integrity:repair-issue", async (_, issueId) => {
+    return service.repairIssue(issueId);
+  });
+  electron.ipcMain.handle("integrity:repair-all", async () => {
+    return service.repairAllAuto();
+  });
+  electron.ipcMain.handle("integrity:run-startup-checks", async () => {
+    return service.runStartupChecks();
+  });
+  electron.ipcMain.handle("integrity:cleanup-wrongly-named", async () => {
+    console.log("[IntegrityHandlers] Starting cleanup of wrongly-named recordings...");
+    const fileResult = deleteWronglyNamedRecordings();
+    const dbCount = clearAllSyncedFiles();
+    const result = {
+      deletedFiles: fileResult.deleted,
+      keptFiles: fileResult.kept,
+      clearedDbRecords: dbCount
+    };
+    console.log("[IntegrityHandlers] Cleanup complete:", result);
+    return result;
+  });
+  electron.ipcMain.handle("integrity:purge-missing-files", async () => {
+    console.log("[IntegrityHandlers] Starting PURGE of recordings with missing files...");
+    const allRecordings = queryAll("SELECT id, filename, file_path FROM recordings");
+    console.log(`[IntegrityHandlers] Found ${allRecordings.length} total recordings in database`);
+    const deleted = [];
+    const kept = [];
+    for (const rec of allRecordings) {
+      const hasValidPath = rec.file_path && rec.file_path.trim() !== "";
+      const fileExists = hasValidPath && fs.existsSync(rec.file_path);
+      if (!fileExists) {
+        console.log(`[IntegrityHandlers] Deleting orphaned record: ${rec.filename} (path: ${rec.file_path || "NULL"}, exists: ${fileExists})`);
+        try {
+          run("DELETE FROM recordings WHERE id = ?", [rec.id]);
+          deleted.push(rec.filename);
+        } catch (err) {
+          console.error(`[IntegrityHandlers] Failed to delete ${rec.filename}:`, err);
+        }
+      } else {
+        kept.push(rec.filename);
+      }
+    }
+    if (deleted.length > 0) {
+      saveDatabase();
+    }
+    const result = {
+      totalRecords: allRecordings.length,
+      deleted: deleted.length,
+      kept: kept.length,
+      deletedFiles: deleted
+    };
+    console.log("[IntegrityHandlers] PURGE complete:", result);
+    return result;
+  });
+  console.log("[IntegrityHandlers] IPC handlers registered");
+}
+function registerKnowledgeHandlers() {
+  electron.ipcMain.handle("knowledge:getAll", async (_, { limit = 100, offset = 0, status, quality, category } = {}) => {
+    let sql = `SELECT * FROM knowledge_captures`;
+    const conditions = [];
+    const params = [];
+    if (status) {
+      conditions.push("status = ?");
+      params.push(status);
+    }
+    if (quality) {
+      conditions.push("quality_rating = ?");
+      params.push(quality);
+    }
+    if (category) {
+      conditions.push("category = ?");
+      params.push(category);
+    }
+    if (conditions.length > 0) {
+      sql += ` WHERE ${conditions.join(" AND ")}`;
+    }
+    sql += ` ORDER BY captured_at DESC LIMIT ? OFFSET ?`;
+    params.push(limit, offset);
+    try {
+      const captures = queryAll(sql, params);
+      return captures.map(mapToKnowledgeCapture);
+    } catch (error2) {
+      console.error("Failed to get knowledge captures:", error2);
+      return [];
+    }
+  });
+  electron.ipcMain.handle("knowledge:getById", async (_, id) => {
+    try {
+      const capture = queryOne(`SELECT * FROM knowledge_captures WHERE id = ?`, [id]);
+      if (!capture) return null;
+      return mapToKnowledgeCapture(capture);
+    } catch (error2) {
+      console.error("Failed to get knowledge capture:", error2);
+      return null;
+    }
+  });
+  electron.ipcMain.handle("knowledge:update", async (_, id, updates) => {
+    try {
+      const fields = [];
+      const values = [];
+      if (updates.title !== void 0) {
+        fields.push("title = ?");
+        values.push(updates.title);
+      }
+      if (updates.summary !== void 0) {
+        fields.push("summary = ?");
+        values.push(updates.summary);
+      }
+      if (updates.category !== void 0) {
+        fields.push("category = ?");
+        values.push(updates.category);
+      }
+      if (updates.status !== void 0) {
+        fields.push("status = ?");
+        values.push(updates.status);
+      }
+      if (updates.quality !== void 0) {
+        fields.push("quality_rating = ?");
+        values.push(updates.quality);
+      }
+      if (updates.storageTier !== void 0) {
+        fields.push("storage_tier = ?");
+        values.push(updates.storageTier);
+      }
+      if (fields.length === 0) return { success: true };
+      fields.push("updated_at = CURRENT_TIMESTAMP");
+      const sql = `UPDATE knowledge_captures SET ${fields.join(", ")} WHERE id = ?`;
+      values.push(id);
+      run(sql, values);
+      return { success: true };
+    } catch (error2) {
+      console.error("Failed to update knowledge capture:", error2);
+      return { success: false, error: error2.message };
+    }
+  });
+}
+function mapToKnowledgeCapture(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    summary: row.summary,
+    category: row.category,
+    status: row.status,
+    quality: row.quality_rating,
+    qualityConfidence: row.quality_confidence,
+    qualityAssessedAt: row.quality_assessed_at,
+    storageTier: row.storage_tier,
+    retentionDays: row.retention_days,
+    expiresAt: row.expires_at,
+    meetingId: row.meeting_id,
+    correlationConfidence: row.correlation_confidence,
+    correlationMethod: row.correlation_method,
+    sourceRecordingId: row.source_recording_id,
+    capturedAt: row.captured_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at
+  };
+}
+function registerAssistantHandlers() {
+  electron.ipcMain.handle("assistant:getConversations", async () => {
+    try {
+      const rows = queryAll("SELECT * FROM conversations ORDER BY updated_at DESC");
+      return rows.map(mapToConversation);
+    } catch (error2) {
+      console.error("Failed to get conversations:", error2);
+      return [];
+    }
+  });
+  electron.ipcMain.handle("assistant:createConversation", async (_, title) => {
+    try {
+      const id = crypto$1.randomUUID();
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      run(
+        "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        [id, title || "New Conversation", now, now]
+      );
+      const newConv = queryOne("SELECT * FROM conversations WHERE id = ?", [id]);
+      return mapToConversation(newConv);
+    } catch (error2) {
+      console.error("Failed to create conversation:", error2);
+      throw error2;
+    }
+  });
+  electron.ipcMain.handle("assistant:deleteConversation", async (_, id) => {
+    try {
+      run("DELETE FROM conversations WHERE id = ?", [id]);
+      return { success: true };
+    } catch (error2) {
+      console.error("Failed to delete conversation:", error2);
+      return { success: false, error: error2.message };
+    }
+  });
+  electron.ipcMain.handle("assistant:getMessages", async (_, conversationId) => {
+    try {
+      const rows = queryAll("SELECT * FROM chat_messages WHERE conversation_id = ? ORDER BY created_at ASC", [conversationId]);
+      return rows.map(mapToMessage);
+    } catch (error2) {
+      console.error("Failed to get messages:", error2);
+      return [];
+    }
+  });
+  electron.ipcMain.handle("assistant:addMessage", async (_, conversationId, role, content, sources) => {
+    try {
+      const id = crypto$1.randomUUID();
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      runInTransaction(() => {
+        run(
+          "INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          [id, conversationId, role, content, sources || null, now]
+        );
+        run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, conversationId]);
+      });
+      const newMessage = queryOne("SELECT * FROM chat_messages WHERE id = ?", [id]);
+      return mapToMessage(newMessage);
+    } catch (error2) {
+      console.error("Failed to add message:", error2);
+      throw error2;
+    }
+  });
+  electron.ipcMain.handle("assistant:addContext", async (_, conversationId, knowledgeCaptureId) => {
+    try {
+      const id = crypto$1.randomUUID();
+      run(
+        "INSERT OR IGNORE INTO conversation_context (id, conversation_id, knowledge_capture_id) VALUES (?, ?, ?)",
+        [id, conversationId, knowledgeCaptureId]
+      );
+      return { success: true };
+    } catch (error2) {
+      console.error("Failed to add context:", error2);
+      return { success: false, error: error2.message };
+    }
+  });
+  electron.ipcMain.handle("assistant:removeContext", async (_, conversationId, knowledgeCaptureId) => {
+    try {
+      run(
+        "DELETE FROM conversation_context WHERE conversation_id = ? AND knowledge_capture_id = ?",
+        [conversationId, knowledgeCaptureId]
+      );
+      return { success: true };
+    } catch (error2) {
+      console.error("Failed to remove context:", error2);
+      return { success: false, error: error2.message };
+    }
+  });
+  electron.ipcMain.handle("assistant:getContext", async (_, conversationId) => {
+    try {
+      const rows = queryAll(
+        "SELECT knowledge_capture_id FROM conversation_context WHERE conversation_id = ?",
+        [conversationId]
+      );
+      return rows.map((r) => r.knowledge_capture_id);
+    } catch (error2) {
+      console.error("Failed to get context:", error2);
+      return [];
+    }
+  });
+}
+function mapToConversation(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    contextIds: [],
+    // We'll handle context in a separate call or sub-query if needed
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+function mapToMessage(row) {
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    role: row.role,
+    content: row.content,
+    sources: row.sources,
+    createdAt: row.created_at
+  };
+}
+function registerActionablesHandlers() {
+  electron.ipcMain.handle("actionables:getAll", async (_, { status } = {}) => {
+    try {
+      let sql = "SELECT * FROM actionables";
+      const params = [];
+      if (status) {
+        sql += " WHERE status = ?";
+        params.push(status);
+      }
+      sql += " ORDER BY created_at DESC";
+      const rows = queryAll(sql, params);
+      return rows.map(mapToActionable);
+    } catch (error2) {
+      console.error("Failed to get actionables:", error2);
+      return [];
+    }
+  });
+  electron.ipcMain.handle("actionables:updateStatus", async (_, id, status) => {
+    try {
+      run("UPDATE actionables SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [status, id]);
+      return { success: true };
+    } catch (error2) {
+      console.error("Failed to update actionable status:", error2);
+      return { success: false, error: error2.message };
+    }
+  });
+}
+function mapToActionable(row) {
+  let recipients = [];
+  if (row.suggested_recipients) {
+    try {
+      recipients = JSON.parse(row.suggested_recipients);
+    } catch {
+      recipients = [];
+    }
+  }
+  return {
+    id: row.id,
+    type: row.type,
+    title: row.title,
+    description: row.description,
+    sourceKnowledgeId: row.source_knowledge_id,
+    sourceActionItemId: row.source_action_item_id,
+    suggestedTemplate: row.suggested_template,
+    suggestedRecipients: recipients,
+    status: row.status,
+    artifactId: row.artifact_id,
+    generatedAt: row.generated_at,
+    sharedAt: row.shared_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
 function registerIpcHandlers() {
   registerConfigHandlers();
   registerDatabaseHandlers();
@@ -6197,6 +7961,10 @@ function registerIpcHandlers() {
   registerMigrationHandlers();
   registerDeviceCacheHandlers();
   registerDownloadServiceHandlers();
+  registerIntegrityHandlers();
+  registerKnowledgeHandlers();
+  registerAssistantHandlers();
+  registerActionablesHandlers();
   console.log("All IPC handlers registered");
 }
 const USB_VENDOR_ID = 4310;
@@ -6240,6 +8008,11 @@ async function initializeServices() {
   console.log("File storage initialized");
   await initializeDatabase();
   console.log("Database initialized");
+  const integrityService = getIntegrityService();
+  const integrityResult = await integrityService.runStartupChecks();
+  if (integrityResult.issuesFound > 0) {
+    console.log(`Integrity checks: ${integrityResult.issuesFixed}/${integrityResult.issuesFound} issues fixed`);
+  }
   const vectorStore = getVectorStore();
   await vectorStore.initialize();
   console.log("Vector store initialized");
@@ -6256,7 +8029,7 @@ electron.app.whenReady().then(async () => {
   electron.app.on("browser-window-created", (_, window) => {
     utils.optimizer.watchWindowShortcuts(window);
   });
-  electron.session.defaultSession.on("select-usb-device", (event, details, callback) => {
+  electron.session.defaultSession.on("select-usb-device", (_event, details, callback) => {
     console.log("=== USB DEVICE SELECTION ===");
     console.log("Available devices:", details.deviceList.map((d) => ({
       vendorId: d.vendorId.toString(16),
@@ -6283,10 +8056,7 @@ electron.app.whenReady().then(async () => {
       callback();
     }
   });
-  electron.session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
-    if (permission === "usb") {
-      return true;
-    }
+  electron.session.defaultSession.setPermissionCheckHandler(() => {
     return true;
   });
   electron.session.defaultSession.setDevicePermissionHandler((details) => {

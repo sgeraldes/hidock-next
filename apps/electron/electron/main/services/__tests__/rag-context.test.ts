@@ -1,9 +1,6 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { getRAGService, resetRAGService } from '../rag'
-import * as db from '../database'
-import * as ollama from '../ollama'
-import * as vectorStore from '../vector-store'
 import initSqlJs from 'sql.js'
 
 // Stable mock object

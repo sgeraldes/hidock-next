@@ -1,18 +1,14 @@
 import { ipcMain } from 'electron'
 import { getQualityAssessmentService } from '../services/quality-assessment'
 import { getStoragePolicyService } from '../services/storage-policy'
-import type { QualityLevel, AssessmentMethod } from '../services/quality-assessment'
-import type { StorageTier, CleanupSuggestion } from '../services/storage-policy'
 import {
   validateRecordingId,
   validateRecordingIds,
   validateQualityLevel,
   validateStorageTier,
   validateOptionalString,
-  validateBoolean,
   validateNumber,
-  validateMinAgeOverride,
-  ValidationError
+  validateMinAgeOverride
 } from './validation'
 
 /**
@@ -188,12 +184,10 @@ export function registerQualityHandlers(): void {
    */
   ipcMain.handle(
     'storage:execute-cleanup',
-    async (_, recordingIds: unknown, archive: unknown = false) => {
+    async (_, recordingIds: unknown) => {
       try {
         const validIds = validateRecordingIds(recordingIds)
-        const validArchive = archive !== undefined ? validateBoolean(archive) : false
-
-        const result = await storageService.executeCleanup(validIds, validArchive)
+        const result = await storageService.executeCleanup(validIds)
         return { success: true, data: result }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'

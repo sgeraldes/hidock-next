@@ -6,7 +6,7 @@
  */
 
 import { useEffect, useState, useCallback } from 'react'
-import { Search, X, Filter, User, Folder, Calendar, Mic } from 'lucide-react'
+import { Search, X, Filter, User, Folder, Mic } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -35,7 +35,6 @@ interface FilterBarProps {
 export function FilterBar({
   className,
   showSearch = true,
-  showDateRange = false,
   showContact = true,
   showProject = true,
   showStatus = true,

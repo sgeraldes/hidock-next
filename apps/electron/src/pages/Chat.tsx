@@ -1,33 +1,30 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { 
-  Send, 
-  Trash2, 
-  Bot, 
-  User, 
-  AlertCircle, 
-  CheckCircle2, 
-  Database, 
-  RefreshCw, 
-  ChevronDown, 
-  ChevronUp, 
-  FileText,
+import {
+  Send,
   Plus,
-  MessageSquare,
-  History,
-  Layers,
+  Trash2,
+  FileText,
   X,
-  BookOpen
+  MessageSquare,
+  RefreshCw,
+  AlertCircle,
+  History,
+  CheckCircle2,
+  Database,
+  Layers,
+  BookOpen,
+  Bot,
+  User
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Card } from '@/components/ui/card'
-import { 
-  Dialog, 
-  DialogContent, 
-  DialogHeader, 
-  DialogTitle, 
-  DialogTrigger 
-} from '@/components/ui/dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
 import { ContextPicker } from '@/components/ContextPicker'
 import { cn, formatDateTime } from '@/lib/utils'
 import type { Message, Conversation, KnowledgeCapture } from '@/types/knowledge'

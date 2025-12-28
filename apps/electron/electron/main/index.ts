@@ -97,7 +97,7 @@ async function initializeServices(): Promise<void> {
   console.log('RAG service initialized')
 
   // Initialize storage policy service (subscribes to events)
-  const storagePolicy = getStoragePolicyService()
+  getStoragePolicyService()
   console.log('Storage policy service initialized')
 
   // Register IPC handlers
@@ -116,7 +116,7 @@ app.whenReady().then(async () => {
 
   // Handle WebUSB device selection - this is REQUIRED for Electron
   // Without this, navigator.usb.requestDevice() will fail silently
-  session.defaultSession.on('select-usb-device', (event, details, callback) => {
+  session.defaultSession.on('select-usb-device', (_event, details, callback) => {
     console.log('=== USB DEVICE SELECTION ===')
     console.log('Available devices:', details.deviceList.map(d => ({
       vendorId: d.vendorId.toString(16),
@@ -152,10 +152,7 @@ app.whenReady().then(async () => {
   })
 
   // Grant USB device permission
-  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
-    if (permission === 'usb') {
-      return true
-    }
+  session.defaultSession.setPermissionCheckHandler(() => {
     return true
   })
 

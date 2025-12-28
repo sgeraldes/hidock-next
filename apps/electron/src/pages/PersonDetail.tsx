@@ -33,9 +33,17 @@ export function PersonDetail() {
     setLoading(true)
     try {
       const result = await window.electronAPI.contacts.getById(id)
-      if (result.success) {
-        setPerson(result.data.contact)
-        setMeetings(result.data.meetings)
+      if (result.success && result.data.contact) {
+        const c = result.data.contact as any
+        setPerson({
+          ...c,
+          type: c.type || 'unknown',
+          tags: c.tags ? (typeof c.tags === 'string' ? JSON.parse(c.tags) : c.tags) : [],
+          firstSeenAt: c.first_seen_at || c.firstSeenAt,
+          lastSeenAt: c.last_seen_at || c.lastSeenAt,
+          interactionCount: c.meeting_count || c.interactionCount || 0,
+          createdAt: c.created_at || c.createdAt || new Date().toISOString()
+        })
       }
     } catch (error) {
       console.error('Failed to load person details:', error)

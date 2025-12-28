@@ -52,13 +52,13 @@ function App(): React.ReactElement {
           <Route path="/calendar" element={<ErrorBoundary><Calendar /></ErrorBoundary>} />
           <Route path="/meeting/:id" element={<ErrorBoundary><MeetingDetail /></ErrorBoundary>} />
           <Route path="/assistant" element={<ErrorBoundary><Chat /></ErrorBoundary>} />
-          <Route path="/explore" element={<ErrorBoundary><Search /></ErrorBoundary>} />
+          <Route path="/explore" element={<ErrorBoundary><Explore /></ErrorBoundary>} />
           <Route path="/sync" element={<ErrorBoundary><Device /></ErrorBoundary>} />
           <Route path="/library" element={<ErrorBoundary><Recordings /></ErrorBoundary>} />
           <Route path="/people" element={<ErrorBoundary><People /></ErrorBoundary>} />
           <Route path="/person/:id" element={<ErrorBoundary><PersonDetail /></ErrorBoundary>} />
           <Route path="/projects" element={<ErrorBoundary><Projects /></ErrorBoundary>} />
-          <Route path="/actionables" element={<ErrorBoundary><Outputs /></ErrorBoundary>} />
+          <Route path="/actionables" element={<ErrorBoundary><Actionables /></ErrorBoundary>} />
           <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
         </Routes>
       </Layout>

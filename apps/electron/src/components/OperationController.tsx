@@ -54,6 +54,7 @@ export function OperationController() {
   const isProcessingDownloads = useRef(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const downloadAbortRef = useRef(false)
+  const autoSyncTriggeredRef = useRef(false) // Prevent duplicate auto-sync triggers
 
   // Global store actions
   const {
@@ -430,9 +431,68 @@ export function OperationController() {
       }
     })
 
-    // Subscribe to device connection changes (for download resumption and abort on disconnect)
-    const unsubDevice = deviceService.onStateChange((deviceState) => {
+    // Check for auto-sync at startup (device may already be connected when app loads)
+    // This handles the case where device is connected BEFORE app starts
+    const checkInitialAutoSync = async () => {
+      // Wait for device initialization to complete (may take a few seconds)
+      // Check every 500ms for up to 30 seconds
+      for (let i = 0; i < 60; i++) {
+        if (!deviceService.isConnected()) {
+          // Device not connected, no auto-sync needed
+          return
+        }
+        if (deviceService.isInitialized()) {
+          break
+        }
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+
+      // If device is connected and initialized, and auto-sync hasn't been triggered
+      if (deviceService.isConnected() && deviceService.isInitialized() && !autoSyncTriggeredRef.current) {
+        try {
+          const appConfig = await window.electronAPI.config.get()
+          const shouldAutoDownload = appConfig?.device?.autoDownload ?? true
+          if (shouldAutoDownload) {
+            if (DEBUG) console.log('[OperationController] Initial auto-sync check (device pre-connected)')
+            const recordings = deviceService.getCachedRecordings()
+            if (recordings.length > 0) {
+              const syncedFilenames = await window.electronAPI.syncedFiles.getFilenames()
+              const syncedSet = new Set(syncedFilenames)
+              const toSync = recordings.filter(rec => !syncedSet.has(rec.filename))
+              if (toSync.length > 0) {
+                autoSyncTriggeredRef.current = true
+                if (DEBUG) console.log(`[OperationController] Initial auto-sync: ${toSync.length} files to download`)
+                deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
+
+                // Queue files for download (with recording dates for proper date preservation)
+                const filesToQueue = toSync.map(rec => ({
+                  filename: rec.filename,
+                  size: rec.size,
+                  dateCreated: rec.dateCreated?.toISOString()
+                }))
+                await window.electronAPI.downloadService.startSession(filesToQueue)
+                setDeviceSyncState({
+                  deviceSyncing: true,
+                  deviceSyncProgress: { total: toSync.length, current: 0 },
+                  deviceFileDownloading: toSync[0]?.filename ?? null
+                })
+              } else {
+                autoSyncTriggeredRef.current = true
+                deviceService.log('success', 'All files synced', 'No new recordings to download')
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[OperationController] Initial auto-sync check error:', e)
+        }
+      }
+    }
+    checkInitialAutoSync()
+
+    // Subscribe to device connection changes (for download resumption, auto-sync, and abort on disconnect)
+    const unsubDevice = deviceService.onStateChange(async (deviceState) => {
       if (deviceState.connected && !isProcessingDownloads.current) {
+        // Check for pending downloads to resume
         window.electronAPI.downloadService.getState().then((state) => {
           const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
           if (hasPending) {
@@ -440,10 +500,56 @@ export function OperationController() {
             processDownloadQueue()
           }
         })
-      } else if (!deviceState.connected && isProcessingDownloads.current) {
-        // Device disconnected while processing - abort downloads immediately
-        if (DEBUG) console.log('[OperationController] Device disconnected, aborting downloads')
-        downloadAbortRef.current = true
+
+        // Trigger auto-sync if enabled and not yet triggered this session
+        // This handles the case where device is connected before app starts
+        if (!autoSyncTriggeredRef.current && deviceService.isInitialized()) {
+          try {
+            const appConfig = await window.electronAPI.config.get()
+            const shouldAutoDownload = appConfig?.device?.autoDownload ?? true
+            if (shouldAutoDownload) {
+              if (DEBUG) console.log('[OperationController] Checking for auto-sync (device was pre-connected)')
+              const recordings = deviceService.getCachedRecordings()
+              if (recordings.length > 0) {
+                const syncedFilenames = await window.electronAPI.syncedFiles.getFilenames()
+                const syncedSet = new Set(syncedFilenames)
+                const toSync = recordings.filter(rec => !syncedSet.has(rec.filename))
+                if (toSync.length > 0) {
+                  autoSyncTriggeredRef.current = true
+                  if (DEBUG) console.log(`[OperationController] Auto-sync: ${toSync.length} files to download`)
+                  deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
+
+                  // Queue files for download (with recording dates for proper date preservation)
+                  const filesToQueue = toSync.map(rec => ({
+                    filename: rec.filename,
+                    size: rec.size,
+                    dateCreated: rec.dateCreated?.toISOString()
+                  }))
+                  await window.electronAPI.downloadService.startSession(filesToQueue)
+                  setDeviceSyncState({
+                    deviceSyncing: true,
+                    deviceSyncProgress: { total: toSync.length, current: 0 },
+                    deviceFileDownloading: toSync[0]?.filename ?? null
+                  })
+                  // Downloads will be processed by the download queue handler
+                } else {
+                  autoSyncTriggeredRef.current = true
+                  deviceService.log('success', 'All files synced', 'No new recordings to download')
+                }
+              }
+            }
+          } catch (e) {
+            console.error('[OperationController] Auto-sync check error:', e)
+          }
+        }
+      } else if (!deviceState.connected) {
+        // Device disconnected - abort downloads if processing
+        if (isProcessingDownloads.current) {
+          if (DEBUG) console.log('[OperationController] Device disconnected, aborting downloads')
+          downloadAbortRef.current = true
+        }
+        // Reset auto-sync flag so it triggers on reconnect
+        autoSyncTriggeredRef.current = false
       }
     })
 
@@ -473,7 +579,7 @@ export function OperationController() {
         audioRef.current.src = ''
       }
     }
-  }, [deviceService, processDownloadQueue])
+  }, [deviceService, processDownloadQueue, setDeviceSyncState])
 
   // This component renders nothing - purely side effects
   return null
@@ -483,7 +589,10 @@ export function OperationController() {
 // Hook for accessing audio controls from any component
 // =============================================================================
 
-export function useAudioControls() {
+export const useAudioControls = () => {
+  const {
+    startDownload
+  } = useAppStore() as any
   return {
     play: (recordingId: string, filePath: string) => {
       (window as any).__audioControls?.play(recordingId, filePath)

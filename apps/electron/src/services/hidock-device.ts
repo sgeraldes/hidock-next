@@ -84,7 +84,7 @@ type StateChangeListener = (state: HiDockDeviceState) => void
 // Activity log entry for debugging USB communication
 export interface ActivityLogEntry {
   timestamp: Date
-  type: 'info' | 'success' | 'error' | 'usb-out' | 'usb-in'
+  type: 'info' | 'success' | 'error' | 'usb-out' | 'usb-in' | 'warning'
   message: string
   details?: string
 }
@@ -254,9 +254,9 @@ class HiDockDeviceService {
     }
   }
 
-  // Start auto-connect polling (silent - no UI updates)
+  // Start auto-connect - uses browser USB events (no polling!)
   // NOTE: This does NOT reset userInitiatedDisconnect - that's only reset by explicit user connect action
-  startAutoConnect(intervalMs?: number): void {
+  startAutoConnect(_intervalMs?: number): void {
     // Check if auto-connect is globally enabled
     if (!this.autoConnectConfig.enabled) {
       this.logActivity('info', 'Auto-connect disabled in config')
@@ -269,25 +269,19 @@ class HiDockDeviceService {
       return
     }
 
-    // Don't start multiple intervals
-    if (this.autoConnectInterval) return
+    // Already started or connected
+    if (this.autoConnectEnabled || this.state.connected) return
 
-    const interval = intervalMs ?? this.autoConnectConfig.intervalMs
     this.autoConnectEnabled = true
-    this.logActivity('info', `Auto-connect started (interval: ${interval}ms)`)
+    this.logActivity('info', 'Auto-connect enabled', 'Will connect when device is plugged in')
 
-    // Try immediately (silent) only if not user-disconnected
-    if (!this.userInitiatedDisconnect) {
-      this.tryConnectSilent()
-    }
+    // Try ONCE on startup to connect to any already-authorized device
+    // After this, the browser's USB connect event will handle new connections
+    // (set up in jensen.ts setupUsbConnectListener via navigator.usb.onconnect)
+    this.tryConnectSilent()
 
-    // Then poll
-    this.autoConnectInterval = window.setInterval(() => {
-      // Don't auto-connect if user explicitly disconnected or disabled
-      if (!this.state.connected && this.autoConnectEnabled && !this.userInitiatedDisconnect && this.autoConnectConfig.enabled) {
-        this.tryConnectSilent()
-      }
-    }, interval)
+    // NO POLLING - rely entirely on browser USB connect events
+    // When a device is plugged in, navigator.usb.onconnect fires and jensen.ts handles it
   }
 
   // Initialize auto-connect on app startup
@@ -335,20 +329,19 @@ class HiDockDeviceService {
 
     if (DEBUG_DEVICE) console.log(`[HiDockDevice] initAutoConnect: Config loaded=${this.configLoaded}, enabled=${this.autoConnectConfig.enabled}, connectOnStartup=${this.autoConnectConfig.connectOnStartup}`)
 
-    // Only log and start if enabled - don't spam log when disabled
+    // Silently start auto-connect if enabled - no activity log spam
     if (this.autoConnectConfig.enabled && this.autoConnectConfig.connectOnStartup) {
-      this.logActivity('info', 'Auto-connect enabled', 'Attempting to connect to device on startup...')
       this.startAutoConnect()
     }
-    // Silent when disabled - no need to log this
   }
 
   stopAutoConnect(): void {
+    // Clear any legacy interval if it exists
     if (this.autoConnectInterval) {
       clearInterval(this.autoConnectInterval)
       this.autoConnectInterval = null
-      this.logActivity('info', 'Auto-connect stopped')
     }
+    this.autoConnectEnabled = false
   }
 
   // Disable auto-connect (e.g., when user explicitly disconnects)
@@ -370,11 +363,11 @@ class HiDockDeviceService {
     return this.autoConnectEnabled && !this.userInitiatedDisconnect
   }
 
-  // Silent auto-connect - no UI updates unless successful
+  // Try to auto-connect once (no polling - browser events handle reconnection)
   private async tryConnectSilent(): Promise<boolean> {
     if (this.state.connected) return true
 
-    // Prevent overlapping auto-connect attempts (could happen if interval fires while previous attempt is slow)
+    // Prevent overlapping auto-connect attempts
     if (this.autoConnectInProgress) {
       return false
     }
@@ -387,14 +380,13 @@ class HiDockDeviceService {
 
     this.autoConnectInProgress = true
     try {
-      // Log the auto-connect attempt so users can see what's happening
       this.logActivity('info', 'Auto-connect', 'Checking for authorized HiDock devices...')
-
       const success = await this.jensen.tryConnect()
       // Note: handleConnect() is called via the onconnect callback in jensen.ts
       // We should NOT call it here to avoid duplicate initialization
       if (success) {
         this.updateStatus('opening', 'Device found, connecting...', 10)
+        this.logActivity('success', 'Auto-connect', 'Device found and connected')
       } else {
         this.logActivity('info', 'Auto-connect', 'No authorized device found. Click Connect to authorize.')
       }
@@ -551,7 +543,7 @@ class HiDockDeviceService {
   }
 
   // Log an activity entry, store it, and notify listeners
-  private logActivity(type: ActivityLogEntry['type'], message: string, details?: string): void {
+  private logActivity(type: 'error' | 'success' | 'info' | 'usb-out' | 'usb-in' | 'warning', message: string, details?: string): void {
     const entry: ActivityLogEntry = {
       timestamp: new Date(),
       type,
@@ -1329,4 +1321,4 @@ export function getHiDockDeviceService(): HiDockDeviceService {
 }
 
 export { HiDockDeviceService }
-export type { RealtimeSettings, RealtimeData, BatteryStatus, BluetoothStatus, ActivityLogEntry }
+export type { RealtimeSettings, RealtimeData, BatteryStatus, BluetoothStatus }

@@ -2,13 +2,12 @@ import { watch, existsSync, statSync, readdirSync } from 'fs'
 import { join, extname, basename } from 'path'
 import { getRecordingsPath } from './file-storage'
 import {
-  insertRecording,
   getRecordingById,
-  updateRecordingStatus,
-  addToQueue,
+  insertRecording,
   getMeetings,
   linkRecordingToMeeting,
-  type Recording
+  addToQueue,
+  Recording
 } from './database'
 import { BrowserWindow } from 'electron'
 import { getConfig } from './config'
@@ -139,7 +138,13 @@ async function processNewRecording(filePath: string): Promise<void> {
       meeting_id: undefined,
       correlation_confidence: undefined,
       correlation_method: undefined,
-      status: 'pending'
+      status: 'pending',
+      location: 'local-only',
+      on_device: 0,
+      on_local: 1,
+      transcription_status: 'pending',
+      source: 'hidock',
+      is_imported: 0
     }
 
     insertRecording(recording)

@@ -1,5 +1,5 @@
 import { ipcMain, BrowserWindow } from 'electron'
-import { getDatabase, runInTransaction, saveDatabase } from '../services/database'
+import { getDatabase, runInTransaction } from '../services/database'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'

@@ -78,7 +78,7 @@ function sanitizeEventPayload<T extends DomainEvent>(event: T): T {
  */
 class DomainEventBus extends EventEmitter {
   private mainWindow: BrowserWindow | null = null
-  private listenerCount: Map<string, number> = new Map()
+  private domainListenerCount: Map<string, number> = new Map()
   private readonly MAX_LISTENERS_PER_EVENT = 20
 
   constructor() {
@@ -120,25 +120,25 @@ class DomainEventBus extends EventEmitter {
    */
   onDomainEvent<T extends DomainEvent>(eventType: string, handler: (event: T) => void): () => void {
     // Enforce per-event listener limit
-    const currentCount = this.listenerCount.get(eventType) || 0
+    const currentCount = this.domainListenerCount.get(eventType) || 0
     if (currentCount >= this.MAX_LISTENERS_PER_EVENT) {
       console.warn(`[EventBus] Max listeners (${this.MAX_LISTENERS_PER_EVENT}) reached for event ${eventType}`)
       // Remove oldest listener to make room
       const listeners = this.listeners(eventType)
       if (listeners.length > 0) {
         this.off(eventType, listeners[0] as any)
-        this.listenerCount.set(eventType, currentCount - 1)
+        this.domainListenerCount.set(eventType, currentCount - 1)
       }
     }
     
     this.on(eventType, handler)
-    this.listenerCount.set(eventType, (this.listenerCount.get(eventType) || 0) + 1)
+    this.domainListenerCount.set(eventType, (this.domainListenerCount.get(eventType) || 0) + 1)
     
     // Return cleanup function
     return () => {
       this.off(eventType, handler)
-      const count = this.listenerCount.get(eventType) || 0
-      this.listenerCount.set(eventType, Math.max(0, count - 1))
+      const count = this.domainListenerCount.get(eventType) || 0
+      this.domainListenerCount.set(eventType, Math.max(0, count - 1))
     }
   }
 
@@ -147,23 +147,23 @@ class DomainEventBus extends EventEmitter {
    */
   onAnyDomainEvent(handler: (event: DomainEvent) => void): () => void {
     // Enforce per-event listener limit
-    const currentCount = this.listenerCount.get('*') || 0
+    const currentCount = this.domainListenerCount.get('*') || 0
     if (currentCount >= this.MAX_LISTENERS_PER_EVENT) {
       console.warn(`[EventBus] Max listeners (${this.MAX_LISTENERS_PER_EVENT}) reached for wildcard events`)
       const listeners = this.listeners('*')
       if (listeners.length > 0) {
         this.off('*', listeners[0] as any)
-        this.listenerCount.set('*', currentCount - 1)
+        this.domainListenerCount.set('*', currentCount - 1)
       }
     }
     
     this.on('*', handler)
-    this.listenerCount.set('*', (this.listenerCount.get('*') || 0) + 1)
+    this.domainListenerCount.set('*', (this.domainListenerCount.get('*') || 0) + 1)
     
     return () => {
       this.off('*', handler)
-      const count = this.listenerCount.get('*') || 0
-      this.listenerCount.set('*', Math.max(0, count - 1))
+      const count = this.domainListenerCount.get('*') || 0
+      this.domainListenerCount.set('*', Math.max(0, count - 1))
     }
   }
 }

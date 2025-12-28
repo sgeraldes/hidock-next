@@ -27,7 +27,7 @@ function parseICSInWorker(icsData: string): MeetingData[] {
     const event = new ICAL.Event(vevent)
 
     // Skip cancelled events
-    if (event.status === 'CANCELLED') {
+    if ((event as any).status === 'CANCELLED') {
       continue
     }
 
@@ -105,7 +105,7 @@ function parseICSInWorker(icsData: string): MeetingData[] {
     }
 
     // Handle recurring events - expand occurrences
-    if (isRecurring && event.isRecurrenceException !== true) {
+    if (isRecurring && (event as any).isRecurrenceException !== true) {
       try {
         const iterator = event.iterator()
         const maxOccurrences = 100

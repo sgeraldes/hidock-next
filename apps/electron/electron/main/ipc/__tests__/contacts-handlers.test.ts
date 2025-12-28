@@ -65,7 +65,7 @@ describe('Contacts IPC Handlers', () => {
     
     registerContactsHandlers()
     const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:getAll')?.[1]
-    const result = await handler?.(null, {}) as any
+    const result = await handler?.({} as any, {}) as any
     
     const person = result.data.contacts[0]
     expect(person.type).toBe('team')

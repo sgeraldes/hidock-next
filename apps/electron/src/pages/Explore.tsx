@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { 
   Search, 
@@ -6,44 +6,33 @@ import {
   FileText, 
   Users, 
   Folder, 
-  MessageSquare, 
-  Bot, 
   ChevronRight,
   TrendingUp,
-  Sparkles,
   Zap,
-  Clock,
-  ExternalLink
+  Clock
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { formatDateTime } from '@/lib/utils'
-import { cn } from '@/lib/utils'
-
-interface SearchResults {
-  knowledge: any[]
-  people: any[]
-  projects: any[]
-}
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { formatDateTime, cn } from '@/lib/utils'
 
 export function Explore() {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
-  const [results, setResults] = useState<SearchResults | null>(null)
+  const [results, setResults] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const [activeTab, setActiveTab] = useState<'all' | 'knowledge' | 'people' | 'projects'>('all')
 
-  const handleSearch = async (e?: React.FormEvent) => {
-    e?.preventDefault()
+  const handleSearch = async () => {
     if (!query.trim()) return
-
     setLoading(true)
     try {
-      const res = await window.electronAPI.rag.globalSearch({ query, limit: 10 })
-      if (res.success) {
-        setResults(res.data)
+      const res = await window.electronAPI.rag.search(query, 10)
+      // Map legacy array response to categorized object if needed
+      if (Array.isArray(res)) {
+        setResults({ knowledge: res, people: [], projects: [] })
+      } else {
+        setResults(res || { knowledge: [], people: [], projects: [] })
       }
     } catch (error) {
       console.error('Search failed:', error)

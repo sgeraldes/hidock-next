@@ -1,14 +1,9 @@
 import * as React from 'react'
+import * as SliderPrimitive from '@radix-ui/react-slider'
 import { cn } from '@/lib/utils'
 
-interface SliderProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'onChange'> {
-  value?: number[]
-  defaultValue?: number[]
-  min?: number
-  max?: number
-  step?: number
-  onValueChange?: (value: number[]) => void
-  disabled?: boolean
+interface SliderProps extends React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root> {
+  className?: string
 }
 
 const Slider = React.forwardRef<HTMLDivElement, SliderProps>(

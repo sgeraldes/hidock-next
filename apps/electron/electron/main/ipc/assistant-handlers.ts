@@ -1,7 +1,7 @@
 
 import { ipcMain } from 'electron'
 import { queryAll, queryOne, run, runInTransaction } from '../services/database'
-import type { Conversation, Message } from '../../src/types/knowledge'
+import type { Conversation, Message } from '@/types/knowledge'
 import { randomUUID } from 'crypto'
 
 export function registerAssistantHandlers(): void {

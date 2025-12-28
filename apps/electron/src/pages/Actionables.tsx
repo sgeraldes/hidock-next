@@ -1,23 +1,19 @@
 import { useState, useEffect, useMemo } from 'react'
-import { 
-  ListTodo, 
-  RefreshCw, 
-  CheckCircle2, 
-  Clock, 
+import {
+  RefreshCw,
   FileText,
+  CheckCircle2,
+  Clock,
   Mail,
+  X,
+  ListTodo,
   Users,
-  AlertCircle,
-  Plus,
-  Trash2,
-  ExternalLink,
-  Bot,
-  ArrowRight,
   Sparkles,
-  X
+  Trash2,
+  Bot
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { cn, formatDateTime } from '@/lib/utils'
 import type { Actionable, ActionableStatus } from '@/types/knowledge'
 
@@ -52,11 +48,13 @@ export function Actionables() {
   const handleGenerate = async (a: Actionable) => {
     try {
       // Trigger generation
-      await window.electronAPI.outputs.generate({
-        templateId: a.suggestedTemplate as any,
-        knowledgeCaptureId: a.sourceKnowledgeId,
-        actionableId: a.id
-      })
+      const result = await window.electronAPI.outputs.generate({
+        templateId: (a.suggestedTemplate as any) || 'minutes',
+        sourceId: a.sourceKnowledgeId,
+        title: `Output for ${a.title}`
+      } as any)
+      console.log('Generation result:', result)
+
       
       // Reload
       loadActionables()

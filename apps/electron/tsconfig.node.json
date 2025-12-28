@@ -2,7 +2,8 @@
   "extends": "@electron-toolkit/tsconfig/tsconfig.node.json",
   "include": [
     "electron.vite.config.*",
-    "electron/**/*"
+    "electron/**/*",
+    "src/types/**/*"
   ],
   "compilerOptions": {
     "composite": true,
@@ -10,7 +11,8 @@
     "outDir": "./out",
     "baseUrl": ".",
     "paths": {
-      "@shared/*": ["./shared/*"]
+      "@shared/*": ["./shared/*"],
+      "@/*": ["./src/*"]
     }
   }
 }

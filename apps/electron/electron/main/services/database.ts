@@ -780,47 +780,84 @@ const MIGRATIONS: Record<number, () => void> = {
     console.log('Migration v10 complete: Quality assessment and storage policy tables created')
   },
   11: () => {
-    // v11: Knowledge Captures tables
+    // v11: Knowledge Captures architecture
     console.log('Running migration to schema v11: Knowledge Captures architecture')
     const database = getDatabase()
 
     try {
-      // Check if recordings table needs migration columns (v11)
-      const tableInfo = database.exec("PRAGMA table_info(recordings)")
-      const hasMigrationStatus = tableInfo[0].values.some(col => col[1] === 'migration_status')
+      // 1. Check if recordings table needs migration columns (v11)
+      const recordingsInfo = database.exec("PRAGMA table_info(recordings)")
+      const hasMigrationStatus = recordingsInfo[0].values.some(col => col[1] === 'migration_status')
 
       if (!hasMigrationStatus) {
-        console.log('[Migration v11] Migration columns not found in recordings, executing schema script...')
+        console.log('[Migration v11] Migration columns not found in recordings, adding them...')
+        const columnsToAdd = [
+          "ALTER TABLE recordings ADD COLUMN migrated_to_capture_id TEXT",
+          "ALTER TABLE recordings ADD COLUMN migration_status TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'",
+          "ALTER TABLE recordings ADD COLUMN migrated_at TEXT"
+        ]
+        for (const sql of columnsToAdd) {
+          try { database.run(sql) } catch (e) { /* ignore duplicate */ }
+        }
+      }
+
+      // 2. Check if knowledge_captures table exists and has all columns
+      const tableCheck = database.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_captures'")
+      const tableExists = tableCheck.length > 0 && tableCheck[0].values.length > 0
+
+      if (!tableExists) {
+        console.log('[Migration v11] knowledge_captures table not found, executing full schema script...')
         const schemaPath = join(__dirname, 'migrations/v11-knowledge-captures.sql')
         if (existsSync(schemaPath)) {
           const schemaSQL = readFileSync(schemaPath, 'utf-8')
-          
-          // Remove comments and split into statements
-          const statements = schemaSQL
-            .split('\n')
-            .filter(line => !line.trim().startsWith('--'))
-            .join('\n')
-            .split(';')
-            .map(s => s.trim())
-            .filter(s => s.length > 0)
-
+          const statements = schemaSQL.split('\n').filter(line => !line.trim().startsWith('--')).join('\n').split(';').map(s => s.trim()).filter(s => s.length > 0)
           for (const sql of statements) {
-            try {
-              database.run(sql)
-            } catch (e) {
-              // Ignore errors for already existing tables/columns
-              if (!(e as Error).message.includes('already exists') && !(e as Error).message.includes('duplicate column name')) {
-                console.warn(`[Migration v11] Statement warning: ${(e as Error).message}`)
-              }
-            }
+            try { database.run(sql) } catch (e) { /* ignore existing */ }
           }
-          console.log('[Migration v11] Schema script executed successfully')
-        } else {
-          console.error(`[Migration v11] Schema file not found at ${schemaPath}`)
         }
       } else {
-        console.log('[Migration v11] recordings table already has migration columns')
+        // Table exists, check for ALL columns added during redesign
+        const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)")
+        const existingCols = captureInfo[0].values.map(col => col[1])
+        
+        const requiredColumns = [
+          { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
+          { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
+          { name: 'quality_rating', def: "quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated'" },
+          { name: 'quality_confidence', def: "quality_confidence REAL" },
+          { name: 'quality_assessed_at', def: "quality_assessed_at TEXT" },
+          { name: 'storage_tier', def: "storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot'" },
+          { name: 'retention_days', def: "retention_days INTEGER" },
+          { name: 'expires_at', def: "expires_at TEXT" },
+          { name: 'meeting_id', def: "meeting_id TEXT REFERENCES meetings(id)" },
+          { name: 'correlation_confidence', def: "correlation_confidence REAL" },
+          { name: 'correlation_method', def: "correlation_method TEXT" },
+          { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
+        ]
+
+        for (const col of requiredColumns) {
+          if (!existingCols.includes(col.name)) {
+            console.log(`[Migration v11] Adding missing column ${col.name} to knowledge_captures`)
+            try {
+              database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`)
+            } catch (e) {
+              console.warn(`[Migration v11] Could not add column ${col.name}: ${e}`)
+            }
+          }
+        }
       }
+
+      // 3. Ensure all v11 indexes exist
+      const indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_captures_status ON knowledge_captures(status)",
+        "CREATE INDEX IF NOT EXISTS idx_knowledge_captures_category ON knowledge_captures(category)",
+        "CREATE INDEX IF NOT EXISTS idx_actionables_source_knowledge ON actionables(source_knowledge_id)",
+        "CREATE INDEX IF NOT EXISTS idx_actionables_status ON actionables(status)"
+      ]
+      for (const sql of indexes) {
+        try { database.run(sql) } catch (e) { console.warn(`Index warning: ${e}`) }
+      }
+
     } catch (error) {
       console.error('[Migration v11] Error during schema upgrade:', error)
     }
@@ -897,14 +934,19 @@ function runMigrations(currentVersion: number): void {
   }
 }
 
+/**
+ * Safe database initialization.
+ * Performs a 4-phase boot sequence:
+ * 1. Core Tables: Ensure basic table structure exists.
+ * 2. Structural Repair: Force-add missing columns required by the code.
+ * 3. Migrations: Handle version-specific data transformations.
+ * 4. Full Schema: Apply indexes and constraints safely.
+ */
 export async function initializeDatabase(): Promise<void> {
   dbPath = getDatabasePath()
 
   try {
-    // Initialize SQL.js
     const SQL = await initSqlJs()
-
-    // Load existing database or create new one
     if (existsSync(dbPath)) {
       const fileBuffer = readFileSync(dbPath)
       db = new SQL.Database(fileBuffer)
@@ -912,30 +954,95 @@ export async function initializeDatabase(): Promise<void> {
       db = new SQL.Database()
     }
 
-    // Run schema (all CREATE IF NOT EXISTS statements are idempotent)
-    db.run(SCHEMA)
+    const database = getDatabase()
+    const statements = SCHEMA.split(';').map(s => s.trim()).filter(s => s.length > 0)
 
-    // Check current schema version and run migrations if needed
-    const versionResult = db.exec('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    const currentVersion =
-      versionResult.length > 0 && versionResult[0].values.length > 0
+    // --- PHASE 1: CORE TABLES ---
+    console.log('[Database] Phase 1: Ensuring core tables exist...')
+    for (const sql of statements) {
+      if (sql.toUpperCase().startsWith('CREATE TABLE')) {
+        try {
+          database.run(sql)
+        } catch (e) {
+          console.warn(`[Database] Table creation warning: ${(e as Error).message}`)
+        }
+      }
+    }
+
+    // --- PHASE 2: MANDATORY STRUCTURAL REPAIR ---
+    // This runs on EVERY boot to ensure parity between code and disk.
+    console.log('[Database] Phase 2: Aligning table structures...')
+    
+    // Repair Recordings
+    const recordingsInfo = database.exec("PRAGMA table_info(recordings)")
+    const recCols = recordingsInfo[0].values.map(col => col[1])
+    const recordingRepairs = [
+      { name: 'migrated_to_capture_id', def: "TEXT" },
+      { name: 'migration_status', def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
+      { name: 'migrated_at', def: "TEXT" }
+    ]
+    for (const col of recordingRepairs) {
+      if (!recCols.includes(col.name)) {
+        console.log(`[Database] Repairing recordings: adding ${col.name}`)
+        try { database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+      }
+    }
+
+    // Repair Knowledge Captures
+    const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)")
+    const capCols = captureInfo[0].values.map(col => col[1])
+    const knowledgeRepairs = [
+      { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
+      { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
+      { name: 'quality_rating', def: "quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated'" },
+      { name: 'quality_confidence', def: "quality_confidence REAL" },
+      { name: 'quality_assessed_at', def: "quality_assessed_at TEXT" },
+      { name: 'storage_tier', def: "storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot'" },
+      { name: 'retention_days', def: "retention_days INTEGER" },
+      { name: 'expires_at', def: "expires_at TEXT" },
+      { name: 'meeting_id', def: "meeting_id TEXT REFERENCES meetings(id)" },
+      { name: 'correlation_confidence', def: "correlation_confidence REAL" },
+      { name: 'correlation_method', def: "correlation_method TEXT" },
+      { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
+    ]
+    for (const col of knowledgeRepairs) {
+      if (!capCols.includes(col.name)) {
+        console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`)
+        try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch (e) {}
+      }
+    }
+
+    // --- PHASE 3: VERSIONED MIGRATIONS ---
+    const versionResult = database.exec('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
+    const currentVersion = versionResult.length > 0 && versionResult[0].values.length > 0
         ? (versionResult[0].values[0][0] as number)
         : 0
 
     if (currentVersion < SCHEMA_VERSION) {
+      console.log(`[Database] Phase 3: Migrating v${currentVersion} -> v${SCHEMA_VERSION}`)
       runMigrations(currentVersion)
-      console.log(`Database migrated from v${currentVersion} to v${SCHEMA_VERSION}`)
     } else if (currentVersion === 0) {
-      // Fresh database, insert initial version
-      db.run('INSERT INTO schema_version (version) VALUES (?)', [SCHEMA_VERSION])
+      database.run('INSERT INTO schema_version (version) VALUES (?)', [SCHEMA_VERSION])
     }
 
-    // Save to disk
-    saveDatabase()
+    // --- PHASE 4: FULL SCHEMA (INDEXES & CONSTRAINTS) ---
+    console.log('[Database] Phase 4: Finalizing schema and indexes...')
+    for (const sql of statements) {
+      try {
+        database.run(sql)
+      } catch (e) {
+        // Log but don't crash the boot if a statement (like an existing index) fails
+        const msg = (e as Error).message
+        if (!msg.includes('already exists') && !msg.includes('duplicate column name')) {
+          console.warn(`[Database] Schema statement warning: ${msg}`)
+        }
+      }
+    }
 
-    console.log(`Database initialized at ${dbPath} (schema v${SCHEMA_VERSION})`)
+    saveDatabase()
+    console.log(`[Database] Initialization complete (schema v${SCHEMA_VERSION})`)
   } catch (error) {
-    console.error('Failed to initialize database:', error)
+    console.error('[Database] FATAL initialization error:', error)
     throw error
   }
 }

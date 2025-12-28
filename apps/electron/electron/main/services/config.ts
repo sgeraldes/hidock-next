@@ -138,7 +138,7 @@ export async function updateConfig<K extends keyof AppConfig>(
   section: K,
   values: Partial<AppConfig[K]>
 ): Promise<void> {
-  const updatedSection = { ...config[section], ...values }
+  const updatedSection = { ...(config[section] as any), ...values }
   await saveConfig({ [section]: updatedSection } as Partial<AppConfig>)
 }
 

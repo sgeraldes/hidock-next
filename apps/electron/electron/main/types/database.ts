@@ -45,18 +45,25 @@ export interface Recording {
   id: string
   filename: string
   original_filename: string | null
-  file_path: string
+  file_path: string | null
   file_size: number | null
   duration_seconds: number | null
   date_recorded: string
   meeting_id: string | null
   correlation_confidence: number | null
   correlation_method: string | null
-  status: RecordingStatus
+  status: string
   created_at: string
+  // Lifecycle fields
+  location: 'device-only' | 'local-only' | 'both' | 'deleted'
+  transcription_status: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+  on_device: number
+  device_last_seen?: string
+  on_local: number
+  source: 'hidock' | 'import' | 'external'
+  is_imported: number
+  storage_tier?: 'hot' | 'warm' | 'cold' | 'archive' | null
 }
-
-export type RecordingStatus = 'pending' | 'transcribing' | 'transcribed' | 'error'
 
 /**
  * AI-generated transcript from recording

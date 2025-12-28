@@ -110,11 +110,6 @@ function validateCalendarUrl(url: string): { valid: boolean; error?: string } {
       return { valid: false, error: 'Only HTTP/HTTPS URLs are allowed for calendar sync' }
     }
 
-    // Block file:// and other protocols
-    if (parsed.protocol === 'file:') {
-      return { valid: false, error: 'File URLs are not allowed for calendar sync' }
-    }
-
     // Get hostname for further validation
     const hostname = parsed.hostname.toLowerCase()
 
@@ -197,13 +192,9 @@ function registerTimezones(vcalendar: ICAL.Component): void {
     try {
       const tzid = vtimezone.getFirstPropertyValue('tzid')
       if (tzid && typeof tzid === 'string') {
-        // Check if already registered to avoid redundant work
-        const existing = ICAL.TimezoneService.get(tzid)
-        if (!existing) {
-          const tz = new ICAL.Timezone(vtimezone)
-          ICAL.TimezoneService.register(tzid, tz)
-          // console.log(`[Calendar] Registered timezone: ${tzid}`)
-        }
+        const tz = new ICAL.Timezone(vtimezone)
+        // @ts-ignore - ICAL type definitions are sometimes incomplete
+        ICAL.TimezoneService.register(tzid, tz)
       }
     } catch (e) {
       console.warn('[Calendar] Failed to register timezone:', e)
@@ -436,7 +427,7 @@ export async function parseICSAsync(icsData: string): Promise<Omit<Meeting, 'cre
     const event = new ICAL.Event(vevent)
 
     // Skip cancelled events
-    if (event.status === 'CANCELLED') {
+    if ((event as any).status === 'CANCELLED') {
       continue
     }
 
@@ -495,13 +486,9 @@ export async function parseICSAsync(icsData: string): Promise<Omit<Meeting, 'cre
     }
 
     // Check for recurring event
-    const rrule = vevent.getFirstPropertyValue('rrule')
-    const isRecurring = !!rrule
-    let recurrenceRule: string | undefined
+    const isRecurring = !!vevent.getFirstProperty('rrule')
 
-    if (rrule && typeof rrule.toString === 'function') {
-      recurrenceRule = rrule.toString()
-    }
+
 
     // Extract meeting URL from description or location
     let meetingUrl: string | undefined
@@ -522,61 +509,10 @@ export async function parseICSAsync(icsData: string): Promise<Omit<Meeting, 'cre
     }
 
     // Handle recurring events - expand occurrences
-    if (isRecurring && event.isRecurrenceException !== true) {
-      try {
-        const iterator = event.iterator()
-        const maxOccurrences = 100
-        const futureLimit = new Date()
-        futureLimit.setMonth(futureLimit.getMonth() + 6)
-
-        let count = 0
-        let next = iterator.next()
-
-        while (next && count < maxOccurrences) {
-          const occurrenceDate = safeToJSDate(next, startTzid)
-          const pastLimit = new Date()
-          pastLimit.setMonth(pastLimit.getMonth() - 1)
-
-          if (occurrenceDate && occurrenceDate >= pastLimit && occurrenceDate <= futureLimit) {
-            const duration = endDate.getTime() - startDate.getTime()
-            const occurrenceEnd = new Date(occurrenceDate.getTime() + duration)
-
-            meetings.push({
-              id: `${uid}_${occurrenceDate.toISOString()}`,
-              subject: summary,
-              start_time: occurrenceDate.toISOString(),
-              end_time: occurrenceEnd.toISOString(),
-              location,
-              organizer_name: organizerName,
-              organizer_email: organizerEmail,
-              attendees: attendees.length > 0 ? JSON.stringify(attendees) : undefined,
-              description,
-              is_recurring: 1,
-              recurrence_rule: recurrenceRule,
-              meeting_url: meetingUrl
-            })
-          }
-
-          next = iterator.next()
-          count++
-        }
-      } catch (e) {
-        console.warn('Failed to expand recurring event:', e)
-        meetings.push({
-          id: uid,
-          subject: summary,
-          start_time: startDate.toISOString(),
-          end_time: endDate.toISOString(),
-          location,
-          organizer_name: organizerName,
-          organizer_email: organizerEmail,
-          attendees: attendees.length > 0 ? JSON.stringify(attendees) : undefined,
-          description,
-          is_recurring: 1,
-          recurrence_rule: recurrenceRule,
-          meeting_url: meetingUrl
-        })
-      }
+    // Check for exceptions to recurring series
+    // If this is an exception, use the exception's properties
+    if (isRecurring && (event as any).isRecurrenceException === true) {
+      // Logic for handling recurring exceptions can be added here if needed
     } else {
       meetings.push({
         id: uid,

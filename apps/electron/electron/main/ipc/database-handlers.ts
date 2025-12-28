@@ -1,30 +1,26 @@
 import { ipcMain } from 'electron'
 import {
   getMeetings,
-  getMeetingById,
   getMeetingsByIds,
+  getMeetingById,
   getRecordings,
   getRecordingById,
   getRecordingsForMeeting,
   getTranscriptByRecordingId,
   getTranscriptsByRecordingIds,
   searchTranscripts,
+  getQueueItems,
   getChatHistory,
   addChatMessage,
   clearChatHistory,
-  linkRecordingToMeeting,
-  updateRecordingStatus,
-  getQueueItems,
   isFileSynced,
   getSyncedFile,
   getAllSyncedFiles,
   addSyncedFile,
   removeSyncedFile,
   getSyncedFilenames,
-  Meeting,
-  Recording,
-  Transcript,
-  SyncedFile
+  updateRecordingStatus,
+  linkRecordingToMeeting
 } from '../services/database'
 
 export function registerDatabaseHandlers(): void {

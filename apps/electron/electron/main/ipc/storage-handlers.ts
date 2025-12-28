@@ -204,7 +204,13 @@ export function registerStorageHandlers(): void {
         meeting_id: undefined,
         correlation_confidence: undefined,
         correlation_method: undefined,
-        status: 'pending'
+        status: 'pending',
+        location: 'both',
+        on_device: 1,
+        on_local: 1,
+        transcription_status: 'pending',
+        source: 'hidock',
+        is_imported: 0
       }
 
       insertRecording(recording)

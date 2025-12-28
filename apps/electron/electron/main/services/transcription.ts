@@ -12,8 +12,7 @@ import {
   findCandidateMeetingsForRecording,
   addRecordingMeetingCandidate,
   linkRecordingToMeeting,
-  type Transcript,
-  type Meeting
+  type Transcript
 } from './database'
 import { BrowserWindow } from 'electron'
 import { getVectorStore } from './vector-store'
@@ -96,8 +95,8 @@ async function processQueue(): Promise<void> {
 
 async function transcribeRecording(recordingId: string): Promise<void> {
   const recording = getRecordingById(recordingId)
-  if (!recording) {
-    throw new Error(`Recording not found: ${recordingId}`)
+  if (!recording || !recording.file_path) {
+    throw new Error(`Recording not found or no local file: ${recordingId}`)
   }
 
   if (!existsSync(recording.file_path)) {

@@ -3,7 +3,6 @@ import { contextBridge, ipcRenderer } from 'electron'
 // Import types from api.ts for proper typing
 import type {
   Result,
-  RAGFilter,
   RAGChatRequest,
   RAGChatResponse,
   RAGStatus,
@@ -21,6 +20,12 @@ import type {
 } from '../main/types/api'
 import type { Contact, ContactWithMeetings, Project, ProjectWithMeetings } from '../main/types/database'
 import type { MigrationAPI } from './migration-types'
+import type { 
+  KnowledgeCapture, 
+  Actionable, 
+  Conversation, 
+  Message 
+} from '../../src/types/knowledge'
 
 // Type definitions for the API
 export interface ElectronAPI {

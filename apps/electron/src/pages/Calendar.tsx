@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Mic, RefreshCw, Cloud, HardDrive, Check, Download, Play, X, LayoutGrid, Square, CheckSquare, FileText, Trash2, List, FileAudio } from 'lucide-react'
+import { Mic, RefreshCw, Play, X, LayoutGrid, Square, CheckSquare, FileText, Trash2, List, FileAudio, Download } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { CardContent } from '@/components/ui/card'
+import { cn, formatTime, isToday, formatDuration } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
-import { cn, formatTime, isToday, formatDateTime, formatDuration } from '@/lib/utils'
 import type { Meeting, Recording } from '@/types'
 import {
   Tooltip,
@@ -464,7 +465,7 @@ export function Calendar() {
 
     setDeleting(recording.id)
     try {
-      const filename = 'deviceFilename' in recording ? recording.deviceFilename : recording.filename
+      const filename = ('deviceFilename' in (recording as any)) ? (recording as any).deviceFilename : recording.filename
       await deviceService.deleteRecording(filename)
       await refreshRecordings(true)
     } catch (e) {
@@ -502,8 +503,8 @@ export function Calendar() {
 
     setTranscribing(recording.id)
     try {
-      const result = await window.electronAPI.recordings.transcribe(recording.id)
-      if (result && !result.success) {
+      const result: any = await window.electronAPI.recordings.transcribe(recording.id)
+      if (result && result.success === false) {
         console.error('Transcription failed:', result.error)
         alert(`Transcription failed: ${result.error}`)
       } else {

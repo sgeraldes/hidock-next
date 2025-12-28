@@ -1,20 +1,18 @@
-import type { Transcript } from './database'
 import { v4 as uuidv4 } from 'uuid'
 import {
-  getRecordingById,
-  getTranscriptByRecordingId,
-  getQualityAssessment,
-  upsertQualityAssessment,
-  getRecordingsByQuality,
-  getRecordingsByIds,
-  getTranscriptsByRecordingIds,
   queryAll,
   getRecordingByIdAsync,
   getTranscriptByRecordingIdAsync,
-  getQualityAssessmentAsync,
   upsertQualityAssessmentAsync,
-  type Recording,
-  type QualityAssessment
+  getQualityAssessmentAsync,
+  getQualityAssessment,
+  getRecordingsByQuality,
+  getRecordingsByIds,
+  getTranscriptsByRecordingIds,
+  upsertQualityAssessment,
+  Recording,
+  Transcript,
+  QualityAssessment
 } from './database'
 import { getEventBus } from './event-bus'
 import type { QualityAssessedEvent } from './event-bus'
@@ -224,108 +222,6 @@ export class QualityAssessmentService {
 
     const transcript = await getTranscriptByRecordingIdAsync(recordingId)
     return this.inferQualityFromData(recording, transcript)
-  }
-
-  private inferQuality(recordingId: string): {
-    level: QualityLevel
-    confidence: number
-    reason: string
-  } {
-    const recording = getRecordingById(recordingId)
-    if (!recording) {
-      return { level: 'low', confidence: 1.0, reason: 'Recording not found' }
-    }
-
-    const transcript = getTranscriptByRecordingId(recordingId)
-    return this.inferQualityFromData(recording, transcript)
-  }
-
-  // Legacy implementation - kept for backwards compatibility
-  private inferQualityOld(recordingId: string): {
-    level: QualityLevel
-    confidence: number
-    reason: string
-  } {
-    const recording = getRecordingById(recordingId)
-    if (!recording) {
-      return { level: 'low', confidence: 1.0, reason: 'Recording not found' }
-    }
-
-    const transcript = getTranscriptByRecordingId(recordingId)
-    const hasMeeting = !!recording.meeting_id
-    const hasTranscript = !!transcript
-    const duration = recording.duration_seconds || 0
-
-    let score = 0
-    let confidence = 0.7 // Default confidence for auto-assessment
-    const reasons: string[] = []
-
-    // Factor 1: Has transcript (40 points)
-    if (hasTranscript) {
-      score += 40
-      reasons.push('has transcript')
-
-      // Check transcript quality
-      if (transcript.word_count && transcript.word_count > 100) {
-        score += 10
-        reasons.push('substantial transcript')
-      }
-
-      if (transcript.summary) {
-        score += 5
-        reasons.push('has summary')
-      }
-    } else {
-      reasons.push('no transcript')
-    }
-
-    // Factor 2: Meeting correlation (30 points)
-    if (hasMeeting) {
-      score += 30
-      reasons.push('linked to meeting')
-
-      if (recording.correlation_confidence && recording.correlation_confidence > 0.8) {
-        score += 10
-        reasons.push('high meeting confidence')
-      }
-    } else {
-      reasons.push('no meeting link')
-    }
-
-    // Factor 3: Duration appropriateness (20 points)
-    if (duration >= 60 && duration <= 7200) {
-      // 1 min to 2 hours is reasonable for meetings
-      score += 20
-      reasons.push('appropriate duration')
-    } else if (duration < 60) {
-      reasons.push('very short recording')
-      confidence = 0.6
-    } else if (duration > 7200) {
-      reasons.push('very long recording')
-    }
-
-    // Factor 4: File integrity (10 points)
-    if (recording.file_size && recording.file_size > 1000) {
-      // Non-trivial file size
-      score += 10
-      reasons.push('valid file size')
-    } else {
-      reasons.push('suspicious file size')
-      confidence = 0.5
-    }
-
-    // Determine quality level from score
-    let level: QualityLevel
-    if (score >= 70) {
-      level = 'high'
-    } else if (score >= 40) {
-      level = 'medium'
-    } else {
-      level = 'low'
-    }
-
-    const reason = reasons.join(', ')
-    return { level, confidence, reason }
   }
 
   /**

@@ -141,7 +141,7 @@ export const useDeviceSyncStore = create<DeviceSyncStore>()(
     connect: async () => {
       set({ connectionStatus: 'connecting', connectionError: null })
       try {
-        const result = await window.electronAPI.device.connect()
+        const result = await (window.electronAPI as any).device.connect()
         if (result.success) {
           set({
             connectionStatus: 'connected',
@@ -166,7 +166,7 @@ export const useDeviceSyncStore = create<DeviceSyncStore>()(
 
     disconnect: async () => {
       try {
-        await window.electronAPI.device.disconnect()
+        await (window.electronAPI as any).device.disconnect()
         set({
           connectionStatus: 'disconnected',
           deviceModel: null,
@@ -186,7 +186,7 @@ export const useDeviceSyncStore = create<DeviceSyncStore>()(
 
       set({ filesLoading: true })
       try {
-        const result = await window.electronAPI.device.getFileList()
+        const result = await (window.electronAPI as any).device.getFileList()
         if (result.success) {
           set({
             files: result.files.map((file: any) => ({
@@ -217,7 +217,7 @@ export const useDeviceSyncStore = create<DeviceSyncStore>()(
       })
 
       try {
-        await window.electronAPI.device.downloadFile(filename, (progress: number) => {
+        await (window.electronAPI as any).device.downloadFile(filename, (progress: number) => {
           get().setSyncState({ fileProgress: progress })
         })
 
@@ -248,7 +248,7 @@ export const useDeviceSyncStore = create<DeviceSyncStore>()(
         })
 
         try {
-          await window.electronAPI.device.downloadFile(file.filename, (progress: number) => {
+          await (window.electronAPI as any).device.downloadFile(file.filename, (progress: number) => {
             get().setSyncState({ fileProgress: progress })
           })
           get().markFileSynced(file.filename)

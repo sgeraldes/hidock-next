@@ -1,58 +1,60 @@
+/**
+ * StoragePolicyService - Manages storage tier assignment and cleanup policies
+ * Subscribes to QualityAssessed events and automatically assigns tiers
+ */
+
 import {
   getRecordingById,
-  getRecordingsByStorageTier,
-  updateRecordingStorageTier,
-  getQualityAssessment,
   getRecordingByIdAsync,
+  updateRecordingStorageTier,
   updateRecordingStorageTierAsync,
-  getQualityAssessmentAsync,
-  type Recording,
+  getRecordingsByStorageTier,
   queryAll,
+  getQualityAssessmentAsync,
+  Recording,
   deleteRecordingLocal
 } from './database'
-import { getEventBus } from './event-bus'
-import type { StorageTierAssignedEvent, RecordingCleanupSuggestedEvent, QualityAssessedEvent } from './event-bus'
+import { 
+  getEventBus,
+  QualityAssessedEvent,
+  StorageTierAssignedEvent,
+  RecordingCleanupSuggestedEvent
+} from './event-bus'
+import { QualityLevel } from './quality-assessment'
 
+// Define storage tiers
 export type StorageTier = 'hot' | 'warm' | 'cold' | 'archive'
-export type QualityLevel = 'high' | 'medium' | 'low'
 
-/**
- * Storage Policy - Maps quality levels to storage tiers
- * This defines the business rules for where recordings should be stored
- */
-export const STORAGE_POLICIES: Record<QualityLevel, StorageTier> = {
-  high: 'hot', // High-quality: keep readily accessible
-  medium: 'warm', // Medium-quality: accessible but can be slower
-  low: 'cold' // Low-quality: archive or cleanup candidate
+// Retention policies (in days)
+const TIER_RETENTION_DAYS: Record<StorageTier, number> = {
+  hot: 30, // Keep locally for 30 days
+  warm: 90, // Keep for 90 days
+  cold: 180, // Keep for 180 days
+  archive: 365 // Keep indefinitely (or until manual cleanup)
 }
 
-/**
- * Tier Retention Policies - Days before suggesting cleanup
- */
-export const TIER_RETENTION_DAYS: Record<StorageTier, number> = {
-  hot: 365, // Keep high-quality for 1 year
-  warm: 180, // Medium-quality for 6 months
-  cold: 90, // Low-quality for 3 months
-  archive: 30 // Archive for 1 month before suggesting deletion
+// Map quality to initial storage tier
+const STORAGE_POLICIES: Record<QualityLevel, StorageTier> = {
+  high: 'hot',
+  medium: 'warm',
+  low: 'cold'
 }
 
 export interface CleanupSuggestion {
   recordingId: string
   filename: string
   dateRecorded: string
-  tier: StorageTier
+  currentTier: StorageTier
+  suggestedTier: StorageTier | null
   quality?: QualityLevel
   ageInDays: number
-  sizeBytes?: number
+  sizeBytes: number | null
   reason: string
   hasTranscript: boolean
   hasMeeting: boolean
+  actionableId?: string
 }
 
-/**
- * StoragePolicyService - Manages storage tier assignment and cleanup policies
- * Subscribes to QualityAssessed events and automatically assigns tiers
- */
 export class StoragePolicyService {
   constructor() {
     // Subscribe to quality assessment events
@@ -187,18 +189,21 @@ export class StoragePolicyService {
         const recordedDate = new Date(recording.date_recorded)
         const ageMs = now.getTime() - recordedDate.getTime()
         const ageInDays = Math.floor(ageMs / (1000 * 60 * 60 * 24))
+        const quality = qualityMap.get(recording.id)
 
         suggestions.push({
           recordingId: recording.id,
           filename: recording.filename,
           dateRecorded: recording.date_recorded,
-          tier,
-          quality: qualityMap.get(recording.id),
+          currentTier: tier,
+          suggestedTier: this.getNextLowerTier(tier),
+          quality,
           ageInDays,
-          sizeBytes: recording.file_size,
+          sizeBytes: recording.file_size ?? null,
           reason: `Exceeds ${tier} tier retention (${maxAge} days) by ${ageInDays - maxAge} days`,
           hasTranscript: recording.transcription_status === 'complete',
-          hasMeeting: !!recording.meeting_id
+          hasMeeting: !!recording.meeting_id,
+          actionableId: (recording as any).actionable_id // If linked
         })
       }
     }
@@ -215,17 +220,13 @@ export class StoragePolicyService {
   getCleanupSuggestionsForTier(tier: StorageTier, minAgeDays?: number): CleanupSuggestion[] {
     const override = minAgeDays ? { [tier]: minAgeDays } : undefined
     const allSuggestions = this.getCleanupSuggestions(override)
-    return allSuggestions.filter((s) => s.tier === tier)
+    return allSuggestions.filter((s) => s.currentTier === tier)
   }
 
   /**
    * Execute cleanup for a list of recording IDs
-   * This will:
-   * - Delete local files
-   * - Update recording location to 'deleted' or 'device-only'
-   * - Optionally archive tier to next lower tier instead of deletion
    */
-  async executeCleanup(recordingIds: string[], archive: boolean = false): Promise<{
+  async executeCleanup(recordingIds: string[]): Promise<{
     deleted: string[]
     archived: string[]
     failed: { id: string; reason: string }[]
@@ -242,11 +243,12 @@ export class StoragePolicyService {
           continue
         }
 
-        if (archive) {
-          // Move to next lower tier
-          const currentTier = recording.storage_tier
-          const nextTier = this.getNextLowerTier(currentTier)
+        // Check if quality assessment exists
+        const quality = await getQualityAssessmentAsync(recording.id)
 
+        if (quality) {
+          const currentTier = recording.storage_tier || 'hot'
+          const nextTier = this.getNextLowerTier(currentTier as StorageTier)
           if (nextTier) {
             updateRecordingStorageTier(recordingId, nextTier)
             archived.push(recordingId)
@@ -255,9 +257,7 @@ export class StoragePolicyService {
             failed.push({ id: recordingId, reason: 'Already at lowest tier' })
           }
         } else {
-          // Delete local file (implementation would call file-storage service)
-          // For now, just mark as deleted
-          // imports moved to top of file
+          // Delete local file
           deleteRecordingLocal(recordingId)
           deleted.push(recordingId)
           console.log(`[StoragePolicy] Deleted local file for ${recordingId}`)
@@ -311,7 +311,12 @@ export class StoragePolicyService {
     avgAgeDays: number
   }[] {
     const tiers: StorageTier[] = ['hot', 'warm', 'cold', 'archive']
-    const stats = []
+    const stats: {
+      tier: StorageTier
+      count: number
+      totalSizeBytes: number
+      avgAgeDays: number
+    }[] = []
     const now = new Date()
 
     // OPTIMIZED: Query all tiered recordings once

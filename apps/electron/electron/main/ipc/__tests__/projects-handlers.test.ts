@@ -58,7 +58,7 @@ describe('Projects IPC Handlers', () => {
     
     registerProjectsHandlers()
     const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'projects:getAll')?.[1]
-    const result = await handler?.(null, {}) as any
+    const result = await handler?.({} as any, {}) as any
     
     expect(result.data.projects[0].status).toBe('active')
   })

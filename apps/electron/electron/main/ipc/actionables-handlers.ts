@@ -1,7 +1,7 @@
 
 import { ipcMain } from 'electron'
-import { queryAll, queryOne, run } from '../services/database'
-import type { Actionable } from '../../src/types/knowledge'
+import { queryAll, run } from '../services/database'
+import type { Actionable } from '@/types/knowledge'
 
 export function registerActionablesHandlers(): void {
   // Get all actionables

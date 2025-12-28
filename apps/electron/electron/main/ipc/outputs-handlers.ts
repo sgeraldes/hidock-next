@@ -10,7 +10,8 @@ import { getOutputGeneratorService } from '../services/output-generator'
 import { success, error, Result } from '../types/api'
 import { GenerateOutputRequestSchema } from '../validation/outputs'
 import type { OutputTemplate, GenerateOutputResponse } from '../types/api'
-import { run, runInTransaction, randomUUID } from '../services/database'
+import { run, runInTransaction } from '../services/database'
+import { randomUUID } from 'crypto'
 
 export function registerOutputsHandlers(): void {
   const generator = getOutputGeneratorService()

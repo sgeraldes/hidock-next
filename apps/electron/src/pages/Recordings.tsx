@@ -316,11 +316,12 @@ export function Recordings() {
   // Delete handlers
   const handleDeleteFromDevice = async (recording: UnifiedRecording) => {
     if (!deviceConnected) return
+    if (!('deviceFilename' in recording)) return
     if (!window.confirm(`Delete "${recording.filename}" from device? This cannot be undone.`)) return
 
     setDeleting(recording.id)
     try {
-      await window.electronAPI.device.deleteFile(recording.deviceFilename)
+      await window.electronAPI.recordings.delete(recording.id)
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete from device:', e)
@@ -752,7 +753,7 @@ export function Recordings() {
                           <Button variant="ghost" size="icon" className="h-7 w-7"
                             onClick={() => currentlyPlayingId === recording.id
                               ? audioControls.stop()
-                              : audioControls.play(recording.id, recording.localPath)}
+                              : audioControls.play(recording.id, 'localPath' in recording ? recording.localPath : '')}
                             disabled={!canPlay}>
                             {currentlyPlayingId === recording.id ? <X className="h-3 w-3" /> : <Play className="h-3 w-3" />}
                           </Button>
@@ -898,7 +899,7 @@ export function Recordings() {
                                   <Button
                                     variant="ghost"
                                     size="icon"
-                                    onClick={() => audioControls.play(recording.id, recording.localPath)}
+                                    onClick={() => audioControls.play(recording.id, 'localPath' in recording ? recording.localPath : '')}
                                     disabled={!canPlay}
                                     title={canPlay ? 'Play capture' : 'Download to play'}
                                   >

@@ -9,9 +9,8 @@
  * Runs checks on startup and provides on-demand health checks.
  */
 
-import { existsSync, readdirSync, statSync, unlinkSync, utimesSync, renameSync } from 'fs'
-import { join, extname, basename } from 'path'
-import { BrowserWindow } from 'electron'
+import { existsSync, readdirSync, statSync, unlinkSync, utimesSync } from 'fs'
+import { join, basename, extname } from 'path'
 import {
   getDatabase,
   queryAll,
@@ -971,18 +970,6 @@ class IntegrityService {
    */
   getLastReport(): IntegrityReport | null {
     return this.lastReport
-  }
-
-  /**
-   * Emit progress to renderer windows
-   */
-  private emitProgress(message: string, progress: number): void {
-    const windows = BrowserWindow.getAllWindows()
-    for (const win of windows) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('integrity:progress', { message, progress })
-      }
-    }
   }
 }
 

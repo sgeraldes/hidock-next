@@ -36,32 +36,28 @@ function formatEta(seconds: number | null): string {
 }
 
 export function Device() {
-  // Global store for sync state (shown in sidebar) and device state (updated by OperationController)
   const {
-    setDeviceSyncState,
-    clearDeviceSyncState,
-    addToDownloadQueue,
-    updateDownloadProgress,
-    removeFromDownloadQueue,
-    cancelDeviceSync,
-    deviceSyncProgress,
-    deviceSyncEta,
+    isDeviceConnected,
+    deviceInfo,
+    isScanning,
+    downloadQueue,
     deviceSyncing: storeSyncing,
     deviceState,
     connectionStatus,
-    activityLog
-  } = useAppStore()
+    activityLog,
+    setDeviceSyncState,
+    cancelDeviceSync,
+    deviceSyncProgress,
+    deviceSyncEta
+  } = useAppStore() as any
 
   // Initialize service
   const deviceService = getHiDockDeviceService()
   const [connecting, setConnecting] = useState(false)
   const [recordings, setRecordings] = useState<HiDockRecording[]>([])
-  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
-  const [downloading, setDownloading] = useState<string | null>(null)
-  const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  // Connection timing state
+  const [syncing, setSyncing] = useState(false)
+  const [downloadProgress, setDownloadProgress] = useState<any>(null)
   const [connectionStartTime, setConnectionStartTime] = useState<number | null>(null)
   const [connectionElapsed, setConnectionElapsed] = useState(0)
   const connectionTimeoutRef = useRef<number | null>(null)
@@ -591,7 +587,7 @@ export function Device() {
       const timer = setTimeout(checkAndTriggerAutoSync, 100)
       return () => clearTimeout(timer)
     }
-  }, [deviceState.connected, recordings, syncing, storeSyncing, deviceService, triggerAutoSync])
+  }, [deviceState.connected, recordings, syncing, (storeSyncing as any), deviceService, triggerAutoSync])
 
   const handleAutoRecordToggle = async (enabled: boolean) => {
     try {
@@ -630,7 +626,7 @@ export function Device() {
 
   const handleRetryFailed = async () => {
     try {
-      const count = await window.electronAPI.downloadService.retryFailed()
+      const count = await (window.electronAPI.downloadService as any).retryFailed()
       if (count > 0) {
         toast({
           title: 'Retrying downloads',

@@ -174,7 +174,7 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
     // Async Actions
     loadQueue: async () => {
       try {
-        const result = await window.electronAPI.transcription.getQueue()
+        const result = await (window.electronAPI.recordings as any).getQueue()
         if (result.success) {
           const queue = new Map<string, TranscriptionItem>()
           const processing = new Set<string>()

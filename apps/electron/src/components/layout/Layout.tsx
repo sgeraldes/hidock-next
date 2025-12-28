@@ -1,28 +1,29 @@
 import { ReactNode, useEffect, useState, useRef } from 'react'
 import { useLocation, Link } from 'react-router-dom'
 import {
-  MessageSquare,
-  Settings,
-  ChevronLeft,
-  ChevronRight,
-  RotateCcw,
+  FileText,
   Users,
   Folder,
-  RefreshCw,
-  Download,
-  CheckCircle2,
-  XCircle,
-  Loader2,
+  Calendar,
+  CloudDownload,
   BookOpen,
   Bot,
   Compass,
   ListTodo,
-  Calendar,
-  CloudDownload,
-  LucideIcon
+  Settings,
+  ChevronLeft,
+  ChevronRight,
+  CheckCircle2,
+  Loader2,
+  XCircle,
+  Download,
+  RefreshCw,
+  RotateCcw
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
+
+type LucideIcon = typeof FileText
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
 import { OperationController } from '@/components/OperationController'

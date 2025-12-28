@@ -3,7 +3,9 @@
   "include": [
     "src/**/*",
     "src/**/*.tsx",
-    "electron/preload/*.d.ts"
+    "electron/preload/*.ts",
+    "electron/preload/*.d.ts",
+    "electron/main/types/*.ts"
   ],
   "compilerOptions": {
     "composite": true,
