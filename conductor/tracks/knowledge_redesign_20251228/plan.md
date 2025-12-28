@@ -14,7 +14,7 @@
 - [x] Task: Execute V11 Database Migration [0cc1bde]
     - [ ] Subtask: Run the migration script via the Migration UI (or CLI trigger)
     - [ ] Subtask: Verify data integrity (count check, field verification)
-- [~] Task: Update Library Page (formerly Recordings)
+- [x] Task: Update Library Page (formerly Recordings) [8ad05df]
     - [ ] Subtask: Update `Recordings.tsx` to display `KnowledgeCapture` data (title, quality, status)
     - [ ] Subtask: Implement quality rating UI (stars/badges)
 
