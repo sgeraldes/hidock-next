@@ -230,5 +230,10 @@ export function registerRAGHandlers(): void {
     }))
   })
 
+  // Global search
+  ipcMain.handle('rag:globalSearch', async (_event, { query, limit }: { query: string; limit?: number }) => {
+    return rag.globalSearch(query, limit)
+  })
+
   console.log('RAG IPC handlers registered')
 }

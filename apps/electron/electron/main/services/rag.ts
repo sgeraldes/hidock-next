@@ -6,6 +6,7 @@
 import { getVectorStore, SearchResult } from './vector-store'
 import { getOllamaService, OllamaChatMessage } from './ollama'
 import { getDatabase } from './database'
+import { Result, success, error } from '../types/api'
 
 interface ChatContext {
   meetingId?: string
@@ -313,6 +314,69 @@ ${transcript.substring(0, 8000)}`
       documentCount: vectorStore.getDocumentCount(),
       meetingCount: vectorStore.getMeetingCount(),
       sessionCount: this.contexts.size
+    }
+  }
+
+  /**
+   * Perform a global search across all entities
+   */
+  async globalSearch(query: string, limit = 5): Promise<Result<{
+    knowledge: any[]
+    people: any[]
+    projects: any[]
+  }>> {
+    try {
+      const db = getDatabase()
+      const vectorStore = getVectorStore()
+      
+      const escaped = query.replace(/'/g, "''")
+      const likeQuery = `%${escaped}%`
+
+      // 1. Search knowledge captures (SQL search + Vector search)
+      const knowledgeRows = db.exec(`
+        SELECT * FROM knowledge_captures 
+        WHERE title LIKE ? OR summary LIKE ?
+        LIMIT ?
+      `, [likeQuery, likeQuery, limit])
+      
+      const knowledge = knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
+        id: v[0],
+        title: v[1],
+        summary: v[2],
+        capturedAt: v[13]
+      })) : []
+
+      // 2. Search people
+      const peopleRows = db.exec(`
+        SELECT * FROM contacts 
+        WHERE name LIKE ? OR email LIKE ? OR company LIKE ? OR role LIKE ?
+        LIMIT ?
+      `, [likeQuery, likeQuery, likeQuery, likeQuery, limit])
+      
+      const people = peopleRows.length > 0 ? peopleRows[0].values.map(v => ({
+        id: v[0],
+        name: v[1],
+        email: v[2],
+        type: v[3]
+      })) : []
+
+      // 3. Search projects
+      const projectRows = db.exec(`
+        SELECT * FROM projects 
+        WHERE name LIKE ? OR description LIKE ?
+        LIMIT ?
+      `, [likeQuery, likeQuery, limit])
+      
+      const projects = projectRows.length > 0 ? projectRows[0].values.map(v => ({
+        id: v[0],
+        name: v[1],
+        status: v[3]
+      })) : []
+
+      return success({ knowledge, people, projects })
+    } catch (err) {
+      console.error('RAGService:globalSearch error:', err)
+      return error('DATABASE_ERROR', 'Global search failed', err)
     }
   }
 }
