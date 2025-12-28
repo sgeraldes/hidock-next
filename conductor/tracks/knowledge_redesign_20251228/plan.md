@@ -29,7 +29,7 @@
 - [x] Task: Implement Context Injection Backend [764d95a]
     - [ ] Subtask: Update `chat_messages` table or create `conversation_context` table
     - [ ] Subtask: Implement logic to retrieve context content for AI prompt
-- [ ] Task: Implement Assistant UI - Context Picker
+- [x] Task: Implement Assistant UI - Context Picker [15be61d]
     - [ ] Subtask: Create `ContextPicker` component (modal/popover) to select Knowledge items
     - [ ] Subtask: Visualize attached context in the chat interface
 - [ ] Task: Integrate Context into LLM Prompt
