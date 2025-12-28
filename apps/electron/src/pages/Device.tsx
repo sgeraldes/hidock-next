@@ -442,11 +442,12 @@ export function Device() {
 
       // Queue files to download service - DownloadController will handle actual downloads
       // IMPORTANT: Pass dateCreated to preserve original recording dates from device
+      // Note: dateCreated from getFilesToSync is already serialized to ISO string by IPC
       const queuedIds = await window.electronAPI.downloadService.queueDownloads(
         toSync.map(f => ({
           filename: f.filename,
           size: f.size,
-          dateCreated: f.dateCreated?.toISOString()
+          dateCreated: typeof f.dateCreated === 'string' ? f.dateCreated : f.dateCreated?.toISOString()
         }))
       )
 
@@ -524,11 +525,12 @@ export function Device() {
 
       // Queue files to download service - DownloadController will handle actual downloads
       // IMPORTANT: Pass dateCreated to preserve original recording dates from device
+      // Note: dateCreated from getFilesToSync is already serialized to ISO string by IPC
       const queuedIds = await window.electronAPI.downloadService.queueDownloads(
         toSync.map(f => ({
           filename: f.filename,
           size: f.size,
-          dateCreated: f.dateCreated?.toISOString()
+          dateCreated: typeof f.dateCreated === 'string' ? f.dateCreated : f.dateCreated?.toISOString()
         }))
       )
 
