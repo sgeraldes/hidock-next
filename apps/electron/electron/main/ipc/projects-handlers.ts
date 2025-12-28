@@ -12,13 +12,12 @@ import {
   updateProject,
   deleteProject,
   getMeetingsForProject,
-  getProjectsForMeeting,
   tagMeetingToProject,
   untagMeetingFromProject,
   getMeetingById,
   getTranscriptByRecordingId,
   getRecordingsForMeeting,
-  Project
+  Project as DBProject
 } from '../services/database'
 import { success, error, Result } from '../types/api'
 import {
@@ -32,6 +31,8 @@ import {
 } from '../validation/projects'
 import type { ProjectWithMeetings } from '../types/database'
 import type { GetProjectsResponse } from '../types/api'
+import type { Project } from '../../src/types/knowledge'
+import { randomUUID } from 'crypto'
 
 export function registerProjectsHandlers(): void {
   /**
@@ -39,7 +40,7 @@ export function registerProjectsHandlers(): void {
    */
   ipcMain.handle(
     'projects:getAll',
-    async (_, request?: unknown): Promise<Result<GetProjectsResponse>> => {
+    async (_, request?: unknown): Promise<Result<{ projects: Project[]; total: number }>> => {
       try {
         const parsed = GetProjectsRequestSchema.safeParse(request ?? {})
         if (!parsed.success) {
@@ -49,7 +50,10 @@ export function registerProjectsHandlers(): void {
         const { search, limit, offset } = parsed.data
         const result = getProjects(search, limit, offset)
 
-        return success(result)
+        return success({
+          projects: result.projects.map(mapToProject),
+          total: result.total
+        })
       } catch (err) {
         console.error('projects:getAll error:', err)
         return error('DATABASE_ERROR', 'Failed to fetch projects', err)
@@ -62,15 +66,15 @@ export function registerProjectsHandlers(): void {
    */
   ipcMain.handle(
     'projects:getById',
-    async (_, id: unknown): Promise<Result<ProjectWithMeetings>> => {
+    async (_, id: unknown): Promise<Result<{ project: Project; meetings: any[]; topics: string[] }>> => {
       try {
         const parsed = GetProjectByIdRequestSchema.safeParse({ id })
         if (!parsed.success) {
           return error('VALIDATION_ERROR', 'Invalid project ID', parsed.error.format())
         }
 
-        const project = getProjectById(parsed.data.id)
-        if (!project) {
+        const dbProject = getProjectById(parsed.data.id)
+        if (!dbProject) {
           return error('NOT_FOUND', `Project with ID ${parsed.data.id} not found`)
         }
 
@@ -94,7 +98,7 @@ export function registerProjectsHandlers(): void {
         }
 
         return success({
-          project,
+          project: mapToProject(dbProject),
           meetings,
           topics: Array.from(topicsSet)
         })
@@ -117,13 +121,16 @@ export function registerProjectsHandlers(): void {
           return error('VALIDATION_ERROR', 'Invalid create request', parsed.error.format())
         }
 
+        const id = randomUUID()
         const project = createProject({
-          id: crypto.randomUUID(),
+          id,
           name: parsed.data.name,
           description: parsed.data.description ?? null
         })
 
-        return success(project)
+        // Re-fetch to get status and created_at
+        const newProject = getProjectById(id)
+        return success(mapToProject(newProject!))
       } catch (err) {
         console.error('projects:create error:', err)
         return error('DATABASE_ERROR', 'Failed to create project', err)
@@ -143,19 +150,16 @@ export function registerProjectsHandlers(): void {
           return error('VALIDATION_ERROR', 'Invalid update request', parsed.error.format())
         }
 
-        const { id, name, description } = parsed.data
+        const { id, name, description, status } = parsed.data
         const project = getProjectById(id)
         if (!project) {
           return error('NOT_FOUND', `Project with ID ${id} not found`)
         }
 
-        updateProject(id, name, description)
+        updateProject(id, name, description, status)
 
-        return success({
-          ...project,
-          name: name ?? project.name,
-          description: description !== undefined ? description : project.description
-        })
+        const updatedProject = getProjectById(id)
+        return success(mapToProject(updatedProject!))
       } catch (err) {
         console.error('projects:update error:', err)
         return error('DATABASE_ERROR', 'Failed to update project', err)
@@ -261,11 +265,21 @@ export function registerProjectsHandlers(): void {
         }
 
         const projects = getProjectsForMeeting(meetingId)
-        return success(projects)
+        return success(projects.map(mapToProject))
       } catch (err) {
         console.error('projects:getForMeeting error:', err)
         return error('DATABASE_ERROR', 'Failed to fetch projects for meeting', err)
       }
     }
   )
+}
+
+function mapToProject(dbProject: DBProject): Project {
+  return {
+    id: dbProject.id,
+    name: dbProject.name,
+    description: dbProject.description,
+    status: (dbProject as any).status || 'active',
+    createdAt: dbProject.created_at
+  }
 }

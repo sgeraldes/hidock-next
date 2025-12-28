@@ -5,7 +5,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 13
+const SCHEMA_VERSION = 14
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -169,6 +169,7 @@ CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
+    status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -618,6 +619,19 @@ const MIGRATIONS: Record<number, () => void> = {
       }
     }
     console.log('Migration v13 complete: Contacts table enhanced')
+  },
+  14: () => {
+    // v14: Project Status
+    console.log('Running migration to schema v14: Adding status to projects table')
+    const database = getDatabase()
+
+    try {
+      database.run("ALTER TABLE projects ADD COLUMN status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active'")
+      console.log('[Migration v14] Added status column to projects')
+    } catch (e) {
+      console.log('[Migration v14] status column may already exist')
+    }
+    console.log('Migration v14 complete: Projects table enhanced')
   }
 
 }
@@ -1773,7 +1787,7 @@ export function createProject(project: Omit<Project, 'created_at'>): Project {
   return { ...project, created_at: new Date().toISOString() }
 }
 
-export function updateProject(id: string, name?: string, description?: string): void {
+export function updateProject(id: string, name?: string, description?: string, status?: string): void {
   const updates: string[] = []
   const params: unknown[] = []
 
@@ -1784,6 +1798,10 @@ export function updateProject(id: string, name?: string, description?: string): 
   if (description !== undefined) {
     updates.push('description = ?')
     params.push(description)
+  }
+  if (status !== undefined) {
+    updates.push('status = ?')
+    params.push(status)
   }
 
   if (updates.length > 0) {

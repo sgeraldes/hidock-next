@@ -192,7 +192,15 @@ export interface Person {
 
 
 
+
+
+
+
   id: string
+
+
+
+
 
 
 
@@ -200,7 +208,15 @@ export interface Person {
 
 
 
+
+
+
+
   email?: string | null
+
+
+
+
 
 
 
@@ -208,7 +224,15 @@ export interface Person {
 
 
 
+
+
+
+
   role?: string | null
+
+
+
+
 
 
 
@@ -216,7 +240,15 @@ export interface Person {
 
 
 
+
+
+
+
   notes?: string | null
+
+
+
+
 
 
 
@@ -224,7 +256,15 @@ export interface Person {
 
 
 
+
+
+
+
   firstSeenAt: string
+
+
+
+
 
 
 
@@ -232,7 +272,15 @@ export interface Person {
 
 
 
+
+
+
+
   interactionCount: number
+
+
+
+
 
 
 
@@ -240,7 +288,15 @@ export interface Person {
 
 
 
+
+
+
+
   
+
+
+
+
 
 
 
@@ -248,7 +304,15 @@ export interface Person {
 
 
 
+
+
+
+
   knowledgeIds?: string[]
+
+
+
+
 
 
 
@@ -256,11 +320,123 @@ export interface Person {
 
 
 
+
+
+
+
   relatedPeople?: string[]
 
 
 
+
+
+
+
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+export interface Project {
+
+
+
+
+
+
+
+  id: string
+
+
+
+
+
+
+
+  name: string
+
+
+
+
+
+
+
+  status: 'active' | 'archived'
+
+
+
+
+
+
+
+  description?: string | null
+
+
+
+
+
+
+
+  createdAt: string
+
+
+
+
+
+
+
+  
+
+
+
+
+
+
+
+  // Aggregated data
+
+
+
+
+
+
+
+  knowledgeIds?: string[]
+
+
+
+
+
+
+
+  personIds?: string[]
+
+
+
+
+
+
+
+}
+
+
+
+
+
+
+
+
 
 
 

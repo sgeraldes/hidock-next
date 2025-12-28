@@ -37,10 +37,11 @@ export const CreateProjectRequestSchema = z.object({
 export const UpdateProjectRequestSchema = z.object({
   id: UUIDSchema,
   name: NonEmptyStringSchema.optional(),
-  description: OptionalStringSchema
+  description: OptionalStringSchema,
+  status: z.enum(['active', 'archived']).optional()
 }).refine(
-  (data) => data.name !== undefined || data.description !== undefined,
-  { message: 'At least one field (name or description) must be provided' }
+  (data) => data.name !== undefined || data.description !== undefined || data.status !== undefined,
+  { message: 'At least one field (name, description, or status) must be provided' }
 )
 
 /**
