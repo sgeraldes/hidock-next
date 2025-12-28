@@ -43,7 +43,7 @@
 - [x] Task: Implement People UI [9d9626c]
     - [ ] Subtask: Create `People.tsx` list view
     - [ ] Subtask: Create `PersonDetail.tsx` view with knowledge map and interaction history
-- [ ] Task: Implement Projects Entity Backend
+- [x] Task: Implement Projects Entity Backend [a0d1a4c]
     - [ ] Subtask: Create `projects-handlers.ts`
     - [ ] Subtask: Implement auto-suggestion logic (topic-based)
     - [ ] Subtask: Implement `getProjects`, `getProjectById`
