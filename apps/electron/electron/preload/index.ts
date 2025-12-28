@@ -111,6 +111,12 @@ export interface ElectronAPI {
     update: (id: string, updates: Partial<KnowledgeCapture>) => Promise<{ success: boolean; error?: string }>
   }
 
+  // Actionables
+  actionables: {
+    getAll: (options?: { status?: string }) => Promise<Actionable[]>
+    updateStatus: (id: string, status: string) => Promise<{ success: boolean; error?: string }>
+  }
+
   // Assistant
   assistant: {
     getConversations: () => Promise<Conversation[]>
@@ -429,6 +435,11 @@ const electronAPI: ElectronAPI = {
     getAll: (options) => ipcRenderer.invoke('knowledge:getAll', options),
     getById: (id) => ipcRenderer.invoke('knowledge:getById', id),
     update: (id, updates) => ipcRenderer.invoke('knowledge:update', id, updates)
+  },
+
+  actionables: {
+    getAll: (options) => ipcRenderer.invoke('actionables:getAll', options),
+    updateStatus: (id, status) => ipcRenderer.invoke('actionables:updateStatus', id, status)
   },
 
   assistant: {

@@ -15,6 +15,7 @@ import { registerDownloadServiceHandlers } from '../services/download-service'
 import { registerIntegrityHandlers } from './integrity-handlers'
 import { registerKnowledgeHandlers } from './knowledge-handlers'
 import { registerAssistantHandlers } from './assistant-handlers'
+import { registerActionablesHandlers } from './actionables-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -35,6 +36,7 @@ export function registerIpcHandlers(): void {
   registerIntegrityHandlers()
   registerKnowledgeHandlers()
   registerAssistantHandlers()
+  registerActionablesHandlers()
 
   console.log('All IPC handlers registered')
 }

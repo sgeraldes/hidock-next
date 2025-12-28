@@ -356,7 +356,23 @@ export interface Project {
 
 
 
+
+
+
+
+
+
+
+
   id: string
+
+
+
+
+
+
+
+
 
 
 
@@ -372,7 +388,23 @@ export interface Project {
 
 
 
+
+
+
+
+
+
+
+
   status: 'active' | 'archived'
+
+
+
+
+
+
+
+
 
 
 
@@ -388,7 +420,23 @@ export interface Project {
 
 
 
+
+
+
+
+
+
+
+
   createdAt: string
+
+
+
+
+
+
+
+
 
 
 
@@ -404,7 +452,23 @@ export interface Project {
 
 
 
+
+
+
+
+
+
+
+
   // Aggregated data
+
+
+
+
+
+
+
+
 
 
 
@@ -420,6 +484,14 @@ export interface Project {
 
 
 
+
+
+
+
+
+
+
+
   personIds?: string[]
 
 
@@ -428,7 +500,335 @@ export interface Project {
 
 
 
+
+
+
+
+
+
+
+
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+export type ActionableStatus = 'pending' | 'in_progress' | 'generated' | 'shared' | 'dismissed'
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+export interface Actionable {
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  id: string
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  type: string
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  title: string
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  description?: string | null
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  sourceKnowledgeId: string
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  sourceActionItemId?: string | null
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  suggestedTemplate?: string | null
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  suggestedRecipients: string[]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  status: ActionableStatus
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  artifactId?: string | null
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  generatedAt?: string | null
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  sharedAt?: string | null
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  createdAt: string
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  updatedAt: string
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

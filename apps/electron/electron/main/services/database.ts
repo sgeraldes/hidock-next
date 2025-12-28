@@ -5,7 +5,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 14
+const SCHEMA_VERSION = 15
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -258,6 +258,26 @@ CREATE INDEX IF NOT EXISTS idx_recording_candidates_meeting ON recording_meeting
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_selected ON recording_meeting_candidates(is_selected);
 CREATE INDEX IF NOT EXISTS idx_quality_recording ON quality_assessments(recording_id);
 CREATE INDEX IF NOT EXISTS idx_quality_level ON quality_assessments(quality);
+
+-- Actionables (intent to create artifacts) (v15)
+CREATE TABLE IF NOT EXISTS actionables (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    source_knowledge_id TEXT NOT NULL,
+    source_action_item_id TEXT,
+    suggested_template TEXT,
+    suggested_recipients TEXT, -- JSON array
+    status TEXT CHECK(status IN ('pending', 'in_progress', 'generated', 'shared', 'dismissed')) DEFAULT 'pending',
+    artifact_id TEXT, -- Links to outputs table
+    generated_at TEXT,
+    shared_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (source_knowledge_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+    FOREIGN KEY (artifact_id) REFERENCES outputs(id) ON DELETE SET NULL
+);
 
 `
 
@@ -632,6 +652,11 @@ const MIGRATIONS: Record<number, () => void> = {
       console.log('[Migration v14] status column may already exist')
     }
     console.log('Migration v14 complete: Projects table enhanced')
+  },
+  15: () => {
+    // v15: Actionables table handled by SCHEMA CREATE TABLE IF NOT EXISTS
+    console.log('Running migration to schema v15: Actionables architecture')
+    console.log('Migration v15 complete: Actionables table created')
   }
 
 }
