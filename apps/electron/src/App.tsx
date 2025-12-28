@@ -9,7 +9,8 @@ import { Search } from '@/pages/Search'
 import { Device } from '@/pages/Device'
 import { Recordings } from '@/pages/Recordings'
 import { Settings } from '@/pages/Settings'
-import { Contacts } from '@/pages/Contacts'
+import { People } from '@/pages/People'
+import { PersonDetail } from '@/pages/PersonDetail'
 import { Projects } from '@/pages/Projects'
 import { Outputs } from '@/pages/Outputs'
 import { ToastProvider } from '@/components/ui/toaster'
@@ -54,7 +55,8 @@ function App(): React.ReactElement {
           <Route path="/explore" element={<ErrorBoundary><Search /></ErrorBoundary>} />
           <Route path="/sync" element={<ErrorBoundary><Device /></ErrorBoundary>} />
           <Route path="/library" element={<ErrorBoundary><Recordings /></ErrorBoundary>} />
-          <Route path="/people" element={<ErrorBoundary><Contacts /></ErrorBoundary>} />
+          <Route path="/people" element={<ErrorBoundary><People /></ErrorBoundary>} />
+          <Route path="/person/:id" element={<ErrorBoundary><PersonDetail /></ErrorBoundary>} />
           <Route path="/projects" element={<ErrorBoundary><Projects /></ErrorBoundary>} />
           <Route path="/actionables" element={<ErrorBoundary><Outputs /></ErrorBoundary>} />
           <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
