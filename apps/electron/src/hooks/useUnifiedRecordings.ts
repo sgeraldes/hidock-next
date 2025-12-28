@@ -262,17 +262,22 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         window.electronAPI.deviceCache.getAll() as Promise<CachedDeviceFile[]>
       ])
 
+      // Check if device service has in-memory cached recordings (from a recent fetch)
+      // This is faster than the database cache and more up-to-date
+      const memoryCachedDeviceRecs = isConnected ? deviceService.getCachedRecordings() : []
+
       // Show cached/local data immediately and mark as loaded
-      // This allows the UI to be interactive while we fetch fresh device data
-      const initialRecordings = buildRecordingMap([], dbRecs, syncedFiles, cachedDeviceFiles, isConnected)
+      // If we have in-memory cache from device service, use that for immediate display
+      // This fixes the issue where navigating to Library shows stale data
+      const initialRecordings = buildRecordingMap(memoryCachedDeviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, isConnected)
       setRecordings(initialRecordings)
       setLoading(false) // Mark as loaded after showing cached data
       markLoaded() // Mark as loaded in store
 
       // PHASE 2: Fetch device recordings (slow) - this updates the view when complete
-      // This runs in the background after initial data is shown
-      let deviceRecs: HiDockRecording[] = []
-      if (isConnected) {
+      // Only needed if we don't have memory cache or forceRefresh is true
+      let deviceRecs: HiDockRecording[] = memoryCachedDeviceRecs
+      if (isConnected && (memoryCachedDeviceRecs.length === 0 || forceRefresh)) {
         try {
           deviceRecs = await deviceService.listRecordings(undefined, forceRefresh)
         } catch (deviceError) {

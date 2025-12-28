@@ -24,6 +24,7 @@ import { getRAGService } from './services/rag'
 import { setMainWindowForEventBus } from './services/event-bus'
 import { getStoragePolicyService } from './services/storage-policy'
 import { setMainWindowForMigration } from './ipc/migration-handlers'
+import { getIntegrityService } from './services/integrity-service'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -77,6 +78,13 @@ async function initializeServices(): Promise<void> {
   // Initialize database
   await initializeDatabase()
   console.log('Database initialized')
+
+  // Run integrity checks (fixes orphaned downloads, stuck transcriptions, etc.)
+  const integrityService = getIntegrityService()
+  const integrityResult = await integrityService.runStartupChecks()
+  if (integrityResult.issuesFound > 0) {
+    console.log(`Integrity checks: ${integrityResult.issuesFixed}/${integrityResult.issuesFound} issues fixed`)
+  }
 
   // Initialize vector store (for RAG)
   const vectorStore = getVectorStore()

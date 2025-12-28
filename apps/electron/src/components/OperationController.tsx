@@ -183,9 +183,30 @@ export function OperationController() {
 
     let completed = 0
     let failed = 0
+    let aborted = false
 
     for (const item of pendingItems) {
-      if (downloadAbortRef.current) break
+      // Check abort flag (set by cancel or disconnect)
+      if (downloadAbortRef.current) {
+        if (DEBUG) console.log('[OperationController] Download aborted by user')
+        aborted = true
+        break
+      }
+
+      // Check device connection before EACH download
+      if (!deviceService.isConnected()) {
+        if (DEBUG) console.log('[OperationController] Device disconnected, stopping downloads')
+        aborted = true
+        break
+      }
+
+      // Check store state for cancel (user clicked Cancel Sync button)
+      const storeState = useAppStore.getState()
+      if (!storeState.deviceSyncing) {
+        if (DEBUG) console.log('[OperationController] Sync cancelled by user')
+        aborted = true
+        break
+      }
 
       setDeviceSyncState({
         deviceFileDownloading: item.filename,
@@ -205,13 +226,15 @@ export function OperationController() {
       loadRecordings()
     }
 
-    if (completed > 0 || failed > 0) {
+    if (completed > 0 || failed > 0 || aborted) {
       toast({
-        title: failed === 0 ? 'Sync complete' : 'Sync completed with errors',
-        description: failed === 0
-          ? `Downloaded ${completed} file${completed !== 1 ? 's' : ''}`
-          : `Downloaded ${completed}, failed ${failed}`,
-        variant: failed === 0 ? 'success' : 'warning'
+        title: aborted ? 'Sync cancelled' : (failed === 0 ? 'Sync complete' : 'Sync completed with errors'),
+        description: aborted
+          ? `Downloaded ${completed} of ${pendingItems.length} file${pendingItems.length !== 1 ? 's' : ''}`
+          : (failed === 0
+            ? `Downloaded ${completed} file${completed !== 1 ? 's' : ''}`
+            : `Downloaded ${completed}, failed ${failed}`),
+        variant: aborted ? 'default' : (failed === 0 ? 'success' : 'warning')
       })
     }
   }, [deviceService, processDownload, setDeviceSyncState, clearDeviceSyncState, loadRecordings])
@@ -407,7 +430,7 @@ export function OperationController() {
       }
     })
 
-    // Subscribe to device connection changes (for download resumption)
+    // Subscribe to device connection changes (for download resumption and abort on disconnect)
     const unsubDevice = deviceService.onStateChange((deviceState) => {
       if (deviceState.connected && !isProcessingDownloads.current) {
         window.electronAPI.downloadService.getState().then((state) => {
@@ -417,6 +440,10 @@ export function OperationController() {
             processDownloadQueue()
           }
         })
+      } else if (!deviceState.connected && isProcessingDownloads.current) {
+        // Device disconnected while processing - abort downloads immediately
+        if (DEBUG) console.log('[OperationController] Device disconnected, aborting downloads')
+        downloadAbortRef.current = true
       }
     })
 

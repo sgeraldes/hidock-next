@@ -6,6 +6,8 @@ import {
   updateRecordingStatus,
   linkRecordingToMeeting,
   getTranscriptByRecordingId,
+  getCandidatesForRecordingWithDetails,
+  getMeetingsNearDate,
   type Recording,
   type Transcript
 } from '../services/database'
@@ -232,6 +234,35 @@ export function registerRecordingHandlers(): void {
   // Scan recordings folder
   ipcMain.handle('recordings:scanFolder', async (): Promise<string[]> => {
     return getRecordingFiles()
+  })
+
+  // Get meeting candidates for a recording (for manual linking)
+  ipcMain.handle('recordings:getCandidates', async (_, recordingId: unknown) => {
+    try {
+      const result = GetRecordingByIdSchema.safeParse({ id: recordingId })
+      if (!result.success) {
+        console.error('recordings:getCandidates validation error:', result.error)
+        return []
+      }
+      return getCandidatesForRecordingWithDetails(result.data.id)
+    } catch (error) {
+      console.error('recordings:getCandidates error:', error)
+      return []
+    }
+  })
+
+  // Get meetings near a specific date (for manual linking)
+  ipcMain.handle('recordings:getMeetingsNearDate', async (_, dateStr: unknown) => {
+    try {
+      if (typeof dateStr !== 'string') {
+        console.error('recordings:getMeetingsNearDate invalid date:', dateStr)
+        return []
+      }
+      return getMeetingsNearDate(dateStr)
+    } catch (error) {
+      console.error('recordings:getMeetingsNearDate error:', error)
+      return []
+    }
   })
 
   console.log('Recording IPC handlers registered')
