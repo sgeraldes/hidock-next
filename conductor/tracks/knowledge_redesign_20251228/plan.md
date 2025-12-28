@@ -4,7 +4,7 @@
 - [x] Task: Define TypeScript interfaces for `KnowledgeCapture`, `AudioSource`, `ActionItem` in `apps/electron/src/types` [1b78ecd]
     - [ ] Subtask: Create interfaces mirroring the V11 schema
     - [ ] Subtask: Update `UnifiedRecording` to extend or relate to `KnowledgeCapture`
-- [ ] Task: Implement Backend IPC Handlers for Knowledge Captures
+- [x] Task: Implement Backend IPC Handlers for Knowledge Captures [c7ddfc8]
     - [ ] Subtask: Create `knowledge-handlers.ts` in `electron/main/ipc`
     - [ ] Subtask: Implement `getKnowledgeCaptures`, `getKnowledgeCaptureById`, `updateKnowledgeCapture`
     - [ ] Subtask: Register handlers in `index.ts`
