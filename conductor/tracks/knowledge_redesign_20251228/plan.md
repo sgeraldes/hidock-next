@@ -11,10 +11,10 @@
 - [x] Task: Update Frontend `useUnifiedRecordings` Hook [1509cb0]
     - [ ] Subtask: Refactor hook to consume new `knowledge_captures` data (via IPC)
     - [ ] Subtask: Maintain backward compatibility during migration
-- [ ] Task: Execute V11 Database Migration
+- [x] Task: Execute V11 Database Migration [0cc1bde]
     - [ ] Subtask: Run the migration script via the Migration UI (or CLI trigger)
     - [ ] Subtask: Verify data integrity (count check, field verification)
-- [ ] Task: Update Library Page (formerly Recordings)
+- [~] Task: Update Library Page (formerly Recordings)
     - [ ] Subtask: Update `Recordings.tsx` to display `KnowledgeCapture` data (title, quality, status)
     - [ ] Subtask: Implement quality rating UI (stars/badges)
 
