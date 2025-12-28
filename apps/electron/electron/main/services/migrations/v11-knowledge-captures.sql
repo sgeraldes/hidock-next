@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS knowledge_captures (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     summary TEXT,
+    category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting',
+    status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready',
 
     -- Quality assessment
     quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated',
@@ -190,6 +192,29 @@ CREATE TABLE IF NOT EXISTS outputs (
 );
 
 -- =============================================================================
+-- Actionables (intent to create artifacts)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS actionables (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    source_knowledge_id TEXT NOT NULL,
+    source_action_item_id TEXT,
+    suggested_template TEXT,
+    suggested_recipients TEXT, -- JSON array
+    status TEXT CHECK(status IN ('pending', 'in_progress', 'generated', 'shared', 'dismissed')) DEFAULT 'pending',
+    artifact_id TEXT, -- Links to outputs table
+    generated_at TEXT,
+    shared_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (source_knowledge_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+    FOREIGN KEY (artifact_id) REFERENCES outputs(id) ON DELETE SET NULL
+);
+
+-- =============================================================================
 -- Indexes for Performance
 -- =============================================================================
 
@@ -198,6 +223,8 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_captures_captured_at ON knowledge_captu
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_meeting_id ON knowledge_captures(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_source_recording ON knowledge_captures(source_recording_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_quality ON knowledge_captures(quality_rating);
+CREATE INDEX IF NOT EXISTS idx_knowledge_captures_status ON knowledge_captures(status);
+CREATE INDEX IF NOT EXISTS idx_knowledge_captures_category ON knowledge_captures(category);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_storage_tier ON knowledge_captures(storage_tier);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_expires_at ON knowledge_captures(expires_at);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_deleted_at ON knowledge_captures(deleted_at);
@@ -229,6 +256,10 @@ CREATE INDEX IF NOT EXISTS idx_follow_ups_meeting_id ON follow_ups(scheduled_mee
 CREATE INDEX IF NOT EXISTS idx_outputs_capture_id ON outputs(knowledge_capture_id);
 CREATE INDEX IF NOT EXISTS idx_outputs_template_id ON outputs(template_id);
 CREATE INDEX IF NOT EXISTS idx_outputs_generated_at ON outputs(generated_at);
+
+-- Actionables indexes
+CREATE INDEX IF NOT EXISTS idx_actionables_source_knowledge ON actionables(source_knowledge_id);
+CREATE INDEX IF NOT EXISTS idx_actionables_status ON actionables(status);
 
 -- =============================================================================
 -- Migration Tracking Columns for Recordings

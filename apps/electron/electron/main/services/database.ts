@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS knowledge_captures (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     summary TEXT,
+    category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting',
+    status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready',
 
     -- Quality assessment
     quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated',
@@ -434,10 +436,13 @@ CREATE INDEX IF NOT EXISTS idx_meeting_projects_project ON meeting_projects(proj
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_recording ON recording_meeting_candidates(recording_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_meeting ON recording_meeting_candidates(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_selected ON recording_meeting_candidates(is_selected);
+CREATE INDEX IF NOT EXISTS idx_knowledge_captures_quality ON knowledge_captures(quality_rating);
+CREATE INDEX IF NOT EXISTS idx_knowledge_captures_status ON knowledge_captures(status);
+CREATE INDEX IF NOT EXISTS idx_knowledge_captures_category ON knowledge_captures(category);
 CREATE INDEX IF NOT EXISTS idx_quality_recording ON quality_assessments(recording_id);
 CREATE INDEX IF NOT EXISTS idx_quality_level ON quality_assessments(quality);
 
--- Actionables (intent to create artifacts) (v15)
+-- Actionables (intent to create artifacts) (v15 - unified with v11 architecture)
 CREATE TABLE IF NOT EXISTS actionables (
     id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
@@ -456,6 +461,9 @@ CREATE TABLE IF NOT EXISTS actionables (
     FOREIGN KEY (source_knowledge_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
     FOREIGN KEY (artifact_id) REFERENCES outputs(id) ON DELETE SET NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_actionables_source_knowledge ON actionables(source_knowledge_id);
+CREATE INDEX IF NOT EXISTS idx_actionables_status ON actionables(status);
 
 `
 
