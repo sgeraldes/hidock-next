@@ -26,6 +26,7 @@ interface RecordingBase {
   meetingId?: string
   meetingSubject?: string
   transcript?: TranscriptSummary
+  knowledgeCaptureId?: string
 }
 
 /**
