@@ -64,7 +64,7 @@
     - [ ] Subtask: Create `OutputPreview` component for editing/exporting generated artifacts
 
 ## Phase 5: Intelligence
-- [ ] Task: Update Explore Backend (Search)
+- [x] Task: Update Explore Backend (Search) [3dec305]
     - [ ] Subtask: Enhance `search-handlers.ts` to index/search People and Projects
     - [ ] Subtask: Implement "Insights" queries (recurring topics)
 - [ ] Task: Update Explore UI
