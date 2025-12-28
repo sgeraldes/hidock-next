@@ -23,7 +23,7 @@
     - [ ] Subtask: Create `assistant-handlers.ts`
     - [ ] Subtask: Implement `getConversations`, `createConversation`, `deleteConversation`
     - [ ] Subtask: Implement `getMessages`, `addMessage`
-- [ ] Task: Implement Assistant UI - Sidebar & History
+- [x] Task: Implement Assistant UI - Sidebar & History [df90d10]
     - [ ] Subtask: Update `Chat.tsx` to include a sidebar for conversation history
     - [ ] Subtask: Implement "New Chat" and "Delete Chat" functionality
 - [ ] Task: Implement Context Injection Backend
