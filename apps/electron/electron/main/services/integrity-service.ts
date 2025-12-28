@@ -194,7 +194,7 @@ class IntegrityService {
     // Note: The main download state is in the DownloadService queue (in-memory)
     // But we also track in recordings table via on_local and file_path
 
-    // Find recordings that claim to be downloading but have no file
+    // Find recordings that have file_path set but on_local = 0 (inconsistent state)
     const stuckRecordings = queryAll<Recording>(`
       SELECT * FROM recordings
       WHERE on_local = 0
@@ -204,18 +204,29 @@ class IntegrityService {
 
     let fixed = 0
     for (const rec of stuckRecordings) {
-      // File path is set but file doesn't exist - reset state
-      if (rec.file_path && !existsSync(rec.file_path)) {
+      if (!rec.file_path) continue
+
+      if (existsSync(rec.file_path)) {
+        // File EXISTS but on_local = 0 - this is the inconsistency! Fix it.
+        console.log(`[IntegrityService] Fixing on_local flag for: ${rec.filename}`)
+        try {
+          run(`UPDATE recordings SET on_local = 1, location = 'both' WHERE id = ?`, [rec.id])
+          fixed++
+        } catch (error) {
+          console.error(`[IntegrityService] Failed to fix on_local for ${rec.filename}:`, error)
+        }
+      } else {
+        // File path is set but file doesn't exist - reset state
         console.log(`[IntegrityService] Resetting orphaned download: ${rec.filename}`)
         try {
           // Try to set file_path to NULL - may fail if old schema had NOT NULL constraint
-          run(`UPDATE recordings SET file_path = NULL, on_local = 0 WHERE id = ?`, [rec.id])
+          run(`UPDATE recordings SET file_path = NULL, on_local = 0, location = 'device-only' WHERE id = ?`, [rec.id])
           fixed++
         } catch (error) {
           // If NULL fails (old schema), set to empty string instead
           console.warn(`[IntegrityService] Could not set NULL, trying empty string: ${error}`)
           try {
-            run(`UPDATE recordings SET file_path = '', on_local = 0 WHERE id = ?`, [rec.id])
+            run(`UPDATE recordings SET file_path = '', on_local = 0, location = 'device-only' WHERE id = ?`, [rec.id])
             fixed++
           } catch (innerError) {
             console.error(`[IntegrityService] Failed to reset recording ${rec.filename}:`, innerError)
