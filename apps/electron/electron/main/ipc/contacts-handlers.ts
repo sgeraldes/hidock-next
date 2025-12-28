@@ -8,7 +8,7 @@ import { ipcMain } from 'electron'
 import {
   getContacts,
   getContactById,
-  updateContactNotes,
+  updateContact,
   getMeetingsForContact,
   getContactsForMeeting,
   Contact
@@ -21,6 +21,7 @@ import {
 } from '../validation/contacts'
 import type { ContactWithMeetings } from '../types/database'
 import type { GetContactsResponse } from '../types/api'
+import type { Person } from '../../src/types/knowledge'
 
 export function registerContactsHandlers(): void {
   /**
@@ -28,7 +29,7 @@ export function registerContactsHandlers(): void {
    */
   ipcMain.handle(
     'contacts:getAll',
-    async (_, request?: unknown): Promise<Result<GetContactsResponse>> => {
+    async (_, request?: unknown): Promise<Result<{ contacts: Person[]; total: number }>> => {
       try {
         const parsed = GetContactsRequestSchema.safeParse(request ?? {})
         if (!parsed.success) {
@@ -38,7 +39,10 @@ export function registerContactsHandlers(): void {
         const { search, limit, offset } = parsed.data
         const result = getContacts(search, limit, offset)
 
-        return success(result)
+        return success({
+          contacts: result.contacts.map(mapToPerson),
+          total: result.total
+        })
       } catch (err) {
         console.error('contacts:getAll error:', err)
         return error('DATABASE_ERROR', 'Failed to fetch contacts', err)
@@ -51,7 +55,7 @@ export function registerContactsHandlers(): void {
    */
   ipcMain.handle(
     'contacts:getById',
-    async (_, id: unknown): Promise<Result<ContactWithMeetings>> => {
+    async (_, id: unknown): Promise<Result<{ contact: Person; meetings: any[]; totalMeetingTimeMinutes: number }>> => {
       try {
         const parsed = GetContactByIdRequestSchema.safeParse({ id })
         if (!parsed.success) {
@@ -74,7 +78,7 @@ export function registerContactsHandlers(): void {
         }
 
         return success({
-          contact,
+          contact: mapToPerson(contact),
           meetings,
           totalMeetingTimeMinutes
         })
@@ -86,26 +90,32 @@ export function registerContactsHandlers(): void {
   )
 
   /**
-   * Update contact notes
+   * Update contact
    */
   ipcMain.handle(
     'contacts:update',
-    async (_, request: unknown): Promise<Result<Contact>> => {
+    async (_, request: unknown): Promise<Result<Person>> => {
       try {
         const parsed = UpdateContactRequestSchema.safeParse(request)
         if (!parsed.success) {
           return error('VALIDATION_ERROR', 'Invalid update request', parsed.error.format())
         }
 
-        const { id, notes } = parsed.data
+        const { id, tags, ...otherUpdates } = parsed.data
         const contact = getContactById(id)
         if (!contact) {
           return error('NOT_FOUND', `Contact with ID ${id} not found`)
         }
 
-        updateContactNotes(id, notes ?? null)
+        const updates: Partial<Contact> = { ...otherUpdates }
+        if (tags) {
+          updates.tags = JSON.stringify(tags)
+        }
 
-        return success({ ...contact, notes: notes ?? null })
+        updateContact(id, updates)
+
+        const updatedContact = getContactById(id)
+        return success(mapToPerson(updatedContact!))
       } catch (err) {
         console.error('contacts:update error:', err)
         return error('DATABASE_ERROR', 'Failed to update contact', err)
@@ -118,18 +128,44 @@ export function registerContactsHandlers(): void {
    */
   ipcMain.handle(
     'contacts:getForMeeting',
-    async (_, meetingId: unknown): Promise<Result<Contact[]>> => {
+    async (_, meetingId: unknown): Promise<Result<Person[]>> => {
       try {
         if (typeof meetingId !== 'string') {
           return error('VALIDATION_ERROR', 'Meeting ID must be a string')
         }
 
         const contacts = getContactsForMeeting(meetingId)
-        return success(contacts)
+        return success(contacts.map(mapToPerson))
       } catch (err) {
         console.error('contacts:getForMeeting error:', err)
         return error('DATABASE_ERROR', 'Failed to fetch contacts for meeting', err)
       }
     }
   )
+}
+
+function mapToPerson(contact: Contact): Person {
+  let tags: string[] = []
+  if (contact.tags) {
+    try {
+      tags = JSON.parse(contact.tags)
+    } catch {
+      tags = []
+    }
+  }
+
+  return {
+    id: contact.id,
+    name: contact.name,
+    email: contact.email,
+    type: contact.type as any,
+    role: contact.role,
+    company: contact.company,
+    notes: contact.notes,
+    tags,
+    firstSeenAt: contact.first_seen_at,
+    lastSeenAt: contact.last_seen_at,
+    interactionCount: contact.meeting_count,
+    createdAt: contact.created_at
+  }
 }

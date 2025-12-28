@@ -122,28 +122,146 @@ export interface Conversation {
 
 export interface Message {
 
+
+
   id: string
+
+
 
   conversationId?: string
 
+
+
   role: 'user' | 'assistant'
+
+
 
   content: string
 
+
+
   sources?: string // JSON string of source info
+
+
 
   createdAt: string
 
+
+
   
+
+
 
   // New fields from spec
 
+
+
   editedAt?: string
+
+
 
   originalContent?: string
 
+
+
   createdOutputId?: string
+
+
 
   savedAsInsightId?: string
 
+
+
 }
+
+
+
+
+
+
+
+export type PersonType = 'team' | 'candidate' | 'customer' | 'external' | 'unknown'
+
+
+
+
+
+
+
+export interface Person {
+
+
+
+  id: string
+
+
+
+  name: string
+
+
+
+  email?: string | null
+
+
+
+  type: PersonType
+
+
+
+  role?: string | null
+
+
+
+  company?: string | null
+
+
+
+  notes?: string | null
+
+
+
+  tags: string[]
+
+
+
+  firstSeenAt: string
+
+
+
+  lastSeenAt: string
+
+
+
+  interactionCount: number
+
+
+
+  createdAt: string
+
+
+
+  
+
+
+
+  // Knowledge connections (computed or fetched separately)
+
+
+
+  knowledgeIds?: string[]
+
+
+
+  topicFrequencies?: Record<string, number>
+
+
+
+  relatedPeople?: string[]
+
+
+
+}
+
+
+
+

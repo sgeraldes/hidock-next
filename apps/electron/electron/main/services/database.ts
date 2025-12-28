@@ -5,7 +5,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 12
+const SCHEMA_VERSION = 13
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -148,12 +148,16 @@ CREATE TABLE IF NOT EXISTS synced_files (
     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- Contacts extracted from meeting attendees
+-- Contacts extracted from meeting attendees (renamed to People in UI)
 CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     email TEXT UNIQUE,
+    type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown',
+    role TEXT,
+    company TEXT,
     notes TEXT,
+    tags TEXT, -- JSON string of tags
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     meeting_count INTEGER DEFAULT 0,
@@ -593,6 +597,27 @@ const MIGRATIONS: Record<number, () => void> = {
 
     // conversation_context and conversations tables are handled by CREATE TABLE IF NOT EXISTS in SCHEMA
     console.log('Migration v12 complete: Conversation tables and columns created')
+  },
+  13: () => {
+    // v13: Enhanced People Entity
+    console.log('Running migration to schema v13: Adding fields to contacts table')
+    const database = getDatabase()
+
+    const columnsToAdd = [
+      "ALTER TABLE contacts ADD COLUMN type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown'",
+      "ALTER TABLE contacts ADD COLUMN role TEXT",
+      "ALTER TABLE contacts ADD COLUMN company TEXT",
+      "ALTER TABLE contacts ADD COLUMN tags TEXT"
+    ]
+
+    for (const sql of columnsToAdd) {
+      try {
+        database.run(sql)
+      } catch (e) {
+        console.log(`Column may already exist: ${sql}`)
+      }
+    }
+    console.log('Migration v13 complete: Contacts table enhanced')
   }
 
 }
@@ -1534,7 +1559,11 @@ export interface Contact {
   id: string
   name: string
   email: string | null
+  type: string
+  role: string | null
+  company: string | null
   notes: string | null
+  tags: string | null // JSON string
   first_seen_at: string
   last_seen_at: string
   meeting_count: number
@@ -1556,10 +1585,10 @@ export function getContacts(search?: string, limit = 100, offset = 0): { contact
 
   if (search) {
     const escaped = escapeLikePattern(search)
-    const searchClause = " WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\'"
+    const searchClause = " WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\'"
     countSql += searchClause
     sql += searchClause
-    params.push(`%${escaped}%`, `%${escaped}%`)
+    params.push(`%${escaped}%`, `%${escaped}%`, `%${escaped}%`, `%${escaped}%`)
   }
 
   sql += ' ORDER BY meeting_count DESC, last_seen_at DESC LIMIT ? OFFSET ?'
@@ -1627,20 +1656,42 @@ export function upsertContact(contact: Omit<Contact, 'created_at'>): Contact {
   } else {
     // Insert new contact
     run(
-      `INSERT INTO contacts (id, name, email, notes, first_seen_at, last_seen_at, meeting_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         contact.id,
         contact.name,
         contact.email,
-        contact.notes,
+        contact.type || 'unknown',
+        contact.role || null,
+        contact.company || null,
+        contact.notes || null,
+        contact.tags || null,
         contact.first_seen_at,
         contact.last_seen_at,
         contact.meeting_count
       ]
     )
-    return { ...contact, created_at: new Date().toISOString() }
+    return { ...contact, created_at: new Date().toISOString() } as Contact
   }
+}
+
+export function updateContact(id: string, updates: Partial<Contact>): void {
+  const fields: string[] = []
+  const params: unknown[] = []
+
+  if (updates.name !== undefined) { fields.push('name = ?'); params.push(updates.name); }
+  if (updates.email !== undefined) { fields.push('email = ?'); params.push(updates.email); }
+  if (updates.type !== undefined) { fields.push('type = ?'); params.push(updates.type); }
+  if (updates.role !== undefined) { fields.push('role = ?'); params.push(updates.role); }
+  if (updates.company !== undefined) { fields.push('company = ?'); params.push(updates.company); }
+  if (updates.notes !== undefined) { fields.push('notes = ?'); params.push(updates.notes); }
+  if (updates.tags !== undefined) { fields.push('tags = ?'); params.push(updates.tags); }
+
+  if (fields.length === 0) return
+
+  params.push(id)
+  run(`UPDATE contacts SET ${fields.join(', ')} WHERE id = ?`, params)
 }
 
 export function updateContactNotes(id: string, notes: string | null): void {

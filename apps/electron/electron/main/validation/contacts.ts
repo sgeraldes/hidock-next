@@ -24,11 +24,15 @@ export const GetContactByIdRequestSchema = z.object({
 })
 
 /**
- * Update contact request (only notes is editable in v1)
+ * Update contact request
  */
 export const UpdateContactRequestSchema = z.object({
   id: UUIDSchema,
-  notes: OptionalStringSchema
+  notes: OptionalStringSchema,
+  type: z.enum(['team', 'candidate', 'customer', 'external', 'unknown']).optional(),
+  role: OptionalStringSchema,
+  company: OptionalStringSchema,
+  tags: z.array(z.string()).optional()
 })
 
 /**
