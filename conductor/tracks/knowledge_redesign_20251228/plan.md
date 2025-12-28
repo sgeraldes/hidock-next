@@ -47,7 +47,7 @@
     - [ ] Subtask: Create `projects-handlers.ts`
     - [ ] Subtask: Implement auto-suggestion logic (topic-based)
     - [ ] Subtask: Implement `getProjects`, `getProjectById`
-- [ ] Task: Implement Projects UI
+- [x] Task: Implement Projects UI [ff6231e]
     - [ ] Subtask: Create `Projects.tsx` list view
     - [ ] Subtask: Create `ProjectDetail.tsx` view
 
