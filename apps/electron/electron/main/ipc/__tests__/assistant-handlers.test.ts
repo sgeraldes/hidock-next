@@ -30,5 +30,8 @@ describe('Assistant IPC Handlers', () => {
     expect(ipcMain.handle).toHaveBeenCalledWith('assistant:deleteConversation', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('assistant:getMessages', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('assistant:addMessage', expect.any(Function))
+    expect(ipcMain.handle).toHaveBeenCalledWith('assistant:addContext', expect.any(Function))
+    expect(ipcMain.handle).toHaveBeenCalledWith('assistant:removeContext', expect.any(Function))
+    expect(ipcMain.handle).toHaveBeenCalledWith('assistant:getContext', expect.any(Function))
   })
 })

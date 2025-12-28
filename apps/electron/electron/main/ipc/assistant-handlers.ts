@@ -75,6 +75,46 @@ export function registerAssistantHandlers(): void {
       throw error
     }
   })
+
+  // Add context to conversation
+  ipcMain.handle('assistant:addContext', async (_, conversationId: string, knowledgeCaptureId: string) => {
+    try {
+      const id = randomUUID()
+      run('INSERT OR IGNORE INTO conversation_context (id, conversation_id, knowledge_capture_id) VALUES (?, ?, ?)',
+        [id, conversationId, knowledgeCaptureId])
+      return { success: true }
+    } catch (error) {
+      console.error('Failed to add context:', error)
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  // Remove context from conversation
+  ipcMain.handle('assistant:removeContext', async (_, conversationId: string, knowledgeCaptureId: string) => {
+    try {
+      run('DELETE FROM conversation_context WHERE conversation_id = ? AND knowledge_capture_id = ?',
+        [conversationId, knowledgeCaptureId])
+      return { success: true }
+    } catch (error) {
+      console.error('Failed to remove context:', error)
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  // Get context for conversation
+  ipcMain.handle('assistant:getContext', async (_, conversationId: string) => {
+    try {
+      // Return IDs of knowledge captures attached as context
+      const rows = queryAll<{ knowledge_capture_id: string }>(
+        'SELECT knowledge_capture_id FROM conversation_context WHERE conversation_id = ?',
+        [conversationId]
+      )
+      return rows.map(r => r.knowledge_capture_id)
+    } catch (error) {
+      console.error('Failed to get context:', error)
+      return []
+    }
+  })
 }
 
 function mapToConversation(row: any): Conversation {
