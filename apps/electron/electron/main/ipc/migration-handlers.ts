@@ -147,19 +147,35 @@ function createMigrationBackup(): void {
   db.run('DROP TABLE IF EXISTS _backup_recordings')
   db.run('DROP TABLE IF EXISTS _backup_transcripts')
 
-  // P3-019: Create backup tables in single step (no double-copy)
-  db.run(`
-    CREATE TEMP TABLE _backup_recordings AS
-    SELECT * FROM recordings
-    WHERE migration_status IS NULL OR migration_status = 'pending'
-  `)
+  // Check if migration_status column exists
+  let hasMigrationStatus = false
+  try {
+    const stmt = db.prepare('SELECT migration_status FROM recordings LIMIT 1')
+    stmt.free()
+    hasMigrationStatus = true
+  } catch (e) {
+    hasMigrationStatus = false
+  }
 
-  db.run(`
-    CREATE TEMP TABLE _backup_transcripts AS
-    SELECT t.* FROM transcripts t
-    INNER JOIN recordings r ON t.recording_id = r.id
-    WHERE r.migration_status IS NULL OR r.migration_status = 'pending'
-  `)
+  if (hasMigrationStatus) {
+    // P3-019: Create backup tables in single step (no double-copy)
+    db.run(`
+      CREATE TEMP TABLE _backup_recordings AS
+      SELECT * FROM recordings
+      WHERE migration_status IS NULL OR migration_status = 'pending'
+    `)
+
+    db.run(`
+      CREATE TEMP TABLE _backup_transcripts AS
+      SELECT t.* FROM transcripts t
+      INNER JOIN recordings r ON t.recording_id = r.id
+      WHERE r.migration_status IS NULL OR r.migration_status = 'pending'
+    `)
+  } else {
+    // Fresh migration: backup everything
+    db.run(`CREATE TEMP TABLE _backup_recordings AS SELECT * FROM recordings`)
+    db.run(`CREATE TEMP TABLE _backup_transcripts AS SELECT * FROM transcripts`)
+  }
 }
 
 // P2-017: Helper to check if backup tables exist
@@ -477,7 +493,7 @@ async function runPreMigrationCleanupImpl(): Promise<CleanupResult> {
 // P1 #011: V11 Migration with Transaction Safety
 // ============================================================================
 
-async function migrateToV11Impl(mainWindow: BrowserWindow | null): Promise<MigrationResult> {
+export async function migrateToV11Impl(mainWindow: BrowserWindow | null): Promise<MigrationResult> {
   // P1 #009: Acquire migration lock
   if (!migrationLock.acquire()) {
     return {
@@ -521,14 +537,19 @@ async function migrateToV11Impl(mainWindow: BrowserWindow | null): Promise<Migra
       // P1 #010: Load and execute proper V11 schema
       const schemaSQL = loadV11Schema()
 
-      // Execute schema SQL (split by semicolons, filter out comments and empty lines)
-      const statements = schemaSQL
+      // Remove comments (lines starting with --) and split by semicolon
+      const cleanSQL = schemaSQL
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('--'))
+        .join('\n')
+
+      const statements = cleanSQL
         .split(';')
-        .map(s => s.trim())
-        .filter(s => s.length > 0 && !s.startsWith('--'))
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
 
       for (const stmt of statements) {
-        if (stmt.trim()) {
+        if (stmt) {
           try {
             db.run(stmt)
           } catch (error) {
