@@ -19,7 +19,7 @@
     - [ ] Subtask: Implement quality rating UI (stars/badges)
 
 ## Phase 2: Assistant Enhancement
-- [ ] Task: Implement Conversation History Backend
+- [x] Task: Implement Conversation History Backend [589343d]
     - [ ] Subtask: Create `assistant-handlers.ts`
     - [ ] Subtask: Implement `getConversations`, `createConversation`, `deleteConversation`
     - [ ] Subtask: Implement `getMessages`, `addMessage`
