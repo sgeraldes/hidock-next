@@ -67,7 +67,7 @@
 - [x] Task: Update Explore Backend (Search) [3dec305]
     - [ ] Subtask: Enhance `search-handlers.ts` to index/search People and Projects
     - [ ] Subtask: Implement "Insights" queries (recurring topics)
-- [ ] Task: Update Explore UI
+- [x] Task: Update Explore UI [c40e58f]
     - [ ] Subtask: Refactor `Search.tsx` to `Explore.tsx`
     - [ ] Subtask: Implement faceted search results (Knowledge, People, Projects)
     - [ ] Subtask: Add "Insights" section to the Explore landing page
