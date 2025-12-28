@@ -7,6 +7,8 @@
  * - Both locations (on device and downloaded)
  */
 
+import type { QualityRating } from './knowledge'
+
 // Transcript summary for display purposes
 export interface TranscriptSummary {
   id: string
@@ -26,7 +28,11 @@ interface RecordingBase {
   meetingId?: string
   meetingSubject?: string
   transcript?: TranscriptSummary
+  // Knowledge Capture integration
   knowledgeCaptureId?: string
+  title?: string
+  quality?: QualityRating
+  summary?: string
 }
 
 /**

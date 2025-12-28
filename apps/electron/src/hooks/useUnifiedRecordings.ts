@@ -151,7 +151,10 @@ function buildRecordingMap(
         deviceFilename: deviceRec.filename,
         localPath: synced?.file_path || dbRec?.file_path || '',
         syncStatus: 'synced',
-        knowledgeCaptureId: capture?.id
+        knowledgeCaptureId: capture?.id,
+        title: capture?.title,
+        quality: capture?.quality,
+        summary: capture?.summary || undefined
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)
@@ -197,7 +200,10 @@ function buildRecordingMap(
         localPath: dbRec.file_path,
         syncStatus: 'synced',
         isImported: !synced,
-        knowledgeCaptureId: capture?.id
+        knowledgeCaptureId: capture?.id,
+        title: capture?.title,
+        quality: capture?.quality,
+        summary: capture?.summary || undefined
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)

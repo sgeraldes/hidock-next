@@ -720,7 +720,7 @@ export function Recordings() {
                               <div className="flex items-center gap-3">
                                 <StatusIcon recording={recording} />
                                 <div>
-                                  <CardTitle className="text-base">{recording.filename}</CardTitle>
+                                  <CardTitle className="text-base">{recording.title || recording.filename}</CardTitle>
                                   <CardDescription>
                                     {formatDateTime(recording.dateRecorded.toISOString())}
                                     {recording.size && ` • ${formatBytes(recording.size)}`}
@@ -729,6 +729,19 @@ export function Recordings() {
                                 </div>
                               </div>
                               <div className="flex items-center gap-2">
+                                {/* Quality badge */}
+                                {recording.quality && (
+                                  <span className={`text-xs px-2 py-1 rounded-full ${
+                                    recording.quality === 'valuable'
+                                      ? 'bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300'
+                                      : recording.quality === 'archived'
+                                      ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300'
+                                      : 'bg-secondary'
+                                  }`}>
+                                    {recording.quality}
+                                  </span>
+                                )}
+
                                 {/* Transcription status badge */}
                                 <span className={`text-xs px-2 py-1 rounded-full ${
                                   recording.transcriptionStatus === 'complete'
