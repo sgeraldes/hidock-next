@@ -161,15 +161,23 @@ class IntegrityService {
     let issuesFound = 0
     let issuesFixed = 0
 
-    // 1. Reset orphaned downloads (stuck in 'downloading' status)
-    const orphanedResult = this.resetOrphanedDownloads()
-    issuesFound += orphanedResult.found
-    issuesFixed += orphanedResult.fixed
+    try {
+      // 1. Reset orphaned downloads (stuck in 'downloading' status)
+      const orphanedResult = this.resetOrphanedDownloads()
+      issuesFound += orphanedResult.found
+      issuesFixed += orphanedResult.fixed
+    } catch (error) {
+      console.error('[IntegrityService] Error resetting orphaned downloads:', error)
+    }
 
-    // 2. Reset stuck transcriptions
-    const transcriptionResult = this.resetStuckTranscriptions()
-    issuesFound += transcriptionResult.found
-    issuesFixed += transcriptionResult.fixed
+    try {
+      // 2. Reset stuck transcriptions
+      const transcriptionResult = this.resetStuckTranscriptions()
+      issuesFound += transcriptionResult.found
+      issuesFixed += transcriptionResult.fixed
+    } catch (error) {
+      console.error('[IntegrityService] Error resetting stuck transcriptions:', error)
+    }
 
     console.log(`[IntegrityService] Startup checks complete: ${issuesFound} issues found, ${issuesFixed} fixed`)
     return { issuesFound, issuesFixed }
@@ -199,8 +207,20 @@ class IntegrityService {
       // File path is set but file doesn't exist - reset state
       if (rec.file_path && !existsSync(rec.file_path)) {
         console.log(`[IntegrityService] Resetting orphaned download: ${rec.filename}`)
-        run(`UPDATE recordings SET file_path = NULL, on_local = 0 WHERE id = ?`, [rec.id])
-        fixed++
+        try {
+          // Try to set file_path to NULL - may fail if old schema had NOT NULL constraint
+          run(`UPDATE recordings SET file_path = NULL, on_local = 0 WHERE id = ?`, [rec.id])
+          fixed++
+        } catch (error) {
+          // If NULL fails (old schema), set to empty string instead
+          console.warn(`[IntegrityService] Could not set NULL, trying empty string: ${error}`)
+          try {
+            run(`UPDATE recordings SET file_path = '', on_local = 0 WHERE id = ?`, [rec.id])
+            fixed++
+          } catch (innerError) {
+            console.error(`[IntegrityService] Failed to reset recording ${rec.filename}:`, innerError)
+          }
+        }
       }
     }
 
