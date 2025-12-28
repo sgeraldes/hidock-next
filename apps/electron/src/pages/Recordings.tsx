@@ -200,8 +200,13 @@ export function Recordings() {
 
     try {
       // Queue via download service - OperationController handles the actual download
+      // IMPORTANT: Pass dateCreated to preserve original recording date from device
       await window.electronAPI.downloadService.queueDownloads([
-        { filename: recording.deviceFilename, size: recording.size }
+        {
+          filename: recording.deviceFilename,
+          size: recording.size,
+          dateCreated: recording.dateRecorded.toISOString()
+        }
       ])
     } catch (e) {
       console.error('Failed to queue download:', e)
@@ -231,8 +236,13 @@ export function Recordings() {
 
     try {
       // Queue all downloads at once - OperationController handles them sequentially
+      // IMPORTANT: Pass dateCreated to preserve original recording dates from device
       await window.electronAPI.downloadService.queueDownloads(
-        deviceOnlyRecordings.map(r => ({ filename: r.deviceFilename, size: r.size }))
+        deviceOnlyRecordings.map(r => ({
+          filename: r.deviceFilename,
+          size: r.size,
+          dateCreated: r.dateRecorded.toISOString()
+        }))
       )
     } catch (e) {
       console.error('Failed to queue bulk downloads:', e)

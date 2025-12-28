@@ -441,8 +441,13 @@ export function Device() {
       }
 
       // Queue files to download service - DownloadController will handle actual downloads
+      // IMPORTANT: Pass dateCreated to preserve original recording dates from device
       const queuedIds = await window.electronAPI.downloadService.queueDownloads(
-        toSync.map(f => ({ filename: f.filename, size: f.size }))
+        toSync.map(f => ({
+          filename: f.filename,
+          size: f.size,
+          dateCreated: f.dateCreated?.toISOString()
+        }))
       )
 
       if (queuedIds.length > 0) {
@@ -518,8 +523,13 @@ export function Device() {
       setSyncing(true)
 
       // Queue files to download service - DownloadController will handle actual downloads
+      // IMPORTANT: Pass dateCreated to preserve original recording dates from device
       const queuedIds = await window.electronAPI.downloadService.queueDownloads(
-        toSync.map(f => ({ filename: f.filename, size: f.size }))
+        toSync.map(f => ({
+          filename: f.filename,
+          size: f.size,
+          dateCreated: f.dateCreated?.toISOString()
+        }))
       )
 
       if (queuedIds.length > 0) {
