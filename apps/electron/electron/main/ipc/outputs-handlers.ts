@@ -10,6 +10,7 @@ import { getOutputGeneratorService } from '../services/output-generator'
 import { success, error, Result } from '../types/api'
 import { GenerateOutputRequestSchema } from '../validation/outputs'
 import type { OutputTemplate, GenerateOutputResponse } from '../types/api'
+import { run, runInTransaction, randomUUID } from '../services/database'
 
 export function registerOutputsHandlers(): void {
   const generator = getOutputGeneratorService()
@@ -44,6 +45,26 @@ export function registerOutputsHandlers(): void {
         }
 
         const result = await generator.generate(parsed.data)
+
+        // If actionableId was provided, link the result
+        if (parsed.data.actionableId) {
+          try {
+            const outputId = randomUUID()
+            const now = new Date().toISOString()
+            
+            runInTransaction(() => {
+              // Create output entry
+              run('INSERT INTO outputs (id, knowledge_capture_id, template_id, template_name, content, generated_at) VALUES (?, ?, ?, ?, ?, ?)',
+                [outputId, parsed.data.knowledgeCaptureId || '', parsed.data.templateId, parsed.data.templateId, result.content, now])
+              
+              // Update actionable status and link artifact
+              run('UPDATE actionables SET status = ?, artifact_id = ?, generated_at = ?, updated_at = ? WHERE id = ?',
+                ['generated', outputId, now, now, parsed.data.actionableId])
+            })
+          } catch (linkError) {
+            console.error('Failed to link output to actionable:', linkError)
+          }
+        }
 
         return success({
           content: result.content,

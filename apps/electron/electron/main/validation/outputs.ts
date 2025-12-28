@@ -27,16 +27,17 @@ export const OutputTemplateIdSchema = z.enum([
 
 /**
  * Request to generate output
- * At least one context (meetingId, projectId, or contactId) should be provided
  */
 export const GenerateOutputRequestSchema = z.object({
   templateId: OutputTemplateIdSchema,
   meetingId: UUIDSchema.optional(),
   projectId: UUIDSchema.optional(),
-  contactId: UUIDSchema.optional()
+  contactId: UUIDSchema.optional(),
+  knowledgeCaptureId: UUIDSchema.optional(),
+  actionableId: UUIDSchema.optional()
 }).refine(
-  (data) => data.meetingId || data.projectId || data.contactId,
-  { message: 'At least one of meetingId, projectId, or contactId must be provided' }
+  (data) => data.meetingId || data.projectId || data.contactId || data.knowledgeCaptureId,
+  { message: 'At least one context (meetingId, projectId, contactId, or knowledgeCaptureId) must be provided' }
 )
 
 // =============================================================================

@@ -13,7 +13,8 @@ import {
   getMeetingsForProject,
   getMeetingsForContact,
   getProjectById,
-  getContactById
+  getContactById,
+  queryOne
 } from './database'
 
 export interface GenerateOutputOptions {
@@ -21,6 +22,8 @@ export interface GenerateOutputOptions {
   meetingId?: string
   projectId?: string
   contactId?: string
+  knowledgeCaptureId?: string
+  actionableId?: string
 }
 
 export interface GenerateOutputResult {
@@ -124,6 +127,23 @@ class OutputGeneratorService {
         contact_name: contact.name,
         contact_email: contact.email || '',
         meeting_count: String(meetings.length)
+      }
+    } else if (options.knowledgeCaptureId) {
+      // Single knowledge capture
+      const kc = queryOne<any>('SELECT * FROM knowledge_captures WHERE id = ?', [options.knowledgeCaptureId])
+      if (!kc) {
+        throw new Error(`Knowledge capture not found: ${options.knowledgeCaptureId}`)
+      }
+
+      const transcript = getTranscriptByRecordingId(kc.source_recording_id)
+      if (transcript?.full_text) {
+        transcripts.push(transcript.full_text)
+      }
+
+      contextInfo = {
+        capture_title: kc.title,
+        capture_date: new Date(kc.captured_at).toLocaleDateString(),
+        capture_summary: kc.summary || ''
       }
     }
 
