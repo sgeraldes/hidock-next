@@ -26,7 +26,7 @@
 - [x] Task: Implement Assistant UI - Sidebar & History [df90d10]
     - [ ] Subtask: Update `Chat.tsx` to include a sidebar for conversation history
     - [ ] Subtask: Implement "New Chat" and "Delete Chat" functionality
-- [ ] Task: Implement Context Injection Backend
+- [x] Task: Implement Context Injection Backend [764d95a]
     - [ ] Subtask: Update `chat_messages` table or create `conversation_context` table
     - [ ] Subtask: Implement logic to retrieve context content for AI prompt
 - [ ] Task: Implement Assistant UI - Context Picker
