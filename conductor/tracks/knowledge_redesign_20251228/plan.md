@@ -59,7 +59,7 @@
     - [ ] Subtask: Create `output-service.ts`
     - [ ] Subtask: Define templates (Markdown) for Minutes, Reports, etc.
     - [ ] Subtask: Implement generation logic using LLM
-- [ ] Task: Implement Actionables UI
+- [x] Task: Implement Actionables UI [6b49ba8]
     - [ ] Subtask: Create `Actionables.tsx` dashboard (Pending, Suggestions)
     - [ ] Subtask: Create `OutputPreview` component for editing/exporting generated artifacts
 
