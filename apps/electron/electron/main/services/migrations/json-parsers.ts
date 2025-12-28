@@ -45,9 +45,9 @@ export function parseActionItems(jsonString: string | null | undefined): ActionI
 
     // Handle array of strings
     if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'string') {
-      return parsed.map((text, index) => ({
+      return parsed.map((text) => ({
         id: crypto.randomUUID(),
-        text: text.trim(),
+        text: String(text).trim(),
         status: 'pending' as const
       }))
     }
