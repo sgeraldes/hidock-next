@@ -1,7 +1,7 @@
 # Implementation Plan - Complete Knowledge App Redesign
 
 ## Phase 1.5: Core Knowledge Architecture & Data Migration
-- [ ] Task: Define TypeScript interfaces for `KnowledgeCapture`, `AudioSource`, `ActionItem` in `apps/electron/src/types`
+- [x] Task: Define TypeScript interfaces for `KnowledgeCapture`, `AudioSource`, `ActionItem` in `apps/electron/src/types` [1b78ecd]
     - [ ] Subtask: Create interfaces mirroring the V11 schema
     - [ ] Subtask: Update `UnifiedRecording` to extend or relate to `KnowledgeCapture`
 - [ ] Task: Implement Backend IPC Handlers for Knowledge Captures
