@@ -14,6 +14,7 @@ import { registerDeviceCacheHandlers } from './device-cache-handlers'
 import { registerDownloadServiceHandlers } from '../services/download-service'
 import { registerIntegrityHandlers } from './integrity-handlers'
 import { registerKnowledgeHandlers } from './knowledge-handlers'
+import { registerAssistantHandlers } from './assistant-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -33,6 +34,7 @@ export function registerIpcHandlers(): void {
   registerDownloadServiceHandlers()
   registerIntegrityHandlers()
   registerKnowledgeHandlers()
+  registerAssistantHandlers()
 
   console.log('All IPC handlers registered')
 }

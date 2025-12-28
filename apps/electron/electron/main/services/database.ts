@@ -5,7 +5,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 11
+const SCHEMA_VERSION = 12
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -102,13 +102,34 @@ CREATE TABLE IF NOT EXISTS transcription_queue (
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
 );
 
+-- Conversations (v12)
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Chat history
 CREATE TABLE IF NOT EXISTS chat_messages (
     id TEXT PRIMARY KEY,
+    conversation_id TEXT,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
     sources TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
+-- Conversation context (v12)
+CREATE TABLE IF NOT EXISTS conversation_context (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    knowledge_capture_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+    UNIQUE(conversation_id, knowledge_capture_id)
 );
 
 -- Schema version tracking
@@ -556,6 +577,22 @@ const MIGRATIONS: Record<number, () => void> = {
     console.log('Running migration to schema v11: Knowledge Captures architecture')
     console.log('[Migration v11] Knowledge captures tables will be created by manual migration')
     console.log('Migration v11 complete: Schema version updated to v11')
+  },
+  12: () => {
+    // v12: Conversation History & Context
+    console.log('Running migration to schema v12: Adding conversations and conversation_context tables')
+    const database = getDatabase()
+
+    // Add conversation_id column to chat_messages if it doesn't exist
+    try {
+      database.run('ALTER TABLE chat_messages ADD COLUMN conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE')
+      console.log('[Migration v12] Added conversation_id column to chat_messages')
+    } catch (e) {
+      console.log('[Migration v12] conversation_id column may already exist')
+    }
+
+    // conversation_context and conversations tables are handled by CREATE TABLE IF NOT EXISTS in SCHEMA
+    console.log('Migration v12 complete: Conversation tables and columns created')
   }
 
 }

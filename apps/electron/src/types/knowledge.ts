@@ -63,22 +63,87 @@ export interface AudioSource {
 }
 
 export interface ActionItem {
+
   id: string
+
   knowledgeCaptureId: string
 
+
+
   // Action item content
+
   content: string
+
   assignee?: string | null
+
   dueDate?: string | null
 
+
+
   // Priority and status
+
   priority: ActionItemPriority
+
   status: ActionItemStatus
 
+
+
   // Extraction metadata
+
   extractedFrom?: string | null
+
   confidence?: number | null
 
+
+
   createdAt: string
+
   updatedAt?: string
+
+}
+
+
+
+export interface Conversation {
+
+  id: string
+
+  title?: string
+
+  contextIds: string[]
+
+  createdAt: string
+
+  updatedAt: string
+
+}
+
+
+
+export interface Message {
+
+  id: string
+
+  conversationId?: string
+
+  role: 'user' | 'assistant'
+
+  content: string
+
+  sources?: string // JSON string of source info
+
+  createdAt: string
+
+  
+
+  // New fields from spec
+
+  editedAt?: string
+
+  originalContent?: string
+
+  createdOutputId?: string
+
+  savedAsInsightId?: string
+
 }
