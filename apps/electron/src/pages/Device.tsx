@@ -297,16 +297,6 @@ export function Device() {
       clearConnectionTimers()
     }
 
-    // Auto-scroll activity log to bottom when new entries are added
-    if (activityLog.length > 0) {
-      requestAnimationFrame(() => {
-        if (logContainerRef.current) {
-          logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
-        }
-      })
-    }
-
-
     // NOTE: We do NOT start auto-connect here. Auto-connect is managed at the app level.
     // Starting it here would reset user's disconnect decision when navigating pages.
 
@@ -322,7 +312,18 @@ export function Device() {
       // Clean up download service listener
       unsubscribeDownloadService()
     }
-  }, [clearConnectionTimers, connectionStatus.step, connectionStatus.message, activityLog.length])
+  }, [clearConnectionTimers, connectionStatus.step, connectionStatus.message])
+
+  // Separate effect for auto-scrolling activity log - does NOT trigger re-renders
+  useEffect(() => {
+    if (activityLog.length > 0 && logContainerRef.current) {
+      requestAnimationFrame(() => {
+        if (logContainerRef.current) {
+          logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
+        }
+      })
+    }
+  }, [activityLog.length])
 
   const loadRecordings = useCallback(async (forceRefresh: boolean = false) => {
     if (DEBUG_DEVICE_UI) console.log('[Device.tsx] loadRecordings called, forceRefresh:', forceRefresh)
