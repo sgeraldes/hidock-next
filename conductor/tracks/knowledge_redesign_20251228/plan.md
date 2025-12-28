@@ -8,7 +8,7 @@
     - [ ] Subtask: Create `knowledge-handlers.ts` in `electron/main/ipc`
     - [ ] Subtask: Implement `getKnowledgeCaptures`, `getKnowledgeCaptureById`, `updateKnowledgeCapture`
     - [ ] Subtask: Register handlers in `index.ts`
-- [ ] Task: Update Frontend `useUnifiedRecordings` Hook
+- [x] Task: Update Frontend `useUnifiedRecordings` Hook [1509cb0]
     - [ ] Subtask: Refactor hook to consume new `knowledge_captures` data (via IPC)
     - [ ] Subtask: Maintain backward compatibility during migration
 - [ ] Task: Execute V11 Database Migration
