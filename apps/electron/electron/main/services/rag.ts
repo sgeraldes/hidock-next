@@ -130,6 +130,36 @@ class RAGService {
       searchResults = await vectorStore.search(message, 5)
     }
 
+    // --- Added: Fetch explicit conversation context ---
+    const pinnedContextParts: string[] = []
+    try {
+      const db = getDatabase()
+      if (db) {
+        // Get knowledge captures attached to this conversation
+        const contextRes = db.exec('SELECT knowledge_capture_id FROM conversation_context WHERE conversation_id = ?', [sessionId])
+        if (contextRes && contextRes.length > 0 && contextRes[0].values && contextRes[0].values.length > 0) {
+          const kcIds = contextRes[0].values.map(v => v[0] as string)
+          for (const id of kcIds) {
+            // Fetch the full transcript for each pinned knowledge capture
+            const transcriptRes = db.exec(`
+              SELECT t.full_text, k.title 
+              FROM transcripts t
+              JOIN knowledge_captures k ON k.source_recording_id = t.recording_id
+              WHERE k.id = ?
+            `, [id])
+            
+            if (transcriptRes && transcriptRes.length > 0 && transcriptRes[0].values && transcriptRes[0].values.length > 0) {
+              const [text, title] = transcriptRes[0].values[0] as [string, string]
+              pinnedContextParts.push(`[PINNED CONTEXT: ${title}]\n${text}`)
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch pinned context:', error)
+    }
+    // ------------------------------------------------
+
     // Build context from search results
     const contextParts: string[] = []
     const sources: RAGResponse['sources'] = []
@@ -158,10 +188,13 @@ class RAGService {
       })
     }
 
+    // Combine pinned context and search results
+    const allContextParts = [...pinnedContextParts, ...contextParts]
+
     // Prepare messages
     const contextText =
-      contextParts.length > 0
-        ? `Here are relevant excerpts from meeting transcripts:\n\n${contextParts.join('\n\n---\n\n')}`
+      allContextParts.length > 0
+        ? `Here are relevant excerpts from meeting transcripts and pinned knowledge base items:\n\n${allContextParts.join('\n\n---\n\n')}`
         : 'No relevant meeting transcripts found for this query.'
 
     const userMessage = `Context:\n${contextText}\n\nQuestion: ${message}`
@@ -292,6 +325,10 @@ export function getRAGService(): RAGService {
     ragInstance = new RAGService()
   }
   return ragInstance
+}
+
+export function resetRAGService(): void {
+  ragInstance = null
 }
 
 export { RAGService }
