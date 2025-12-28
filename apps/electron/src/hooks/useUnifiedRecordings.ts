@@ -154,6 +154,8 @@ function buildRecordingMap(
         knowledgeCaptureId: capture?.id,
         title: capture?.title,
         quality: capture?.quality,
+        category: capture?.category,
+        status: capture?.status,
         summary: capture?.summary || undefined
       }
       recordingMap.set(baseName, recording)
@@ -203,6 +205,8 @@ function buildRecordingMap(
         knowledgeCaptureId: capture?.id,
         title: capture?.title,
         quality: capture?.quality,
+        category: capture?.category,
+        status: capture?.status,
         summary: capture?.summary || undefined
       }
       recordingMap.set(baseName, recording)

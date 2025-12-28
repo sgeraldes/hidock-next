@@ -77,6 +77,9 @@ export function Recordings() {
 
   const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set())
   const [locationFilter, setLocationFilter] = useState<LocationFilter>('all')
+  const [categoryFilter, setCategoryFilter] = useState<string>('all')
+  const [qualityFilter, setQualityFilter] = useState<string>('all')
+  const [statusFilter, setStatusFilter] = useState<string>('all')
   const [searchQuery, setSearchQuery] = useState('')
   // View mode persisted in store across navigation
   const compactView = useUIStore((state) => state.recordingsCompactView)
@@ -158,17 +161,33 @@ export function Recordings() {
         return false
       }
 
+      // Category filter
+      if (categoryFilter !== 'all' && rec.category !== categoryFilter) {
+        return false
+      }
+
+      // Quality filter
+      if (qualityFilter !== 'all' && rec.quality !== qualityFilter) {
+        return false
+      }
+
+      // Status filter
+      if (statusFilter !== 'all' && rec.status !== statusFilter) {
+        return false
+      }
+
       // Search filter
       if (searchQuery) {
         const query = searchQuery.toLowerCase()
         const filename = rec.filename.toLowerCase()
         const meetingSubject = rec.meetingSubject?.toLowerCase() || ''
-        return filename.includes(query) || meetingSubject.includes(query)
+        const title = rec.title?.toLowerCase() || ''
+        return filename.includes(query) || meetingSubject.includes(query) || title.includes(query)
       }
 
       return true
     })
-  }, [recordings, locationFilter, searchQuery])
+  }, [recordings, locationFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
 
   const toggleTranscript = (id: string) => {
     setExpandedTranscripts((prev) => {
@@ -226,6 +245,14 @@ export function Recordings() {
     } catch (e) {
       console.error('Failed to import recording:', e)
     }
+  }
+
+  const handleAskAssistant = (recording: UnifiedRecording) => {
+    navigate('/assistant', { state: { contextId: recording.knowledgeCaptureId || recording.id } })
+  }
+
+  const handleGenerateOutput = (recording: UnifiedRecording) => {
+    navigate('/actionables', { state: { sourceId: recording.knowledgeCaptureId || recording.id, action: 'generate' } })
   }
 
   // Bulk download all device-only recordings via centralized service
@@ -501,55 +528,109 @@ export function Recordings() {
         </div>
 
         {/* Filter bar */}
-        <div className="flex items-center gap-4 mt-4">
-          {/* Location filter */}
-          <div className="flex items-center gap-2">
-            <Filter className="h-4 w-4 text-muted-foreground" />
+        <div className="flex flex-col gap-4 mt-4">
+          <div className="flex items-center gap-4">
+            {/* Location filter */}
+            <div className="flex items-center gap-2">
+              <Filter className="h-4 w-4 text-muted-foreground" />
+              <div className="flex rounded-lg border overflow-hidden">
+                <button
+                  onClick={() => setLocationFilter('all')}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                    locationFilter === 'all'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  All ({stats.total})
+                </button>
+                <button
+                  onClick={() => setLocationFilter('device-only')}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
+                    locationFilter === 'device-only'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  <Cloud className="h-3 w-3 inline mr-1" />
+                  Device ({stats.deviceOnly})
+                </button>
+                <button
+                  onClick={() => setLocationFilter('local-only')}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
+                    locationFilter === 'local-only'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  <HardDrive className="h-3 w-3 inline mr-1" />
+                  Downloaded ({stats.localOnly})
+                </button>
+              </div>
+            </div>
+
+            {/* Category filter */}
             <div className="flex rounded-lg border overflow-hidden">
-              <button
-                onClick={() => setLocationFilter('all')}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                  locationFilter === 'all'
-                    ? 'bg-primary text-primary-foreground'
-                    : 'hover:bg-muted'
-                }`}
-              >
-                All ({stats.total})
-              </button>
-              <button
-                onClick={() => setLocationFilter('device-only')}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                  locationFilter === 'device-only'
-                    ? 'bg-primary text-primary-foreground'
-                    : 'hover:bg-muted'
-                }`}
-              >
-                <Cloud className="h-3 w-3 inline mr-1" />
-                Device ({stats.deviceOnly})
-              </button>
-              <button
-                onClick={() => setLocationFilter('local-only')}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                  locationFilter === 'local-only'
-                    ? 'bg-primary text-primary-foreground'
-                    : 'hover:bg-muted'
-                }`}
-              >
-                <HardDrive className="h-3 w-3 inline mr-1" />
-                Downloaded ({stats.localOnly})
-              </button>
+              {['all', 'meeting', 'interview', '1:1', 'brainstorm', 'note'].map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setCategoryFilter(cat)}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                    cat !== 'all' ? 'border-l' : ''
+                  } ${
+                    categoryFilter === cat
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  {cat.charAt(0).toUpperCase() + cat.slice(1)}
+                </button>
+              ))}
+            </div>
+
+            {/* Search */}
+            <div className="relative flex-1 max-w-xs">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search captures..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-9 h-8"
+              />
             </div>
           </div>
 
-          {/* Search */}
-          <div className="relative flex-1 max-w-xs">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search captures..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 h-8"
-            />
+          <div className="flex items-center gap-4">
+            {/* Quality Filter */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-muted-foreground">Quality:</span>
+              <select
+                value={qualityFilter}
+                onChange={(e) => setQualityFilter(e.target.value)}
+                className="h-8 rounded-md border border-input bg-background px-3 py-1 text-xs"
+              >
+                <option value="all">All Ratings</option>
+                <option value="valuable">Valuable</option>
+                <option value="archived">Archived</option>
+                <option value="low-value">Low-Value</option>
+                <option value="unrated">Unrated</option>
+              </select>
+            </div>
+
+            {/* Status Filter */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-muted-foreground">Status:</span>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="h-8 rounded-md border border-input bg-background px-3 py-1 text-xs"
+              >
+                <option value="all">All Statuses</option>
+                <option value="processing">Processing</option>
+                <option value="ready">Ready</option>
+                <option value="enriched">Enriched</option>
+              </select>
+            </div>
           </div>
         </div>
       </header>
@@ -651,6 +732,16 @@ export function Recordings() {
                           }`}>
                             {recording.transcriptionStatus === 'none' ? '—' : recording.transcriptionStatus}
                           </span>
+                          <Button variant="ghost" size="icon" className="h-7 w-7"
+                            onClick={() => handleAskAssistant(recording)}
+                            title="Ask Assistant about this capture">
+                            <Mic className="h-3 w-3" />
+                          </Button>
+                          <Button variant="ghost" size="icon" className="h-7 w-7"
+                            onClick={() => handleGenerateOutput(recording)}
+                            title="Generate artifact from this capture">
+                            <FileText className="h-3 w-3" />
+                          </Button>
                           {isDeviceOnly(recording) && (
                             <Button variant="ghost" size="icon" className="h-7 w-7"
                               onClick={() => handleDownload(recording)}
@@ -738,11 +829,30 @@ export function Recordings() {
                                       ? 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300'
                                       : 'bg-secondary'
                                   }`}>
-                                    {recording.quality}
-                                  </span>
-                                )}
-
-                                {/* Transcription status badge */}
+                                                                      {recording.quality}
+                                                                    </span>
+                                                                    )}
+                                    
+                                                                    <Button
+                                                                      variant="ghost"
+                                                                      size="icon"
+                                                                      onClick={() => handleAskAssistant(recording)}
+                                                                      title="Ask Assistant about this capture"
+                                                                    >
+                                                                      <Mic className="h-4 w-4" />
+                                                                    </Button>
+                                    
+                                                                    <Button
+                                                                      variant="ghost"
+                                                                      size="icon"
+                                                                      onClick={() => handleGenerateOutput(recording)}
+                                                                      title="Generate artifact from this capture"
+                                                                    >
+                                                                      <FileText className="h-4 w-4" />
+                                                                    </Button>
+                                    
+                                                                    {/* Transcription status badge */}
+                                    
                                 <span className={`text-xs px-2 py-1 rounded-full ${
                                   recording.transcriptionStatus === 'complete'
                                     ? 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300'

@@ -1,33 +1,37 @@
 
 import { ipcMain } from 'electron'
 import { queryAll, queryOne, run } from '../services/database'
-import type { KnowledgeCapture } from '../../src/types/knowledge'
+import type { KnowledgeCapture } from '@/types/knowledge'
 
 export function registerKnowledgeHandlers(): void {
   // Get all knowledge captures
-  ipcMain.handle('knowledge:getAll', async (_, { limit = 100, offset = 0, status }: { limit?: number; offset?: number; status?: string } = {}) => {
+  ipcMain.handle('knowledge:getAll', async (_, { limit = 100, offset = 0, status, quality, category }: { limit?: number; offset?: number; status?: string; quality?: string; category?: string } = {}) => {
     let sql = `SELECT * FROM knowledge_captures`
+    const conditions: string[] = []
     const params: (string | number)[] = []
 
     if (status) {
-      // Since 'status' is not in the DB, we might need to filter in memory or assume it's stored in a way not yet in schema?
-      // Wait, I updated the interface but the DB schema is still missing 'status'.
-      // For now, I will assume we might query by 'quality_rating' or just return all and let frontend filter if needed.
-      // Or if I add it to schema later.
-      // Let's check if I can join with recordings?
-      // "SELECT k.*, r.status as processing_status FROM knowledge_captures k LEFT JOIN recordings r ON k.source_recording_id = r.id"
-      // But knowledge_captures is the new source of truth.
-      // I'll stick to simple select for now.
+      conditions.push('status = ?')
+      params.push(status)
+    }
+    if (quality) {
+      conditions.push('quality_rating = ?')
+      params.push(quality)
+    }
+    if (category) {
+      conditions.push('category = ?')
+      params.push(category)
+    }
+
+    if (conditions.length > 0) {
+      sql += ` WHERE ${conditions.join(' AND ')}`
     }
 
     sql += ` ORDER BY captured_at DESC LIMIT ? OFFSET ?`
     params.push(limit, offset)
 
     try {
-      const captures = queryAll<KnowledgeCapture>(sql, params)
-      // Map DB fields to camelCase if needed, but I defined interface to match DB usually?
-      // The interface has camelCase (capturedAt), DB has snake_case (captured_at).
-      // I need a mapper.
+      const captures = queryAll<any>(sql, params)
       return captures.map(mapToKnowledgeCapture)
     } catch (error) {
       console.error('Failed to get knowledge captures:', error)
@@ -57,6 +61,8 @@ export function registerKnowledgeHandlers(): void {
       // Map camelCase updates to snake_case DB columns
       if (updates.title !== undefined) { fields.push('title = ?'); values.push(updates.title); }
       if (updates.summary !== undefined) { fields.push('summary = ?'); values.push(updates.summary); }
+      if (updates.category !== undefined) { fields.push('category = ?'); values.push(updates.category); }
+      if (updates.status !== undefined) { fields.push('status = ?'); values.push(updates.status); }
       if (updates.quality !== undefined) { fields.push('quality_rating = ?'); values.push(updates.quality); }
       if (updates.storageTier !== undefined) { fields.push('storage_tier = ?'); values.push(updates.storageTier); }
       
@@ -82,7 +88,9 @@ function mapToKnowledgeCapture(row: any): KnowledgeCapture {
     id: row.id,
     title: row.title,
     summary: row.summary,
-    quality: row.quality_rating, // Mapping
+    category: row.category,
+    status: row.status,
+    quality: row.quality_rating,
     qualityConfidence: row.quality_confidence,
     qualityAssessedAt: row.quality_assessed_at,
     storageTier: row.storage_tier,
@@ -95,8 +103,6 @@ function mapToKnowledgeCapture(row: any): KnowledgeCapture {
     capturedAt: row.captured_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    deletedAt: row.deleted_at,
-    // Status is missing in DB, we might default it or leave undefined
-    status: 'ready' // Defaulting for now as migration implies processed
+    deletedAt: row.deleted_at
   }
 }

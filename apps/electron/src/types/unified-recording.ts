@@ -32,6 +32,8 @@ interface RecordingBase {
   knowledgeCaptureId?: string
   title?: string
   quality?: QualityRating
+  category?: string
+  status?: string
   summary?: string
 }
 

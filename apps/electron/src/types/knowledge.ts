@@ -9,6 +9,7 @@ export interface KnowledgeCapture {
   id: string
   title: string
   summary?: string | null
+  category?: string | null
 
   // Processing status (from spec)
   status?: KnowledgeCaptureStatus
