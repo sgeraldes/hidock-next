@@ -32,7 +32,7 @@
 - [x] Task: Implement Assistant UI - Context Picker [15be61d]
     - [ ] Subtask: Create `ContextPicker` component (modal/popover) to select Knowledge items
     - [ ] Subtask: Visualize attached context in the chat interface
-- [ ] Task: Integrate Context into LLM Prompt
+- [x] Task: Integrate Context into LLM Prompt [0be59fe]
     - [ ] Subtask: Update `llm-service.ts` to prepend context to the system prompt or user message
 
 ## Phase 3: Organization (People & Projects)
