@@ -52,7 +52,7 @@
     - [ ] Subtask: Create `ProjectDetail.tsx` view
 
 ## Phase 4: Actionables & Outputs
-- [ ] Task: Implement Actionables Backend
+- [x] Task: Implement Actionables Backend [187920d]
     - [ ] Subtask: Create `actionables-handlers.ts`
     - [ ] Subtask: Implement logic to aggregate action items and generate suggestions
 - [ ] Task: Implement Output Generation Backend
