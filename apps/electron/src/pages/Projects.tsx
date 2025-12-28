@@ -1,442 +1,274 @@
-/**
- * Projects Page
- *
- * Displays user-created projects for organizing meetings.
- * Supports creating, editing, deleting projects and tagging meetings.
- */
-
-import { useEffect, useState } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import {
-  Search,
-  Folder,
-  Plus,
-  Calendar,
-  Tag,
-  X,
+import { 
+  Folder, 
+  Search, 
+  Plus, 
+  RefreshCw, 
+  Clock, 
+  MessageSquare, 
+  Trash2, 
   ChevronRight,
-  Pencil,
-  Trash2
+  Archive,
+  CheckCircle2,
+  FileText,
+  Bot,
+  ExternalLink,
+  Users
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle
-} from '@/components/ui/alert-dialog'
-import { useProjectsStore } from '@/store'
-import { cn, formatDate } from '@/lib/utils'
-import type { Project, Meeting } from '@/types'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { formatDateTime } from '@/lib/utils'
+import type { Project } from '@/types/knowledge'
+import { cn } from '@/lib/utils'
 
 export function Projects() {
   const navigate = useNavigate()
-  const {
-    projects,
-    selectedProject,
-    selectedProjectMeetings,
-    selectedProjectTopics,
-    loading,
-    searchQuery,
-    total,
-    loadProjects,
-    selectProject,
-    createProject,
-    updateProject,
-    deleteProject,
-    setSearchQuery,
-    clearSelection
-  } = useProjectsStore()
+  const [projects, setProjects] = useState<Project[]>([])
+  const [activeProject, setActiveConversation] = useState<Project | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'all'>('active')
 
-  const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
-  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
-  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
-  const [newProjectName, setNewProjectName] = useState('')
-  const [newProjectDescription, setNewProjectDescription] = useState('')
-  const [editName, setEditName] = useState('')
-  const [editDescription, setEditDescription] = useState('')
+  const loadProjects = async () => {
+    setLoading(true)
+    try {
+      const result = await window.electronAPI.projects.getAll({ search: searchQuery })
+      if (result.success) {
+        setProjects(result.data.projects)
+      }
+    } catch (error) {
+      console.error('Failed to load projects:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
 
-  // Load projects on mount
   useEffect(() => {
     loadProjects()
-  }, [loadProjects])
+  }, [searchQuery])
 
-  // Sync edit state when selected project changes
-  useEffect(() => {
-    if (selectedProject) {
-      setEditName(selectedProject.name)
-      setEditDescription(selectedProject.description || '')
-    }
-  }, [selectedProject])
+  const filteredProjects = useMemo(() => {
+    return projects.filter(p => {
+      if (statusFilter !== 'all' && p.status !== statusFilter) return false
+      return true
+    })
+  }, [projects, statusFilter])
 
-  const handleCreate = async () => {
-    if (!newProjectName.trim()) return
-
+  const handleCreateProject = async () => {
+    const name = prompt('Enter project name:')
+    if (!name) return
+    
     try {
-      const project = await createProject(newProjectName.trim(), newProjectDescription.trim() || undefined)
-      setIsCreateDialogOpen(false)
-      setNewProjectName('')
-      setNewProjectDescription('')
-      selectProject(project.id)
+      const result = await window.electronAPI.projects.create({ name })
+      if (result.success) {
+        setProjects(prev => [result.data, ...prev])
+        setActiveConversation(result.data)
+      }
     } catch (error) {
       console.error('Failed to create project:', error)
     }
   }
 
-  const handleEdit = async () => {
-    if (!selectedProject || !editName.trim()) return
-
-    try {
-      await updateProject(selectedProject.id, editName.trim(), editDescription.trim() || undefined)
-      setIsEditDialogOpen(false)
-    } catch (error) {
-      console.error('Failed to update project:', error)
-    }
-  }
-
-  const handleDelete = async () => {
-    if (!selectedProject) return
-
-    try {
-      await deleteProject(selectedProject.id)
-      setIsDeleteDialogOpen(false)
-    } catch (error) {
-      console.error('Failed to delete project:', error)
-    }
-  }
-
-  const handleMeetingClick = (meeting: Meeting) => {
-    navigate(`/meeting/${meeting.id}`)
-  }
-
   return (
-    <div className="flex h-full">
-      {/* Project List */}
-      <div className="w-80 border-r flex flex-col">
-        {/* Header */}
-        <div className="p-4 border-b space-y-3">
+    <div className="flex h-full bg-background">
+      {/* Sidebar - Projects List */}
+      <aside className="w-80 border-r flex flex-col bg-muted/10">
+        <div className="p-4 border-b space-y-4">
           <div className="flex items-center justify-between">
-            <h1 className="text-xl font-semibold">Projects</h1>
-            <Button
-              size="sm"
-              onClick={() => setIsCreateDialogOpen(true)}
-            >
-              <Plus className="h-4 w-4 mr-1" />
+            <h1 className="text-xl font-bold">Projects</h1>
+            <Button onClick={handleCreateProject} size="sm" className="h-8 gap-1">
+              <Plus className="h-4 w-4" />
               New
             </Button>
           </div>
+          
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
               placeholder="Search projects..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9"
+              className="pl-9 h-9"
             />
           </div>
-          <p className="text-xs text-muted-foreground">
-            {total} projects
-          </p>
+
+          <div className="flex gap-1 p-1 bg-muted rounded-lg">
+            {['active', 'archived'].map((s) => (
+              <button
+                key={s}
+                onClick={() => setStatusFilter(s as any)}
+                className={cn(
+                  "flex-1 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all",
+                  statusFilter === s ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {/* Project List */}
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-auto p-2">
           {loading && projects.length === 0 ? (
-            <div className="p-4 text-center text-muted-foreground">
-              Loading projects...
+            <div className="flex items-center justify-center py-12">
+              <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
-          ) : projects.length === 0 ? (
-            <div className="p-4 text-center text-muted-foreground">
-              <Folder className="h-8 w-8 mx-auto mb-2 opacity-50" />
-              <p>No projects yet</p>
-              <p className="text-xs mt-1">Create one to organize your meetings</p>
-            </div>
+          ) : filteredProjects.length === 0 ? (
+            <p className="text-center text-xs text-muted-foreground py-12">No {statusFilter} projects</p>
           ) : (
-            <div className="divide-y">
-              {projects.map((project) => (
-                <ProjectListItem
+            <div className="space-y-1">
+              {filteredProjects.map((project) => (
+                <div
                   key={project.id}
-                  project={project}
-                  isSelected={selectedProject?.id === project.id}
-                  onClick={() => selectProject(project.id)}
-                />
+                  onClick={() => setActiveConversation(project)}
+                  className={cn(
+                    "w-full text-left p-3 rounded-xl transition-all cursor-pointer group",
+                    activeProject?.id === project.id 
+                      ? "bg-primary text-primary-foreground shadow-md" 
+                      : "hover:bg-muted text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className={cn(
+                      "w-10 h-10 rounded-xl flex items-center justify-center border shadow-sm",
+                      activeProject?.id === project.id ? "bg-primary-foreground/10 border-primary-foreground/20" : "bg-background border-border"
+                    )}>
+                      <Folder className={cn("h-5 w-5", activeProject?.id === project.id ? "text-primary-foreground" : "text-muted-foreground")} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold truncate">{project.name}</p>
+                      <div className="flex items-center gap-2 mt-1 text-[10px] opacity-70">
+                        <Clock className="h-3 w-3" />
+                        <span>{new Date(project.createdAt).toLocaleDateString()}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               ))}
             </div>
           )}
         </div>
-      </div>
+      </aside>
 
-      {/* Project Detail */}
-      <div className="flex-1 flex flex-col">
-        {selectedProject ? (
-          <>
-            {/* Project Header */}
-            <div className="p-6 border-b">
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-4">
-                  <div className="h-16 w-16 rounded-lg bg-primary/10 flex items-center justify-center">
-                    <Folder className="h-8 w-8 text-primary" />
-                  </div>
-                  <div>
-                    <h2 className="text-2xl font-semibold">{selectedProject.name}</h2>
-                    {selectedProject.description && (
-                      <p className="text-muted-foreground mt-1">{selectedProject.description}</p>
-                    )}
-                  </div>
+      {/* Main Detail Area */}
+      <main className="flex-1 flex flex-col min-w-0">
+        {activeProject ? (
+          <div className="flex flex-col h-full overflow-hidden animate-in fade-in slide-in-from-right-2 duration-300">
+            {/* Header */}
+            <header className="border-b px-8 py-6 h-[120px] flex items-center justify-between">
+              <div className="flex items-center gap-4 min-w-0">
+                <div className="w-14 h-14 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center shadow-inner">
+                  <Folder className="h-7 w-7 text-primary" />
                 </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setIsEditDialogOpen(true)}
-                  >
-                    <Pencil className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setIsDeleteDialogOpen(true)}
-                    className="text-destructive hover:text-destructive"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={clearSelection}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
+                <div className="min-w-0">
+                  <h2 className="text-2xl font-bold truncate">{activeProject.name}</h2>
+                  <div className="flex items-center gap-3 mt-1">
+                    <span className={cn(
+                      "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border",
+                      activeProject.status === 'active' ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20" : "bg-slate-500/10 text-slate-600 border-slate-500/20"
+                    )}>
+                      {activeProject.status}
+                    </span>
+                    <span className="text-xs text-muted-foreground">Created {new Date(activeProject.createdAt).toLocaleDateString()}</span>
+                  </div>
                 </div>
               </div>
-
-              {/* Stats */}
-              <div className="flex gap-6 mt-4 text-sm">
-                <div>
-                  <span className="text-muted-foreground">Meetings:</span>
-                  <span className="ml-1 font-medium">{selectedProjectMeetings.length}</span>
-                </div>
-                <div>
-                  <span className="text-muted-foreground">Created:</span>
-                  <span className="ml-1 font-medium">{formatDate(selectedProject.created_at)}</span>
-                </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" className="h-9 gap-2">
+                  <Archive className="h-4 w-4" />
+                  {activeProject.status === 'active' ? 'Archive' : 'Activate'}
+                </Button>
+                <Button variant="ghost" size="icon" className="h-9 w-9 text-muted-foreground hover:text-destructive">
+                  <Trash2 className="h-4 w-4" />
+                </Button>
               </div>
-            </div>
+            </header>
 
-            {/* Content Area */}
-            <div className="flex-1 overflow-auto p-6 space-y-6">
-              {/* Topics Section */}
-              {selectedProjectTopics.length > 0 && (
-                <div>
-                  <h3 className="font-medium flex items-center gap-2 mb-3">
-                    <Tag className="h-4 w-4" />
-                    Topics
-                  </h3>
-                  <div className="flex flex-wrap gap-2">
-                    {selectedProjectTopics.map((topic, index) => (
-                      <span
-                        key={index}
-                        className="px-2 py-1 bg-muted rounded-md text-sm"
-                      >
-                        {topic}
-                      </span>
-                    ))}
-                  </div>
+            {/* Content */}
+            <div className="flex-1 overflow-auto p-8">
+              <div className="max-w-4xl mx-auto space-y-8">
+                {/* Stats Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <Card className="bg-muted/5">
+                    <CardContent className="pt-6">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Knowledge</p>
+                        <FileText className="h-4 w-4 text-primary" />
+                      </div>
+                      <p className="text-2xl font-bold mt-2">12 Items</p>
+                    </CardContent>
+                  </Card>
+                  <Card className="bg-muted/5">
+                    <CardContent className="pt-6">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">People</p>
+                        <Users className="h-4 w-4 text-primary" />
+                      </div>
+                      <p className="text-2xl font-bold mt-2">5 Involved</p>
+                    </CardContent>
+                  </Card>
+                  <Card className="bg-muted/5">
+                    <CardContent className="pt-6">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Actions</p>
+                        <CheckCircle2 className="h-4 w-4 text-primary" />
+                      </div>
+                      <p className="text-2xl font-bold mt-2">8 Pending</p>
+                    </CardContent>
+                  </Card>
                 </div>
-              )}
 
-              {/* Meetings Section */}
-              <div>
-                <h3 className="font-medium flex items-center gap-2 mb-3">
-                  <Calendar className="h-4 w-4" />
-                  Meetings ({selectedProjectMeetings.length})
-                </h3>
-                {selectedProjectMeetings.length === 0 ? (
-                  <div className="text-sm text-muted-foreground bg-muted/30 rounded-md p-4 text-center">
-                    <p>No meetings tagged to this project yet.</p>
-                    <p className="text-xs mt-1">Tag meetings from the meeting detail page.</p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {selectedProjectMeetings.map((meeting) => (
-                      <button
-                        key={meeting.id}
-                        onClick={() => handleMeetingClick(meeting)}
-                        className="w-full text-left p-3 rounded-md border hover:bg-accent transition-colors group"
-                      >
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <div className="font-medium group-hover:text-primary transition-colors">
-                              {meeting.subject}
-                            </div>
-                            <div className="text-sm text-muted-foreground">
-                              {formatDate(meeting.start_time)}
-                            </div>
-                          </div>
-                          <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary" />
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
+                {/* Description */}
+                <div className="space-y-3">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Description</h3>
+                  <p className="text-sm leading-relaxed text-muted-foreground bg-muted/20 p-4 rounded-xl border italic">
+                    {activeProject.description || "No description provided for this project."}
+                  </p>
+                </div>
+
+                {/* AI Suggestions */}
+                <Card className="border-primary/20 bg-primary/5">
+                  <CardContent className="p-6">
+                    <div className="flex items-center gap-2 mb-4">
+                      <Bot className="h-5 w-5 text-primary" />
+                      <h3 className="font-bold text-sm uppercase tracking-wider">AI Project Insight</h3>
+                    </div>
+                    <p className="text-sm leading-relaxed">
+                      Based on the 12 knowledge items in this project, the recurring theme is **"Amazon Connect Integration Strategy"**. Dani has been the primary driver of technical decisions.
+                    </p>
+                    <div className="mt-4 flex gap-2">
+                      <Button size="sm" variant="outline" className="h-8 text-xs bg-background">Generate Status Report</Button>
+                      <Button size="sm" variant="outline" className="h-8 text-xs bg-background">Summarize Decisions</Button>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Placeholder for tabs content */}
+                <div className="pt-4 text-center py-20 border-2 border-dashed rounded-3xl opacity-30">
+                  <Folder className="h-12 w-12 mx-auto mb-4" />
+                  <p className="text-sm">Knowledge Timeline and Related People visualization will appear here.</p>
+                </div>
               </div>
             </div>
-          </>
+          </div>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-muted-foreground">
-            <div className="text-center">
-              <Folder className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p>Select a project to view details</p>
-              <p className="text-xs mt-1">or create a new one to get started</p>
+          <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground p-8">
+            <div className="w-20 h-20 rounded-3xl bg-muted/20 flex items-center justify-center mb-6">
+              <Folder className="h-10 w-10 opacity-20" />
             </div>
+            <h2 className="text-xl font-bold text-foreground mb-2">Select a Project</h2>
+            <p className="text-sm max-w-xs text-center leading-relaxed">
+              Choose a project from the sidebar to view aggregated knowledge, people, and AI insights.
+            </p>
+            <Button onClick={handleCreateProject} variant="outline" className="mt-8 gap-2">
+              <Plus className="h-4 w-4" />
+              Create New Project
+            </Button>
           </div>
         )}
-      </div>
-
-      {/* Create Project Dialog */}
-      <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Create New Project</DialogTitle>
-            <DialogDescription>
-              Create a project to organize related meetings together.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div>
-              <label className="text-sm font-medium">Name</label>
-              <Input
-                placeholder="Project name"
-                value={newProjectName}
-                onChange={(e) => setNewProjectName(e.target.value)}
-                className="mt-1"
-                autoFocus
-              />
-            </div>
-            <div>
-              <label className="text-sm font-medium">Description (optional)</label>
-              <Textarea
-                placeholder="Describe what this project is about..."
-                value={newProjectDescription}
-                onChange={(e) => setNewProjectDescription(e.target.value)}
-                className="mt-1"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsCreateDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleCreate} disabled={!newProjectName.trim()}>
-              Create Project
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Edit Project Dialog */}
-      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit Project</DialogTitle>
-            <DialogDescription>
-              Update the project name and description.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div>
-              <label className="text-sm font-medium">Name</label>
-              <Input
-                placeholder="Project name"
-                value={editName}
-                onChange={(e) => setEditName(e.target.value)}
-                className="mt-1"
-                autoFocus
-              />
-            </div>
-            <div>
-              <label className="text-sm font-medium">Description (optional)</label>
-              <Textarea
-                placeholder="Describe what this project is about..."
-                value={editDescription}
-                onChange={(e) => setEditDescription(e.target.value)}
-                className="mt-1"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button onClick={handleEdit} disabled={!editName.trim()}>
-              Save Changes
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Delete Confirmation Dialog */}
-      <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Project</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to delete "{selectedProject?.name}"?
-              This will untag all meetings from this project. This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      </main>
     </div>
-  )
-}
-
-interface ProjectListItemProps {
-  project: Project
-  isSelected: boolean
-  onClick: () => void
-}
-
-function ProjectListItem({ project, isSelected, onClick }: ProjectListItemProps) {
-  return (
-    <button
-      onClick={onClick}
-      className={cn(
-        'w-full text-left p-3 hover:bg-accent transition-colors',
-        isSelected && 'bg-primary/10'
-      )}
-    >
-      <div className="flex items-center gap-3">
-        <div className="h-10 w-10 rounded-lg bg-muted flex items-center justify-center flex-shrink-0">
-          <Folder className="h-5 w-5 text-muted-foreground" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="font-medium truncate">{project.name}</div>
-          {project.description && (
-            <div className="text-sm text-muted-foreground truncate">{project.description}</div>
-          )}
-        </div>
-      </div>
-    </button>
   )
 }
