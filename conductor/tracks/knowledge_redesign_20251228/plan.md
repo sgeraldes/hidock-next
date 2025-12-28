@@ -40,7 +40,7 @@
     - [ ] Subtask: Create `people-handlers.ts`
     - [ ] Subtask: Implement auto-population logic (from meeting attendees & transcript speakers)
     - [ ] Subtask: Implement `getPeople`, `getPersonById`
-- [ ] Task: Implement People UI
+- [x] Task: Implement People UI [9d9626c]
     - [ ] Subtask: Create `People.tsx` list view
     - [ ] Subtask: Create `PersonDetail.tsx` view with knowledge map and interaction history
 - [ ] Task: Implement Projects Entity Backend
