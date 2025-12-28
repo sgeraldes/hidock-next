@@ -36,7 +36,7 @@
     - [ ] Subtask: Update `llm-service.ts` to prepend context to the system prompt or user message
 
 ## Phase 3: Organization (People & Projects)
-- [ ] Task: Implement People Entity Backend
+- [x] Task: Implement People Entity Backend [132f591]
     - [ ] Subtask: Create `people-handlers.ts`
     - [ ] Subtask: Implement auto-population logic (from meeting attendees & transcript speakers)
     - [ ] Subtask: Implement `getPeople`, `getPersonById`
