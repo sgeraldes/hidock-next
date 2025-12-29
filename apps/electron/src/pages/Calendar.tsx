@@ -78,6 +78,7 @@ export function Calendar() {
     addToDownloadQueue,
     updateDownloadProgress,
     removeFromDownloadQueue,
+    setDeviceSyncState,
   } = useAppStore()
 
   // Get unified recordings (device + local)
@@ -340,7 +341,9 @@ export function Calendar() {
     return { top, height }
   }
 
-  const monthYear = currentDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+  const monthYear = currentDate instanceof Date 
+    ? currentDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+    : ''
 
   // Format last sync time (memoized)
   const formatLastSync = useCallback(() => {
@@ -366,12 +369,28 @@ export function Calendar() {
 
   // Handle navigation (memoized)
   const handleNavigatePrev = useCallback(() => {
-    calendarView === 'month' ? navigateMonth('prev') : navigateWeek('prev')
-  }, [calendarView, navigateMonth, navigateWeek])
+    if (calendarView === 'day') {
+      const newDate = new Date(currentDate)
+      newDate.setDate(newDate.getDate() - 1)
+      setCurrentDate(newDate)
+    } else if (calendarView === 'month') {
+      navigateMonth('prev')
+    } else {
+      navigateWeek('prev')
+    }
+  }, [calendarView, navigateMonth, navigateWeek, currentDate, setCurrentDate])
 
   const handleNavigateNext = useCallback(() => {
-    calendarView === 'month' ? navigateMonth('next') : navigateWeek('next')
-  }, [calendarView, navigateMonth, navigateWeek])
+    if (calendarView === 'day') {
+      const newDate = new Date(currentDate)
+      newDate.setDate(newDate.getDate() + 1)
+      setCurrentDate(newDate)
+    } else if (calendarView === 'month') {
+      navigateMonth('next')
+    } else {
+      navigateWeek('next')
+    }
+  }, [calendarView, navigateMonth, navigateWeek, currentDate, setCurrentDate])
 
   // Handle view changes with config persistence (memoized)
   const handleCalendarViewChange = useCallback(async (view: CalendarViewType) => {
@@ -579,23 +598,52 @@ export function Calendar() {
     if (!deviceService.isConnected()) return
 
     setBulkDownloading(true)
+    
+    // Set initial total count for sidebar progress
+    setDeviceSyncState({
+      deviceSyncing: true,
+      deviceSyncProgress: { current: 0, total: toDownload.length }
+    })
+    
+    // Process sequentially but show progress for each
+    let completedCount = 0
     for (const rec of toDownload) {
+      // Skip if already downloading
+      if (downloadQueue.has(rec.id)) {
+        completedCount++
+        continue
+      }
+      
+      addToDownloadQueue(rec.id, rec.deviceFilename, rec.size)
+      
       try {
         await deviceService.downloadRecordingToFile(
           rec.deviceFilename,
           rec.size,
           '',
-          undefined, // No progress callback for bulk downloads
+          (received) => {
+            const percent = Math.round((received / rec.size) * 100)
+            updateDownloadProgress(rec.id, percent)
+          },
           rec.dateRecorded // Pass the original recording date from device
         )
+        completedCount++
+        // Update sidebar progress count
+        setDeviceSyncState({
+          deviceSyncProgress: { current: completedCount, total: toDownload.length }
+        })
       } catch (e) {
         console.error('Download failed:', rec.filename, e)
+      } finally {
+        removeFromDownloadQueue(rec.id)
       }
     }
+    
     await refreshRecordings(false)
     setBulkDownloading(false)
+    setDeviceSyncState({ deviceSyncing: false, deviceSyncProgress: null })
     clearSelection()
-  }, [filteredRecordings, selectedIds, refreshRecordings, clearSelection])
+  }, [filteredRecordings, selectedIds, refreshRecordings, clearSelection, downloadQueue, addToDownloadQueue, updateDownloadProgress, removeFromDownloadQueue, setDeviceSyncState])
 
   // Location filter handler (memoized)
   const handleLocationFilterChange = useCallback((filter: LocationFilter) => {
