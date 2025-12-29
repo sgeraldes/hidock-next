@@ -771,7 +771,7 @@ const MIGRATIONS = {
   },
   6: () => {
     console.log("Running migration to schema v6: Adding recording lifecycle columns");
-    const database = getDatabase();
+    const database2 = getDatabase();
     const columnsToAdd = [
       "ALTER TABLE recordings ADD COLUMN location TEXT DEFAULT 'device-only'",
       "ALTER TABLE recordings ADD COLUMN transcription_status TEXT DEFAULT 'none'",
@@ -783,13 +783,13 @@ const MIGRATIONS = {
     ];
     for (const sql of columnsToAdd) {
       try {
-        database.run(sql);
+        database2.run(sql);
       } catch (e) {
         console.log(`Column may already exist: ${sql}`);
       }
     }
     try {
-      database.run(`
+      database2.run(`
         UPDATE recordings
         SET on_local = 1,
             location = CASE WHEN on_device = 1 THEN 'both' ELSE 'local-only' END
@@ -802,9 +802,9 @@ const MIGRATIONS = {
   },
   7: () => {
     console.log("Running migration to schema v7: Recalculating HDA file durations");
-    const database = getDatabase();
+    const database2 = getDatabase();
     try {
-      const recordings = database.exec(`
+      const recordings = database2.exec(`
         SELECT id, filename, file_size, duration_seconds
         FROM recordings
         WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
@@ -817,7 +817,7 @@ const MIGRATIONS = {
           const [id, filename, fileSize, oldDuration] = row;
           const newDuration = Math.round(fileSize / 8e3);
           if (oldDuration !== newDuration) {
-            database.run(
+            database2.run(
               "UPDATE recordings SET duration_seconds = ? WHERE id = ?",
               [newDuration, id]
             );
@@ -830,7 +830,7 @@ const MIGRATIONS = {
         console.log("[Migration v7] No HDA recordings found to update");
       }
       try {
-        const cachedFiles = database.exec(`
+        const cachedFiles = database2.exec(`
           SELECT id, filename, file_size, duration_seconds
           FROM device_files_cache
           WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
@@ -842,7 +842,7 @@ const MIGRATIONS = {
             const [id, _filename, fileSize, oldDuration] = row;
             const newDuration = Math.round(fileSize / 8e3);
             if (oldDuration !== newDuration) {
-              database.run(
+              database2.run(
                 "UPDATE device_files_cache SET duration_seconds = ? WHERE id = ?",
                 [newDuration, id]
               );
@@ -860,9 +860,9 @@ const MIGRATIONS = {
   },
   8: () => {
     console.log("Running migration to schema v8: Fixing HDA duration formula (v7 was wrong)");
-    const database = getDatabase();
+    const database2 = getDatabase();
     try {
-      const recordings = database.exec(`
+      const recordings = database2.exec(`
         SELECT id, filename, file_size, duration_seconds
         FROM recordings
         WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
@@ -875,7 +875,7 @@ const MIGRATIONS = {
           const [id, filename, fileSize, oldDuration] = row;
           const newDuration = Math.round(fileSize / 8e3);
           if (oldDuration !== newDuration) {
-            database.run(
+            database2.run(
               "UPDATE recordings SET duration_seconds = ? WHERE id = ?",
               [newDuration, id]
             );
@@ -892,7 +892,7 @@ const MIGRATIONS = {
         console.log("[Migration v8] No HDA recordings found to fix");
       }
       try {
-        const cachedFiles = database.exec(`
+        const cachedFiles = database2.exec(`
           SELECT id, filename, file_size, duration_seconds
           FROM device_files_cache
           WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
@@ -904,7 +904,7 @@ const MIGRATIONS = {
             const [id, _filename, fileSize, oldDuration] = row;
             const newDuration = Math.round(fileSize / 8e3);
             if (oldDuration !== newDuration) {
-              database.run(
+              database2.run(
                 "UPDATE device_files_cache SET duration_seconds = ? WHERE id = ?",
                 [newDuration, id]
               );
@@ -922,9 +922,9 @@ const MIGRATIONS = {
   },
   9: () => {
     console.log("Running migration to schema v9: Ensuring HDA durations are correct");
-    const database = getDatabase();
+    const database2 = getDatabase();
     try {
-      const recordings = database.exec(`
+      const recordings = database2.exec(`
         SELECT id, filename, file_size, duration_seconds
         FROM recordings
         WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
@@ -938,7 +938,7 @@ const MIGRATIONS = {
           const newDuration = Math.round(fileSize / 8e3);
           const needsUpdate = oldDuration !== newDuration || oldDuration && oldDuration > 21600;
           if (needsUpdate) {
-            database.run(
+            database2.run(
               "UPDATE recordings SET duration_seconds = ? WHERE id = ?",
               [newDuration, id]
             );
@@ -955,7 +955,7 @@ const MIGRATIONS = {
         console.log("[Migration v9] No HDA recordings found");
       }
       try {
-        const cachedFiles = database.exec(`
+        const cachedFiles = database2.exec(`
           SELECT id, filename, file_size, duration_seconds
           FROM device_files_cache
           WHERE (filename LIKE '%.hda' OR filename LIKE '%.HDA')
@@ -968,7 +968,7 @@ const MIGRATIONS = {
             const newDuration = Math.round(fileSize / 8e3);
             const needsUpdate = oldDuration !== newDuration || oldDuration && oldDuration > 21600;
             if (needsUpdate) {
-              database.run(
+              database2.run(
                 "UPDATE device_files_cache SET duration_seconds = ? WHERE id = ?",
                 [newDuration, id]
               );
@@ -986,9 +986,9 @@ const MIGRATIONS = {
   },
   10: () => {
     console.log("Running migration to schema v10: Adding quality assessment and storage policy support");
-    const database = getDatabase();
+    const database2 = getDatabase();
     try {
-      database.run(`
+      database2.run(`
         ALTER TABLE recordings
         ADD COLUMN storage_tier TEXT DEFAULT NULL
         CHECK(storage_tier IN (NULL, 'hot', 'warm', 'cold', 'archive'))
@@ -998,7 +998,7 @@ const MIGRATIONS = {
       console.log("[Migration v10] storage_tier column may already exist");
     }
     try {
-      database.run("CREATE INDEX IF NOT EXISTS idx_recordings_storage_tier ON recordings(storage_tier)");
+      database2.run("CREATE INDEX IF NOT EXISTS idx_recordings_storage_tier ON recordings(storage_tier)");
       console.log("[Migration v10] Created storage_tier index");
     } catch (e) {
       console.log("[Migration v10] storage_tier index may already exist");
@@ -1008,9 +1008,9 @@ const MIGRATIONS = {
   },
   11: () => {
     console.log("Running migration to schema v11: Knowledge Captures architecture");
-    const database = getDatabase();
+    const database2 = getDatabase();
     try {
-      const recordingsInfo = database.exec("PRAGMA table_info(recordings)");
+      const recordingsInfo = database2.exec("PRAGMA table_info(recordings)");
       const hasMigrationStatus = recordingsInfo[0].values.some((col) => col[1] === "migration_status");
       if (!hasMigrationStatus) {
         console.log("[Migration v11] Migration columns not found in recordings, adding them...");
@@ -1021,12 +1021,12 @@ const MIGRATIONS = {
         ];
         for (const sql of columnsToAdd) {
           try {
-            database.run(sql);
+            database2.run(sql);
           } catch (e) {
           }
         }
       }
-      const tableCheck = database.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_captures'");
+      const tableCheck = database2.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_captures'");
       const tableExists = tableCheck.length > 0 && tableCheck[0].values.length > 0;
       if (!tableExists) {
         console.log("[Migration v11] knowledge_captures table not found, executing full schema script...");
@@ -1036,13 +1036,13 @@ const MIGRATIONS = {
           const statements = schemaSQL.split("\n").filter((line) => !line.trim().startsWith("--")).join("\n").split(";").map((s) => s.trim()).filter((s) => s.length > 0);
           for (const sql of statements) {
             try {
-              database.run(sql);
+              database2.run(sql);
             } catch (e) {
             }
           }
         }
       } else {
-        const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)");
+        const captureInfo = database2.exec("PRAGMA table_info(knowledge_captures)");
         const existingCols = captureInfo[0].values.map((col) => col[1]);
         const requiredColumns = [
           { name: "category", def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
@@ -1062,7 +1062,7 @@ const MIGRATIONS = {
           if (!existingCols.includes(col.name)) {
             console.log(`[Migration v11] Adding missing column ${col.name} to knowledge_captures`);
             try {
-              database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`);
+              database2.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`);
             } catch (e) {
               console.warn(`[Migration v11] Could not add column ${col.name}: ${e}`);
             }
@@ -1077,7 +1077,7 @@ const MIGRATIONS = {
       ];
       for (const sql of indexes) {
         try {
-          database.run(sql);
+          database2.run(sql);
         } catch (e) {
           console.warn(`Index warning: ${e}`);
         }
@@ -1089,9 +1089,9 @@ const MIGRATIONS = {
   },
   12: () => {
     console.log("Running migration to schema v12: Adding conversations and conversation_context tables");
-    const database = getDatabase();
+    const database2 = getDatabase();
     try {
-      database.run("ALTER TABLE chat_messages ADD COLUMN conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE");
+      database2.run("ALTER TABLE chat_messages ADD COLUMN conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE");
       console.log("[Migration v12] Added conversation_id column to chat_messages");
     } catch (e) {
       console.log("[Migration v12] conversation_id column may already exist");
@@ -1100,7 +1100,7 @@ const MIGRATIONS = {
   },
   13: () => {
     console.log("Running migration to schema v13: Adding fields to contacts table");
-    const database = getDatabase();
+    const database2 = getDatabase();
     const columnsToAdd = [
       "ALTER TABLE contacts ADD COLUMN type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown'",
       "ALTER TABLE contacts ADD COLUMN role TEXT",
@@ -1109,7 +1109,7 @@ const MIGRATIONS = {
     ];
     for (const sql of columnsToAdd) {
       try {
-        database.run(sql);
+        database2.run(sql);
       } catch (e) {
         console.log(`Column may already exist: ${sql}`);
       }
@@ -1118,9 +1118,9 @@ const MIGRATIONS = {
   },
   14: () => {
     console.log("Running migration to schema v14: Adding status to projects table");
-    const database = getDatabase();
+    const database2 = getDatabase();
     try {
-      database.run("ALTER TABLE projects ADD COLUMN status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active'");
+      database2.run("ALTER TABLE projects ADD COLUMN status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active'");
       console.log("[Migration v14] Added status column to projects");
     } catch (e) {
       console.log("[Migration v14] status column may already exist");
@@ -1152,20 +1152,20 @@ async function initializeDatabase() {
     } else {
       db = new SQL.Database();
     }
-    const database = getDatabase();
+    const database2 = getDatabase();
     const statements = SCHEMA.split(";").map((s) => s.trim()).filter((s) => s.length > 0);
     console.log("[Database] Phase 1: Ensuring core tables exist...");
     for (const sql of statements) {
       if (sql.toUpperCase().startsWith("CREATE TABLE")) {
         try {
-          database.run(sql);
+          database2.run(sql);
         } catch (e) {
           console.warn(`[Database] Table creation warning: ${e.message}`);
         }
       }
     }
     console.log("[Database] Phase 2: Aligning table structures...");
-    const recordingsInfo = database.exec("PRAGMA table_info(recordings)");
+    const recordingsInfo = database2.exec("PRAGMA table_info(recordings)");
     const recCols = recordingsInfo[0].values.map((col) => col[1]);
     const recordingRepairs = [
       { name: "migrated_to_capture_id", def: "TEXT" },
@@ -1176,12 +1176,12 @@ async function initializeDatabase() {
       if (!recCols.includes(col.name)) {
         console.log(`[Database] Repairing recordings: adding ${col.name}`);
         try {
-          database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`);
+          database2.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`);
         } catch (e) {
         }
       }
     }
-    const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)");
+    const captureInfo = database2.exec("PRAGMA table_info(knowledge_captures)");
     const capCols = captureInfo[0].values.map((col) => col[1]);
     const knowledgeRepairs = [
       { name: "category", def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
@@ -1201,23 +1201,23 @@ async function initializeDatabase() {
       if (!capCols.includes(col.name)) {
         console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`);
         try {
-          database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`);
+          database2.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`);
         } catch (e) {
         }
       }
     }
-    const versionResult = database.exec("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
+    const versionResult = database2.exec("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
     const currentVersion = versionResult.length > 0 && versionResult[0].values.length > 0 ? versionResult[0].values[0][0] : 0;
     if (currentVersion < SCHEMA_VERSION) {
       console.log(`[Database] Phase 3: Migrating v${currentVersion} -> v${SCHEMA_VERSION}`);
       runMigrations(currentVersion);
     } else if (currentVersion === 0) {
-      database.run("INSERT INTO schema_version (version) VALUES (?)", [SCHEMA_VERSION]);
+      database2.run("INSERT INTO schema_version (version) VALUES (?)", [SCHEMA_VERSION]);
     }
     console.log("[Database] Phase 4: Finalizing schema and indexes...");
     for (const sql of statements) {
       try {
-        database.run(sql);
+        database2.run(sql);
       } catch (e) {
         const msg = e.message;
         if (!msg.includes("already exists") && !msg.includes("duplicate column name")) {
@@ -1275,15 +1275,15 @@ function runNoSave(sql, params = []) {
   getDatabase().run(sql, params);
 }
 function runInTransaction(fn) {
-  const database = getDatabase();
-  database.run("BEGIN TRANSACTION");
+  const database2 = getDatabase();
+  database2.run("BEGIN TRANSACTION");
   try {
     const result = fn();
-    database.run("COMMIT");
+    database2.run("COMMIT");
     saveDatabase();
     return result;
   } catch (error2) {
-    database.run("ROLLBACK");
+    database2.run("ROLLBACK");
     throw error2;
   }
 }
@@ -1998,6 +1998,78 @@ async function updateRecordingStorageTierAsync(recordingId, tier) {
     });
   });
 }
+const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  addChatMessage,
+  addRecordingMeetingCandidate,
+  addSyncedFile,
+  addToQueue,
+  clearAllSyncedFiles,
+  clearChatHistory,
+  closeDatabase,
+  createProject,
+  deleteProject,
+  deleteRecordingLocal,
+  findCandidateMeetingsForRecording,
+  getAllSyncedFiles,
+  getCandidatesForRecordingWithDetails,
+  getChatHistory,
+  getContactById,
+  getContacts,
+  getContactsByEmails,
+  getContactsForMeeting,
+  getDatabase,
+  getMeetingById,
+  getMeetings,
+  getMeetingsByIds,
+  getMeetingsForContact,
+  getMeetingsForProject,
+  getMeetingsNearDate,
+  getProjectById,
+  getProjects,
+  getProjectsForMeeting,
+  getQualityAssessment,
+  getQualityAssessmentAsync,
+  getQueueItems,
+  getRecordingByFilename,
+  getRecordingById,
+  getRecordingByIdAsync,
+  getRecordings,
+  getRecordingsByIds,
+  getRecordingsByQuality,
+  getRecordingsByStorageTier,
+  getRecordingsForMeeting,
+  getSyncedFile,
+  getSyncedFilenames,
+  getTranscriptByRecordingId,
+  getTranscriptByRecordingIdAsync,
+  getTranscriptsByRecordingIds,
+  initializeDatabase,
+  insertRecording,
+  insertTranscript,
+  isFileSynced,
+  linkRecordingToMeeting,
+  markRecordingDownloaded,
+  queryAll,
+  queryOne,
+  removeSyncedFile,
+  run,
+  runInTransaction,
+  saveDatabase,
+  searchTranscripts,
+  tagMeetingToProject,
+  untagMeetingFromProject,
+  updateContact,
+  updateProject,
+  updateQueueItem,
+  updateRecordingLifecycle,
+  updateRecordingStatus,
+  updateRecordingStorageTier,
+  updateRecordingStorageTierAsync,
+  upsertMeetingsBatch,
+  upsertQualityAssessment,
+  upsertQualityAssessmentAsync
+}, Symbol.toStringTag, { value: "Module" }));
 function registerConfigHandlers() {
   electron.ipcMain.handle("config:get", async () => {
     return getConfig();
@@ -2979,9 +3051,25 @@ async function processNewRecording(filePath) {
     const filename = path.basename(filePath);
     const stats = fs.statSync(filePath);
     const recordingId = generateRecordingId(filePath);
-    const existing = getRecordingById(recordingId);
-    if (existing) {
-      console.log("Recording already in database:", filename);
+    let existing = getRecordingById(recordingId);
+    if (!existing) {
+      const { getRecordingByFilename: getRecordingByFilename2, updateRecordingLifecycle: updateRecordingLifecycle2 } = await Promise.resolve().then(() => database);
+      existing = getRecordingByFilename2(filename);
+      if (existing) {
+        console.log("Recording found by filename:", filename, "updating status");
+        if (!existing.file_path) {
+          updateRecordingLifecycle2(existing.id, {
+            file_path: filePath,
+            on_local: 1,
+            // If it was device-only, now it's both. If it was deleted/unknown, now local-only.
+            location: existing.on_device ? "both" : "local-only"
+          });
+          console.log("Updated existing recording path via watcher:", existing.id);
+        }
+        return;
+      }
+    } else {
+      console.log("Recording already in database by ID:", filename);
       return;
     }
     console.log("Processing new recording:", filename);
@@ -8024,8 +8112,10 @@ async function initializeServices() {
   registerIpcHandlers();
   console.log("IPC handlers registered");
 }
+electron.app.commandLine.appendSwitch("remote-debugging-port", "9222");
 electron.app.whenReady().then(async () => {
   utils.electronApp.setAppUserModelId("com.hidock.meeting-intelligence");
+  electron.app.commandLine.appendSwitch("remote-debugging-port", "9222");
   electron.app.on("browser-window-created", (_, window) => {
     utils.optimizer.watchWindowShortcuts(window);
   });

@@ -105,9 +105,14 @@ async function initializeServices(): Promise<void> {
   console.log('IPC handlers registered')
 }
 
+app.commandLine.appendSwitch('remote-debugging-port', '9222')
+
 app.whenReady().then(async () => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.hidock.meeting-intelligence')
+
+  // Enable remote debugging for MCP tools
+  app.commandLine.appendSwitch('remote-debugging-port', '9222')
 
   // Default open or close DevTools by F12 in development
   app.on('browser-window-created', (_, window) => {

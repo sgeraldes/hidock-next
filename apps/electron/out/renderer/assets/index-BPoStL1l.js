@@ -16250,7 +16250,7 @@ function OperationController() {
     setIsPlaying
   } = useUIStore();
   const processDownload = reactExports.useCallback(async (item) => {
-    console.log(`[OperationController] Processing download: ${item.filename}`);
+    console.log(`[QA-MONITOR][Operation] Processing download: ${item.filename}`);
     if (!deviceService.isConnected()) {
       console.error("[OperationController] Device not connected");
       await window.electronAPI.downloadService.markFailed(item.filename, "Device not connected");
@@ -16271,7 +16271,7 @@ function OperationController() {
         }
       );
       if (!success) {
-        console.error(`[OperationController] Download failed: ${item.filename}`);
+        console.error(`[QA-MONITOR][Operation] Download failed: ${item.filename}`);
         await window.electronAPI.downloadService.markFailed(item.filename, "USB transfer failed");
         removeFromDownloadQueue(item.filename);
         toast({
@@ -16294,7 +16294,7 @@ function OperationController() {
       );
       removeFromDownloadQueue(item.filename);
       if (result.success) {
-        if (DEBUG) console.log(`[OperationController] Download completed: ${item.filename}`);
+        if (DEBUG) console.log(`[QA-MONITOR][Operation] Download completed: ${item.filename}`);
         return true;
       } else {
         toast({
@@ -16306,7 +16306,7 @@ function OperationController() {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : "Unknown error";
-      console.error(`[OperationController] Error: ${item.filename}`, error);
+      console.error(`[QA-MONITOR][Operation] Error: ${item.filename}`, error);
       await window.electronAPI.downloadService.markFailed(item.filename, errorMsg);
       removeFromDownloadQueue(item.filename);
       toast({
@@ -16324,7 +16324,7 @@ function OperationController() {
     if (pendingItems.length === 0 || !deviceService.isConnected()) return;
     isProcessingDownloads.current = true;
     downloadAbortRef.current = false;
-    console.log(`[OperationController] Processing ${pendingItems.length} downloads`);
+    console.log(`[QA-MONITOR][Operation] Processing ${pendingItems.length} downloads`);
     setDeviceSyncState({
       deviceSyncing: true,
       deviceSyncProgress: { current: 0, total: pendingItems.length },
@@ -16361,7 +16361,10 @@ function OperationController() {
     isProcessingDownloads.current = false;
     clearDeviceSyncState();
     if (completed > 0) {
-      loadRecordings();
+      const store = useAppStore.getState();
+      if (store.invalidateUnifiedRecordings) {
+        store.invalidateUnifiedRecordings();
+      }
     }
     if (completed > 0 || failed > 0 || aborted) {
       toast({
@@ -16372,7 +16375,7 @@ function OperationController() {
     }
   }, [deviceService, processDownload, setDeviceSyncState, clearDeviceSyncState, loadRecordings]);
   const playAudio = reactExports.useCallback(async (recordingId, filePath) => {
-    console.log(`[OperationController] Playing: ${recordingId}`);
+    console.log(`[QA-MONITOR][Operation] Playing: ${recordingId}`);
     try {
       if (audioRef.current) {
         audioRef.current.pause();
@@ -16528,7 +16531,7 @@ function OperationController() {
               const toSync = recordings.filter((rec) => !syncedSet.has(rec.filename));
               if (toSync.length > 0) {
                 autoSyncTriggeredRef.current = true;
-                if (DEBUG) console.log(`[OperationController] Initial auto-sync: ${toSync.length} files to download`);
+                if (DEBUG) console.log(`[QA-MONITOR][Operation] Initial auto-sync: ${toSync.length} files to download`);
                 deviceService.log("info", "Auto-sync triggered", `${toSync.length} new recordings to download`);
                 const filesToQueue = toSync.map((rec) => ({
                   filename: rec.filename,
@@ -16575,7 +16578,7 @@ function OperationController() {
                 const toSync = recordings.filter((rec) => !syncedSet.has(rec.filename));
                 if (toSync.length > 0) {
                   autoSyncTriggeredRef.current = true;
-                  if (DEBUG) console.log(`[OperationController] Auto-sync: ${toSync.length} files to download`);
+                  if (DEBUG) console.log(`[QA-MONITOR][Operation] Auto-sync: ${toSync.length} files to download`);
                   deviceService.log("info", "Auto-sync triggered", `${toSync.length} new recordings to download`);
                   const filesToQueue = toSync.map((rec) => ({
                     filename: rec.filename,
@@ -16724,7 +16727,6 @@ function Layout({ children }) {
   reactExports.useEffect(() => {
     loadConfig();
     loadMeetings();
-    loadRecordings();
   }, []);
   reactExports.useEffect(() => {
     if (prevConnectedRef.current === null) {
@@ -23216,7 +23218,8 @@ function Calendar() {
     downloadQueue,
     addToDownloadQueue,
     updateDownloadProgress,
-    removeFromDownloadQueue
+    removeFromDownloadQueue,
+    setDeviceSyncState
   } = useAppStore();
   const { recordings: unifiedRecordings, loading: recordingsLoading, refresh: refreshRecordings, deviceConnected, stats } = useUnifiedRecordings();
   const [calendarView, setCalendarViewLocal] = reactExports.useState("week");
@@ -23412,11 +23415,27 @@ function Calendar() {
     }
   }, [viewDates, loadMeetings]);
   const handleNavigatePrev = reactExports.useCallback(() => {
-    calendarView === "month" ? navigateMonth("prev") : navigateWeek("prev");
-  }, [calendarView, navigateMonth, navigateWeek]);
+    if (calendarView === "day") {
+      const newDate = new Date(currentDate);
+      newDate.setDate(newDate.getDate() - 1);
+      setCurrentDate(newDate);
+    } else if (calendarView === "month") {
+      navigateMonth("prev");
+    } else {
+      navigateWeek("prev");
+    }
+  }, [calendarView, navigateMonth, navigateWeek, currentDate, setCurrentDate]);
   const handleNavigateNext = reactExports.useCallback(() => {
-    calendarView === "month" ? navigateMonth("next") : navigateWeek("next");
-  }, [calendarView, navigateMonth, navigateWeek]);
+    if (calendarView === "day") {
+      const newDate = new Date(currentDate);
+      newDate.setDate(newDate.getDate() + 1);
+      setCurrentDate(newDate);
+    } else if (calendarView === "month") {
+      navigateMonth("next");
+    } else {
+      navigateWeek("next");
+    }
+  }, [calendarView, navigateMonth, navigateWeek, currentDate, setCurrentDate]);
   const handleCalendarViewChange = reactExports.useCallback(async (view) => {
     setCalendarViewLocal(view);
     setCalendarView(view);
@@ -23580,25 +23599,44 @@ function Calendar() {
     const deviceService = getHiDockDeviceService();
     if (!deviceService.isConnected()) return;
     setBulkDownloading(true);
+    setDeviceSyncState({
+      deviceSyncing: true,
+      deviceSyncProgress: { current: 0, total: toDownload.length }
+    });
+    let completedCount = 0;
     for (const rec of toDownload) {
+      if (downloadQueue.has(rec.id)) {
+        completedCount++;
+        continue;
+      }
+      addToDownloadQueue(rec.id, rec.deviceFilename, rec.size);
       try {
         await deviceService.downloadRecordingToFile(
           rec.deviceFilename,
           rec.size,
           "",
-          void 0,
-          // No progress callback for bulk downloads
+          (received) => {
+            const percent = Math.round(received / rec.size * 100);
+            updateDownloadProgress(rec.id, percent);
+          },
           rec.dateRecorded
           // Pass the original recording date from device
         );
+        completedCount++;
+        setDeviceSyncState({
+          deviceSyncProgress: { current: completedCount, total: toDownload.length }
+        });
       } catch (e) {
         console.error("Download failed:", rec.filename, e);
+      } finally {
+        removeFromDownloadQueue(rec.id);
       }
     }
     await refreshRecordings(false);
     setBulkDownloading(false);
+    setDeviceSyncState({ deviceSyncing: false, deviceSyncProgress: null });
     clearSelection();
-  }, [filteredRecordings, selectedIds, refreshRecordings, clearSelection]);
+  }, [filteredRecordings, selectedIds, refreshRecordings, clearSelection, downloadQueue, addToDownloadQueue, updateDownloadProgress, removeFromDownloadQueue, setDeviceSyncState]);
   const handleLocationFilterChange = reactExports.useCallback((filter) => {
     setLocationFilter(filter);
   }, []);
@@ -25573,7 +25611,7 @@ function Device() {
       setSyncing(false);
     }
   };
-  const triggerAutoSync = reactExports.useCallback(async (recs, _syncedSet) => {
+  reactExports.useCallback(async (recs, _syncedSet) => {
     if (autoSyncTriggeredRef.current) {
       deviceService.log("info", "Auto-sync skipped", "Already triggered for this session");
       return;
@@ -25633,33 +25671,6 @@ function Device() {
       setSyncing(false);
     }
   }, [deviceService]);
-  reactExports.useEffect(() => {
-    if (deviceState.connected && recordings.length > 0 && !autoSyncTriggeredRef.current && !syncing && !storeSyncing) {
-      const checkAndTriggerAutoSync = async () => {
-        try {
-          const config = await window.electronAPI.config.get();
-          const shouldAutoDownload = config?.device?.autoDownload ?? true;
-          if (shouldAutoDownload) {
-            deviceService.log("info", "Auto-sync check (recordings loaded)", `${recordings.length} recordings available`);
-            const syncedFiles = await window.electronAPI.syncedFiles.getFilenames();
-            const syncedSet = new Set(syncedFiles);
-            const toSync = recordings.filter((rec) => !syncedSet.has(rec.filename));
-            if (toSync.length > 0) {
-              setSyncedFilenames(syncedSet);
-              triggerAutoSync(recordings, syncedSet);
-            } else {
-              deviceService.log("success", "All files synced", "No new recordings to download");
-              autoSyncTriggeredRef.current = true;
-            }
-          }
-        } catch (e) {
-          console.error("[Device.tsx] Auto-sync check error:", e);
-        }
-      };
-      const timer = setTimeout(checkAndTriggerAutoSync, 100);
-      return () => clearTimeout(timer);
-    }
-  }, [deviceState.connected, recordings, syncing, storeSyncing, deviceService, triggerAutoSync]);
   const handleAutoRecordToggle = async (enabled) => {
     try {
       await deviceService.setAutoRecord(enabled);
@@ -28745,6 +28756,7 @@ function HealthCheck() {
   const [cleanupResult, setCleanupResult] = reactExports.useState(null);
   const [purgeResult, setPurgeResult] = reactExports.useState(null);
   const [showDetails, setShowDetails] = reactExports.useState(false);
+  const [showAdvanced, setShowAdvanced] = reactExports.useState(false);
   const [error, setError] = reactExports.useState(null);
   const runScan = async () => {
     setScanning(true);
@@ -28955,58 +28967,96 @@ function HealthCheck() {
         ] })
       ] }),
       !report && !scanning && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-sm text-muted-foreground text-center py-4", children: "Run a health check to scan for data integrity issues" }),
-      purgeResult && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 rounded-lg text-sm", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "font-medium text-red-700 dark:text-red-400 mb-1", children: "Purge Complete" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-red-600 dark:text-red-500 space-y-1", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-            "Total records scanned: ",
-            purgeResult.totalRecords
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pt-4 border-t", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          Button,
+          {
+            variant: "ghost",
+            size: "sm",
+            onClick: () => setShowAdvanced(!showAdvanced),
+            className: "w-full flex justify-between items-center",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-medium", children: "Advanced Operations" }),
+              showAdvanced ? /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronUp, { className: "h-4 w-4" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronDown, { className: "h-4 w-4" })
+            ]
+          }
+        ),
+        showAdvanced && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mt-4 space-y-6 pl-2 border-l-2 border-muted ml-2", children: [
+          purgeResult && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 rounded-lg text-sm", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "font-medium text-red-700 dark:text-red-400 mb-1", children: "Purge Complete" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-red-600 dark:text-red-500 space-y-1", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                "Total records scanned: ",
+                purgeResult.totalRecords
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                "Deleted ",
+                purgeResult.deleted,
+                " orphaned records"
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                "Kept ",
+                purgeResult.kept,
+                " valid records"
+              ] })
+            ] })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-            "Deleted ",
-            purgeResult.deleted,
-            " orphaned records"
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-sm font-medium mb-2 text-red-600 dark:text-red-400", children: "Purge Orphaned Records" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-muted-foreground mb-3", children: "Delete ALL database records where the audio file doesn't exist on disk. Use this if Health Check finds no issues but the Library still shows deleted files." }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              Button,
+              {
+                variant: "destructive",
+                size: "sm",
+                onClick: purgeMissingFiles,
+                disabled: purging || cleaning || scanning || repairing,
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: `h-4 w-4 mr-2 ${purging ? "animate-pulse" : ""}` }),
+                  purging ? "Purging..." : "Purge Missing Files"
+                ]
+              }
+            )
+          ] }),
+          cleanupResult && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3 bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-900 rounded-lg text-sm", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "font-medium text-amber-700 dark:text-amber-400 mb-1", children: "Cleanup Complete" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-amber-600 dark:text-amber-500 space-y-1", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                "Deleted ",
+                cleanupResult.deletedFiles.length,
+                " wrongly-named files"
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                "Cleared ",
+                cleanupResult.clearedDbRecords,
+                " sync records"
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                "Kept ",
+                cleanupResult.keptFiles.length,
+                " correctly-named files"
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-xs text-amber-500 dark:text-amber-400 mt-2", children: "Reconnect your device to re-download files with correct names" })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-            "Kept ",
-            purgeResult.kept,
-            " valid records"
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-sm font-medium mb-2", children: "Reset Downloaded Recordings" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-muted-foreground mb-3", children: "If your downloaded files have wrong names (e.g., 2025-12-27_2252.wav instead of 2025Dec15-100105-Rec22.wav), use this to delete them and clear sync records. Then reconnect your device to re-download with correct names." }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              Button,
+              {
+                variant: "destructive",
+                size: "sm",
+                onClick: cleanupWronglyNamed,
+                disabled: cleaning || scanning || repairing || purging,
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: `h-4 w-4 mr-2 ${cleaning ? "animate-pulse" : ""}` }),
+                  cleaning ? "Cleaning..." : "Delete Wrongly-Named Files"
+                ]
+              }
+            )
           ] })
         ] })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pt-4 border-t", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-sm font-medium mb-2 text-red-600 dark:text-red-400", children: "Purge Orphaned Records" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-muted-foreground mb-3", children: "Delete ALL database records where the audio file doesn't exist on disk. Use this if Health Check finds no issues but the Library still shows deleted files." }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          Button,
-          {
-            variant: "destructive",
-            size: "sm",
-            onClick: purgeMissingFiles,
-            disabled: purging || cleaning || scanning || repairing,
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: `h-4 w-4 mr-2 ${purging ? "animate-pulse" : ""}` }),
-              purging ? "Purging..." : "Purge Missing Files"
-            ]
-          }
-        )
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pt-4 border-t", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-sm font-medium mb-2", children: "Reset Downloaded Recordings" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-muted-foreground mb-3", children: "If your downloaded files have wrong names (e.g., 2025-12-27_2252.wav instead of 2025Dec15-100105-Rec22.wav), use this to delete them and clear sync records. Then reconnect your device to re-download with correct names." }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          Button,
-          {
-            variant: "destructive",
-            size: "sm",
-            onClick: cleanupWronglyNamed,
-            disabled: cleaning || scanning || repairing || purging,
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: `h-4 w-4 mr-2 ${cleaning ? "animate-pulse" : ""}` }),
-              cleaning ? "Cleaning..." : "Delete Wrongly-Named Files"
-            ]
-          }
-        )
       ] })
     ] })
   ] });
@@ -29283,8 +29333,48 @@ function Settings() {
     ] }) })
   ] });
 }
+function NavigationLogger() {
+  const location = useLocation();
+  reactExports.useEffect(() => {
+    console.log(`[QA-MONITOR] Navigation: -> ${location.pathname}${location.search}`);
+    const pageName = location.pathname.replace("/", "") || "home";
+    const markName = `page-load-${pageName}`;
+    performance.mark(`${markName}-start`);
+    return () => {
+    };
+  }, [location]);
+  return null;
+}
+function initInteractionLogger() {
+  if (window.hasInitializedInteractionLogger) return;
+  window.hasInitializedInteractionLogger = true;
+  const getElementLabel = (el2) => {
+    const id2 = el2.id ? `#${el2.id}` : "";
+    el2.classList.value ? `.${el2.classList.value.split(" ").join(".")}` : "";
+    const text = el2.innerText ? ` ("${el2.innerText.slice(0, 20)}")` : "";
+    const role = el2.getAttribute("role") ? `[role="${el2.getAttribute("role")}"]` : "";
+    const ariaLabel = el2.getAttribute("aria-label") ? `[aria-label="${el2.getAttribute("aria-label")}"]` : "";
+    return `${el2.tagName.toLowerCase()}${id2}${role}${ariaLabel}${text}`;
+  };
+  window.addEventListener("click", (event) => {
+    const target = event.target;
+    const interactive = target.closest('button, a, input, select, [role="button"]') || target;
+    console.log(`[QA-MONITOR] Interaction: Clicked ${getElementLabel(interactive)}`);
+  }, true);
+  console.log("[QA-MONITOR] Interaction logger initialized");
+}
+function initErrorLogger() {
+  window.addEventListener("error", (event) => {
+    console.error(`[QA-MONITOR] Uncaught Error: ${event.message}`, event.error);
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    console.error(`[QA-MONITOR] Unhandled Promise Rejection:`, event.reason);
+  });
+}
 function App() {
   reactExports.useEffect(() => {
+    initInteractionLogger();
+    initErrorLogger();
     const deviceService = getHiDockDeviceService();
     deviceService.initAutoConnect();
     const handleBeforeUnload = () => {
@@ -29301,20 +29391,23 @@ function App() {
       }
     };
   }, []);
-  return /* @__PURE__ */ jsxRuntimeExports.jsx(ToastProvider, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Layout, { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(Routes, { children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/", element: /* @__PURE__ */ jsxRuntimeExports.jsx(Navigate, { to: "/library", replace: true }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/calendar", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Calendar, {}) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/meeting/:id", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(MeetingDetail, {}) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/assistant", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Chat, {}) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/explore", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Explore, {}) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/sync", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Device, {}) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/library", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Recordings, {}) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/people", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(People, {}) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/person/:id", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(PersonDetail, {}) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/projects", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Projects, {}) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/actionables", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Actionables, {}) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/settings", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Settings, {}) }) })
-  ] }) }) });
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(ToastProvider, { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(Layout, { children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx(NavigationLogger, {}),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(Routes, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/", element: /* @__PURE__ */ jsxRuntimeExports.jsx(Navigate, { to: "/library", replace: true }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/calendar", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Calendar, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/meeting/:id", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(MeetingDetail, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/assistant", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Chat, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/explore", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Explore, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/sync", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Device, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/library", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Recordings, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/people", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(People, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/person/:id", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(PersonDetail, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/projects", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Projects, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/actionables", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Actionables, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/settings", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Settings, {}) }) })
+    ] })
+  ] }) });
 }
 client.createRoot(document.getElementById("root")).render(
   /* @__PURE__ */ jsxRuntimeExports.jsx(React.StrictMode, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(HashRouter, { future: { v7_startTransition: true, v7_relativeSplatPath: true }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(App, {}) }) })

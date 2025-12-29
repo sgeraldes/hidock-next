@@ -58,6 +58,7 @@ export function HealthCheck() {
   const [cleanupResult, setCleanupResult] = useState<CleanupResult | null>(null)
   const [purgeResult, setPurgeResult] = useState<PurgeResult | null>(null)
   const [showDetails, setShowDetails] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const runScan = async () => {
@@ -325,54 +326,88 @@ export function HealthCheck() {
           </div>
         )}
 
-        {/* Purge Result */}
-        {purgeResult && (
-          <div className="p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 rounded-lg text-sm">
-            <div className="font-medium text-red-700 dark:text-red-400 mb-1">
-              Purge Complete
-            </div>
-            <div className="text-red-600 dark:text-red-500 space-y-1">
-              <div>Total records scanned: {purgeResult.totalRecords}</div>
-              <div>Deleted {purgeResult.deleted} orphaned records</div>
-              <div>Kept {purgeResult.kept} valid records</div>
-            </div>
-          </div>
-        )}
-
-        {/* Purge Section - Nuclear Option */}
+        {/* Advanced Operations Section */}
         <div className="pt-4 border-t">
-          <div className="text-sm font-medium mb-2 text-red-600 dark:text-red-400">Purge Orphaned Records</div>
-          <p className="text-xs text-muted-foreground mb-3">
-            Delete ALL database records where the audio file doesn't exist on disk.
-            Use this if Health Check finds no issues but the Library still shows deleted files.
-          </p>
           <Button
-            variant="destructive"
+            variant="ghost"
             size="sm"
-            onClick={purgeMissingFiles}
-            disabled={purging || cleaning || scanning || repairing}
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            className="w-full flex justify-between items-center"
           >
-            <Trash2 className={`h-4 w-4 mr-2 ${purging ? 'animate-pulse' : ''}`} />
-            {purging ? 'Purging...' : 'Purge Missing Files'}
+            <span className="font-medium">Advanced Operations</span>
+            {showAdvanced ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
           </Button>
-        </div>
 
-        {/* Cleanup Section */}
-        <div className="pt-4 border-t">
-          <div className="text-sm font-medium mb-2">Reset Downloaded Recordings</div>
-          <p className="text-xs text-muted-foreground mb-3">
-            If your downloaded files have wrong names (e.g., 2025-12-27_2252.wav instead of 2025Dec15-100105-Rec22.wav),
-            use this to delete them and clear sync records. Then reconnect your device to re-download with correct names.
-          </p>
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={cleanupWronglyNamed}
-            disabled={cleaning || scanning || repairing || purging}
-          >
-            <Trash2 className={`h-4 w-4 mr-2 ${cleaning ? 'animate-pulse' : ''}`} />
-            {cleaning ? 'Cleaning...' : 'Delete Wrongly-Named Files'}
-          </Button>
+          {showAdvanced && (
+            <div className="mt-4 space-y-6 pl-2 border-l-2 border-muted ml-2">
+              {/* Purge Result */}
+              {purgeResult && (
+                <div className="p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 rounded-lg text-sm">
+                  <div className="font-medium text-red-700 dark:text-red-400 mb-1">
+                    Purge Complete
+                  </div>
+                  <div className="text-red-600 dark:text-red-500 space-y-1">
+                    <div>Total records scanned: {purgeResult.totalRecords}</div>
+                    <div>Deleted {purgeResult.deleted} orphaned records</div>
+                    <div>Kept {purgeResult.kept} valid records</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Purge Section - Nuclear Option */}
+              <div>
+                <div className="text-sm font-medium mb-2 text-red-600 dark:text-red-400">Purge Orphaned Records</div>
+                <p className="text-xs text-muted-foreground mb-3">
+                  Delete ALL database records where the audio file doesn't exist on disk.
+                  Use this if Health Check finds no issues but the Library still shows deleted files.
+                </p>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={purgeMissingFiles}
+                  disabled={purging || cleaning || scanning || repairing}
+                >
+                  <Trash2 className={`h-4 w-4 mr-2 ${purging ? 'animate-pulse' : ''}`} />
+                  {purging ? 'Purging...' : 'Purge Missing Files'}
+                </Button>
+              </div>
+
+              {/* Cleanup Results */}
+              {cleanupResult && (
+                <div className="p-3 bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-900 rounded-lg text-sm">
+                  <div className="font-medium text-amber-700 dark:text-amber-400 mb-1">
+                    Cleanup Complete
+                  </div>
+                  <div className="text-amber-600 dark:text-amber-500 space-y-1">
+                    <div>Deleted {cleanupResult.deletedFiles.length} wrongly-named files</div>
+                    <div>Cleared {cleanupResult.clearedDbRecords} sync records</div>
+                    <div>Kept {cleanupResult.keptFiles.length} correctly-named files</div>
+                  </div>
+                  <div className="text-xs text-amber-500 dark:text-amber-400 mt-2">
+                    Reconnect your device to re-download files with correct names
+                  </div>
+                </div>
+              )}
+
+              {/* Cleanup Section */}
+              <div>
+                <div className="text-sm font-medium mb-2">Reset Downloaded Recordings</div>
+                <p className="text-xs text-muted-foreground mb-3">
+                  If your downloaded files have wrong names (e.g., 2025-12-27_2252.wav instead of 2025Dec15-100105-Rec22.wav),
+                  use this to delete them and clear sync records. Then reconnect your device to re-download with correct names.
+                </p>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={cleanupWronglyNamed}
+                  disabled={cleaning || scanning || repairing || purging}
+                >
+                  <Trash2 className={`h-4 w-4 mr-2 ${cleaning ? 'animate-pulse' : ''}`} />
+                  {cleaning ? 'Cleaning...' : 'Delete Wrongly-Named Files'}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>

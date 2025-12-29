@@ -103,10 +103,34 @@ async function processNewRecording(filePath: string): Promise<void> {
     const stats = statSync(filePath)
     const recordingId = generateRecordingId(filePath)
 
-    // Check if already processed
-    const existing = getRecordingById(recordingId)
-    if (existing) {
-      console.log('Recording already in database:', filename)
+    // Check if already in database (by ID or filename)
+    // This prevents duplicates when files are downloaded (which have UUIDs) vs external files
+    let existing = getRecordingById(recordingId)
+    
+    // If not found by generated ID, check by filename (how device files are stored)
+    if (!existing) {
+      // Import here to avoid circular dependencies if possible, or use the imported one
+      const { getRecordingByFilename, updateRecordingLifecycle } = await import('./database')
+      existing = getRecordingByFilename(filename)
+      
+      // If found by filename, it might be a device-only record becoming local
+      if (existing) {
+        console.log('Recording found by filename:', filename, 'updating status')
+        
+        // If it doesn't have a file path yet, update it
+        if (!existing.file_path) {
+          updateRecordingLifecycle(existing.id, {
+            file_path: filePath,
+            on_local: 1,
+            // If it was device-only, now it's both. If it was deleted/unknown, now local-only.
+            location: existing.on_device ? 'both' : 'local-only'
+          })
+          console.log('Updated existing recording path via watcher:', existing.id)
+        }
+        return
+      }
+    } else {
+      console.log('Recording already in database by ID:', filename)
       return
     }
 

@@ -15,10 +15,15 @@ import { Actionables } from '@/pages/Actionables'
 import { Settings } from '@/pages/Settings'
 import { ToastProvider } from '@/components/ui/toaster'
 import { getHiDockDeviceService } from '@/services/hidock-device'
+import { NavigationLogger, initInteractionLogger, initErrorLogger } from '@/services/qa-monitor'
 
 function App(): React.ReactElement {
-  // Initialize auto-connect on app startup (if enabled in config)
+  // Initialize QA monitoring and auto-connect
   useEffect(() => {
+    // Initialize QA Monitoring
+    initInteractionLogger();
+    initErrorLogger();
+
     const deviceService = getHiDockDeviceService()
     deviceService.initAutoConnect()
 
@@ -47,6 +52,7 @@ function App(): React.ReactElement {
   return (
     <ToastProvider>
       <Layout>
+        <NavigationLogger />
         <Routes>
           <Route path="/" element={<Navigate to="/library" replace />} />
           <Route path="/calendar" element={<ErrorBoundary><Calendar /></ErrorBoundary>} />

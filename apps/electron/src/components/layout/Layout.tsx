@@ -121,7 +121,7 @@ export function Layout({ children }: LayoutProps) {
   useEffect(() => {
     loadConfig()
     loadMeetings()
-    loadRecordings()
+    // loadRecordings() // Redundant: Pages load their own data via useUnifiedRecordings
   }, [])
 
   // Toast notifications for device state changes (read from store)

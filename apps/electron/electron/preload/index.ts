@@ -1,5 +1,26 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+// --- IPC Logging Wrapper ---
+const callIPC = async (channel: string, ...args: any[]) => {
+  const isPolling = ['recordings:getTranscriptionStatus', 'db:get-recordings', 'knowledge:getAll'].includes(channel);
+  
+  try {
+    const start = performance.now();
+    const result = await ipcRenderer.invoke(channel, ...args);
+    const duration = (performance.now() - start).toFixed(1);
+    
+    if (!isPolling) {
+        console.log(`[QA-MONITOR][IPC] ${channel} (${duration}ms)`);
+    }
+    return result;
+  } catch (error) {
+    if (!isPolling) {
+        console.error(`[QA-MONITOR][IPC-ERR] ${channel}:`, error);
+    }
+    throw error;
+  }
+}
+
 // Import types from api.ts for proper typing
 import type {
   Result,
@@ -369,141 +390,141 @@ export interface ElectronAPI {
 // Expose the API to the renderer process
 const electronAPI: ElectronAPI = {
   app: {
-    restart: () => ipcRenderer.invoke('app:restart'),
-    info: () => ipcRenderer.invoke('app:info')
+    restart: () => callIPC('app:restart'),
+    info: () => callIPC('app:info')
   },
 
   config: {
-    get: () => ipcRenderer.invoke('config:get'),
-    set: (config) => ipcRenderer.invoke('config:set', config),
-    updateSection: (section, values) => ipcRenderer.invoke('config:update-section', section, values),
-    getValue: (key) => ipcRenderer.invoke('config:get-value', key)
+    get: () => callIPC('config:get'),
+    set: (config) => callIPC('config:set', config),
+    updateSection: (section, values) => callIPC('config:update-section', section, values),
+    getValue: (key) => callIPC('config:get-value', key)
   },
 
   meetings: {
-    getAll: (startDate, endDate) => ipcRenderer.invoke('db:get-meetings', startDate, endDate),
-    getById: (id) => ipcRenderer.invoke('db:get-meeting', id),
-    getByIds: (ids) => ipcRenderer.invoke('db:get-meetings-by-ids', ids),
-    getDetails: (id) => ipcRenderer.invoke('db:get-meeting-details', id)
+    getAll: (startDate, endDate) => callIPC('db:get-meetings', startDate, endDate),
+    getById: (id) => callIPC('db:get-meeting', id),
+    getByIds: (ids) => callIPC('db:get-meetings-by-ids', ids),
+    getDetails: (id) => callIPC('db:get-meeting-details', id)
   },
 
   contacts: {
-    getAll: (request) => ipcRenderer.invoke('contacts:getAll', request),
-    getById: (id) => ipcRenderer.invoke('contacts:getById', id),
-    update: (request) => ipcRenderer.invoke('contacts:update', request),
-    getForMeeting: (meetingId) => ipcRenderer.invoke('contacts:getForMeeting', meetingId)
+    getAll: (request) => callIPC('contacts:getAll', request),
+    getById: (id) => callIPC('contacts:getById', id),
+    update: (request) => callIPC('contacts:update', request),
+    getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
   },
 
   projects: {
-    getAll: (request) => ipcRenderer.invoke('projects:getAll', request),
-    getById: (id) => ipcRenderer.invoke('projects:getById', id),
-    create: (request) => ipcRenderer.invoke('projects:create', request),
-    update: (request) => ipcRenderer.invoke('projects:update', request),
-    delete: (id) => ipcRenderer.invoke('projects:delete', { id }),
-    tagMeeting: (request) => ipcRenderer.invoke('projects:tagMeeting', request),
-    untagMeeting: (request) => ipcRenderer.invoke('projects:untagMeeting', request),
-    getForMeeting: (meetingId) => ipcRenderer.invoke('projects:getForMeeting', meetingId)
+    getAll: (request) => callIPC('projects:getAll', request),
+    getById: (id) => callIPC('projects:getById', id),
+    create: (request) => callIPC('projects:create', request),
+    update: (request) => callIPC('projects:update', request),
+    delete: (id) => callIPC('projects:delete', { id }),
+    tagMeeting: (request) => callIPC('projects:tagMeeting', request),
+    untagMeeting: (request) => callIPC('projects:untagMeeting', request),
+    getForMeeting: (meetingId) => callIPC('projects:getForMeeting', meetingId)
   },
 
   recordings: {
-    getAll: () => ipcRenderer.invoke('db:get-recordings'),
-    getById: (id) => ipcRenderer.invoke('db:get-recording', id),
-    getForMeeting: (meetingId) => ipcRenderer.invoke('db:get-recordings-for-meeting', meetingId),
-    updateStatus: (id, status) => ipcRenderer.invoke('db:update-recording-status', id, status),
+    getAll: () => callIPC('db:get-recordings'),
+    getById: (id) => callIPC('db:get-recording', id),
+    getForMeeting: (meetingId) => callIPC('db:get-recordings-for-meeting', meetingId),
+    updateStatus: (id, status) => callIPC('db:update-recording-status', id, status),
     linkToMeeting: (recordingId, meetingId, confidence, method) =>
-      ipcRenderer.invoke('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
-    delete: (id) => ipcRenderer.invoke('recordings:delete', id),
+      callIPC('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
+    delete: (id) => callIPC('recordings:delete', id),
     // Recording-Meeting linking dialog methods
-    getCandidates: (recordingId) => ipcRenderer.invoke('recordings:getCandidates', recordingId),
-    getMeetingsNearDate: (date) => ipcRenderer.invoke('recordings:getMeetingsNearDate', date),
-    selectMeeting: (recordingId, meetingId) => ipcRenderer.invoke('recordings:selectMeeting', recordingId, meetingId),
+    getCandidates: (recordingId) => callIPC('recordings:getCandidates', recordingId),
+    getMeetingsNearDate: (date) => callIPC('recordings:getMeetingsNearDate', date),
+    selectMeeting: (recordingId, meetingId) => callIPC('recordings:selectMeeting', recordingId, meetingId),
     // External file import
-    addExternal: () => ipcRenderer.invoke('recordings:addExternal'),
+    addExternal: () => callIPC('recordings:addExternal'),
     // Transcription
-    transcribe: (recordingId) => ipcRenderer.invoke('recordings:transcribe', recordingId),
-    addToQueue: (recordingId) => ipcRenderer.invoke('recordings:addToQueue', recordingId),
-    processQueue: () => ipcRenderer.invoke('recordings:processQueue'),
-    getTranscriptionStatus: () => ipcRenderer.invoke('recordings:getTranscriptionStatus')
+    transcribe: (recordingId) => callIPC('recordings:transcribe', recordingId),
+    addToQueue: (recordingId) => callIPC('recordings:addToQueue', recordingId),
+    processQueue: () => callIPC('recordings:processQueue'),
+    getTranscriptionStatus: () => callIPC('recordings:getTranscriptionStatus')
   },
 
   transcripts: {
-    getByRecordingId: (recordingId) => ipcRenderer.invoke('db:get-transcript', recordingId),
-    getByRecordingIds: (recordingIds) => ipcRenderer.invoke('db:get-transcripts-by-recording-ids', recordingIds),
-    search: (query) => ipcRenderer.invoke('db:search-transcripts', query)
+    getByRecordingId: (recordingId) => callIPC('db:get-transcript', recordingId),
+    getByRecordingIds: (recordingIds) => callIPC('db:get-transcripts-by-recording-ids', recordingIds),
+    search: (query) => callIPC('db:search-transcripts', query)
   },
 
   queue: {
-    getItems: (status) => ipcRenderer.invoke('db:get-queue', status)
+    getItems: (status) => callIPC('db:get-queue', status)
   },
 
   knowledge: {
-    getAll: (options) => ipcRenderer.invoke('knowledge:getAll', options),
-    getById: (id) => ipcRenderer.invoke('knowledge:getById', id),
-    update: (id, updates) => ipcRenderer.invoke('knowledge:update', id, updates)
+    getAll: (options) => callIPC('knowledge:getAll', options),
+    getById: (id) => callIPC('knowledge:getById', id),
+    update: (id, updates) => callIPC('knowledge:update', id, updates)
   },
 
   actionables: {
-    getAll: (options) => ipcRenderer.invoke('actionables:getAll', options),
-    updateStatus: (id, status) => ipcRenderer.invoke('actionables:updateStatus', id, status)
+    getAll: (options) => callIPC('actionables:getAll', options),
+    updateStatus: (id, status) => callIPC('actionables:updateStatus', id, status)
   },
 
   assistant: {
-    getConversations: () => ipcRenderer.invoke('assistant:getConversations'),
-    createConversation: (title) => ipcRenderer.invoke('assistant:createConversation', title),
-    deleteConversation: (id) => ipcRenderer.invoke('assistant:deleteConversation', id),
-    getMessages: (conversationId) => ipcRenderer.invoke('assistant:getMessages', conversationId),
-    addMessage: (conversationId, role, content, sources) => ipcRenderer.invoke('assistant:addMessage', conversationId, role, content, sources),
-    addContext: (conversationId, knowledgeCaptureId) => ipcRenderer.invoke('assistant:addContext', conversationId, knowledgeCaptureId),
-    removeContext: (conversationId, knowledgeCaptureId) => ipcRenderer.invoke('assistant:removeContext', conversationId, knowledgeCaptureId),
-    getContext: (conversationId) => ipcRenderer.invoke('assistant:getContext', conversationId)
+    getConversations: () => callIPC('assistant:getConversations'),
+    createConversation: (title) => callIPC('assistant:createConversation', title),
+    deleteConversation: (id) => callIPC('assistant:deleteConversation', id),
+    getMessages: (conversationId) => callIPC('assistant:getMessages', conversationId),
+    addMessage: (conversationId, role, content, sources) => callIPC('assistant:addMessage', conversationId, role, content, sources),
+    addContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:addContext', conversationId, knowledgeCaptureId),
+    removeContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:removeContext', conversationId, knowledgeCaptureId),
+    getContext: (conversationId) => callIPC('assistant:getContext', conversationId)
   },
 
   chat: {
-    getHistory: (limit) => ipcRenderer.invoke('db:get-chat-history', limit),
-    addMessage: (role, content, sources) => ipcRenderer.invoke('db:add-chat-message', role, content, sources),
-    clearHistory: () => ipcRenderer.invoke('db:clear-chat-history')
+    getHistory: (limit) => callIPC('db:get-chat-history', limit),
+    addMessage: (role, content, sources) => callIPC('db:add-chat-message', role, content, sources),
+    clearHistory: () => callIPC('db:clear-chat-history')
   },
 
   calendar: {
-    sync: () => ipcRenderer.invoke('calendar:sync'),
-    clearAndSync: () => ipcRenderer.invoke('calendar:clear-and-sync'),
-    getLastSync: () => ipcRenderer.invoke('calendar:get-last-sync'),
-    setUrl: (url) => ipcRenderer.invoke('calendar:set-url', url),
-    toggleAutoSync: (enabled) => ipcRenderer.invoke('calendar:toggle-auto-sync', enabled),
-    setInterval: (minutes) => ipcRenderer.invoke('calendar:set-interval', minutes),
-    getSettings: () => ipcRenderer.invoke('calendar:get-settings')
+    sync: () => callIPC('calendar:sync'),
+    clearAndSync: () => callIPC('calendar:clear-and-sync'),
+    getLastSync: () => callIPC('calendar:get-last-sync'),
+    setUrl: (url) => callIPC('calendar:set-url', url),
+    toggleAutoSync: (enabled) => callIPC('calendar:toggle-auto-sync', enabled),
+    setInterval: (minutes) => callIPC('calendar:set-interval', minutes),
+    getSettings: () => callIPC('calendar:get-settings')
   },
 
   storage: {
-    getInfo: () => ipcRenderer.invoke('storage:get-info'),
-    openFolder: (folder) => ipcRenderer.invoke('storage:open-folder', folder),
-    readRecording: (filePath) => ipcRenderer.invoke('storage:read-recording', filePath),
-    deleteRecording: (filePath) => ipcRenderer.invoke('storage:delete-recording', filePath),
-    saveRecording: (filename, data, recordingDateIso) => ipcRenderer.invoke('storage:save-recording', filename, data, recordingDateIso)
+    getInfo: () => callIPC('storage:get-info'),
+    openFolder: (folder) => callIPC('storage:open-folder', folder),
+    readRecording: (filePath) => callIPC('storage:read-recording', filePath),
+    deleteRecording: (filePath) => callIPC('storage:delete-recording', filePath),
+    saveRecording: (filename, data, recordingDateIso) => callIPC('storage:save-recording', filename, data, recordingDateIso)
   },
 
   syncedFiles: {
-    isFileSynced: (originalFilename) => ipcRenderer.invoke('db:is-file-synced', originalFilename),
-    getSyncedFile: (originalFilename) => ipcRenderer.invoke('db:get-synced-file', originalFilename),
-    getAll: () => ipcRenderer.invoke('db:get-all-synced-files'),
+    isFileSynced: (originalFilename) => callIPC('db:is-file-synced', originalFilename),
+    getSyncedFile: (originalFilename) => callIPC('db:get-synced-file', originalFilename),
+    getAll: () => callIPC('db:get-all-synced-files'),
     add: (originalFilename, localFilename, filePath, fileSize) =>
-      ipcRenderer.invoke('db:add-synced-file', originalFilename, localFilename, filePath, fileSize),
-    remove: (originalFilename) => ipcRenderer.invoke('db:remove-synced-file', originalFilename),
-    getFilenames: () => ipcRenderer.invoke('db:get-synced-filenames')
+      callIPC('db:add-synced-file', originalFilename, localFilename, filePath, fileSize),
+    remove: (originalFilename) => callIPC('db:remove-synced-file', originalFilename),
+    getFilenames: () => callIPC('db:get-synced-filenames')
   },
 
   deviceCache: {
-    getAll: () => ipcRenderer.invoke('deviceCache:getAll'),
-    saveAll: (files) => ipcRenderer.invoke('deviceCache:saveAll', files),
-    clear: () => ipcRenderer.invoke('deviceCache:clear')
+    getAll: () => callIPC('deviceCache:getAll'),
+    saveAll: (files) => callIPC('deviceCache:saveAll', files),
+    clear: () => callIPC('deviceCache:clear')
   },
 
   migration: {
-    previewCleanup: () => ipcRenderer.invoke('migration:previewCleanup'),
-    runCleanup: () => ipcRenderer.invoke('migration:runCleanup'),
-    runV11: () => ipcRenderer.invoke('migration:runV11'),
-    rollbackV11: () => ipcRenderer.invoke('migration:rollbackV11'),
-    getStatus: () => ipcRenderer.invoke('migration:getStatus'),
+    previewCleanup: () => callIPC('migration:previewCleanup'),
+    runCleanup: () => callIPC('migration:runCleanup'),
+    runV11: () => callIPC('migration:runV11'),
+    rollbackV11: () => callIPC('migration:rollbackV11'),
+    getStatus: () => callIPC('migration:getStatus'),
     onProgress: (callback) => {
       const handler = (_event: any, progress: any) => callback(progress)
       ipcRenderer.on('migration:progress', handler)
@@ -514,39 +535,39 @@ const electronAPI: ElectronAPI = {
   },
 
   outputs: {
-    getTemplates: () => ipcRenderer.invoke('outputs:getTemplates'),
-    generate: (request) => ipcRenderer.invoke('outputs:generate', request),
-    copyToClipboard: (content) => ipcRenderer.invoke('outputs:copyToClipboard', content),
-    saveToFile: (content, suggestedName) => ipcRenderer.invoke('outputs:saveToFile', content, suggestedName)
+    getTemplates: () => callIPC('outputs:getTemplates'),
+    generate: (request) => callIPC('outputs:generate', request),
+    copyToClipboard: (content) => callIPC('outputs:copyToClipboard', content),
+    saveToFile: (content, suggestedName) => callIPC('outputs:saveToFile', content, suggestedName)
   },
 
   rag: {
-    status: () => ipcRenderer.invoke('rag:status'),
-    chat: (request) => ipcRenderer.invoke('rag:chat', request),
+    status: () => callIPC('rag:status'),
+    chat: (request) => callIPC('rag:chat', request),
     chatLegacy: (sessionId, message, meetingFilter) =>
-      ipcRenderer.invoke('rag:chat-legacy', { sessionId, message, meetingFilter }),
-    summarizeMeeting: (meetingId) => ipcRenderer.invoke('rag:summarize-meeting', meetingId),
-    findActionItems: (meetingId) => ipcRenderer.invoke('rag:find-action-items', meetingId),
-    clearSession: (sessionId) => ipcRenderer.invoke('rag:clear-session', sessionId),
-    stats: () => ipcRenderer.invoke('rag:stats'),
+      callIPC('rag:chat-legacy', { sessionId, message, meetingFilter }),
+    summarizeMeeting: (meetingId) => callIPC('rag:summarize-meeting', meetingId),
+    findActionItems: (meetingId) => callIPC('rag:find-action-items', meetingId),
+    clearSession: (sessionId) => callIPC('rag:clear-session', sessionId),
+    stats: () => callIPC('rag:stats'),
     indexTranscript: (transcript, metadata) =>
-      ipcRenderer.invoke('rag:index-transcript', { transcript, metadata }),
-    search: (query, limit) => ipcRenderer.invoke('rag:search', { query, limit }),
-    getChunks: () => ipcRenderer.invoke('rag:get-chunks')
+      callIPC('rag:index-transcript', { transcript, metadata }),
+    search: (query, limit) => callIPC('rag:search', { query, limit }),
+    getChunks: () => callIPC('rag:get-chunks')
   },
 
   downloadService: {
-    getState: () => ipcRenderer.invoke('download-service:get-state'),
-    isFileSynced: (filename) => ipcRenderer.invoke('download-service:is-file-synced', filename),
-    getFilesToSync: (files) => ipcRenderer.invoke('download-service:get-files-to-sync', files),
-    queueDownloads: (files) => ipcRenderer.invoke('download-service:queue-downloads', files),
-    startSession: (files) => ipcRenderer.invoke('download-service:start-session', files),
-    processDownload: (filename, data) => ipcRenderer.invoke('download-service:process-download', filename, data),
-    updateProgress: (filename, bytesReceived) => ipcRenderer.invoke('download-service:update-progress', filename, bytesReceived),
-    markFailed: (filename, error) => ipcRenderer.invoke('download-service:mark-failed', filename, error),
-    clearCompleted: () => ipcRenderer.invoke('download-service:clear-completed'),
-    cancelAll: () => ipcRenderer.invoke('download-service:cancel-all'),
-    getStats: () => ipcRenderer.invoke('download-service:get-stats'),
+    getState: () => callIPC('download-service:get-state'),
+    isFileSynced: (filename) => callIPC('download-service:is-file-synced', filename),
+    getFilesToSync: (files) => callIPC('download-service:get-files-to-sync', files),
+    queueDownloads: (files) => callIPC('download-service:queue-downloads', files),
+    startSession: (files) => callIPC('download-service:start-session', files),
+    processDownload: (filename, data) => callIPC('download-service:process-download', filename, data),
+    updateProgress: (filename, bytesReceived) => callIPC('download-service:update-progress', filename, bytesReceived),
+    markFailed: (filename, error) => callIPC('download-service:mark-failed', filename, error),
+    clearCompleted: () => callIPC('download-service:clear-completed'),
+    cancelAll: () => callIPC('download-service:cancel-all'),
+    getStats: () => callIPC('download-service:get-stats'),
     onStateUpdate: (callback) => {
       const handler = (_event: any, state: any) => callback(state)
       ipcRenderer.on('download-service:state-update', handler)
@@ -559,39 +580,39 @@ const electronAPI: ElectronAPI = {
 
   // Quality Assessment API
   quality: {
-    get: (recordingId: string) => ipcRenderer.invoke('quality:get', recordingId),
+    get: (recordingId: string) => callIPC('quality:get', recordingId),
     set: (recordingId: string, quality: 'high' | 'medium' | 'low', reason?: string, assessedBy?: string) =>
-      ipcRenderer.invoke('quality:set', recordingId, quality, reason, assessedBy),
-    autoAssess: (recordingId: string) => ipcRenderer.invoke('quality:auto-assess', recordingId),
-    getByQuality: (quality: 'high' | 'medium' | 'low') => ipcRenderer.invoke('quality:get-by-quality', quality),
-    batchAutoAssess: (recordingIds: string[]) => ipcRenderer.invoke('quality:batch-auto-assess', recordingIds),
-    assessUnassessed: () => ipcRenderer.invoke('quality:assess-unassessed')
+      callIPC('quality:set', recordingId, quality, reason, assessedBy),
+    autoAssess: (recordingId: string) => callIPC('quality:auto-assess', recordingId),
+    getByQuality: (quality: 'high' | 'medium' | 'low') => callIPC('quality:get-by-quality', quality),
+    batchAutoAssess: (recordingIds: string[]) => callIPC('quality:batch-auto-assess', recordingIds),
+    assessUnassessed: () => callIPC('quality:assess-unassessed')
   },
 
   // Storage Policy API
   storagePolicy: {
-    getByTier: (tier: 'hot' | 'warm' | 'cold' | 'archive') => ipcRenderer.invoke('storage:get-by-tier', tier),
+    getByTier: (tier: 'hot' | 'warm' | 'cold' | 'archive') => callIPC('storage:get-by-tier', tier),
     getCleanupSuggestions: (minAgeOverride?: Partial<Record<'hot' | 'warm' | 'cold' | 'archive', number>>) =>
-      ipcRenderer.invoke('storage:get-cleanup-suggestions', minAgeOverride),
+      callIPC('storage:get-cleanup-suggestions', minAgeOverride),
     getCleanupSuggestionsForTier: (tier: 'hot' | 'warm' | 'cold' | 'archive', minAgeDays?: number) =>
-      ipcRenderer.invoke('storage:get-cleanup-suggestions-for-tier', tier, minAgeDays),
+      callIPC('storage:get-cleanup-suggestions-for-tier', tier, minAgeDays),
     executeCleanup: (recordingIds: string[], archive?: boolean) =>
-      ipcRenderer.invoke('storage:execute-cleanup', recordingIds, archive),
-    getStats: () => ipcRenderer.invoke('storage:get-stats'),
-    initializeUntiered: () => ipcRenderer.invoke('storage:initialize-untiered'),
+      callIPC('storage:execute-cleanup', recordingIds, archive),
+    getStats: () => callIPC('storage:get-stats'),
+    initializeUntiered: () => callIPC('storage:initialize-untiered'),
     assignTier: (recordingId: string, quality: 'high' | 'medium' | 'low') =>
-      ipcRenderer.invoke('storage:assign-tier', recordingId, quality)
+      callIPC('storage:assign-tier', recordingId, quality)
   },
 
   // Data Integrity Service API
   integrity: {
-    runScan: () => ipcRenderer.invoke('integrity:run-scan'),
-    getReport: () => ipcRenderer.invoke('integrity:get-report'),
-    repairIssue: (issueId: string) => ipcRenderer.invoke('integrity:repair-issue', issueId),
-    repairAll: () => ipcRenderer.invoke('integrity:repair-all'),
-    runStartupChecks: () => ipcRenderer.invoke('integrity:run-startup-checks'),
-    cleanupWronglyNamed: () => ipcRenderer.invoke('integrity:cleanup-wrongly-named'),
-    purgeMissingFiles: () => ipcRenderer.invoke('integrity:purge-missing-files'),
+    runScan: () => callIPC('integrity:run-scan'),
+    getReport: () => callIPC('integrity:get-report'),
+    repairIssue: (issueId: string) => callIPC('integrity:repair-issue', issueId),
+    repairAll: () => callIPC('integrity:repair-all'),
+    runStartupChecks: () => callIPC('integrity:run-startup-checks'),
+    cleanupWronglyNamed: () => callIPC('integrity:cleanup-wrongly-named'),
+    purgeMissingFiles: () => callIPC('integrity:purge-missing-files'),
     onProgress: (callback: (progress: { message: string; progress: number }) => void) => {
       const handler = (_event: any, progress: { message: string; progress: number }) => callback(progress)
       ipcRenderer.on('integrity:progress', handler)

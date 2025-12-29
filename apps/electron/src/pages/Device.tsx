@@ -555,6 +555,8 @@ export function Device() {
   }, [deviceService])
 
   // Effect to trigger auto-sync when recordings are actually loaded (handles race condition)
+  /* 
+  // DISABLED: Auto-sync logic moved to background service (or disabled per user request to stop page-load triggers)
   useEffect(() => {
     // Only trigger if:
     // 1. Device is connected
@@ -588,6 +590,7 @@ export function Device() {
       return () => clearTimeout(timer)
     }
   }, [deviceState.connected, recordings, syncing, (storeSyncing as any), deviceService, triggerAutoSync])
+  */
 
   const handleAutoRecordToggle = async (enabled: boolean) => {
     try {

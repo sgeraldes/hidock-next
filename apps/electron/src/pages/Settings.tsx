@@ -303,7 +303,7 @@ export function Settings() {
             </CardContent>
           </Card>
 
-          {/* Health Check */}
+          {/* Health Check & Advanced Operations */}
           <HealthCheck />
         </div>
       </div>

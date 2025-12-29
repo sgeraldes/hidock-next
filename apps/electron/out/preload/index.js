@@ -1,124 +1,141 @@
 "use strict";
 const electron = require("electron");
+const callIPC = async (channel, ...args) => {
+  const isPolling = ["recordings:getTranscriptionStatus", "db:get-recordings", "knowledge:getAll"].includes(channel);
+  try {
+    const start = performance.now();
+    const result = await electron.ipcRenderer.invoke(channel, ...args);
+    const duration = (performance.now() - start).toFixed(1);
+    if (!isPolling) {
+      console.log(`[QA-MONITOR][IPC] ${channel} (${duration}ms)`);
+    }
+    return result;
+  } catch (error) {
+    if (!isPolling) {
+      console.error(`[QA-MONITOR][IPC-ERR] ${channel}:`, error);
+    }
+    throw error;
+  }
+};
 const electronAPI = {
   app: {
-    restart: () => electron.ipcRenderer.invoke("app:restart"),
-    info: () => electron.ipcRenderer.invoke("app:info")
+    restart: () => callIPC("app:restart"),
+    info: () => callIPC("app:info")
   },
   config: {
-    get: () => electron.ipcRenderer.invoke("config:get"),
-    set: (config) => electron.ipcRenderer.invoke("config:set", config),
-    updateSection: (section, values) => electron.ipcRenderer.invoke("config:update-section", section, values),
-    getValue: (key) => electron.ipcRenderer.invoke("config:get-value", key)
+    get: () => callIPC("config:get"),
+    set: (config) => callIPC("config:set", config),
+    updateSection: (section, values) => callIPC("config:update-section", section, values),
+    getValue: (key) => callIPC("config:get-value", key)
   },
   meetings: {
-    getAll: (startDate, endDate) => electron.ipcRenderer.invoke("db:get-meetings", startDate, endDate),
-    getById: (id) => electron.ipcRenderer.invoke("db:get-meeting", id),
-    getByIds: (ids) => electron.ipcRenderer.invoke("db:get-meetings-by-ids", ids),
-    getDetails: (id) => electron.ipcRenderer.invoke("db:get-meeting-details", id)
+    getAll: (startDate, endDate) => callIPC("db:get-meetings", startDate, endDate),
+    getById: (id) => callIPC("db:get-meeting", id),
+    getByIds: (ids) => callIPC("db:get-meetings-by-ids", ids),
+    getDetails: (id) => callIPC("db:get-meeting-details", id)
   },
   contacts: {
-    getAll: (request) => electron.ipcRenderer.invoke("contacts:getAll", request),
-    getById: (id) => electron.ipcRenderer.invoke("contacts:getById", id),
-    update: (request) => electron.ipcRenderer.invoke("contacts:update", request),
-    getForMeeting: (meetingId) => electron.ipcRenderer.invoke("contacts:getForMeeting", meetingId)
+    getAll: (request) => callIPC("contacts:getAll", request),
+    getById: (id) => callIPC("contacts:getById", id),
+    update: (request) => callIPC("contacts:update", request),
+    getForMeeting: (meetingId) => callIPC("contacts:getForMeeting", meetingId)
   },
   projects: {
-    getAll: (request) => electron.ipcRenderer.invoke("projects:getAll", request),
-    getById: (id) => electron.ipcRenderer.invoke("projects:getById", id),
-    create: (request) => electron.ipcRenderer.invoke("projects:create", request),
-    update: (request) => electron.ipcRenderer.invoke("projects:update", request),
-    delete: (id) => electron.ipcRenderer.invoke("projects:delete", { id }),
-    tagMeeting: (request) => electron.ipcRenderer.invoke("projects:tagMeeting", request),
-    untagMeeting: (request) => electron.ipcRenderer.invoke("projects:untagMeeting", request),
-    getForMeeting: (meetingId) => electron.ipcRenderer.invoke("projects:getForMeeting", meetingId)
+    getAll: (request) => callIPC("projects:getAll", request),
+    getById: (id) => callIPC("projects:getById", id),
+    create: (request) => callIPC("projects:create", request),
+    update: (request) => callIPC("projects:update", request),
+    delete: (id) => callIPC("projects:delete", { id }),
+    tagMeeting: (request) => callIPC("projects:tagMeeting", request),
+    untagMeeting: (request) => callIPC("projects:untagMeeting", request),
+    getForMeeting: (meetingId) => callIPC("projects:getForMeeting", meetingId)
   },
   recordings: {
-    getAll: () => electron.ipcRenderer.invoke("db:get-recordings"),
-    getById: (id) => electron.ipcRenderer.invoke("db:get-recording", id),
-    getForMeeting: (meetingId) => electron.ipcRenderer.invoke("db:get-recordings-for-meeting", meetingId),
-    updateStatus: (id, status) => electron.ipcRenderer.invoke("db:update-recording-status", id, status),
-    linkToMeeting: (recordingId, meetingId, confidence, method) => electron.ipcRenderer.invoke("db:link-recording-to-meeting", recordingId, meetingId, confidence, method),
-    delete: (id) => electron.ipcRenderer.invoke("recordings:delete", id),
+    getAll: () => callIPC("db:get-recordings"),
+    getById: (id) => callIPC("db:get-recording", id),
+    getForMeeting: (meetingId) => callIPC("db:get-recordings-for-meeting", meetingId),
+    updateStatus: (id, status) => callIPC("db:update-recording-status", id, status),
+    linkToMeeting: (recordingId, meetingId, confidence, method) => callIPC("db:link-recording-to-meeting", recordingId, meetingId, confidence, method),
+    delete: (id) => callIPC("recordings:delete", id),
     // Recording-Meeting linking dialog methods
-    getCandidates: (recordingId) => electron.ipcRenderer.invoke("recordings:getCandidates", recordingId),
-    getMeetingsNearDate: (date) => electron.ipcRenderer.invoke("recordings:getMeetingsNearDate", date),
-    selectMeeting: (recordingId, meetingId) => electron.ipcRenderer.invoke("recordings:selectMeeting", recordingId, meetingId),
+    getCandidates: (recordingId) => callIPC("recordings:getCandidates", recordingId),
+    getMeetingsNearDate: (date) => callIPC("recordings:getMeetingsNearDate", date),
+    selectMeeting: (recordingId, meetingId) => callIPC("recordings:selectMeeting", recordingId, meetingId),
     // External file import
-    addExternal: () => electron.ipcRenderer.invoke("recordings:addExternal"),
+    addExternal: () => callIPC("recordings:addExternal"),
     // Transcription
-    transcribe: (recordingId) => electron.ipcRenderer.invoke("recordings:transcribe", recordingId),
-    addToQueue: (recordingId) => electron.ipcRenderer.invoke("recordings:addToQueue", recordingId),
-    processQueue: () => electron.ipcRenderer.invoke("recordings:processQueue"),
-    getTranscriptionStatus: () => electron.ipcRenderer.invoke("recordings:getTranscriptionStatus")
+    transcribe: (recordingId) => callIPC("recordings:transcribe", recordingId),
+    addToQueue: (recordingId) => callIPC("recordings:addToQueue", recordingId),
+    processQueue: () => callIPC("recordings:processQueue"),
+    getTranscriptionStatus: () => callIPC("recordings:getTranscriptionStatus")
   },
   transcripts: {
-    getByRecordingId: (recordingId) => electron.ipcRenderer.invoke("db:get-transcript", recordingId),
-    getByRecordingIds: (recordingIds) => electron.ipcRenderer.invoke("db:get-transcripts-by-recording-ids", recordingIds),
-    search: (query) => electron.ipcRenderer.invoke("db:search-transcripts", query)
+    getByRecordingId: (recordingId) => callIPC("db:get-transcript", recordingId),
+    getByRecordingIds: (recordingIds) => callIPC("db:get-transcripts-by-recording-ids", recordingIds),
+    search: (query) => callIPC("db:search-transcripts", query)
   },
   queue: {
-    getItems: (status) => electron.ipcRenderer.invoke("db:get-queue", status)
+    getItems: (status) => callIPC("db:get-queue", status)
   },
   knowledge: {
-    getAll: (options) => electron.ipcRenderer.invoke("knowledge:getAll", options),
-    getById: (id) => electron.ipcRenderer.invoke("knowledge:getById", id),
-    update: (id, updates) => electron.ipcRenderer.invoke("knowledge:update", id, updates)
+    getAll: (options) => callIPC("knowledge:getAll", options),
+    getById: (id) => callIPC("knowledge:getById", id),
+    update: (id, updates) => callIPC("knowledge:update", id, updates)
   },
   actionables: {
-    getAll: (options) => electron.ipcRenderer.invoke("actionables:getAll", options),
-    updateStatus: (id, status) => electron.ipcRenderer.invoke("actionables:updateStatus", id, status)
+    getAll: (options) => callIPC("actionables:getAll", options),
+    updateStatus: (id, status) => callIPC("actionables:updateStatus", id, status)
   },
   assistant: {
-    getConversations: () => electron.ipcRenderer.invoke("assistant:getConversations"),
-    createConversation: (title) => electron.ipcRenderer.invoke("assistant:createConversation", title),
-    deleteConversation: (id) => electron.ipcRenderer.invoke("assistant:deleteConversation", id),
-    getMessages: (conversationId) => electron.ipcRenderer.invoke("assistant:getMessages", conversationId),
-    addMessage: (conversationId, role, content, sources) => electron.ipcRenderer.invoke("assistant:addMessage", conversationId, role, content, sources),
-    addContext: (conversationId, knowledgeCaptureId) => electron.ipcRenderer.invoke("assistant:addContext", conversationId, knowledgeCaptureId),
-    removeContext: (conversationId, knowledgeCaptureId) => electron.ipcRenderer.invoke("assistant:removeContext", conversationId, knowledgeCaptureId),
-    getContext: (conversationId) => electron.ipcRenderer.invoke("assistant:getContext", conversationId)
+    getConversations: () => callIPC("assistant:getConversations"),
+    createConversation: (title) => callIPC("assistant:createConversation", title),
+    deleteConversation: (id) => callIPC("assistant:deleteConversation", id),
+    getMessages: (conversationId) => callIPC("assistant:getMessages", conversationId),
+    addMessage: (conversationId, role, content, sources) => callIPC("assistant:addMessage", conversationId, role, content, sources),
+    addContext: (conversationId, knowledgeCaptureId) => callIPC("assistant:addContext", conversationId, knowledgeCaptureId),
+    removeContext: (conversationId, knowledgeCaptureId) => callIPC("assistant:removeContext", conversationId, knowledgeCaptureId),
+    getContext: (conversationId) => callIPC("assistant:getContext", conversationId)
   },
   chat: {
-    getHistory: (limit) => electron.ipcRenderer.invoke("db:get-chat-history", limit),
-    addMessage: (role, content, sources) => electron.ipcRenderer.invoke("db:add-chat-message", role, content, sources),
-    clearHistory: () => electron.ipcRenderer.invoke("db:clear-chat-history")
+    getHistory: (limit) => callIPC("db:get-chat-history", limit),
+    addMessage: (role, content, sources) => callIPC("db:add-chat-message", role, content, sources),
+    clearHistory: () => callIPC("db:clear-chat-history")
   },
   calendar: {
-    sync: () => electron.ipcRenderer.invoke("calendar:sync"),
-    clearAndSync: () => electron.ipcRenderer.invoke("calendar:clear-and-sync"),
-    getLastSync: () => electron.ipcRenderer.invoke("calendar:get-last-sync"),
-    setUrl: (url) => electron.ipcRenderer.invoke("calendar:set-url", url),
-    toggleAutoSync: (enabled) => electron.ipcRenderer.invoke("calendar:toggle-auto-sync", enabled),
-    setInterval: (minutes) => electron.ipcRenderer.invoke("calendar:set-interval", minutes),
-    getSettings: () => electron.ipcRenderer.invoke("calendar:get-settings")
+    sync: () => callIPC("calendar:sync"),
+    clearAndSync: () => callIPC("calendar:clear-and-sync"),
+    getLastSync: () => callIPC("calendar:get-last-sync"),
+    setUrl: (url) => callIPC("calendar:set-url", url),
+    toggleAutoSync: (enabled) => callIPC("calendar:toggle-auto-sync", enabled),
+    setInterval: (minutes) => callIPC("calendar:set-interval", minutes),
+    getSettings: () => callIPC("calendar:get-settings")
   },
   storage: {
-    getInfo: () => electron.ipcRenderer.invoke("storage:get-info"),
-    openFolder: (folder) => electron.ipcRenderer.invoke("storage:open-folder", folder),
-    readRecording: (filePath) => electron.ipcRenderer.invoke("storage:read-recording", filePath),
-    deleteRecording: (filePath) => electron.ipcRenderer.invoke("storage:delete-recording", filePath),
-    saveRecording: (filename, data, recordingDateIso) => electron.ipcRenderer.invoke("storage:save-recording", filename, data, recordingDateIso)
+    getInfo: () => callIPC("storage:get-info"),
+    openFolder: (folder) => callIPC("storage:open-folder", folder),
+    readRecording: (filePath) => callIPC("storage:read-recording", filePath),
+    deleteRecording: (filePath) => callIPC("storage:delete-recording", filePath),
+    saveRecording: (filename, data, recordingDateIso) => callIPC("storage:save-recording", filename, data, recordingDateIso)
   },
   syncedFiles: {
-    isFileSynced: (originalFilename) => electron.ipcRenderer.invoke("db:is-file-synced", originalFilename),
-    getSyncedFile: (originalFilename) => electron.ipcRenderer.invoke("db:get-synced-file", originalFilename),
-    getAll: () => electron.ipcRenderer.invoke("db:get-all-synced-files"),
-    add: (originalFilename, localFilename, filePath, fileSize) => electron.ipcRenderer.invoke("db:add-synced-file", originalFilename, localFilename, filePath, fileSize),
-    remove: (originalFilename) => electron.ipcRenderer.invoke("db:remove-synced-file", originalFilename),
-    getFilenames: () => electron.ipcRenderer.invoke("db:get-synced-filenames")
+    isFileSynced: (originalFilename) => callIPC("db:is-file-synced", originalFilename),
+    getSyncedFile: (originalFilename) => callIPC("db:get-synced-file", originalFilename),
+    getAll: () => callIPC("db:get-all-synced-files"),
+    add: (originalFilename, localFilename, filePath, fileSize) => callIPC("db:add-synced-file", originalFilename, localFilename, filePath, fileSize),
+    remove: (originalFilename) => callIPC("db:remove-synced-file", originalFilename),
+    getFilenames: () => callIPC("db:get-synced-filenames")
   },
   deviceCache: {
-    getAll: () => electron.ipcRenderer.invoke("deviceCache:getAll"),
-    saveAll: (files) => electron.ipcRenderer.invoke("deviceCache:saveAll", files),
-    clear: () => electron.ipcRenderer.invoke("deviceCache:clear")
+    getAll: () => callIPC("deviceCache:getAll"),
+    saveAll: (files) => callIPC("deviceCache:saveAll", files),
+    clear: () => callIPC("deviceCache:clear")
   },
   migration: {
-    previewCleanup: () => electron.ipcRenderer.invoke("migration:previewCleanup"),
-    runCleanup: () => electron.ipcRenderer.invoke("migration:runCleanup"),
-    runV11: () => electron.ipcRenderer.invoke("migration:runV11"),
-    rollbackV11: () => electron.ipcRenderer.invoke("migration:rollbackV11"),
-    getStatus: () => electron.ipcRenderer.invoke("migration:getStatus"),
+    previewCleanup: () => callIPC("migration:previewCleanup"),
+    runCleanup: () => callIPC("migration:runCleanup"),
+    runV11: () => callIPC("migration:runV11"),
+    rollbackV11: () => callIPC("migration:rollbackV11"),
+    getStatus: () => callIPC("migration:getStatus"),
     onProgress: (callback) => {
       const handler = (_event, progress) => callback(progress);
       electron.ipcRenderer.on("migration:progress", handler);
@@ -128,35 +145,35 @@ const electronAPI = {
     }
   },
   outputs: {
-    getTemplates: () => electron.ipcRenderer.invoke("outputs:getTemplates"),
-    generate: (request) => electron.ipcRenderer.invoke("outputs:generate", request),
-    copyToClipboard: (content) => electron.ipcRenderer.invoke("outputs:copyToClipboard", content),
-    saveToFile: (content, suggestedName) => electron.ipcRenderer.invoke("outputs:saveToFile", content, suggestedName)
+    getTemplates: () => callIPC("outputs:getTemplates"),
+    generate: (request) => callIPC("outputs:generate", request),
+    copyToClipboard: (content) => callIPC("outputs:copyToClipboard", content),
+    saveToFile: (content, suggestedName) => callIPC("outputs:saveToFile", content, suggestedName)
   },
   rag: {
-    status: () => electron.ipcRenderer.invoke("rag:status"),
-    chat: (request) => electron.ipcRenderer.invoke("rag:chat", request),
-    chatLegacy: (sessionId, message, meetingFilter) => electron.ipcRenderer.invoke("rag:chat-legacy", { sessionId, message, meetingFilter }),
-    summarizeMeeting: (meetingId) => electron.ipcRenderer.invoke("rag:summarize-meeting", meetingId),
-    findActionItems: (meetingId) => electron.ipcRenderer.invoke("rag:find-action-items", meetingId),
-    clearSession: (sessionId) => electron.ipcRenderer.invoke("rag:clear-session", sessionId),
-    stats: () => electron.ipcRenderer.invoke("rag:stats"),
-    indexTranscript: (transcript, metadata) => electron.ipcRenderer.invoke("rag:index-transcript", { transcript, metadata }),
-    search: (query, limit) => electron.ipcRenderer.invoke("rag:search", { query, limit }),
-    getChunks: () => electron.ipcRenderer.invoke("rag:get-chunks")
+    status: () => callIPC("rag:status"),
+    chat: (request) => callIPC("rag:chat", request),
+    chatLegacy: (sessionId, message, meetingFilter) => callIPC("rag:chat-legacy", { sessionId, message, meetingFilter }),
+    summarizeMeeting: (meetingId) => callIPC("rag:summarize-meeting", meetingId),
+    findActionItems: (meetingId) => callIPC("rag:find-action-items", meetingId),
+    clearSession: (sessionId) => callIPC("rag:clear-session", sessionId),
+    stats: () => callIPC("rag:stats"),
+    indexTranscript: (transcript, metadata) => callIPC("rag:index-transcript", { transcript, metadata }),
+    search: (query, limit) => callIPC("rag:search", { query, limit }),
+    getChunks: () => callIPC("rag:get-chunks")
   },
   downloadService: {
-    getState: () => electron.ipcRenderer.invoke("download-service:get-state"),
-    isFileSynced: (filename) => electron.ipcRenderer.invoke("download-service:is-file-synced", filename),
-    getFilesToSync: (files) => electron.ipcRenderer.invoke("download-service:get-files-to-sync", files),
-    queueDownloads: (files) => electron.ipcRenderer.invoke("download-service:queue-downloads", files),
-    startSession: (files) => electron.ipcRenderer.invoke("download-service:start-session", files),
-    processDownload: (filename, data) => electron.ipcRenderer.invoke("download-service:process-download", filename, data),
-    updateProgress: (filename, bytesReceived) => electron.ipcRenderer.invoke("download-service:update-progress", filename, bytesReceived),
-    markFailed: (filename, error) => electron.ipcRenderer.invoke("download-service:mark-failed", filename, error),
-    clearCompleted: () => electron.ipcRenderer.invoke("download-service:clear-completed"),
-    cancelAll: () => electron.ipcRenderer.invoke("download-service:cancel-all"),
-    getStats: () => electron.ipcRenderer.invoke("download-service:get-stats"),
+    getState: () => callIPC("download-service:get-state"),
+    isFileSynced: (filename) => callIPC("download-service:is-file-synced", filename),
+    getFilesToSync: (files) => callIPC("download-service:get-files-to-sync", files),
+    queueDownloads: (files) => callIPC("download-service:queue-downloads", files),
+    startSession: (files) => callIPC("download-service:start-session", files),
+    processDownload: (filename, data) => callIPC("download-service:process-download", filename, data),
+    updateProgress: (filename, bytesReceived) => callIPC("download-service:update-progress", filename, bytesReceived),
+    markFailed: (filename, error) => callIPC("download-service:mark-failed", filename, error),
+    clearCompleted: () => callIPC("download-service:clear-completed"),
+    cancelAll: () => callIPC("download-service:cancel-all"),
+    getStats: () => callIPC("download-service:get-stats"),
     onStateUpdate: (callback) => {
       const handler = (_event, state) => callback(state);
       electron.ipcRenderer.on("download-service:state-update", handler);
@@ -167,32 +184,32 @@ const electronAPI = {
   },
   // Quality Assessment API
   quality: {
-    get: (recordingId) => electron.ipcRenderer.invoke("quality:get", recordingId),
-    set: (recordingId, quality, reason, assessedBy) => electron.ipcRenderer.invoke("quality:set", recordingId, quality, reason, assessedBy),
-    autoAssess: (recordingId) => electron.ipcRenderer.invoke("quality:auto-assess", recordingId),
-    getByQuality: (quality) => electron.ipcRenderer.invoke("quality:get-by-quality", quality),
-    batchAutoAssess: (recordingIds) => electron.ipcRenderer.invoke("quality:batch-auto-assess", recordingIds),
-    assessUnassessed: () => electron.ipcRenderer.invoke("quality:assess-unassessed")
+    get: (recordingId) => callIPC("quality:get", recordingId),
+    set: (recordingId, quality, reason, assessedBy) => callIPC("quality:set", recordingId, quality, reason, assessedBy),
+    autoAssess: (recordingId) => callIPC("quality:auto-assess", recordingId),
+    getByQuality: (quality) => callIPC("quality:get-by-quality", quality),
+    batchAutoAssess: (recordingIds) => callIPC("quality:batch-auto-assess", recordingIds),
+    assessUnassessed: () => callIPC("quality:assess-unassessed")
   },
   // Storage Policy API
   storagePolicy: {
-    getByTier: (tier) => electron.ipcRenderer.invoke("storage:get-by-tier", tier),
-    getCleanupSuggestions: (minAgeOverride) => electron.ipcRenderer.invoke("storage:get-cleanup-suggestions", minAgeOverride),
-    getCleanupSuggestionsForTier: (tier, minAgeDays) => electron.ipcRenderer.invoke("storage:get-cleanup-suggestions-for-tier", tier, minAgeDays),
-    executeCleanup: (recordingIds, archive) => electron.ipcRenderer.invoke("storage:execute-cleanup", recordingIds, archive),
-    getStats: () => electron.ipcRenderer.invoke("storage:get-stats"),
-    initializeUntiered: () => electron.ipcRenderer.invoke("storage:initialize-untiered"),
-    assignTier: (recordingId, quality) => electron.ipcRenderer.invoke("storage:assign-tier", recordingId, quality)
+    getByTier: (tier) => callIPC("storage:get-by-tier", tier),
+    getCleanupSuggestions: (minAgeOverride) => callIPC("storage:get-cleanup-suggestions", minAgeOverride),
+    getCleanupSuggestionsForTier: (tier, minAgeDays) => callIPC("storage:get-cleanup-suggestions-for-tier", tier, minAgeDays),
+    executeCleanup: (recordingIds, archive) => callIPC("storage:execute-cleanup", recordingIds, archive),
+    getStats: () => callIPC("storage:get-stats"),
+    initializeUntiered: () => callIPC("storage:initialize-untiered"),
+    assignTier: (recordingId, quality) => callIPC("storage:assign-tier", recordingId, quality)
   },
   // Data Integrity Service API
   integrity: {
-    runScan: () => electron.ipcRenderer.invoke("integrity:run-scan"),
-    getReport: () => electron.ipcRenderer.invoke("integrity:get-report"),
-    repairIssue: (issueId) => electron.ipcRenderer.invoke("integrity:repair-issue", issueId),
-    repairAll: () => electron.ipcRenderer.invoke("integrity:repair-all"),
-    runStartupChecks: () => electron.ipcRenderer.invoke("integrity:run-startup-checks"),
-    cleanupWronglyNamed: () => electron.ipcRenderer.invoke("integrity:cleanup-wrongly-named"),
-    purgeMissingFiles: () => electron.ipcRenderer.invoke("integrity:purge-missing-files"),
+    runScan: () => callIPC("integrity:run-scan"),
+    getReport: () => callIPC("integrity:get-report"),
+    repairIssue: (issueId) => callIPC("integrity:repair-issue", issueId),
+    repairAll: () => callIPC("integrity:repair-all"),
+    runStartupChecks: () => callIPC("integrity:run-startup-checks"),
+    cleanupWronglyNamed: () => callIPC("integrity:cleanup-wrongly-named"),
+    purgeMissingFiles: () => callIPC("integrity:purge-missing-files"),
     onProgress: (callback) => {
       const handler = (_event, progress) => callback(progress);
       electron.ipcRenderer.on("integrity:progress", handler);

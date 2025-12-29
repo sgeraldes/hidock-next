@@ -85,7 +85,7 @@ export function OperationController() {
   // ==========================================================================
 
   const processDownload = useCallback(async (item: { filename: string; fileSize: number }) => {
-    if (DEBUG) console.log(`[OperationController] Processing download: ${item.filename}`)
+    if (DEBUG) console.log(`[QA-MONITOR][Operation] Processing download: ${item.filename}`)
 
     if (!deviceService.isConnected()) {
       console.error('[OperationController] Device not connected')
@@ -111,7 +111,7 @@ export function OperationController() {
       )
 
       if (!success) {
-        console.error(`[OperationController] Download failed: ${item.filename}`)
+        console.error(`[QA-MONITOR][Operation] Download failed: ${item.filename}`)
         await window.electronAPI.downloadService.markFailed(item.filename, 'USB transfer failed')
         removeFromDownloadQueue(item.filename)
         toast({
@@ -139,7 +139,7 @@ export function OperationController() {
       removeFromDownloadQueue(item.filename)
 
       if (result.success) {
-        if (DEBUG) console.log(`[OperationController] Download completed: ${item.filename}`)
+        if (DEBUG) console.log(`[QA-MONITOR][Operation] Download completed: ${item.filename}`)
         return true
       } else {
         toast({
@@ -151,7 +151,7 @@ export function OperationController() {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Unknown error'
-      console.error(`[OperationController] Error: ${item.filename}`, error)
+      console.error(`[QA-MONITOR][Operation] Error: ${item.filename}`, error)
       await window.electronAPI.downloadService.markFailed(item.filename, errorMsg)
       removeFromDownloadQueue(item.filename)
       toast({
@@ -174,7 +174,7 @@ export function OperationController() {
     isProcessingDownloads.current = true
     downloadAbortRef.current = false
 
-    if (DEBUG) console.log(`[OperationController] Processing ${pendingItems.length} downloads`)
+    if (DEBUG) console.log(`[QA-MONITOR][Operation] Processing ${pendingItems.length} downloads`)
 
     setDeviceSyncState({
       deviceSyncing: true,
@@ -224,7 +224,11 @@ export function OperationController() {
 
     // Refresh data after sync
     if (completed > 0) {
-      loadRecordings()
+      // loadRecordings() // Disabled to prevent loops; views use useUnifiedRecordings which auto-refreshes
+      const store = useAppStore.getState();
+      if (store.invalidateUnifiedRecordings) {
+        store.invalidateUnifiedRecordings();
+      }
     }
 
     if (completed > 0 || failed > 0 || aborted) {
@@ -245,7 +249,7 @@ export function OperationController() {
   // ==========================================================================
 
   const playAudio = useCallback(async (recordingId: string, filePath: string) => {
-    if (DEBUG) console.log(`[OperationController] Playing: ${recordingId}`)
+    if (DEBUG) console.log(`[QA-MONITOR][Operation] Playing: ${recordingId}`)
 
     try {
       // Stop current playback and reset state
@@ -461,7 +465,7 @@ export function OperationController() {
               const toSync = recordings.filter(rec => !syncedSet.has(rec.filename))
               if (toSync.length > 0) {
                 autoSyncTriggeredRef.current = true
-                if (DEBUG) console.log(`[OperationController] Initial auto-sync: ${toSync.length} files to download`)
+                if (DEBUG) console.log(`[QA-MONITOR][Operation] Initial auto-sync: ${toSync.length} files to download`)
                 deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
 
                 // Queue files for download (with recording dates for proper date preservation)
@@ -516,7 +520,7 @@ export function OperationController() {
                 const toSync = recordings.filter(rec => !syncedSet.has(rec.filename))
                 if (toSync.length > 0) {
                   autoSyncTriggeredRef.current = true
-                  if (DEBUG) console.log(`[OperationController] Auto-sync: ${toSync.length} files to download`)
+                  if (DEBUG) console.log(`[QA-MONITOR][Operation] Auto-sync: ${toSync.length} files to download`)
                   deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
 
                   // Queue files for download (with recording dates for proper date preservation)
