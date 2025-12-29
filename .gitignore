@@ -38,6 +38,7 @@ temp/mypy_cache/
 # ===================================================================
 
 # Custom folders that should not be in the repository
+temp/
 archive/
 archived/
 reference/
