@@ -1,6 +1,6 @@
 # Master Test Plan: HiDock Next
 
-**Version:** 2.0
+**Version:** 2.1
 **Date:** 2025-12-28
 **Scope:** `apps/web` (React/Electron Frontend)
 **Target Audience:** QA Engineers, Developers
@@ -226,3 +226,23 @@ The following screenshots capture the application state as of Version 2.0 of thi
 *   **Actionables:** `docs/qa/screenshots/actionables_master.png`
 *   **Sync:** `docs/qa/screenshots/sync_master.png`
 *   **Settings:** `docs/qa/screenshots/settings_master.png`
+
+---
+
+## 8. Lessons Learned & Automation Pitfalls
+
+### 8.1 Navigation & Click Simulation
+*   **Pitfall:** Relying solely on `click_by_text` or `click_by_selector` for navigation is unreliable in Electron/React apps where click events might be intercepted or debounced.
+*   **Lesson:** For robust E2E test navigation, prefer direct routing via `window.location.hash = '#/route'` or React Router hooks. Always verify the URL (`window.location.href`) *after* an action to confirm success.
+
+### 8.2 Native Dialogs (`window.prompt`)
+*   **Pitfall:** Electron apps using native browser dialogs like `alert`, `confirm`, or `prompt` block the execution thread and are often invisible or inaccessible to standard web automation tools (headless or not).
+*   **Lesson:** Avoid native dialogs in production code. Use custom UI modals (e.g., Shadcn Dialog) which are fully accessible to the DOM and automation agents.
+
+### 8.3 State Initialization
+*   **Pitfall:** Components accessing global stores (Zustand/Redux) may crash if they assume data exists before the store hydration completes (e.g., `currentDate` being undefined).
+*   **Lesson:** Always implement "Loading" states or safe default values in components. E2E tests should wait for a "Ready" signal (e.g., specific DOM element) before interacting.
+
+### 8.4 Visual Verification
+*   **Pitfall:** Taking screenshots without confirming the UI state can lead to duplicate or misleading artifacts (e.g., capturing the "Loading" spinner instead of the data).
+*   **Lesson:** Implement a "Wait for Selector" step before every screenshot command to ensure the page has settled.
