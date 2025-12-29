@@ -148,6 +148,10 @@ interface UnifiedRecording {
     *   **Metadata:** Auto-associate recording time/location with Calendar events (already partially done) and GPS/Location data (future).
 5.  **Trend Identification:**
     *   **Insight:** "You spend 30% of your time discussing 'Optimization' this month."
+6.  **Expandable Data Ingestion (Plugins):**
+    *   **Concept:** Knowledge is not limited to audio. The system must ingest text, documents, and messages from external tools.
+    *   **Sources:** Slack, MS Teams, Email (Outlook/Gmail), Jira, GitHub, Notion.
+    *   **Architecture:** Modular Plugin System (See `09_EXTENSIONS.md`).
 
 ### 8.3 UX/UI Redesign Concepts
 *   **Dashboard View:** Not a list. A high-level overview of *Recent Activity*, *Pending Actions*, and *Suggested Insights*.
