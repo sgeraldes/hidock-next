@@ -1,115 +1,169 @@
-# Library View - Deep Functional Specification
+# Library View - Comprehensive Engineering Specification
 
-## 1. Overview & Goals
-The **Library** is the core knowledge repository of the application. It aggregates all captured audio (meetings, notes, uploads) from both the local file system and connected HiDock devices.
-**Goal**: Provide a highly performant, filterable, and actionable list of all captures, allowing users to manage (delete/move) and consume (play/read) content efficiently.
+## 1. Component Architecture
+The Library view is the primary data grid for the application. It manages the display, filtering, and interaction of `UnifiedRecording` entities.
 
-## 2. Views & Components
+### 1.1 Component Hierarchy
+```
+LibraryPage (Route: /library)
+â”œâ”€â”€ FilterToolbar
+â”‚   â”œâ”€â”€ SearchInput
+â”‚   â”œâ”€â”€ FilterChips (Status, Location)
+â”‚   â”œâ”€â”€ SortDropdown
+â”‚   â””â”€â”€ BulkActionsBar (Conditional)
+â”œâ”€â”€ LibraryContent (Flex-1, Scrollable)
+â”‚   â”œâ”€â”€ VirtualList (Wrapper for @tanstack/react-virtual)
+â”‚   â”‚   â”œâ”€â”€ RecordingListRow (Memoized)
+â”‚   â”‚   â””â”€â”€ RecordingGridCard (Memoized)
+â”‚   â””â”€â”€ EmptyState (Zero / No Results)
+â””â”€â”€ RecordingDetailDrawer (Overlay/Push)
+    â”œâ”€â”€ AudioPlayer
+    â”œâ”€â”€ TranscriptView
+    â””â”€â”€ AISummaryView
+```
 
-### 2.1 View Structure
-The Library consists of two main visualization modes and a detail context.
-1.  **List View (Default)**: A dense, virtualized table optimized for scanning metadata.
-2.  **Card View**: A richer visual grid emphasizing content summary and media type.
-3.  **Detail Panel (Drawer/Modal)**: A focused view for a single recording (see Detail Spec).
+## 2. Data Model & State
 
-### 2.2 Minimal Viable Components (MVC)
+### 2.1 Types & Interfaces
+```typescript
+// Core Entity
+interface UnifiedRecording {
+  id: string; // UUID
+  filename: string;
+  title?: string;
+  duration: number; // Seconds
+  size: number; // Bytes
+  createdAt: string; // ISO Date
+  location: 'device-only' | 'local-only' | 'synced';
+  transcriptionStatus: 'none' | 'pending' | 'processing' | 'completed' | 'error';
+  isFavorite: boolean;
+  meetingId?: string; // Link to Calendar
+}
 
-#### A. Filter Toolbar (Top)
-*   **Search Input**: Real-time text filtering (title, filename, participants).
-*   **Filter Chips**: "Device Only", "Downloaded", "Transcribed", "Favorites".
-*   **Sort Dropdown**: Date (New/Old), Duration, Name.
-*   **View Toggle**: Icons for List vs Card.
-*   **Bulk Actions Bar**: Appears only when items are selected (Download Selected, Delete Selected, Process Selected).
+// View State
+interface LibraryState {
+  // Data
+  items: UnifiedRecording[];
+  isLoading: boolean;
+  error: Error | null;
+  
+  // Selection & Filters
+  selectedIds: Set<string>;
+  filter: {
+    searchQuery: string;
+    status: 'all' | 'transcribed' | 'pending';
+    location: 'all' | 'device' | 'local';
+    dateRange?: [Date, Date];
+  };
+  sort: {
+    field: 'date' | 'duration' | 'title';
+    direction: 'asc' | 'desc';
+  };
+  viewMode: 'list' | 'grid';
+  
+  // UI
+  activeDetailId: string | null; // Controls Drawer
+}
+```
 
-#### B. Recording List (Main Content)
-*   **Virtualized Container**: Handles infinite scroll for 1000+ items.
-*   **List Item Row**:
-    *   **Selection Checkbox**: For bulk actions.
-    *   **Status Icon**: Cloud (Device), Check (Local), Spinner (Syncing).
-    *   **Title/Name**: Primary identifier.
-    *   **Meta Info**: Date, Duration, Size.
-    *   **Quick Actions (Hover)**: Play, Transcribe, Menu (dots).
+### 2.2 Lifecycle & Data Flow
+1.  **Mount**: Triggers `useLibraryData` hook.
+    *   *Action*: Dispatch `FETCH_RECORDINGS`.
+    *   *State*: `isLoading = true`.
+2.  **Update**:
+    *   **Search/Filter**: Client-side filtering of `items` array via `useMemo`.
+    *   **Selection**: Updates `selectedIds` set (efficient O(1) lookups).
+3.  **Real-time**: Subscribes to `DeviceService` events (`file-added`, `file-removed`) and `DatabaseService` (`transcription-updated`) to patch `items` without full reload.
 
-#### C. Detail View (Side Panel/Route)
-*   **Header**: Title, Date, Duration, Edit Title button.
-*   **Media Player**: Waveform visualization, Play/Pause, Speed.
-*   **Transcript View**: Speaker-diarized text, auto-scroll.
-*   **AI Summary**: "Key Points", "Action Items" tabs.
+## 3. Detailed Component Specifications
 
-## 3. Data States
+### 3.1 FilterToolbar
+*   **Props**: 
+    *   `totalCount: number`
+    *   `filteredCount: number`
+    *   `onFilterChange: (filter: FilterState) => void`
+*   **Behavior**:
+    *   **Search**: Debounced (300ms) input. Updates `filter.searchQuery`.
+    *   **Bulk Mode**: When `selectedIds.size > 0`, the Toolbar transforms into `BulkActionsBar`.
+        *   *Visual*: Background color changes to `bg-accent`. Text changes to "X items selected".
+        *   *Actions*: "Download All", "Delete", "Clear Selection".
 
-| State | Visual Representation | Behavior |
-| :--- | :--- | :--- |
-| **Loading** | Skeleton rows (shimmer effect). | User cannot interact. |
-| **Empty (Total)** | "Zero State" illustration. CTA: "Connect Device" or "Import File". | Center aligned, friendly messaging. |
-| **Empty (Filtered)** | "No matching results". | CTA: "Clear Filters". |
-| **Populated** | Full list rendered. | Interactive. |
-| **Error** | Red banner/toast at top. | "Retry" button available. |
+### 3.2 RecordingListRow (List Mode)
+*   **Height**: Fixed **52px**.
+*   **Layout (Flexbox)**:
+    1.  **Checkbox** (40px): `w-4 h-4` checkbox.
+    2.  **Status** (32px): Icon (`Cloud`, `Check`). Tooltip on hover.
+    3.  **Title** (Flex-1): Truncated text. Bold.
+    4.  **Meta** (120px): Duration (`mm:ss`), Date (`MMM dd`).
+    5.  **Actions** (Opacity-0 -> Opacity-100 on Group Hover):
+        *   `PlayButton`: Starts audio.
+        *   `DetailButton`: Opens Drawer.
+*   **Interaction**:
+    *   **Click**: Opens Detail View.
+    *   **Shift+Click**: Range selection.
+    *   **Double Click**: Plays Audio.
+
+### 3.3 RecordingDetailDrawer
+*   **Props**: `recording: UnifiedRecording`, `isOpen: boolean`, `onClose: () => void`.
+*   **Visual Hierarchy**:
+    *   **Header (Primary)**: Large Title (Editable), Status Badge.
+    *   **Player (Sticky)**: Waveform (`wavesurfer.js`), Play/Pause FAB, Speed Toggle.
+    *   **Content (Scrollable)**:
+        *   **Tabs**: "Transcript", "Summary", "Notes".
+        *   **Transcript**: Diarized text (Speaker A: text...). Clicking timestamp seeks audio.
+*   **Accessibility**:
+    *   `role="dialog"`, `aria-modal="true"`.
+    *   Focus trap within drawer.
+    *   `Esc` key closes drawer.
 
 ## 4. Interaction Patterns
 
-### 4.1 Navigation & Gestures
-*   **Scroll**: Standard vertical scroll. Sticky header for column titles.
-*   **Click/Tap (Row)**: Opens Detail View (Side Panel or Navigate).
-*   **Right-Click (Row)**: Context Menu (Delete, Rename, Show in Folder).
-*   **Double-Click**: Starts Audio Playback immediately.
-*   **Hover**: Reveals "Quick Actions" to reduce visual clutter.
+| User Action | System Response | Visual Feedback |
+| :--- | :--- | :--- |
+| **Search Typing** | Filters list in real-time. | List height changes. "No results" state if empty. |
+| **Row Click** | Sets `activeDetailId`. | Row background `bg-accent`. Drawer slides in from right. |
+| **Play Click** | Sets global `audioContext`. | Play icon turns to Pause. Waveform appears in footer/drawer. |
+| **Delete Key** | Checks `selectedIds`. | Dialog: "Delete X items?". |
 
-### 4.2 Selection Model
-*   **Single Click Checkbox**: Selects row (enters Bulk Mode).
-*   **Shift + Click**: Range selection.
-*   **Cmd/Ctrl + A**: Select all visible/loaded.
+## 5. Visual Hierarchy & Styling (Theme Tokens)
 
-## 5. Visual Hierarchy
+*   **Primary Elements**:
+    *   Row Title: `text-sm font-medium text-foreground`.
+    *   Play Button: `text-primary hover:scale-110`.
+*   **Secondary Elements**:
+    *   Meta Data: `text-xs text-muted-foreground`.
+    *   Icons: `w-4 h-4 text-muted-foreground`.
+*   **States**:
+    *   **Hover**: `bg-muted/50`.
+    *   **Selected**: `bg-primary/5 border-l-2 border-primary`.
+    *   **Playing**: `bg-green-500/5` (distinct from selection).
 
-1.  **Primary**: Recording Title, Play Button.
-2.  **Secondary**: Date, Duration, Status Icons (Sync state).
-3.  **Tertiary**: File size, Path, Tech metadata (Format, Bitrate).
+## 6. Error Handling
 
-**Theme Tokens**:
--   **Background**: `bg-background` (White/Dark Gray)
--   **Row Hover**: `hover:bg-muted/50`
--   **Selected Row**: `bg-accent/20`
--   **Text Primary**: `text-foreground`
--   **Text Meta**: `text-muted-foreground`
+*   **Load Failure**:
+    *   *UI*: Central `ErrorState` component with "Retry" button.
+    *   *Action*: Re-dispatch `FETCH_RECORDINGS`.
+*   **Playback Error** (Missing File):
+    *   *UI*: Toast notification "File not found locally".
+    *   *Action*: Prompt "Download from Device?".
+*   **Bulk Action Failure**:
+    *   *UI*: Toast "Failed to delete 2 items".
+    *   *State*: Revert UI removal of failed items.
 
-## 6. Responsiveness
+## 7. Testing Strategy
 
-| Breakpoint | Layout Change |
-| :--- | :--- |
-| **Desktop (>1024px)** | Full Table with all columns (Size, Path, etc). Detail view can be a Side Drawer (Split View). |
-| **Tablet (768px-1024px)** | Hide "Path" and "Size" columns. Detail view is a Modal. |
-| **Mobile (<768px)** | Switch to **Card View** automatically (Row layout too wide). Hide "Bulk Actions" behind a "Select" mode toggle. |
+### 7.1 Unit Tests (Vitest)
+*   **`filterRecordings`**: Test search logic (case-insensitive, fuzzy).
+*   **`RecordingRow`**: Verify rendering of all props. Test "Selected" class application.
+*   **`TimeUtils`**: Verify `formatDuration(3665)` -> "1:01:05".
 
-## 7. Implementation Manual (Step-by-Step)
+### 7.2 Integration Tests
+*   **Selection Logic**:
+    *   Click Row 1 -> Selected.
+    *   Shift+Click Row 5 -> Rows 1-5 Selected.
+*   **Data Flow**: Mock `electronAPI.recordings.list`. Verify list populates.
 
-### Phase 1: Structure & Routing
-1.  **Rename**: `apps/electron/src/pages/Recordings.tsx` -> `Library.tsx`.
-2.  **Refactor**: Split `Library.tsx` into `components/library/RecordingList.tsx`, `RecordingCard.tsx`, `FilterToolbar.tsx`.
-3.  **Route**: Ensure `/library` points to this new container.
-
-### Phase 2: Virtualization & Data
-1.  **Hook**: Create `useLibraryData.ts`. Move data fetching logic (UnifiedRecordings) there.
-2.  **Virtualizer**: Implement `@tanstack/react-virtual` in `RecordingList.tsx`.
-3.  **Optimization**: Ensure `estimateSize` is accurate for both List (52px) and Card (variable) modes.
-
-### Phase 3: Selection & Bulk Actions
-1.  **State**: Add `selectedIds: Set<string>` to `useUIStore` or local state.
-2.  **UI**: Create `BulkActionBar` component (floating bottom or sticky top).
-3.  **Logic**: Implement `handleDownloadSelected`, `handleDeleteSelected` connecting to `electronAPI`.
-
-### Phase 4: Detail View
-1.  **Router**: Add child route `/library/:id` OR state-driven Drawer `<Sheet open={!!selectedId}>`.
-2.  **Component**: Extract Detail logic from `Recordings.tsx` (the expanded accordion part) into a proper `RecordingDetail` component.
-3.  **Waveform**: (Optional) Integrate a waveform player library (e.g., `wavesurfer.js`) replacing the simple HTML5 audio.
-
-### Phase 5: Design Polish
-1.  **Tailwind**: Apply `shadcn/ui` Table component styles to the virtualized list.
-2.  **Icons**: Update status icons to use the specific color tokens defined in Hierarchy.
-3.  **Empty States**: Create designated SVG/Illustration components for "No Device" and "No Results".
-
-## 8. Proposed Design Mockup Description
-*   **Header**: Clean white background. Left: "Library" (H1). Right: "Search" (pill shape), "View Toggle" (Segmented Control).
-*   **Sub-Header**: Filter Chips (Pill shape, outline). Active filters turn solid primary color.
-*   **Main List**: Zebra-striped rows (very subtle). Status icon is the first column. Title is bold. Hovering a row highlights it and shows a floating "Play" button over the file icon.
-*   **Drawer**: Slides in from right (30% width). White background. Top: Audio Player (Sticky). Bottom: Scrollable Transcript with "Summary" tab.
+### 7.3 Performance Targets
+*   **Initial Render**: < 100ms.
+*   **Scrolling**: 60 FPS (using `windowing`).
+*   **Search**: < 16ms per keystroke (filtering 2000 items).

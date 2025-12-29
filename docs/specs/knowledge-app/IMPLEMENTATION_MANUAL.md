@@ -1,76 +1,73 @@
-# Implementation Manual: Knowledge App Redesign
+# Implementation Manual: Knowledge App Redesign (Phase 1)
 
-This manual guides the engineering team through the implementation of the new Library, Assistant, and Explore views, transitioning from the current prototype to the "Deep Spec" vision.
+This manual details the step-by-step execution plan to implement the "Deep Specs" for Library, Assistant, and Explore.
 
-## Phase 0: Foundation & Cleanup
-**Goal**: Prepare the codebase structure.
+## 1. Foundation & Data Layer (Week 1)
 
-1.  **Rename & Route Update**:
-    *   `Recordings.tsx` -> `Library.tsx` (Update `App.tsx` routes).
-    *   `Chat.tsx` -> `Assistant.tsx`.
-    *   Ensure `/library`, `/assistant`, `/explore` are the canonical routes.
-2.  **Shared Components**:
-    *   Create `components/common/VirtualList.tsx` (Wrapper around TanStack Virtual).
-    *   Create `components/common/FilterBar.tsx`.
-    *   Create `components/common/EmptyState.tsx`.
-3.  **Store Updates**:
-    *   Update `useUIStore` to hold view preferences for all 3 pages (`libraryViewMode`, `assistantSidebarOpen`).
+### 1.1 Store & Types
+**Goal**: Establish the strict TypeScript interfaces defined in the Deep Specs.
+1.  **Create Types File**: `apps/electron/src/types/knowledge-next.ts`.
+    *   Copy `UnifiedRecording`, `Message`, `Conversation`, `SearchResult` interfaces from specs.
+2.  **Update Global Store**:
+    *   Extend `useAppStore` or create `useKnowledgeStore` (Zustand).
+    *   Add `activeConversationId`, `libraryFilters`, `exploreQuery`.
 
-## Phase 1: Library Implementation
+### 1.2 Shared Components System
+**Goal**: Build the reusable visual primitives.
+1.  **VirtualList**: Wrap `@tanstack/react-virtual` in a generic component handling empty/loading states.
+2.  **FilterToolbar**: Create a generic toolbar accepting `FilterDef[]`.
+3.  **ResultCard**: Polymorphic card component for files/people/projects.
+
+## 2. Library Implementation (Week 2)
 **Spec**: [`LIBRARY_DEEP_SPEC.md`](./LIBRARY_DEEP_SPEC.md)
 
-1.  **Data Layer**:
-    *   Create `hooks/useLibraryData.ts`.
-    *   Migrate logic from `useUnifiedRecordings` into this new hook, adding sorting/filtering logic *inside the hook* or a selector.
-2.  **List View**:
-    *   Implement `RecordingList.tsx` using `VirtualList`.
-    *   Create `RecordingRow.tsx` (Compact) and `RecordingCard.tsx` (Grid).
-    *   **Task**: Ensure 52px fixed height for rows.
-3.  **Detail View**:
-    *   Create `components/library/RecordingDetailDrawer.tsx`.
-    *   Implement the "Split View" logic: If screen > 1024px and item selected, show Drawer inline. Else, show Modal.
-4.  **Polish**:
-    *   Add "Skeleton" loading states.
-    *   Implement "Bulk Action Bar" (appears when `selectedIds.size > 0`).
+### 2.1 Logic (`useLibraryData`)
+1.  **Hook**: Create `useLibraryData.ts`.
+2.  **Aggregation**: Combine `DeviceService.listRecordings()` and `DatabaseService.getAll()`.
+3.  **Memoization**: Implement `useMemo` for filtering `items` based on `searchQuery` and `location`.
+    *   *Test*: Ensure typing in search doesn't cause full re-renders of the virtual list.
 
-## Phase 2: Assistant Implementation
+### 2.2 Views
+1.  **List View**:
+    *   Implement `RecordingListRow.tsx`. Match the **52px** height spec.
+    *   Implement `RecordingDetailDrawer.tsx`. Use `Sheet` from shadcn/ui.
+2.  **Audio Player**:
+    *   Integrate `wavesurfer.js` into the Drawer.
+    *   Connect to `useAudioControls` for global state (stop others when playing).
+
+## 3. Assistant Implementation (Week 3)
 **Spec**: [`ASSISTANT_DEEP_SPEC.md`](./ASSISTANT_DEEP_SPEC.md)
 
-1.  **Layout Refactor**:
-    *   Split `Assistant.tsx` into `Sidebar.tsx`, `ChatThread.tsx`, `Composer.tsx`.
-2.  **Message Components**:
-    *   Create `MessageBubble.tsx`.
-    *   Implement `CitationChip` component that parses the `sources` JSON.
-    *   **Task**: Ensure clicking a citation navigates to `Library` detail view.
-3.  **RAG Context**:
-    *   Enhance `ContextPicker` to support filtering by date/type.
-    *   Ensure attached context visual feedback in `Composer`.
-4.  **Streaming**:
-    *   (Backend task) Verify if `electronAPI.rag.chat` supports streaming. If so, implement `onChunk` handler in `useAssistant`.
+### 3.1 RAG Service Upgrade
+1.  **Streaming**: Verify `electronAPI.rag` supports streaming. If not, implement standard request/response first, then refactor.
+2.  **Context**: Ensure `addContext(convId, recId)` endpoint works and actually influences the RAG prompt.
 
-## Phase 3: Explore Implementation
+### 3.2 UI Components
+1.  **MessageBubble**:
+    *   Implement `react-markdown` configuration.
+    *   Create `CitationChip` component.
+2.  **Sidebar**:
+    *   Implement `VirtualList` for conversation history (could be hundreds).
+
+## 4. Explore Implementation (Week 4)
 **Spec**: [`EXPLORE_DEEP_SPEC.md`](./EXPLORE_DEEP_SPEC.md)
 
-1.  **Dashboard Grid**:
-    *   Create `components/explore/Dashboard.tsx`.
-    *   Implement widgets: `TopicCloud`, `RecentActivity`.
-2.  **Search Logic**:
-    *   Create `components/explore/GlobalSearch.tsx`.
-    *   Implement the "Hero Input" to "Sticky Header" transition animation.
-3.  **Result Rendering**:
-    *   Create `ResultCard` components for `Knowledge`, `Person`, `Project` types.
-    *   Implement tab switching logic.
+### 4.1 Dashboard Widgets
+1.  **Topic Extraction**:
+    *   Implement `rag.getTopTopics()` (likely aggregated from latest 10 transcripts).
+    *   Render `TopicCloudWidget`.
+2.  **Recent Activity**:
+    *   Query `recordings` sorted by `createdAt` desc.
 
-## Phase 4: Integration & Testing
-1.  **Navigation**:
-    *   Verify deep links: Clicking a Search Result -> Opens Library Detail.
-    *   Verify Citation -> Opens Library Detail.
-2.  **Responsiveness**:
-    *   Test on 1920x1080 (Desktop), 1024x768 (Laptop), and resized window (Mobile view).
-3.  **Performance**:
-    *   Run Library with 1000 mock items. Scroll FPS > 50.
-    *   Assistant typing latency < 50ms.
+### 4.2 Search Experience
+1.  **Global Search Input**:
+    *   Implement the "Hero" to "Header" animation logic using CSS classes (`translate-y`, `scale`).
+2.  **Search Service**:
+    *   Combine results from FTS (Full Text Search) and Vector Search.
 
-## Phase 5: Design Review
-*   Compare implementation against the "Proposed Design Mockup Descriptions" in the Deep Specs.
-*   Adjust margins, typography, and colors to match the "Visual Hierarchy" rules.
+## 5. QA & Polish (Week 5)
+1.  **Accessibility Audit**: Run Lighthouse/axe-core. Verify all `aria-labels` from specs.
+2.  **Performance Profiling**:
+    *   Check `Library` scroll performance (Target 60fps).
+    *   Check `Explore` search debounce responsiveness.
+3.  **Theme Check**: Verify Dark Mode consistency across all new components.
