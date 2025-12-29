@@ -6,9 +6,15 @@
 **Screenshot:** ![Library View](../qa/screenshots/library_master.png)
 
 ## 1. Overview
-The Library acts as the central **Knowledge Repository**, storing all captured conversations, meetings, and insights. It allows users to browse, filter, and manage their knowledge base efficiently using a virtualized list for performance.
+The Library currently acts as the central **Knowledge Repository**, storing all captured conversations, meetings, and insights. It allows users to browse, filter, and manage their knowledge base efficiently using a virtualized list for performance.
 
-## UI Components & Behavior
+**Strategic Note:** While currently implemented as a "List of Files", the vision for this module is to evolve into a "Knowledge System" where the audio file is secondary to the extracted insights, semantic connections, and knowledge graph. See Section 8 for the Future Vision.
+
+---
+
+## 2. Current Implementation (Phase 1)
+
+### 2.1 UI Components & Behavior
 
 | Feature | UI Element | Action | Expected Outcome | Redesign Alignment |
 | :--- | :--- | :--- | :--- | :--- |
@@ -21,11 +27,9 @@ The Library acts as the central **Knowledge Repository**, storing all captured c
 | **Download** | Download Icon (⬇) | Click on Device-Only Item | Initiates background download. Updates sync status to "Local". | Core "Device Management" utility. |
 | **Management** | Trash Icon | Click Delete | Prompts confirmation. Removes from DB (and optionally device). | Standard management action. |
 
----
+### 2.2 Component Specification
 
-## 2. Component Specification
-
-### 2.1 State Management
+#### State Management
 | State Variable | Type | Description | Persistence |
 | :--- | :--- | :--- | :--- |
 | `searchQuery` | `string` | Text filter for title/subject/filename. | Session |
@@ -35,23 +39,21 @@ The Library acts as the central **Knowledge Repository**, storing all captured c
 | `meetings` | `Map<string, Meeting>` | Linked meeting data. | Session (Memoized) |
 | `expandedTranscripts` | `Set<string>` | IDs of cards with expanded details. | Session |
 
-### 2.2 Lifecycle & Events
+#### Lifecycle & Events
 *   **Mount:** Fetches initial recording list via `useUnifiedRecordings` (Device + DB).
 *   **Enrichment:** On `recordings` change, batch fetches missing transcripts (`transcripts.getByRecordingIds`) and meetings (`meetings.getByIds`).
 *   **Virtualization:** Uses `useVirtualizer` to render only visible rows (`overscan: 5`).
 
----
+### 2.3 Detailed Behavior
 
-## 3. Detailed Behavior
-
-### 3.1 List Rendering
+#### List Rendering
 *   **Specs:** Must render 1000+ items at 60fps.
 *   **Logic:** `filteredRecordings` array is memoized based on all active filters.
 *   **Height Calculation:**
     *   **Compact:** Fixed 52px.
     *   **Card:** Dynamic (Base 120px + Player 80px + Transcript 400px).
 
-### 3.2 Playback Interactions
+#### Playback Interactions
 *   **Local File:**
     *   **Action:** Click Play (▶).
     *   **Flow:** `currentlyPlayingId` set in global store -> `AudioPlayer` component mounts.
@@ -62,7 +64,7 @@ The Library acts as the central **Knowledge Repository**, storing all captured c
     *   **Visual:** Button shows spinner (`isDownloading` check from global queue).
     *   **Outcome:** File downloads -> List refreshes -> Play button becomes enabled.
 
-### 3.3 Bulk Actions
+#### Bulk Actions
 *   **Bulk Download:**
     *   **Trigger:** "Download All" button (visible if `stats.deviceOnly > 0`).
     *   **Flow:** Iterates all device-only items -> Adds to download queue.
@@ -70,11 +72,9 @@ The Library acts as the central **Knowledge Repository**, storing all captured c
     *   **Trigger:** "Process All" button.
     *   **Flow:** Sets status to `pending` for all untranscribed local files -> Queue picks them up.
 
----
+### 2.4 API Contracts
 
-## 4. API Contracts
-
-### `UnifiedRecording` (Frontend Model)
+#### `UnifiedRecording` (Frontend Model)
 ```typescript
 interface UnifiedRecording {
   id: string;
@@ -89,42 +89,78 @@ interface UnifiedRecording {
 }
 ```
 
-### IPC Methods
+#### IPC Methods
 *   `recordings.getAll()`: Returns raw DB records.
 *   `deviceCache.getAll()`: Returns cached device file list.
 *   `transcripts.getByRecordingIds(ids[])`: Returns Map of `Transcript` objects.
 *   `downloadService.queueDownloads(files[])`: Adds files to background downloader.
 
----
-
-## 5. Error Handling & Edge Cases
+### 2.5 Error Handling & Edge Cases
 
 *   **Device Disconnect:** "Download" buttons disabled immediately via `deviceConnected` prop.
 *   **Missing Local File:** If `play()` fails due to missing file, shows Toast error "File not found".
 *   **Transcription Fail:** Status badge turns Red (`error`). Retry button appears.
 
----
-
-## 6. Accessibility & Styling
+### 2.6 Accessibility & Styling
 
 *   **ARIA:** List items have `role="listitem"`. Interactive elements have `aria-label`.
 *   **Keyboard:** `Tab` navigation through list items. `Space` to toggle Play/Pause.
 *   **Theme:** Uses `muted/50` for hover states. `primary` color for active filters. Dark mode supported via Tailwind classes.
 
----
+### 2.7 Testing Strategy
 
-## 7. Testing Strategy
-
-### Unit Tests (`src/pages/__tests__/Recordings.test.tsx`)
+#### Unit Tests (`src/pages/__tests__/Recordings.test.tsx`)
 *   Test filter logic (`filteredRecordings` memo).
 *   Test virtualizer height estimation logic.
 
-### Integration Tests
+#### Integration Tests
 *   **Render:** Mock `useUnifiedRecordings` with 10 items -> Assert 10 cards rendered.
 *   **Enrichment:** Verify `transcripts.getByRecordingIds` is called with correct IDs.
 *   **Playback:** Click Play -> Verify `audioControls.play` called with correct ID/Path.
 
-### Performance Targets
+#### Performance Targets
 *   **Initial Render:** < 200ms.
 *   **Filter Update:** < 50ms.
 *   **Scroll FPS:** > 50fps on mid-range hardware.
+
+---
+
+## 8. Strategic Vision: The True Knowledge Library (Enhancement Proposal)
+
+**Expert Note:** The current "File List" implementation is insufficient for the product vision. The goal is to move from "managing files" to "managing knowledge".
+
+### 8.1 Core Concept Shift
+*   **From:** A directory of `.wav` files with attached transcripts.
+*   **To:** A **Knowledge System** that indexes, connects, and visualizes "EVERYTHING that is going on around you".
+*   **Entrance:** The HiDock device is merely the *ingestion point*, not the defining structure.
+
+### 8.2 Proposed Core Functionality
+1.  **Intelligent Indexing:**
+    *   **Automated Pipeline:** Audio -> Transcript -> Speaker Diarization -> Topic Extraction -> Action Item Extraction -> Entity Linking.
+    *   **Outcome:** "Files" disappear; "Events" and "Insights" emerge.
+2.  **Semantic Search:**
+    *   **Capability:** "Find where we discussed the Q3 budget" (Natural Language).
+    *   **Tech:** Vector embeddings (RAG) for all indexed content.
+3.  **Knowledge Graph:**
+    *   **Structure:** `Person` <-> `Meeting` <-> `Topic` <-> `Project`.
+    *   **Navigation:** Click a "Topic" node to see all related Meetings and People.
+4.  **Contextual Linking:**
+    *   **Metadata:** Auto-associate recording time/location with Calendar events (already partially done) and GPS/Location data (future).
+5.  **Trend Identification:**
+    *   **Insight:** "You spend 30% of your time discussing 'Optimization' this month."
+
+### 8.3 UX/UI Redesign Concepts
+*   **Dashboard View:** Not a list. A high-level overview of *Recent Activity*, *Pending Actions*, and *Suggested Insights*.
+*   **Graph Visualization:** An interactive node-link diagram replacing the list view for exploration.
+*   **Timeline View:** A chronological stream of "Knowledge Events" (Meetings, Ideas, Decisions) rather than file dates.
+*   **Tagging 2.0:** AI-suggested taxonomy (e.g., "Strategic", "Tactical", "HR") replacing manual tags.
+
+### 8.4 Technical Requirements (Gap Analysis)
+*   **Storage:** Need vector database (e.g., `pgvector`, local ChromaDB) for semantic search.
+*   **Search Engine:** Move beyond SQL `LIKE` queries to Hybrid Search (Keyword + Semantic).
+*   **API:** Expose "Knowledge Graph" API for external integrations (e.g., Notion sync).
+
+### 8.5 Measurable Success Metrics
+*   **Retrieval Time:** Reduce time to find a specific decision by **50%**.
+*   **Insight Accuracy:** Increase AI-generated summary acceptance rate to **90%**.
+*   **Feature Adoption:** Achieve **40%** user adoption of Semantic Search vs. Keyword Search.
