@@ -10,7 +10,6 @@
 ### Critical / High Severity
 | ID | Severity | Component | Issue Description | Root Cause Analysis | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **CAL-02** | **CRITICAL** | Calendar | Page Crash on Load | `Cannot read properties of undefined (reading 'toLocaleDateString')` in `something went wrong` error boundary. Likely missing date prop or context. | 🔴 Open |
 | **PLY-01** | **HIGH** | Player | Playback Failed | "Playback error: Failed to play audio" toast when clicking play on Library items. | 🔴 Open |
 
 ### Medium / Low Severity
@@ -26,6 +25,7 @@
 ## Verified Fixes (Closed)
 | ID | Issue | Verification Method |
 | :--- | :--- | :--- |
+| **CAL-02** | Calendar Page Crash | **FIXED**. Fixed `toLocaleDateString` on undefined and added missing `setCurrentDate` destructuring. Verified Month/Day views load. |
 | **SYS-01** | Database Rollback Error | Verified logs during Assistant chat save operations. No `cannot rollback` errors found. |
 | **SYS-02** | Jensen "Unexpected seq" Flood | Verified logs during device sync. Protocol traffic is healthy. |
 | **SVC-01** | Implicit Auto-Download | Verified logs on startup and Sync page load. No massive queue trigger observed. |
@@ -40,7 +40,7 @@
 *   [00:05] **Library**: Loaded. Verified "Missing Key" warning (UI-01). Filter works. View toggle failed (UI limitation?).
 *   [00:10] **Assistant**: Loaded. Chat sent successfully. **SYS-01 Verified Fixed**.
 *   [00:15] **Explore**: Loaded. Search input worked but no results (empty state?).
-*   [00:18] **Calendar**: **CRASHED (CAL-02)**.
+*   [00:18] **Calendar**: **CRASHED (CAL-02)**. -> **FIXED & VERIFIED**.
 *   [00:20] **People**: Error persisted, but recovered after "Try Again".
 *   [00:22] **Projects**: Loaded. Create Modal Verified.
 *   [00:25] **Actionables**: Loaded. Empty state verified.
