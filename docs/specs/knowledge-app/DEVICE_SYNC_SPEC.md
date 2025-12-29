@@ -3,7 +3,10 @@
 ## 1. Component Overview
 The **Device Sync** page (formerly `Device`) manages the connection to HiDock hardware (H1, H1E, P1). It handles USB connectivity, file synchronization, realtime audio streaming, and device-specific configuration.
 
-**Path**: `apps/electron/src/pages/Device.tsx` (To be renamed `DeviceSync.tsx`)
+### Vision alignment (do not mirror the current UI)
+- Device Sync is an *ingestion and operations* surface: it moves device captures into the system as Sources.
+- The UI should focus on outcomes (connected/not, synced/not, what’s new, what failed) rather than exposing internal service wiring.
+- Device-originated files become immutable Sources once ingested; the user should be able to navigate into Library/Source detail from sync results.
 
 ## 2. Component Interface
 
@@ -18,7 +21,7 @@ interface DeviceSyncProps {}
 | :--- | :--- | :--- |
 | `deviceState` | `HiDockDeviceState` | Core hardware info (Model, SN, Firmware, Storage). |
 | `connectionStatus` | `StatusObject` | Step-by-step connection progress/error info. |
-| `recordings` | `HiDockRecording[]` | List of files currently on the device. |
+| `deviceFiles` | `HiDockRecording[]` | List of files currently on the device. |
 | `syncing` | `boolean` | Indicates if a sync operation is active. |
 | `downloadQueue` | `Map` | Tracks status of active file downloads. |
 | `realtimeActive` | `boolean` | State of live audio streaming. |
@@ -37,7 +40,7 @@ interface DeviceSyncProps {}
 -   **Connect**:
     1.  User clicks "Connect" or Auto-connect triggers.
     2.  Service handshakes with USB device.
-    3.  On success: Fetches Device Info + Recording List.
+    3.  On success: Fetches Device Info + File List.
 -   **Disconnect**: Clears device state and stops polling.
 -   **Auto-Connect**:
     -   Configurable option to connect on app startup.
@@ -55,6 +58,7 @@ interface DeviceSyncProps {}
 
 ### 3.3 Realtime Streaming
 -   **Purpose**: Live audio monitoring (e.g., testing mic).
+-   **Purpose**: Live audio monitoring (e.g., testing mic); not a primary capture workflow.
 -   **Format**: 16kHz 16-bit Mono (PCM).
 -   **Visual**: Status indicator (Streaming/Paused/Idle) and "Bytes Received" counter.
 
@@ -106,3 +110,7 @@ interface DeviceSyncProps {}
 
 ### Hardware Tests
 -   **Real Device**: Manual QA required for actual USB plug/unplug events and transfer speeds.
+
+## Appendix A: Migration pointers (non-normative)
+- Current route implementation: `apps/electron/src/pages/Device.tsx` (candidate rename: `DeviceSync.tsx`).
+- Current service names referenced by the app: `DeviceService`, `DownloadService`, `AppStore`, `Config`.

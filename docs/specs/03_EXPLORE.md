@@ -1,12 +1,14 @@
 # Explore Specification
 
-**Module:** Knowledge Management (Pillar II: THE GRAPH)
-**Screen:** Explore (`/explore`)
-**Component:** `src/pages/Explore.tsx` (Current) / `src/components/GraphExplorer.tsx` (Target)
+**Version:** 1.1 (2025-12-29)
+**Module:** Knowledge Management (Pillar II: Explore)
+**Screen / Route:** Explore (`/explore`)
+**Component:** `apps/electron/src/pages/Explore.tsx` (Current) / Graph Explorer component (Target, TBD)
+**References:** [11_CONCEPTUAL_FRAMEWORK.md](./11_CONCEPTUAL_FRAMEWORK.md), [11_REDESIGN_ARCH.md](./11_REDESIGN_ARCH.md)
 **Screenshot:** ![Explore View](../qa/screenshots/explore_master.png)
 
 ## 1. Overview
-Explore is the **Discovery Engine** that visualizes the Knowledge Graph. It transforms raw sources from the Library into structured relationships, allowing users to spot trends, navigate entities (People/Projects), and find lateral connections.
+Explore is the discovery layer for **entities + relationships** derived from Sources. It enables lateral navigation (People/Projects/Topics/Decisions) and global search over the knowledge base.
 
 ## UI Components & Behavior
 
@@ -30,8 +32,8 @@ Explore is the **Discovery Engine** that visualizes the Knowledge Graph. It tran
 | `trendData` | `Object` | Aggregated metrics for visualizations. | Polled |
 
 ### 2.2 Lifecycle & Events
-*   **Mount:** Fetches graph topology from the backend (Neo4j/SQLite Graph layer).
-*   **Search:** Real-time semantic search filters the graph view.
+*   **Mount:** Fetches derived data (entities/relationships) and/or dashboard summary.
+*   **Search:** Keyword + semantic search over Sources and derived entities.
 
 ---
 
@@ -73,7 +75,7 @@ interface GraphNode {
 ## 6. Accessibility & Styling
 
 *   **Keyboard:** `Tab` focus cycles through major entity cards. Arrow keys pan graph.
-*   **Theming:** Node colors match entity types (People: Blue, Projects: Green, Topics: Amber).
+*   **Theming:** Use existing design system tokens only; entity type distinction should not rely on bespoke hard-coded colors.
 
 ---
 

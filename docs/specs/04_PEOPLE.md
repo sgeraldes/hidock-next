@@ -1,8 +1,10 @@
 # People Specification
 
-**Module:** Organization
-**Screen:** People (`/people`)
-**Component:** `src/pages/People.tsx`
+**Version:** 1.1 (2025-12-29)
+**Module:** Organization (Entity: Person)
+**Screen / Route:** People (`/people`)
+**Component:** `apps/electron/src/pages/People.tsx`
+**References:** [11_CONCEPTUAL_FRAMEWORK.md](./11_CONCEPTUAL_FRAMEWORK.md)
 **Screenshot:** ![People View](../qa/screenshots/people_master.png)
 
 ## 1. Overview
@@ -87,11 +89,7 @@ interface Person {
 ## 6. Accessibility & Styling
 
 *   **Keyboard:** Cards are interactive (`cursor-pointer`) but need `tabIndex` for keyboard focus (Missing in code).
-*   **Colors:**
-    *   **Team:** Blue.
-    *   **Candidate:** Purple.
-    *   **Customer:** Emerald.
-    *   **External:** Orange.
+*   **Visual distinction:** Use existing theme tokens and components (badges/labels) rather than introducing new hard-coded colors.
 
 ---
 

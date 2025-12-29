@@ -1,100 +1,141 @@
+
 # Knowledge Library Specification
 
-**Module:** Knowledge Management (Pillar I: SOURCES)
-**Screen:** Library (`/library`)
-**Component:** `src/pages/Recordings.tsx` (Current) / `src/components/ReaderWorkspace.tsx` (Target)
-**Screenshot:** ![Library View](../qa/screenshots/library_master.png)
-
-## 1. Overview
-The Library is the **Ingestion and Consumption Workspace**. It facilitates the transition from "managing audio files" to a "Document Reader" interface where users can navigate hierarchical sources, read transcripts/PDFs, and bookmark critical segments.
-
-## UI Components & Behavior
-
-| Feature | UI Element | Action | Expected Outcome | Redesign Alignment |
-| :--- | :--- | :--- | :--- | :--- |
-| **Global Navigation** | Sidebar Link | Click "Library" | Navigates to `#/library`. Loads the **Reader Workspace**. | Matches "Archive" metaphor. |
-| **Hierarchical Nav** | Tree View (Left Pane) | Expand Folder | Displays nested sources (Audio, PDF, Web, Images). | NotebookLM "Source Panel". |
-| **Content Reader** | Main Pane | Select Source | Renders interactive content (Waveform + Transcript for audio, Markdown for text, PDF Viewer). | "Seamless Reading Experience". |
-| **Processing** | Action Toolbar | Click "Analyze" | Triggers multimodal processing: Transcribe (Audio), Analyze (Docs), Describe (Pictures). | "Intelligent Indexing". |
-| **Bookmarking** | Bookmark Icon | Click on segment | Saves a reference to a specific time/line. Persists in "Bookmarks" sidebar. | "Deep Context Retrieval". |
-| **UI Controls** | Theme/Font Toggle | Click Icon | Updates typography (Font Size, Contrast) for reading comfort. | "Ample Whitespace/Clear Typography". |
+**Module:** Knowledge Management (Pillar I: Sources)
+**Screen / Route:** Library (`/library`)
+**Current UI:** recordings-based library
+**Current Component:** `apps/electron/src/pages/Recordings.tsx`
+**Primary Hook:** `apps/electron/src/hooks/useUnifiedRecordings.ts`
 
 ---
 
-## 2. Component Specification (Target State)
+## 1. Purpose (What the Library is)
 
-### 2.1 State Management
-| State Variable | Type | Description | Persistence |
-| :--- | :--- | :--- | :--- |
-| `sourceTree` | `SourceNode[]` | Hierarchical structure of all raw inputs. | DB-backed |
-| `activeSource` | `Source \| null` | The currently rendered document/audio. | Session |
-| `viewSettings` | `Object` | Zoom level, font size, theme preference. | **Persisted** (Config) |
-| `bookmarks` | `Bookmark[]` | List of saved anchors within sources. | DB-backed |
+The Library is the systems **evidence layer**: it lists and renders Sources and their processing status. The Library must make it easy to:
 
-### 2.2 Lifecycle & Events
-*   **Mount:** Fetches source hierarchy and user reading preferences.
-*   **Switch Source:** Unloads current renderer (Audio/PDF) and initializes new one.
-*   **Process:** Monitors background IPC for completion of OCR/Transcription.
+- ingest content (device  local)
+- review content (play/read) with high performance
+- trigger processing (transcription, extraction, indexing)
+- supply anchors for citations (timestamps / text ranges)
+
+This spec describes both the **current state** (UnifiedRecording-based) and the **target state** (Source/Note model from [11_CONCEPTUAL_FRAMEWORK.md](./11_CONCEPTUAL_FRAMEWORK.md)).
 
 ---
 
-## 3. Detailed Behavior
+## 2. Goals / Non-goals
 
-### 3.1 Hierarchical Navigation
-*   **Structure:** Recursive tree component.
-*   **Drag & Drop:** Supports moving sources between folders and bulk uploads.
+**Goals**
+- Provide a fast, scalable list/grid of knowledge captures (device + local) with clear status.
+- Make playback + transcript review reliable (no stale state when navigating back).
+- Expose a consistent "process" surface (single recording or bulk).
+- Provide citation anchors that other modules can deep-link to (Assistant, Actionables).
 
-### 3.2 Document Reader Interface
-*   **Audio/Transcript Integration:** Synchronized scrolling. Clicking a word seeks audio to that timestamp.
-*   **PDF/Markdown:** High-performance rendering with full-text selection and highlighting.
-*   **Picture Description:** AI generates alt-text/descriptions for visual sources.
-
-### 3.3 Intelligence: Extraction
-*   **Action:** Click "Process".
-*   **Flow:** Source -> AI Backbone (Esperanto) -> Extract Entities (People, Places) -> Index into Explore (Graph).
+**Non-goals (for 01 spec)**
+- Full tri-pane Notebook UI (covered by redesign architecture; will be implemented incrementally).
+- Full-text PDF + web clip ingestion (future plugin/integration work).
 
 ---
 
-## 4. API Contracts
+## 3. Current UX Surface (Electron)
 
-### `Source` (Redesign Model)
+### 3.1 Core behaviors
+
+| Behavior | Implementation notes |
+| :--- | :--- |
+| List of recordings (device + local) | Aggregated by `useUnifiedRecordings()` |
+| Filters (location/category/quality/status) + search | Client-side filter over the unified list |
+| Virtualized rendering | `@tanstack/react-virtual` |
+| Enrichment (transcripts + calendar meeting data) | Batched fetch keyed by the set of IDs |
+| Playback | Centralized via `useAudioControls()` and `useUIStore()` |
+| Bulk operations | Download/process queues with progress UI |
+
+### 3.2 Key state (current)
+
+The current Library page tracks:
+
+- `recordings: UnifiedRecording[]` (from hook)
+- `locationFilter`, `categoryFilter`, `qualityFilter`, `statusFilter`, `searchQuery`
+- `compactView` (persisted UI preference)
+- `expandedTranscripts: Set<recordingId>`
+- enrichment maps: `transcripts: Map<recordingId, Transcript>`, `meetings: Map<meetingId, Meeting>`
+
+---
+
+## 4. Target UX (Open Notebook alignment)
+
+Target layout is described in [11_REDESIGN_ARCH.md](./11_REDESIGN_ARCH.md). Library becomes the left-pane Sources panel + the center-pane reader when a Source is selected.
+
+Minimum target behaviors:
+
+- hierarchical Sources (folders / notebooks)
+- renderer selection by type (audio transcript vs. PDF vs. markdown)
+- processing state per Source (queued/running/failed/ready)
+- deep-link anchors: `sourceId + anchor` (timestamp range, text offsets)
+
+---
+
+## 5. Data Contracts
+
+### 5.1 Current: `UnifiedRecording`
+
+The Library currently uses `UnifiedRecording` from `apps/electron/src/types/unified-recording`.
+
+Required invariants:
+- A recording is either device-only, local-only, or synced.
+- Playback requires `localPath` (device-only must be downloaded first).
+
+### 5.2 Target: `Source` + anchors
+
+The redesign model introduces immutable Sources (see [11_REDESIGN_ARCH.md](./11_REDESIGN_ARCH.md)). Library must produce stable citation anchors.
+
+Example anchor formats (implementation may vary):
+
 ```typescript
-interface Source {
-  id: string;
-  type: 'audio' | 'pdf' | 'markdown' | 'image';
-  parentId?: string; // For hierarchy
-  title: string;
-  content: string; // Raw text or JSON transcript
-  metadata: {
-    size: number;
-    mimeType: string;
-    capturedAt: Date;
-  };
+type SourceAnchor =
+  | { kind: 'audio_time'; startMs: number; endMs: number }
+  | { kind: 'text_range'; startOffset: number; endOffset: number }
+  | { kind: 'page_range'; startPage: number; endPage: number };
+
+interface Citation {
+  sourceId: string;
+  anchor: SourceAnchor;
+  quote?: string;
 }
 ```
 
 ---
 
-## 5. Error Handling
+## 6. IPC / Service Responsibilities
 
-*   **Process Fail:** Shows "Analysis Failed" state on source card with retry option.
-*   **Large Files:** Progressive loading for 100MB+ PDFs to prevent UI freeze.
+The Library is a coordinator. Heavy work happens in services (main process).
+
+Required IPC capabilities (current patterns already exist):
+
+- transcripts batch fetch by recording ids
+- meetings batch fetch by ids
+- download service queue + progress
+- processing/transcription queue + progress
+
+Implementation rule:
+- UI should never block on processing; all long-running jobs must be queued with progress reporting.
 
 ---
 
-## 6. Accessibility & Styling
+## 7. Error handling & UX states
 
-*   **ARIA:** `role="tree"` for navigation. `aria-live` for processing status updates.
-*   **Typography:** Ample line height (1.6), sans-serif default, high contrast mode support.
+- Load failure: show an actionable error state + retry (not just console logging).
+- Device disconnected: disable device-only actions with a clear explanation.
+- Processing failure: per-item failure state with retry and a link to logs.
 
 ---
 
-## 7. Testing Strategy
+## 8. Testing & performance
 
-### Integration Tests
-*   **Tree Nav:** Click deep nested file -> Verify correct content renders.
-*   **Sync:** Verify text highlight in transcript matches audio `currentTime`.
+**Tests (minimum)**
+- Filtering/search correctness (unit)
+- Enrichment batching (integration)
+- Device-only playback requires download (integration)
 
-### Performance Targets
-*   **Source Switch:** < 300ms.
-*   **Search (In-Source):** < 100ms.
+**Performance targets**
+- Virtualized scroll remains smooth with 1000+ items
+- Initial render stays responsive (no large synchronous enrichment)

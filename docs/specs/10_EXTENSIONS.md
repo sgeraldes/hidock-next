@@ -3,6 +3,7 @@
 **Module:** Core Architecture
 **Component:** Plugin System
 **Target:** Future Expansion (Phase 3+)
+**References:** [11_CONCEPTUAL_FRAMEWORK.md](./11_CONCEPTUAL_FRAMEWORK.md), [11_REDESIGN_ARCH.md](./11_REDESIGN_ARCH.md)
 
 ## 1. Overview
 To realize the vision of "registering and understanding EVERYTHING," the HiDock Knowledge System must expand beyond audio recordings. This document defines a modular **Plugin Architecture** that allows the ingestion of data from diverse external sources (Slack, Teams, Jira, etc.) into the unified Knowledge Graph.
@@ -70,7 +71,7 @@ interface KnowledgePlugin {
 
 ### 4.1 Plugin Manager
 *   **Discovery:** Scans a `plugins/` directory or a registry.
-*   **Sandboxing:** Runs plugins in isolated contexts (e.g., separate Node process or Worker) to prevent crashes from affecting the main app.
+*   **Sandboxing:** Runs plugins in isolated contexts (preferred: separate process) to prevent crashes from affecting the main app.
 *   **Lifecycle Management:** Loads, enables, disables, and updates plugins.
 
 ### 4.2 Data Normalization & Schema Mapping
@@ -108,8 +109,16 @@ A new section in Settings (`/settings/integrations`) will manage these extension
 
 ### Phase 3.1: Foundation
 *   Define `KnowledgeEvent` schema in DB.
-*   Implement `PluginManager` class in Electron Main process.
+*   Implement `PluginManager` in the Electron main process and expose a minimal IPC surface to the renderer.
 *   Create "Integrations" UI skeleton.
+
+---
+
+## 8. Implementation notes (practical constraints)
+
+- Keep plugin execution out of the renderer; only the main process should talk to external networks.
+- Treat all plugin input as untrusted: validate payload sizes, sanitize strings, and apply timeouts.
+- Start with a single built-in "Local File Import" connector to validate the architecture before adding OAuth-heavy integrations.
 
 ### Phase 3.2: Pilot Plugins
 *   **Text File Importer:** Simple plugin to ingest local `.md` or `.txt` files.

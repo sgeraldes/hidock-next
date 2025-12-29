@@ -1,12 +1,16 @@
 # Knowledge Assistant Specification
 
-**Module:** Knowledge Management (Pillar III: THE ANALYST)
-**Screen:** Assistant (`/assistant`)
-**Component:** `src/pages/Chat.tsx`
+**Version:** 1.1 (2025-12-29)
+**Module:** Knowledge Management (Pillar III: Assistant)
+**Screen / Route:** Assistant (`/assistant`)
+**Component:** `apps/electron/src/pages/Chat.tsx`
+**References:** [11_CONCEPTUAL_FRAMEWORK.md](./11_CONCEPTUAL_FRAMEWORK.md), [11_REDESIGN_ARCH.md](./11_REDESIGN_ARCH.md)
 **Screenshot:** ![Assistant View](../qa/screenshots/assistant_master.png)
 
 ## 1. Overview
 The Assistant is the **Creative Engine** for synthesis and action. It grounded AI conversations in the truth of the Library and the context of the Explore graph to transform knowledge into artifacts (reports, emails, tasks).
+
+Key invariant: if the Assistant cannot ground an answer in Sources/Notes, it must say so and point to what evidence is missing.
 
 ## UI Components & Behavior
 
@@ -58,6 +62,19 @@ interface Note {
   sourceLink: string; // ID:Anchor
 }
 ```
+
+---
+
+## 4.1 Grounding & citation contract (required)
+
+Every response that creates a decision, summary, task, or claim must include citations that map to Library anchors (timestamp/text range/page range). Exact anchor serialization can evolve, but the contract must support deep-linking.
+
+---
+
+## 8. Implementation notes (current code alignment)
+
+- The current Assistant page already supports explicit context selection via a picker; keep context explicit rather than implicit "whole library" prompts.
+- Prefer storing conversations and their selected context IDs so the same answer can be reproduced.
 
 ---
 

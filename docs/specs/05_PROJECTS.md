@@ -1,8 +1,10 @@
 # Projects Specification
 
-**Module:** Organization
-**Screen:** Projects (`/projects`)
-**Component:** `src/pages/Projects.tsx`
+**Version:** 1.1 (2025-12-29)
+**Module:** Organization (Entity: Project/Notebook)
+**Screen / Route:** Projects (`/projects`)
+**Component:** `apps/electron/src/pages/Projects.tsx`
+**References:** [11_CONCEPTUAL_FRAMEWORK.md](./11_CONCEPTUAL_FRAMEWORK.md)
 **Screenshot:** ![Projects View](../qa/screenshots/projects_master.png)
 
 ## 1. Overview
@@ -91,7 +93,7 @@ interface Project {
 
 *   **Keyboard:** Sidebar items need `tabIndex`.
 *   **Animation:** `animate-in fade-in slide-in-from-right-2` on detail view entry.
-*   **Theme:** Uses `muted/10` for sidebar background.
+*   **Theme:** Use existing design system tokens and components; avoid bespoke color values.
 
 ---
 

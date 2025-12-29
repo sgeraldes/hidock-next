@@ -1,8 +1,10 @@
 # Calendar Specification
 
-**Module:** Organization
-**Screen:** Calendar (`/calendar`)
-**Component:** `src/pages/Calendar.tsx`
+**Version:** 1.1 (2025-12-29)
+**Module:** Organization (Temporal view)
+**Screen / Route:** Calendar (`/calendar`)
+**Component:** `apps/electron/src/pages/Calendar.tsx`
+**References:** [11_CONCEPTUAL_FRAMEWORK.md](./11_CONCEPTUAL_FRAMEWORK.md)
 **Screenshot:** ![Calendar Month View](../qa/screenshots/calendar_month_master.png)
 
 ## 1. Overview

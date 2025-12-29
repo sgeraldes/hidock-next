@@ -1,8 +1,10 @@
 # Settings Specification
 
+**Version:** 1.1 (2025-12-29)
 **Module:** Configuration
-**Screen:** Settings (`/settings`)
-**Component:** `src/pages/Settings.tsx`
+**Screen / Route:** Settings (`/settings`)
+**Component:** `apps/electron/src/pages/Settings.tsx`
+**References:** [11_REDESIGN_ARCH.md](./11_REDESIGN_ARCH.md), [10_EXTENSIONS.md](./10_EXTENSIONS.md)
 **Screenshot:** ![Settings View](../qa/screenshots/settings_master.png)
 
 ## 1. Overview
@@ -89,6 +91,14 @@ interface AppConfig {
 
 *   **Forms:** Standard Shadcn `Card` + `Input` layout.
 *   **Security:** API Key input uses `type="password"`.
+
+---
+
+## 8. Security requirements (implementation)
+
+- Secrets (API keys, tokens) must be stored encrypted at rest.
+- The UI must never log secrets to console.
+- Provide an explicit "Test Connection" action where applicable so users can validate configuration without guesswork.
 
 ---
 

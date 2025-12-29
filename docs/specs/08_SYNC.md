@@ -1,8 +1,10 @@
 # Sync Specification
 
-**Module:** Device Management
-**Screen:** Sync (`/sync`)
-**Component:** `src/pages/Device.tsx`
+**Version:** 1.1 (2025-12-29)
+**Module:** Device Management (Ingestion path)
+**Screen / Route:** Sync (`/sync`)
+**Component:** `apps/electron/src/pages/Device.tsx`
+**References:** [11_CONCEPTUAL_FRAMEWORK.md](./11_CONCEPTUAL_FRAMEWORK.md), [01_LIBRARY.md](./01_LIBRARY.md)
 **Screenshot:** ![Sync View](../qa/screenshots/sync_master.png)
 
 ## 1. Overview
