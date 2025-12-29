@@ -10,6 +10,8 @@
 ## 1. Overview
 This document serves as the single source of truth for testing the HiDock Next frontend application. It details screen analysis, expected behaviors, and a rigorous testing strategy covering Unit, Integration, and End-to-End (E2E) layers.
 
+**Reference:** For detailed functional requirements, API contracts, and validation rules, refer to [06_BEHAVIORAL_SPECIFICATION.md](./06_BEHAVIORAL_SPECIFICATION.md).
+
 **Core Objectives:**
 *   **Functional Integrity:** Ensure all interactive elements perform their intended actions.
 *   **State Consistency:** Verify data persistence across navigation and sessions.
