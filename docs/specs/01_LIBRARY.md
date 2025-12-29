@@ -1,170 +1,100 @@
 # Knowledge Library Specification
 
-**Module:** Knowledge Management
+**Module:** Knowledge Management (Pillar I: SOURCES)
 **Screen:** Library (`/library`)
-**Component:** `src/pages/Recordings.tsx`
+**Component:** `src/pages/Recordings.tsx` (Current) / `src/components/ReaderWorkspace.tsx` (Target)
 **Screenshot:** ![Library View](../qa/screenshots/library_master.png)
 
 ## 1. Overview
-The Library currently acts as the central **Knowledge Repository**, storing all captured conversations, meetings, and insights. It allows users to browse, filter, and manage their knowledge base efficiently using a virtualized list for performance.
+The Library is the **Ingestion and Consumption Workspace**. It facilitates the transition from "managing audio files" to a "Document Reader" interface where users can navigate hierarchical sources, read transcripts/PDFs, and bookmark critical segments.
 
-**Strategic Note:** While currently implemented as a "List of Files", the vision for this module is to evolve into a "Knowledge System" where the audio file is secondary to the extracted insights, semantic connections, and knowledge graph. See Section 8 for the Future Vision.
-
----
-
-## 2. Current Implementation (Phase 1)
-
-### 2.1 UI Components & Behavior
+## UI Components & Behavior
 
 | Feature | UI Element | Action | Expected Outcome | Redesign Alignment |
 | :--- | :--- | :--- | :--- | :--- |
-| **Global Navigation** | Sidebar Link | Click "Library" | Navigates to `#/library`. Loads virtualized list of recordings. | Matches "Knowledge Library" renaming. |
-| **Search** | Input Field | Type text (e.g., "Amazon") | Filters list by filename/title case-insensitive. Debounced (300ms). | Aligns with "Search & Filter" requirement. |
-| **Source Filtering** | Tag Buttons | Click "Meeting", "Interview", etc. | Filters list to show only items with selected tag. Updates item count. | Matches "By Source" taxonomy. |
-| **Status Filtering** | "All Statuses" Dropdown | Select "Processing", "Ready" | Filters list by transcription status. | Matches "By Status" taxonomy. |
-| **Quality Filtering** | "All Ratings" Dropdown | Select "Valuable", "Low-Value" | Filters list by quality rating. | Matches "By Quality" taxonomy. |
-| **Playback** | Play Button (▶) | Click on Item | **Local:** Plays immediately via AudioPlayer.<br>**Device:** Queues download, shows spinner, plays on completion. | Aligns with "Actions per Knowledge Item". |
-| **Download** | Download Icon (⬇) | Click on Device-Only Item | Initiates background download. Updates sync status to "Local". | Core "Device Management" utility. |
-| **Management** | Trash Icon | Click Delete | Prompts confirmation. Removes from DB (and optionally device). | Standard management action. |
-
-### 2.2 Component Specification
-
-#### State Management
-| State Variable | Type | Description | Persistence |
-| :--- | :--- | :--- | :--- |
-| `searchQuery` | `string` | Text filter for title/subject/filename. | Session |
-| `locationFilter` | `'all' \| 'device-only' \| 'local-only'` | Filter by storage location. | Session |
-| `compactView` | `boolean` | Toggle between Card and List view. | **Persisted** (Zustand) |
-| `transcripts` | `Map<string, Transcript>` | Enriched data for local recordings. | Session (Memoized) |
-| `meetings` | `Map<string, Meeting>` | Linked meeting data. | Session (Memoized) |
-| `expandedTranscripts` | `Set<string>` | IDs of cards with expanded details. | Session |
-
-#### Lifecycle & Events
-*   **Mount:** Fetches initial recording list via `useUnifiedRecordings` (Device + DB).
-*   **Enrichment:** On `recordings` change, batch fetches missing transcripts (`transcripts.getByRecordingIds`) and meetings (`meetings.getByIds`).
-*   **Virtualization:** Uses `useVirtualizer` to render only visible rows (`overscan: 5`).
-
-### 2.3 Detailed Behavior
-
-#### List Rendering
-*   **Specs:** Must render 1000+ items at 60fps.
-*   **Logic:** `filteredRecordings` array is memoized based on all active filters.
-*   **Height Calculation:**
-    *   **Compact:** Fixed 52px.
-    *   **Card:** Dynamic (Base 120px + Player 80px + Transcript 400px).
-
-#### Playback Interactions
-*   **Local File:**
-    *   **Action:** Click Play (▶).
-    *   **Flow:** `currentlyPlayingId` set in global store -> `AudioPlayer` component mounts.
-    *   **Outcome:** Audio starts immediately.
-*   **Device File:**
-    *   **Action:** Click Download/Play.
-    *   **Flow:** Calls `downloadService.queueDownloads` with `deviceFilename` and `dateRecorded`.
-    *   **Visual:** Button shows spinner (`isDownloading` check from global queue).
-    *   **Outcome:** File downloads -> List refreshes -> Play button becomes enabled.
-
-#### Bulk Actions
-*   **Bulk Download:**
-    *   **Trigger:** "Download All" button (visible if `stats.deviceOnly > 0`).
-    *   **Flow:** Iterates all device-only items -> Adds to download queue.
-*   **Bulk Process:**
-    *   **Trigger:** "Process All" button.
-    *   **Flow:** Sets status to `pending` for all untranscribed local files -> Queue picks them up.
-
-### 2.4 API Contracts
-
-#### `UnifiedRecording` (Frontend Model)
-```typescript
-interface UnifiedRecording {
-  id: string;
-  filename: string;
-  location: 'device-only' | 'local-only' | 'both';
-  duration: number;
-  size: number;
-  dateRecorded: Date;
-  transcriptionStatus: 'none' | 'pending' | 'processing' | 'complete' | 'error';
-  deviceFilename?: string; // If on device
-  localPath?: string;      // If local
-}
-```
-
-#### IPC Methods
-*   `recordings.getAll()`: Returns raw DB records.
-*   `deviceCache.getAll()`: Returns cached device file list.
-*   `transcripts.getByRecordingIds(ids[])`: Returns Map of `Transcript` objects.
-*   `downloadService.queueDownloads(files[])`: Adds files to background downloader.
-
-### 2.5 Error Handling & Edge Cases
-
-*   **Device Disconnect:** "Download" buttons disabled immediately via `deviceConnected` prop.
-*   **Missing Local File:** If `play()` fails due to missing file, shows Toast error "File not found".
-*   **Transcription Fail:** Status badge turns Red (`error`). Retry button appears.
-
-### 2.6 Accessibility & Styling
-
-*   **ARIA:** List items have `role="listitem"`. Interactive elements have `aria-label`.
-*   **Keyboard:** `Tab` navigation through list items. `Space` to toggle Play/Pause.
-*   **Theme:** Uses `muted/50` for hover states. `primary` color for active filters. Dark mode supported via Tailwind classes.
-
-### 2.7 Testing Strategy
-
-#### Unit Tests (`src/pages/__tests__/Recordings.test.tsx`)
-*   Test filter logic (`filteredRecordings` memo).
-*   Test virtualizer height estimation logic.
-
-#### Integration Tests
-*   **Render:** Mock `useUnifiedRecordings` with 10 items -> Assert 10 cards rendered.
-*   **Enrichment:** Verify `transcripts.getByRecordingIds` is called with correct IDs.
-*   **Playback:** Click Play -> Verify `audioControls.play` called with correct ID/Path.
-
-#### Performance Targets
-*   **Initial Render:** < 200ms.
-*   **Filter Update:** < 50ms.
-*   **Scroll FPS:** > 50fps on mid-range hardware.
+| **Global Navigation** | Sidebar Link | Click "Library" | Navigates to `#/library`. Loads the **Reader Workspace**. | Matches "Archive" metaphor. |
+| **Hierarchical Nav** | Tree View (Left Pane) | Expand Folder | Displays nested sources (Audio, PDF, Web, Images). | NotebookLM "Source Panel". |
+| **Content Reader** | Main Pane | Select Source | Renders interactive content (Waveform + Transcript for audio, Markdown for text, PDF Viewer). | "Seamless Reading Experience". |
+| **Processing** | Action Toolbar | Click "Analyze" | Triggers multimodal processing: Transcribe (Audio), Analyze (Docs), Describe (Pictures). | "Intelligent Indexing". |
+| **Bookmarking** | Bookmark Icon | Click on segment | Saves a reference to a specific time/line. Persists in "Bookmarks" sidebar. | "Deep Context Retrieval". |
+| **UI Controls** | Theme/Font Toggle | Click Icon | Updates typography (Font Size, Contrast) for reading comfort. | "Ample Whitespace/Clear Typography". |
 
 ---
 
-## 8. Strategic Vision: The True Knowledge Library (Enhancement Proposal)
+## 2. Component Specification (Target State)
 
-**Expert Note:** The current "File List" implementation is insufficient for the product vision. The goal is to move from "managing files" to "managing knowledge".
+### 2.1 State Management
+| State Variable | Type | Description | Persistence |
+| :--- | :--- | :--- | :--- |
+| `sourceTree` | `SourceNode[]` | Hierarchical structure of all raw inputs. | DB-backed |
+| `activeSource` | `Source \| null` | The currently rendered document/audio. | Session |
+| `viewSettings` | `Object` | Zoom level, font size, theme preference. | **Persisted** (Config) |
+| `bookmarks` | `Bookmark[]` | List of saved anchors within sources. | DB-backed |
 
-### 8.1 Core Concept Shift
-*   **From:** A directory of `.wav` files with attached transcripts.
-*   **To:** A **Knowledge System** that indexes, connects, and visualizes "EVERYTHING that is going on around you".
-*   **Entrance:** The HiDock device is merely the *ingestion point*, not the defining structure.
+### 2.2 Lifecycle & Events
+*   **Mount:** Fetches source hierarchy and user reading preferences.
+*   **Switch Source:** Unloads current renderer (Audio/PDF) and initializes new one.
+*   **Process:** Monitors background IPC for completion of OCR/Transcription.
 
-### 8.2 Proposed Core Functionality
-1.  **Intelligent Indexing:**
-    *   **Automated Pipeline:** Audio -> Transcript -> Speaker Diarization -> Topic Extraction -> Action Item Extraction -> Entity Linking.
-    *   **Outcome:** "Files" disappear; "Events" and "Insights" emerge.
-2.  **Semantic Search:**
-    *   **Capability:** "Find where we discussed the Q3 budget" (Natural Language).
-    *   **Tech:** Vector embeddings (RAG) for all indexed content.
-3.  **Knowledge Graph:**
-    *   **Structure:** `Person` <-> `Meeting` <-> `Topic` <-> `Project`.
-    *   **Navigation:** Click a "Topic" node to see all related Meetings and People.
-4.  **Contextual Linking:**
-    *   **Metadata:** Auto-associate recording time/location with Calendar events (already partially done) and GPS/Location data (future).
-5.  **Trend Identification:**
-    *   **Insight:** "You spend 30% of your time discussing 'Optimization' this month."
-6.  **Expandable Data Ingestion (Plugins):**
-    *   **Concept:** Knowledge is not limited to audio. The system must ingest text, documents, and messages from external tools.
-    *   **Sources:** Slack, MS Teams, Email (Outlook/Gmail), Jira, GitHub, Notion.
-    *   **Architecture:** Modular Plugin System (See `09_EXTENSIONS.md`).
+---
 
-### 8.3 UX/UI Redesign Concepts
-*   **Dashboard View:** Not a list. A high-level overview of *Recent Activity*, *Pending Actions*, and *Suggested Insights*.
-*   **Graph Visualization:** An interactive node-link diagram replacing the list view for exploration.
-*   **Timeline View:** A chronological stream of "Knowledge Events" (Meetings, Ideas, Decisions) rather than file dates.
-*   **Tagging 2.0:** AI-suggested taxonomy (e.g., "Strategic", "Tactical", "HR") replacing manual tags.
+## 3. Detailed Behavior
 
-### 8.4 Technical Requirements (Gap Analysis)
-*   **Storage:** Need vector database (e.g., `pgvector`, local ChromaDB) for semantic search.
-*   **Search Engine:** Move beyond SQL `LIKE` queries to Hybrid Search (Keyword + Semantic).
-*   **API:** Expose "Knowledge Graph" API for external integrations (e.g., Notion sync).
+### 3.1 Hierarchical Navigation
+*   **Structure:** Recursive tree component.
+*   **Drag & Drop:** Supports moving sources between folders and bulk uploads.
 
-### 8.5 Measurable Success Metrics
-*   **Retrieval Time:** Reduce time to find a specific decision by **50%**.
-*   **Insight Accuracy:** Increase AI-generated summary acceptance rate to **90%**.
-*   **Feature Adoption:** Achieve **40%** user adoption of Semantic Search vs. Keyword Search.
+### 3.2 Document Reader Interface
+*   **Audio/Transcript Integration:** Synchronized scrolling. Clicking a word seeks audio to that timestamp.
+*   **PDF/Markdown:** High-performance rendering with full-text selection and highlighting.
+*   **Picture Description:** AI generates alt-text/descriptions for visual sources.
+
+### 3.3 Intelligence: Extraction
+*   **Action:** Click "Process".
+*   **Flow:** Source -> AI Backbone (Esperanto) -> Extract Entities (People, Places) -> Index into Explore (Graph).
+
+---
+
+## 4. API Contracts
+
+### `Source` (Redesign Model)
+```typescript
+interface Source {
+  id: string;
+  type: 'audio' | 'pdf' | 'markdown' | 'image';
+  parentId?: string; // For hierarchy
+  title: string;
+  content: string; // Raw text or JSON transcript
+  metadata: {
+    size: number;
+    mimeType: string;
+    capturedAt: Date;
+  };
+}
+```
+
+---
+
+## 5. Error Handling
+
+*   **Process Fail:** Shows "Analysis Failed" state on source card with retry option.
+*   **Large Files:** Progressive loading for 100MB+ PDFs to prevent UI freeze.
+
+---
+
+## 6. Accessibility & Styling
+
+*   **ARIA:** `role="tree"` for navigation. `aria-live` for processing status updates.
+*   **Typography:** Ample line height (1.6), sans-serif default, high contrast mode support.
+
+---
+
+## 7. Testing Strategy
+
+### Integration Tests
+*   **Tree Nav:** Click deep nested file -> Verify correct content renders.
+*   **Sync:** Verify text highlight in transcript matches audio `currentTime`.
+
+### Performance Targets
+*   **Source Switch:** < 300ms.
+*   **Search (In-Source):** < 100ms.

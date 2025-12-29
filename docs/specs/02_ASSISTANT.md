@@ -1,22 +1,22 @@
 # Knowledge Assistant Specification
 
-**Module:** AI Intelligence
+**Module:** Knowledge Management (Pillar III: THE ANALYST)
 **Screen:** Assistant (`/assistant`)
 **Component:** `src/pages/Chat.tsx`
 **Screenshot:** ![Assistant View](../qa/screenshots/assistant_master.png)
 
 ## 1. Overview
-The Assistant is a **Knowledge-Powered AI** interface implementing a RAG (Retrieval-Augmented Generation) pipeline. It allows users to query their knowledge base, maintaining conversation history and allowing manual context injection.
+The Assistant is the **Creative Engine** for synthesis and action. It grounded AI conversations in the truth of the Library and the context of the Explore graph to transform knowledge into artifacts (reports, emails, tasks).
 
 ## UI Components & Behavior
 
 | Feature | UI Element | Action | Expected Outcome | Redesign Alignment |
 | :--- | :--- | :--- | :--- | :--- |
-| **Chat Interface** | Message List | Scroll | Displays history of User and Assistant messages. Renders Markdown. | "Conversation History" feature. |
-| **Input** | Text Area | Type + Enter | Sends message. Shows "Thinking..." state. Streams response token-by-token. | Standard Chat UI. |
-| **Context Injection** | "Context" Dropdown | Select Recording/Meeting | Scopes RAG retrieval to specific items (e.g., "Summarize *this* meeting"). | "Context Injection" core feature. |
-| **New Session** | "New Chat" Button | Click | Clears current message history. Resets context selection. | "Branch/Reset" functionality. |
-| **Artifact Generation** | (Planned) Output Button | Click "Create Output" | (Future) Generates structured document from chat content. | Phase 2: "Create output from conversation". |
+| **Global Navigation** | Sidebar Link | Click "Assistant" | Navigates to `#/assistant`. Loads chat workspace. | Matches "Synthesis" metaphor. |
+| **Interactive Chat** | Conversation | Ask Question | Retrieves context from Library/Explore. Streams answer. | "Talk with the data". |
+| **Source Linking** | Citations `[1]` | Click/Hover | Opens the original Library segment (timestamp/page) for verification. | "Source Linking/Cross-reference". |
+| **Transformation** | "Transform" Button | Click | Converts current chat insight into a specific Output (Actionable, Report). | "Generate Artifacts". |
+| **Output Panel** | Note Thumbnail View | View | Shows small previews of AI-generated notes/actionables. | "Thumbnail view of notes". |
 
 ---
 
@@ -25,94 +25,58 @@ The Assistant is a **Knowledge-Powered AI** interface implementing a RAG (Retrie
 ### 2.1 State Management
 | State Variable | Type | Description | Persistence |
 | :--- | :--- | :--- | :--- |
-| `activeConversation` | `Conversation \| null` | Currently selected chat session. | Session |
-| `messages` | `Message[]` | Message history for current session. | Session (DB-backed) |
-| `contextIds` | `string[]` | IDs of manually attached knowledge items. | Session (DB-backed) |
-| `status` | `RAGStatus` | Ollama/Index readiness status. | Polled |
-| `input` | `string` | Current user query text. | Session |
+| `activeSession` | `Conversation` | Message history and context state. | DB-backed |
+| `activeCitations` | `Citation[]` | Pointers to specific segments in Sources. | Session |
+| `noteGallery` | `Note[]` | Preview thumbnails of generated insights. | Session |
 
 ### 2.2 Lifecycle & Events
-*   **Mount:** Checks `rag.status()` -> Loads `conversations` list -> Selects most recent conversation.
-*   **Polling:** Periodically checks RAG status to enable/disable input.
-*   **Message:** `handleSubmit` creates conversation (if new) -> Adds User Msg -> Calls RAG -> Adds Assistant Msg.
+*   **Mount:** Fetches recent conversation and any pending "Actionable" suggestions.
+*   **Generation:** Real-time token streaming using the **Esperanto** AI Backbone.
 
 ---
 
 ## 3. Detailed Behavior
 
-### 3.1 Chat Interaction
-*   **Submission:**
-    *   **Action:** Enter or Click Send.
-    *   **Pre-check:** If no `activeConversation`, call `assistant.createConversation`.
-    *   **Flow:**
-        1.  `assistant.addMessage(user)` (Optimistic UI update).
-        2.  `rag.chatLegacy(conversationId, text)`.
-        3.  `assistant.addMessage(assistant, response.answer, response.sources)`.
-    *   **Loading:** Show "Thinking..." bubble while awaiting RAG.
+### 3.1 Synthesis & Transformation
+*   **Prompting:** Users can use "Recipes" (e.g., "Draft Interview Feedback").
+*   **Actionability:** Every insight is one click away from becoming an "Actionable" (See `07_ACTIONABLES.md`).
 
-### 3.2 Context Management
-*   **Picker:**
-    *   **Action:** Click "Context" button -> Opens `ContextPicker` dialog.
-    *   **Selection:** Multi-select Recordings/Meetings.
-    *   **Outcome:** Calls `assistant.addContext` / `removeContext`. Updates `contextIds`.
-    *   **Visual:** Attached items appear as chips in the header.
-
-### 3.3 Source Attribution
-*   **Logic:** `getMessageSources` parses `message.sources` JSON.
-*   **Display:** Assistant messages show "Used 3 references" chips. Hovering reveals specific document titles.
+### 3.2 Metadata Auto-Tagging
+*   **Logic:** Assistant detects People, Places, and Dates in chat and offers to update the Explore Graph.
 
 ---
 
 ## 4. API Contracts
 
-### `RAGChatResponse`
+### `Note` (AI Generated)
 ```typescript
-interface RAGChatResponse {
-  answer: string;
-  sources: Array<{
-    content: string;
-    meetingId?: string;
-    subject?: string;
-    score: number;
-  }>;
-  error?: string;
+interface Note {
+  id: string;
+  category: 'summary' | 'action_item' | 'insight';
+  label: 'AI-Generated' | 'User-Edited';
+  content: string; // Markdown
+  sourceLink: string; // ID:Anchor
 }
 ```
-
-### IPC Methods
-*   `assistant.getConversations()`: Returns list of past chats.
-*   `assistant.getMessages(id)`: Returns full history.
-*   `assistant.addContext(convId, itemId)`: Links knowledge to session.
-*   `rag.chatLegacy(sessionId, message)`: Core RAG execution.
 
 ---
 
 ## 5. Error Handling
 
-*   **Ollama Offline:** `rag.status()` returns `ollamaAvailable: false` -> Input disabled with warning "Ollama offline".
-*   **Generation Fail:** RAG returns `error` string -> Displayed as a red System Message in chat.
-*   **Empty History:** Shows "Welcome" state with suggestion chips ("Summarize recent meetings").
+*   **Hallucination Warning:** If confidence < 0.7, Assistant adds a disclaimer to the citation.
+*   **Offline Mode:** If LLM provider is unreachable, Assistant offers local fallback (Ollama).
 
 ---
 
 ## 6. Accessibility & Styling
 
-*   **Keyboard:** `Enter` to send (prevented if `Shift+Enter`). Auto-focus input on load.
-*   **Scrolling:** `messagesEndRef` auto-scrolls to bottom on new message. `behavior: 'smooth'`.
-*   **Tokens:** `bg-muted` for User bubbles, `bg-background` for Assistant. Markdown rendering for bold/lists.
+*   **Keyboard:** `Cmd+Enter` to send. `Alt+Up` to edit last message.
+*   **Layout:** Three-column: Chat | Preview Panel | References.
 
 ---
 
 ## 7. Testing Strategy
 
-### Unit Tests
-*   Test `handleSubmit` flow (conversation creation vs existing).
-*   Test `getMessageSources` parsing logic.
-
 ### Integration Tests
-*   **Chat Flow:** Mock `rag.chatLegacy` -> Send "Hello" -> Verify User bubble appears -> Verify Assistant bubble appears with mock response.
-*   **Context:** Click Context -> Select Item -> Verify `assistant.addContext` called.
-
-### Performance
-*   **Latency:** Time-to-first-token (TTFT) depends on local LLM. UI must remain responsive.
-*   **Rendering:** Large histories (100+ msgs) should not lag input typing.
+*   **Citations:** Ask question -> Verify citation link points to correct source ID.
+*   **Artifact Flow:** Click "Create Report" -> Verify new item appears in Actionables.
