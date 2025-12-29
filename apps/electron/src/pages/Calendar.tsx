@@ -65,6 +65,7 @@ export function Calendar() {
     navigateWeek,
     navigateMonth,
     goToToday,
+    setCurrentDate,
     setCalendarView,
     loadMeetings,
     lastCalendarSync: lastSync,
