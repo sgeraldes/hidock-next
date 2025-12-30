@@ -644,6 +644,8 @@ export function Library() {
                     return (
                       <div
                         key={recording.id}
+                        data-index={virtualRow.index}
+                        ref={rowVirtualizer.measureElement}
                         style={{
                           position: 'absolute',
                           top: 0,
