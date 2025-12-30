@@ -234,22 +234,25 @@ export function Library() {
     await window.electronAPI.storage.openFolder('recordings')
   }
 
-  const handleDownload = async (recording: UnifiedRecording) => {
-    if (!isDeviceOnly(recording)) return
-    if (!deviceConnected) return
+  const handleDownload = useCallback(
+    async (recording: UnifiedRecording) => {
+      if (!isDeviceOnly(recording)) return
+      if (!deviceConnected) return
 
-    try {
-      await window.electronAPI.downloadService.queueDownloads([
-        {
-          filename: recording.deviceFilename,
-          size: recording.size,
-          dateCreated: recording.dateRecorded.toISOString()
-        }
-      ])
-    } catch (e) {
-      console.error('Failed to queue download:', e)
-    }
-  }
+      try {
+        await window.electronAPI.downloadService.queueDownloads([
+          {
+            filename: recording.deviceFilename,
+            size: recording.size,
+            dateCreated: recording.dateRecorded.toISOString()
+          }
+        ])
+      } catch (e) {
+        console.error('Failed to queue download:', e)
+      }
+    },
+    [deviceConnected]
+  )
 
   const handleAddRecording = async () => {
     try {
@@ -458,6 +461,61 @@ export function Library() {
     [deviceConnected, transcripts]
   )
 
+  // Stable callbacks for child components (prevents breaking React.memo)
+  const handlePlayCallback = useCallback(
+    (recordingId: string, localPath: string) => {
+      audioControls.play(recordingId, localPath)
+    },
+    [audioControls]
+  )
+
+  const handleStopCallback = useCallback(() => {
+    audioControls.stop()
+  }, [audioControls])
+
+  const handleNavigateToMeeting = useCallback(
+    (meetingId: string) => {
+      navigate(`/meeting/${meetingId}`)
+    },
+    [navigate]
+  )
+
+  // Create stable callback wrappers that accept recording parameter
+  const handleDownloadCallback = useCallback(
+    (recording: UnifiedRecording) => {
+      handleDownload(recording)
+    },
+    [handleDownload]
+  )
+
+  const handleDeleteCallback = useCallback(
+    (recording: UnifiedRecording) => {
+      handleDelete(recording)
+    },
+    [handleDelete]
+  )
+
+  const handleAskAssistantCallback = useCallback(
+    (recording: UnifiedRecording) => {
+      handleAskAssistant(recording)
+    },
+    [handleAskAssistant]
+  )
+
+  const handleGenerateOutputCallback = useCallback(
+    (recording: UnifiedRecording) => {
+      handleGenerateOutput(recording)
+    },
+    [handleGenerateOutput]
+  )
+
+  const handleToggleTranscriptCallback = useCallback(
+    (recordingId: string) => {
+      toggleTranscript(recordingId)
+    },
+    [toggleTranscript]
+  )
+
   // Virtualization setup
   const parentRef = useRef<HTMLDivElement>(null)
 
@@ -634,13 +692,13 @@ export function Library() {
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
                           onPlay={() =>
-                            audioControls.play(recording.id, 'localPath' in recording ? recording.localPath : '')
+                            handlePlayCallback(recording.id, 'localPath' in recording ? recording.localPath : '')
                           }
-                          onStop={() => audioControls.stop()}
-                          onDownload={() => handleDownload(recording)}
-                          onDelete={() => handleDelete(recording)}
-                          onAskAssistant={() => handleAskAssistant(recording)}
-                          onGenerateOutput={() => handleGenerateOutput(recording)}
+                          onStop={handleStopCallback}
+                          onDownload={() => handleDownloadCallback(recording)}
+                          onDelete={() => handleDeleteCallback(recording)}
+                          onAskAssistant={() => handleAskAssistantCallback(recording)}
+                          onGenerateOutput={() => handleGenerateOutputCallback(recording)}
                         />
                       </div>
                     )
@@ -685,15 +743,15 @@ export function Library() {
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
                           onPlay={() =>
-                            audioControls.play(recording.id, 'localPath' in recording ? recording.localPath : '')
+                            handlePlayCallback(recording.id, 'localPath' in recording ? recording.localPath : '')
                           }
-                          onStop={() => audioControls.stop()}
-                          onDownload={() => handleDownload(recording)}
-                          onDelete={() => handleDelete(recording)}
-                          onAskAssistant={() => handleAskAssistant(recording)}
-                          onGenerateOutput={() => handleGenerateOutput(recording)}
-                          onToggleTranscript={() => toggleTranscript(recording.id)}
-                          onNavigateToMeeting={(meetingId) => navigate(`/meeting/${meetingId}`)}
+                          onStop={handleStopCallback}
+                          onDownload={() => handleDownloadCallback(recording)}
+                          onDelete={() => handleDeleteCallback(recording)}
+                          onAskAssistant={() => handleAskAssistantCallback(recording)}
+                          onGenerateOutput={() => handleGenerateOutputCallback(recording)}
+                          onToggleTranscript={() => handleToggleTranscriptCallback(recording.id)}
+                          onNavigateToMeeting={handleNavigateToMeeting}
                         />
                       </div>
                     )
