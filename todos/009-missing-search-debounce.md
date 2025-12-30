@@ -1,7 +1,8 @@
 ---
 id: "009"
 title: "Add search debouncing"
-status: pending
+status: completed
+completed: 2025-12-30
 priority: P2
 category: performance
 source: performance-oracle

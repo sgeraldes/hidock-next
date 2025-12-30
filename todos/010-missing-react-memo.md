@@ -1,7 +1,9 @@
 ---
 id: "010"
 title: "Add React.memo to list item components"
-status: pending
+status: completed
+completed: 2025-12-30
+note: "React.memo was already present; fixed by stabilizing parent callbacks"
 priority: P2
 category: performance
 source: performance-oracle

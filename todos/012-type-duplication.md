@@ -1,7 +1,8 @@
 ---
 id: "012"
 title: "Remove duplicate type definitions"
-status: pending
+status: completed
+completed: 2025-12-30
 priority: P2
 category: tech-debt
 source: pattern-recognition
