@@ -1296,7 +1296,7 @@ export class JensenDevice {
 
       // Incremental parsing state
       const allFiles: FileInfo[] = []
-      let partialBuffer = new Uint8Array(0)
+      let partialBuffer: Uint8Array = new Uint8Array(0)
       let totalFilesFromHeader = 0
       let totalBytesReceived = 0
       let packetsReceived = 0
@@ -1425,112 +1425,6 @@ export class JensenDevice {
       console.log(`[Jensen] listFiles: Loop exited - ${allFiles.length} files from ${packetsReceived} packets, ${totalBytesReceived} bytes, elapsed: ${Date.now() - startTime}ms`)
       return allFiles
     })
-  }
-
-  // Parse file list data from collected chunks
-  private parseFileListData(chunks: Uint8Array[]): FileInfo[] {
-    // Combine all chunks
-    const totalSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
-    if (totalSize === 0) return []
-
-    const buffer = new Uint8Array(totalSize)
-    let offset = 0
-    for (const chunk of chunks) {
-      buffer.set(chunk, offset)
-      offset += chunk.length
-    }
-
-    return this.parseFileListBuffer(buffer)
-  }
-
-  // Parse file list data from a combined buffer
-  private parseFileListBuffer(buffer: Uint8Array): FileInfo[] {
-    if (buffer.length === 0) return []
-
-    const files: FileInfo[] = []
-    let pos = 0
-
-    // Check for header (0xFF 0xFF + 4 byte count)
-    let expectedCount = -1
-    if (buffer.length >= 6 && buffer[0] === 0xff && buffer[1] === 0xff) {
-      expectedCount =
-        ((buffer[2] & 0xff) << 24) |
-        ((buffer[3] & 0xff) << 16) |
-        ((buffer[4] & 0xff) << 8) |
-        (buffer[5] & 0xff)
-      pos = 6
-    }
-
-    // Parse file entries
-    while (pos < buffer.length && (expectedCount === -1 || files.length < expectedCount)) {
-      try {
-        // Minimum entry size check
-        if (pos + 4 > buffer.length) break
-
-        // File version (1 byte)
-        const fileVersion = buffer[pos++]
-
-        // Filename length (3 bytes, big-endian)
-        if (pos + 3 > buffer.length) break
-        const nameLen =
-          ((buffer[pos] & 0xff) << 16) |
-          ((buffer[pos + 1] & 0xff) << 8) |
-          (buffer[pos + 2] & 0xff)
-        pos += 3
-
-        // Filename
-        if (pos + nameLen > buffer.length) break
-        let filename = ''
-        for (let i = 0; i < nameLen; i++) {
-          const char = buffer[pos + i]
-          if (char > 0) filename += String.fromCharCode(char)
-        }
-        pos += nameLen
-
-        // File length (4 bytes, big-endian)
-        if (pos + 4 > buffer.length) break
-        const fileLength =
-          ((buffer[pos] & 0xff) << 24) |
-          ((buffer[pos + 1] & 0xff) << 16) |
-          ((buffer[pos + 2] & 0xff) << 8) |
-          (buffer[pos + 3] & 0xff)
-        pos += 4
-
-        // Skip 6 bytes
-        if (pos + 6 > buffer.length) break
-        pos += 6
-
-        // Signature (16 bytes)
-        if (pos + 16 > buffer.length) break
-        let signature = ''
-        for (let i = 0; i < 16; i++) {
-          signature += buffer[pos + i].toString(16).padStart(2, '0')
-        }
-        pos += 16
-
-        // Parse filename for date/time (format: HDA_YYYYMMDD_HHMMSS.hda)
-        const { createDate, createTime, time } = this.parseFilenameDateTime(filename)
-
-        // Calculate duration based on file version (different audio formats)
-        const duration = calculateDurationSeconds(fileLength, fileVersion)
-
-        files.push({
-          name: filename,
-          createDate,
-          createTime,
-          time,
-          duration,
-          version: fileVersion,
-          length: fileLength,
-          signature
-        })
-      } catch {
-        break
-      }
-    }
-
-    if (DEBUG_PROTOCOL) console.log(`Parsed ${files.length} files from device`)
-    return files
   }
 
   // Parse partial file list data, returning parsed files and remaining unparsed buffer

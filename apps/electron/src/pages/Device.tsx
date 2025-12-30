@@ -6,19 +6,14 @@ import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import {
   getHiDockDeviceService,
-  HiDockDeviceState,
   HiDockRecording,
-  DownloadProgress,
-  ConnectionStatus,
-  BatteryStatus,
-  ActivityLogEntry
+  BatteryStatus
 } from '@/services/hidock-device'
 import { Progress } from '@/components/ui/progress'
 import { toast } from '@/components/ui/toaster'
 import { useAppStore } from '@/store/useAppStore'
 
 const CONNECTION_TIMEOUT_MS = 15000 // 15 second timeout
-const MAX_LOG_ENTRIES = 100 // Maximum activity log entries to keep
 const DEBUG_DEVICE_UI = false // Enable verbose UI logging
 
 // Format ETA in human-readable form
@@ -37,10 +32,6 @@ function formatEta(seconds: number | null): string {
 
 export function Device() {
   const {
-    isDeviceConnected,
-    deviceInfo,
-    isScanning,
-    downloadQueue,
     deviceSyncing: storeSyncing,
     deviceState,
     connectionStatus,
@@ -57,8 +48,10 @@ export function Device() {
   const [recordings, setRecordings] = useState<HiDockRecording[]>([])
   const [error, setError] = useState<string | null>(null)
   const [syncing, setSyncing] = useState(false)
-  const [downloadProgress, setDownloadProgress] = useState<any>(null)
-  const [connectionStartTime, setConnectionStartTime] = useState<number | null>(null)
+  const [_downloadProgress, setDownloadProgress] = useState<any>(null)
+  void _downloadProgress // Reserved for future UI display
+  const [_connectionStartTime, setConnectionStartTime] = useState<number | null>(null)
+  void _connectionStartTime // Reserved for future UI display
   const [connectionElapsed, setConnectionElapsed] = useState(0)
   const connectionTimeoutRef = useRef<number | null>(null)
   const connectionTimerRef = useRef<number | null>(null)
@@ -321,25 +314,6 @@ export function Device() {
     }
   }, [activityLog.length])
 
-  const loadRecordings = useCallback(async (forceRefresh: boolean = false) => {
-    if (DEBUG_DEVICE_UI) console.log('[Device.tsx] loadRecordings called, forceRefresh:', forceRefresh)
-    setLoadingRecordings(true)
-    setLoadingProgress(null)
-    try {
-      const recs = await deviceService.listRecordings((filesLoaded, expectedFiles) => {
-        // No need to log every progress update - this creates too much noise
-        setLoadingProgress({ filesLoaded, expectedFiles })
-      }, forceRefresh)
-      if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Received ${recs.length} recordings`)
-      setRecordings(recs)
-    } catch (e) {
-      console.error('[Device.tsx] Failed to load recordings:', e)
-    } finally {
-      setLoadingRecordings(false)
-      setLoadingProgress(null)
-    }
-  }, [deviceService])
-
   const handleConnect = async () => {
     setConnecting(true)
     setError(null)
@@ -474,86 +448,6 @@ export function Device() {
     }
   }
 
-  // Trigger auto-sync after connection (used by connection handler)
-  // Now uses centralized download service - just queues files, DownloadController handles the actual downloads
-  const triggerAutoSync = useCallback(async (recs: HiDockRecording[], _syncedSet: Set<string>) => {
-    // Prevent duplicate auto-sync triggers (race condition between loadInitialData and onConnectionChange)
-    if (autoSyncTriggeredRef.current) {
-      deviceService.log('info', 'Auto-sync skipped', 'Already triggered for this session')
-      return
-    }
-
-    // Don't trigger auto-sync if we have no recordings (still loading)
-    if (recs.length === 0) {
-      deviceService.log('info', 'Auto-sync skipped', 'No recordings loaded yet')
-      return
-    }
-
-    autoSyncTriggeredRef.current = true
-    deviceService.log('info', 'Auto-sync triggered', `${recs.length} recordings to check`)
-
-    // Validate connection before starting
-    if (!deviceService.isConnected()) {
-      deviceService.log('error', 'Auto-sync aborted', 'Device not connected')
-      autoSyncTriggeredRef.current = false // Reset so it can try again
-      return
-    }
-
-    // Use download service to determine which files need syncing (handles all reconciliation)
-    const filesToCheck = recs.map(rec => ({
-      filename: rec.filename,
-      size: rec.size,
-      duration: rec.duration,
-      dateCreated: rec.dateCreated
-    }))
-
-    try {
-      deviceService.log('info', 'Checking sync status', `Querying download service for ${filesToCheck.length} files...`)
-      const filesWithStatus = await window.electronAPI.downloadService.getFilesToSync(filesToCheck)
-      const toSync = filesWithStatus.filter(f => !f.skipReason)
-
-      if (toSync.length === 0) {
-        deviceService.log('success', 'All files already synced', 'Nothing to download')
-        return
-      }
-
-      deviceService.log('info', 'Queueing downloads', `${toSync.length} files to sync`)
-      setSyncing(true)
-
-      // Queue files to download service - DownloadController will handle actual downloads
-      // IMPORTANT: Pass dateCreated to preserve original recording dates from device
-      // Note: dateCreated from getFilesToSync is already serialized to ISO string by IPC
-      const queuedIds = await window.electronAPI.downloadService.queueDownloads(
-        toSync.map(f => ({
-          filename: f.filename,
-          size: f.size,
-          dateCreated: typeof f.dateCreated === 'string' ? f.dateCreated : f.dateCreated?.toISOString()
-        }))
-      )
-
-      if (queuedIds.length > 0) {
-        deviceService.log('success', 'Downloads queued', `${queuedIds.length} files queued for download`)
-        toast({
-          title: 'Auto-sync started',
-          description: `Queued ${queuedIds.length} recording${queuedIds.length !== 1 ? 's' : ''} for download`,
-          variant: 'default'
-        })
-      } else {
-        deviceService.log('info', 'No files queued', 'All files already in queue or downloaded')
-      }
-    } catch (e) {
-      const errorMsg = e instanceof Error ? e.message : 'Unknown error'
-      deviceService.log('error', 'Auto-sync failed', errorMsg)
-      toast({
-        title: 'Auto-sync failed',
-        description: errorMsg,
-        variant: 'error'
-      })
-      setSyncing(false)
-    }
-    // Note: setSyncing(false) is NOT called here - the DownloadController will manage sync state
-  }, [deviceService])
-
   // Effect to trigger auto-sync when recordings are actually loaded (handles race condition)
   /* 
   // DISABLED: Auto-sync logic moved to background service (or disabled per user request to stop page-load triggers)
@@ -575,7 +469,7 @@ export function Device() {
             const toSync = recordings.filter((rec) => !syncedSet.has(rec.filename))
             if (toSync.length > 0) {
               setSyncedFilenames(syncedSet)
-              triggerAutoSync(recordings, syncedSet)
+              _triggerAutoSync(recordings, syncedSet)
             } else {
               deviceService.log('success', 'All files synced', 'No new recordings to download')
               autoSyncTriggeredRef.current = true // Mark as handled
@@ -589,7 +483,7 @@ export function Device() {
       const timer = setTimeout(checkAndTriggerAutoSync, 100)
       return () => clearTimeout(timer)
     }
-  }, [deviceState.connected, recordings, syncing, (storeSyncing as any), deviceService, triggerAutoSync])
+  }, [deviceState.connected, recordings, syncing, (storeSyncing as any), deviceService, _triggerAutoSync])
   */
 
   const handleAutoRecordToggle = async (enabled: boolean) => {

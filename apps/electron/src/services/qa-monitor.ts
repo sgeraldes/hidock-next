@@ -34,11 +34,12 @@ export function initInteractionLogger() {
 
   const getElementLabel = (el: HTMLElement): string => {
     const id = el.id ? `#${el.id}` : '';
-    const classList = el.classList.value ? `.${el.classList.value.split(' ').join('.')}` : '';
+    const _classList = el.classList.value ? `.${el.classList.value.split(' ').join('.')}` : '';
+    void _classList; // Available for debugging element identification
     const text = el.innerText ? ` ("${el.innerText.slice(0, 20)}")` : '';
     const role = el.getAttribute('role') ? `[role="${el.getAttribute('role')}"]` : '';
     const ariaLabel = el.getAttribute('aria-label') ? `[aria-label="${el.getAttribute('aria-label')}"]` : '';
-    
+
     return `${el.tagName.toLowerCase()}${id}${role}${ariaLabel}${text}`;
   };
 

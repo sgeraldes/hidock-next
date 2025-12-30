@@ -14,7 +14,7 @@ global.window.electronAPI = {
     getConversations: vi.fn().mockResolvedValue([{ id: 'c1', title: 'Conversation 1', updatedAt: new Date().toISOString() }]),
     createConversation: vi.fn().mockResolvedValue({ id: 'c2', title: 'New Chat', updatedAt: new Date().toISOString() }),
     getMessages: vi.fn().mockResolvedValue([]),
-    addMessage: vi.fn().mockImplementation((id, role, content) => Promise.resolve({ id: Math.random().toString(), role, content, createdAt: new Date().toISOString() })),
+    addMessage: vi.fn().mockImplementation((_id, role, content) => Promise.resolve({ id: Math.random().toString(), role, content, createdAt: new Date().toISOString() })),
     deleteConversation: vi.fn().mockResolvedValue({ success: true }),
     getContext: vi.fn().mockResolvedValue([]),
     addContext: vi.fn().mockResolvedValue({ success: true }),

@@ -34,14 +34,6 @@ interface DownloadQueueItem {
   error?: string
 }
 
-interface PlaybackState {
-  recordingId: string | null
-  filePath: string | null
-  isPlaying: boolean
-  currentTime: number
-  duration: number
-}
-
 // =============================================================================
 // OperationController Component
 // =============================================================================
@@ -68,13 +60,11 @@ export function OperationController() {
     removeFromDownloadQueue,
     loadRecordings,
     loadMeetings,
-    syncCalendar,
     config
   } = useAppStore()
 
   // UI store for playback state
   const {
-    currentlyPlayingId,
     setCurrentlyPlaying,
     setPlaybackProgress,
     setIsPlaying
@@ -594,9 +584,6 @@ export function OperationController() {
 // =============================================================================
 
 export const useAudioControls = () => {
-  const {
-    startDownload
-  } = useAppStore() as any
   return {
     play: (recordingId: string, filePath: string) => {
       (window as any).__audioControls?.play(recordingId, filePath)

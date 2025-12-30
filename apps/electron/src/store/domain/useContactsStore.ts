@@ -5,7 +5,7 @@
  */
 
 import { create } from 'zustand'
-import type { Contact, Meeting } from '@/types'
+// Contact type imported via ContactsStore type definition
 import type { ContactsStore } from '@/types/stores'
 
 export const useContactsStore = create<ContactsStore>((set, get) => ({

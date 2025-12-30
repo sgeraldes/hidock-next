@@ -8,7 +8,7 @@ import { parseAttendees, parseJsonArray } from '@/types'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
-import type { MeetingDetails, MeetingAttendee } from '@/types'
+import type { MeetingDetails } from '@/types'
 
 export function MeetingDetail() {
   const { id } = useParams<{ id: string }>()

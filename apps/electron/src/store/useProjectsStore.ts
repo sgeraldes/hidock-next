@@ -5,7 +5,7 @@
  */
 
 import { create } from 'zustand'
-import type { Project, Meeting } from '@/types'
+import type { Project } from '@/types'
 import type { ProjectsStore } from '@/types/stores'
 
 export const useProjectsStore = create<ProjectsStore>((set, get) => ({

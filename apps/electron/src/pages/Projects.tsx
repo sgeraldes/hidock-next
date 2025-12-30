@@ -1,30 +1,27 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { 
-  Folder, 
-  Search, 
-  Plus, 
-  RefreshCw, 
-  Clock, 
-  MessageSquare, 
-  Trash2, 
-  ChevronRight,
+import {
+  Folder,
+  Search,
+  Plus,
+  RefreshCw,
+  Clock,
+  Trash2,
   Archive,
   CheckCircle2,
   FileText,
   Bot,
-  ExternalLink,
   Users
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { formatDateTime } from '@/lib/utils'
+import { Card, CardContent } from '@/components/ui/card'
 import type { Project } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
 
 export function Projects() {
-  const navigate = useNavigate()
+  const _navigate = useNavigate()
+  void _navigate // Reserved for project detail navigation
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProject, setActiveConversation] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)

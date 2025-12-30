@@ -6,7 +6,7 @@
  */
 
 import { create } from 'zustand'
-import type { Meeting, CalendarSyncResult } from '@/types'
+import type { CalendarSyncResult } from '@/types'
 import type { CalendarStore } from '@/types/stores'
 
 // Helper functions

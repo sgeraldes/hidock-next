@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Mic, RefreshCw, Play, X, LayoutGrid, Square, CheckSquare, FileText, Trash2, List, FileAudio, Download } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { CardContent } from '@/components/ui/card'
 import { cn, formatTime, isToday, formatDuration } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
 import type { Meeting, Recording } from '@/types'
@@ -21,16 +20,14 @@ import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
 
 // Extracted calendar components
-import { CalendarHeader, CalendarStatsBar, StatusIcon, RecordingTooltipContent, MeetingOverlayTooltipContent, MeetingTooltipContent } from '@/components/calendar'
-import type { LocationFilter, SortOption, RecordingStats } from '@/components/calendar'
+import { CalendarHeader, CalendarStatsBar, StatusIcon, RecordingTooltipContent, MeetingOverlayTooltipContent } from '@/components/calendar'
+import type { LocationFilter, SortOption } from '@/components/calendar'
 
 // Extracted calendar utilities
 import {
   type CalendarViewType,
   type CalendarRecording,
   type CalendarMeetingOverlay,
-  type CalendarMeeting,
-  type DurationMatch,
   HOUR_HEIGHT,
   START_HOUR,
   END_HOUR,
@@ -69,7 +66,6 @@ export function Calendar() {
     setCalendarView,
     loadMeetings,
     lastCalendarSync: lastSync,
-    syncCalendar,
     calendarSyncing,
     config,
     loadConfig,
@@ -321,20 +317,6 @@ export function Calendar() {
   const getMeetingOverlayStyle = (meeting: CalendarMeetingOverlay) => {
     const startHour = meeting.startTime.getHours() + meeting.startTime.getMinutes() / 60
     const endHour = meeting.endTime.getHours() + meeting.endTime.getMinutes() / 60
-
-    const top = Math.max(0, (startHour - START_HOUR) * HOUR_HEIGHT)
-    const height = Math.max(20, (endHour - startHour) * HOUR_HEIGHT - 2)
-
-    return { top, height }
-  }
-
-  // Calculate meeting position and height (legacy - for backwards compat)
-  const getMeetingStyle = (meeting: Meeting) => {
-    const start = new Date(meeting.start_time)
-    const end = new Date(meeting.end_time)
-
-    const startHour = start.getHours() + start.getMinutes() / 60
-    const endHour = end.getHours() + end.getMinutes() / 60
 
     const top = Math.max(0, (startHour - START_HOUR) * HOUR_HEIGHT)
     const height = Math.max(20, (endHour - startHour) * HOUR_HEIGHT - 2)
@@ -1170,7 +1152,9 @@ export function Calendar() {
               {/* Day Columns */}
               {viewDates.map((date) => {
                 const key = date.toISOString().split('T')[0]
-                const dayMeetings = meetingsByDay[key] || []
+                // dayMeetings variable reserved for future per-day rendering
+                const _dayMeetings = meetingsByDay[key] || []
+                void _dayMeetings
                 const today = isToday(date)
                 const isWeekend = !isWorkDay(date)
 

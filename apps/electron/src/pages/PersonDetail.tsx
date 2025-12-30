@@ -1,13 +1,12 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { 
-  ArrowLeft, 
-  Mail, 
-  Building, 
-  Briefcase, 
-  Clock, 
-  MessageSquare, 
-  Tag, 
+import {
+  ArrowLeft,
+  Mail,
+  Briefcase,
+  Clock,
+  MessageSquare,
+  Tag,
   Calendar,
   Edit,
   RefreshCw,
@@ -15,7 +14,7 @@ import {
   Bot
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatDateTime } from '@/lib/utils'
 import type { Person, PersonType } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
@@ -24,7 +23,8 @@ export function PersonDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [person, setPerson] = useState<Person | null>(null)
-  const [meetings, setMeetings] = useState<any[]>([])
+  const [meetings, _setMeetings] = useState<any[]>([])
+  void _setMeetings // Reserved for future meeting updates
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'timeline' | 'knowledge'>('timeline')
 

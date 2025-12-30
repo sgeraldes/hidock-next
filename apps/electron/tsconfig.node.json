@@ -5,6 +5,9 @@
     "electron/**/*",
     "src/types/**/*"
   ],
+  "exclude": [
+    "electron/main/services/__tests__/benchmark.test.ts"
+  ],
   "compilerOptions": {
     "composite": true,
     "types": ["node"],

@@ -49,8 +49,7 @@ export function DownloadController() {
     clearDeviceSyncState,
     addToDownloadQueue,
     updateDownloadProgress,
-    removeFromDownloadQueue,
-    deviceSyncing
+    removeFromDownloadQueue
   } = useAppStore()
 
   // Track bytes for ETA calculation

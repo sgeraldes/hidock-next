@@ -57,7 +57,7 @@ export interface LibraryUIStore {
 
 export const useLibraryUIStore = create<LibraryUIStore>()(
   persist(
-    (set, get) => ({
+    (set, _get) => ({
       // Initial state - Filters
       qualityFilter: null,
       sourceFilter: 'all',

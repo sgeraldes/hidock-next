@@ -26,8 +26,8 @@ export interface CalendarRecording {
     subject: string
     startTime: Date
     endTime: Date
-    location?: string
-    organizer?: string
+    location?: string | null
+    organizer?: string | null
   }
 }
 
@@ -37,8 +37,8 @@ export interface CalendarMeetingOverlay {
   subject: string
   startTime: Date
   endTime: Date
-  location?: string
-  organizer?: string
+  location?: string | null
+  organizer?: string | null
   hasRecording: boolean
 }
 

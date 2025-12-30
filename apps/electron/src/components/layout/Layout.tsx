@@ -91,7 +91,6 @@ export function Layout({ children }: LayoutProps) {
     toggleSidebar,
     loadConfig,
     loadMeetings,
-    loadRecordings,
     syncCalendar,
     lastCalendarSync,
     config,

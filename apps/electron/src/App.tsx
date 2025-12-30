@@ -7,7 +7,7 @@ import { MeetingDetail } from '@/pages/MeetingDetail'
 import { Chat } from '@/pages/Chat'
 import { Explore } from '@/pages/Explore'
 import { Device } from '@/pages/Device'
-import { Recordings } from '@/pages/Recordings'
+import { Library } from '@/pages/Library'
 import { People } from '@/pages/People'
 import { PersonDetail } from '@/pages/PersonDetail'
 import { Projects } from '@/pages/Projects'
@@ -60,7 +60,7 @@ function App(): React.ReactElement {
           <Route path="/assistant" element={<ErrorBoundary><Chat /></ErrorBoundary>} />
           <Route path="/explore" element={<ErrorBoundary><Explore /></ErrorBoundary>} />
           <Route path="/sync" element={<ErrorBoundary><Device /></ErrorBoundary>} />
-          <Route path="/library" element={<ErrorBoundary><Recordings /></ErrorBoundary>} />
+          <Route path="/library" element={<ErrorBoundary><Library /></ErrorBoundary>} />
           <Route path="/people" element={<ErrorBoundary><People /></ErrorBoundary>} />
           <Route path="/person/:id" element={<ErrorBoundary><PersonDetail /></ErrorBoundary>} />
           <Route path="/projects" element={<ErrorBoundary><Projects /></ErrorBoundary>} />

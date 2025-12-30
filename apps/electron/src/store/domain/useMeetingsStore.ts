@@ -8,7 +8,7 @@
 
 import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
-import type { Meeting, MeetingWithAssociations } from '@/types'
+import type { Meeting } from '@/types'
 
 export interface MeetingsStore {
   // State

@@ -15,14 +15,14 @@ export interface Meeting {
   subject: string
   start_time: string
   end_time: string
-  location?: string
-  organizer_name?: string
-  organizer_email?: string
-  attendees?: string // JSON string of attendee array
-  description?: string
+  location?: string | null
+  organizer_name?: string | null
+  organizer_email?: string | null
+  attendees?: string | null // JSON string of attendee array
+  description?: string | null
   is_recurring: number
-  recurrence_rule?: string
-  meeting_url?: string
+  recurrence_rule?: string | null
+  meeting_url?: string | null
   created_at: string
   updated_at: string
 }
@@ -304,7 +304,7 @@ export type RAGFilter =
 // =============================================================================
 
 // Helper to parse attendees JSON
-export function parseAttendees(attendeesJson?: string): MeetingAttendee[] {
+export function parseAttendees(attendeesJson?: string | null): MeetingAttendee[] {
   if (!attendeesJson) return []
   try {
     return JSON.parse(attendeesJson)
@@ -314,7 +314,7 @@ export function parseAttendees(attendeesJson?: string): MeetingAttendee[] {
 }
 
 // Helper to parse JSON arrays
-export function parseJsonArray<T>(json?: string): T[] {
+export function parseJsonArray<T>(json?: string | null): T[] {
   if (!json) return []
   try {
     return JSON.parse(json)

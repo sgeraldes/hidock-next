@@ -1,5 +1,5 @@
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it } from 'vitest'
 import { getHiDockDeviceService } from '../../../../src/services/hidock-device'
 import { getJensenDevice } from '../../../../src/services/jensen'
 
