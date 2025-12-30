@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { ipcMain, dialog, BrowserWindow } from 'electron'
 import {
   getRecordings,
   getRecordingById,
@@ -8,10 +8,14 @@ import {
   getTranscriptByRecordingId,
   getCandidatesForRecordingWithDetails,
   getMeetingsNearDate,
+  insertRecording,
   type Recording,
   type Transcript
 } from '../services/database'
-import { getRecordingFiles, deleteRecording as deleteRecordingFile } from '../services/file-storage'
+import { getRecordingFiles, deleteRecording as deleteRecordingFile, getRecordingsPath } from '../services/file-storage'
+import { copyFileSync, existsSync, statSync } from 'fs'
+import { basename, join, extname } from 'path'
+import { randomUUID } from 'crypto'
 import {
   startRecordingWatcher,
   stopRecordingWatcher,
@@ -262,6 +266,90 @@ export function registerRecordingHandlers(): void {
     } catch (error) {
       console.error('recordings:getMeetingsNearDate error:', error)
       return []
+    }
+  })
+
+  // Add external recording (from file dialog)
+  ipcMain.handle('recordings:addExternal', async (): Promise<{ success: boolean; recording?: Recording; error?: string }> => {
+    try {
+      // Get the focused window for the dialog parent
+      const focusedWindow = BrowserWindow.getFocusedWindow()
+
+      // Open file dialog to select an audio file
+      const result = await dialog.showOpenDialog(focusedWindow || BrowserWindow.getAllWindows()[0], {
+        title: 'Select Audio File',
+        filters: [
+          { name: 'Audio Files', extensions: ['mp3', 'm4a', 'wav', 'ogg', 'flac'] }
+        ],
+        properties: ['openFile']
+      })
+
+      // Check if user cancelled the dialog
+      if (result.canceled || result.filePaths.length === 0) {
+        return { success: false, error: 'No file selected' }
+      }
+
+      const sourcePath = result.filePaths[0]
+
+      // Check if file exists
+      if (!existsSync(sourcePath)) {
+        return { success: false, error: 'Selected file does not exist' }
+      }
+
+      // Get file stats
+      const stats = statSync(sourcePath)
+      const originalFilename = basename(sourcePath)
+      const fileExtension = extname(originalFilename)
+
+      // Generate a unique filename for the recordings folder
+      const recordingsPath = getRecordingsPath()
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')
+      const newFilename = `external-${timestamp[0]}-${timestamp[1].substring(0, 8)}${fileExtension}`
+      const destinationPath = join(recordingsPath, newFilename)
+
+      // Copy the file to the recordings folder
+      copyFileSync(sourcePath, destinationPath)
+
+      // Create database entry
+      const recordingId = randomUUID()
+
+      const recording: Omit<Recording, 'created_at'> = {
+        id: recordingId,
+        filename: newFilename,
+        original_filename: originalFilename,
+        file_path: destinationPath,
+        file_size: stats.size,
+        duration_seconds: undefined, // Will be populated later if needed
+        date_recorded: stats.mtime.toISOString(),
+        meeting_id: undefined,
+        correlation_confidence: undefined,
+        correlation_method: undefined,
+        status: 'ready',
+        location: 'local-only',
+        transcription_status: 'none',
+        on_device: 0,
+        device_last_seen: undefined,
+        on_local: 1,
+        source: 'external',
+        is_imported: 1
+      }
+
+      insertRecording(recording)
+
+      // Get the full recording with created_at timestamp
+      const insertedRecording = getRecordingById(recordingId)
+
+      if (!insertedRecording) {
+        return { success: false, error: 'Failed to retrieve recording after insert' }
+      }
+
+      return { success: true, recording: insertedRecording }
+    } catch (error) {
+      console.error('recordings:addExternal error:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred'
+      }
     }
   })
 
