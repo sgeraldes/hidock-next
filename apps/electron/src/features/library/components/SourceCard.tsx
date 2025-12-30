@@ -15,33 +15,10 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { AudioPlayer } from '@/components/AudioPlayer'
-import { formatDateTime, formatDuration } from '@/lib/utils'
-import { parseJsonArray } from '@/types'
+import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
+import { parseJsonArray, Transcript, Meeting } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
-
-interface Transcript {
-  id: string
-  recording_id: string
-  full_text: string
-  language: string
-  summary?: string
-  action_items?: string
-  topics?: string
-  key_points?: string
-  sentiment?: string
-  speakers?: string
-  word_count?: number
-  transcription_provider?: string
-  transcription_model?: string
-  created_at: string
-}
-
-interface Meeting {
-  id: string
-  subject: string
-  start_time: string
-}
 
 interface SourceCardProps {
   recording: UnifiedRecording
@@ -63,13 +40,6 @@ interface SourceCardProps {
   onGenerateOutput: () => void
   onToggleTranscript: () => void
   onNavigateToMeeting: (meetingId: string) => void
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }
 
 export const SourceCard = memo(function SourceCard({

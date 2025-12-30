@@ -4,6 +4,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { RefreshCw, AlertCircle } from 'lucide-react'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import { UnifiedRecording, LocationFilter, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
+import { Transcript, Meeting } from '@/types'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
 import { useAppStore } from '@/store/useAppStore'
@@ -19,29 +20,6 @@ import {
   useAnnouncement
 } from '@/features/library/components'
 import { useSourceSelection, useKeyboardNavigation } from '@/features/library/hooks'
-
-interface Transcript {
-  id: string
-  recording_id: string
-  full_text: string
-  language: string
-  summary?: string
-  action_items?: string
-  topics?: string
-  key_points?: string
-  sentiment?: string
-  speakers?: string
-  word_count?: number
-  transcription_provider?: string
-  transcription_model?: string
-  created_at: string
-}
-
-interface Meeting {
-  id: string
-  subject: string
-  start_time: string
-}
 
 export function Library() {
   const navigate = useNavigate()

@@ -3,14 +3,9 @@ import { Mic, FileText, Play, X, Download, RefreshCw, Trash2 } from 'lucide-reac
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { formatDateTime, formatDuration } from '@/lib/utils'
+import { Meeting } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
-
-interface Meeting {
-  id: string
-  subject: string
-  start_time: string
-}
 
 interface SourceRowProps {
   recording: UnifiedRecording
