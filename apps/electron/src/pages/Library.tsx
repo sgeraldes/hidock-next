@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { RefreshCw, AlertCircle } from 'lucide-react'
@@ -61,6 +61,7 @@ export function Library() {
   const [qualityFilter, setQualityFilter] = useState<string>('all')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [searchQuery, setSearchQuery] = useState('')
+  const deferredSearchQuery = useDeferredValue(searchQuery)
 
   // View mode persisted in store across navigation
   const compactView = useUIStore((state) => state.recordingsCompactView)
@@ -176,8 +177,8 @@ export function Library() {
       if (categoryFilter !== 'all' && rec.category !== categoryFilter) return false
       if (qualityFilter !== 'all' && rec.quality !== qualityFilter) return false
       if (statusFilter !== 'all' && rec.status !== statusFilter) return false
-      if (searchQuery) {
-        const query = searchQuery.toLowerCase()
+      if (deferredSearchQuery) {
+        const query = deferredSearchQuery.toLowerCase()
         const filename = rec.filename.toLowerCase()
         const meetingSubject = rec.meetingSubject?.toLowerCase() || ''
         const title = rec.title?.toLowerCase() || ''
@@ -185,7 +186,7 @@ export function Library() {
       }
       return true
     })
-  }, [recordings, locationFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
+  }, [recordings, locationFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery])
 
   // Announce filter result changes (after filteredRecordings is declared)
   useEffect(() => {
