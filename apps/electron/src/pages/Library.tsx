@@ -688,9 +688,11 @@ export function Library() {
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
-                          onPlay={() =>
-                            handlePlayCallback(recording.id, 'localPath' in recording ? recording.localPath : '')
-                          }
+                          onPlay={() => {
+                            if (hasLocalPath(recording)) {
+                              handlePlayCallback(recording.id, recording.localPath)
+                            }
+                          }}
                           onStop={handleStopCallback}
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
@@ -739,9 +741,11 @@ export function Library() {
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
-                          onPlay={() =>
-                            handlePlayCallback(recording.id, 'localPath' in recording ? recording.localPath : '')
-                          }
+                          onPlay={() => {
+                            if (hasLocalPath(recording)) {
+                              handlePlayCallback(recording.id, recording.localPath)
+                            }
+                          }}
                           onStop={handleStopCallback}
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}

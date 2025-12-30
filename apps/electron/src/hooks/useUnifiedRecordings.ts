@@ -226,7 +226,7 @@ function buildRecordingMap(
         const cachedDate = new Date(cached.date_recorded)
         const dateRecorded = getBestDate(cached.filename, cachedDate, cachedDate)
         const recording: DeviceOnlyRecording = {
-          id: cached.id,
+          id: getBaseFilename(cached.filename),
           filename: cached.filename,
           size: cached.file_size ?? cached.size ?? 0,
           duration: cached.duration_seconds || 0,
