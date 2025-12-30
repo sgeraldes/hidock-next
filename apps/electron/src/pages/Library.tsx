@@ -90,8 +90,12 @@ export function Library() {
   const [isReconnecting, setIsReconnecting] = useState(false)
   const showDisconnectBanner = wasConnected && !deviceConnected
 
+  // Ref to track latest deviceConnected value (avoids stale closure in setTimeout)
+  const deviceConnectedRef = useRef(deviceConnected)
+
   // Track device connection changes
   useEffect(() => {
+    deviceConnectedRef.current = deviceConnected
     if (deviceConnected) {
       setWasConnected(true)
       setIsReconnecting(false)
@@ -107,12 +111,12 @@ export function Library() {
       // isReconnecting will be cleared when deviceConnected becomes true
       // If reconnection fails, we'll show the banner again after a delay
       setTimeout(() => {
-        if (!deviceConnected) {
+        if (!deviceConnectedRef.current) {
           setIsReconnecting(false)
         }
       }, 5000)
     }
-  }, [refresh, deviceConnected])
+  }, [refresh])
 
   // Enrichment: Load transcripts and meetings for recordings
   const [transcripts, setTranscripts] = useState<Map<string, Transcript>>(new Map())
