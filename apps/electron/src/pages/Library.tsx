@@ -150,7 +150,7 @@ export function Library() {
 
   // Filter recordings based on location and search
   const filteredRecordings = useMemo(() => {
-    return recordings.filter((rec) => {
+    const filtered = recordings.filter((rec) => {
       if (locationFilter !== 'all' && rec.location !== locationFilter) return false
       if (categoryFilter !== 'all' && rec.category !== categoryFilter) return false
       if (qualityFilter !== 'all' && rec.quality !== qualityFilter) return false
@@ -164,6 +164,23 @@ export function Library() {
       }
       return true
     })
+
+    // Development check for duplicate IDs
+    if (import.meta.env.DEV) {
+      const ids = new Set<string>()
+      const duplicates = new Set<string>()
+      filtered.forEach((rec) => {
+        if (ids.has(rec.id)) {
+          duplicates.add(rec.id)
+        }
+        ids.add(rec.id)
+      })
+      if (duplicates.size > 0) {
+        console.warn('[Library] Duplicate recording IDs detected:', Array.from(duplicates))
+      }
+    }
+
+    return filtered
   }, [recordings, locationFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery])
 
   // Announce filter result changes (after filteredRecordings is declared)
@@ -636,7 +653,7 @@ export function Library() {
             >
               {compactView ? (
                 // Compact List View
-                <div className="border rounded-lg overflow-hidden">
+                <div key="compact-view" className="border rounded-lg overflow-hidden">
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                     const recording = filteredRecordings[virtualRow.index]
                     const meeting = recording.meetingId ? meetings.get(recording.meetingId) : undefined
@@ -686,7 +703,7 @@ export function Library() {
                 </div>
               ) : (
                 // Card View
-                <div className="space-y-4">
+                <div key="card-view" className="space-y-4">
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                     const recording = filteredRecordings[virtualRow.index]
                     const transcript = transcripts.get(recording.id)
