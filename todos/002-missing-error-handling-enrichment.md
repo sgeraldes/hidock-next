@@ -1,7 +1,9 @@
 ---
 id: "002"
 title: "Add error handling for enrichment loading"
-status: pending
+status: skipped
+skipped: 2025-12-30
+reason: "Validation found error handling already exists (try/catch in lines 144-159)"
 priority: P1
 category: bug
 source: feature-code-reviewer

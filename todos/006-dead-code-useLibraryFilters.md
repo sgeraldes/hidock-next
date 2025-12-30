@@ -1,7 +1,8 @@
 ---
 id: "006"
 title: "Remove dead code: useLibraryFilters hook"
-status: pending
+status: completed
+completed: 2025-12-30
 priority: P1
 category: tech-debt
 source: feature-code-reviewer, typescript-reviewer

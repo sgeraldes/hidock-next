@@ -1,7 +1,8 @@
 ---
 id: "001"
 title: "Fix race condition in handleRetryConnection"
-status: pending
+status: completed
+completed: 2025-12-30
 priority: P1
 category: bug
 source: feature-code-reviewer

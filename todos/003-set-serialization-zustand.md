@@ -1,7 +1,9 @@
 ---
 id: "003"
 title: "Fix Set serialization in Zustand persist"
-status: pending
+status: skipped
+skipped: 2025-12-30
+reason: "Validation found selectedIds is correctly excluded from persist via partialize"
 priority: P1
 category: bug
 source: data-integrity-guardian
