@@ -20,9 +20,9 @@ interface LibraryState {
 
   // Filter state (persisted)
   locationFilter: LocationFilter
-  categoryFilter: string
-  qualityFilter: string
-  statusFilter: string
+  categoryFilter: string | null
+  qualityFilter: string | null
+  statusFilter: string | null
   searchQuery: string
 
   // Selection state (transient - not persisted)
@@ -68,9 +68,9 @@ const initialState: LibraryState = {
   sortBy: 'date',
   sortOrder: 'desc',
   locationFilter: 'all',
-  categoryFilter: 'all',
-  qualityFilter: 'all',
-  statusFilter: 'all',
+  categoryFilter: null,
+  qualityFilter: null,
+  statusFilter: null,
   searchQuery: '',
   selectedIds: new Set(),
   scrollOffset: 0
@@ -99,9 +99,9 @@ export const useLibraryStore = create<LibraryStore>()(
       clearFilters: () =>
         set({
           locationFilter: 'all',
-          categoryFilter: 'all',
-          qualityFilter: 'all',
-          statusFilter: 'all',
+          categoryFilter: null,
+          qualityFilter: null,
+          statusFilter: null,
           searchQuery: ''
         }),
 
