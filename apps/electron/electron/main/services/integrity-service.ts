@@ -194,13 +194,11 @@ class IntegrityService {
   /**
    * Reset downloads that are stuck in 'downloading' status
    * This happens when the app crashes during a download
+   *
+   * Performance optimized: Uses batch updates instead of individual queries
    */
   resetOrphanedDownloads(): { found: number; fixed: number } {
     console.log('[IntegrityService] Checking for orphaned downloads...')
-
-    // Check recordings table for any stuck in downloading-related states
-    // Note: The main download state is in the DownloadService queue (in-memory)
-    // But we also track in recordings table via on_local and file_path
 
     // Find recordings that have file_path set but on_local = 0 (inconsistent state)
     const stuckRecordings = queryAll<Recording>(`
@@ -210,35 +208,77 @@ class IntegrityService {
         AND file_path != ''
     `)
 
-    let fixed = 0
+    if (stuckRecordings.length === 0) {
+      console.log('[IntegrityService] No orphaned downloads found')
+      return { found: 0, fixed: 0 }
+    }
+
+    console.log(`[IntegrityService] Found ${stuckRecordings.length} recordings to check...`)
+
+    // Batch categorize: files that exist vs files that are missing
+    const existingFileIds: string[] = []
+    const missingFileIds: string[] = []
+
     for (const rec of stuckRecordings) {
       if (!rec.file_path) continue
 
       if (existsSync(rec.file_path)) {
-        // File EXISTS but on_local = 0 - this is the inconsistency! Fix it.
-        console.log(`[IntegrityService] Fixing on_local flag for: ${rec.filename}`)
-        try {
-          run(`UPDATE recordings SET on_local = 1, location = 'both' WHERE id = ?`, [rec.id])
-          fixed++
-        } catch (error) {
-          console.error(`[IntegrityService] Failed to fix on_local for ${rec.filename}:`, error)
-        }
+        existingFileIds.push(rec.id)
       } else {
-        // File path is set but file doesn't exist - reset state
-        console.log(`[IntegrityService] Resetting orphaned download: ${rec.filename}`)
-        try {
-          // Try to set file_path to NULL - may fail if old schema had NOT NULL constraint
-          run(`UPDATE recordings SET file_path = NULL, on_local = 0, location = 'device-only' WHERE id = ?`, [rec.id])
-          fixed++
-        } catch (error) {
-          // If NULL fails (old schema), set to empty string instead
-          console.warn(`[IntegrityService] Could not set NULL, trying empty string: ${error}`)
+        missingFileIds.push(rec.id)
+      }
+    }
+
+    let fixed = 0
+
+    // Batch update: files that exist - set on_local = 1
+    if (existingFileIds.length > 0) {
+      console.log(`[IntegrityService] Fixing on_local flag for ${existingFileIds.length} recordings with existing files...`)
+      try {
+        // SQLite supports up to ~1000 parameters, batch in chunks if needed
+        const chunkSize = 500
+        for (let i = 0; i < existingFileIds.length; i += chunkSize) {
+          const chunk = existingFileIds.slice(i, i + chunkSize)
+          const placeholders = chunk.map(() => '?').join(',')
+          run(`UPDATE recordings SET on_local = 1, location = 'both' WHERE id IN (${placeholders})`, chunk)
+        }
+        fixed += existingFileIds.length
+      } catch (error) {
+        console.error('[IntegrityService] Batch update failed, falling back to individual updates:', error)
+        for (const id of existingFileIds) {
           try {
-            run(`UPDATE recordings SET file_path = '', on_local = 0, location = 'device-only' WHERE id = ?`, [rec.id])
+            run(`UPDATE recordings SET on_local = 1, location = 'both' WHERE id = ?`, [id])
             fixed++
-          } catch (innerError) {
-            console.error(`[IntegrityService] Failed to reset recording ${rec.filename}:`, innerError)
+          } catch (err) {
+            console.error(`[IntegrityService] Failed to fix on_local for id ${id}:`, err)
           }
+        }
+      }
+    }
+
+    // Batch update: files that are missing - reset state
+    if (missingFileIds.length > 0) {
+      console.log(`[IntegrityService] Resetting ${missingFileIds.length} recordings with missing files...`)
+      try {
+        const chunkSize = 500
+        for (let i = 0; i < missingFileIds.length; i += chunkSize) {
+          const chunk = missingFileIds.slice(i, i + chunkSize)
+          const placeholders = chunk.map(() => '?').join(',')
+          run(`UPDATE recordings SET file_path = NULL, on_local = 0, location = 'device-only' WHERE id IN (${placeholders})`, chunk)
+        }
+        fixed += missingFileIds.length
+      } catch (error) {
+        console.warn('[IntegrityService] Batch NULL update failed, trying empty string:', error)
+        try {
+          const chunkSize = 500
+          for (let i = 0; i < missingFileIds.length; i += chunkSize) {
+            const chunk = missingFileIds.slice(i, i + chunkSize)
+            const placeholders = chunk.map(() => '?').join(',')
+            run(`UPDATE recordings SET file_path = '', on_local = 0, location = 'device-only' WHERE id IN (${placeholders})`, chunk)
+          }
+          fixed += missingFileIds.length
+        } catch (innerError) {
+          console.error('[IntegrityService] Batch update failed completely:', innerError)
         }
       }
     }
@@ -247,7 +287,7 @@ class IntegrityService {
       saveDatabase()
     }
 
-    console.log(`[IntegrityService] Orphaned downloads: ${stuckRecordings.length} checked, ${fixed} fixed`)
+    console.log(`[IntegrityService] Orphaned downloads: ${stuckRecordings.length} checked, ${fixed} fixed (${existingFileIds.length} files exist, ${missingFileIds.length} missing)`)
     return { found: stuckRecordings.length, fixed }
   }
 

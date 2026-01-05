@@ -75,20 +75,50 @@ async function scanExistingRecordings(): Promise<void> {
   if (!existsSync(recordingsPath)) return
 
   const files = readdirSync(recordingsPath)
-
-  for (const file of files) {
+  const audioFiles = files.filter(file => {
     const ext = extname(file).toLowerCase()
-    if (!AUDIO_EXTENSIONS.includes(ext)) continue
+    return AUDIO_EXTENSIONS.includes(ext)
+  })
 
+  if (audioFiles.length === 0) return
+
+  console.log(`[RecordingWatcher] Scanning ${audioFiles.length} existing recordings...`)
+
+  // Batch check: which files need processing
+  const filesToProcess: string[] = []
+
+  for (const file of audioFiles) {
     const filePath = join(recordingsPath, file)
     const recordingId = generateRecordingId(filePath)
 
     // Check if already in database
     const existing = getRecordingById(recordingId)
     if (!existing) {
-      await processNewRecording(filePath)
+      filesToProcess.push(filePath)
     }
   }
+
+  if (filesToProcess.length === 0) {
+    console.log('[RecordingWatcher] All recordings already in database')
+    return
+  }
+
+  console.log(`[RecordingWatcher] Processing ${filesToProcess.length} new recordings...`)
+
+  // Process files - this is the slow part, but we need to check meeting correlation
+  // Process in batches to avoid blocking the event loop too long
+  const batchSize = 50
+  for (let i = 0; i < filesToProcess.length; i += batchSize) {
+    const batch = filesToProcess.slice(i, i + batchSize)
+    await Promise.all(batch.map(filePath => processNewRecording(filePath)))
+
+    // Log progress for large batches
+    if (filesToProcess.length > 100 && (i + batchSize) % 100 === 0) {
+      console.log(`[RecordingWatcher] Processed ${Math.min(i + batchSize, filesToProcess.length)}/${filesToProcess.length} recordings...`)
+    }
+  }
+
+  console.log(`[RecordingWatcher] Finished scanning ${filesToProcess.length} recordings`)
 }
 
 function generateRecordingId(filePath: string): string {
@@ -115,7 +145,7 @@ async function processNewRecording(filePath: string): Promise<void> {
       
       // If found by filename, it might be a device-only record becoming local
       if (existing) {
-        console.log('Recording found by filename:', filename, 'updating status')
+        // Individual recording logs disabled for performance
         
         // If it doesn't have a file path yet, update it
         if (!existing.file_path) {
@@ -125,16 +155,16 @@ async function processNewRecording(filePath: string): Promise<void> {
             // If it was device-only, now it's both. If it was deleted/unknown, now local-only.
             location: existing.on_device ? 'both' : 'local-only'
           })
-          console.log('Updated existing recording path via watcher:', existing.id)
+          // Individual recording logs disabled for performance
         }
         return
       }
     } else {
-      console.log('Recording already in database by ID:', filename)
+      // Individual recording logs disabled for performance
       return
     }
 
-    console.log('Processing new recording:', filename)
+    // Individual recording logs disabled for performance
 
     // Parse date from filename if possible (format: YYYY-MM-DD_HHMM-description.ext)
     const dateMatch = filename.match(/^(\d{4}-\d{2}-\d{2})_(\d{4})/)
@@ -172,7 +202,7 @@ async function processNewRecording(filePath: string): Promise<void> {
     }
 
     insertRecording(recording)
-    console.log('Recording added to database:', recordingId)
+    // Individual recording logs disabled for performance
 
     // Try to correlate with a meeting
     correlateWithMeeting(recordingId, new Date(dateRecorded))
@@ -181,9 +211,9 @@ async function processNewRecording(filePath: string): Promise<void> {
     const config = getConfig()
     if (config.transcription.autoTranscribe) {
       addToQueue(recordingId)
-      console.log('Recording added to transcription queue:', recordingId)
+      // Individual recording logs disabled for performance
     } else {
-      console.log('Auto-transcribe disabled, skipping queue for:', recordingId)
+      // Individual recording logs disabled for performance
     }
 
     // Notify renderer
