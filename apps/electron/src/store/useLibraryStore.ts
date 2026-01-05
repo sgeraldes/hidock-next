@@ -29,6 +29,10 @@ interface LibraryState {
   // Selection state (transient - not persisted)
   selectedIds: Set<string>
 
+  // Panel state (persisted)
+  panelSizes: number[]
+  selectedSourceId: string | null
+
   // Error state (transient - not persisted)
   recordingErrors: Map<string, LibraryError>
 
@@ -66,6 +70,10 @@ interface LibraryActions {
   clearRecordingError: (id: string) => void
   clearAllErrors: () => void
 
+  // Panel state
+  setPanelSizes: (sizes: number[]) => void
+  setSelectedSourceId: (id: string | null) => void
+
   // Scroll
   setScrollOffset: (offset: number) => void
 }
@@ -82,6 +90,8 @@ const initialState: LibraryState = {
   statusFilter: null,
   searchQuery: '',
   selectedIds: new Set(),
+  panelSizes: [25, 45, 30],
+  selectedSourceId: null,
   recordingErrors: new Map(),
   scrollOffset: 0
 }
@@ -165,6 +175,10 @@ export const useLibraryStore = create<LibraryStore>()(
 
       clearAllErrors: () => set({ recordingErrors: new Map() }),
 
+      // Panel state
+      setPanelSizes: (sizes) => set({ panelSizes: sizes }),
+      setSelectedSourceId: (id) => set({ selectedSourceId: id }),
+
       // Scroll
       setScrollOffset: (offset) => set({ scrollOffset: offset })
     }),
@@ -179,9 +193,11 @@ export const useLibraryStore = create<LibraryStore>()(
         locationFilter: state.locationFilter,
         categoryFilter: state.categoryFilter,
         qualityFilter: state.qualityFilter,
-        statusFilter: state.statusFilter
+        statusFilter: state.statusFilter,
+        panelSizes: state.panelSizes
         // searchQuery intentionally not persisted - should start fresh
         // selectedIds intentionally not persisted - transient
+        // selectedSourceId intentionally not persisted - should start fresh
         // scrollOffset intentionally not persisted - transient
       })
     }

@@ -20,13 +20,21 @@ import {
   useAnnouncement,
   BulkProgressModal,
   BulkResultSummary,
-  SourceDetailDrawer
+  SourceDetailDrawer,
+  TriPaneLayout,
+  SourceReader,
+  AssistantPanel
 } from '@/features/library/components'
 import { useSourceSelection, useKeyboardNavigation, useTransitionFilters } from '@/features/library/hooks'
+import { useLibraryStore } from '@/store/useLibraryStore'
 
 export function Library() {
   const navigate = useNavigate()
   const { recordings, loading, error, refresh, deviceConnected, stats } = useUnifiedRecordings()
+
+  // Selected source for center panel
+  const selectedSourceId = useLibraryStore((state) => state.selectedSourceId)
+  const setSelectedSourceId = useLibraryStore((state) => state.setSelectedSourceId)
 
   // Centralized audio controls (persists across navigation)
   const audioControls = useAudioControls()
@@ -542,11 +550,14 @@ export function Library() {
     [toggleTranscript]
   )
 
-  // Drawer handlers
-  const handleOpenDrawer = useCallback((recording: UnifiedRecording) => {
-    setSelectedSourceForDrawer(recording)
-    setDrawerOpen(true)
-  }, [])
+  // Handle row click for tri-pane layout
+  const handleRowClick = useCallback((recording: UnifiedRecording) => {
+    setSelectedSourceId(recording.id)
+  }, [setSelectedSourceId])
+
+  // Get selected recording and its data for SourceReader
+  const selectedRecording = selectedSourceId ? recordings.find((r) => r.id === selectedSourceId) : null
+  const selectedTranscript = selectedRecording ? transcripts.get(selectedRecording.id) : undefined
 
   const handleCloseDrawer = useCallback(() => {
     setDrawerOpen(false)
@@ -676,14 +687,18 @@ export function Library() {
       {/* Accessibility: Live Region for announcements */}
       <LiveRegion message={announcement} />
 
-      {/* Content - Virtualized for performance with 1000+ recordings */}
-      <div
-        ref={parentRef}
-        className="flex-1 overflow-auto p-6"
-        onKeyDown={handleKeyDown}
-        tabIndex={0}
-        data-testid="library-list"
-      >
+      {/* Tri-Pane Layout */}
+      <div className="flex-1 overflow-hidden">
+        <TriPaneLayout
+          leftPanel={
+            /* Left Panel: Recording List */
+            <div
+              ref={parentRef}
+              className="h-full overflow-auto p-6"
+              onKeyDown={handleKeyDown}
+              tabIndex={0}
+              data-testid="library-list"
+            >
         <div className={`max-w-4xl mx-auto transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
           {filteredRecordings.length === 0 ? (
             <EmptyState
@@ -739,7 +754,7 @@ export function Library() {
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
-                          onClick={() => handleOpenDrawer(recording)}
+                          onClick={() => handleRowClick(recording)}
                           onPlay={() => {
                             if (hasLocalPath(recording)) {
                               handlePlayCallback(recording.id, recording.localPath)
@@ -793,7 +808,7 @@ export function Library() {
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
-                          onClick={() => handleOpenDrawer(recording)}
+                          onClick={() => handleRowClick(recording)}
                           onPlay={() => {
                             if (hasLocalPath(recording)) {
                               handlePlayCallback(recording.id, recording.localPath)
@@ -815,6 +830,36 @@ export function Library() {
             </div>
           )}
         </div>
+            </div>
+          }
+          centerPanel={
+            /* Center Panel: Source Reader */
+            <SourceReader
+              recording={selectedRecording ?? null}
+              transcript={selectedTranscript}
+              isPlaying={selectedRecording ? currentlyPlayingId === selectedRecording.id : false}
+              currentTimeMs={0}
+              onPlay={() => {
+                if (selectedRecording && hasLocalPath(selectedRecording)) {
+                  handlePlayCallback(selectedRecording.id, selectedRecording.localPath)
+                }
+              }}
+              onStop={handleStopCallback}
+              onSeek={(startMs, endMs) => {
+                // TODO: Implement seek functionality
+                console.log('Seek to:', startMs, endMs)
+              }}
+            />
+          }
+          rightPanel={
+            /* Right Panel: AI Assistant */
+            <AssistantPanel
+              recording={selectedRecording ?? null}
+              onAskAssistant={handleAskAssistantCallback}
+              onGenerateOutput={handleGenerateOutputCallback}
+            />
+          }
+        />
       </div>
 
       {/* Bulk Progress Modal - shows during bulk operations */}
