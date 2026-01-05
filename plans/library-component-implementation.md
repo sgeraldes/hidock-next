@@ -396,7 +396,7 @@ apps/electron/src/
 
 #### Phase 7: Detail Drawer & Tri-Pane Layout
 
-**Goal:** Implement the Source Detail Drawer and prepare for tri-pane layout.
+**Goal:** Implement the Source Detail Drawer and full tri-pane layout.
 
 **Tasks:**
 
@@ -418,7 +418,7 @@ apps/electron/src/
     highlightTranscriptRange(startMs, endMs)
   }
   ```
-- [ ] Prepare tri-pane layout structure (future)
+- [ ] Implement tri-pane layout structure
   ```tsx
   <ResizablePanelGroup direction="horizontal">
     <ResizablePanel defaultSize={25}>
@@ -426,25 +426,158 @@ apps/electron/src/
     </ResizablePanel>
     <ResizableHandle />
     <ResizablePanel defaultSize={45}>
-      <SourceReader /> {/* Future: transcript/PDF viewer */}
+      <SourceReader />
     </ResizablePanel>
     <ResizableHandle />
     <ResizablePanel defaultSize={30}>
-      <AssistantPanel /> {/* Future: context-aware chat */}
+      <AssistantPanel />
     </ResizablePanel>
   </ResizablePanelGroup>
   ```
+- [ ] Create `SourceReader.tsx` component
+  - Unified viewer for all source types
+  - Audio: Waveform + transcript view
+  - PDF: Embedded PDF viewer with annotations
+  - Markdown: Rendered markdown with syntax highlighting
+  - Image: Zoomable image viewer with metadata
+  - Web clip: Rendered HTML content with source link
+- [ ] Create `AssistantPanel.tsx` component
+  - Context-aware chat interface
+  - Source content as context for AI queries
+  - Quick actions: Summarize, Extract key points, Generate notes
+  - Conversation history scoped to selected source
 
 **Files to Create:**
 - `apps/electron/src/features/library/components/SourceDetailDrawer.tsx`
 - `apps/electron/src/features/library/components/TranscriptViewer.tsx`
 - `apps/electron/src/features/library/components/TimeAnchor.tsx`
+- `apps/electron/src/features/library/components/SourceReader.tsx`
+- `apps/electron/src/features/library/components/AssistantPanel.tsx`
+- `apps/electron/src/features/library/components/viewers/AudioViewer.tsx`
+- `apps/electron/src/features/library/components/viewers/PdfViewer.tsx`
+- `apps/electron/src/features/library/components/viewers/MarkdownViewer.tsx`
+- `apps/electron/src/features/library/components/viewers/ImageViewer.tsx`
+- `apps/electron/src/features/library/components/viewers/WebClipViewer.tsx`
 
 **Success Criteria:**
 - Detail drawer opens smoothly
 - Responsive behavior works on all breakpoints
 - Time anchors sync with audio playback
-- Foundation ready for tri-pane expansion
+- Tri-pane layout fully functional with resizable panels
+- SourceReader displays all source types correctly
+- AssistantPanel provides context-aware AI chat
+
+---
+
+#### Phase 8: Multi-Source Type Support
+
+**Goal:** Implement full support for all source types beyond audio.
+
+**Tasks:**
+
+- [ ] Implement `PdfSource` type and handling
+  ```typescript
+  interface PdfSource extends BaseSource {
+    type: 'pdf'
+    pageCount: number
+    fileSize: number
+    thumbnailPath?: string
+    ocrStatus: 'none' | 'queued' | 'processing' | 'ready' | 'error'
+    extractedText?: string
+  }
+  ```
+  - PDF import via drag-and-drop and file picker
+  - Thumbnail generation for list view
+  - OCR integration for searchable text extraction
+  - PDF viewer with page navigation and zoom
+
+- [ ] Implement `MarkdownSource` type and handling
+  ```typescript
+  interface MarkdownSource extends BaseSource {
+    type: 'markdown'
+    content: string
+    wordCount: number
+    headings: string[]
+  }
+  ```
+  - Markdown file import
+  - In-app markdown editor
+  - Live preview rendering
+  - Frontmatter metadata extraction
+
+- [ ] Implement `ImageSource` type and handling
+  ```typescript
+  interface ImageSource extends BaseSource {
+    type: 'image'
+    dimensions: { width: number; height: number }
+    fileSize: number
+    format: 'png' | 'jpg' | 'gif' | 'webp'
+    ocrStatus: 'none' | 'queued' | 'processing' | 'ready' | 'error'
+    extractedText?: string
+    altText?: string
+  }
+  ```
+  - Image import via drag-and-drop and file picker
+  - Thumbnail generation
+  - OCR for text extraction from images
+  - Image viewer with zoom and pan
+
+- [ ] Implement `WebClipSource` type and handling
+  ```typescript
+  interface WebClipSource extends BaseSource {
+    type: 'web_clip'
+    sourceUrl: string
+    clippedAt: string
+    htmlContent: string
+    textContent: string
+    screenshot?: string
+  }
+  ```
+  - Browser extension integration for clipping
+  - Manual URL import with content fetching
+  - Rendered HTML preview
+  - Link back to original source
+
+- [ ] Update `LibraryFilters.tsx` for source type filtering
+  - Add "Type" filter dropdown (audio, pdf, markdown, image, web_clip)
+  - Update search to include extracted text from all types
+
+- [ ] Update `SourceRow.tsx` and `SourceCard.tsx` for multi-type display
+  - Type-specific icons
+  - Type-specific metadata display
+  - Type-specific action buttons
+
+- [ ] Implement unified import flow
+  - Drag-and-drop zone in Library header
+  - File picker with multi-type support
+  - Import progress tracking
+  - Batch import handling
+
+- [ ] Add download progress indicator to `SourceRow.tsx`
+  - Progress bar overlay during download
+  - Cancel button for in-progress downloads
+
+**Files to Create:**
+- `apps/electron/src/features/library/services/pdfService.ts`
+- `apps/electron/src/features/library/services/markdownService.ts`
+- `apps/electron/src/features/library/services/imageService.ts`
+- `apps/electron/src/features/library/services/webClipService.ts`
+- `apps/electron/src/features/library/components/ImportDropZone.tsx`
+- `apps/electron/src/features/library/components/ImportProgressModal.tsx`
+
+**Files to Modify:**
+- `apps/electron/src/features/library/types/source.ts` - Activate all source types
+- `apps/electron/src/features/library/components/LibraryFilters.tsx`
+- `apps/electron/src/features/library/components/SourceRow.tsx`
+- `apps/electron/src/features/library/components/SourceCard.tsx`
+- `apps/electron/src/features/library/components/LibraryHeader.tsx`
+
+**Success Criteria:**
+- All 5 source types can be imported and displayed
+- Type-specific viewers render content correctly
+- Search works across all source types including extracted text
+- Import flow handles all file types seamlessly
+- Download progress visible in list items
 
 ---
 

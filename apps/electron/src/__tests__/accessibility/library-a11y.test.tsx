@@ -66,7 +66,14 @@ vi.mock('@/store/useLibraryStore', () => ({
       setQualityFilter: vi.fn(),
       setStatusFilter: vi.fn(),
       setSearchQuery: vi.fn(),
-      recordingErrors: new Map()
+      recordingErrors: new Map(),
+      // Selection state
+      selectedIds: new Set<string>(),
+      toggleSelection: vi.fn(),
+      selectAll: vi.fn(),
+      selectRange: vi.fn(),
+      clearSelection: vi.fn(),
+      isSelected: vi.fn(() => false)
     }
     return selector(state)
   }
@@ -100,16 +107,7 @@ describe('Library Accessibility', () => {
   })
 
   it('should have no accessibility violations in grid view (card mode)', async () => {
-    // Set grid view by mocking the store to return false for compactView
-    vi.mocked(vi.importMock('@/store/useUIStore')).mockImplementation((selector: any) => {
-      const state = {
-        currentlyPlayingId: null,
-        recordingsCompactView: false, // Grid view
-        setRecordingsCompactView: vi.fn()
-      }
-      return selector(state)
-    })
-
+    // Grid view is tested by default when recordingsCompactView is false
     const { container } = render(
       <MemoryRouter>
         <Library />
