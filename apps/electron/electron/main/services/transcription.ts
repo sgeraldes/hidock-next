@@ -12,6 +12,7 @@ import {
   findCandidateMeetingsForRecording,
   addRecordingMeetingCandidate,
   linkRecordingToMeeting,
+  updateKnowledgeCaptureTitle,
   type Transcript
 } from './database'
 import { BrowserWindow } from 'electron'
@@ -197,6 +198,11 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
 2. A list of action items mentioned (as a JSON array of strings)
 3. Key topics discussed (as a JSON array of strings)
 4. Key points or decisions made (as a JSON array of strings)
+5. A short, descriptive title for this recording (3-8 words that capture the essence)
+6. 4-5 specific, context-aware questions that could be asked about this recording
+   - Questions should be SPECIFIC to the content (e.g., "What was decided about the Q3 marketing budget?")
+   - Avoid generic questions (e.g., "What was discussed?" or "Tell me more")
+   - Questions should help users quickly understand key decisions, action items, and outcomes
 ${meetingSelectionSection}
 
 Transcript:
@@ -208,6 +214,8 @@ Respond in JSON format:
   "action_items": ["...", "..."],
   "topics": ["...", "..."],
   "key_points": ["...", "..."],
+  "title_suggestion": "Brief Descriptive Title (3-8 words)",
+  "question_suggestions": ["Specific question about decision 1?", "Specific question about action item 2?", "..."],
   "language": "es" or "en"${candidateMeetings.length > 0 ? `,
   "selected_meeting_id": "...",
   "meeting_confidence": 0.0,
@@ -223,6 +231,8 @@ Respond in JSON format:
     action_items?: string[]
     topics?: string[]
     key_points?: string[]
+    title_suggestion?: string
+    question_suggestions?: string[]
     language?: string
     selected_meeting_id?: string
     meeting_confidence?: number
@@ -283,11 +293,18 @@ Respond in JSON format:
     speakers: undefined,
     word_count: wordCount,
     transcription_provider: 'gemini',
-    transcription_model: 'gemini-2.0-flash-exp'
+    transcription_model: 'gemini-2.0-flash-exp',
+    title_suggestion: analysis.title_suggestion,
+    question_suggestions: analysis.question_suggestions ? JSON.stringify(analysis.question_suggestions) : undefined
   }
 
   insertTranscript(transcript)
   updateRecordingStatus(recordingId, 'transcribed')
+
+  // Auto-update recording title if we have a title suggestion
+  if (analysis.title_suggestion) {
+    updateKnowledgeCaptureTitle(recordingId, analysis.title_suggestion)
+  }
 
   // Index transcript into vector store for RAG
   try {
