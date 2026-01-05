@@ -6,6 +6,7 @@ interface AppState {
   // Config
   config: AppConfig | null
   configLoading: boolean
+  configReady: boolean // True ONLY when config has been loaded from main process
 
   // Calendar
   meetings: Meeting[]
@@ -111,6 +112,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   config: null,
   configLoading: false,
+  configReady: false,
 
   meetings: [],
   meetingsLoading: false,
@@ -165,10 +167,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ configLoading: true })
     try {
       const config = await window.electronAPI.config.get()
-      set({ config, configLoading: false })
+      set({ config, configLoading: false, configReady: true })
     } catch (error) {
       console.error('Failed to load config:', error)
-      set({ configLoading: false })
+      set({ configLoading: false, configReady: true }) // Ready with null = safe default
     }
   },
 
