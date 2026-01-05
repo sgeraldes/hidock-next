@@ -206,14 +206,6 @@ export const useLibraryStore = create<LibraryStore>()(
 
 // Selector hooks for performance (avoid re-renders when unrelated state changes)
 export const useLibraryViewMode = () => useLibraryStore((state) => state.viewMode)
-export const useLibraryFilters = () =>
-  useLibraryStore((state) => ({
-    locationFilter: state.locationFilter,
-    categoryFilter: state.categoryFilter,
-    qualityFilter: state.qualityFilter,
-    statusFilter: state.statusFilter,
-    searchQuery: state.searchQuery
-  }))
 export const useLibrarySelection = () => useLibraryStore((state) => state.selectedIds)
 export const useLibrarySorting = () =>
   useLibraryStore((state) => ({

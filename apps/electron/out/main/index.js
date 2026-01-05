@@ -303,7 +303,7 @@ function readRecordingFile(filePath) {
 }
 let db = null;
 let dbPath = "";
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 16;
 const SCHEMA = `
 -- Calendar events from ICS
 CREATE TABLE IF NOT EXISTS meetings (
@@ -545,6 +545,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
     word_count INTEGER,
     transcription_provider TEXT,
     transcription_model TEXT,
+    title_suggestion TEXT,
+    question_suggestions TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
 );
@@ -1130,6 +1132,22 @@ const MIGRATIONS = {
   15: () => {
     console.log("Running migration to schema v15: Actionables architecture");
     console.log("Migration v15 complete: Actionables table created");
+  },
+  16: () => {
+    console.log("Running migration to schema v16: Adding AI-generated title and question suggestions to transcripts");
+    const database2 = getDatabase();
+    const columnsToAdd = [
+      "ALTER TABLE transcripts ADD COLUMN title_suggestion TEXT",
+      "ALTER TABLE transcripts ADD COLUMN question_suggestions TEXT"
+    ];
+    for (const sql of columnsToAdd) {
+      try {
+        database2.run(sql);
+      } catch (e) {
+        console.log(`Column may already exist: ${sql}`);
+      }
+    }
+    console.log("Migration v16 complete: AI title and question suggestions added to transcripts");
   }
 };
 function runMigrations(currentVersion) {
@@ -1250,6 +1268,28 @@ function closeDatabase() {
     saveDatabase();
     db.close();
     db = null;
+  }
+}
+function updateKnowledgeCaptureTitle(recordingId, titleSuggestion) {
+  try {
+    const recording = getRecordingById(recordingId);
+    if (!recording) return;
+    const captureId = recording.migrated_to_capture_id;
+    if (!captureId) return;
+    const capture = queryOne(
+      "SELECT id, title FROM knowledge_captures WHERE id = ?",
+      [captureId]
+    );
+    if (!capture) return;
+    if (capture.title.includes(".") || capture.title === "Untitled") {
+      run(
+        "UPDATE knowledge_captures SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [titleSuggestion, captureId]
+      );
+      console.log(`Updated knowledge_capture title: "${capture.title}" -> "${titleSuggestion}"`);
+    }
+  } catch (error2) {
+    console.warn("Failed to update knowledge_capture title:", error2);
   }
 }
 function queryAll(sql, params = []) {
@@ -1569,8 +1609,9 @@ function getTranscriptsByRecordingIds(recordingIds) {
 function insertTranscript(transcript) {
   run(
     `INSERT INTO transcripts (id, recording_id, full_text, language, summary, action_items,
-      topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model,
+      title_suggestion, question_suggestions)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       transcript.id,
       transcript.recording_id,
@@ -1584,7 +1625,9 @@ function insertTranscript(transcript) {
       null,
       transcript.word_count ?? null,
       transcript.transcription_provider ?? null,
-      transcript.transcription_model ?? null
+      transcript.transcription_model ?? null,
+      transcript.title_suggestion ?? null,
+      transcript.question_suggestions ?? null
     ]
   );
 }
@@ -2060,6 +2103,7 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   tagMeetingToProject,
   untagMeetingFromProject,
   updateContact,
+  updateKnowledgeCaptureTitle,
   updateProject,
   updateQueueItem,
   updateRecordingLifecycle,
@@ -3647,6 +3691,11 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
 2. A list of action items mentioned (as a JSON array of strings)
 3. Key topics discussed (as a JSON array of strings)
 4. Key points or decisions made (as a JSON array of strings)
+5. A short, descriptive title for this recording (3-8 words that capture the essence)
+6. 4-5 specific, context-aware questions that could be asked about this recording
+   - Questions should be SPECIFIC to the content (e.g., "What was decided about the Q3 marketing budget?")
+   - Avoid generic questions (e.g., "What was discussed?" or "Tell me more")
+   - Questions should help users quickly understand key decisions, action items, and outcomes
 ${meetingSelectionSection}
 
 Transcript:
@@ -3658,6 +3707,8 @@ Respond in JSON format:
   "action_items": ["...", "..."],
   "topics": ["...", "..."],
   "key_points": ["...", "..."],
+  "title_suggestion": "Brief Descriptive Title (3-8 words)",
+  "question_suggestions": ["Specific question about decision 1?", "Specific question about action item 2?", "..."],
   "language": "es" or "en"${candidateMeetings.length > 0 ? `,
   "selected_meeting_id": "...",
   "meeting_confidence": 0.0,
@@ -3707,10 +3758,15 @@ Respond in JSON format:
     key_points: analysis.key_points ? JSON.stringify(analysis.key_points) : void 0,
     word_count: wordCount,
     transcription_provider: "gemini",
-    transcription_model: "gemini-2.0-flash-exp"
+    transcription_model: "gemini-2.0-flash-exp",
+    title_suggestion: analysis.title_suggestion,
+    question_suggestions: analysis.question_suggestions ? JSON.stringify(analysis.question_suggestions) : void 0
   };
   insertTranscript(transcript);
   updateRecordingStatus(recordingId, "transcribed");
+  if (analysis.title_suggestion) {
+    updateKnowledgeCaptureTitle(recordingId, analysis.title_suggestion);
+  }
   try {
     const vectorStore = getVectorStore();
     const meetingId = recording.meeting_id;
@@ -8119,6 +8175,68 @@ function registerIpcHandlers() {
 const USB_VENDOR_ID = 4310;
 const USB_PRODUCT_IDS = [44812, 44813, 45069, 44814, 45070];
 let mainWindow = null;
+let splashWindow = null;
+const SPLASH_HTML = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>HiDock</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#e8e8e8;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;-webkit-app-region:drag;user-select:none}
+.logo{font-size:28px;font-weight:600;margin-bottom:24px;color:#fff}
+.spinner{width:32px;height:32px;border:3px solid rgba(255,255,255,0.1);border-top-color:#4f8cff;border-radius:50%;animation:spin 1s linear infinite;margin-bottom:20px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.status{font-size:13px;color:#a0a0a0;text-align:center;max-width:280px;min-height:40px}
+.progress-container{width:200px;height:4px;background:rgba(255,255,255,0.1);border-radius:2px;margin:16px 0;overflow:hidden}
+.progress-bar{height:100%;background:#4f8cff;border-radius:2px;transition:width 0.3s ease;width:0%}
+.cancel-btn{-webkit-app-region:no-drag;margin-top:24px;padding:8px 20px;background:transparent;border:1px solid rgba(255,255,255,0.2);color:#a0a0a0;border-radius:6px;cursor:pointer;font-size:12px;transition:all 0.2s}
+.cancel-btn:hover{background:rgba(255,255,255,0.05);border-color:rgba(255,255,255,0.3);color:#fff}
+</style></head>
+<body>
+<div class="logo">HiDock</div>
+<div class="spinner"></div>
+<div class="progress-container"><div class="progress-bar" id="progress"></div></div>
+<div class="status" id="status">Initializing...</div>
+<button class="cancel-btn" id="cancelBtn">Cancel</button>
+<script>
+const statusEl=document.getElementById('status');
+const progressEl=document.getElementById('progress');
+const cancelBtn=document.getElementById('cancelBtn');
+window.electronAPI?.onSplashStatus?.((status,progress)=>{statusEl.textContent=status;if(progress!==undefined)progressEl.style.width=progress+'%';});
+cancelBtn.addEventListener('click',()=>{window.electronAPI?.quitApp?.();});
+<\/script>
+</body></html>`;
+function createSplashWindow() {
+  const splash = new electron.BrowserWindow({
+    width: 340,
+    height: 280,
+    frame: false,
+    transparent: false,
+    resizable: false,
+    center: true,
+    alwaysOnTop: true,
+    skipTaskbar: false,
+    webPreferences: {
+      preload: path.join(__dirname, "../preload/splash.js"),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  splash.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(SPLASH_HTML));
+  return splash;
+}
+function updateSplashStatus(status, progress) {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.webContents.send("splash:status", status, progress);
+  }
+}
+function closeSplash() {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.close();
+    splashWindow = null;
+  }
+}
+electron.ipcMain.on("splash:quit", () => {
+  electron.app.quit();
+});
 function createWindow() {
   mainWindow = new electron.BrowserWindow({
     width: 1400,
@@ -8137,6 +8255,7 @@ function createWindow() {
     }
   });
   mainWindow.on("ready-to-show", () => {
+    closeSplash();
     mainWindow?.show();
   });
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -8151,32 +8270,41 @@ function createWindow() {
 }
 async function initializeServices() {
   console.log("Initializing services...");
+  updateSplashStatus("Loading configuration...", 10);
   await initializeConfig();
   console.log("Config initialized");
+  updateSplashStatus("Setting up storage...", 20);
   await initializeFileStorage();
   console.log("File storage initialized");
+  updateSplashStatus("Initializing database...", 30);
   await initializeDatabase();
   console.log("Database initialized");
+  updateSplashStatus("Checking data integrity...", 40);
   const integrityService = getIntegrityService();
   const integrityResult = await integrityService.runStartupChecks();
   if (integrityResult.issuesFound > 0) {
     console.log(`Integrity checks: ${integrityResult.issuesFixed}/${integrityResult.issuesFound} issues fixed`);
   }
+  updateSplashStatus("Initializing search index...", 60);
   const vectorStore = getVectorStore();
   await vectorStore.initialize();
   console.log("Vector store initialized");
+  updateSplashStatus("Starting AI services...", 75);
   const rag = getRAGService();
   await rag.initialize();
   console.log("RAG service initialized");
+  updateSplashStatus("Finalizing setup...", 90);
   getStoragePolicyService();
   console.log("Storage policy service initialized");
   registerIpcHandlers();
   console.log("IPC handlers registered");
+  updateSplashStatus("Starting application...", 100);
 }
 electron.app.commandLine.appendSwitch("remote-debugging-port", "9222");
 electron.app.whenReady().then(async () => {
   utils.electronApp.setAppUserModelId("com.hidock.meeting-intelligence");
   electron.app.commandLine.appendSwitch("remote-debugging-port", "9222");
+  splashWindow = createSplashWindow();
   electron.app.on("browser-window-created", (_, window) => {
     utils.optimizer.watchWindowShortcuts(window);
   });

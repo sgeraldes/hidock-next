@@ -1,0 +1,1132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Library - Compact Prototype</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg-primary: #1e1e1e;
+      --bg-secondary: #252526;
+      --bg-tertiary: #2d2d2d;
+      --bg-active: #37373d;
+      --bg-hover: #2a2d2e;
+      --border: #3c3c3c;
+      --text-primary: #cccccc;
+      --text-secondary: #969696;
+      --text-muted: #5a5a5a;
+      --accent: #0078d4;
+      --accent-secondary: #569cd6;
+      --success: #4ec9b0;
+      --warning: #dcdcaa;
+      --error: #f14c4c;
+      --string: #ce9178;
+    }
+
+    body {
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      height: 100vh;
+      overflow: hidden;
+      font-size: 13px;
+    }
+
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    /* Title Bar */
+    .title-bar {
+      height: 30px;
+      background: var(--bg-tertiary);
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .title-bar-title {
+      flex: 1;
+      text-align: center;
+    }
+
+    .window-controls {
+      display: flex;
+      gap: 8px;
+    }
+
+    .window-control {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+
+    .window-control.close { background: #ff5f57; }
+    .window-control.minimize { background: #febc2e; }
+    .window-control.maximize { background: #28c840; }
+
+    /* Menu Bar */
+    .menu-bar {
+      height: 28px;
+      background: var(--bg-secondary);
+      display: flex;
+      align-items: center;
+      padding: 0 8px;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .menu-item {
+      padding: 4px 10px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      border-radius: 3px;
+    }
+
+    .menu-item:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .menu-item.active {
+      background: var(--bg-active);
+      color: var(--text-primary);
+    }
+
+    /* Main Layout */
+    .main-layout {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* Activity Bar */
+    .activity-bar {
+      width: 48px;
+      background: var(--bg-secondary);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 8px 0;
+    }
+
+    .activity-item {
+      width: 40px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--text-muted);
+      border-left: 2px solid transparent;
+      margin-bottom: 4px;
+      font-size: 18px;
+    }
+
+    .activity-item:hover {
+      color: var(--text-primary);
+    }
+
+    .activity-item.active {
+      color: var(--text-primary);
+      border-left-color: var(--accent);
+    }
+
+    /* Panels */
+    .panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg-secondary);
+    }
+
+    .panel-sidebar {
+      width: 240px;
+      min-width: 180px;
+      max-width: 360px;
+      border-right: 1px solid var(--border);
+    }
+
+    .panel-editor {
+      flex: 1;
+      min-width: 300px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .panel-auxiliary {
+      width: 280px;
+      min-width: 200px;
+      max-width: 400px;
+      border-left: 1px solid var(--border);
+    }
+
+    .resizer {
+      width: 4px;
+      cursor: col-resize;
+      background: transparent;
+      flex-shrink: 0;
+    }
+
+    .resizer:hover, .resizer.active {
+      background: var(--accent);
+    }
+
+    /* Sidebar Header */
+    .sidebar-header {
+      height: 35px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      text-transform: uppercase;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      color: var(--text-secondary);
+      background: var(--bg-secondary);
+    }
+
+    .sidebar-actions {
+      display: flex;
+      gap: 4px;
+    }
+
+    .sidebar-action {
+      width: 22px;
+      height: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--text-muted);
+      border-radius: 3px;
+      font-size: 12px;
+    }
+
+    .sidebar-action:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    /* Search */
+    .sidebar-search {
+      padding: 8px;
+      background: var(--bg-primary);
+    }
+
+    .search-input {
+      width: 100%;
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      font-size: 12px;
+      font-family: inherit;
+      outline: none;
+    }
+
+    .search-input:focus {
+      border-color: var(--accent);
+    }
+
+    /* Tree View */
+    .tree-view {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 0;
+    }
+
+    .tree-section {
+      margin-bottom: 4px;
+    }
+
+    .tree-section-header {
+      height: 22px;
+      padding: 0 8px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+
+    .tree-section-header:hover {
+      background: var(--bg-hover);
+    }
+
+    .tree-item {
+      height: 22px;
+      padding: 0 8px 0 20px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .tree-item:hover {
+      background: var(--bg-hover);
+    }
+
+    .tree-item.selected {
+      background: var(--bg-active);
+    }
+
+    .tree-item-icon {
+      font-size: 14px;
+      width: 16px;
+      text-align: center;
+    }
+
+    .tree-item-icon.audio { color: var(--accent-secondary); }
+    .tree-item-icon.pdf { color: var(--error); }
+    .tree-item-icon.markdown { color: var(--success); }
+    .tree-item-icon.image { color: var(--warning); }
+    .tree-item-icon.web_clip { color: var(--string); }
+
+    .tree-item-name {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tree-item-badge {
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: var(--bg-tertiary);
+      color: var(--text-muted);
+    }
+
+    /* Editor Tabs */
+    .editor-tabs {
+      height: 35px;
+      display: flex;
+      background: var(--bg-tertiary);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+    }
+
+    .editor-tab {
+      height: 35px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      border-right: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    .editor-tab:hover {
+      background: var(--bg-hover);
+    }
+
+    .editor-tab.active {
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      border-bottom: 1px solid var(--bg-primary);
+      margin-bottom: -1px;
+    }
+
+    .editor-tab-close {
+      width: 16px;
+      height: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 3px;
+      font-size: 14px;
+    }
+
+    .editor-tab-close:hover {
+      background: var(--bg-active);
+    }
+
+    /* Editor Content */
+    .editor-content {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-primary);
+    }
+
+    .editor-empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+    }
+
+    .editor-empty-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+      opacity: 0.3;
+    }
+
+    .editor-view {
+      flex: 1;
+      display: none;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .editor-view.active {
+      display: flex;
+    }
+
+    /* Breadcrumb */
+    .breadcrumb {
+      height: 22px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--text-muted);
+      background: var(--bg-primary);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .breadcrumb-sep {
+      color: var(--text-muted);
+    }
+
+    .breadcrumb-item {
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+
+    .breadcrumb-item:hover {
+      color: var(--accent-secondary);
+    }
+
+    /* Minimap placeholder */
+    .editor-main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    .editor-gutter {
+      width: 50px;
+      background: var(--bg-primary);
+      border-right: 1px solid var(--border);
+      padding: 8px 0;
+      text-align: right;
+      color: var(--text-muted);
+      font-size: 11px;
+      line-height: 20px;
+      user-select: none;
+    }
+
+    .editor-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 16px;
+    }
+
+    /* Audio Controls */
+    .audio-controls {
+      padding: 12px 16px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .audio-btn {
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      cursor: pointer;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+
+    .audio-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .audio-btn.play {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .audio-progress {
+      flex: 1;
+      height: 4px;
+      background: var(--bg-tertiary);
+      border-radius: 2px;
+      cursor: pointer;
+      position: relative;
+    }
+
+    .audio-progress-fill {
+      height: 100%;
+      width: 30%;
+      background: var(--accent);
+      border-radius: 2px;
+    }
+
+    .audio-time {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Transcript Lines */
+    .transcript-line {
+      display: flex;
+      line-height: 20px;
+      padding: 2px 0;
+    }
+
+    .transcript-line:hover {
+      background: var(--bg-hover);
+    }
+
+    .transcript-line.current {
+      background: rgba(0, 120, 212, 0.15);
+    }
+
+    .transcript-timestamp {
+      color: var(--accent-secondary);
+      margin-right: 16px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+
+    .transcript-speaker {
+      color: var(--success);
+      margin-right: 8px;
+    }
+
+    .transcript-text {
+      color: var(--text-primary);
+    }
+
+    /* Auxiliary Panel */
+    .aux-header {
+      height: 35px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-tertiary);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .aux-tabs {
+      display: flex;
+      gap: 2px;
+    }
+
+    .aux-tab {
+      padding: 4px 12px;
+      font-size: 11px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-radius: 3px;
+    }
+
+    .aux-tab:hover {
+      color: var(--text-secondary);
+    }
+
+    .aux-tab.active {
+      background: var(--bg-active);
+      color: var(--text-primary);
+    }
+
+    .aux-content {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Chat */
+    .chat-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+    }
+
+    .chat-message {
+      margin-bottom: 12px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .chat-message-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .chat-role {
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
+    .chat-role.user { color: var(--accent-secondary); }
+    .chat-role.assistant { color: var(--success); }
+
+    .chat-time {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .chat-text {
+      color: var(--text-secondary);
+      padding-left: 0;
+    }
+
+    .chat-text code {
+      background: var(--bg-tertiary);
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+
+    .chat-input-area {
+      padding: 8px;
+      background: var(--bg-primary);
+      border-top: 1px solid var(--border);
+    }
+
+    .chat-input-wrapper {
+      display: flex;
+      gap: 8px;
+    }
+
+    .chat-input {
+      flex: 1;
+      padding: 6px 10px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 12px;
+      resize: none;
+      outline: none;
+    }
+
+    .chat-input:focus {
+      border-color: var(--accent);
+    }
+
+    .chat-submit {
+      padding: 6px 12px;
+      background: var(--accent);
+      border: none;
+      color: white;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .chat-submit:hover {
+      opacity: 0.9;
+    }
+
+    /* Quick Actions */
+    .quick-actions-bar {
+      padding: 8px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .quick-btn {
+      padding: 4px 10px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-size: 11px;
+      cursor: pointer;
+      border-radius: 3px;
+      font-family: inherit;
+    }
+
+    .quick-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+      border-color: var(--accent);
+    }
+
+    /* Status Bar */
+    .status-bar {
+      height: 22px;
+      background: var(--accent);
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      font-size: 11px;
+      color: white;
+    }
+
+    .status-item {
+      padding: 0 10px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .status-item:hover {
+      background: rgba(255,255,255,0.1);
+    }
+
+    .status-spacer {
+      flex: 1;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: var(--bg-primary);
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--bg-tertiary);
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="title-bar">
+      <div class="window-controls">
+        <div class="window-control close"></div>
+        <div class="window-control minimize"></div>
+        <div class="window-control maximize"></div>
+      </div>
+      <div class="title-bar-title">Knowledge Library — hidock-workspace</div>
+    </div>
+
+    <div class="menu-bar">
+      <div class="menu-item">File</div>
+      <div class="menu-item">Edit</div>
+      <div class="menu-item">View</div>
+      <div class="menu-item active">Library</div>
+      <div class="menu-item">Tools</div>
+      <div class="menu-item">Help</div>
+    </div>
+
+    <div class="main-layout">
+      <div class="activity-bar">
+        <div class="activity-item active" title="Explorer">📁</div>
+        <div class="activity-item" title="Search">🔍</div>
+        <div class="activity-item" title="Sources">📚</div>
+        <div class="activity-item" title="AI">🤖</div>
+        <div class="activity-item" title="Settings">⚙️</div>
+      </div>
+
+      <aside class="panel panel-sidebar" id="panel-sidebar">
+        <div class="sidebar-header">
+          Explorer
+          <div class="sidebar-actions">
+            <div class="sidebar-action" title="New File">+</div>
+            <div class="sidebar-action" title="Refresh">↻</div>
+            <div class="sidebar-action" title="Collapse">−</div>
+          </div>
+        </div>
+        <div class="sidebar-search">
+          <input type="text" class="search-input" placeholder="Search sources...">
+        </div>
+        <div class="tree-view" id="tree-view"></div>
+      </aside>
+
+      <div class="resizer" id="resizer-1"></div>
+
+      <section class="panel panel-editor" id="panel-editor">
+        <div class="editor-tabs" id="editor-tabs">
+          <div class="editor-tab" data-id="welcome">
+            <span>Welcome</span>
+            <span class="editor-tab-close">×</span>
+          </div>
+        </div>
+
+        <div class="editor-content">
+          <div class="editor-empty" id="editor-empty">
+            <div class="editor-empty-icon">📄</div>
+            <div>Select a source to view</div>
+            <div style="margin-top: 8px; font-size: 11px;">Cmd+P to quick open</div>
+          </div>
+
+          <div class="editor-view" id="editor-view">
+            <div class="breadcrumb">
+              <span class="breadcrumb-item">Library</span>
+              <span class="breadcrumb-sep">/</span>
+              <span class="breadcrumb-item">Audio</span>
+              <span class="breadcrumb-sep">/</span>
+              <span class="breadcrumb-item" id="breadcrumb-name">file.wav</span>
+            </div>
+
+            <div class="audio-controls" id="audio-controls">
+              <button class="audio-btn">⏮</button>
+              <button class="audio-btn play" id="play-btn">▶</button>
+              <button class="audio-btn">⏭</button>
+              <div class="audio-progress">
+                <div class="audio-progress-fill"></div>
+              </div>
+              <span class="audio-time" id="audio-time">12:34 / 45:23</span>
+              <button class="audio-btn">1x</button>
+            </div>
+
+            <div class="editor-main">
+              <div class="editor-gutter" id="editor-gutter"></div>
+              <div class="editor-body" id="editor-body"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="resizer" id="resizer-2"></div>
+
+      <aside class="panel panel-auxiliary" id="panel-auxiliary">
+        <div class="aux-header">
+          <div class="aux-tabs">
+            <div class="aux-tab active">Assistant</div>
+            <div class="aux-tab">Outline</div>
+            <div class="aux-tab">Output</div>
+          </div>
+        </div>
+
+        <div class="aux-content">
+          <div class="quick-actions-bar">
+            <button class="quick-btn">Summarize</button>
+            <button class="quick-btn">Key Points</button>
+            <button class="quick-btn">Actions</button>
+            <button class="quick-btn">Explain</button>
+          </div>
+
+          <div class="chat-container">
+            <div class="chat-messages" id="chat-messages">
+              <div class="chat-message">
+                <div class="chat-message-header">
+                  <span class="chat-role assistant">ASSISTANT</span>
+                  <span class="chat-time">now</span>
+                </div>
+                <div class="chat-text">Ready to help analyze your sources. Select a file from the explorer to begin.</div>
+              </div>
+            </div>
+
+            <div class="chat-input-area">
+              <div class="chat-input-wrapper">
+                <textarea class="chat-input" placeholder="> Ask about this source..." rows="2" id="chat-input"></textarea>
+                <button class="chat-submit" id="chat-send">Run</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <div class="status-bar">
+      <div class="status-item">📚 24 sources</div>
+      <div class="status-item">⏱ 12h 34m total</div>
+      <div class="status-spacer"></div>
+      <div class="status-item">UTF-8</div>
+      <div class="status-item">Ln 1, Col 1</div>
+      <div class="status-item">Spaces: 2</div>
+    </div>
+  </div>
+
+  <script>
+    const sources = [
+      { id: 1, title: "weekly-standup.wav", type: "audio", meta: "45:23", folder: "Meetings" },
+      { id: 2, title: "q4-strategy.pdf", type: "pdf", meta: "12p", folder: "Documents" },
+      { id: 3, title: "research-notes.md", type: "markdown", meta: "2.3k", folder: "Notes" },
+      { id: 4, title: "client-call-acme.wav", type: "audio", meta: "32:15", folder: "Meetings" },
+      { id: 5, title: "architecture.png", type: "image", meta: "2.4M", folder: "Images" },
+      { id: 6, title: "competitor-analysis.pdf", type: "pdf", meta: "8p", folder: "Documents" },
+      { id: 7, title: "interview-senior.wav", type: "audio", meta: "58:42", folder: "Interviews" },
+      { id: 8, title: "api-docs.clip", type: "web_clip", meta: "ext", folder: "Clips" },
+    ];
+
+    const transcriptData = [
+      { time: "00:00:00", speaker: "JOHN", text: "Good morning everyone! Let's get started with our weekly standup." },
+      { time: "00:00:12", speaker: "SARAH", text: "Morning! Yes, ready to dive into this week's priorities." },
+      { time: "00:00:18", speaker: "JOHN", text: "Perfect. Let's start with product updates. Sarah?" },
+      { time: "00:00:28", speaker: "SARAH", text: "Last week we completed the new onboarding flow. A/B tests show 23% improvement." },
+      { time: "00:00:45", speaker: "MIKE", text: "Fantastic! Does that include mobile users?" },
+      { time: "00:00:52", speaker: "SARAH", text: "Yes! Mobile is even better at 28% improvement." },
+      { time: "00:01:05", speaker: "JOHN", text: "Great work. What's on the roadmap for this week?" },
+      { time: "00:01:12", speaker: "SARAH", text: "Focusing on notification system redesign. Specs are ready." },
+    ];
+
+    const typeIcons = { audio: "♪", pdf: "◧", markdown: "◆", image: "◫", web_clip: "◈" };
+
+    function createElement(tag, className, textContent) {
+      const el = document.createElement(tag);
+      if (className) el.className = className;
+      if (textContent) el.textContent = textContent;
+      return el;
+    }
+
+    function renderTreeView() {
+      const tree = document.getElementById('tree-view');
+      tree.textContent = '';
+
+      const folders = {};
+      sources.forEach(s => {
+        if (!folders[s.folder]) folders[s.folder] = [];
+        folders[s.folder].push(s);
+      });
+
+      Object.keys(folders).forEach(folder => {
+        const section = createElement('div', 'tree-section');
+
+        const header = createElement('div', 'tree-section-header');
+        header.textContent = '▼ ' + folder;
+        section.appendChild(header);
+
+        folders[folder].forEach(source => {
+          const item = createElement('div', 'tree-item');
+          item.dataset.id = source.id;
+
+          const icon = createElement('span', 'tree-item-icon ' + source.type, typeIcons[source.type]);
+          const name = createElement('span', 'tree-item-name', source.title);
+          const badge = createElement('span', 'tree-item-badge', source.meta);
+
+          item.appendChild(icon);
+          item.appendChild(name);
+          item.appendChild(badge);
+
+          item.addEventListener('click', () => selectSource(source.id));
+          section.appendChild(item);
+        });
+
+        tree.appendChild(section);
+      });
+    }
+
+    function renderTranscript() {
+      const gutter = document.getElementById('editor-gutter');
+      const body = document.getElementById('editor-body');
+      gutter.textContent = '';
+      body.textContent = '';
+
+      transcriptData.forEach((seg, i) => {
+        const lineNum = createElement('div', null, String(i + 1));
+        lineNum.style.lineHeight = '20px';
+        lineNum.style.paddingRight = '12px';
+        gutter.appendChild(lineNum);
+
+        const line = createElement('div', 'transcript-line' + (i === 3 ? ' current' : ''));
+
+        const timestamp = createElement('span', 'transcript-timestamp', seg.time);
+        const speaker = createElement('span', 'transcript-speaker', seg.speaker + ':');
+        const text = createElement('span', 'transcript-text', seg.text);
+
+        line.appendChild(timestamp);
+        line.appendChild(speaker);
+        line.appendChild(text);
+
+        body.appendChild(line);
+      });
+    }
+
+    function selectSource(id) {
+      const source = sources.find(s => s.id === id);
+      if (!source) return;
+
+      document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('selected'));
+      document.querySelector('.tree-item[data-id="' + id + '"]').classList.add('selected');
+
+      document.getElementById('editor-empty').classList.add('hidden');
+      document.getElementById('editor-view').classList.add('active');
+
+      document.getElementById('breadcrumb-name').textContent = source.title;
+      document.getElementById('audio-controls').style.display = source.type === 'audio' ? 'flex' : 'none';
+
+      // Update tab
+      const tabs = document.getElementById('editor-tabs');
+      tabs.textContent = '';
+
+      const tab = createElement('div', 'editor-tab active');
+      tab.dataset.id = id;
+
+      const icon = createElement('span', null, typeIcons[source.type] + ' ');
+      const name = createElement('span', null, source.title);
+      const close = createElement('span', 'editor-tab-close', '×');
+
+      tab.appendChild(icon);
+      tab.appendChild(name);
+      tab.appendChild(close);
+      tabs.appendChild(tab);
+
+      renderTranscript();
+    }
+
+    function initResizers() {
+      const resizer1 = document.getElementById('resizer-1');
+      const resizer2 = document.getElementById('resizer-2');
+      const panelSidebar = document.getElementById('panel-sidebar');
+      const panelAuxiliary = document.getElementById('panel-auxiliary');
+
+      let isResizing = false;
+      let currentResizer = null;
+
+      function startResize(e, resizer) {
+        isResizing = true;
+        currentResizer = resizer;
+        resizer.classList.add('active');
+        document.addEventListener('mousemove', resize);
+        document.addEventListener('mouseup', stopResize);
+        e.preventDefault();
+      }
+
+      function resize(e) {
+        if (!isResizing) return;
+
+        if (currentResizer === resizer1) {
+          const newWidth = e.clientX - 48;
+          if (newWidth >= 180 && newWidth <= 360) {
+            panelSidebar.style.width = newWidth + 'px';
+          }
+        } else if (currentResizer === resizer2) {
+          const newWidth = window.innerWidth - e.clientX;
+          if (newWidth >= 200 && newWidth <= 400) {
+            panelAuxiliary.style.width = newWidth + 'px';
+          }
+        }
+      }
+
+      function stopResize() {
+        isResizing = false;
+        if (currentResizer) currentResizer.classList.remove('active');
+        currentResizer = null;
+        document.removeEventListener('mousemove', resize);
+        document.removeEventListener('mouseup', stopResize);
+      }
+
+      resizer1.addEventListener('mousedown', (e) => startResize(e, resizer1));
+      resizer2.addEventListener('mousedown', (e) => startResize(e, resizer2));
+    }
+
+    document.getElementById('play-btn').addEventListener('click', function() {
+      const isPlaying = this.dataset.playing === 'true';
+      this.textContent = isPlaying ? '▶' : '⏸';
+      this.dataset.playing = isPlaying ? 'false' : 'true';
+    });
+
+    function sendMessage() {
+      const input = document.getElementById('chat-input');
+      const message = input.value.trim();
+      if (!message) return;
+
+      const container = document.getElementById('chat-messages');
+
+      const userMsg = createElement('div', 'chat-message');
+      const userHeader = createElement('div', 'chat-message-header');
+      userHeader.appendChild(createElement('span', 'chat-role user', 'USER'));
+      userHeader.appendChild(createElement('span', 'chat-time', 'now'));
+      userMsg.appendChild(userHeader);
+      userMsg.appendChild(createElement('div', 'chat-text', message));
+      container.appendChild(userMsg);
+
+      setTimeout(() => {
+        const assistantMsg = createElement('div', 'chat-message');
+        const assistantHeader = createElement('div', 'chat-message-header');
+        assistantHeader.appendChild(createElement('span', 'chat-role assistant', 'ASSISTANT'));
+        assistantHeader.appendChild(createElement('span', 'chat-time', 'now'));
+        assistantMsg.appendChild(assistantHeader);
+
+        const text = createElement('div', 'chat-text');
+        text.textContent = 'Analysis complete. Key findings: onboarding improvement +23%, mobile +28%. Focus area: notification redesign.';
+        assistantMsg.appendChild(text);
+
+        container.appendChild(assistantMsg);
+        container.scrollTop = container.scrollHeight;
+      }, 500);
+
+      input.value = '';
+      container.scrollTop = container.scrollHeight;
+    }
+
+    document.getElementById('chat-send').addEventListener('click', sendMessage);
+    document.getElementById('chat-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    document.querySelectorAll('.quick-btn').forEach(btn => {
+      btn.addEventListener('click', function() {
+        document.getElementById('chat-input').value = this.textContent.toLowerCase() + ' the current source';
+        sendMessage();
+      });
+    });
+
+    document.querySelectorAll('.aux-tab').forEach(tab => {
+      tab.addEventListener('click', function() {
+        document.querySelectorAll('.aux-tab').forEach(t => t.classList.remove('active'));
+        this.classList.add('active');
+      });
+    });
+
+    document.querySelectorAll('.activity-item').forEach(item => {
+      item.addEventListener('click', function() {
+        document.querySelectorAll('.activity-item').forEach(i => i.classList.remove('active'));
+        this.classList.add('active');
+      });
+    });
+
+    renderTreeView();
+    initResizers();
+  </script>
+</body>
+</html>

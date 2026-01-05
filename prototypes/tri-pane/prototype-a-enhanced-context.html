@@ -1,0 +1,1546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prototype A: Enhanced Context Panel</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --sidebar-bg: #0f172a;
+      --sidebar-border: #334155;
+      --sidebar-text: #94a3b8;
+      --sidebar-text-active: #ffffff;
+      --sidebar-hover: #1e293b;
+      --sidebar-active: #334155;
+      --bg: #ffffff;
+      --bg-secondary: #f8fafc;
+      --bg-muted: #f1f5f9;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-secondary: #64748b;
+      --text-muted: #94a3b8;
+      --accent: #3b82f6;
+      --accent-light: #eff6ff;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --error: #ef4444;
+      --purple: #8b5cf6;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+      font-size: 14px;
+    }
+    .app { display: flex; height: 100vh; }
+    .sidebar {
+      width: 200px;
+      background: var(--sidebar-bg);
+      border-right: 1px solid var(--sidebar-border);
+      display: flex;
+      flex-direction: column;
+      color: var(--sidebar-text);
+      flex-shrink: 0;
+    }
+    .sidebar-header { padding: 16px; border-bottom: 1px solid var(--sidebar-border); }
+    .sidebar-logo { font-size: 18px; font-weight: 700; color: var(--sidebar-text-active); }
+    .device-status {
+      margin: 8px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+    .device-status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--error); }
+    .device-status-text { color: #fca5a5; font-weight: 500; }
+    .nav-section { padding: 8px; }
+    .nav-section-title { padding: 8px 12px; font-size: 10px; font-weight: 600; letter-spacing: 0.5px; color: #475569; }
+    .nav-item {
+      display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+      border-radius: 6px; cursor: pointer; font-size: 13px; transition: all 0.15s;
+    }
+    .nav-item:hover { background: var(--sidebar-hover); color: var(--sidebar-text-active); }
+    .nav-item.active { background: var(--sidebar-active); color: var(--sidebar-text-active); font-weight: 500; }
+    .nav-divider { height: 1px; background: var(--sidebar-border); margin: 8px; }
+    .sidebar-footer { margin-top: auto; padding: 8px; border-top: 1px solid var(--sidebar-border); }
+    .main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .page-header {
+      padding: 16px 24px;
+      display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 1px solid var(--border); background: var(--bg);
+    }
+    .page-title { font-size: 20px; font-weight: 600; }
+    .page-subtitle { font-size: 12px; color: var(--success); margin-top: 2px; }
+    .page-actions { display: flex; gap: 8px; }
+    .btn {
+      padding: 8px 14px; border-radius: 6px; font-size: 13px; font-weight: 500;
+      cursor: pointer; display: flex; align-items: center; gap: 6px;
+      border: 1px solid var(--border); background: var(--bg); color: var(--text); transition: all 0.15s;
+    }
+    .btn:hover { background: var(--bg-muted); }
+    .btn-primary { background: var(--accent); color: white; border-color: var(--accent); }
+    .btn-sm { padding: 4px 8px; font-size: 12px; }
+    .btn-icon { padding: 6px; width: 32px; height: 32px; justify-content: center; }
+    .filter-bar {
+      padding: 12px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    }
+    .filter-tabs { display: flex; gap: 4px; }
+    .filter-tab {
+      padding: 6px 12px; font-size: 12px; border-radius: 6px;
+      background: var(--bg-muted); color: var(--text-secondary); cursor: pointer; border: none;
+    }
+    .filter-tab.active { background: var(--accent); color: white; }
+    .filter-divider { width: 1px; height: 24px; background: var(--border); }
+    .filter-chips { display: flex; gap: 4px; }
+    .filter-chip {
+      padding: 6px 12px; font-size: 12px; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--bg); color: var(--text-secondary); cursor: pointer;
+    }
+    .filter-chip.active { background: var(--accent-light); border-color: var(--accent); color: var(--accent); }
+    .search-box { margin-left: auto; position: relative; }
+    .search-input {
+      width: 200px; padding: 6px 12px 6px 32px; border: 1px solid var(--border);
+      border-radius: 6px; font-size: 13px; outline: none;
+    }
+    .search-input:focus { border-color: var(--accent); }
+    .search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 12px; }
+    .filters-row {
+      padding: 8px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 16px;
+      background: var(--bg-secondary);
+    }
+    .filter-group { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+    .filter-select {
+      padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px;
+      font-size: 12px; background: var(--bg); cursor: pointer;
+    }
+    .sort-group { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+    .library-layout { flex: 1; display: flex; overflow: hidden; }
+    .panel { display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+    .panel-sources { width: 340px; min-width: 280px; border-right: 1px solid var(--border); }
+    .panel-viewer { flex: 1; min-width: 400px; }
+    .panel-context { width: 340px; min-width: 280px; border-left: 1px solid var(--border); }
+    .resizer { width: 4px; cursor: col-resize; background: transparent; flex-shrink: 0; }
+    .resizer:hover { background: var(--accent); }
+    .source-list { flex: 1; overflow-y: auto; }
+    .source-item {
+      padding: 12px 16px; display: flex; align-items: center; gap: 12px;
+      cursor: pointer; border-bottom: 1px solid var(--border); transition: all 0.1s;
+    }
+    .source-item:hover { background: var(--bg-secondary); }
+    .source-item.selected { background: var(--accent-light); border-left: 3px solid var(--accent); }
+    .source-checkbox { width: 16px; height: 16px; }
+    .source-type-icon {
+      width: 32px; height: 32px; border-radius: 6px;
+      display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0;
+    }
+    .source-type-icon.audio { background: #dbeafe; color: #2563eb; }
+    .source-type-icon.pdf { background: #fee2e2; color: #dc2626; }
+    .source-type-icon.markdown { background: #d1fae5; color: #059669; }
+    .source-type-icon.image { background: #fef3c7; color: #d97706; }
+    .source-info { flex: 1; min-width: 0; }
+    .source-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .source-title-custom { color: var(--text); }
+    .source-title-original { font-size: 11px; color: var(--text-muted); font-weight: 400; margin-top: 2px; }
+    .source-meta { font-size: 11px; color: var(--text-muted); display: flex; gap: 8px; margin-top: 4px; }
+    .source-badges { display: flex; gap: 4px; margin-top: 4px; }
+    .badge { font-size: 10px; padding: 2px 6px; border-radius: 3px; background: var(--bg-muted); color: var(--text-secondary); }
+    .badge.complete { background: #d1fae5; color: #059669; }
+    .badge.processing { background: #fef3c7; color: #d97706; }
+    .badge.has-insights { background: #ede9fe; color: #7c3aed; }
+    .source-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s; }
+    .source-item:hover .source-actions { opacity: 1; }
+    .action-btn {
+      width: 28px; height: 28px; border-radius: 4px; border: none;
+      background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center;
+      color: var(--text-muted); font-size: 12px;
+    }
+    .action-btn:hover { background: var(--bg-muted); color: var(--text); }
+    .action-btn.delete:hover { background: #fee2e2; color: #dc2626; }
+    .viewer-header { padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); }
+    .viewer-title-row { display: flex; align-items: flex-start; gap: 12px; }
+    .viewer-title-edit { flex: 1; }
+    .viewer-title {
+      font-size: 16px; font-weight: 600; border: none; background: transparent;
+      width: 100%; padding: 4px 0; outline: none;
+    }
+    .viewer-title:hover { background: var(--bg-muted); border-radius: 4px; padding: 4px 8px; margin: -4px -8px; }
+    .viewer-title:focus { background: var(--bg); border: 1px solid var(--accent); border-radius: 4px; padding: 4px 8px; margin: -4px -8px; }
+    .viewer-original-name { font-size: 11px; color: var(--text-muted); margin-top: 4px; display: flex; align-items: center; gap: 4px; }
+    .viewer-meta { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+    .viewer-meta-item { display: flex; align-items: center; gap: 4px; }
+    .viewer-tags { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+    .tag { font-size: 11px; padding: 3px 8px; border-radius: 4px; background: var(--bg); border: 1px solid var(--border); }
+    .tag-add { border-style: dashed; cursor: pointer; }
+    .tag-add:hover { border-color: var(--accent); color: var(--accent); }
+    .audio-player { padding: 16px 20px; background: var(--bg); border-bottom: 1px solid var(--border); }
+    .waveform { height: 48px; background: var(--bg-muted); border-radius: 6px; margin-bottom: 12px; display: flex; align-items: center; gap: 2px; padding: 8px; cursor: pointer; position: relative; }
+    .waveform-bar { flex: 1; background: var(--text-muted); border-radius: 1px; opacity: 0.3; }
+    .waveform-bar.played { background: var(--accent); opacity: 1; }
+    .player-controls { display: flex; align-items: center; gap: 12px; }
+    .play-btn { width: 36px; height: 36px; border-radius: 50%; background: var(--accent); color: white; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+    .player-time { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+    .player-speed { margin-left: auto; padding: 4px 8px; font-size: 12px; border: 1px solid var(--border); border-radius: 4px; }
+    .viewer-tabs { display: flex; border-bottom: 1px solid var(--border); padding: 0 20px; background: var(--bg); }
+    .viewer-tab { padding: 10px 16px; font-size: 13px; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+    .viewer-tab:hover { color: var(--text-secondary); }
+    .viewer-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .viewer-body { flex: 1; overflow-y: auto; padding: 16px 20px; }
+    .transcript-segment { padding: 10px; margin-bottom: 6px; border-radius: 6px; cursor: pointer; }
+    .transcript-segment:hover { background: var(--bg-secondary); }
+    .transcript-segment.current { background: var(--accent-light); }
+    .transcript-time { font-size: 11px; color: var(--accent); font-weight: 500; margin-bottom: 2px; }
+    .transcript-speaker { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 2px; }
+    .transcript-text { font-size: 14px; line-height: 1.5; }
+    .context-tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--bg); }
+    .context-tab { flex: 1; padding: 12px 8px; font-size: 11px; font-weight: 500; text-align: center; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent; }
+    .context-tab:hover { color: var(--text-secondary); }
+    .context-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .context-content { flex: 1; overflow-y: auto; display: none; }
+    .context-content.active { display: block; }
+    .assistant-section { padding: 12px; border-bottom: 1px solid var(--border); }
+    .assistant-section-title { font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; }
+    .quick-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .quick-action { padding: 6px 10px; font-size: 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); cursor: pointer; }
+    .quick-action:hover { background: var(--accent-light); border-color: var(--accent); color: var(--accent); }
+    .chat-messages { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .chat-message { max-width: 90%; padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.4; }
+    .chat-message.user { align-self: flex-end; background: var(--accent); color: white; }
+    .chat-message.assistant { align-self: flex-start; background: var(--bg-muted); }
+    .chat-input-area { padding: 12px; border-top: 1px solid var(--border); }
+    .chat-input-wrapper { display: flex; gap: 8px; }
+    .chat-input { flex: 1; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; resize: none; }
+    .chat-send { width: 32px; height: 32px; border-radius: 6px; background: var(--accent); color: white; border: none; cursor: pointer; }
+    .outline-list { padding: 12px; }
+    .outline-item { padding: 8px 12px; font-size: 13px; color: var(--text-secondary); cursor: pointer; border-radius: 4px; display: flex; align-items: center; gap: 8px; }
+    .outline-item:hover { background: var(--bg-muted); color: var(--text); }
+    .outline-item.h1 { font-weight: 600; color: var(--text); }
+    .outline-item.h2 { padding-left: 24px; }
+    .outline-item.h3 { padding-left: 36px; font-size: 12px; }
+    .outline-time { font-size: 10px; color: var(--accent); margin-left: auto; }
+    .outline-icon { font-size: 10px; color: var(--text-muted); }
+    .links-section { padding: 12px; border-bottom: 1px solid var(--border); }
+    .links-section-title { font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+    .links-section-title .count { background: var(--bg-muted); padding: 2px 6px; border-radius: 10px; font-size: 10px; }
+    .link-item { padding: 8px 10px; margin-bottom: 4px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 10px; }
+    .link-item:hover { background: var(--bg-muted); }
+    .link-icon { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; }
+    .link-icon.person { background: #dbeafe; color: #2563eb; }
+    .link-icon.project { background: #fef3c7; color: #d97706; }
+    .link-icon.calendar { background: #d1fae5; color: #059669; }
+    .link-icon.action { background: #fee2e2; color: #dc2626; }
+    .link-info { flex: 1; min-width: 0; }
+    .link-name { font-size: 12px; font-weight: 500; }
+    .link-detail { font-size: 10px; color: var(--text-muted); }
+    .link-add { border: 1px dashed var(--border); background: transparent; justify-content: center; font-size: 11px; color: var(--text-muted); }
+    .link-add:hover { border-color: var(--accent); color: var(--accent); }
+    .insights-section { padding: 12px; border-bottom: 1px solid var(--border); }
+    .insights-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+    .insights-title { font-size: 11px; font-weight: 600; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
+    .insight-card { padding: 10px; margin-bottom: 8px; border-radius: 6px; background: var(--bg-secondary); border-left: 3px solid var(--accent); }
+    .insight-card.action-item { border-left-color: var(--error); }
+    .insight-card.decision { border-left-color: var(--success); }
+    .insight-card.key-point { border-left-color: var(--purple); }
+    .insight-card.question { border-left-color: var(--warning); }
+    .insight-type { font-size: 10px; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; }
+    .insight-text { font-size: 13px; line-height: 1.4; }
+    .insight-meta { font-size: 10px; color: var(--text-muted); margin-top: 6px; display: flex; align-items: center; gap: 8px; }
+    .insight-actions { display: flex; gap: 4px; margin-top: 8px; }
+    .generate-btn { padding: 8px 12px; font-size: 11px; border: 1px dashed var(--border); border-radius: 6px; background: transparent; cursor: pointer; width: 100%; text-align: center; margin: 12px; }
+    .generate-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-light); }
+    .no-content { padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px; }
+    .pdf-viewer { padding: 20px; text-align: center; }
+    .pdf-placeholder { background: var(--bg-secondary); border: 2px dashed var(--border); border-radius: 8px; padding: 40px 20px; }
+    .md-content { padding: 16px 20px; line-height: 1.7; }
+    .md-content h2 { font-size: 16px; margin: 20px 0 10px 0; color: var(--text); }
+    .md-content p { margin-bottom: 12px; color: var(--text-secondary); }
+    .md-content ul { margin-left: 20px; margin-bottom: 12px; }
+    .md-content li { margin-bottom: 6px; color: var(--text-secondary); }
+    .hidden { display: none !important; }
+
+    /* Modal */
+    .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+    .modal { background: var(--bg); border-radius: 12px; padding: 24px; max-width: 500px; width: 90%; max-height: 80vh; overflow-y: auto; }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    .modal-title { font-size: 18px; font-weight: 600; }
+    .modal-close { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--text-muted); }
+    .modal-close:hover { color: var(--text); }
+    .modal-body { margin-bottom: 20px; }
+    .modal-footer { display: flex; justify-content: flex-end; gap: 8px; }
+    .form-group { margin-bottom: 16px; }
+    .form-label { display: block; font-size: 12px; font-weight: 500; margin-bottom: 6px; color: var(--text-secondary); }
+    .form-input { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+    .form-input:focus { outline: none; border-color: var(--accent); }
+
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: var(--bg-muted); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    /* AI Modal Enhancements */
+    .ai-modal { max-width: 640px; }
+    .ai-modal-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .ai-modal-type { font-size: 12px; color: var(--accent); font-weight: 500; }
+    .ai-modal-source { font-size: 11px; color: var(--text-muted); }
+    .ai-loading { text-align: center; padding: 40px 20px; }
+    .ai-loading-dots { display: flex; justify-content: center; gap: 6px; margin-bottom: 16px; }
+    .ai-loading-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: bounce 1.4s ease-in-out infinite both; }
+    .ai-loading-dot:nth-child(1) { animation-delay: -0.32s; }
+    .ai-loading-dot:nth-child(2) { animation-delay: -0.16s; }
+    @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+    .ai-loading-text { font-size: 14px; color: var(--accent); font-weight: 500; }
+    .ai-result-content { font-size: 14px; line-height: 1.7; color: var(--text); }
+    .ai-result-content h3 { font-size: 14px; font-weight: 600; margin: 16px 0 8px; display: flex; align-items: center; gap: 6px; }
+    .ai-result-content h3:first-child { margin-top: 0; }
+    .ai-result-content ul { margin: 0 0 12px 0; padding-left: 18px; }
+    .ai-result-content li { margin-bottom: 6px; color: var(--text-secondary); }
+    .ai-result-content p { margin-bottom: 10px; color: var(--text-secondary); }
+    .ai-result-content .highlight { background: var(--accent-light); color: var(--accent); padding: 1px 5px; border-radius: 3px; font-weight: 500; }
+    .copy-success { color: var(--success); font-size: 12px; opacity: 0; transition: opacity 0.3s; margin-right: 8px; }
+    .copy-success.visible { opacity: 1; }
+    .quick-action { cursor: pointer; transition: all 0.2s; }
+    .quick-action:hover { background: var(--accent); color: white; border-color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="sidebar-header"><span class="sidebar-logo">HiDock Next</span></div>
+      <div class="device-status">
+        <div class="device-status-dot"></div>
+        <div><div class="device-status-text">Disconnected</div></div>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">KNOWLEDGE</div>
+        <div class="nav-item active"><span>📚</span><span>Library</span></div>
+        <div class="nav-item"><span>🤖</span><span>Assistant</span></div>
+        <div class="nav-item"><span>🧭</span><span>Explore</span></div>
+      </div>
+      <div class="nav-divider"></div>
+      <div class="nav-section">
+        <div class="nav-section-title">ORGANIZATION</div>
+        <div class="nav-item"><span>👥</span><span>People</span></div>
+        <div class="nav-item"><span>📁</span><span>Projects</span></div>
+        <div class="nav-item"><span>📅</span><span>Calendar</span></div>
+      </div>
+      <div class="nav-divider"></div>
+      <div class="nav-section">
+        <div class="nav-section-title">ACTIONS</div>
+        <div class="nav-item"><span>✅</span><span>Actionables</span></div>
+      </div>
+      <div class="nav-divider"></div>
+      <div class="nav-section">
+        <div class="nav-section-title">DEVICE</div>
+        <div class="nav-item"><span>☁️</span><span>Sync</span></div>
+      </div>
+      <div class="sidebar-footer"><div class="nav-item"><span>⚙️</span><span>Settings</span></div></div>
+    </aside>
+
+    <div class="main-content">
+      <header class="page-header">
+        <div>
+          <h1 class="page-title">Knowledge Library</h1>
+          <p class="page-subtitle" id="source-count">6 sources</p>
+        </div>
+        <div class="page-actions">
+          <button class="btn">+ Add Capture</button>
+          <button class="btn">📂 Open Folder</button>
+          <button class="btn" onclick="applyFilters()">↻ Refresh</button>
+        </div>
+      </header>
+
+      <div class="filter-bar">
+        <div class="filter-tabs" id="location-filter">
+          <button class="filter-tab active" data-location="all">All</button>
+          <button class="filter-tab" data-location="device">📱 Device</button>
+          <button class="filter-tab" data-location="local">💾 Downloaded</button>
+        </div>
+        <div class="filter-divider"></div>
+        <div class="filter-chips" id="type-filter">
+          <button class="filter-chip active" data-type="all">All Types</button>
+          <button class="filter-chip" data-type="audio">🎙 Audio</button>
+          <button class="filter-chip" data-type="pdf">📄 PDF</button>
+          <button class="filter-chip" data-type="markdown">📝 Notes</button>
+          <button class="filter-chip" data-type="image">🖼 Images</button>
+        </div>
+        <div class="search-box">
+          <span class="search-icon">🔍</span>
+          <input type="text" class="search-input" placeholder="Search captures..." id="search-input" oninput="applyFilters()">
+        </div>
+      </div>
+
+      <div class="filters-row">
+        <div class="filter-group">
+          <span>Category:</span>
+          <select class="filter-select" id="category-filter" onchange="applyFilters()">
+            <option value="all">All Categories</option>
+            <option value="meeting">Meeting</option>
+            <option value="interview">Interview</option>
+            <option value="planning">Planning</option>
+            <option value="research">Research</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <span>Status:</span>
+          <select class="filter-select" id="status-filter" onchange="applyFilters()">
+            <option value="all">All Statuses</option>
+            <option value="complete">Complete</option>
+            <option value="processing">Processing</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <span>Has Insights:</span>
+          <select class="filter-select" id="insights-filter" onchange="applyFilters()">
+            <option value="all">Any</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <span>Linked to:</span>
+          <select class="filter-select" id="linked-filter" onchange="applyFilters()">
+            <option value="all">Anyone</option>
+            <option value="john-davis">John Davis</option>
+            <option value="sarah-miller">Sarah Miller</option>
+            <option value="mike-kim">Mike Kim</option>
+            <option value="amanda-chen">Amanda Chen</option>
+          </select>
+        </div>
+        <div class="sort-group">
+          <span>Sort:</span>
+          <select class="filter-select" id="sort-select" onchange="applyFilters()">
+            <option value="date-desc">Date (Newest)</option>
+            <option value="date-asc">Date (Oldest)</option>
+            <option value="name-asc">Name (A-Z)</option>
+            <option value="name-desc">Name (Z-A)</option>
+            <option value="duration-desc">Duration (Longest)</option>
+            <option value="duration-asc">Duration (Shortest)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="library-layout">
+        <aside class="panel panel-sources">
+          <div class="source-list" id="source-list"></div>
+        </aside>
+        <div class="resizer"></div>
+        <section class="panel panel-viewer" id="viewer-panel">
+          <div class="viewer-header" id="viewer-header"></div>
+          <div class="audio-player" id="audio-player"></div>
+          <div class="viewer-tabs" id="viewer-tabs"></div>
+          <div class="viewer-body" id="viewer-body"></div>
+        </section>
+        <div class="resizer"></div>
+        <aside class="panel panel-context">
+          <div class="context-tabs">
+            <div class="context-tab active" data-tab="assistant">Assistant</div>
+            <div class="context-tab" data-tab="outline">Outline</div>
+            <div class="context-tab" data-tab="links">Links</div>
+            <div class="context-tab" data-tab="insights">Insights</div>
+          </div>
+          <div class="context-content active" id="context-assistant"></div>
+          <div class="context-content" id="context-outline"></div>
+          <div class="context-content" id="context-links"></div>
+          <div class="context-content" id="context-insights"></div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay hidden" id="modal-overlay">
+    <div class="modal" id="modal-content"></div>
+  </div>
+
+  <!-- AI Result Modal -->
+  <div class="modal-overlay hidden" id="ai-modal-overlay">
+    <div class="modal ai-modal">
+      <div class="modal-header">
+        <div>
+          <div class="ai-modal-header">
+            <span class="ai-modal-type" id="ai-modal-type">✨ Summarize</span>
+          </div>
+          <div class="ai-modal-source" id="ai-modal-source">Source title</div>
+        </div>
+        <button class="modal-close" onclick="closeAIModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="ai-modal-body"></div>
+      <div class="modal-footer">
+        <span class="copy-success" id="ai-copy-success">✓ Copied!</span>
+        <button class="btn" onclick="copyAIResult()">📋 Copy</button>
+        <button class="btn" onclick="closeAIModal()">Close</button>
+        <button class="btn btn-primary" onclick="regenerateAI()">🔄 Regenerate</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ==== HELPER FUNCTION ====
+    function el(tag, className, text) {
+      const e = document.createElement(tag);
+      if (className) e.className = className;
+      if (text) e.textContent = text;
+      return e;
+    }
+
+    // ==== COMPREHENSIVE DATA STORE ====
+    const sourcesData = {
+      1: {
+        id: 1, type: 'audio', title: 'Weekly Team Standup - Q4 Planning', original: '2025Dec02-180515-Rec96.wav',
+        duration: '45:23', durationSec: 2723, date: 'Dec 2, 2025', dateSort: '2025-12-02',
+        status: 'complete', category: 'meeting', location: 'local', hasInsights: true,
+        tags: ['#meeting', '#q4-planning', '#team'],
+        transcript: [
+          { time: '00:00:00', speaker: 'John Davis', text: 'Good morning everyone! Let\'s get started with our weekly standup. I\'d like to hear updates from each team.' },
+          { time: '00:00:18', speaker: 'Sarah Miller', text: 'Morning! I have some exciting news about the onboarding flow we launched last week.' },
+          { time: '00:00:28', speaker: 'Sarah Miller', text: 'Our A/B tests are showing a 23% improvement in activation rates! The new flow is really resonating with users.' },
+          { time: '00:00:45', speaker: 'Mike Kim', text: 'That\'s fantastic news! Does that include mobile users as well, or just desktop?' },
+          { time: '00:00:52', speaker: 'Sarah Miller', text: 'Yes! Mobile is actually performing even better - we\'re seeing 28% improvement there.' },
+          { time: '00:01:12', speaker: 'John Davis', text: 'Excellent work. Let\'s focus on the notification system redesign this week. Sarah, can you review the onboarding metrics and share a detailed report by Friday?' },
+        ],
+        outline: [
+          { type: 'h1', text: 'Meeting Start', time: '00:00:00', icon: '🎬' },
+          { type: 'h2', text: 'Product Updates', time: '00:00:18', icon: '📦' },
+          { type: 'h3', text: 'Onboarding Flow Results', time: '00:00:28', icon: '📈' },
+          { type: 'h3', text: 'Mobile Performance', time: '00:00:52', icon: '📱' },
+          { type: 'h2', text: 'Week Priorities', time: '00:01:12', icon: '🎯' },
+        ],
+        links: {
+          people: [
+            { id: 'john-davis', init: 'JD', name: 'John Davis', detail: 'CEO - 4 mentions' },
+            { id: 'sarah-miller', init: 'SM', name: 'Sarah Miller', detail: 'Product Lead - 6 mentions' },
+            { id: 'mike-kim', init: 'MK', name: 'Mike Kim', detail: 'Engineer - 2 mentions' }
+          ],
+          projects: [
+            { name: 'Q4 Planning', detail: '5 sources linked' },
+            { name: 'Product v2.0', detail: '12 sources linked' }
+          ],
+          calendar: [
+            { name: 'Weekly Team Standup', detail: 'Dec 2, 2025 - 9:00 AM' }
+          ],
+          actions: [
+            { name: 'Review onboarding metrics', detail: 'Sarah - Due Jan 3', status: 'pending' },
+            { name: 'Schedule design review', detail: 'Mike - Due Jan 5', status: 'pending' }
+          ]
+        },
+        insights: {
+          keyPoints: [
+            { text: '23% improvement in activation rates from new onboarding flow', meta: '@ 00:00:28 - Sarah' },
+            { text: 'Mobile performance is 28% better than desktop', meta: '@ 00:00:52 - Sarah' }
+          ],
+          actions: [
+            { text: 'Review onboarding metrics and share detailed report by Friday', meta: 'Assigned to: Sarah Miller' },
+            { text: 'Schedule design review for notification system', meta: 'Assigned to: Mike Kim' }
+          ],
+          decisions: [
+            { text: 'Focus on notification system redesign this week', meta: '@ 00:01:12 - John' }
+          ],
+          questions: [
+            { text: 'Does the mobile improvement include tablet users?', meta: '@ 00:00:45 - Mike' }
+          ]
+        }
+      },
+      2: {
+        id: 2, type: 'audio', title: 'Technical Interview - Senior Frontend', original: '2025Aug27-150317-Rec92.wav',
+        duration: '58:42', durationSec: 3522, date: 'Aug 27, 2025', dateSort: '2025-08-27',
+        status: 'complete', category: 'interview', location: 'local', hasInsights: true,
+        tags: ['#interview', '#hiring', '#frontend'],
+        transcript: [
+          { time: '00:00:00', speaker: 'Amanda Chen', text: 'Thanks for joining us today. I\'m Amanda, the engineering manager. Can you tell me about your experience with React?' },
+          { time: '00:00:25', speaker: 'Candidate', text: 'I\'ve been working with React for about 5 years now, primarily on large-scale enterprise applications.' },
+          { time: '00:01:15', speaker: 'Candidate', text: 'One of my key projects was rebuilding our customer dashboard, which handles over 10,000 concurrent users.' },
+          { time: '00:02:30', speaker: 'Amanda Chen', text: 'How did you handle state management at that scale?' },
+          { time: '00:03:00', speaker: 'Candidate', text: 'We used a combination of Redux for global state and React Query for server state. This reduced our bundle size by 40%.' },
+          { time: '00:05:20', speaker: 'Amanda Chen', text: 'Impressive. Let\'s move on to the coding exercise.' },
+        ],
+        outline: [
+          { type: 'h1', text: 'Interview Start', time: '00:00:00', icon: '🎤' },
+          { type: 'h2', text: 'Technical Background', time: '00:00:25', icon: '💼' },
+          { type: 'h3', text: 'React Experience', time: '00:00:25', icon: '⚛️' },
+          { type: 'h3', text: 'Dashboard Project', time: '00:01:15', icon: '📊' },
+          { type: 'h2', text: 'State Management', time: '00:02:30', icon: '🔄' },
+          { type: 'h2', text: 'Coding Exercise', time: '00:05:20', icon: '💻' },
+        ],
+        links: {
+          people: [
+            { id: 'amanda-chen', init: 'AC', name: 'Amanda Chen', detail: 'Eng Manager - Interviewer' }
+          ],
+          projects: [
+            { name: 'Hiring - Frontend', detail: '3 candidates' }
+          ],
+          calendar: [
+            { name: 'Frontend Interview', detail: 'Aug 27, 2025 - 3:00 PM' }
+          ],
+          actions: [
+            { name: 'Submit interview feedback', detail: 'Amanda - Due Aug 28', status: 'complete' },
+            { name: 'Schedule follow-up round', detail: 'HR - Due Aug 30', status: 'pending' }
+          ]
+        },
+        insights: {
+          keyPoints: [
+            { text: 'Candidate has 5 years of React experience with enterprise applications', meta: '@ 00:00:25' },
+            { text: 'Built dashboard handling 10,000 concurrent users', meta: '@ 00:01:15' },
+            { text: 'Reduced bundle size by 40% using Redux + React Query', meta: '@ 00:03:00' }
+          ],
+          actions: [
+            { text: 'Submit interview feedback by end of day', meta: 'Assigned to: Amanda Chen' },
+            { text: 'Schedule follow-up technical round', meta: 'Assigned to: HR' }
+          ],
+          decisions: [
+            { text: 'Proceed to coding exercise after strong technical discussion', meta: '@ 00:05:20' }
+          ],
+          questions: [
+            { text: 'Need to assess system design skills in follow-up', meta: 'Amanda' }
+          ]
+        }
+      },
+      3: {
+        id: 3, type: 'pdf', title: 'Q4 Strategy Document', original: 'q4-strategy-2025.pdf',
+        duration: '12 pages', durationSec: 12, date: 'Nov 28, 2025', dateSort: '2025-11-28',
+        status: 'complete', category: 'planning', location: 'local', hasInsights: true,
+        tags: ['#strategy', '#q4', '#roadmap'],
+        content: '<h2>Q4 2025 Strategic Priorities</h2><p>This document outlines our key strategic initiatives for Q4 2025, focusing on growth, retention, and platform stability.</p><h2>Key Objectives</h2><ul><li>Launch new onboarding experience by Nov 15</li><li>Achieve 25% improvement in activation rates</li><li>Reduce churn by 10% through proactive engagement</li><li>Complete notification system redesign</li></ul><h2>Resource Allocation</h2><p>Engineering team will be split 60/40 between new features and technical debt reduction. Product team to focus on user research and competitive analysis.</p>',
+        outline: [
+          { type: 'h1', text: 'Executive Summary', time: 'p.1', icon: '📋' },
+          { type: 'h2', text: 'Strategic Priorities', time: 'p.2', icon: '🎯' },
+          { type: 'h2', text: 'Key Objectives', time: 'p.4', icon: '✅' },
+          { type: 'h2', text: 'Resource Allocation', time: 'p.7', icon: '👥' },
+          { type: 'h2', text: 'Timeline & Milestones', time: 'p.10', icon: '📅' },
+        ],
+        links: {
+          people: [
+            { id: 'john-davis', init: 'JD', name: 'John Davis', detail: 'Author' },
+            { id: 'sarah-miller', init: 'SM', name: 'Sarah Miller', detail: 'Reviewer' }
+          ],
+          projects: [
+            { name: 'Q4 Planning', detail: 'Main document' },
+            { name: 'Product Roadmap', detail: 'Referenced' }
+          ],
+          calendar: [
+            { name: 'Q4 Planning Review', detail: 'Nov 28, 2025' }
+          ],
+          actions: [
+            { name: 'Review budget allocations', detail: 'Finance - Due Dec 5', status: 'pending' },
+            { name: 'Share with leadership', detail: 'John - Due Dec 1', status: 'complete' }
+          ]
+        },
+        insights: {
+          keyPoints: [
+            { text: 'Target 25% improvement in activation rates', meta: 'Key Objectives section' },
+            { text: 'Engineering split 60/40 between features and tech debt', meta: 'Resource Allocation' },
+            { text: 'Notification system redesign is Q4 priority', meta: 'Strategic Priorities' }
+          ],
+          actions: [
+            { text: 'Launch new onboarding by Nov 15', meta: 'Key Objectives' },
+            { text: 'Complete notification system redesign', meta: 'Key Objectives' },
+            { text: 'Reduce churn by 10%', meta: 'Key Objectives' }
+          ],
+          decisions: [
+            { text: 'Prioritize growth and retention over new features', meta: 'Executive Summary' }
+          ],
+          questions: [
+            { text: 'How to measure proactive engagement success?', meta: 'Open item' }
+          ]
+        }
+      },
+      4: {
+        id: 4, type: 'markdown', title: 'Product Research Notes', original: 'research-notes-competitive.md',
+        duration: '2,341 words', durationSec: 2341, date: 'Aug 20, 2025', dateSort: '2025-08-20',
+        status: 'complete', category: 'research', location: 'local', hasInsights: true,
+        tags: ['#research', '#competitive', '#product'],
+        content: '<h2>Competitive Analysis Summary</h2><p>Analysis of top 5 competitors in the voice recording and transcription space. Key findings below.</p><h2>Market Leaders</h2><ul><li><strong>Otter.ai</strong> - Strong in meeting transcription, weak in device integration</li><li><strong>Rev.ai</strong> - High accuracy, expensive pricing model</li><li><strong>Fireflies.ai</strong> - Good Zoom integration, limited mobile support</li></ul><h2>Opportunity Areas</h2><p>Based on user interviews and market analysis, we identified three key differentiation opportunities:</p><ul><li>Hardware-software integration (unique to us)</li><li>Offline-first recording capability</li><li>AI-powered insights generation</li></ul><h2>Recommendations</h2><p>Focus marketing on hardware integration as key differentiator. Accelerate AI insights feature development.</p>',
+        outline: [
+          { type: 'h1', text: 'Executive Summary', time: '', icon: '📋' },
+          { type: 'h2', text: 'Market Leaders Analysis', time: '', icon: '🏆' },
+          { type: 'h3', text: 'Otter.ai', time: '', icon: '🎙' },
+          { type: 'h3', text: 'Rev.ai', time: '', icon: '📝' },
+          { type: 'h3', text: 'Fireflies.ai', time: '', icon: '🔥' },
+          { type: 'h2', text: 'Opportunity Areas', time: '', icon: '💡' },
+          { type: 'h2', text: 'Recommendations', time: '', icon: '✅' },
+        ],
+        links: {
+          people: [
+            { id: 'sarah-miller', init: 'SM', name: 'Sarah Miller', detail: 'Author' }
+          ],
+          projects: [
+            { name: 'Product v2.0', detail: 'Input for roadmap' },
+            { name: 'Marketing Strategy', detail: 'Referenced' }
+          ],
+          calendar: [],
+          actions: [
+            { name: 'Update product roadmap with findings', detail: 'Product - Due Aug 25', status: 'complete' },
+            { name: 'Schedule competitive review meeting', detail: 'Sarah - Due Aug 22', status: 'complete' }
+          ]
+        },
+        insights: {
+          keyPoints: [
+            { text: 'Hardware-software integration is our unique differentiator', meta: 'Opportunity Areas' },
+            { text: 'Otter.ai leads in meeting transcription but weak in device integration', meta: 'Market Leaders' },
+            { text: 'AI-powered insights is key opportunity area', meta: 'Opportunity Areas' }
+          ],
+          actions: [
+            { text: 'Focus marketing on hardware integration', meta: 'Recommendations' },
+            { text: 'Accelerate AI insights feature development', meta: 'Recommendations' }
+          ],
+          decisions: [],
+          questions: [
+            { text: 'How to position against Otter.ai premium features?', meta: 'Open item' }
+          ]
+        }
+      },
+      5: {
+        id: 5, type: 'audio', title: null, original: '2025Dec02-150710-Rec95.wav',
+        duration: '32:15', durationSec: 1935, date: 'Dec 2, 2025', dateSort: '2025-12-02',
+        status: 'processing', category: 'meeting', location: 'device', hasInsights: false,
+        tags: [],
+        transcript: [
+          { time: '00:00:00', speaker: 'Unknown', text: '[Processing transcript...]' }
+        ],
+        outline: [],
+        links: { people: [], projects: [], calendar: [], actions: [] },
+        insights: { keyPoints: [], actions: [], decisions: [], questions: [] }
+      },
+      6: {
+        id: 6, type: 'audio', title: '1:1 with Sarah - Performance Review', original: '2025Nov15-140000-Rec88.wav',
+        duration: '28:45', durationSec: 1725, date: 'Nov 15, 2025', dateSort: '2025-11-15',
+        status: 'complete', category: 'meeting', location: 'local', hasInsights: true,
+        tags: ['#1on1', '#performance', '#team'],
+        transcript: [
+          { time: '00:00:00', speaker: 'John Davis', text: 'Thanks for meeting Sarah. I wanted to discuss your performance this quarter and talk about your career goals.' },
+          { time: '00:00:30', speaker: 'Sarah Miller', text: 'Thanks John. I\'ve been really enjoying leading the product team this year.' },
+          { time: '00:01:15', speaker: 'John Davis', text: 'Your work on the onboarding redesign has been exceptional. The metrics speak for themselves.' },
+          { time: '00:02:00', speaker: 'Sarah Miller', text: 'I\'d like to discuss potentially expanding my role to include more strategic planning.' },
+          { time: '00:03:30', speaker: 'John Davis', text: 'That aligns well with where we see the team growing. Let\'s create a development plan.' },
+        ],
+        outline: [
+          { type: 'h1', text: 'Meeting Start', time: '00:00:00', icon: '🎬' },
+          { type: 'h2', text: 'Performance Discussion', time: '00:01:15', icon: '📈' },
+          { type: 'h2', text: 'Career Goals', time: '00:02:00', icon: '🎯' },
+          { type: 'h2', text: 'Development Plan', time: '00:03:30', icon: '📋' },
+        ],
+        links: {
+          people: [
+            { id: 'john-davis', init: 'JD', name: 'John Davis', detail: 'Manager' },
+            { id: 'sarah-miller', init: 'SM', name: 'Sarah Miller', detail: 'Direct Report' }
+          ],
+          projects: [],
+          calendar: [
+            { name: '1:1 John & Sarah', detail: 'Nov 15, 2025 - 2:00 PM' }
+          ],
+          actions: [
+            { name: 'Create development plan for Sarah', detail: 'John - Due Nov 22', status: 'pending' },
+            { name: 'Draft role expansion proposal', detail: 'Sarah - Due Nov 20', status: 'pending' }
+          ]
+        },
+        insights: {
+          keyPoints: [
+            { text: 'Sarah\'s onboarding redesign work was exceptional', meta: '@ 00:01:15 - John' },
+            { text: 'Sarah interested in expanding to strategic planning', meta: '@ 00:02:00' }
+          ],
+          actions: [
+            { text: 'Create development plan for role expansion', meta: 'Assigned to: John Davis' },
+            { text: 'Draft proposal for expanded strategic role', meta: 'Assigned to: Sarah Miller' }
+          ],
+          decisions: [
+            { text: 'Proceed with creating development plan for Sarah', meta: '@ 00:03:30' }
+          ],
+          questions: []
+        }
+      }
+    };
+
+    let currentSourceId = 1;
+    let filteredSources = Object.values(sourcesData);
+
+    // ==== FILTER LOGIC ====
+    function applyFilters() {
+      const locationFilter = document.querySelector('#location-filter .filter-tab.active').dataset.location;
+      const typeFilter = document.querySelector('#type-filter .filter-chip.active').dataset.type;
+      const categoryFilter = document.getElementById('category-filter').value;
+      const statusFilter = document.getElementById('status-filter').value;
+      const insightsFilter = document.getElementById('insights-filter').value;
+      const linkedFilter = document.getElementById('linked-filter').value;
+      const searchQuery = document.getElementById('search-input').value.toLowerCase();
+      const sortBy = document.getElementById('sort-select').value;
+
+      filteredSources = Object.values(sourcesData).filter(s => {
+        if (locationFilter !== 'all' && s.location !== locationFilter) return false;
+        if (typeFilter !== 'all' && s.type !== typeFilter) return false;
+        if (categoryFilter !== 'all' && s.category !== categoryFilter) return false;
+        if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+        if (insightsFilter === 'yes' && !s.hasInsights) return false;
+        if (insightsFilter === 'no' && s.hasInsights) return false;
+        if (linkedFilter !== 'all') {
+          const hasLink = s.links.people.some(p => p.id === linkedFilter);
+          if (!hasLink) return false;
+        }
+        if (searchQuery) {
+          const title = (s.title || s.original).toLowerCase();
+          if (!title.includes(searchQuery)) return false;
+        }
+        return true;
+      });
+
+      // Sort
+      filteredSources.sort((a, b) => {
+        switch (sortBy) {
+          case 'date-desc': return b.dateSort.localeCompare(a.dateSort);
+          case 'date-asc': return a.dateSort.localeCompare(b.dateSort);
+          case 'name-asc': return (a.title || a.original).localeCompare(b.title || b.original);
+          case 'name-desc': return (b.title || b.original).localeCompare(a.title || a.original);
+          case 'duration-desc': return b.durationSec - a.durationSec;
+          case 'duration-asc': return a.durationSec - b.durationSec;
+          default: return 0;
+        }
+      });
+
+      document.getElementById('source-count').textContent = filteredSources.length + ' sources';
+      renderSourceList();
+      if (filteredSources.length > 0 && !filteredSources.find(s => s.id === currentSourceId)) {
+        selectSource(filteredSources[0].id);
+      }
+    }
+
+    // ==== SOURCE LIST ====
+    const typeIcons = { audio: '🎙', pdf: '📄', markdown: '📝', image: '🖼' };
+
+    function renderSourceList() {
+      const list = document.getElementById('source-list');
+      list.textContent = '';
+      filteredSources.forEach(s => {
+        const item = el('div', 'source-item' + (s.id === currentSourceId ? ' selected' : ''));
+        item.dataset.id = s.id;
+
+        const cb = el('input', 'source-checkbox');
+        cb.type = 'checkbox';
+        cb.onclick = (e) => e.stopPropagation();
+
+        const icon = el('div', 'source-type-icon ' + s.type, typeIcons[s.type]);
+        const info = el('div', 'source-info');
+        const title = el('div', 'source-title' + (s.title ? ' source-title-custom' : ''), s.title || s.original);
+        info.appendChild(title);
+        if (s.title) {
+          info.appendChild(el('div', 'source-title-original', '📎 ' + s.original));
+        }
+        const meta = el('div', 'source-meta');
+        meta.appendChild(el('span', null, s.duration + ' · ' + s.date));
+        info.appendChild(meta);
+        const badges = el('div', 'source-badges');
+        badges.appendChild(el('span', 'badge ' + s.status, s.status));
+        if (s.hasInsights) badges.appendChild(el('span', 'badge has-insights', '✨ insights'));
+        info.appendChild(badges);
+
+        const actions = el('div', 'source-actions');
+        const playBtn = el('button', 'action-btn', '▶');
+        playBtn.onclick = (e) => { e.stopPropagation(); selectSource(s.id); };
+        const dlBtn = el('button', 'action-btn', '💾');
+        const delBtn = el('button', 'action-btn delete', '🗑');
+        actions.appendChild(playBtn);
+        actions.appendChild(dlBtn);
+        actions.appendChild(delBtn);
+
+        item.appendChild(cb);
+        item.appendChild(icon);
+        item.appendChild(info);
+        item.appendChild(actions);
+        item.onclick = () => selectSource(s.id);
+        list.appendChild(item);
+      });
+    }
+
+    // ==== SELECT SOURCE ====
+    function selectSource(id) {
+      currentSourceId = id;
+      document.querySelectorAll('.source-item').forEach(item => {
+        item.classList.toggle('selected', parseInt(item.dataset.id) === id);
+      });
+      renderViewer();
+      renderContextPanels();
+    }
+
+    // ==== VIEWER PANEL ====
+    function renderViewer() {
+      const s = sourcesData[currentSourceId];
+      if (!s) return;
+
+      // Header
+      const header = document.getElementById('viewer-header');
+      header.textContent = '';
+      const titleRow = el('div', 'viewer-title-row');
+      const titleEdit = el('div', 'viewer-title-edit');
+      const titleInput = el('input', 'viewer-title');
+      titleInput.type = 'text';
+      titleInput.value = s.title || s.original;
+      titleInput.id = 'source-title';
+      titleEdit.appendChild(titleInput);
+      const origName = el('div', 'viewer-original-name');
+      origName.appendChild(el('span', null, '📎'));
+      origName.appendChild(el('span', null, s.original));
+      titleEdit.appendChild(origName);
+      titleRow.appendChild(titleEdit);
+      const editBtn = el('button', 'btn btn-sm', '✏️ Edit');
+      editBtn.onclick = () => showRenameModal(s);
+      titleRow.appendChild(editBtn);
+      header.appendChild(titleRow);
+
+      const meta = el('div', 'viewer-meta');
+      meta.appendChild(el('span', 'viewer-meta-item', typeIcons[s.type] + ' ' + s.type.charAt(0).toUpperCase() + s.type.slice(1)));
+      meta.appendChild(el('span', 'viewer-meta-item', '⏱ ' + s.duration));
+      meta.appendChild(el('span', 'viewer-meta-item', '📅 ' + s.date));
+      header.appendChild(meta);
+
+      if (s.tags.length > 0) {
+        const tags = el('div', 'viewer-tags');
+        s.tags.forEach(t => tags.appendChild(el('span', 'tag', t)));
+        const addTag = el('span', 'tag tag-add', '+ Add tag');
+        addTag.onclick = () => showAddTagModal(s);
+        tags.appendChild(addTag);
+        header.appendChild(tags);
+      }
+
+      // Audio Player (for audio type)
+      const audioPlayer = document.getElementById('audio-player');
+      if (s.type === 'audio') {
+        audioPlayer.style.display = 'block';
+        audioPlayer.textContent = '';
+        const waveform = el('div', 'waveform');
+        waveform.id = 'waveform';
+        for (let i = 0; i < 80; i++) {
+          const bar = el('div', 'waveform-bar' + (i < 24 ? ' played' : ''));
+          bar.style.height = (Math.random() * 70 + 30) + '%';
+          waveform.appendChild(bar);
+        }
+        audioPlayer.appendChild(waveform);
+
+        const controls = el('div', 'player-controls');
+        controls.appendChild(el('button', 'btn btn-icon btn-sm', '⏮'));
+        const playBtn = el('button', 'play-btn', '▶');
+        playBtn.onclick = function() { this.textContent = this.textContent === '▶' ? '⏸' : '▶'; };
+        controls.appendChild(playBtn);
+        controls.appendChild(el('button', 'btn btn-icon btn-sm', '⏭'));
+        controls.appendChild(el('span', 'player-time', '00:00 / ' + s.duration));
+        const speedSelect = el('select', 'player-speed');
+        ['0.5x', '0.75x', '1x', '1.5x', '2x'].forEach(sp => {
+          const opt = el('option', null, sp);
+          if (sp === '1x') opt.selected = true;
+          speedSelect.appendChild(opt);
+        });
+        controls.appendChild(speedSelect);
+        audioPlayer.appendChild(controls);
+      } else {
+        audioPlayer.style.display = 'none';
+      }
+
+      // Viewer Tabs
+      const tabs = document.getElementById('viewer-tabs');
+      tabs.textContent = '';
+      if (s.type === 'audio') {
+        ['Transcript', 'Summary', 'Notes'].forEach((t, i) => {
+          const tab = el('div', 'viewer-tab' + (i === 0 ? ' active' : ''), t);
+          tabs.appendChild(tab);
+        });
+      } else if (s.type === 'pdf') {
+        ['Document', 'Notes'].forEach((t, i) => {
+          const tab = el('div', 'viewer-tab' + (i === 0 ? ' active' : ''), t);
+          tabs.appendChild(tab);
+        });
+      } else {
+        ['Content', 'Notes'].forEach((t, i) => {
+          const tab = el('div', 'viewer-tab' + (i === 0 ? ' active' : ''), t);
+          tabs.appendChild(tab);
+        });
+      }
+
+      // Viewer Body
+      const body = document.getElementById('viewer-body');
+      body.textContent = '';
+      if (s.type === 'audio' && s.transcript.length > 0) {
+        s.transcript.forEach((seg, i) => {
+          const div = el('div', 'transcript-segment' + (i === 2 ? ' current' : ''));
+          div.appendChild(el('div', 'transcript-time', seg.time));
+          div.appendChild(el('div', 'transcript-speaker', seg.speaker));
+          div.appendChild(el('div', 'transcript-text', seg.text));
+          body.appendChild(div);
+        });
+      } else if (s.type === 'pdf') {
+        const pdfDiv = el('div', 'pdf-viewer');
+        const placeholder = el('div', 'pdf-placeholder');
+        placeholder.appendChild(el('div', null, '📄'));
+        placeholder.appendChild(el('p', null, s.original));
+        placeholder.appendChild(el('p', 'text-muted', s.duration));
+        pdfDiv.appendChild(placeholder);
+        body.appendChild(pdfDiv);
+      } else if (s.type === 'markdown' && s.content) {
+        const mdDiv = el('div', 'md-content');
+        mdDiv.innerHTML = s.content;
+        body.appendChild(mdDiv);
+      }
+    }
+
+    // ==== CONTEXT PANELS ====
+    function renderContextPanels() {
+      renderAssistant();
+      renderOutline();
+      renderLinks();
+      renderInsights();
+    }
+
+    function renderAssistant() {
+      const s = sourcesData[currentSourceId];
+      const container = document.getElementById('context-assistant');
+      container.textContent = '';
+
+      const section = el('div', 'assistant-section');
+      section.appendChild(el('div', 'assistant-section-title', 'QUICK ACTIONS'));
+      const actions = el('div', 'quick-actions');
+      const actionTypes = [
+        { text: '✨ Summarize', type: 'summarize' },
+        { text: '📌 Key Points', type: 'keyPoints' },
+        { text: '✅ Extract Actions', type: 'extractActions' },
+        { text: '❓ Find Questions', type: 'findQuestions' }
+      ];
+      actionTypes.forEach(action => {
+        const btn = el('button', 'quick-action', action.text);
+        btn.onclick = () => triggerAIAction(action.type);
+        actions.appendChild(btn);
+      });
+      section.appendChild(actions);
+      container.appendChild(section);
+
+      const chat = el('div', 'chat-messages');
+      chat.id = 'chat-messages';
+      const msg = el('div', 'chat-message assistant', 'I can help you understand and work with "' + (s.title || s.original) + '". Try asking me to summarize it or extract specific information.');
+      chat.appendChild(msg);
+      container.appendChild(chat);
+
+      const inputArea = el('div', 'chat-input-area');
+      const wrapper = el('div', 'chat-input-wrapper');
+      const input = el('textarea', 'chat-input');
+      input.id = 'assistant-chat-input';
+      input.placeholder = 'Ask about this source...';
+      input.rows = 1;
+      input.onkeypress = (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAssistantChat(); } };
+      wrapper.appendChild(input);
+      const sendBtn = el('button', 'chat-send', '➤');
+      sendBtn.onclick = sendAssistantChat;
+      wrapper.appendChild(sendBtn);
+      inputArea.appendChild(wrapper);
+      container.appendChild(inputArea);
+    }
+
+    function renderOutline() {
+      const s = sourcesData[currentSourceId];
+      const container = document.getElementById('context-outline');
+      container.textContent = '';
+
+      if (!s.outline || s.outline.length === 0) {
+        container.appendChild(el('div', 'no-content', 'No outline available for this source.'));
+        return;
+      }
+
+      const list = el('div', 'outline-list');
+      s.outline.forEach(item => {
+        const div = el('div', 'outline-item ' + item.type);
+        div.appendChild(el('span', 'outline-icon', item.icon));
+        div.appendChild(el('span', null, item.text));
+        if (item.time) div.appendChild(el('span', 'outline-time', item.time));
+        list.appendChild(div);
+      });
+      container.appendChild(list);
+    }
+
+    function renderLinks() {
+      const s = sourcesData[currentSourceId];
+      const container = document.getElementById('context-links');
+      container.textContent = '';
+
+      // People
+      const peopleSection = el('div', 'links-section');
+      const pTitle = el('div', 'links-section-title', '👥 PEOPLE ');
+      pTitle.appendChild(el('span', 'count', s.links.people.length.toString()));
+      peopleSection.appendChild(pTitle);
+      s.links.people.forEach(p => {
+        const li = el('div', 'link-item');
+        li.appendChild(el('div', 'link-icon person', p.init));
+        const info = el('div', 'link-info');
+        info.appendChild(el('div', 'link-name', p.name));
+        info.appendChild(el('div', 'link-detail', p.detail));
+        li.appendChild(info);
+        li.onclick = () => showPersonModal(p);
+        peopleSection.appendChild(li);
+      });
+      const addP = el('div', 'link-item link-add', '+ Link person');
+      addP.onclick = () => showLinkModal('person');
+      peopleSection.appendChild(addP);
+      container.appendChild(peopleSection);
+
+      // Projects
+      const projSection = el('div', 'links-section');
+      const prTitle = el('div', 'links-section-title', '📁 PROJECTS ');
+      prTitle.appendChild(el('span', 'count', s.links.projects.length.toString()));
+      projSection.appendChild(prTitle);
+      s.links.projects.forEach(p => {
+        const li = el('div', 'link-item');
+        li.appendChild(el('div', 'link-icon project', '📁'));
+        const info = el('div', 'link-info');
+        info.appendChild(el('div', 'link-name', p.name));
+        info.appendChild(el('div', 'link-detail', p.detail));
+        li.appendChild(info);
+        projSection.appendChild(li);
+      });
+      projSection.appendChild(el('div', 'link-item link-add', '+ Link project'));
+      container.appendChild(projSection);
+
+      // Calendar
+      const calSection = el('div', 'links-section');
+      const cTitle = el('div', 'links-section-title', '📅 CALENDAR ');
+      cTitle.appendChild(el('span', 'count', s.links.calendar.length.toString()));
+      calSection.appendChild(cTitle);
+      s.links.calendar.forEach(c => {
+        const li = el('div', 'link-item');
+        li.appendChild(el('div', 'link-icon calendar', '📅'));
+        const info = el('div', 'link-info');
+        info.appendChild(el('div', 'link-name', c.name));
+        info.appendChild(el('div', 'link-detail', c.detail));
+        li.appendChild(info);
+        calSection.appendChild(li);
+      });
+      container.appendChild(calSection);
+
+      // Actions
+      const actSection = el('div', 'links-section');
+      const aTitle = el('div', 'links-section-title', '✅ ACTIONABLES ');
+      aTitle.appendChild(el('span', 'count', s.links.actions.length.toString()));
+      actSection.appendChild(aTitle);
+      s.links.actions.forEach(a => {
+        const li = el('div', 'link-item');
+        li.appendChild(el('div', 'link-icon action', a.status === 'complete' ? '✓' : '○'));
+        const info = el('div', 'link-info');
+        info.appendChild(el('div', 'link-name', a.name));
+        info.appendChild(el('div', 'link-detail', a.detail));
+        li.appendChild(info);
+        actSection.appendChild(li);
+      });
+      actSection.appendChild(el('div', 'link-item link-add', '+ Add action'));
+      container.appendChild(actSection);
+    }
+
+    function renderInsights() {
+      const s = sourcesData[currentSourceId];
+      const container = document.getElementById('context-insights');
+      container.textContent = '';
+
+      if (!s.hasInsights) {
+        const noContent = el('div', 'no-content');
+        noContent.appendChild(el('p', null, 'No insights generated yet.'));
+        const genBtn = el('button', 'btn btn-primary', '✨ Generate Insights');
+        genBtn.onclick = () => alert('Generating insights... (demo)');
+        noContent.appendChild(genBtn);
+        container.appendChild(noContent);
+        return;
+      }
+
+      // Key Points
+      if (s.insights.keyPoints.length > 0) {
+        const section = el('div', 'insights-section');
+        const header = el('div', 'insights-header');
+        const title = el('div', 'insights-title', '📌 KEY POINTS ');
+        title.appendChild(el('span', 'count', s.insights.keyPoints.length.toString()));
+        header.appendChild(title);
+        section.appendChild(header);
+        s.insights.keyPoints.forEach(k => {
+          const card = el('div', 'insight-card key-point');
+          card.appendChild(el('div', 'insight-type', 'Key Point'));
+          card.appendChild(el('div', 'insight-text', k.text));
+          card.appendChild(el('div', 'insight-meta', k.meta));
+          section.appendChild(card);
+        });
+        container.appendChild(section);
+      }
+
+      // Actions
+      if (s.insights.actions.length > 0) {
+        const section = el('div', 'insights-section');
+        const header = el('div', 'insights-header');
+        const title = el('div', 'insights-title', '✅ ACTION ITEMS ');
+        title.appendChild(el('span', 'count', s.insights.actions.length.toString()));
+        header.appendChild(title);
+        section.appendChild(header);
+        s.insights.actions.forEach(a => {
+          const card = el('div', 'insight-card action-item');
+          card.appendChild(el('div', 'insight-type', 'Action Item'));
+          card.appendChild(el('div', 'insight-text', a.text));
+          card.appendChild(el('div', 'insight-meta', a.meta));
+          const actions = el('div', 'insight-actions');
+          const createBtn = el('button', 'btn btn-sm', 'Create Task');
+          createBtn.onclick = () => showCreateTaskModal(a);
+          actions.appendChild(createBtn);
+          card.appendChild(actions);
+          section.appendChild(card);
+        });
+        container.appendChild(section);
+      }
+
+      // Decisions
+      if (s.insights.decisions.length > 0) {
+        const section = el('div', 'insights-section');
+        const header = el('div', 'insights-header');
+        const title = el('div', 'insights-title', '🎯 DECISIONS ');
+        title.appendChild(el('span', 'count', s.insights.decisions.length.toString()));
+        header.appendChild(title);
+        section.appendChild(header);
+        s.insights.decisions.forEach(d => {
+          const card = el('div', 'insight-card decision');
+          card.appendChild(el('div', 'insight-type', 'Decision'));
+          card.appendChild(el('div', 'insight-text', d.text));
+          card.appendChild(el('div', 'insight-meta', d.meta));
+          section.appendChild(card);
+        });
+        container.appendChild(section);
+      }
+
+      // Questions
+      if (s.insights.questions.length > 0) {
+        const section = el('div', 'insights-section');
+        const header = el('div', 'insights-header');
+        const title = el('div', 'insights-title', '❓ OPEN QUESTIONS ');
+        title.appendChild(el('span', 'count', s.insights.questions.length.toString()));
+        header.appendChild(title);
+        section.appendChild(header);
+        s.insights.questions.forEach(q => {
+          const card = el('div', 'insight-card question');
+          card.appendChild(el('div', 'insight-type', 'Question'));
+          card.appendChild(el('div', 'insight-text', q.text));
+          card.appendChild(el('div', 'insight-meta', q.meta));
+          section.appendChild(card);
+        });
+        container.appendChild(section);
+      }
+
+      const genBtn = el('button', 'generate-btn', '✨ Re-generate Insights');
+      container.appendChild(genBtn);
+    }
+
+    // ==== MODALS ====
+    function showModal(content) {
+      document.getElementById('modal-content').innerHTML = '';
+      document.getElementById('modal-content').appendChild(content);
+      document.getElementById('modal-overlay').classList.remove('hidden');
+    }
+
+    function hideModal() {
+      document.getElementById('modal-overlay').classList.add('hidden');
+    }
+
+    function showRenameModal(source) {
+      const modal = el('div');
+      const header = el('div', 'modal-header');
+      header.appendChild(el('h2', 'modal-title', 'Rename Source'));
+      const closeBtn = el('button', 'modal-close', '×');
+      closeBtn.onclick = hideModal;
+      header.appendChild(closeBtn);
+      modal.appendChild(header);
+
+      const body = el('div', 'modal-body');
+      const group = el('div', 'form-group');
+      group.appendChild(el('label', 'form-label', 'Display Name'));
+      const input = el('input', 'form-input');
+      input.type = 'text';
+      input.value = source.title || '';
+      input.placeholder = 'Enter a descriptive name...';
+      group.appendChild(input);
+      body.appendChild(group);
+
+      const origGroup = el('div', 'form-group');
+      origGroup.appendChild(el('label', 'form-label', 'Original Filename (preserved)'));
+      const origInput = el('input', 'form-input');
+      origInput.type = 'text';
+      origInput.value = source.original;
+      origInput.disabled = true;
+      origInput.style.background = '#f1f5f9';
+      origGroup.appendChild(origInput);
+      body.appendChild(origGroup);
+      modal.appendChild(body);
+
+      const footer = el('div', 'modal-footer');
+      const cancelBtn = el('button', 'btn', 'Cancel');
+      cancelBtn.onclick = hideModal;
+      footer.appendChild(cancelBtn);
+      const saveBtn = el('button', 'btn btn-primary', 'Save');
+      saveBtn.onclick = () => {
+        sourcesData[source.id].title = input.value || null;
+        hideModal();
+        renderSourceList();
+        renderViewer();
+      };
+      footer.appendChild(saveBtn);
+      modal.appendChild(footer);
+
+      showModal(modal);
+    }
+
+    function showPersonModal(person) {
+      const modal = el('div');
+      const header = el('div', 'modal-header');
+      header.appendChild(el('h2', 'modal-title', person.name));
+      const closeBtn = el('button', 'modal-close', '×');
+      closeBtn.onclick = hideModal;
+      header.appendChild(closeBtn);
+      modal.appendChild(header);
+
+      const body = el('div', 'modal-body');
+      body.appendChild(el('p', null, 'Role: ' + person.detail.split(' - ')[0]));
+      body.appendChild(el('p', null, 'Mentions in this source: ' + (person.detail.match(/\d+/) || ['0'])[0]));
+      body.appendChild(el('hr'));
+      body.appendChild(el('p', 'text-muted', 'View all sources linked to this person, or navigate to their profile.'));
+      modal.appendChild(body);
+
+      const footer = el('div', 'modal-footer');
+      const closeBtn2 = el('button', 'btn', 'Close');
+      closeBtn2.onclick = hideModal;
+      footer.appendChild(closeBtn2);
+      const viewBtn = el('button', 'btn btn-primary', 'View Profile');
+      footer.appendChild(viewBtn);
+      modal.appendChild(footer);
+
+      showModal(modal);
+    }
+
+    function showCreateTaskModal(action) {
+      const modal = el('div');
+      const header = el('div', 'modal-header');
+      header.appendChild(el('h2', 'modal-title', 'Create Task'));
+      const closeBtn = el('button', 'modal-close', '×');
+      closeBtn.onclick = hideModal;
+      header.appendChild(closeBtn);
+      modal.appendChild(header);
+
+      const body = el('div', 'modal-body');
+      const group = el('div', 'form-group');
+      group.appendChild(el('label', 'form-label', 'Task Title'));
+      const input = el('input', 'form-input');
+      input.type = 'text';
+      input.value = action.text;
+      group.appendChild(input);
+      body.appendChild(group);
+
+      const assignGroup = el('div', 'form-group');
+      assignGroup.appendChild(el('label', 'form-label', 'Assignee'));
+      const assignInput = el('input', 'form-input');
+      assignInput.type = 'text';
+      assignInput.value = action.meta.replace('Assigned to: ', '');
+      assignGroup.appendChild(assignInput);
+      body.appendChild(assignGroup);
+      modal.appendChild(body);
+
+      const footer = el('div', 'modal-footer');
+      const cancelBtn = el('button', 'btn', 'Cancel');
+      cancelBtn.onclick = hideModal;
+      footer.appendChild(cancelBtn);
+      const createBtn = el('button', 'btn btn-primary', 'Create Task');
+      createBtn.onclick = () => { alert('Task created! (demo)'); hideModal(); };
+      footer.appendChild(createBtn);
+      modal.appendChild(footer);
+
+      showModal(modal);
+    }
+
+    function showLinkModal(type) {
+      const modal = el('div');
+      const header = el('div', 'modal-header');
+      header.appendChild(el('h2', 'modal-title', 'Link ' + type.charAt(0).toUpperCase() + type.slice(1)));
+      const closeBtn = el('button', 'modal-close', '×');
+      closeBtn.onclick = hideModal;
+      header.appendChild(closeBtn);
+      modal.appendChild(header);
+
+      const body = el('div', 'modal-body');
+      body.appendChild(el('p', null, 'Search for a ' + type + ' to link to this source.'));
+      const input = el('input', 'form-input');
+      input.type = 'text';
+      input.placeholder = 'Search...';
+      body.appendChild(input);
+      modal.appendChild(body);
+
+      const footer = el('div', 'modal-footer');
+      const cancelBtn = el('button', 'btn', 'Cancel');
+      cancelBtn.onclick = hideModal;
+      footer.appendChild(cancelBtn);
+      modal.appendChild(footer);
+
+      showModal(modal);
+    }
+
+    function showAddTagModal(source) {
+      const modal = el('div');
+      const header = el('div', 'modal-header');
+      header.appendChild(el('h2', 'modal-title', 'Add Tag'));
+      const closeBtn = el('button', 'modal-close', '×');
+      closeBtn.onclick = hideModal;
+      header.appendChild(closeBtn);
+      modal.appendChild(header);
+
+      const body = el('div', 'modal-body');
+      const input = el('input', 'form-input');
+      input.type = 'text';
+      input.placeholder = '#newtag';
+      body.appendChild(input);
+      modal.appendChild(body);
+
+      const footer = el('div', 'modal-footer');
+      const cancelBtn = el('button', 'btn', 'Cancel');
+      cancelBtn.onclick = hideModal;
+      footer.appendChild(cancelBtn);
+      const addBtn = el('button', 'btn btn-primary', 'Add');
+      addBtn.onclick = () => {
+        if (input.value) {
+          sourcesData[source.id].tags.push(input.value.startsWith('#') ? input.value : '#' + input.value);
+          hideModal();
+          renderViewer();
+        }
+      };
+      footer.appendChild(addBtn);
+      modal.appendChild(footer);
+
+      showModal(modal);
+    }
+
+    // ==== EVENT LISTENERS ====
+    document.querySelectorAll('#location-filter .filter-tab').forEach(tab => {
+      tab.addEventListener('click', function() {
+        document.querySelectorAll('#location-filter .filter-tab').forEach(t => t.classList.remove('active'));
+        this.classList.add('active');
+        applyFilters();
+      });
+    });
+
+    document.querySelectorAll('#type-filter .filter-chip').forEach(chip => {
+      chip.addEventListener('click', function() {
+        document.querySelectorAll('#type-filter .filter-chip').forEach(c => c.classList.remove('active'));
+        this.classList.add('active');
+        applyFilters();
+      });
+    });
+
+    document.querySelectorAll('.context-tab').forEach(tab => {
+      tab.addEventListener('click', function() {
+        document.querySelectorAll('.context-tab').forEach(t => t.classList.remove('active'));
+        this.classList.add('active');
+        document.querySelectorAll('.context-content').forEach(c => c.classList.remove('active'));
+        document.getElementById('context-' + this.dataset.tab).classList.add('active');
+      });
+    });
+
+    document.getElementById('modal-overlay').addEventListener('click', function(e) {
+      if (e.target === this) hideModal();
+    });
+
+    // ==== AI ACTIONS ====
+    let currentAIAction = null;
+    let currentAIResult = '';
+
+    const aiActionConfigs = {
+      summarize: {
+        icon: '✨', label: 'Summarize', loadingText: 'Generating summary...',
+        generateResult: (s) => `<h3>📝 Executive Summary</h3><p>${s.summary || 'This source contains valuable insights and information.'}</p>
+          <h3>🎯 Main Topics</h3><ul><li><strong>Primary:</strong> ${s.insights?.keyPoints?.[0] || 'Key discussion points'}</li>
+          <li><strong>Secondary:</strong> ${s.insights?.keyPoints?.slice(1).join(', ') || 'Additional context'}</li></ul>
+          <h3>👥 People</h3><p>${s.people?.map(p => '<span class="highlight">' + p.name + '</span> (' + p.role + ')').join(', ') || 'No people identified'}</p>
+          <h3>⏱️ Duration</h3><p>This ${s.type} spans ${s.duration} from ${s.date}.</p>`
+      },
+      keyPoints: {
+        icon: '📌', label: 'Key Points', loadingText: 'Extracting key points...',
+        generateResult: (s) => `<h3>💡 Key Points (${s.insights?.keyPoints?.length || 0})</h3>
+          <ul>${(s.insights?.keyPoints || []).map(p => '<li>' + p + '</li>').join('') || '<li>No key points extracted</li>'}</ul>
+          ${s.insights?.decisions?.length ? '<h3>✅ Decisions</h3><ul>' + s.insights.decisions.map(d => '<li>' + d + '</li>').join('') + '</ul>' : ''}`
+      },
+      extractActions: {
+        icon: '✅', label: 'Extract Actions', loadingText: 'Finding action items...',
+        generateResult: (s) => `<h3>✅ Action Items (${s.insights?.actions?.length || 0})</h3>
+          <ul>${(s.insights?.actions || []).map(a => '<li>' + a + '</li>').join('') || '<li>No action items found</li>'}</ul>
+          ${s.followUp?.length ? '<h3>📅 Follow-ups</h3><ul>' + s.followUp.map(f => '<li>' + f.title + ' - ' + f.date + '</li>').join('') + '</ul>' : ''}`
+      },
+      findQuestions: {
+        icon: '❓', label: 'Find Questions', loadingText: 'Identifying questions...',
+        generateResult: (s) => `<h3>❓ Open Questions (${s.insights?.questions?.length || 0})</h3>
+          ${s.insights?.questions?.length ? '<ul>' + s.insights.questions.map(q => '<li>' + q + '</li>').join('') + '</ul>' : '<p>No explicit questions found.</p>'}
+          <h3>🤔 Suggested Questions</h3><ul><li>What are the next steps?</li><li>Who is responsible for follow-up?</li><li>What resources are needed?</li></ul>`
+      }
+    };
+
+    function triggerAIAction(actionType) {
+      const s = sourcesData[currentSourceId];
+      if (!s) return;
+      currentAIAction = actionType;
+      const config = aiActionConfigs[actionType];
+      document.getElementById('ai-modal-type').textContent = config.icon + ' ' + config.label;
+      document.getElementById('ai-modal-source').textContent = s.title || s.original;
+      document.getElementById('ai-modal-body').innerHTML = '<div class="ai-loading"><div class="ai-loading-dots"><span class="ai-loading-dot"></span><span class="ai-loading-dot"></span><span class="ai-loading-dot"></span></div><div class="ai-loading-text">' + config.loadingText + '</div></div>';
+      document.getElementById('ai-modal-overlay').classList.remove('hidden');
+      setTimeout(() => {
+        currentAIResult = config.generateResult(s);
+        document.getElementById('ai-modal-body').innerHTML = '<div class="ai-result-content">' + currentAIResult + '</div>';
+      }, 1500 + Math.random() * 1000);
+    }
+
+    function closeAIModal() { document.getElementById('ai-modal-overlay').classList.add('hidden'); }
+    function regenerateAI() { if (currentAIAction) triggerAIAction(currentAIAction); }
+    function copyAIResult() {
+      const temp = document.createElement('div');
+      temp.innerHTML = currentAIResult;
+      navigator.clipboard.writeText(temp.textContent || temp.innerText).then(() => {
+        const el = document.getElementById('ai-copy-success');
+        el.classList.add('visible');
+        setTimeout(() => el.classList.remove('visible'), 2000);
+      });
+    }
+
+    // ==== ASSISTANT CHAT ====
+    function sendAssistantChat() {
+      const input = document.getElementById('assistant-chat-input');
+      const message = input.value.trim();
+      if (!message) return;
+      const s = sourcesData[currentSourceId];
+      const chat = document.getElementById('chat-messages');
+      const userMsg = el('div', 'chat-message user', message);
+      chat.appendChild(userMsg);
+      input.value = '';
+      const typing = el('div', 'chat-message assistant', '...');
+      chat.appendChild(typing);
+      chat.scrollTop = chat.scrollHeight;
+      setTimeout(() => {
+        typing.remove();
+        let response;
+        const lowerMsg = message.toLowerCase();
+        if (lowerMsg.includes('summary') || lowerMsg.includes('summarize')) {
+          response = 'Here\'s a quick summary: ' + (s.summary || 'This source covers important topics related to ' + s.title);
+        } else if (lowerMsg.includes('who') || lowerMsg.includes('people')) {
+          response = 'The people involved are: ' + (s.people?.map(p => p.name + ' (' + p.role + ')').join(', ') || 'No specific people identified');
+        } else if (lowerMsg.includes('action') || lowerMsg.includes('todo')) {
+          response = s.insights?.actions?.length ? 'Actions: ' + s.insights.actions.join('; ') : 'No specific actions identified.';
+        } else if (lowerMsg.includes('key') || lowerMsg.includes('point')) {
+          response = s.insights?.keyPoints?.length ? 'Key points: ' + s.insights.keyPoints.join('; ') : 'No key points extracted.';
+        } else {
+          response = 'Based on "' + s.title + '", ' + (s.summary?.split('.')[0] || 'this contains relevant information') + '.';
+        }
+        chat.appendChild(el('div', 'chat-message assistant', response));
+        chat.scrollTop = chat.scrollHeight;
+      }, 1000 + Math.random() * 500);
+    }
+
+    document.getElementById('ai-modal-overlay').addEventListener('click', function(e) { if (e.target === this) closeAIModal(); });
+
+    // ==== INITIALIZE ====
+    applyFilters();
+    selectSource(1);
+  </script>
+</body>
+</html>

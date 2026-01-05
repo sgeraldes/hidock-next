@@ -1,0 +1,1101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prototype B: Inline Metadata</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg-dark: #0f172a;
+      --bg-sidebar: #1e293b;
+      --bg-list: #f8fafc;
+      --bg-viewer: #ffffff;
+      --bg-context: #f1f5f9;
+      --border: #e2e8f0;
+      --border-dark: #334155;
+      --text-primary: #1e293b;
+      --text-secondary: #64748b;
+      --text-muted: #94a3b8;
+      --accent: #3b82f6;
+      --accent-light: #dbeafe;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --purple: #8b5cf6;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-dark);
+      height: 100vh;
+      overflow: hidden;
+    }
+    .layout { display: flex; height: 100vh; }
+
+    /* Sidebar */
+    .sidebar {
+      width: 56px;
+      background: var(--bg-dark);
+      border-right: 1px solid var(--border-dark);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 12px 0;
+    }
+    .sidebar-icon {
+      width: 40px; height: 40px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 10px; margin-bottom: 8px; cursor: pointer;
+      color: var(--text-muted); font-size: 18px; transition: all 0.2s;
+    }
+    .sidebar-icon:hover { background: rgba(255,255,255,0.1); color: #fff; }
+    .sidebar-icon.active { background: var(--accent); color: #fff; }
+    .sidebar-spacer { flex: 1; }
+
+    /* Source List Panel */
+    .source-list-panel {
+      width: 300px;
+      background: var(--bg-list);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+    .list-header { padding: 16px; border-bottom: 1px solid var(--border); }
+    .list-title { font-size: 18px; font-weight: 600; color: var(--text-primary); margin-bottom: 12px; }
+    .search-box {
+      display: flex; align-items: center;
+      background: #fff; border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 12px; gap: 8px;
+    }
+    .search-box input { flex: 1; border: none; outline: none; font-size: 13px; }
+    .search-icon { color: var(--text-muted); }
+
+    .filter-bar {
+      display: flex; gap: 8px; padding: 12px 16px;
+      border-bottom: 1px solid var(--border); flex-wrap: wrap;
+    }
+    .filter-chip {
+      padding: 4px 10px; font-size: 11px; border-radius: 12px; cursor: pointer;
+      background: #fff; border: 1px solid var(--border);
+      color: var(--text-secondary); transition: all 0.2s;
+    }
+    .filter-chip:hover { border-color: var(--accent); }
+    .filter-chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+    .sort-controls {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 16px; border-bottom: 1px solid var(--border); background: #fff;
+    }
+    .sort-label { font-size: 11px; color: var(--text-muted); }
+    .sort-select {
+      font-size: 11px; padding: 4px 8px;
+      border: 1px solid var(--border); border-radius: 4px;
+      background: #fff; cursor: pointer;
+    }
+
+    .source-list { flex: 1; overflow-y: auto; padding: 8px; }
+    .source-item {
+      display: flex; gap: 10px; padding: 10px;
+      border-radius: 8px; cursor: pointer; margin-bottom: 4px;
+      transition: all 0.15s; background: #fff; border: 1px solid transparent;
+    }
+    .source-item:hover { border-color: var(--border); }
+    .source-item.selected { background: var(--accent-light); border-color: var(--accent); }
+    .source-icon {
+      width: 36px; height: 36px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; flex-shrink: 0;
+    }
+    .source-icon.audio { background: #fef3c7; }
+    .source-icon.pdf { background: #fee2e2; }
+    .source-icon.markdown { background: #dbeafe; }
+    .source-icon.image { background: #d1fae5; }
+    .source-info { flex: 1; min-width: 0; }
+    .source-title {
+      font-size: 13px; font-weight: 500; color: var(--text-primary);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px;
+    }
+    .source-meta { font-size: 11px; color: var(--text-muted); display: flex; gap: 8px; }
+    .source-badges { display: flex; gap: 4px; margin-top: 4px; }
+    .badge { font-size: 9px; padding: 2px 6px; border-radius: 8px; font-weight: 500; }
+    .badge.insights { background: #fef3c7; color: #92400e; }
+    .badge.links { background: #dbeafe; color: #1e40af; }
+    .badge.processing { background: #e0e7ff; color: #4338ca; }
+
+    /* Main Viewer with Sidebar */
+    .viewer-container { flex: 1; display: flex; background: var(--bg-viewer); }
+    .viewer-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    .viewer-header { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+    .viewer-title-row {
+      display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 8px;
+    }
+    .viewer-title { font-size: 22px; font-weight: 600; color: var(--text-primary); }
+    .viewer-actions { display: flex; gap: 8px; }
+    .action-btn {
+      padding: 6px 12px; font-size: 12px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--border); background: #fff;
+      color: var(--text-secondary); transition: all 0.2s;
+    }
+    .action-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .action-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .action-btn.primary:hover { background: #2563eb; }
+    .viewer-original { font-size: 11px; color: var(--text-muted); margin-bottom: 12px; }
+
+    .entity-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .entity-chip {
+      display: flex; align-items: center; gap: 4px;
+      padding: 4px 10px; font-size: 11px; border-radius: 14px;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .entity-chip.person { background: #fef3c7; color: #92400e; }
+    .entity-chip.project { background: #dbeafe; color: #1e40af; }
+    .entity-chip.calendar { background: #d1fae5; color: #065f46; }
+    .entity-chip.action { background: #fee2e2; color: #991b1b; }
+    .entity-chip:hover { transform: scale(1.05); }
+
+    .viewer-body { flex: 1; overflow-y: auto; padding: 20px 24px; }
+    .transcript-segment {
+      display: flex; gap: 16px; padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .transcript-segment:last-child { border-bottom: none; }
+    .segment-time {
+      width: 48px; flex-shrink: 0;
+      font-size: 11px; color: var(--text-muted); padding-top: 2px;
+    }
+    .segment-content { flex: 1; }
+    .segment-speaker {
+      font-size: 12px; font-weight: 600;
+      color: var(--text-primary); margin-bottom: 4px;
+    }
+    .segment-text { font-size: 14px; color: var(--text-secondary); line-height: 1.6; }
+    .segment-marker { width: 80px; flex-shrink: 0; display: flex; align-items: flex-start; justify-content: flex-end; }
+    .insight-marker { font-size: 9px; padding: 3px 8px; border-radius: 10px; font-weight: 500; }
+    .insight-marker.key { background: #dbeafe; color: #1e40af; }
+    .insight-marker.action { background: #fee2e2; color: #991b1b; }
+    .insight-marker.decision { background: #d1fae5; color: #065f46; }
+    .insight-marker.question { background: #fef3c7; color: #92400e; }
+
+    .document-content { font-size: 14px; line-height: 1.8; color: var(--text-primary); }
+    .document-content h1 { font-size: 24px; margin-bottom: 16px; }
+    .document-content h2 { font-size: 18px; margin: 24px 0 12px; }
+    .document-content p { margin-bottom: 12px; }
+
+    /* Viewer Sidebar */
+    .viewer-sidebar {
+      width: 280px; background: var(--bg-context);
+      border-left: 1px solid var(--border);
+      display: flex; flex-direction: column; overflow-y: auto;
+    }
+
+    .sidebar-section { border-bottom: 1px solid var(--border); }
+    .section-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px; cursor: pointer; background: #fff; transition: background 0.2s;
+    }
+    .section-header:hover { background: var(--bg-list); }
+    .section-title {
+      font-size: 12px; font-weight: 600; color: var(--text-primary);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .section-icon { font-size: 14px; }
+    .section-badge {
+      font-size: 10px; padding: 2px 6px; border-radius: 8px;
+      background: var(--accent-light); color: var(--accent);
+    }
+    .section-toggle { font-size: 12px; color: var(--text-muted); transition: transform 0.2s; }
+    .sidebar-section.collapsed .section-toggle { transform: rotate(-90deg); }
+    .section-content { padding: 12px 16px; background: #fff; }
+    .sidebar-section.collapsed .section-content { display: none; }
+
+    .ai-chat-input { display: flex; gap: 8px; margin-top: 8px; }
+    .ai-chat-input input {
+      flex: 1; padding: 8px 12px; font-size: 12px;
+      border: 1px solid var(--border); border-radius: 6px; outline: none;
+    }
+    .ai-chat-input input:focus { border-color: var(--accent); }
+    .ai-chat-input button {
+      padding: 8px 12px; background: var(--accent); color: #fff;
+      border: none; border-radius: 6px; cursor: pointer; font-size: 12px;
+    }
+    .ai-suggestion { font-size: 11px; color: var(--text-muted); padding: 8px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+    .suggestion-chip {
+      padding: 4px 8px; background: var(--bg-list);
+      border-radius: 4px; cursor: pointer; transition: background 0.2s;
+    }
+    .suggestion-chip:hover { background: var(--accent-light); }
+
+    .insight-item { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .insight-item:last-child { border-bottom: none; }
+    .insight-category { font-size: 10px; font-weight: 600; text-transform: uppercase; margin-bottom: 4px; }
+    .insight-category.key { color: var(--accent); }
+    .insight-category.action { color: var(--danger); }
+    .insight-category.decision { color: var(--success); }
+    .insight-category.question { color: var(--warning); }
+    .insight-text { font-size: 12px; color: var(--text-primary); line-height: 1.5; }
+
+    .outline-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 0; cursor: pointer; transition: background 0.2s;
+    }
+    .outline-item:hover { background: var(--bg-list); margin: 0 -16px; padding: 6px 16px; }
+    .outline-icon { font-size: 12px; }
+    .outline-text { flex: 1; font-size: 12px; color: var(--text-primary); }
+    .outline-item.h2 { padding-left: 16px; }
+    .outline-item.h3 { padding-left: 32px; }
+    .outline-time { font-size: 10px; color: var(--text-muted); }
+
+    .link-group { margin-bottom: 12px; }
+    .link-group:last-child { margin-bottom: 0; }
+    .link-group-title {
+      font-size: 10px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; margin-bottom: 6px;
+    }
+    .link-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 8px; font-size: 12px; color: var(--text-primary);
+      background: var(--bg-list); border-radius: 6px;
+      margin-bottom: 4px; cursor: pointer; transition: all 0.2s;
+    }
+    .link-item:hover { background: var(--accent-light); }
+    .link-icon { font-size: 12px; }
+
+    /* Modals */
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000; opacity: 0; visibility: hidden; transition: all 0.2s;
+    }
+    .modal-overlay.active { opacity: 1; visibility: visible; }
+    .modal {
+      background: #fff; border-radius: 12px; width: 400px; max-width: 90%;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+      transform: translateY(20px); transition: transform 0.2s;
+    }
+    .modal-overlay.active .modal { transform: translateY(0); }
+    .modal-header {
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .modal-title { font-size: 16px; font-weight: 600; }
+    .modal-close {
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 6px; cursor: pointer;
+      color: var(--text-muted); transition: all 0.2s;
+    }
+    .modal-close:hover { background: var(--bg-list); color: var(--text-primary); }
+    .modal-body { padding: 20px; }
+    .modal-footer {
+      padding: 16px 20px; border-top: 1px solid var(--border);
+      display: flex; justify-content: flex-end; gap: 8px;
+    }
+    .form-group { margin-bottom: 16px; }
+    .form-group:last-child { margin-bottom: 0; }
+    .form-label { display: block; font-size: 12px; font-weight: 500; color: var(--text-primary); margin-bottom: 6px; }
+    .form-input {
+      width: 100%; padding: 10px 12px; font-size: 13px;
+      border: 1px solid var(--border); border-radius: 6px; outline: none;
+    }
+    .form-input:focus { border-color: var(--accent); }
+    .form-hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+    .empty-state {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%; color: var(--text-muted); text-align: center; padding: 40px;
+    }
+    .empty-icon { font-size: 48px; margin-bottom: 16px; opacity: 0.5; }
+    .empty-title { font-size: 16px; font-weight: 500; margin-bottom: 8px; }
+    .empty-desc { font-size: 13px; }
+
+    .processing-indicator {
+      display: flex; align-items: center; gap: 8px;
+      padding: 12px 16px; background: #f0f9ff; border-radius: 8px; margin-bottom: 16px;
+    }
+    .processing-spinner {
+      width: 16px; height: 16px;
+      border: 2px solid var(--accent-light); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .processing-text { font-size: 12px; color: var(--accent); }
+
+    /* AI Modal */
+    .ai-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; opacity: 0; visibility: hidden; transition: all 0.2s; }
+    .ai-modal-overlay.active { opacity: 1; visibility: visible; }
+    .ai-modal { background: var(--bg-viewer); border-radius: 12px; width: 560px; max-width: 90%; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 20px 40px rgba(0,0,0,0.2); }
+    .ai-modal-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: flex-start; }
+    .ai-modal-type { font-size: 13px; color: var(--accent); font-weight: 500; display: flex; align-items: center; gap: 6px; }
+    .ai-modal-source { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+    .ai-modal-close { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 6px; cursor: pointer; color: var(--text-muted); border: none; background: none; font-size: 16px; }
+    .ai-modal-close:hover { background: var(--bg-list); color: var(--text-primary); }
+    .ai-modal-body { flex: 1; overflow-y: auto; padding: 20px; }
+    .ai-modal-footer { padding: 16px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
+    .ai-loading { text-align: center; padding: 40px 20px; }
+    .ai-loading-dots { display: flex; justify-content: center; gap: 6px; margin-bottom: 12px; }
+    .ai-loading-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: bounce 1.4s ease-in-out infinite both; }
+    .ai-loading-dot:nth-child(1) { animation-delay: -0.32s; }
+    .ai-loading-dot:nth-child(2) { animation-delay: -0.16s; }
+    @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+    .ai-loading-text { font-size: 13px; color: var(--accent); font-weight: 500; }
+    .ai-result-content { font-size: 13px; line-height: 1.7; color: var(--text-primary); }
+    .ai-result-content h3 { font-size: 13px; font-weight: 600; margin: 14px 0 8px; display: flex; align-items: center; gap: 6px; }
+    .ai-result-content h3:first-child { margin-top: 0; }
+    .ai-result-content ul { margin: 0 0 10px 0; padding-left: 18px; }
+    .ai-result-content li { margin-bottom: 5px; color: var(--text-secondary); }
+    .ai-result-content p { margin-bottom: 8px; color: var(--text-secondary); }
+    .ai-result-content .highlight { background: var(--accent-light); color: var(--accent); padding: 1px 4px; border-radius: 3px; font-weight: 500; }
+    .copy-success { color: var(--success); font-size: 11px; opacity: 0; transition: opacity 0.3s; }
+    .copy-success.visible { opacity: 1; }
+    .suggestion-chip { cursor: pointer; transition: all 0.15s; }
+    .suggestion-chip:hover { background: var(--accent); color: white; }
+    .ai-chat-response { margin-top: 12px; padding: 12px; background: var(--bg-list); border-radius: 8px; font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <div class="sidebar">
+      <div class="sidebar-icon active" title="Library"><span>📚</span></div>
+      <div class="sidebar-icon" title="Search"><span>🔍</span></div>
+      <div class="sidebar-icon" title="Calendar"><span>📅</span></div>
+      <div class="sidebar-icon" title="People"><span>👥</span></div>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-icon" title="Settings"><span>⚙️</span></div>
+    </div>
+
+    <div class="source-list-panel">
+      <div class="list-header">
+        <div class="list-title">Knowledge Library</div>
+        <div class="search-box">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="search-input" placeholder="Search sources...">
+        </div>
+      </div>
+      <div class="filter-bar">
+        <span class="filter-chip active" data-filter="all">All</span>
+        <span class="filter-chip" data-filter="audio">Audio</span>
+        <span class="filter-chip" data-filter="pdf">PDF</span>
+        <span class="filter-chip" data-filter="markdown">Notes</span>
+        <span class="filter-chip" data-filter="insights">Has Insights</span>
+      </div>
+      <div class="sort-controls">
+        <span class="sort-label">Sort by:</span>
+        <select class="sort-select" id="sort-select">
+          <option value="date-desc">Newest first</option>
+          <option value="date-asc">Oldest first</option>
+          <option value="name">Name A-Z</option>
+          <option value="duration">Duration</option>
+        </select>
+      </div>
+      <div class="source-list" id="source-list"></div>
+    </div>
+
+    <div class="viewer-container">
+      <div class="viewer-main">
+        <div class="viewer-header" id="viewer-header"></div>
+        <div class="viewer-body" id="viewer-body"></div>
+      </div>
+      <div class="viewer-sidebar" id="viewer-sidebar"></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="rename-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <span class="modal-title">Rename Source</span>
+        <div class="modal-close" onclick="closeModal('rename-modal')">✕</div>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">New Title</label>
+          <input type="text" class="form-input" id="rename-input">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Original Filename</label>
+          <input type="text" class="form-input" id="rename-original" readonly style="background: var(--bg-list);">
+          <div class="form-hint">Original filename is preserved for reference</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="action-btn" onclick="closeModal('rename-modal')">Cancel</button>
+        <button class="action-btn primary" onclick="saveRename()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="task-modal">
+    <div class="modal">
+      <div class="modal-header">
+        <span class="modal-title">Create Task</span>
+        <div class="modal-close" onclick="closeModal('task-modal')">✕</div>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Task Title</label>
+          <input type="text" class="form-input" id="task-title" placeholder="Enter task title...">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Assignee</label>
+          <select class="form-input" id="task-assignee">
+            <option value="">Select person...</option>
+            <option value="sarah">Sarah Chen</option>
+            <option value="mike">Mike Rodriguez</option>
+            <option value="emily">Emily Watson</option>
+            <option value="david">David Park</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Due Date</label>
+          <input type="date" class="form-input" id="task-due">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="action-btn" onclick="closeModal('task-modal')">Cancel</button>
+        <button class="action-btn primary" onclick="createTask()">Create Task</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Modal -->
+  <div class="ai-modal-overlay" id="ai-modal">
+    <div class="ai-modal">
+      <div class="ai-modal-header">
+        <div>
+          <div class="ai-modal-type" id="ai-modal-type">✨ Summarize</div>
+          <div class="ai-modal-source" id="ai-modal-source">Source title</div>
+        </div>
+        <button class="ai-modal-close" onclick="closeAIModal()">✕</button>
+      </div>
+      <div class="ai-modal-body" id="ai-modal-body"></div>
+      <div class="ai-modal-footer">
+        <span class="copy-success" id="ai-copy-success">✓ Copied!</span>
+        <button class="action-btn" onclick="copyAIResult()">📋 Copy</button>
+        <button class="action-btn" onclick="closeAIModal()">Close</button>
+        <button class="action-btn primary" onclick="regenerateAI()">🔄 Regenerate</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const sourcesData = {
+      1: {
+        id: 1, type: 'audio',
+        title: 'Weekly Team Standup - Q4 Planning',
+        original: '2025Dec02-180515-Rec96.wav',
+        duration: '45:23', durationSec: 2723,
+        date: 'Dec 2, 2025', dateSort: '2025-12-02',
+        status: 'complete', hasInsights: true,
+        transcript: [
+          { speaker: 'Sarah Chen', time: '00:00', text: 'Good morning everyone. Let\'s start with Q4 planning updates. Mike, can you give us the API status?', insight: 'key' },
+          { speaker: 'Mike Rodriguez', time: '02:15', text: 'The new REST endpoints are 80% complete. We\'re targeting December 15th for the beta release.', insight: 'key' },
+          { speaker: 'Emily Watson', time: '05:30', text: 'I\'ll need the API documentation by December 10th to prepare the frontend integration.', insight: 'action' },
+          { speaker: 'Sarah Chen', time: '08:45', text: 'Agreed. Let\'s set December 10th as the documentation deadline. Mike, can you commit to that?', insight: 'decision' },
+          { speaker: 'Mike Rodriguez', time: '10:20', text: 'Yes, I\'ll have the full OpenAPI spec ready by then.', insight: null },
+          { speaker: 'David Park', time: '15:00', text: 'What about backward compatibility with v2 clients?', insight: 'question' },
+          { speaker: 'Mike Rodriguez', time: '16:30', text: 'We\'ll maintain v2 support for 6 months post-v3 launch. That\'s the standard deprecation window.', insight: 'decision' }
+        ],
+        links: {
+          people: [{ name: 'Sarah Chen', role: 'PM Lead' }, { name: 'Mike Rodriguez', role: 'Backend Dev' }, { name: 'Emily Watson', role: 'Frontend Dev' }, { name: 'David Park', role: 'QA Lead' }],
+          projects: [{ name: 'API v3 Launch', status: 'active' }, { name: 'Q4 Roadmap', status: 'active' }],
+          calendar: [{ title: 'API Beta Release', date: 'Dec 15, 2025' }],
+          actions: [{ text: 'Complete API documentation', assignee: 'Mike', due: 'Dec 10' }]
+        },
+        insights: {
+          keyPoints: ['API endpoints 80% complete', 'Beta release targeting Dec 15', 'v2 compatibility maintained for 6 months'],
+          actions: ['Prepare API documentation by Dec 10', 'Frontend integration after docs ready'],
+          decisions: ['Dec 10 documentation deadline confirmed', '6-month deprecation window for v2'],
+          questions: ['Backward compatibility approach for v2 clients']
+        },
+        outline: [
+          { type: 'h1', text: 'Q4 Planning Updates', time: '00:00', icon: '📋' },
+          { type: 'h2', text: 'API Status Review', time: '02:15', icon: '🔧' },
+          { type: 'h2', text: 'Documentation Timeline', time: '05:30', icon: '📝' },
+          { type: 'h2', text: 'Compatibility Discussion', time: '15:00', icon: '🔄' }
+        ]
+      },
+      2: {
+        id: 2, type: 'audio',
+        title: 'Technical Interview - Senior React Developer',
+        original: '2025Dec01-143022-Rec95.wav',
+        duration: '52:18', durationSec: 3138,
+        date: 'Dec 1, 2025', dateSort: '2025-12-01',
+        status: 'complete', hasInsights: true,
+        transcript: [
+          { speaker: 'Emily Watson', time: '00:00', text: 'Welcome to the technical interview. Can you tell us about your experience with React?', insight: null },
+          { speaker: 'Candidate', time: '01:30', text: 'I\'ve been working with React for 5 years, primarily on large-scale SPAs. Most recently at TechCorp building their customer dashboard.', insight: 'key' },
+          { speaker: 'Emily Watson', time: '08:00', text: 'How do you approach state management in complex applications?', insight: null },
+          { speaker: 'Candidate', time: '09:15', text: 'I prefer starting simple with Context, then moving to Zustand or Redux Toolkit only when needed. Over-engineering state is a common mistake.', insight: 'key' },
+          { speaker: 'David Park', time: '25:00', text: 'What\'s your testing philosophy?', insight: null },
+          { speaker: 'Candidate', time: '26:20', text: 'Integration tests over unit tests. Test behavior, not implementation. I aim for 80% coverage on critical paths.', insight: 'key' },
+          { speaker: 'Emily Watson', time: '45:00', text: 'Strong candidate. Should we proceed to the system design round?', insight: 'decision' }
+        ],
+        links: {
+          people: [{ name: 'Emily Watson', role: 'Interviewer' }, { name: 'David Park', role: 'Interviewer' }, { name: 'James Liu', role: 'Candidate' }],
+          projects: [{ name: 'Engineering Hiring', status: 'active' }],
+          calendar: [{ title: 'System Design Interview', date: 'Dec 5, 2025' }],
+          actions: [{ text: 'Schedule system design round', assignee: 'HR', due: 'Dec 3' }]
+        },
+        insights: {
+          keyPoints: ['5 years React experience', 'Pragmatic state management approach', 'Integration testing focus', 'Strong communication skills'],
+          actions: ['Schedule system design round', 'Prepare take-home assignment'],
+          decisions: ['Proceed to next interview stage'],
+          questions: ['Availability for December start date', 'Salary expectations']
+        },
+        outline: [
+          { type: 'h1', text: 'Technical Interview', time: '00:00', icon: '🎯' },
+          { type: 'h2', text: 'Background & Experience', time: '01:30', icon: '👤' },
+          { type: 'h2', text: 'State Management', time: '08:00', icon: '🔄' },
+          { type: 'h2', text: 'Testing Philosophy', time: '25:00', icon: '🧪' },
+          { type: 'h2', text: 'Decision & Next Steps', time: '45:00', icon: '✅' }
+        ]
+      },
+      3: {
+        id: 3, type: 'pdf',
+        title: 'Q4 Strategy Document',
+        original: 'Q4-2025-Strategy-Final-v3.pdf',
+        duration: '24 pages', durationSec: 0,
+        date: 'Nov 28, 2025', dateSort: '2025-11-28',
+        status: 'complete', hasInsights: true,
+        content: [
+          { type: 'h1', text: 'Q4 2025 Strategic Priorities' },
+          { type: 'p', text: 'This document outlines our key strategic priorities for Q4 2025, focusing on three main pillars: Product Excellence, Market Expansion, and Operational Efficiency.' },
+          { type: 'h2', text: '1. Product Excellence' },
+          { type: 'p', text: 'Launch API v3 with improved performance metrics and developer experience. Target: 40% reduction in response times.' },
+          { type: 'h2', text: '2. Market Expansion' },
+          { type: 'p', text: 'Enter European market with localized product offerings. Initial focus on UK, Germany, and France.' },
+          { type: 'h2', text: '3. Operational Efficiency' },
+          { type: 'p', text: 'Implement automated testing pipeline to reduce QA cycle time by 50%. Deploy infrastructure monitoring.' }
+        ],
+        links: {
+          people: [{ name: 'Sarah Chen', role: 'Author' }, { name: 'Alex Thompson', role: 'CEO Approval' }],
+          projects: [{ name: 'Q4 Roadmap', status: 'active' }, { name: 'EU Expansion', status: 'planning' }],
+          calendar: [{ title: 'Q4 Kickoff Meeting', date: 'Nov 30, 2025' }],
+          actions: [{ text: 'Review strategy with leadership', assignee: 'Sarah', due: 'Nov 29' }]
+        },
+        insights: {
+          keyPoints: ['Three strategic pillars defined', 'API v3 targeting 40% faster response', 'EU market expansion to UK, DE, FR', 'QA automation goal: 50% time reduction'],
+          actions: ['Finalize API v3 launch plan', 'Begin EU legal compliance review', 'Select testing automation tools'],
+          decisions: ['Q4 budget allocated', 'EU expansion approved'],
+          questions: ['Resource allocation for EU team', 'Timeline for QA automation rollout']
+        },
+        outline: [
+          { type: 'h1', text: 'Q4 2025 Strategic Priorities', time: 'p.1', icon: '🎯' },
+          { type: 'h2', text: 'Product Excellence', time: 'p.3', icon: '⭐' },
+          { type: 'h2', text: 'Market Expansion', time: 'p.8', icon: '🌍' },
+          { type: 'h2', text: 'Operational Efficiency', time: 'p.15', icon: '⚡' },
+          { type: 'h2', text: 'Budget & Resources', time: 'p.20', icon: '💰' }
+        ]
+      },
+      4: {
+        id: 4, type: 'markdown',
+        title: 'Product Research Notes - Competitor Analysis',
+        original: 'research-notes-competitors-2025.md',
+        duration: '3,200 words', durationSec: 0,
+        date: 'Nov 25, 2025', dateSort: '2025-11-25',
+        status: 'complete', hasInsights: true,
+        content: [
+          { type: 'h1', text: 'Competitor Analysis 2025' },
+          { type: 'p', text: 'Analysis of top 5 competitors in the knowledge management space.' },
+          { type: 'h2', text: 'Notion' },
+          { type: 'p', text: 'Strengths: Flexible workspace, strong collaboration. Weaknesses: Complex pricing, learning curve.' },
+          { type: 'h2', text: 'Obsidian' },
+          { type: 'p', text: 'Strengths: Local-first, powerful linking. Weaknesses: Limited real-time collaboration, mobile experience.' },
+          { type: 'h2', text: 'Roam Research' },
+          { type: 'p', text: 'Strengths: Bidirectional linking, daily notes. Weaknesses: Expensive, steep learning curve.' },
+          { type: 'h2', text: 'Key Differentiators for HiDock' },
+          { type: 'p', text: 'Audio-first approach, AI-powered insights, seamless device integration.' }
+        ],
+        links: {
+          people: [{ name: 'Product Team', role: 'Research' }],
+          projects: [{ name: 'Competitive Intelligence', status: 'ongoing' }],
+          calendar: [],
+          actions: [{ text: 'Update competitive matrix', assignee: 'Product', due: 'Dec 5' }]
+        },
+        insights: {
+          keyPoints: ['Notion leads in collaboration', 'Obsidian wins on local-first privacy', 'Gap in audio-native solutions', 'AI insights is underserved market'],
+          actions: ['Develop feature comparison chart', 'Interview Obsidian power users'],
+          decisions: ['Focus on audio-first positioning'],
+          questions: ['Enterprise pricing strategy', 'Open-source considerations']
+        },
+        outline: [
+          { type: 'h1', text: 'Competitor Analysis', time: '', icon: '🔍' },
+          { type: 'h2', text: 'Notion Overview', time: '', icon: '📝' },
+          { type: 'h2', text: 'Obsidian Overview', time: '', icon: '💎' },
+          { type: 'h2', text: 'Roam Research', time: '', icon: '🧠' },
+          { type: 'h2', text: 'Differentiators', time: '', icon: '🎯' }
+        ]
+      },
+      5: {
+        id: 5, type: 'audio',
+        title: '1:1 with Sarah - Performance Review',
+        original: '2025Nov20-100030-Rec92.wav',
+        duration: '28:45', durationSec: 1725,
+        date: 'Nov 20, 2025', dateSort: '2025-11-20',
+        status: 'complete', hasInsights: true,
+        transcript: [
+          { speaker: 'Sarah Chen', time: '00:00', text: 'Thanks for meeting. Let\'s discuss your progress this quarter.', insight: null },
+          { speaker: 'Mike Rodriguez', time: '01:00', text: 'I feel good about the API work. The team velocity has improved 30% since we adopted the new sprint format.', insight: 'key' },
+          { speaker: 'Sarah Chen', time: '05:30', text: 'The stakeholders are happy with the quality. I\'m recommending you for the senior promotion track.', insight: 'decision' },
+          { speaker: 'Mike Rodriguez', time: '08:00', text: 'That means a lot. What areas should I focus on for growth?', insight: null },
+          { speaker: 'Sarah Chen', time: '10:15', text: 'Cross-team communication and mentoring. Start pairing with junior devs more regularly.', insight: 'action' },
+          { speaker: 'Mike Rodriguez', time: '15:00', text: 'I\'d like to lead the architecture review sessions. Is that possible?', insight: 'question' },
+          { speaker: 'Sarah Chen', time: '16:30', text: 'Absolutely. I\'ll add you to the next architecture council meeting.', insight: 'decision' }
+        ],
+        links: {
+          people: [{ name: 'Sarah Chen', role: 'Manager' }, { name: 'Mike Rodriguez', role: 'Direct Report' }],
+          projects: [{ name: 'Performance Reviews Q4', status: 'active' }],
+          calendar: [{ title: 'Architecture Council', date: 'Dec 10, 2025' }],
+          actions: [{ text: 'Begin senior promotion paperwork', assignee: 'Sarah', due: 'Dec 1' }]
+        },
+        insights: {
+          keyPoints: ['30% velocity improvement', 'Recommended for senior promotion', 'Strong stakeholder feedback'],
+          actions: ['Pair with junior developers', 'Join architecture council meetings', 'Prepare promotion documentation'],
+          decisions: ['Senior promotion track approved', 'Added to architecture council'],
+          questions: ['Timeline for promotion decision', 'Mentorship program structure']
+        },
+        outline: [
+          { type: 'h1', text: 'Q4 Performance Review', time: '00:00', icon: '📊' },
+          { type: 'h2', text: 'Quarter Accomplishments', time: '01:00', icon: '🏆' },
+          { type: 'h2', text: 'Promotion Discussion', time: '05:30', icon: '📈' },
+          { type: 'h2', text: 'Growth Areas', time: '08:00', icon: '🌱' },
+          { type: 'h2', text: 'Action Items', time: '15:00', icon: '✅' }
+        ]
+      },
+      6: {
+        id: 6, type: 'audio',
+        title: 'Client Demo - Enterprise Features',
+        original: '2025Dec03-141500-Rec97.wav',
+        duration: '35:10', durationSec: 2110,
+        date: 'Dec 3, 2025', dateSort: '2025-12-03',
+        status: 'processing', hasInsights: false,
+        transcript: [],
+        links: { people: [], projects: [], calendar: [], actions: [] },
+        insights: { keyPoints: [], actions: [], decisions: [], questions: [] },
+        outline: []
+      }
+    };
+
+    let currentSourceId = 1;
+    let filteredSources = Object.values(sourcesData);
+    let currentFilter = 'all';
+    let currentSort = 'date-desc';
+    let collapsedSections = {};
+
+    document.addEventListener('DOMContentLoaded', () => {
+      applyFilters();
+      selectSource(1);
+      setupEventListeners();
+    });
+
+    function setupEventListeners() {
+      document.getElementById('search-input').addEventListener('input', applyFilters);
+      document.querySelectorAll('.filter-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+          document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+          chip.classList.add('active');
+          currentFilter = chip.dataset.filter;
+          applyFilters();
+        });
+      });
+      document.getElementById('sort-select').addEventListener('change', (e) => {
+        currentSort = e.target.value;
+        applyFilters();
+      });
+    }
+
+    function applyFilters() {
+      const searchTerm = document.getElementById('search-input').value.toLowerCase();
+      filteredSources = Object.values(sourcesData).filter(s => {
+        if (searchTerm && !s.title.toLowerCase().includes(searchTerm) && !s.original.toLowerCase().includes(searchTerm)) return false;
+        if (currentFilter !== 'all') {
+          if (currentFilter === 'insights') {
+            if (!s.hasInsights) return false;
+          } else if (s.type !== currentFilter) return false;
+        }
+        return true;
+      });
+      filteredSources.sort((a, b) => {
+        switch (currentSort) {
+          case 'date-desc': return b.dateSort.localeCompare(a.dateSort);
+          case 'date-asc': return a.dateSort.localeCompare(b.dateSort);
+          case 'name': return a.title.localeCompare(b.title);
+          case 'duration': return b.durationSec - a.durationSec;
+          default: return 0;
+        }
+      });
+      renderSourceList();
+    }
+
+    function renderSourceList() {
+      const list = document.getElementById('source-list');
+      list.replaceChildren();
+      filteredSources.forEach(s => {
+        const item = el('div', 'source-item' + (s.id === currentSourceId ? ' selected' : ''));
+        item.dataset.id = s.id;
+        item.onclick = () => selectSource(s.id);
+        const icon = el('div', 'source-icon ' + s.type);
+        icon.textContent = getTypeIcon(s.type);
+        item.appendChild(icon);
+        const info = el('div', 'source-info');
+        const title = el('div', 'source-title');
+        title.textContent = s.title;
+        info.appendChild(title);
+        const meta = el('div', 'source-meta');
+        meta.appendChild(document.createTextNode(s.date + ' \u00B7 ' + s.duration));
+        info.appendChild(meta);
+        if (s.hasInsights || s.status === 'processing' || s.links.people.length > 0) {
+          const badges = el('div', 'source-badges');
+          if (s.status === 'processing') {
+            const badge = el('span', 'badge processing');
+            badge.textContent = 'Processing';
+            badges.appendChild(badge);
+          }
+          if (s.hasInsights) {
+            const badge = el('span', 'badge insights');
+            badge.textContent = 'Insights';
+            badges.appendChild(badge);
+          }
+          if (s.links.people.length > 0) {
+            const badge = el('span', 'badge links');
+            badge.textContent = s.links.people.length + ' linked';
+            badges.appendChild(badge);
+          }
+          info.appendChild(badges);
+        }
+        item.appendChild(info);
+        list.appendChild(item);
+      });
+    }
+
+    function selectSource(id) {
+      currentSourceId = id;
+      document.querySelectorAll('.source-item').forEach(item => {
+        item.classList.toggle('selected', parseInt(item.dataset.id) === id);
+      });
+      renderViewer();
+      renderSidebar();
+    }
+
+    function renderViewer() {
+      const s = sourcesData[currentSourceId];
+      const header = document.getElementById('viewer-header');
+      const body = document.getElementById('viewer-body');
+      header.replaceChildren();
+      body.replaceChildren();
+
+      const titleRow = el('div', 'viewer-title-row');
+      const title = el('h1', 'viewer-title');
+      title.textContent = s.title;
+      titleRow.appendChild(title);
+      const actions = el('div', 'viewer-actions');
+      const renameBtn = el('button', 'action-btn');
+      renameBtn.textContent = 'Rename';
+      renameBtn.onclick = () => openRenameModal();
+      actions.appendChild(renameBtn);
+      if (s.type === 'audio') {
+        const playBtn = el('button', 'action-btn primary');
+        playBtn.textContent = 'Play';
+        actions.appendChild(playBtn);
+      }
+      titleRow.appendChild(actions);
+      header.appendChild(titleRow);
+
+      const original = el('div', 'viewer-original');
+      original.textContent = 'Original: ' + s.original;
+      header.appendChild(original);
+
+      if (s.links.people.length > 0 || s.links.projects.length > 0) {
+        const chips = el('div', 'entity-chips');
+        s.links.people.forEach(p => {
+          const chip = el('span', 'entity-chip person');
+          chip.textContent = '👤 ' + p.name;
+          chips.appendChild(chip);
+        });
+        s.links.projects.forEach(p => {
+          const chip = el('span', 'entity-chip project');
+          chip.textContent = '📁 ' + p.name;
+          chips.appendChild(chip);
+        });
+        if (s.links.calendar.length > 0) {
+          s.links.calendar.forEach(c => {
+            const chip = el('span', 'entity-chip calendar');
+            chip.textContent = '📅 ' + c.title;
+            chips.appendChild(chip);
+          });
+        }
+        header.appendChild(chips);
+      }
+
+      if (s.status === 'processing') {
+        const indicator = el('div', 'processing-indicator');
+        indicator.appendChild(el('div', 'processing-spinner'));
+        const text = el('span', 'processing-text');
+        text.textContent = 'Processing audio and generating insights...';
+        indicator.appendChild(text);
+        body.appendChild(indicator);
+        const empty = el('div', 'empty-state');
+        const emptyIcon = el('div', 'empty-icon');
+        emptyIcon.textContent = '🔄';
+        empty.appendChild(emptyIcon);
+        const emptyTitle = el('div', 'empty-title');
+        emptyTitle.textContent = 'Transcription in Progress';
+        empty.appendChild(emptyTitle);
+        const emptyDesc = el('div', 'empty-desc');
+        emptyDesc.textContent = 'This recording is being processed. Check back in a few minutes.';
+        empty.appendChild(emptyDesc);
+        body.appendChild(empty);
+        return;
+      }
+
+      if (s.type === 'audio' && s.transcript.length > 0) {
+        s.transcript.forEach(t => {
+          const segment = el('div', 'transcript-segment');
+          const time = el('div', 'segment-time');
+          time.textContent = t.time;
+          segment.appendChild(time);
+          const content = el('div', 'segment-content');
+          const speaker = el('div', 'segment-speaker');
+          speaker.textContent = t.speaker;
+          content.appendChild(speaker);
+          const text = el('div', 'segment-text');
+          text.textContent = t.text;
+          content.appendChild(text);
+          segment.appendChild(content);
+          const marker = el('div', 'segment-marker');
+          if (t.insight) {
+            const badge = el('span', 'insight-marker ' + t.insight);
+            badge.textContent = getInsightLabel(t.insight);
+            marker.appendChild(badge);
+          }
+          segment.appendChild(marker);
+          body.appendChild(segment);
+        });
+      } else if (s.content) {
+        const doc = el('div', 'document-content');
+        s.content.forEach(block => {
+          let elem;
+          switch (block.type) {
+            case 'h1': elem = el('h1'); break;
+            case 'h2': elem = el('h2'); break;
+            default: elem = el('p');
+          }
+          elem.textContent = block.text;
+          doc.appendChild(elem);
+        });
+        body.appendChild(doc);
+      }
+    }
+
+    function renderSidebar() {
+      const s = sourcesData[currentSourceId];
+      const sidebar = document.getElementById('viewer-sidebar');
+      sidebar.replaceChildren();
+
+      // AI Chat
+      const aiSection = createSection('ai', '🤖', 'AI Assistant', null);
+      const aiContent = aiSection.querySelector('.section-content');
+      const suggestion = el('div', 'ai-suggestion');
+      suggestion.appendChild(document.createTextNode('Try: '));
+      const actionMap = [
+        { text: 'Summarize', type: 'summarize' },
+        { text: 'Key decisions', type: 'keyPoints' },
+        { text: 'Action items', type: 'extractActions' }
+      ];
+      actionMap.forEach(action => {
+        const chip = el('span', 'suggestion-chip');
+        chip.textContent = action.text;
+        chip.onclick = () => triggerAIAction(action.type);
+        suggestion.appendChild(chip);
+      });
+      aiContent.appendChild(suggestion);
+      const chatInput = el('div', 'ai-chat-input');
+      const input = el('input');
+      input.type = 'text';
+      input.id = 'sidebar-chat-input';
+      input.placeholder = 'Ask about this source...';
+      input.onkeypress = (e) => { if (e.key === 'Enter') sendSidebarChat(); };
+      chatInput.appendChild(input);
+      const sendBtn = el('button');
+      sendBtn.textContent = 'Ask';
+      sendBtn.onclick = sendSidebarChat;
+      chatInput.appendChild(sendBtn);
+      aiContent.appendChild(chatInput);
+      // Chat response area
+      const chatResponse = el('div', 'ai-chat-response');
+      chatResponse.id = 'sidebar-chat-response';
+      chatResponse.style.display = 'none';
+      aiContent.appendChild(chatResponse);
+      sidebar.appendChild(aiSection);
+
+      // Insights
+      if (s.hasInsights) {
+        const count = s.insights.keyPoints.length + s.insights.actions.length + s.insights.decisions.length + s.insights.questions.length;
+        const insightsSection = createSection('insights', '✨', 'Insights', count);
+        const insightsContent = insightsSection.querySelector('.section-content');
+        [{ key: 'keyPoints', label: 'Key Points', cls: 'key' }, { key: 'actions', label: 'Actions', cls: 'action' }, { key: 'decisions', label: 'Decisions', cls: 'decision' }, { key: 'questions', label: 'Questions', cls: 'question' }].forEach(cat => {
+          if (s.insights[cat.key].length > 0) {
+            s.insights[cat.key].forEach(text => {
+              const item = el('div', 'insight-item');
+              const label = el('div', 'insight-category ' + cat.cls);
+              label.textContent = cat.label;
+              item.appendChild(label);
+              const textEl = el('div', 'insight-text');
+              textEl.textContent = text;
+              item.appendChild(textEl);
+              insightsContent.appendChild(item);
+            });
+          }
+        });
+        sidebar.appendChild(insightsSection);
+      }
+
+      // Outline
+      if (s.outline.length > 0) {
+        const outlineSection = createSection('outline', '📑', 'Outline', s.outline.length);
+        const outlineContent = outlineSection.querySelector('.section-content');
+        s.outline.forEach(item => {
+          const row = el('div', 'outline-item ' + item.type);
+          const icon = el('span', 'outline-icon');
+          icon.textContent = item.icon;
+          row.appendChild(icon);
+          const text = el('span', 'outline-text');
+          text.textContent = item.text;
+          row.appendChild(text);
+          if (item.time) {
+            const time = el('span', 'outline-time');
+            time.textContent = item.time;
+            row.appendChild(time);
+          }
+          outlineContent.appendChild(row);
+        });
+        sidebar.appendChild(outlineSection);
+      }
+
+      // Links
+      const totalLinks = s.links.people.length + s.links.projects.length + s.links.calendar.length + s.links.actions.length;
+      if (totalLinks > 0) {
+        const linksSection = createSection('links', '🔗', 'Links', totalLinks);
+        const linksContent = linksSection.querySelector('.section-content');
+        if (s.links.people.length > 0) {
+          const group = el('div', 'link-group');
+          const title = el('div', 'link-group-title');
+          title.textContent = 'People';
+          group.appendChild(title);
+          s.links.people.forEach(p => {
+            const item = el('div', 'link-item');
+            item.appendChild(document.createTextNode('👤 ' + p.name));
+            group.appendChild(item);
+          });
+          linksContent.appendChild(group);
+        }
+        if (s.links.projects.length > 0) {
+          const group = el('div', 'link-group');
+          const title = el('div', 'link-group-title');
+          title.textContent = 'Projects';
+          group.appendChild(title);
+          s.links.projects.forEach(p => {
+            const item = el('div', 'link-item');
+            item.appendChild(document.createTextNode('📁 ' + p.name));
+            group.appendChild(item);
+          });
+          linksContent.appendChild(group);
+        }
+        if (s.links.actions.length > 0) {
+          const group = el('div', 'link-group');
+          const title = el('div', 'link-group-title');
+          title.textContent = 'Action Items';
+          group.appendChild(title);
+          s.links.actions.forEach(a => {
+            const item = el('div', 'link-item');
+            item.appendChild(document.createTextNode('✅ ' + a.text));
+            group.appendChild(item);
+          });
+          linksContent.appendChild(group);
+        }
+        sidebar.appendChild(linksSection);
+      }
+    }
+
+    function createSection(id, icon, title, badge) {
+      const section = el('div', 'sidebar-section' + (collapsedSections[id] ? ' collapsed' : ''));
+      const header = el('div', 'section-header');
+      header.onclick = () => toggleSection(id, section);
+      const titleEl = el('div', 'section-title');
+      const iconEl = el('span', 'section-icon');
+      iconEl.textContent = icon;
+      titleEl.appendChild(iconEl);
+      titleEl.appendChild(document.createTextNode(' ' + title));
+      if (badge !== null) {
+        const badgeEl = el('span', 'section-badge');
+        badgeEl.textContent = badge;
+        titleEl.appendChild(badgeEl);
+      }
+      header.appendChild(titleEl);
+      const toggle = el('span', 'section-toggle');
+      toggle.textContent = '\u25BC';
+      header.appendChild(toggle);
+      section.appendChild(header);
+      section.appendChild(el('div', 'section-content'));
+      return section;
+    }
+
+    function toggleSection(id, section) {
+      collapsedSections[id] = !collapsedSections[id];
+      section.classList.toggle('collapsed', collapsedSections[id]);
+    }
+
+    function el(tag, className) {
+      const elem = document.createElement(tag);
+      if (className) elem.className = className;
+      return elem;
+    }
+
+    function getTypeIcon(type) {
+      return { audio: '🎙️', pdf: '📄', markdown: '📝', image: '🖼️' }[type] || '📄';
+    }
+
+    function getInsightLabel(type) {
+      return { key: 'Key Point', action: 'Action', decision: 'Decision', question: 'Question' }[type] || type;
+    }
+
+    function openRenameModal() {
+      const s = sourcesData[currentSourceId];
+      document.getElementById('rename-input').value = s.title;
+      document.getElementById('rename-original').value = s.original;
+      document.getElementById('rename-modal').classList.add('active');
+    }
+
+    function closeModal(id) {
+      document.getElementById(id).classList.remove('active');
+    }
+
+    function saveRename() {
+      const newTitle = document.getElementById('rename-input').value.trim();
+      if (newTitle) {
+        sourcesData[currentSourceId].title = newTitle;
+        renderSourceList();
+        renderViewer();
+      }
+      closeModal('rename-modal');
+    }
+
+    function createTask() {
+      const title = document.getElementById('task-title').value.trim();
+      const assignee = document.getElementById('task-assignee').value;
+      const due = document.getElementById('task-due').value;
+      if (title) {
+        const s = sourcesData[currentSourceId];
+        const assigneeName = assignee ? document.querySelector('#task-assignee option[value="' + assignee + '"]').textContent : 'Unassigned';
+        s.links.actions.push({ text: title, assignee: assigneeName, due: due || 'No date' });
+        renderSidebar();
+        document.getElementById('task-title').value = '';
+        document.getElementById('task-assignee').value = '';
+        document.getElementById('task-due').value = '';
+      }
+      closeModal('task-modal');
+    }
+  </script>
+</body>
+</html>

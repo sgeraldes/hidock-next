@@ -1,0 +1,1167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Library - Rich Prototype</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg-dark: #0f0f0f;
+      --bg-card: #1a1a1a;
+      --bg-elevated: #242424;
+      --bg-hover: #2a2a2a;
+      --border: #333;
+      --text-primary: #ffffff;
+      --text-secondary: #a0a0a0;
+      --text-muted: #666;
+      --accent: #8b5cf6;
+      --accent-glow: rgba(139, 92, 246, 0.3);
+      --gradient-1: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%);
+      --gradient-2: linear-gradient(135deg, #06b6d4 0%, #8b5cf6 100%);
+      --success: #10b981;
+      --warning: #f59e0b;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-dark);
+      color: var(--text-primary);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    .app-header {
+      height: 56px;
+      background: linear-gradient(180deg, #1a1a1a 0%, #0f0f0f 100%);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      gap: 16px;
+    }
+
+    .app-logo {
+      width: 32px;
+      height: 32px;
+      background: var(--gradient-1);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    .app-title {
+      font-size: 16px;
+      font-weight: 600;
+      background: var(--gradient-1);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .app-nav {
+      display: flex;
+      gap: 4px;
+      margin-left: auto;
+    }
+
+    .nav-btn {
+      padding: 8px 16px;
+      border-radius: 8px;
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .nav-btn:hover {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+    }
+
+    .nav-btn.active {
+      background: var(--bg-elevated);
+      color: var(--accent);
+    }
+
+    .main-content {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      padding: 12px;
+      gap: 12px;
+    }
+
+    .panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg-card);
+      border-radius: 16px;
+      border: 1px solid var(--border);
+    }
+
+    .panel-library {
+      width: 300px;
+      min-width: 220px;
+      max-width: 420px;
+    }
+
+    .panel-reader {
+      flex: 1;
+      min-width: 320px;
+    }
+
+    .panel-assistant {
+      width: 340px;
+      min-width: 260px;
+      max-width: 480px;
+    }
+
+    .resizer {
+      width: 12px;
+      cursor: col-resize;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .resizer::before {
+      content: '';
+      width: 4px;
+      height: 40px;
+      background: var(--border);
+      border-radius: 2px;
+      transition: all 0.2s;
+    }
+
+    .resizer:hover::before, .resizer.active::before {
+      background: var(--accent);
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+
+    .panel-header {
+      padding: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .panel-header-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .panel-header h2 {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .panel-header .count {
+      font-size: 12px;
+      color: var(--text-muted);
+      background: var(--bg-elevated);
+      padding: 4px 10px;
+      border-radius: 12px;
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .icon-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+
+    .icon-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+      border-color: var(--accent);
+    }
+
+    .search-box {
+      padding: 16px 20px;
+    }
+
+    .search-input-wrapper {
+      position: relative;
+    }
+
+    .search-input {
+      width: 100%;
+      padding: 12px 16px 12px 44px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 14px;
+      outline: none;
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      transition: all 0.2s;
+    }
+
+    .search-input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .search-input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .search-icon {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-muted);
+    }
+
+    .filter-chips {
+      padding: 0 20px 16px;
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+    }
+
+    .filter-chip {
+      padding: 8px 16px;
+      font-size: 13px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      background: var(--bg-elevated);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .filter-chip:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .filter-chip.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .source-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 12px;
+    }
+
+    .source-card {
+      padding: 16px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      border-radius: 12px;
+      background: var(--bg-elevated);
+      border: 1px solid transparent;
+      transition: all 0.2s;
+    }
+
+    .source-card:hover {
+      background: var(--bg-hover);
+      border-color: var(--border);
+      transform: translateY(-1px);
+    }
+
+    .source-card.selected {
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.15) 0%, rgba(236, 72, 153, 0.1) 100%);
+      border-color: var(--accent);
+    }
+
+    .source-card-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .source-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      flex-shrink: 0;
+    }
+
+    .source-icon.audio { background: linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%); }
+    .source-icon.pdf { background: linear-gradient(135deg, #ef4444 0%, #f97316 100%); }
+    .source-icon.markdown { background: linear-gradient(135deg, #10b981 0%, #34d399 100%); }
+    .source-icon.image { background: linear-gradient(135deg, #06b6d4 0%, #22d3ee 100%); }
+    .source-icon.web_clip { background: linear-gradient(135deg, #3b82f6 0%, #60a5fa 100%); }
+
+    .source-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .source-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .source-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .source-tags {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .source-tag {
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: var(--bg-dark);
+      color: var(--text-secondary);
+    }
+
+    /* Reader Panel */
+    .reader-empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      padding: 40px;
+    }
+
+    .reader-empty-icon {
+      width: 80px;
+      height: 80px;
+      margin-bottom: 20px;
+      background: var(--gradient-1);
+      border-radius: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      opacity: 0.3;
+    }
+
+    .reader-empty p {
+      font-size: 16px;
+    }
+
+    .reader-content {
+      flex: 1;
+      overflow-y: auto;
+      display: none;
+      flex-direction: column;
+    }
+
+    .reader-content.active {
+      display: flex;
+    }
+
+    .reader-hero {
+      padding: 32px;
+      background: linear-gradient(180deg, rgba(139, 92, 246, 0.1) 0%, transparent 100%);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .reader-title {
+      font-size: 28px;
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+
+    .reader-meta {
+      display: flex;
+      gap: 20px;
+      color: var(--text-secondary);
+      font-size: 14px;
+    }
+
+    .meta-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .reader-tags {
+      display: flex;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .reader-tag {
+      font-size: 12px;
+      padding: 6px 12px;
+      border-radius: 8px;
+      background: var(--bg-elevated);
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+
+    .reader-tag.add {
+      border-style: dashed;
+      cursor: pointer;
+    }
+
+    .reader-tag.add:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* Audio Player */
+    .audio-player {
+      padding: 24px 32px;
+      background: var(--bg-elevated);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .waveform-container {
+      height: 64px;
+      background: var(--bg-dark);
+      border-radius: 12px;
+      margin-bottom: 16px;
+      position: relative;
+      overflow: hidden;
+      cursor: pointer;
+    }
+
+    .waveform-bars {
+      display: flex;
+      align-items: center;
+      height: 100%;
+      gap: 3px;
+      padding: 12px;
+    }
+
+    .waveform-bar {
+      flex: 1;
+      background: var(--text-muted);
+      border-radius: 2px;
+      opacity: 0.3;
+      transition: all 0.1s;
+    }
+
+    .waveform-bar.played {
+      background: var(--accent);
+      opacity: 1;
+    }
+
+    .waveform-progress {
+      position: absolute;
+      left: 30%;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: var(--text-primary);
+      box-shadow: 0 0 8px rgba(255,255,255,0.5);
+    }
+
+    .player-controls {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .control-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: var(--bg-dark);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+
+    .control-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .play-btn {
+      width: 48px;
+      height: 48px;
+      background: var(--gradient-1);
+      border: none;
+      color: white;
+    }
+
+    .play-btn:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 20px var(--accent-glow);
+    }
+
+    .player-time {
+      font-size: 13px;
+      color: var(--text-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .player-speed {
+      margin-left: auto;
+      padding: 6px 12px;
+      font-size: 13px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg-dark);
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+
+    /* Tabs */
+    .reader-tabs {
+      display: flex;
+      gap: 4px;
+      padding: 16px 32px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .reader-tab {
+      padding: 10px 20px;
+      font-size: 14px;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+
+    .reader-tab:hover {
+      background: var(--bg-elevated);
+      color: var(--text-secondary);
+    }
+
+    .reader-tab.active {
+      background: var(--accent);
+      color: white;
+    }
+
+    /* Transcript */
+    .transcript {
+      padding: 24px 32px;
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    .transcript-segment {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 24px;
+      padding: 16px;
+      border-radius: 12px;
+      transition: all 0.2s;
+      cursor: pointer;
+    }
+
+    .transcript-segment:hover {
+      background: var(--bg-elevated);
+    }
+
+    .transcript-segment.current {
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.15) 0%, rgba(236, 72, 153, 0.1) 100%);
+      border: 1px solid var(--accent);
+    }
+
+    .transcript-avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: var(--gradient-2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .transcript-content {
+      flex: 1;
+    }
+
+    .transcript-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 6px;
+    }
+
+    .transcript-speaker {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .transcript-time {
+      font-size: 12px;
+      color: var(--accent);
+      cursor: pointer;
+    }
+
+    .transcript-text {
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--text-secondary);
+    }
+
+    /* Assistant Panel */
+    .assistant-header {
+      padding: 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .assistant-avatar {
+      width: 40px;
+      height: 40px;
+      background: var(--gradient-1);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+    }
+
+    .assistant-info h3 {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .assistant-context {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .quick-actions {
+      padding: 16px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .quick-action {
+      padding: 10px 16px;
+      font-size: 13px;
+      border: none;
+      border-radius: 10px;
+      background: var(--bg-elevated);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .quick-action:hover {
+      background: var(--accent);
+      color: white;
+      transform: translateY(-1px);
+    }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .chat-message {
+      max-width: 85%;
+      padding: 14px 18px;
+      border-radius: 16px;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .chat-message.user {
+      align-self: flex-end;
+      background: var(--gradient-1);
+      color: white;
+      border-bottom-right-radius: 6px;
+    }
+
+    .chat-message.assistant {
+      align-self: flex-start;
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      border-bottom-left-radius: 6px;
+      border: 1px solid var(--border);
+    }
+
+    .chat-input-container {
+      padding: 20px;
+      border-top: 1px solid var(--border);
+    }
+
+    .chat-input-box {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+    }
+
+    .chat-input {
+      flex: 1;
+      padding: 14px 18px;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      font-size: 14px;
+      resize: none;
+      outline: none;
+      font-family: inherit;
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      min-height: 48px;
+      max-height: 120px;
+    }
+
+    .chat-input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+    }
+
+    .chat-send-btn {
+      width: 48px;
+      height: 48px;
+      border-radius: 14px;
+      background: var(--gradient-1);
+      color: white;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+      font-size: 18px;
+    }
+
+    .chat-send-btn:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 20px var(--accent-glow);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="app-logo">K</div>
+      <span class="app-title">Knowledge Hub</span>
+      <nav class="app-nav">
+        <button class="nav-btn active">Library</button>
+        <button class="nav-btn">Insights</button>
+        <button class="nav-btn">Settings</button>
+      </nav>
+    </header>
+
+    <main class="main-content">
+      <aside class="panel panel-library" id="panel-library">
+        <div class="panel-header">
+          <div class="panel-header-row">
+            <h2>Sources</h2>
+            <span class="count">24 items</span>
+          </div>
+        </div>
+        <div class="search-box">
+          <div class="search-input-wrapper">
+            <span class="search-icon">🔍</span>
+            <input type="text" class="search-input" placeholder="Search your knowledge...">
+          </div>
+        </div>
+        <div class="filter-chips">
+          <button class="filter-chip active">All</button>
+          <button class="filter-chip">🎙 Audio</button>
+          <button class="filter-chip">📄 PDF</button>
+          <button class="filter-chip">📝 Notes</button>
+          <button class="filter-chip">🖼 Images</button>
+        </div>
+        <div class="source-list" id="source-list"></div>
+      </aside>
+
+      <div class="resizer" id="resizer-1"></div>
+
+      <section class="panel panel-reader" id="panel-reader">
+        <div class="reader-empty" id="reader-empty">
+          <div class="reader-empty-icon">📚</div>
+          <p>Select a source to explore</p>
+        </div>
+        <div class="reader-content" id="reader-content">
+          <div class="reader-hero">
+            <h1 class="reader-title" id="reader-title">Weekly Team Standup</h1>
+            <div class="reader-meta">
+              <span class="meta-item">🎙 <span id="reader-type">Audio</span></span>
+              <span class="meta-item">⏱ <span id="reader-duration">45:23</span></span>
+              <span class="meta-item">📅 <span id="reader-date">Dec 28, 2024</span></span>
+            </div>
+            <div class="reader-tags">
+              <span class="reader-tag">#meeting</span>
+              <span class="reader-tag">#team</span>
+              <span class="reader-tag add">+ Add tag</span>
+            </div>
+          </div>
+
+          <div class="audio-player" id="audio-player">
+            <div class="waveform-container">
+              <div class="waveform-bars" id="waveform-bars"></div>
+              <div class="waveform-progress" id="waveform-progress"></div>
+            </div>
+            <div class="player-controls">
+              <button class="control-btn">⏮</button>
+              <button class="control-btn">⏪</button>
+              <button class="control-btn play-btn" id="play-btn">▶</button>
+              <button class="control-btn">⏩</button>
+              <button class="control-btn">⏭</button>
+              <span class="player-time"><span id="current-time">12:34</span> / <span id="total-time">45:23</span></span>
+              <select class="player-speed">
+                <option>0.5x</option>
+                <option>0.75x</option>
+                <option selected>1x</option>
+                <option>1.25x</option>
+                <option>1.5x</option>
+                <option>2x</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="reader-tabs">
+            <div class="reader-tab active">Transcript</div>
+            <div class="reader-tab">Summary</div>
+            <div class="reader-tab">Notes</div>
+            <div class="reader-tab">Related</div>
+          </div>
+
+          <div class="transcript" id="transcript"></div>
+        </div>
+      </section>
+
+      <div class="resizer" id="resizer-2"></div>
+
+      <aside class="panel panel-assistant" id="panel-assistant">
+        <div class="assistant-header">
+          <div class="assistant-avatar">✨</div>
+          <div class="assistant-info">
+            <h3>AI Assistant</h3>
+            <div class="assistant-context" id="assistant-context">No source selected</div>
+          </div>
+        </div>
+
+        <div class="quick-actions">
+          <button class="quick-action">✨ Summarize</button>
+          <button class="quick-action">📌 Key Points</button>
+          <button class="quick-action">✅ Action Items</button>
+          <button class="quick-action">❓ Questions</button>
+        </div>
+
+        <div class="chat-messages" id="chat-messages">
+          <div class="chat-message assistant">
+            Hey! I'm here to help you explore and understand your knowledge sources. Select something from the library to get started.
+          </div>
+        </div>
+
+        <div class="chat-input-container">
+          <div class="chat-input-box">
+            <textarea class="chat-input" placeholder="Ask me anything..." rows="1" id="chat-input"></textarea>
+            <button class="chat-send-btn" id="chat-send">➤</button>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    const sources = [
+      { id: 1, title: "Weekly Team Standup", type: "audio", duration: "45:23", date: "Dec 28", tags: ["meeting", "team"] },
+      { id: 2, title: "Q4 Strategy Document", type: "pdf", duration: "12 pages", date: "Dec 27", tags: ["strategy"] },
+      { id: 3, title: "Product Research Notes", type: "markdown", duration: "2.3k words", date: "Dec 26", tags: ["research"] },
+      { id: 4, title: "Client Call - Acme Corp", type: "audio", duration: "32:15", date: "Dec 26", tags: ["client"] },
+      { id: 5, title: "Architecture Diagram", type: "image", duration: "2.4 MB", date: "Dec 25", tags: ["tech"] },
+      { id: 6, title: "Competitor Analysis", type: "pdf", duration: "8 pages", date: "Dec 24", tags: ["research"] },
+      { id: 7, title: "Interview - Senior Dev", type: "audio", duration: "58:42", date: "Dec 23", tags: ["hiring"] },
+      { id: 8, title: "API Documentation", type: "web_clip", duration: "external", date: "Dec 22", tags: ["tech"] },
+    ];
+
+    const transcriptData = [
+      { time: "00:00:00", speaker: "John", initial: "J", text: "Good morning everyone! Let's get started with our weekly standup." },
+      { time: "00:00:12", speaker: "Sarah", initial: "S", text: "Morning! Yes, ready to dive into this week's priorities." },
+      { time: "00:00:18", speaker: "John", initial: "J", text: "Perfect. Let's start with product updates. Sarah?" },
+      { time: "00:00:28", speaker: "Sarah", initial: "S", text: "Last week we completed the new onboarding flow. A/B tests show 23% improvement in activation rates!" },
+      { time: "00:00:45", speaker: "Mike", initial: "M", text: "Fantastic! Does that include mobile users?" },
+      { time: "00:00:52", speaker: "Sarah", initial: "S", text: "Yes! Mobile is even better at 28% improvement." },
+    ];
+
+    const typeIcons = { audio: "🎙", pdf: "📄", markdown: "📝", image: "🖼", web_clip: "🌐" };
+
+    function createElement(tag, className, textContent) {
+      const el = document.createElement(tag);
+      if (className) el.className = className;
+      if (textContent) el.textContent = textContent;
+      return el;
+    }
+
+    function renderSourceList() {
+      const list = document.getElementById('source-list');
+      list.textContent = '';
+
+      sources.forEach(source => {
+        const card = createElement('div', 'source-card');
+        card.dataset.id = source.id;
+
+        const header = createElement('div', 'source-card-header');
+        const icon = createElement('div', 'source-icon ' + source.type, typeIcons[source.type]);
+        const info = createElement('div', 'source-info');
+        const title = createElement('div', 'source-title', source.title);
+        const meta = createElement('div', 'source-meta', source.duration + ' · ' + source.date);
+
+        info.appendChild(title);
+        info.appendChild(meta);
+        header.appendChild(icon);
+        header.appendChild(info);
+        card.appendChild(header);
+
+        const tags = createElement('div', 'source-tags');
+        source.tags.forEach(t => {
+          const tag = createElement('span', 'source-tag', '#' + t);
+          tags.appendChild(tag);
+        });
+        card.appendChild(tags);
+
+        card.addEventListener('click', () => selectSource(source.id));
+        list.appendChild(card);
+      });
+    }
+
+    function renderWaveform() {
+      const container = document.getElementById('waveform-bars');
+      container.textContent = '';
+
+      for (let i = 0; i < 60; i++) {
+        const height = Math.random() * 70 + 30;
+        const bar = createElement('div', 'waveform-bar' + (i < 18 ? ' played' : ''));
+        bar.style.height = height + '%';
+        container.appendChild(bar);
+      }
+    }
+
+    function renderTranscript() {
+      const container = document.getElementById('transcript');
+      container.textContent = '';
+
+      transcriptData.forEach((seg, i) => {
+        const segment = createElement('div', 'transcript-segment' + (i === 3 ? ' current' : ''));
+
+        const avatar = createElement('div', 'transcript-avatar', seg.initial);
+        const content = createElement('div', 'transcript-content');
+        const header = createElement('div', 'transcript-header');
+        const speaker = createElement('span', 'transcript-speaker', seg.speaker);
+        const time = createElement('span', 'transcript-time', seg.time);
+        const text = createElement('div', 'transcript-text', seg.text);
+
+        header.appendChild(speaker);
+        header.appendChild(time);
+        content.appendChild(header);
+        content.appendChild(text);
+        segment.appendChild(avatar);
+        segment.appendChild(content);
+
+        container.appendChild(segment);
+      });
+    }
+
+    function selectSource(id) {
+      const source = sources.find(s => s.id === id);
+      if (!source) return;
+
+      document.querySelectorAll('.source-card').forEach(el => el.classList.remove('selected'));
+      document.querySelector('.source-card[data-id="' + id + '"]').classList.add('selected');
+
+      document.getElementById('reader-empty').classList.add('hidden');
+      document.getElementById('reader-content').classList.add('active');
+
+      document.getElementById('reader-title').textContent = source.title;
+      document.getElementById('reader-type').textContent = source.type.charAt(0).toUpperCase() + source.type.slice(1);
+      document.getElementById('reader-duration').textContent = source.duration;
+      document.getElementById('reader-date').textContent = source.date;
+
+      document.getElementById('audio-player').style.display = source.type === 'audio' ? 'block' : 'none';
+      document.getElementById('assistant-context').textContent = 'Context: ' + source.title;
+    }
+
+    function initResizers() {
+      const resizer1 = document.getElementById('resizer-1');
+      const resizer2 = document.getElementById('resizer-2');
+      const panelLibrary = document.getElementById('panel-library');
+      const panelAssistant = document.getElementById('panel-assistant');
+
+      let isResizing = false;
+      let currentResizer = null;
+
+      function startResize(e, resizer) {
+        isResizing = true;
+        currentResizer = resizer;
+        resizer.classList.add('active');
+        document.addEventListener('mousemove', resize);
+        document.addEventListener('mouseup', stopResize);
+        e.preventDefault();
+      }
+
+      function resize(e) {
+        if (!isResizing) return;
+
+        if (currentResizer === resizer1) {
+          const newWidth = e.clientX - 12;
+          if (newWidth >= 220 && newWidth <= 420) {
+            panelLibrary.style.width = newWidth + 'px';
+          }
+        } else if (currentResizer === resizer2) {
+          const newWidth = window.innerWidth - e.clientX - 12;
+          if (newWidth >= 260 && newWidth <= 480) {
+            panelAssistant.style.width = newWidth + 'px';
+          }
+        }
+      }
+
+      function stopResize() {
+        isResizing = false;
+        if (currentResizer) currentResizer.classList.remove('active');
+        currentResizer = null;
+        document.removeEventListener('mousemove', resize);
+        document.removeEventListener('mouseup', stopResize);
+      }
+
+      resizer1.addEventListener('mousedown', (e) => startResize(e, resizer1));
+      resizer2.addEventListener('mousedown', (e) => startResize(e, resizer2));
+    }
+
+    document.getElementById('play-btn').addEventListener('click', function() {
+      const isPlaying = this.dataset.playing === 'true';
+      this.textContent = isPlaying ? '▶' : '⏸';
+      this.dataset.playing = isPlaying ? 'false' : 'true';
+    });
+
+    function sendMessage() {
+      const input = document.getElementById('chat-input');
+      const message = input.value.trim();
+      if (!message) return;
+
+      const container = document.getElementById('chat-messages');
+
+      const userMsg = createElement('div', 'chat-message user', message);
+      container.appendChild(userMsg);
+
+      setTimeout(() => {
+        const assistantMsg = createElement('div', 'chat-message assistant',
+          "Based on the meeting, here are the key insights:\n\n• New onboarding flow achieved 23% improvement\n• Mobile activation is even higher at 28%\n• Team is focused on notification system redesign\n\nWant me to dig deeper into any of these points?");
+        container.appendChild(assistantMsg);
+        container.scrollTop = container.scrollHeight;
+      }, 600);
+
+      input.value = '';
+      container.scrollTop = container.scrollHeight;
+    }
+
+    document.getElementById('chat-send').addEventListener('click', sendMessage);
+    document.getElementById('chat-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    document.querySelectorAll('.quick-action').forEach(btn => {
+      btn.addEventListener('click', function() {
+        const text = this.textContent.replace(/[^\w\s]/g, '').trim();
+        document.getElementById('chat-input').value = text + ' this source';
+        sendMessage();
+      });
+    });
+
+    document.querySelectorAll('.filter-chip').forEach(btn => {
+      btn.addEventListener('click', function() {
+        document.querySelectorAll('.filter-chip').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+      });
+    });
+
+    document.querySelectorAll('.reader-tab').forEach(tab => {
+      tab.addEventListener('click', function() {
+        document.querySelectorAll('.reader-tab').forEach(t => t.classList.remove('active'));
+        this.classList.add('active');
+      });
+    });
+
+    document.querySelectorAll('.nav-btn').forEach(btn => {
+      btn.addEventListener('click', function() {
+        document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+      });
+    });
+
+    renderSourceList();
+    renderWaveform();
+    renderTranscript();
+    initResizers();
+  </script>
+</body>
+</html>

@@ -1,0 +1,2186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HiDock Next - Library Prototype</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      /* App colors matching the real app */
+      --sidebar-bg: #0f172a;
+      --sidebar-border: #334155;
+      --sidebar-text: #94a3b8;
+      --sidebar-text-active: #ffffff;
+      --sidebar-hover: #1e293b;
+      --sidebar-active: #334155;
+
+      --bg: #ffffff;
+      --bg-secondary: #f8fafc;
+      --bg-muted: #f1f5f9;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-secondary: #64748b;
+      --text-muted: #94a3b8;
+
+      --accent: #3b82f6;
+      --accent-light: #eff6ff;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --error: #ef4444;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+      font-size: 14px;
+    }
+
+    .app {
+      display: flex;
+      height: 100vh;
+    }
+
+    /* ==================== SIDEBAR ==================== */
+    .sidebar {
+      width: 224px;
+      background: var(--sidebar-bg);
+      border-right: 1px solid var(--sidebar-border);
+      display: flex;
+      flex-direction: column;
+      color: var(--sidebar-text);
+      flex-shrink: 0;
+    }
+
+    .sidebar-header {
+      height: 85px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      border-bottom: 1px solid var(--sidebar-border);
+    }
+
+    .sidebar-logo {
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--sidebar-text-active);
+    }
+
+    .device-status {
+      margin: 8px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .device-status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+    }
+
+    .device-status-text {
+      color: #6ee7b7;
+      font-weight: 500;
+    }
+
+    .device-status-sub {
+      font-size: 10px;
+      color: var(--sidebar-text);
+    }
+
+    .nav-section {
+      padding: 8px;
+    }
+
+    .nav-section-title {
+      padding: 8px 12px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      color: #475569;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.15s;
+      font-size: 14px;
+    }
+
+    .nav-item:hover {
+      background: var(--sidebar-hover);
+      color: var(--sidebar-text-active);
+    }
+
+    .nav-item.active {
+      background: var(--sidebar-active);
+      color: var(--sidebar-text-active);
+      font-weight: 500;
+    }
+
+    .nav-icon {
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .nav-divider {
+      height: 1px;
+      background: var(--sidebar-border);
+      margin: 8px;
+    }
+
+    .sidebar-footer {
+      margin-top: auto;
+      padding: 8px;
+      border-top: 1px solid var(--sidebar-border);
+    }
+
+    /* ==================== MAIN CONTENT ==================== */
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .page-header {
+      height: 85px;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+    }
+
+    .page-title {
+      font-size: 24px;
+      font-weight: 600;
+    }
+
+    .page-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .btn {
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .btn:hover {
+      background: var(--bg-muted);
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+      border-color: var(--accent);
+    }
+
+    .btn-primary:hover {
+      background: #2563eb;
+    }
+
+    .btn-sm {
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+
+    .btn-icon {
+      padding: 6px;
+      width: 32px;
+      height: 32px;
+      justify-content: center;
+    }
+
+    /* ==================== LIBRARY LAYOUT ==================== */
+    .library-layout {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    .panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .panel-sources {
+      width: 280px;
+      min-width: 220px;
+      max-width: 380px;
+      border-right: 1px solid var(--border);
+    }
+
+    .panel-viewer {
+      flex: 1;
+      min-width: 400px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .panel-context {
+      width: 320px;
+      min-width: 260px;
+      max-width: 420px;
+      border-left: 1px solid var(--border);
+    }
+
+    .resizer {
+      width: 4px;
+      cursor: col-resize;
+      background: transparent;
+      flex-shrink: 0;
+      transition: background 0.15s;
+    }
+
+    .resizer:hover, .resizer.active {
+      background: var(--accent);
+    }
+
+    /* ==================== SOURCES PANEL ==================== */
+    .panel-toolbar {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .search-box {
+      position: relative;
+    }
+
+    .search-input {
+      width: 100%;
+      padding: 8px 12px 8px 36px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 13px;
+      outline: none;
+      background: var(--bg);
+    }
+
+    .search-input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    .search-icon {
+      position: absolute;
+      left: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    .filter-row {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .filter-chip {
+      padding: 4px 10px;
+      font-size: 11px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .filter-chip:hover {
+      background: var(--bg-muted);
+    }
+
+    .filter-chip.active {
+      background: var(--accent-light);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .source-list {
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    .source-group {
+      border-bottom: 1px solid var(--border);
+    }
+
+    .source-group-header {
+      padding: 8px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      background: var(--bg-secondary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+
+    .source-item {
+      padding: 10px 12px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      cursor: pointer;
+      border-left: 3px solid transparent;
+      transition: all 0.1s;
+    }
+
+    .source-item:hover {
+      background: var(--bg-secondary);
+    }
+
+    .source-item.selected {
+      background: var(--accent-light);
+      border-left-color: var(--accent);
+    }
+
+    .source-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .source-icon.audio { background: #dbeafe; color: #2563eb; }
+    .source-icon.pdf { background: #fee2e2; color: #dc2626; }
+    .source-icon.markdown { background: #d1fae5; color: #059669; }
+    .source-icon.image { background: #fef3c7; color: #d97706; }
+    .source-icon.excel { background: #d1fae5; color: #059669; }
+    .source-icon.word { background: #dbeafe; color: #2563eb; }
+    .source-icon.pptx { background: #fce7f3; color: #db2777; }
+
+    .source-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .source-title {
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 2px;
+    }
+
+    .source-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      display: flex;
+      gap: 8px;
+    }
+
+    .source-badge {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: var(--bg-muted);
+      color: var(--text-secondary);
+    }
+
+    /* ==================== VIEWER PANEL ==================== */
+    .viewer-empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+    }
+
+    .viewer-empty-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+      opacity: 0.3;
+    }
+
+    .viewer-container {
+      flex: 1;
+      display: none;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .viewer-container.active {
+      display: flex;
+    }
+
+    .viewer-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-secondary);
+    }
+
+    .viewer-title {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .viewer-meta {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .viewer-meta-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .viewer-tags {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .tag {
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+    }
+
+    .tag-add {
+      border-style: dashed;
+      cursor: pointer;
+    }
+
+    .tag-add:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* Audio Player */
+    .audio-player {
+      padding: 16px 20px;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .waveform {
+      height: 48px;
+      background: var(--bg-muted);
+      border-radius: 6px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 8px;
+      cursor: pointer;
+      position: relative;
+    }
+
+    .waveform-bar {
+      flex: 1;
+      background: var(--text-muted);
+      border-radius: 1px;
+      opacity: 0.3;
+    }
+
+    .waveform-bar.played {
+      background: var(--accent);
+      opacity: 1;
+    }
+
+    .waveform-cursor {
+      position: absolute;
+      width: 2px;
+      height: 100%;
+      background: var(--text);
+      left: 30%;
+    }
+
+    .player-controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .play-btn {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: white;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+    }
+
+    .play-btn:hover {
+      background: #2563eb;
+    }
+
+    .player-time {
+      font-size: 13px;
+      color: var(--text-secondary);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .player-speed {
+      margin-left: auto;
+      padding: 4px 8px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+    }
+
+    /* Viewer Tabs */
+    .viewer-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      padding: 0 20px;
+      background: var(--bg);
+    }
+
+    .viewer-tab {
+      padding: 10px 16px;
+      font-size: 13px;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: all 0.15s;
+    }
+
+    .viewer-tab:hover {
+      color: var(--text-secondary);
+    }
+
+    .viewer-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    /* Viewer Body */
+    .viewer-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+    }
+
+    /* Transcript View */
+    .transcript-segment {
+      padding: 12px;
+      margin-bottom: 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .transcript-segment:hover {
+      background: var(--bg-secondary);
+    }
+
+    .transcript-segment.current {
+      background: var(--accent-light);
+    }
+
+    .transcript-time {
+      font-size: 11px;
+      color: var(--accent);
+      font-weight: 500;
+      cursor: pointer;
+      margin-bottom: 4px;
+    }
+
+    .transcript-speaker {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+
+    .transcript-text {
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    /* PDF View */
+    .pdf-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 20px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .pdf-page-nav {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .pdf-page-input {
+      width: 40px;
+      padding: 4px 8px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      text-align: center;
+      font-size: 13px;
+    }
+
+    .pdf-zoom {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+
+    .pdf-container {
+      flex: 1;
+      overflow: auto;
+      background: var(--bg-muted);
+      display: flex;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .pdf-page {
+      background: white;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      width: 612px;
+      min-height: 792px;
+      padding: 48px;
+    }
+
+    .pdf-content h1 {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 24px;
+      color: var(--text);
+    }
+
+    .pdf-content h2 {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 24px 0 12px;
+      color: var(--text);
+    }
+
+    .pdf-content p {
+      font-size: 14px;
+      line-height: 1.8;
+      margin-bottom: 16px;
+      color: var(--text-secondary);
+    }
+
+    .pdf-content ul {
+      margin: 12px 0 12px 24px;
+      font-size: 14px;
+      line-height: 1.8;
+      color: var(--text-secondary);
+    }
+
+    /* Markdown View */
+    .md-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .md-mode-toggle {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .md-mode-btn {
+      padding: 6px 12px;
+      font-size: 12px;
+      border: none;
+      background: var(--bg);
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+
+    .md-mode-btn.active {
+      background: var(--accent);
+      color: white;
+    }
+
+    .md-container {
+      flex: 1;
+      overflow: auto;
+      padding: 24px;
+    }
+
+    .md-preview {
+      max-width: 720px;
+      margin: 0 auto;
+    }
+
+    .md-preview h1 {
+      font-size: 28px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .md-preview h2 {
+      font-size: 20px;
+      font-weight: 600;
+      margin: 24px 0 12px;
+    }
+
+    .md-preview p {
+      font-size: 15px;
+      line-height: 1.7;
+      margin-bottom: 16px;
+      color: var(--text-secondary);
+    }
+
+    .md-preview ul, .md-preview ol {
+      margin: 12px 0 12px 24px;
+      line-height: 1.7;
+    }
+
+    .md-preview code {
+      background: var(--bg-muted);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'Monaco', monospace;
+      font-size: 13px;
+    }
+
+    .md-preview pre {
+      background: var(--sidebar-bg);
+      color: #e2e8f0;
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 16px 0;
+    }
+
+    .md-preview pre code {
+      background: none;
+      padding: 0;
+      color: inherit;
+    }
+
+    .md-preview blockquote {
+      border-left: 4px solid var(--accent);
+      padding-left: 16px;
+      margin: 16px 0;
+      color: var(--text-secondary);
+      font-style: italic;
+    }
+
+    .md-editor {
+      display: none;
+      width: 100%;
+      height: 100%;
+      padding: 24px;
+      border: none;
+      font-family: 'Monaco', monospace;
+      font-size: 14px;
+      line-height: 1.6;
+      resize: none;
+      outline: none;
+      background: var(--bg);
+    }
+
+    .md-editor.active {
+      display: block;
+    }
+
+    /* Image View */
+    .image-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .image-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 20px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .image-viewer {
+      flex: 1;
+      overflow: auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-muted);
+      padding: 20px;
+    }
+
+    .image-preview {
+      max-width: 100%;
+      max-height: 100%;
+      background: white;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      border-radius: 8px;
+    }
+
+    .image-info {
+      padding: 16px 20px;
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+    }
+
+    .image-info-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .image-ocr-text {
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      max-height: 100px;
+      overflow-y: auto;
+    }
+
+    /* Office Files */
+    .office-preview {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-muted);
+      padding: 40px;
+    }
+
+    .office-icon {
+      font-size: 64px;
+      margin-bottom: 24px;
+    }
+
+    .office-info {
+      text-align: center;
+    }
+
+    .office-filename {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .office-meta {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-bottom: 24px;
+    }
+
+    .office-actions {
+      display: flex;
+      gap: 12px;
+    }
+
+    .office-table {
+      background: white;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      border-radius: 8px;
+      overflow: hidden;
+      width: 100%;
+      max-width: 800px;
+    }
+
+    .office-table table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .office-table th {
+      background: var(--bg-muted);
+      padding: 10px 12px;
+      text-align: left;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .office-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    /* ==================== CONTEXT PANEL ==================== */
+    .context-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+    }
+
+    .context-tab {
+      flex: 1;
+      padding: 12px;
+      font-size: 12px;
+      font-weight: 500;
+      text-align: center;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.15s;
+    }
+
+    .context-tab:hover {
+      color: var(--text-secondary);
+    }
+
+    .context-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    .context-content {
+      flex: 1;
+      overflow-y: auto;
+      display: none;
+    }
+
+    .context-content.active {
+      display: block;
+    }
+
+    /* Assistant Tab */
+    .assistant-section {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .assistant-section-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .quick-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .quick-action {
+      padding: 6px 12px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+
+    .quick-action:hover {
+      background: var(--accent-light);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .chat-messages {
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .chat-message {
+      max-width: 90%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .chat-message.user {
+      align-self: flex-end;
+      background: var(--accent);
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+
+    .chat-message.assistant {
+      align-self: flex-start;
+      background: var(--bg-muted);
+      border-bottom-left-radius: 4px;
+    }
+
+    .chat-input-area {
+      padding: 12px;
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+    }
+
+    .chat-input-wrapper {
+      display: flex;
+      gap: 8px;
+    }
+
+    .chat-input {
+      flex: 1;
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 13px;
+      outline: none;
+      resize: none;
+      font-family: inherit;
+    }
+
+    .chat-input:focus {
+      border-color: var(--accent);
+    }
+
+    .chat-send {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* Outline Tab */
+    .outline-list {
+      padding: 12px;
+    }
+
+    .outline-item {
+      padding: 8px 12px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .outline-item:hover {
+      background: var(--bg-muted);
+      color: var(--text);
+    }
+
+    .outline-item.h1 { padding-left: 12px; font-weight: 600; color: var(--text); }
+    .outline-item.h2 { padding-left: 24px; }
+    .outline-item.h3 { padding-left: 36px; font-size: 12px; }
+
+    .outline-time {
+      font-size: 11px;
+      color: var(--accent);
+    }
+
+    /* Links Tab */
+    .links-section {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .links-section-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .link-item {
+      padding: 8px 12px;
+      margin-bottom: 4px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: background 0.15s;
+    }
+
+    .link-item:hover {
+      background: var(--bg-muted);
+    }
+
+    .link-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+    }
+
+    .link-icon.person { background: #dbeafe; color: #2563eb; }
+    .link-icon.project { background: #fef3c7; color: #d97706; }
+    .link-icon.calendar { background: #d1fae5; color: #059669; }
+    .link-icon.action { background: #fee2e2; color: #dc2626; }
+
+    .link-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .link-name {
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .link-detail {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: var(--bg-muted);
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-logo">HiDock Next</span>
+      </div>
+
+      <div class="device-status">
+        <div class="device-status-dot"></div>
+        <div>
+          <div class="device-status-text">H1E Connected</div>
+          <div class="device-status-sub">12 recordings</div>
+        </div>
+      </div>
+
+      <div class="nav-section">
+        <div class="nav-section-title">KNOWLEDGE</div>
+        <div class="nav-item active">
+          <span class="nav-icon">📚</span>
+          <span>Library</span>
+        </div>
+        <div class="nav-item">
+          <span class="nav-icon">🤖</span>
+          <span>Assistant</span>
+        </div>
+        <div class="nav-item">
+          <span class="nav-icon">🧭</span>
+          <span>Explore</span>
+        </div>
+      </div>
+
+      <div class="nav-divider"></div>
+
+      <div class="nav-section">
+        <div class="nav-section-title">ORGANIZATION</div>
+        <div class="nav-item">
+          <span class="nav-icon">👥</span>
+          <span>People</span>
+        </div>
+        <div class="nav-item">
+          <span class="nav-icon">📁</span>
+          <span>Projects</span>
+        </div>
+        <div class="nav-item">
+          <span class="nav-icon">📅</span>
+          <span>Calendar</span>
+        </div>
+      </div>
+
+      <div class="nav-divider"></div>
+
+      <div class="nav-section">
+        <div class="nav-section-title">ACTIONS</div>
+        <div class="nav-item">
+          <span class="nav-icon">✅</span>
+          <span>Actionables</span>
+        </div>
+      </div>
+
+      <div class="nav-divider"></div>
+
+      <div class="nav-section">
+        <div class="nav-section-title">DEVICE</div>
+        <div class="nav-item">
+          <span class="nav-icon">☁️</span>
+          <span>Sync</span>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="nav-item">
+          <span class="nav-icon">⚙️</span>
+          <span>Settings</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <div class="main-content">
+      <header class="page-header">
+        <h1 class="page-title">Library</h1>
+        <div class="page-actions">
+          <button class="btn">
+            <span>↻</span>
+            Refresh
+          </button>
+          <button class="btn btn-primary">
+            <span>+</span>
+            Import
+          </button>
+        </div>
+      </header>
+
+      <div class="library-layout">
+        <!-- Sources Panel -->
+        <aside class="panel panel-sources" id="panel-sources">
+          <div class="panel-toolbar">
+            <div class="search-box">
+              <span class="search-icon">🔍</span>
+              <input type="text" class="search-input" placeholder="Search sources...">
+            </div>
+            <div class="filter-row">
+              <button class="filter-chip active" data-filter="all">All</button>
+              <button class="filter-chip" data-filter="audio">Audio</button>
+              <button class="filter-chip" data-filter="document">Docs</button>
+              <button class="filter-chip" data-filter="image">Media</button>
+            </div>
+          </div>
+
+          <div class="source-list" id="source-list"></div>
+        </aside>
+
+        <div class="resizer" id="resizer-1"></div>
+
+        <!-- Viewer Panel -->
+        <section class="panel panel-viewer" id="panel-viewer">
+          <div class="viewer-empty" id="viewer-empty">
+            <div class="viewer-empty-icon">📄</div>
+            <p>Select a source to view</p>
+          </div>
+
+          <!-- Audio Viewer -->
+          <div class="viewer-container" id="viewer-audio">
+            <div class="viewer-header">
+              <h2 class="viewer-title" id="audio-title">Weekly Team Standup</h2>
+              <div class="viewer-meta">
+                <span class="viewer-meta-item">🎙 Audio</span>
+                <span class="viewer-meta-item">⏱ 45:23</span>
+                <span class="viewer-meta-item">📅 Dec 28, 2024</span>
+              </div>
+              <div class="viewer-tags">
+                <span class="tag">#meeting</span>
+                <span class="tag">#team</span>
+                <span class="tag tag-add">+ Add tag</span>
+              </div>
+            </div>
+
+            <div class="audio-player">
+              <div class="waveform" id="waveform"></div>
+              <div class="player-controls">
+                <button class="btn btn-icon btn-sm">⏮</button>
+                <button class="play-btn" id="play-btn">▶</button>
+                <button class="btn btn-icon btn-sm">⏭</button>
+                <span class="player-time">12:34 / 45:23</span>
+                <select class="player-speed">
+                  <option>0.5x</option>
+                  <option>0.75x</option>
+                  <option selected>1x</option>
+                  <option>1.5x</option>
+                  <option>2x</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="viewer-tabs" id="audio-tabs">
+              <div class="viewer-tab active" data-tab="transcript">Transcript</div>
+              <div class="viewer-tab" data-tab="summary">Summary</div>
+              <div class="viewer-tab" data-tab="notes">Notes</div>
+            </div>
+
+            <div class="viewer-body" id="audio-body"></div>
+          </div>
+
+          <!-- PDF Viewer -->
+          <div class="viewer-container" id="viewer-pdf">
+            <div class="viewer-header">
+              <h2 class="viewer-title">Q4 Strategy Document</h2>
+              <div class="viewer-meta">
+                <span class="viewer-meta-item">📄 PDF</span>
+                <span class="viewer-meta-item">12 pages</span>
+                <span class="viewer-meta-item">📅 Dec 27, 2024</span>
+              </div>
+              <div class="viewer-tags">
+                <span class="tag">#strategy</span>
+                <span class="tag">#quarterly</span>
+              </div>
+            </div>
+
+            <div class="pdf-toolbar">
+              <div class="pdf-page-nav">
+                <button class="btn btn-sm btn-icon">◀</button>
+                <span>Page</span>
+                <input type="text" class="pdf-page-input" value="1">
+                <span>of 12</span>
+                <button class="btn btn-sm btn-icon">▶</button>
+              </div>
+              <div class="pdf-zoom">
+                <button class="btn btn-sm btn-icon">−</button>
+                <span>100%</span>
+                <button class="btn btn-sm btn-icon">+</button>
+                <button class="btn btn-sm">Fit</button>
+              </div>
+            </div>
+
+            <div class="pdf-container">
+              <div class="pdf-page">
+                <div class="pdf-content">
+                  <h1>Q4 2024 Strategic Plan</h1>
+                  <h2>Executive Summary</h2>
+                  <p>This document outlines our strategic priorities for Q4 2024, focusing on three key areas: product expansion, market penetration, and operational efficiency.</p>
+                  <h2>Key Objectives</h2>
+                  <ul>
+                    <li>Launch Product v2.0 with enhanced AI capabilities</li>
+                    <li>Expand to 3 new international markets</li>
+                    <li>Hire 15 additional engineering team members</li>
+                    <li>Achieve 95% customer satisfaction rating</li>
+                  </ul>
+                  <h2>Timeline & Milestones</h2>
+                  <p>The implementation will be phased across three months, with monthly review checkpoints to assess progress and adjust strategies as needed.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Markdown Viewer -->
+          <div class="viewer-container" id="viewer-markdown">
+            <div class="viewer-header">
+              <h2 class="viewer-title">Product Research Notes</h2>
+              <div class="viewer-meta">
+                <span class="viewer-meta-item">📝 Markdown</span>
+                <span class="viewer-meta-item">2,341 words</span>
+                <span class="viewer-meta-item">📅 Dec 26, 2024</span>
+              </div>
+              <div class="viewer-tags">
+                <span class="tag">#research</span>
+                <span class="tag">#product</span>
+              </div>
+            </div>
+
+            <div class="md-toolbar">
+              <div class="md-mode-toggle">
+                <button class="md-mode-btn active" data-mode="preview">Preview</button>
+                <button class="md-mode-btn" data-mode="edit">Edit</button>
+              </div>
+              <div style="margin-left: auto; display: flex; gap: 8px;">
+                <button class="btn btn-sm">Export</button>
+              </div>
+            </div>
+
+            <div class="md-container">
+              <div class="md-preview" id="md-preview">
+                <h1>Product Research Notes</h1>
+                <p>Comprehensive analysis of user feedback and market trends for the upcoming product iteration.</p>
+
+                <h2>Key Findings</h2>
+                <p>After analyzing 500+ user interviews and survey responses, we've identified the following patterns:</p>
+
+                <ul>
+                  <li><strong>73%</strong> of users want better mobile experience</li>
+                  <li><strong>68%</strong> request AI-powered features</li>
+                  <li><strong>54%</strong> need better collaboration tools</li>
+                </ul>
+
+                <blockquote>
+                  "The desktop app is great, but I need to access my recordings on the go." — User Interview #127
+                </blockquote>
+
+                <h2>Competitive Analysis</h2>
+                <p>Our main competitors are focusing on:</p>
+
+                <pre><code>// Market positioning data
+const competitors = {
+  compA: { focus: 'enterprise', pricing: 'high' },
+  compB: { focus: 'consumer', pricing: 'freemium' },
+  compC: { focus: 'prosumer', pricing: 'mid' }
+};</code></pre>
+
+                <h2>Recommendations</h2>
+                <p>Based on the research, we recommend prioritizing the following features in the next quarter:</p>
+
+                <ol>
+                  <li>Mobile companion app with core functionality</li>
+                  <li>AI-powered meeting summaries</li>
+                  <li>Team sharing and collaboration</li>
+                </ol>
+              </div>
+              <textarea class="md-editor" id="md-editor"># Product Research Notes
+
+Comprehensive analysis of user feedback and market trends for the upcoming product iteration.
+
+## Key Findings
+
+After analyzing 500+ user interviews and survey responses, we've identified the following patterns:
+
+- **73%** of users want better mobile experience
+- **68%** request AI-powered features
+- **54%** need better collaboration tools
+
+> "The desktop app is great, but I need to access my recordings on the go." — User Interview #127
+
+## Competitive Analysis
+
+Our main competitors are focusing on:
+
+```javascript
+// Market positioning data
+const competitors = {
+  compA: { focus: 'enterprise', pricing: 'high' },
+  compB: { focus: 'consumer', pricing: 'freemium' },
+  compC: { focus: 'prosumer', pricing: 'mid' }
+};
+```
+
+## Recommendations
+
+Based on the research, we recommend prioritizing the following features in the next quarter:
+
+1. Mobile companion app with core functionality
+2. AI-powered meeting summaries
+3. Team sharing and collaboration</textarea>
+            </div>
+          </div>
+
+          <!-- Image Viewer -->
+          <div class="viewer-container" id="viewer-image">
+            <div class="viewer-header">
+              <h2 class="viewer-title">Architecture Diagram</h2>
+              <div class="viewer-meta">
+                <span class="viewer-meta-item">🖼 Image</span>
+                <span class="viewer-meta-item">1920 × 1080</span>
+                <span class="viewer-meta-item">📅 Dec 25, 2024</span>
+              </div>
+              <div class="viewer-tags">
+                <span class="tag">#architecture</span>
+                <span class="tag">#tech</span>
+              </div>
+            </div>
+
+            <div class="image-toolbar">
+              <button class="btn btn-sm btn-icon">−</button>
+              <span>100%</span>
+              <button class="btn btn-sm btn-icon">+</button>
+              <button class="btn btn-sm">Fit</button>
+              <button class="btn btn-sm">Actual Size</button>
+              <button class="btn btn-sm" style="margin-left: auto;">↻ Rotate</button>
+            </div>
+
+            <div class="image-viewer">
+              <div class="image-preview" style="width: 600px; height: 400px; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-size: 18px;">
+                [Architecture Diagram Preview]<br>
+                <span style="font-size: 12px; opacity: 0.7;">System components and data flow</span>
+              </div>
+            </div>
+
+            <div class="image-info">
+              <div class="image-info-title">📝 EXTRACTED TEXT (OCR)</div>
+              <div class="image-ocr-text">
+                Frontend Layer → API Gateway → Auth Service → User Service → Database<br>
+                Event Bus → Analytics Service → Notification Service<br>
+                CDN → Static Assets → S3 Bucket
+              </div>
+            </div>
+          </div>
+
+          <!-- Excel Viewer -->
+          <div class="viewer-container" id="viewer-excel">
+            <div class="viewer-header">
+              <h2 class="viewer-title">Budget Planning Q4</h2>
+              <div class="viewer-meta">
+                <span class="viewer-meta-item">📊 Excel</span>
+                <span class="viewer-meta-item">3 sheets</span>
+                <span class="viewer-meta-item">📅 Dec 24, 2024</span>
+              </div>
+              <div class="viewer-tags">
+                <span class="tag">#budget</span>
+                <span class="tag">#finance</span>
+              </div>
+            </div>
+
+            <div class="viewer-tabs" id="excel-tabs">
+              <div class="viewer-tab active">Overview</div>
+              <div class="viewer-tab">Details</div>
+              <div class="viewer-tab">Projections</div>
+            </div>
+
+            <div class="viewer-body" style="background: var(--bg-muted); display: flex; justify-content: center; padding: 24px;">
+              <div class="office-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Category</th>
+                      <th>Oct 2024</th>
+                      <th>Nov 2024</th>
+                      <th>Dec 2024</th>
+                      <th>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Engineering</td>
+                      <td>$125,000</td>
+                      <td>$130,000</td>
+                      <td>$135,000</td>
+                      <td>$390,000</td>
+                    </tr>
+                    <tr>
+                      <td>Marketing</td>
+                      <td>$45,000</td>
+                      <td>$60,000</td>
+                      <td>$75,000</td>
+                      <td>$180,000</td>
+                    </tr>
+                    <tr>
+                      <td>Operations</td>
+                      <td>$35,000</td>
+                      <td>$35,000</td>
+                      <td>$40,000</td>
+                      <td>$110,000</td>
+                    </tr>
+                    <tr>
+                      <td>Infrastructure</td>
+                      <td>$22,000</td>
+                      <td>$24,000</td>
+                      <td>$26,000</td>
+                      <td>$72,000</td>
+                    </tr>
+                    <tr style="font-weight: 600; background: var(--bg-secondary);">
+                      <td>Total</td>
+                      <td>$227,000</td>
+                      <td>$249,000</td>
+                      <td>$276,000</td>
+                      <td>$752,000</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Word Viewer -->
+          <div class="viewer-container" id="viewer-word">
+            <div class="viewer-header">
+              <h2 class="viewer-title">Product Requirements Doc</h2>
+              <div class="viewer-meta">
+                <span class="viewer-meta-item">📝 Word</span>
+                <span class="viewer-meta-item">8 pages</span>
+                <span class="viewer-meta-item">📅 Dec 23, 2024</span>
+              </div>
+              <div class="viewer-tags">
+                <span class="tag">#prd</span>
+                <span class="tag">#product</span>
+              </div>
+            </div>
+
+            <div class="pdf-container">
+              <div class="pdf-page">
+                <div class="pdf-content">
+                  <h1>Product Requirements Document</h1>
+                  <p><strong>Version:</strong> 2.1 | <strong>Last Updated:</strong> December 23, 2024</p>
+
+                  <h2>1. Overview</h2>
+                  <p>This document outlines the requirements for the next major release of our knowledge management platform, focusing on enhanced AI capabilities and improved user experience.</p>
+
+                  <h2>2. User Stories</h2>
+                  <p><strong>US-001:</strong> As a user, I want to automatically transcribe my audio recordings so that I can search and reference them later.</p>
+                  <p><strong>US-002:</strong> As a team lead, I want to share recordings with my team so that everyone stays informed about meeting decisions.</p>
+
+                  <h2>3. Functional Requirements</h2>
+                  <ul>
+                    <li>FR-001: System shall support audio files up to 4 hours in length</li>
+                    <li>FR-002: Transcription accuracy shall be ≥95% for English</li>
+                    <li>FR-003: Processing time shall be ≤2x audio duration</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- PowerPoint Viewer -->
+          <div class="viewer-container" id="viewer-pptx">
+            <div class="viewer-header">
+              <h2 class="viewer-title">Investor Pitch Deck</h2>
+              <div class="viewer-meta">
+                <span class="viewer-meta-item">📊 PowerPoint</span>
+                <span class="viewer-meta-item">24 slides</span>
+                <span class="viewer-meta-item">📅 Dec 22, 2024</span>
+              </div>
+              <div class="viewer-tags">
+                <span class="tag">#pitch</span>
+                <span class="tag">#fundraising</span>
+              </div>
+            </div>
+
+            <div class="pdf-toolbar">
+              <div class="pdf-page-nav">
+                <button class="btn btn-sm btn-icon">◀</button>
+                <span>Slide</span>
+                <input type="text" class="pdf-page-input" value="1">
+                <span>of 24</span>
+                <button class="btn btn-sm btn-icon">▶</button>
+              </div>
+              <button class="btn btn-sm" style="margin-left: auto;">▶ Present</button>
+            </div>
+
+            <div class="pdf-container" style="background: #1a1a2e;">
+              <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); width: 800px; height: 450px; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: white; text-align: center; box-shadow: 0 8px 32px rgba(0,0,0,0.3);">
+                <div style="font-size: 42px; font-weight: 700; margin-bottom: 16px;">HiDock</div>
+                <div style="font-size: 20px; opacity: 0.9;">Knowledge Capture for the Modern Workplace</div>
+                <div style="font-size: 14px; margin-top: 40px; opacity: 0.7;">Series A Pitch Deck | December 2024</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div class="resizer" id="resizer-2"></div>
+
+        <!-- Context Panel -->
+        <aside class="panel panel-context" id="panel-context">
+          <div class="context-tabs">
+            <div class="context-tab active" data-tab="assistant">Assistant</div>
+            <div class="context-tab" data-tab="outline">Outline</div>
+            <div class="context-tab" data-tab="links">Links</div>
+          </div>
+
+          <!-- Assistant Content -->
+          <div class="context-content active" id="context-assistant">
+            <div class="assistant-section">
+              <div class="assistant-section-title">QUICK ACTIONS</div>
+              <div class="quick-actions">
+                <button class="quick-action">✨ Summarize</button>
+                <button class="quick-action">📌 Key Points</button>
+                <button class="quick-action">✅ Actions</button>
+                <button class="quick-action">❓ Questions</button>
+              </div>
+            </div>
+
+            <div class="chat-messages" id="chat-messages">
+              <div class="chat-message assistant">
+                I can help you understand and work with this source. Try asking me to summarize it, extract key points, or find specific information.
+              </div>
+            </div>
+
+            <div class="chat-input-area">
+              <div class="chat-input-wrapper">
+                <textarea class="chat-input" placeholder="Ask about this source..." rows="1" id="chat-input"></textarea>
+                <button class="chat-send" id="chat-send">➤</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Outline Content -->
+          <div class="context-content" id="context-outline">
+            <div class="outline-list" id="outline-list">
+              <!-- Generated dynamically -->
+            </div>
+          </div>
+
+          <!-- Links Content -->
+          <div class="context-content" id="context-links">
+            <div class="links-section">
+              <div class="links-section-title">👥 PEOPLE MENTIONED</div>
+              <div class="link-item">
+                <div class="link-icon person">JD</div>
+                <div class="link-info">
+                  <div class="link-name">John Davis</div>
+                  <div class="link-detail">CEO · 5 mentions</div>
+                </div>
+              </div>
+              <div class="link-item">
+                <div class="link-icon person">SM</div>
+                <div class="link-info">
+                  <div class="link-name">Sarah Miller</div>
+                  <div class="link-detail">Product Lead · 3 mentions</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="links-section">
+              <div class="links-section-title">📁 RELATED PROJECTS</div>
+              <div class="link-item">
+                <div class="link-icon project">📁</div>
+                <div class="link-info">
+                  <div class="link-name">Q4 Planning</div>
+                  <div class="link-detail">5 sources linked</div>
+                </div>
+              </div>
+              <div class="link-item">
+                <div class="link-icon project">📁</div>
+                <div class="link-info">
+                  <div class="link-name">Product v2.0</div>
+                  <div class="link-detail">12 sources linked</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="links-section">
+              <div class="links-section-title">📅 CALENDAR EVENTS</div>
+              <div class="link-item">
+                <div class="link-icon calendar">📅</div>
+                <div class="link-info">
+                  <div class="link-name">Weekly Team Standup</div>
+                  <div class="link-detail">Dec 28, 9:00 AM</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="links-section">
+              <div class="links-section-title">✅ ACTION ITEMS</div>
+              <div class="link-item">
+                <div class="link-icon action">✓</div>
+                <div class="link-info">
+                  <div class="link-name">Review onboarding metrics</div>
+                  <div class="link-detail">Assigned to Sarah · Due Jan 3</div>
+                </div>
+              </div>
+              <div class="link-item">
+                <div class="link-icon action">○</div>
+                <div class="link-info">
+                  <div class="link-name">Schedule design review</div>
+                  <div class="link-detail">Assigned to Mike · Due Jan 5</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Mock Data
+    const sources = [
+      { id: 'audio-1', type: 'audio', title: 'Weekly Team Standup', meta: '45:23', date: 'Dec 28', group: 'Today' },
+      { id: 'pdf-1', type: 'pdf', title: 'Q4 Strategy Document', meta: '12 pages', date: 'Dec 27', group: 'Yesterday' },
+      { id: 'md-1', type: 'markdown', title: 'Product Research Notes', meta: '2,341 words', date: 'Dec 26', group: 'This Week' },
+      { id: 'audio-2', type: 'audio', title: 'Client Call - Acme Corp', meta: '32:15', date: 'Dec 26', group: 'This Week' },
+      { id: 'image-1', type: 'image', title: 'Architecture Diagram', meta: '1920×1080', date: 'Dec 25', group: 'This Week' },
+      { id: 'excel-1', type: 'excel', title: 'Budget Planning Q4', meta: '3 sheets', date: 'Dec 24', group: 'This Week' },
+      { id: 'word-1', type: 'word', title: 'Product Requirements Doc', meta: '8 pages', date: 'Dec 23', group: 'Last Week' },
+      { id: 'pptx-1', type: 'pptx', title: 'Investor Pitch Deck', meta: '24 slides', date: 'Dec 22', group: 'Last Week' },
+      { id: 'audio-3', type: 'audio', title: 'Interview - Senior Dev', meta: '58:42', date: 'Dec 21', group: 'Last Week' },
+    ];
+
+    const transcriptData = [
+      { time: '00:00:00', speaker: 'John', text: 'Good morning everyone! Let\'s get started with our weekly standup.' },
+      { time: '00:00:12', speaker: 'Sarah', text: 'Morning! Yes, ready to dive into this week\'s priorities.' },
+      { time: '00:00:18', speaker: 'John', text: 'Perfect. Let\'s start with product updates. Sarah?' },
+      { time: '00:00:28', speaker: 'Sarah', text: 'Last week we completed the new onboarding flow. A/B tests show 23% improvement in activation rates!' },
+      { time: '00:00:45', speaker: 'Mike', text: 'That\'s fantastic! Does that include mobile users?' },
+      { time: '00:00:52', speaker: 'Sarah', text: 'Yes! Mobile is even better at 28% improvement.' },
+      { time: '00:01:05', speaker: 'John', text: 'Great work. What\'s on the roadmap for this week?' },
+      { time: '00:01:12', speaker: 'Sarah', text: 'We\'re focusing on the notification system redesign. The specs are ready.' },
+    ];
+
+    const outlineData = {
+      audio: [
+        { type: 'h1', text: 'Meeting Start', time: '00:00:00' },
+        { type: 'h2', text: 'Product Updates', time: '00:00:18' },
+        { type: 'h3', text: 'Onboarding Flow Results', time: '00:00:28' },
+        { type: 'h3', text: 'Mobile Performance', time: '00:00:52' },
+        { type: 'h2', text: 'This Week\'s Roadmap', time: '00:01:05' },
+        { type: 'h3', text: 'Notification Redesign', time: '00:01:12' },
+      ],
+      pdf: [
+        { type: 'h1', text: 'Q4 2024 Strategic Plan' },
+        { type: 'h2', text: 'Executive Summary' },
+        { type: 'h2', text: 'Key Objectives' },
+        { type: 'h2', text: 'Timeline & Milestones' },
+      ],
+      markdown: [
+        { type: 'h1', text: 'Product Research Notes' },
+        { type: 'h2', text: 'Key Findings' },
+        { type: 'h2', text: 'Competitive Analysis' },
+        { type: 'h2', text: 'Recommendations' },
+      ]
+    };
+
+    const typeIcons = { audio: '🎙', pdf: '📄', markdown: '📝', image: '🖼', excel: '📊', word: '📝', pptx: '📊' };
+
+    // Helper
+    function createElement(tag, className, textContent) {
+      const el = document.createElement(tag);
+      if (className) el.className = className;
+      if (textContent) el.textContent = textContent;
+      return el;
+    }
+
+    // Render source list grouped
+    function renderSourceList() {
+      const list = document.getElementById('source-list');
+      list.textContent = '';
+
+      const groups = {};
+      sources.forEach(s => {
+        if (!groups[s.group]) groups[s.group] = [];
+        groups[s.group].push(s);
+      });
+
+      Object.keys(groups).forEach(group => {
+        const section = createElement('div', 'source-group');
+
+        const header = createElement('div', 'source-group-header');
+        header.textContent = '▼ ' + group + ' (' + groups[group].length + ')';
+        section.appendChild(header);
+
+        groups[group].forEach(source => {
+          const item = createElement('div', 'source-item');
+          item.dataset.id = source.id;
+          item.dataset.type = source.type;
+
+          const icon = createElement('div', 'source-icon ' + source.type, typeIcons[source.type]);
+          const info = createElement('div', 'source-info');
+          const title = createElement('div', 'source-title', source.title);
+          const meta = createElement('div', 'source-meta');
+          meta.appendChild(createElement('span', null, source.meta));
+          meta.appendChild(createElement('span', null, '·'));
+          meta.appendChild(createElement('span', null, source.date));
+
+          info.appendChild(title);
+          info.appendChild(meta);
+          item.appendChild(icon);
+          item.appendChild(info);
+
+          item.addEventListener('click', () => selectSource(source));
+          section.appendChild(item);
+        });
+
+        list.appendChild(section);
+      });
+    }
+
+    // Render waveform
+    function renderWaveform() {
+      const waveform = document.getElementById('waveform');
+      waveform.textContent = '';
+
+      for (let i = 0; i < 80; i++) {
+        const height = Math.random() * 70 + 30;
+        const bar = createElement('div', 'waveform-bar' + (i < 24 ? ' played' : ''));
+        bar.style.height = height + '%';
+        waveform.appendChild(bar);
+      }
+
+      const cursor = createElement('div', 'waveform-cursor');
+      waveform.appendChild(cursor);
+    }
+
+    // Render transcript
+    function renderTranscript() {
+      const body = document.getElementById('audio-body');
+      body.textContent = '';
+
+      transcriptData.forEach((seg, i) => {
+        const segment = createElement('div', 'transcript-segment' + (i === 3 ? ' current' : ''));
+
+        const time = createElement('div', 'transcript-time', seg.time);
+        const speaker = createElement('div', 'transcript-speaker', seg.speaker);
+        const text = createElement('div', 'transcript-text', seg.text);
+
+        segment.appendChild(time);
+        segment.appendChild(speaker);
+        segment.appendChild(text);
+
+        body.appendChild(segment);
+      });
+    }
+
+    // Render outline
+    function renderOutline(type) {
+      const list = document.getElementById('outline-list');
+      list.textContent = '';
+
+      const data = outlineData[type] || outlineData.audio;
+
+      data.forEach(item => {
+        const el = createElement('div', 'outline-item ' + item.type);
+        el.textContent = item.text;
+        if (item.time) {
+          const time = createElement('span', 'outline-time', item.time);
+          el.appendChild(time);
+        }
+        list.appendChild(el);
+      });
+    }
+
+    // Select source
+    let currentType = null;
+    function selectSource(source) {
+      document.querySelectorAll('.source-item').forEach(el => el.classList.remove('selected'));
+      document.querySelector('.source-item[data-id="' + source.id + '"]').classList.add('selected');
+
+      document.getElementById('viewer-empty').classList.add('hidden');
+      document.querySelectorAll('.viewer-container').forEach(el => el.classList.remove('active'));
+
+      const viewerMap = {
+        audio: 'viewer-audio',
+        pdf: 'viewer-pdf',
+        markdown: 'viewer-markdown',
+        image: 'viewer-image',
+        excel: 'viewer-excel',
+        word: 'viewer-word',
+        pptx: 'viewer-pptx'
+      };
+
+      const viewer = document.getElementById(viewerMap[source.type]);
+      if (viewer) viewer.classList.add('active');
+
+      currentType = source.type;
+      renderOutline(source.type);
+    }
+
+    // Resizers
+    function initResizers() {
+      const resizer1 = document.getElementById('resizer-1');
+      const resizer2 = document.getElementById('resizer-2');
+      const panelSources = document.getElementById('panel-sources');
+      const panelContext = document.getElementById('panel-context');
+
+      let isResizing = false;
+      let currentResizer = null;
+
+      function startResize(e, resizer) {
+        isResizing = true;
+        currentResizer = resizer;
+        resizer.classList.add('active');
+        document.addEventListener('mousemove', resize);
+        document.addEventListener('mouseup', stopResize);
+        e.preventDefault();
+      }
+
+      function resize(e) {
+        if (!isResizing) return;
+
+        if (currentResizer === resizer1) {
+          const newWidth = e.clientX - 224;
+          if (newWidth >= 220 && newWidth <= 380) {
+            panelSources.style.width = newWidth + 'px';
+          }
+        } else if (currentResizer === resizer2) {
+          const newWidth = window.innerWidth - e.clientX;
+          if (newWidth >= 260 && newWidth <= 420) {
+            panelContext.style.width = newWidth + 'px';
+          }
+        }
+      }
+
+      function stopResize() {
+        isResizing = false;
+        if (currentResizer) currentResizer.classList.remove('active');
+        currentResizer = null;
+        document.removeEventListener('mousemove', resize);
+        document.removeEventListener('mouseup', stopResize);
+      }
+
+      resizer1.addEventListener('mousedown', (e) => startResize(e, resizer1));
+      resizer2.addEventListener('mousedown', (e) => startResize(e, resizer2));
+    }
+
+    // Play button
+    document.getElementById('play-btn').addEventListener('click', function() {
+      const isPlaying = this.dataset.playing === 'true';
+      this.textContent = isPlaying ? '▶' : '⏸';
+      this.dataset.playing = isPlaying ? 'false' : 'true';
+    });
+
+    // Markdown mode toggle
+    document.querySelectorAll('.md-mode-btn').forEach(btn => {
+      btn.addEventListener('click', function() {
+        document.querySelectorAll('.md-mode-btn').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+
+        const mode = this.dataset.mode;
+        document.getElementById('md-preview').style.display = mode === 'preview' ? 'block' : 'none';
+        document.getElementById('md-editor').classList.toggle('active', mode === 'edit');
+      });
+    });
+
+    // Context tabs
+    document.querySelectorAll('.context-tab').forEach(tab => {
+      tab.addEventListener('click', function() {
+        document.querySelectorAll('.context-tab').forEach(t => t.classList.remove('active'));
+        this.classList.add('active');
+
+        document.querySelectorAll('.context-content').forEach(c => c.classList.remove('active'));
+        document.getElementById('context-' + this.dataset.tab).classList.add('active');
+      });
+    });
+
+    // Viewer tabs
+    document.querySelectorAll('.viewer-tabs .viewer-tab').forEach(tab => {
+      tab.addEventListener('click', function() {
+        const tabs = this.parentElement;
+        tabs.querySelectorAll('.viewer-tab').forEach(t => t.classList.remove('active'));
+        this.classList.add('active');
+      });
+    });
+
+    // Filter chips
+    document.querySelectorAll('.filter-chip').forEach(chip => {
+      chip.addEventListener('click', function() {
+        document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+        this.classList.add('active');
+      });
+    });
+
+    // Chat
+    function sendMessage() {
+      const input = document.getElementById('chat-input');
+      const message = input.value.trim();
+      if (!message) return;
+
+      const container = document.getElementById('chat-messages');
+
+      const userMsg = createElement('div', 'chat-message user', message);
+      container.appendChild(userMsg);
+
+      setTimeout(() => {
+        let response = 'Based on this source, here are the key insights:\n\n';
+        response += '• Main topic: Team standup and product updates\n';
+        response += '• Key metric: 23% improvement in activation rates\n';
+        response += '• Mobile performance: 28% improvement\n';
+        response += '• Next focus: Notification system redesign';
+
+        const assistantMsg = createElement('div', 'chat-message assistant', response);
+        container.appendChild(assistantMsg);
+        container.scrollTop = container.scrollHeight;
+      }, 600);
+
+      input.value = '';
+      container.scrollTop = container.scrollHeight;
+    }
+
+    document.getElementById('chat-send').addEventListener('click', sendMessage);
+    document.getElementById('chat-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+
+    // Quick actions
+    document.querySelectorAll('.quick-action').forEach(btn => {
+      btn.addEventListener('click', function() {
+        const action = this.textContent.replace(/[^\w\s]/g, '').trim();
+        document.getElementById('chat-input').value = action + ' this source';
+        sendMessage();
+      });
+    });
+
+    // Nav items
+    document.querySelectorAll('.nav-item').forEach(item => {
+      item.addEventListener('click', function() {
+        document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+        this.classList.add('active');
+      });
+    });
+
+    // Initialize
+    renderSourceList();
+    renderWaveform();
+    renderTranscript();
+    renderOutline('audio');
+    initResizers();
+  </script>
+</body>
+</html>

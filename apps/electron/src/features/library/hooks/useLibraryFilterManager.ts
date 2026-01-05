@@ -4,7 +4,6 @@
  * Provides filter state and actions for the Library view.
  * Wraps the useLibraryStore to provide a cohesive filter management interface.
  *
- * NOTE: This is different from useLibraryFilters in the store which only provides state.
  * This hook provides state + actions + derived values following the useSourceSelection pattern.
  */
 
