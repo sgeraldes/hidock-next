@@ -650,8 +650,22 @@ export function Chat() {
                 </button>
               </div>
             ))}
-            <button 
-              onClick={() => { setContextIds([]); setContextItems([]); /* TODO: Clear via IPC */ }}
+            <button
+              onClick={async () => {
+                if (activeConversation) {
+                  try {
+                    await Promise.all(
+                      contextIds.map(id =>
+                        window.electronAPI.assistant.removeContext(activeConversation.id, id)
+                      )
+                    )
+                  } catch (error) {
+                    console.error('Failed to clear all context:', error)
+                  }
+                }
+                setContextIds([])
+                setContextItems([])
+              }}
               className="text-[10px] text-muted-foreground hover:text-foreground underline underline-offset-2 ml-auto"
             >
               Clear all
