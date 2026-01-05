@@ -111,9 +111,14 @@ export function Layout({ children }: LayoutProps) {
 
   // Check if running in dev mode
   useEffect(() => {
-    window.electronAPI.app.info().then((info) => {
-      setIsDevMode(!info.isPackaged)
-    })
+    if (window.electronAPI?.app) {
+      window.electronAPI.app.info().then((info) => {
+        setIsDevMode(!info.isPackaged)
+      })
+    } else {
+      // Not in Electron, assume dev mode
+      setIsDevMode(true)
+    }
   }, [])
 
   // Initialize app on mount
@@ -414,7 +419,7 @@ export function Layout({ children }: LayoutProps) {
                 'w-full gap-2 bg-slate-800 text-slate-200 hover:bg-slate-700 hover:text-white',
                 !sidebarOpen && 'px-0 justify-center'
               )}
-              onClick={() => window.electronAPI.app.restart()}
+              onClick={() => window.electronAPI?.app?.restart()}
               title="Restart App"
             >
               <RotateCcw className="h-4 w-4" />

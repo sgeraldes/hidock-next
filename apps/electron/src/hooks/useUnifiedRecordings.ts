@@ -309,6 +309,16 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     setError(null)
 
     try {
+      // Guard: Check if running in Electron with full API
+      if (!window.electronAPI?.recordings) {
+        console.log('[useUnifiedRecordings] Not in Electron - returning empty data')
+        setRecordings([])
+        setDeviceConnected(false)
+        setLoading(false)
+        loadingRef.current = false
+        return
+      }
+
       // Check device connection
       const isConnected = deviceService.isConnected()
       setDeviceConnected(isConnected)

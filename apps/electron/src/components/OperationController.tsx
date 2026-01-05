@@ -433,25 +433,37 @@ export function OperationController() {
   useEffect(() => {
     if (DEBUG) console.log('[OperationController] Mounted')
 
-    // Subscribe to download service state updates
-    const unsubDownloads = window.electronAPI.downloadService.onStateUpdate((state) => {
-      const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
-      if (hasPending && !isProcessingDownloads.current && deviceService.isConnected()) {
-        processDownloadQueue()
-      }
-    })
+    // Guard: Check if running in Electron with full API
+    const isElectron = !!window.electronAPI?.downloadService
+    if (!isElectron) {
+      if (DEBUG) console.log('[OperationController] Not in Electron - limited functionality')
+    }
 
-    // Check initial download state
-    window.electronAPI.downloadService.getState().then((state) => {
-      const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
-      if (hasPending && deviceService.isConnected()) {
-        processDownloadQueue()
-      }
-    })
+    // Subscribe to download service state updates (only in Electron)
+    const unsubDownloads = isElectron
+      ? window.electronAPI.downloadService.onStateUpdate((state) => {
+          const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
+          if (hasPending && !isProcessingDownloads.current && deviceService.isConnected()) {
+            processDownloadQueue()
+          }
+        })
+      : () => {} // No-op cleanup
+
+    // Check initial download state (only in Electron)
+    if (isElectron) {
+      window.electronAPI.downloadService.getState().then((state) => {
+        const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
+        if (hasPending && deviceService.isConnected()) {
+          processDownloadQueue()
+        }
+      })
+    }
 
     // Check for auto-sync at startup (device may already be connected when app loads)
-    // This handles the case where device is connected BEFORE app starts
+    // This handles the case where device is connected BEFORE app starts (only in Electron)
     const checkInitialAutoSync = async () => {
+      if (!isElectron) return
+
       // Wait for device initialization to complete (may take a few seconds)
       // Check every 500ms for up to 30 seconds
       for (let i = 0; i < 60; i++) {
@@ -509,7 +521,7 @@ export function OperationController() {
 
     // Subscribe to device connection changes (for download resumption, auto-sync, and abort on disconnect)
     const unsubDevice = deviceService.onStateChange(async (deviceState) => {
-      if (deviceState.connected && !isProcessingDownloads.current) {
+      if (deviceState.connected && !isProcessingDownloads.current && isElectron) {
         // Check for pending downloads to resume
         window.electronAPI.downloadService.getState().then((state) => {
           const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
@@ -571,25 +583,26 @@ export function OperationController() {
       }
     })
 
-    // Subscribe to transcription updates (from main process)
-    // Transcription is already handled by main process, just need to refresh data
-    const transcriptionInterval = setInterval(async () => {
-      try {
-        const status = await window.electronAPI.recordings.getTranscriptionStatus()
-        if (status.isProcessing || status.pendingCount > 0) {
-          // Transcription in progress - data will be refreshed when done
-        }
-      } catch (e) {
-        // Ignore errors
-      }
-    }, 5000)
+    // Subscribe to transcription updates (from main process) - only in Electron
+    const transcriptionInterval = isElectron
+      ? setInterval(async () => {
+          try {
+            const status = await window.electronAPI.recordings.getTranscriptionStatus()
+            if (status.isProcessing || status.pendingCount > 0) {
+              // Transcription in progress - data will be refreshed when done
+            }
+          } catch (e) {
+            // Ignore errors
+          }
+        }, 5000)
+      : null
 
     return () => {
       if (DEBUG) console.log('[OperationController] Unmounting')
       downloadAbortControllerRef.current?.abort()
       unsubDownloads()
       unsubDevice()
-      clearInterval(transcriptionInterval)
+      if (transcriptionInterval) clearInterval(transcriptionInterval)
 
       // Clean up audio
       if (audioRef.current) {
