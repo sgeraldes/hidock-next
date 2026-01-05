@@ -49,11 +49,16 @@ export function useBulkOperation<T>(options: BulkOperationOptions<T>): BulkOpera
   const [isRunning, setIsRunning] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
   const optionsRef = useRef(options)
+  const itemsRef = useRef(items)
 
-  // Keep options ref up to date
+  // Keep refs up to date to avoid stale closures
   useEffect(() => {
     optionsRef.current = options
   }, [options])
+
+  useEffect(() => {
+    itemsRef.current = items
+  }, [items])
 
   const start = useCallback(
     async (itemsToProcess: Array<{ id: string; data: T }>) => {
@@ -79,9 +84,9 @@ export function useBulkOperation<T>(options: BulkOperationOptions<T>): BulkOpera
       for (const { id, data } of itemsToProcess) {
         // Check if aborted before starting this item
         if (signal.aborted) {
-          // Collect pending IDs first (synchronously)
+          // Collect pending IDs using ref to avoid stale closure
           const pendingIds: string[] = []
-          for (const [itemId, item] of items) {
+          for (const [itemId, item] of itemsRef.current) {
             if (item.status === 'pending') {
               pendingIds.push(itemId)
             }

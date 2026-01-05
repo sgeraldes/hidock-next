@@ -3,32 +3,64 @@ import { cn } from '@/lib/utils'
 import { formatTimestamp } from '../utils/formatTimestamp'
 
 interface TimeAnchorProps {
-  timestamp: number // seconds
+  /** Timestamp in seconds (simple API) */
+  timestamp?: number
+  /** Start time in milliseconds (TranscriptViewer API) */
+  startMs?: number
+  /** End time in milliseconds (TranscriptViewer API) */
+  endMs?: number
+  /** Whether this anchor is currently active/highlighted */
+  isActive?: boolean
+  /** Custom seek handler (TranscriptViewer API) */
+  onSeek?: (startMs: number, endMs?: number) => void
+  /** Simple click handler */
+  onClick?: () => void
   children?: React.ReactNode
   className?: string
-  onClick?: () => void
 }
 
 /**
  * TimeAnchor - Clickable timestamp component for transcripts
  *
- * When clicked, seeks the audio player to the specified timestamp.
- * Displays as a formatted timestamp (MM:SS or HH:MM:SS) or custom content.
+ * Supports two APIs:
+ * 1. Simple: timestamp (seconds) + optional onClick
+ * 2. TranscriptViewer: startMs/endMs + onSeek callback
  *
  * @example
+ * // Simple usage
  * <TimeAnchor timestamp={65} /> // Displays "1:05"
- * <TimeAnchor timestamp={3665}>Go to hour mark</TimeAnchor> // Custom content
+ *
+ * // TranscriptViewer usage
+ * <TimeAnchor startMs={65000} endMs={70000} onSeek={handleSeek} isActive={true} />
  */
-export function TimeAnchor({ timestamp, children, className, onClick }: TimeAnchorProps) {
+export function TimeAnchor({
+  timestamp,
+  startMs,
+  endMs,
+  isActive,
+  onSeek,
+  onClick,
+  children,
+  className
+}: TimeAnchorProps) {
   const { seek } = useAudioControls()
 
+  // Determine the timestamp to display (prefer startMs if provided)
+  const displaySeconds = startMs !== undefined ? startMs / 1000 : (timestamp ?? 0)
+
   const handleClick = () => {
-    seek(timestamp)
+    if (onSeek && startMs !== undefined) {
+      // TranscriptViewer API: call onSeek with ms values
+      onSeek(startMs, endMs)
+    } else if (timestamp !== undefined) {
+      // Simple API: use audio controls directly
+      seek(timestamp)
+    }
     onClick?.()
   }
 
   // Format timestamp as MM:SS or HH:MM:SS
-  const formatted = formatTimestamp(timestamp)
+  const formatted = formatTimestamp(displaySeconds)
 
   return (
     <button
@@ -36,9 +68,11 @@ export function TimeAnchor({ timestamp, children, className, onClick }: TimeAnch
       onClick={handleClick}
       className={cn(
         'text-primary hover:underline cursor-pointer font-mono text-sm',
+        isActive && 'bg-primary/10 rounded px-1',
         className
       )}
       aria-label={`Jump to ${formatted}`}
+      aria-current={isActive ? 'time' : undefined}
     >
       {children ?? formatted}
     </button>
