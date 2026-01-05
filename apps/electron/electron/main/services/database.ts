@@ -1470,6 +1470,10 @@ export interface Recording {
   source: 'hidock' | 'import' | 'external'
   is_imported: number
   storage_tier?: 'hot' | 'warm' | 'cold' | 'archive' | null
+  // Migration fields (for Phase 0 -> Phase 1 migration)
+  migration_status?: 'pending' | 'migrated' | 'skipped' | 'error' | null
+  migrated_to_capture_id?: string | null
+  migrated_at?: string | null
 }
 
 export function getRecordings(): Recording[] {
