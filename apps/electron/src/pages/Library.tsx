@@ -172,6 +172,8 @@ export function Library() {
   }, [recordings])
 
   // Load enrichment data only when the set of IDs that need data changes
+  // Note: The exhaustive-deps disable below is intentional - we use enrichmentKey to avoid
+  // refetching when recordings array reference changes but IDs remain the same (optimization pattern)
   useEffect(() => {
     const loadEnrichment = async () => {
       const recordingIdsForTranscripts = recordings.filter((rec) => hasLocalPath(rec)).map((rec) => rec.id)
@@ -464,7 +466,7 @@ export function Library() {
     }
   }, [filteredRecordings, selectedIds, refresh, clearSelection])
 
-  const handleDeleteFromDevice = async (recording: UnifiedRecording) => {
+  const handleDeleteFromDevice = useCallback(async (recording: UnifiedRecording) => {
     if (!deviceConnected) return
     if (!('deviceFilename' in recording)) return
     if (!window.confirm(`Delete "${recording.filename}" from device? This cannot be undone.`)) return
@@ -478,9 +480,9 @@ export function Library() {
     } finally {
       setDeleting(null)
     }
-  }
+  }, [deviceConnected, refresh])
 
-  const handleDeleteLocal = async (recording: UnifiedRecording) => {
+  const handleDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
     if (!hasLocalPath(recording)) return
     const hasTranscript = transcripts.has(recording.id)
     const message = hasTranscript
@@ -497,7 +499,7 @@ export function Library() {
     } finally {
       setDeleting(null)
     }
-  }
+  }, [transcripts, refresh])
 
   const handleDelete = useCallback(
     (recording: UnifiedRecording) => {
@@ -507,8 +509,7 @@ export function Library() {
         handleDeleteLocal(recording)
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [deviceConnected, transcripts]
+    [handleDeleteFromDevice, handleDeleteLocal]
   )
 
   // Stable callbacks for child components (prevents breaking React.memo)
