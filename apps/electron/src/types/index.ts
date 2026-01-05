@@ -15,14 +15,14 @@ export interface Meeting {
   subject: string
   start_time: string
   end_time: string
-  location?: string | null
-  organizer_name?: string | null
-  organizer_email?: string | null
-  attendees?: string | null // JSON string of attendee array
-  description?: string | null
+  location: string | null
+  organizer_name: string | null
+  organizer_email: string | null
+  attendees: string | null // JSON string of attendee array
+  description: string | null
   is_recurring: number
-  recurrence_rule?: string | null
-  meeting_url?: string | null
+  recurrence_rule: string | null
+  meeting_url: string | null
   created_at: string
   updated_at: string
 }
@@ -36,14 +36,14 @@ export interface MeetingAttendee {
 export interface Recording {
   id: string
   filename: string
-  original_filename?: string
+  original_filename: string | null
   file_path: string
-  file_size?: number
-  duration_seconds?: number
+  file_size: number | null
+  duration_seconds: number | null
   date_recorded: string
-  meeting_id?: string
-  correlation_confidence?: number
-  correlation_method?: string
+  meeting_id: string | null
+  correlation_confidence: number | null
+  correlation_method: string | null
   status: 'pending' | 'transcribing' | 'transcribed' | 'error'
   created_at: string
 }
@@ -53,17 +53,17 @@ export interface Transcript {
   recording_id: string
   full_text: string
   language: string
-  summary?: string
-  action_items?: string // JSON string
-  topics?: string // JSON string
-  key_points?: string // JSON string
-  sentiment?: string
-  speakers?: string // JSON string
-  word_count?: number
-  transcription_provider?: string
-  transcription_model?: string
-  title_suggestion?: string
-  question_suggestions?: string // JSON string of suggested questions
+  summary: string | null
+  action_items: string | null // JSON string
+  topics: string | null // JSON string
+  key_points: string | null // JSON string
+  sentiment: string | null
+  speakers: string | null // JSON string
+  word_count: number | null
+  transcription_provider: string | null
+  transcription_model: string | null
+  title_suggestion: string | null
+  question_suggestions: string | null // JSON string of suggested questions
   created_at: string
 }
 
@@ -80,7 +80,7 @@ export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
-  sources?: string // JSON string of source references
+  sources: string | null // JSON string of source references
   created_at: string
 }
 
@@ -89,10 +89,10 @@ export interface QueueItem {
   recording_id: string
   status: 'pending' | 'processing' | 'completed' | 'failed'
   attempts: number
-  error_message?: string
+  error_message: string | null
   created_at: string
-  started_at?: string
-  completed_at?: string
+  started_at: string | null
+  completed_at: string | null
 }
 
 export interface StorageInfo {
