@@ -196,9 +196,17 @@ def main():
     print(f"Retry count: {args.retry_count}")
     print()
 
+    # Initialize USB backend
+    print("Initializing USB backend...")
+    try:
+        backend = init_usb_backend()
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return 1
+
     # Initialize device
     print("Initializing device connection...")
-    device = HiDockJensen()
+    device = HiDockJensen(backend)
 
     # Try to connect with different product IDs
     connected = False
