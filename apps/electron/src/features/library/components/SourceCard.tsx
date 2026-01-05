@@ -19,6 +19,7 @@ import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
 import { parseJsonArray, Transcript, Meeting } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
+import { useLibraryStore } from '@/store/useLibraryStore'
 
 interface SourceCardProps {
   recording: UnifiedRecording
@@ -32,6 +33,7 @@ interface SourceCardProps {
   deviceConnected: boolean
   isSelected?: boolean
   onSelectionChange?: (id: string, shiftKey: boolean) => void
+  onClick?: () => void
   onPlay: () => void
   onStop: () => void
   onDownload: () => void
@@ -54,6 +56,7 @@ export const SourceCard = memo(function SourceCard({
   deviceConnected,
   isSelected = false,
   onSelectionChange,
+  onClick,
   onPlay,
   onStop,
   onDownload,
@@ -64,14 +67,24 @@ export const SourceCard = memo(function SourceCard({
   onNavigateToMeeting
 }: SourceCardProps) {
   const canPlay = hasLocalPath(recording)
+  const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
 
   const handleCheckboxClick = (e: React.MouseEvent) => {
     e.stopPropagation()
     onSelectionChange?.(recording.id, e.shiftKey)
   }
 
+  const handleCardClick = (e: React.MouseEvent) => {
+    // Don't trigger onClick if clicking on buttons, checkbox, or interactive elements
+    const target = e.target as HTMLElement
+    if (target.closest('button') || target.closest('[role="checkbox"]') || target.closest('a')) {
+      return
+    }
+    onClick?.()
+  }
+
   return (
-    <Card className={isSelected ? 'ring-2 ring-primary' : ''}>
+    <Card className={`${isSelected ? 'ring-2 ring-primary' : ''} cursor-pointer`} onClick={handleCardClick}>
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-3">

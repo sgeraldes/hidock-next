@@ -17,7 +17,10 @@ import {
   DeviceDisconnectBanner,
   BulkActionsBar,
   LiveRegion,
-  useAnnouncement
+  useAnnouncement,
+  BulkProgressModal,
+  BulkResultSummary,
+  SourceDetailDrawer
 } from '@/features/library/components'
 import { useSourceSelection, useKeyboardNavigation, useTransitionFilters } from '@/features/library/hooks'
 
@@ -68,7 +71,15 @@ export function Library() {
   // Bulk operations
   const [bulkProcessing, setBulkProcessing] = useState(false)
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 })
+  const [bulkOperationItems] = useState<Array<{ id: string; status: 'pending' | 'processing' | 'success' | 'failed' | 'cancelled' }>>([])
+  const [bulkOperationResult, setBulkOperationResult] = useState<{ succeeded: string[]; failed: Array<{ id: string; error: any }>; cancelled: string[]; wasAborted: boolean } | null>(null)
+  const [showBulkProgressModal, setShowBulkProgressModal] = useState(false)
+  const [showBulkResultModal, setShowBulkResultModal] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
+
+  // Detail drawer state
+  const [selectedSourceForDrawer, setSelectedSourceForDrawer] = useState<UnifiedRecording | null>(null)
+  const [drawerOpen, setDrawerOpen] = useState(false)
 
   // Selection for bulk operations
   const {
@@ -186,7 +197,7 @@ export function Library() {
     })
 
     // Development check for duplicate IDs
-    if (import.meta.env.DEV) {
+    if (process.env.NODE_ENV === 'development') {
       const ids = new Set<string>()
       const duplicates = new Set<string>()
       filtered.forEach((rec) => {
@@ -531,6 +542,18 @@ export function Library() {
     [toggleTranscript]
   )
 
+  // Drawer handlers
+  const handleOpenDrawer = useCallback((recording: UnifiedRecording) => {
+    setSelectedSourceForDrawer(recording)
+    setDrawerOpen(true)
+  }, [])
+
+  const handleCloseDrawer = useCallback(() => {
+    setDrawerOpen(false)
+    // Clear selection after animation completes
+    setTimeout(() => setSelectedSourceForDrawer(null), 300)
+  }, [])
+
   // Virtualization setup
   const parentRef = useRef<HTMLDivElement>(null)
 
@@ -715,6 +738,7 @@ export function Library() {
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
+                          onClick={() => handleOpenDrawer(recording)}
                           onPlay={() => {
                             if (hasLocalPath(recording)) {
                               handlePlayCallback(recording.id, recording.localPath)
@@ -768,6 +792,7 @@ export function Library() {
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
+                          onClick={() => handleOpenDrawer(recording)}
                           onPlay={() => {
                             if (hasLocalPath(recording)) {
                               handlePlayCallback(recording.id, recording.localPath)
@@ -790,6 +815,86 @@ export function Library() {
           )}
         </div>
       </div>
+
+      {/* Bulk Progress Modal - shows during bulk operations */}
+      <BulkProgressModal
+        isOpen={showBulkProgressModal}
+        onClose={() => setShowBulkProgressModal(false)}
+        operation="download" // TODO: Make this dynamic based on operation type
+        items={bulkOperationItems.map((item) => ({
+          id: item.id,
+          status: item.status,
+          data: filteredRecordings.find((r) => r.id === item.id)
+        }))}
+        progress={bulkProgress}
+        onCancel={() => {
+          setBulkProcessing(false)
+          setShowBulkProgressModal(false)
+        }}
+      />
+
+      {/* Bulk Result Summary - shows after operations complete */}
+      {bulkOperationResult && (
+        <BulkResultSummary
+          isOpen={showBulkResultModal}
+          onClose={() => {
+            setShowBulkResultModal(false)
+            setBulkOperationResult(null)
+          }}
+          operation="Download" // TODO: Make this dynamic
+          result={bulkOperationResult}
+          onRetryFailed={(ids) => {
+            // TODO: Implement retry logic
+            console.log('Retry failed items:', ids)
+          }}
+        />
+      )}
+
+      {/* Source Detail Drawer */}
+      <SourceDetailDrawer
+        source={selectedSourceForDrawer}
+        transcript={selectedSourceForDrawer ? transcripts.get(selectedSourceForDrawer.id) : undefined}
+        meeting={
+          selectedSourceForDrawer && selectedSourceForDrawer.meetingId
+            ? meetings.get(selectedSourceForDrawer.meetingId)
+            : undefined
+        }
+        isOpen={drawerOpen}
+        isPlaying={selectedSourceForDrawer ? currentlyPlayingId === selectedSourceForDrawer.id : false}
+        onClose={handleCloseDrawer}
+        onPlay={() => {
+          if (selectedSourceForDrawer && hasLocalPath(selectedSourceForDrawer)) {
+            handlePlayCallback(selectedSourceForDrawer.id, selectedSourceForDrawer.localPath)
+          }
+        }}
+        onStop={handleStopCallback}
+        onTranscribe={() => {
+          if (selectedSourceForDrawer) {
+            // Queue for transcription
+            window.electronAPI.recordings.updateStatus(selectedSourceForDrawer.id, 'pending').catch((e) => {
+              console.error('Failed to queue transcription:', e)
+            })
+          }
+        }}
+        onDownload={() => {
+          if (selectedSourceForDrawer) {
+            handleDownloadCallback(selectedSourceForDrawer)
+          }
+        }}
+        onDelete={() => {
+          if (selectedSourceForDrawer) {
+            handleDeleteCallback(selectedSourceForDrawer)
+            handleCloseDrawer()
+          }
+        }}
+        onNavigateToMeeting={handleNavigateToMeeting}
+        onAskAssistant={() => {
+          if (selectedSourceForDrawer) {
+            handleAskAssistantCallback(selectedSourceForDrawer)
+          }
+        }}
+        deviceConnected={deviceConnected}
+      />
     </div>
   )
 }

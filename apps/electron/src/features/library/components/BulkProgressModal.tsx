@@ -17,7 +17,6 @@ import { Button } from '@/components/ui/button'
 import { CheckCircle2, XCircle, Circle, Loader2, Ban, ChevronDown, ChevronRight } from 'lucide-react'
 import { BulkOperationItem, BulkItemStatus } from '@/hooks/useBulkOperation'
 import { LibraryError, getRecoveryAction } from '@/features/library/utils/errorHandling'
-import { cn } from '@/lib/utils'
 
 interface BulkProgressModalProps {
   isOpen: boolean

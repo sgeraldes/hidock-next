@@ -19,6 +19,7 @@ interface SourceRowProps {
   deviceConnected: boolean
   isSelected?: boolean
   onSelectionChange?: (id: string, shiftKey: boolean) => void
+  onClick?: () => void
   onPlay: () => void
   onStop: () => void
   onDownload: () => void
@@ -37,6 +38,7 @@ export const SourceRow = memo(function SourceRow({
   deviceConnected,
   isSelected = false,
   onSelectionChange,
+  onClick,
   onPlay,
   onStop,
   onDownload,
@@ -54,10 +56,20 @@ export const SourceRow = memo(function SourceRow({
     onSelectionChange?.(recording.id, e.shiftKey)
   }
 
+  const handleRowClick = (e: React.MouseEvent) => {
+    // Don't trigger onClick if clicking on buttons or checkbox
+    const target = e.target as HTMLElement
+    if (target.closest('button') || target.closest('[role="checkbox"]')) {
+      return
+    }
+    onClick?.()
+  }
+
   return (
     <div
-      className={`flex items-center justify-between p-3 hover:bg-muted/50 ${isSelected ? 'bg-primary/5' : ''}`}
+      className={`flex items-center justify-between p-3 hover:bg-muted/50 cursor-pointer ${isSelected ? 'bg-primary/5' : ''}`}
       role="option"
+      onClick={handleRowClick}
       aria-selected={isPlaying || isSelected}
       tabIndex={0}
     >
