@@ -18,6 +18,7 @@ import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
 import { useUIStore } from '@/store/useUIStore'
 import { toast } from '@/components/ui/toaster'
+import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
 
 const DEBUG = true
 
@@ -30,7 +31,7 @@ interface DownloadQueueItem {
   filename: string
   fileSize: number
   progress: number
-  status: 'pending' | 'downloading' | 'completed' | 'failed'
+  status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
   error?: string
 }
 
@@ -45,7 +46,7 @@ export function OperationController() {
   // Refs for persistent state
   const isProcessingDownloads = useRef(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
-  const downloadAbortRef = useRef(false)
+  const downloadAbortControllerRef = useRef<AbortController | null>(null)
   const autoSyncTriggeredRef = useRef(false) // Prevent duplicate auto-sync triggers
 
   // Global store actions
@@ -74,12 +75,17 @@ export function OperationController() {
   // Download Operations
   // ==========================================================================
 
-  const processDownload = useCallback(async (item: { filename: string; fileSize: number }) => {
+  const processDownload = useCallback(async (item: { filename: string; fileSize: number }, signal: AbortSignal) => {
     if (DEBUG) console.log(`[QA-MONITOR][Operation] Processing download: ${item.filename}`)
 
     if (!deviceService.isConnected()) {
       console.error('[OperationController] Device not connected')
       await window.electronAPI.downloadService.markFailed(item.filename, 'Device not connected')
+      return false
+    }
+
+    // Check if aborted before starting
+    if (signal.aborted) {
       return false
     }
 
@@ -93,6 +99,10 @@ export function OperationController() {
         item.filename,
         item.fileSize,
         (chunk) => {
+          // Check abort signal during download
+          if (signal.aborted) {
+            throw new Error('Download cancelled')
+          }
           chunks.push(chunk)
           totalReceived += chunk.length
           window.electronAPI.downloadService.updateProgress(item.filename, totalReceived)
@@ -162,7 +172,10 @@ export function OperationController() {
     if (pendingItems.length === 0 || !deviceService.isConnected()) return
 
     isProcessingDownloads.current = true
-    downloadAbortRef.current = false
+
+    // Create new AbortController for this download session
+    downloadAbortControllerRef.current = new AbortController()
+    const signal = downloadAbortControllerRef.current.signal
 
     if (DEBUG) console.log(`[QA-MONITOR][Operation] Processing ${pendingItems.length} downloads`)
 
@@ -177,8 +190,8 @@ export function OperationController() {
     let aborted = false
 
     for (const item of pendingItems) {
-      // Check abort flag (set by cancel or disconnect)
-      if (downloadAbortRef.current) {
+      // Check abort signal
+      if (signal.aborted) {
         if (DEBUG) console.log('[OperationController] Download aborted by user')
         aborted = true
         break
@@ -205,7 +218,7 @@ export function OperationController() {
         deviceFileProgress: 0
       })
 
-      const success = await processDownload(item)
+      const success = await processDownload(item, signal)
       success ? completed++ : failed++
     }
 
@@ -540,7 +553,7 @@ export function OperationController() {
         // Device disconnected - abort downloads if processing
         if (isProcessingDownloads.current) {
           if (DEBUG) console.log('[OperationController] Device disconnected, aborting downloads')
-          downloadAbortRef.current = true
+          downloadAbortControllerRef.current?.abort()
         }
         // Reset auto-sync flag so it triggers on reconnect
         autoSyncTriggeredRef.current = false
@@ -562,7 +575,7 @@ export function OperationController() {
 
     return () => {
       if (DEBUG) console.log('[OperationController] Unmounting')
-      downloadAbortRef.current = true
+      downloadAbortControllerRef.current?.abort()
       unsubDownloads()
       unsubDevice()
       clearInterval(transcriptionInterval)
