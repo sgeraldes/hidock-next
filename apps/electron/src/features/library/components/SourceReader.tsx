@@ -93,13 +93,13 @@ export function SourceReader({
             {/* Progress Bar */}
             <div className="flex-1">
               <div className="text-xs text-muted-foreground mb-1">
-                {formatDuration(currentTimeMs / 1000)} / {formatDuration(recording.duration)}
+                {formatDuration(currentTimeMs / 1000)} / {recording.duration > 0 ? formatDuration(recording.duration) : '--:--'}
               </div>
               <div className="h-1 bg-muted rounded-full overflow-hidden">
                 <div
                   className="h-full bg-primary transition-all"
                   style={{
-                    width: `${(currentTimeMs / (recording.duration * 1000)) * 100}%`
+                    width: `${recording.duration > 0 ? (currentTimeMs / (recording.duration * 1000)) * 100 : 0}%`
                   }}
                 />
               </div>
