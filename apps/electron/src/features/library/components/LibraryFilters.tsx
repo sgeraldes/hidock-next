@@ -116,6 +116,7 @@ export function LibraryFilters({
             value={qualityFilter}
             onChange={(e) => onQualityFilterChange(e.target.value)}
             className="h-8 rounded-md border border-input bg-background px-3 py-1 text-xs"
+            aria-label="Filter by quality rating"
           >
             <option value="all">All Ratings</option>
             <option value="valuable">Valuable</option>
@@ -132,6 +133,7 @@ export function LibraryFilters({
             value={statusFilter}
             onChange={(e) => onStatusFilterChange(e.target.value)}
             className="h-8 rounded-md border border-input bg-background px-3 py-1 text-xs"
+            aria-label="Filter by processing status"
           >
             <option value="all">All Statuses</option>
             <option value="processing">Processing</option>

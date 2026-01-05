@@ -7,23 +7,26 @@ import { Library } from '@/pages/Library'
 // Extend Vitest's expect with jest-axe matchers
 expect.extend(toHaveNoViolations)
 
+// Create a mock function we can override per-test
+const mockUseUnifiedRecordings = vi.fn(() => ({
+  recordings: [],
+  loading: false,
+  error: null,
+  refresh: vi.fn(),
+  deviceConnected: false,
+  stats: {
+    total: 0,
+    deviceOnly: 0,
+    localOnly: 0,
+    synced: 0,
+    transcribed: 0,
+    untranscribed: 0
+  }
+}))
+
 // Mock dependencies
 vi.mock('@/hooks/useUnifiedRecordings', () => ({
-  useUnifiedRecordings: () => ({
-    recordings: [],
-    loading: false,
-    error: null,
-    refresh: vi.fn(),
-    deviceConnected: false,
-    stats: {
-      total: 0,
-      deviceOnly: 0,
-      localOnly: 0,
-      synced: 0,
-      transcribed: 0,
-      untranscribed: 0
-    }
-  })
+  useUnifiedRecordings: () => mockUseUnifiedRecordings()
 }))
 
 vi.mock('@/components/OperationController', () => ({
@@ -126,24 +129,59 @@ describe('Library Accessibility', () => {
     expect(results).toHaveNoViolations()
   })
 
-  it('should have proper ARIA attributes on library container when not empty', async () => {
+  it('should have proper ARIA for listbox elements when recordings exist', async () => {
+    // Override the mock to return recordings data for this test
+    const mockRecordings = [
+      {
+        id: 'test-1',
+        title: 'Test Recording 1',
+        duration: 120,
+        date: new Date('2026-01-01'),
+        location: 'both' as const,
+        status: 'ready' as const
+      },
+      {
+        id: 'test-2',
+        title: 'Test Recording 2',
+        duration: 180,
+        date: new Date('2026-01-02'),
+        location: 'device-only' as const,
+        status: 'processing' as const
+      }
+    ]
+
+    mockUseUnifiedRecordings.mockReturnValueOnce({
+      recordings: mockRecordings,
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      deviceConnected: false,
+      stats: {
+        total: 2,
+        deviceOnly: 1,
+        localOnly: 0,
+        synced: 1,
+        transcribed: 0,
+        untranscribed: 2
+      }
+    })
+
     const { container } = render(
       <MemoryRouter>
         <Library />
       </MemoryRouter>
     )
 
-    // When empty, no listbox is rendered (EmptyState is shown instead)
-    // When not empty, check for listbox role and aria-label
-    // This test validates structure but accepts empty state
+    // With recordings, listbox should be rendered with proper ARIA attributes
     const listbox = container.querySelector('[role="listbox"]')
-    if (listbox) {
-      expect(listbox.getAttribute('aria-label')).toBe('Knowledge Library')
-      expect(listbox.getAttribute('aria-rowcount')).toBeTruthy()
-    } else {
-      // Empty state - this is acceptable
-      expect(container.textContent).toContain('No Knowledge Captured Yet')
-    }
+    expect(listbox).toBeTruthy()
+    expect(listbox?.getAttribute('aria-label')).toBe('Knowledge Library')
+    expect(listbox?.getAttribute('aria-rowcount')).toBeTruthy()
+
+    // Note: Virtualized lists may not render actual option elements in test environment
+    // due to missing scroll container dimensions. This test validates the listbox
+    // container structure exists and has proper ARIA attributes when data is present.
+    // Actual option rendering is validated through integration/E2E tests.
   })
 
   it('should have accessible form controls in filters', async () => {
