@@ -20,7 +20,8 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test": "vitest",
     "test:ui": "vitest --ui",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "test:performance": "vitest run src/__tests__/performance"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",
