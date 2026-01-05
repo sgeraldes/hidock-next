@@ -407,9 +407,50 @@ export function OperationController() {
     })
 
     // Subscribe to connection status changes
-    const unsubStatusChange = deviceService.onStatusChange((status) => {
+    const unsubStatusChange = deviceService.onStatusChange(async (status) => {
       if (DEBUG) console.log('[OperationController] Connection status changed:', status)
       setConnectionStatus(status)
+
+      // AUTO-SYNC TRIGGER: Only when status becomes 'ready'
+      if (status.step !== 'ready') return
+      if (autoSyncTriggeredRef.current) return
+
+      // Verify all preconditions (this also checks config is loaded)
+      const { allowed, reason } = checkAutoSyncAllowed()
+      if (!allowed) {
+        if (DEBUG) console.log(`[OperationController] Auto-sync skipped on ready: ${reason}`)
+        return
+      }
+
+      // Trigger auto-sync
+      autoSyncTriggeredRef.current = true
+      if (DEBUG) console.log('[OperationController] Auto-sync triggered on device ready')
+
+      const recordings = deviceService.getCachedRecordings()
+      if (recordings.length > 0) {
+        const syncedFilenames = await window.electronAPI.syncedFiles.getFilenames()
+        const syncedSet = new Set(syncedFilenames)
+        const toSync = recordings.filter(rec => !syncedSet.has(rec.filename))
+        if (toSync.length > 0) {
+          if (DEBUG) console.log(`[QA-MONITOR][Operation] Auto-sync on ready: ${toSync.length} files to download`)
+          deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
+
+          // Queue files for download (with recording dates for proper date preservation)
+          const filesToQueue = toSync.map(rec => ({
+            filename: rec.filename,
+            size: rec.size,
+            dateCreated: rec.dateCreated?.toISOString()
+          }))
+          await window.electronAPI.downloadService.startSession(filesToQueue)
+          setDeviceSyncState({
+            deviceSyncing: true,
+            deviceSyncProgress: { total: toSync.length, current: 0 },
+            deviceFileDownloading: toSync[0]?.filename ?? null
+          })
+        } else {
+          deviceService.log('success', 'All files synced', 'No new recordings to download')
+        }
+      }
     })
 
     // Subscribe to activity log (for error reporting and debugging)
@@ -464,62 +505,64 @@ export function OperationController() {
     const checkInitialAutoSync = async () => {
       if (!isElectron) return
 
-      // Wait for device initialization to complete (may take a few seconds)
-      // Check every 500ms for up to 30 seconds
-      for (let i = 0; i < 60; i++) {
-        if (!deviceService.isConnected()) {
-          // Device not connected, no auto-sync needed
-          return
-        }
-        if (deviceService.isInitialized()) {
-          break
-        }
-        await new Promise(resolve => setTimeout(resolve, 500))
+      // CRITICAL: Wait for config to load first - never use defaults
+      const configLoaded = await waitForConfig(10000)
+      if (!configLoaded) {
+        if (DEBUG) console.log('[OperationController] Config load timeout, skipping auto-sync')
+        return
       }
 
-      // If device is connected and initialized, and auto-sync hasn't been triggered
-      if (deviceService.isConnected() && deviceService.isInitialized() && !autoSyncTriggeredRef.current) {
-        try {
-          const appConfig = await window.electronAPI.config.get()
-          const shouldAutoDownload = appConfig?.device?.autoDownload ?? true
-          if (shouldAutoDownload) {
-            if (DEBUG) console.log('[OperationController] Initial auto-sync check (device pre-connected)')
-            const recordings = deviceService.getCachedRecordings()
-            if (recordings.length > 0) {
-              const syncedFilenames = await window.electronAPI.syncedFiles.getFilenames()
-              const syncedSet = new Set(syncedFilenames)
-              const toSync = recordings.filter(rec => !syncedSet.has(rec.filename))
-              if (toSync.length > 0) {
-                autoSyncTriggeredRef.current = true
-                if (DEBUG) console.log(`[QA-MONITOR][Operation] Initial auto-sync: ${toSync.length} files to download`)
-                deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
+      // Wait for device to be fully ready (not just connected)
+      const deviceReady = await waitForDeviceReady(60000)
+      if (!deviceReady) {
+        if (DEBUG) console.log('[OperationController] Device not ready, skipping auto-sync')
+        return
+      }
 
-                // Queue files for download (with recording dates for proper date preservation)
-                const filesToQueue = toSync.map(rec => ({
-                  filename: rec.filename,
-                  size: rec.size,
-                  dateCreated: rec.dateCreated?.toISOString()
-                }))
-                await window.electronAPI.downloadService.startSession(filesToQueue)
-                setDeviceSyncState({
-                  deviceSyncing: true,
-                  deviceSyncProgress: { total: toSync.length, current: 0 },
-                  deviceFileDownloading: toSync[0]?.filename ?? null
-                })
-              } else {
-                autoSyncTriggeredRef.current = true
-                deviceService.log('success', 'All files synced', 'No new recordings to download')
-              }
-            }
-          }
-        } catch (e) {
-          console.error('[OperationController] Initial auto-sync check error:', e)
+      // Check all preconditions
+      const { allowed, reason } = checkAutoSyncAllowed()
+      if (!allowed) {
+        if (DEBUG) console.log(`[OperationController] Auto-sync skipped: ${reason}`)
+        deviceService.log('info', 'Auto-sync skipped', reason)
+        return
+      }
+
+      // Prevent duplicate triggers
+      if (autoSyncTriggeredRef.current) return
+
+      // All checks passed - proceed with auto-sync
+      autoSyncTriggeredRef.current = true
+      if (DEBUG) console.log('[OperationController] Initial auto-sync check (device pre-connected)')
+
+      const recordings = deviceService.getCachedRecordings()
+      if (recordings.length > 0) {
+        const syncedFilenames = await window.electronAPI.syncedFiles.getFilenames()
+        const syncedSet = new Set(syncedFilenames)
+        const toSync = recordings.filter(rec => !syncedSet.has(rec.filename))
+        if (toSync.length > 0) {
+          if (DEBUG) console.log(`[QA-MONITOR][Operation] Initial auto-sync: ${toSync.length} files to download`)
+          deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
+
+          // Queue files for download (with recording dates for proper date preservation)
+          const filesToQueue = toSync.map(rec => ({
+            filename: rec.filename,
+            size: rec.size,
+            dateCreated: rec.dateCreated?.toISOString()
+          }))
+          await window.electronAPI.downloadService.startSession(filesToQueue)
+          setDeviceSyncState({
+            deviceSyncing: true,
+            deviceSyncProgress: { total: toSync.length, current: 0 },
+            deviceFileDownloading: toSync[0]?.filename ?? null
+          })
+        } else {
+          deviceService.log('success', 'All files synced', 'No new recordings to download')
         }
       }
     }
     checkInitialAutoSync()
 
-    // Subscribe to device connection changes (for download resumption, auto-sync, and abort on disconnect)
+    // Subscribe to device connection changes (for download resumption and abort on disconnect)
     const unsubDevice = deviceService.onStateChange(async (deviceState) => {
       if (deviceState.connected && !isProcessingDownloads.current && isElectron) {
         // Check for pending downloads to resume
@@ -531,47 +574,8 @@ export function OperationController() {
           }
         })
 
-        // Trigger auto-sync if enabled and not yet triggered this session
-        // This handles the case where device is connected before app starts
-        if (!autoSyncTriggeredRef.current && deviceService.isInitialized()) {
-          try {
-            const appConfig = await window.electronAPI.config.get()
-            const shouldAutoDownload = appConfig?.device?.autoDownload ?? true
-            if (shouldAutoDownload) {
-              if (DEBUG) console.log('[OperationController] Checking for auto-sync (device was pre-connected)')
-              const recordings = deviceService.getCachedRecordings()
-              if (recordings.length > 0) {
-                const syncedFilenames = await window.electronAPI.syncedFiles.getFilenames()
-                const syncedSet = new Set(syncedFilenames)
-                const toSync = recordings.filter(rec => !syncedSet.has(rec.filename))
-                if (toSync.length > 0) {
-                  autoSyncTriggeredRef.current = true
-                  if (DEBUG) console.log(`[QA-MONITOR][Operation] Auto-sync: ${toSync.length} files to download`)
-                  deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
-
-                  // Queue files for download (with recording dates for proper date preservation)
-                  const filesToQueue = toSync.map(rec => ({
-                    filename: rec.filename,
-                    size: rec.size,
-                    dateCreated: rec.dateCreated?.toISOString()
-                  }))
-                  await window.electronAPI.downloadService.startSession(filesToQueue)
-                  setDeviceSyncState({
-                    deviceSyncing: true,
-                    deviceSyncProgress: { total: toSync.length, current: 0 },
-                    deviceFileDownloading: toSync[0]?.filename ?? null
-                  })
-                  // Downloads will be processed by the download queue handler
-                } else {
-                  autoSyncTriggeredRef.current = true
-                  deviceService.log('success', 'All files synced', 'No new recordings to download')
-                }
-              }
-            }
-          } catch (e) {
-            console.error('[OperationController] Auto-sync check error:', e)
-          }
-        }
+        // AUTO-SYNC: Device connected - DON'T trigger here
+        // Auto-sync is now triggered by status reaching 'ready' state (see status change handler)
       } else if (!deviceState.connected) {
         // Device disconnected - abort downloads if processing
         if (isProcessingDownloads.current) {
