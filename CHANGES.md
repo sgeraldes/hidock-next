@@ -1,345 +1,123 @@
-# TODO-017: Fix Actionables Context Integration - Changes Summary
+# TODO-018: AI Title & Question Generation During Transcription
 
-## Overview
-Fixed the Actionables page to receive navigation state from Library and auto-trigger output generation when navigated with `action: 'generate'`.
+## Summary
 
-## Updates - Code Review Fixes (2026-01-05)
+Enhanced the transcription pipeline to automatically generate:
+1. A brief title suggestion (3-8 words) for each recording
+2. 4-5 context-aware, specific questions for the AssistantPanel
 
-### Critical Fixes Applied
-
-#### 1. Fixed Missing handleAutoGenerate in useEffect Dependencies
-**Severity:** CRITICAL (Confidence: 95%)
-
-**Problem:** The handleAutoGenerate function referenced generationHistory state but wasn't in the dependency array, causing stale closure issues.
-
-**Solution:**
-- Wrapped handleAutoGenerate in useCallback with generationHistory as dependency
-- Added handleAutoGenerate to useEffect dependencies
-- Prevents stale closures and ensures rate limiting uses current state
-
-**Changes:**
-```typescript
-// Before: Regular function
-const handleAutoGenerate = async (sourceId: string) => { ... }
-
-// After: Memoized with useCallback
-const handleAutoGenerate = useCallback(async (sourceId: string) => {
-  // ... implementation
-}, [generationHistory])
-
-// Updated useEffect to include handleAutoGenerate
-useEffect(() => {
-  // ... code
-}, [location.state, handleAutoGenerate])
-```
-
-#### 2. Fixed Rate Limiting Stale State Issue
-**Severity:** CRITICAL (Confidence: 92%)
-
-**Problem:** Rate limiting used closure-captured value instead of functional update when adding to history.
-
-**Solution:**
-- Changed from `setGenerationHistory([...generationHistory, now])` to functional update
-- Added automatic cleanup of old entries (older than 60 seconds)
-- Prevents memory leak and ensures accurate rate limiting
-
-**Changes:**
-```typescript
-// Before: Uses stale closure
-setGenerationHistory([...generationHistory, now])
-
-// After: Functional update with cleanup
-setGenerationHistory(prev => [...prev.filter(t => now - t < 60000), now])
-```
-
-#### 3. Implemented ReactMarkdown for Output Display
-**Severity:** IMPORTANT (Confidence: 88%)
-
-**Problem:** Generated output was rendered as plain text instead of formatted Markdown.
-
-**Solution:**
-- Installed react-markdown package
-- Replaced `<pre>` tag with ReactMarkdown component
-- Added dark mode support with prose-invert class
-
-**Changes:**
-```typescript
-// Before: Plain text display
-<pre className="whitespace-pre-wrap text-sm font-mono">
-  {generatedOutput?.content || ''}
-</pre>
-
-// After: Markdown rendering
-<ReactMarkdown>{generatedOutput?.content || ''}</ReactMarkdown>
-```
-
-**Package Added:**
-- `react-markdown` (installed via npm)
-
-#### 4. Fixed Rate Limit History Memory Leak
-**Severity:** MEDIUM (Confidence: 82%)
-
-**Problem:** Old generation timestamps were never cleaned up, causing memory leak.
-
-**Solution:** Fixed by issue #2 - the functional update now filters out old entries automatically.
-
-### Additional Improvements
-
-1. **Import Updates:**
-   - Added `useCallback` to React imports
-   - Added `ReactMarkdown` import from 'react-markdown'
-
-2. **CSS Improvements:**
-   - Added `dark:prose-invert` for dark mode support
-   - Uses Tailwind Typography classes for proper Markdown rendering
-
-### Testing Checklist
-
-- [ ] Verify rate limiting works correctly (no stale state)
-- [ ] Verify handleAutoGenerate triggers only once per navigation
-- [ ] Verify Markdown content renders with proper formatting
-- [ ] Verify dark mode displays Markdown correctly
-- [ ] Verify no memory leaks with repeated generations
-- [ ] Verify error handling still works
-- [ ] Verify copy to clipboard works with Markdown content
-
-### Files Modified
-
-1. `apps/electron/src/pages/Actionables.tsx`
-   - Added useCallback import
-   - Added ReactMarkdown import
-   - Wrapped handleAutoGenerate in useCallback
-   - Fixed rate limiting with functional state update
-   - Replaced plain text display with ReactMarkdown
-   - Added handleAutoGenerate to useEffect dependencies
-
-2. `apps/electron/package.json`
-   - Added react-markdown dependency
-
-## Problem Statement
-The Actionables page was not reading navigation state passed from the Library page. When a user clicked "Generate Meeting Minutes" in Library, they were navigated to Actionables but the generation was not triggered automatically.
-
-**Root Cause:**
-- No `useLocation` import from react-router-dom in Actionables.tsx
-- Navigation state with `sourceId` and `action` was completely ignored
-- Page showed all actionables instead of generating output for the specific recording
+This feature provides users with better recording organization and more relevant AI assistant suggestions based on the actual content of their recordings.
 
 ## Changes Made
 
-### File: `apps/electron/src/pages/Actionables.tsx`
+### Database Layer
 
-#### 1. Added Imports
-- `useLocation` from react-router-dom for accessing navigation state
-- `Loader2`, `AlertCircle`, `Copy` icons from lucide-react
-- Dialog components from `@/components/ui/dialog`:
-  - `Dialog`
-  - `DialogContent`
-  - `DialogDescription`
-  - `DialogFooter`
-  - `DialogHeader`
-  - `DialogTitle`
+**File: `apps/electron/electron/main/services/database.ts`**
+- Bumped schema version from 15 to 16
+- Added migration v16 to add `title_suggestion` and `question_suggestions` columns to `transcripts` table
+- Updated `SCHEMA` to include new columns in the transcripts table definition
+- Updated `insertTranscript` function to support the new fields
+- Added `updateKnowledgeCaptureTitle` function to auto-update recording titles when they match filename patterns
 
-#### 2. Added State Variables
-```typescript
-const location = useLocation()
-const [generating, setGenerating] = useState(false)
-const [generatedOutput, setGeneratedOutput] = useState<{
-  content: string
-  templateId: string
-  generatedAt: string
-} | null>(null)
-const [generationError, setGenerationError] = useState<string | null>(null)
-const [showOutputModal, setShowOutputModal] = useState(false)
-const [generationHistory, setGenerationHistory] = useState<number[]>([])
-```
+**File: `apps/electron/electron/main/types/database.ts`**
+- Updated `Transcript` interface to include:
+  - `title_suggestion: string | null` - AI-generated title (3-8 words)
+  - `question_suggestions: string | null` - JSON string array of 4-5 context-aware questions
 
-#### 3. Implemented Rate Limiting
-- Tracks generation timestamps in `generationHistory` state
-- Limits to maximum 3 generations per minute
-- Shows error message if rate limit exceeded
+### Transcription Service
 
-#### 4. Added `handleAutoGenerate` Function
-```typescript
-const handleAutoGenerate = async (sourceId: string) => {
-  // Check rate limiting (max 3/minute)
-  const now = Date.now()
-  const recentGenerations = generationHistory.filter(t => now - t < 60000)
-  if (recentGenerations.length >= 3) {
-    setGenerationError('Rate limit reached. Please wait a minute before generating again.')
-    return
-  }
+**File: `apps/electron/electron/main/services/transcription.ts`**
+- Enhanced analysis prompt to generate:
+  - Title suggestions (3-8 words that capture the essence of the recording)
+  - Question suggestions (4-5 specific, context-aware questions)
+- Updated analysis type definition to include new fields
+- Modified transcript creation to save `title_suggestion` and `question_suggestions`
+- Added logic to auto-update `knowledge_captures.title` if:
+  - A title suggestion exists
+  - Current title looks like a filename (contains `.` or equals "Untitled")
+- Imported `updateKnowledgeCaptureTitle` function
 
-  setGenerating(true)
-  setGenerationError(null)
+### UI Components
 
-  try {
-    const result = await window.electronAPI.outputs.generate({
-      templateId: 'meeting_minutes',
-      knowledgeCaptureId: sourceId
-    })
+**File: `apps/electron/src/features/library/components/AssistantPanel.tsx`**
+- Added `transcript` prop with type `{ question_suggestions?: string | null } | null`
+- Implemented dynamic question parsing:
+  - Parses `question_suggestions` JSON from transcript
+  - Falls back to default questions if parsing fails or no suggestions exist
+  - Default questions: "What were the key topics discussed?", "What action items were mentioned?", "Summarize the main decisions made"
+- Updated suggested questions UI to map through dynamic questions array
 
-    if (result.success) {
-      setGeneratedOutput(result.data)
-      setShowOutputModal(true)
-      setGenerationHistory([...generationHistory, now])
-    } else {
-      setGenerationError(result.error.message || 'Failed to generate output')
-    }
-  } catch (error: any) {
-    setGenerationError(error.message || 'Failed to generate output')
-    console.error('Output generation failed:', error)
-  } finally {
-    setGenerating(false)
-  }
-}
-```
+**File: `apps/electron/src/pages/Library.tsx`**
+- Passed `selectedTranscript` to `AssistantPanel` component
+- Enables dynamic question suggestions based on transcript content
 
-#### 5. Added `copyToClipboard` Helper
-```typescript
-const copyToClipboard = async (text?: string) => {
-  if (!text) return
-  try {
-    const result = await window.electronAPI.outputs.copyToClipboard(text)
-    if (result.success) {
-      console.log('Copied to clipboard')
-    } else {
-      console.error('Failed to copy:', result.error.message)
-    }
-  } catch (error) {
-    console.error('Failed to copy to clipboard:', error)
-  }
-}
-```
+## Acceptance Criteria Status
 
-#### 6. Added Location State Handling useEffect
-```typescript
-useEffect(() => {
-  const state = location.state as {
-    sourceId?: string
-    action?: 'generate'
-  } | null
+- ✅ Transcription generates title_suggestion
+- ✅ Transcription generates 4-5 question_suggestions
+- ✅ Recording title auto-populated if not set (via `updateKnowledgeCaptureTitle`)
+- ✅ AssistantPanel shows dynamic questions
+- ✅ Fallback to defaults if suggestions unavailable
+- ✅ Existing transcripts continue to work (backwards compatible - nullable fields)
 
-  if (state?.sourceId && state?.action === 'generate') {
-    handleAutoGenerate(state.sourceId)
-  }
-}, [location.state])
-```
+## Implementation Details
 
-#### 7. Added UI Components
+### Title Generation
+- AI generates 3-8 word descriptive titles during transcription analysis
+- Titles are designed to capture the essence of the recording
+- Stored in `transcripts.title_suggestion` as TEXT (nullable)
+- Auto-updates `knowledge_captures.title` only if current title matches filename pattern
 
-##### Error Banner (Fixed Top)
-- Displays error messages with dismiss button
-- Shows at top of page with destructive styling
-- Dismissible by user
+### Question Generation
+- AI generates 4-5 specific, context-aware questions
+- Questions are designed to be actionable and specific (e.g., "What was decided about the Q3 marketing budget?")
+- Generic questions are avoided (e.g., "What was discussed?" or "Tell me more")
+- Stored as JSON array in `transcripts.question_suggestions` (nullable)
+- Parsed and displayed in AssistantPanel with graceful fallback
 
-##### Loading Overlay
-- Full-screen backdrop with blur effect
-- Centered card with spinner animation
-- Shows "Generating Meeting Minutes" message
-
-##### Output Modal
-- Uses Dialog component from shadcn/ui
-- Displays generated content in formatted pre block
-- Shows template ID in description
-- Copy to Clipboard button
-- Close button to dismiss modal
-
-## User Flow
-
-1. User navigates to Library page
-2. User selects a recording and clicks "Generate Meeting Minutes"
-3. Navigation to `/actionables` occurs with state: `{ sourceId: recording.knowledgeCaptureId, action: 'generate' }`
-4. Actionables page mounts and useEffect detects the state
-5. `handleAutoGenerate(sourceId)` is called automatically
-6. Rate limiting is checked (max 3/minute)
-7. Loading overlay displays with spinner
-8. Output generation request is sent to backend
-9. On success:
-   - Generated output is stored in state
-   - Output modal opens with content
-   - User can copy to clipboard or close
-10. On error:
-   - Error banner displays at top
-   - User can dismiss the error
-
-## Acceptance Criteria - Status
-
-- [x] Navigation with `action: 'generate'` triggers generation
-- [x] Loading state shown during generation
-- [x] Generated output displayed in modal
-- [x] Copy to clipboard works
-- [x] Error handling with dismiss option
-- [x] Rate limiting (max 3/minute)
-- [x] Rate limit message shown if exceeded
-- [x] Can close modal and continue using page
-
-## Technical Notes
-
-### Type Safety
-- Used proper TypeScript types for location state
-- Leveraged `Result<T>` pattern from API for error handling
-- Typed generatedOutput with explicit interface matching API response
-
-### Error Handling
-- Rate limiting prevents API abuse
-- User-friendly error messages
-- Dismissible error banner
-- Console logging for debugging
-
-### UX Improvements
-- Loading overlay prevents interaction during generation
-- Modal prevents losing generated content
-- Copy functionality for easy sharing
-- Clear visual feedback for all states
+### Backwards Compatibility
+- New columns are nullable, so existing transcripts work without issues
+- Migration v16 runs automatically on first app launch after update
+- AssistantPanel gracefully handles missing or invalid `question_suggestions`
+- Default questions are shown if no AI-generated questions are available
 
 ## Testing Recommendations
 
-1. **Happy Path:**
-   - Navigate from Library with valid recording
-   - Verify generation triggers automatically
-   - Verify modal displays with content
-   - Test copy to clipboard
+1. **New Transcriptions**: Transcribe a new recording and verify:
+   - Title suggestion is generated and saved
+   - Question suggestions are generated (4-5 questions)
+   - Recording title is auto-updated if it was filename-based
+   - AssistantPanel shows the AI-generated questions
 
-2. **Rate Limiting:**
-   - Trigger 3 generations in quick succession
-   - Verify 4th attempt shows rate limit error
-   - Wait 60 seconds and verify generation works again
+2. **Existing Transcripts**: Open a recording transcribed before this update:
+   - Verify no errors occur
+   - Confirm default questions are shown in AssistantPanel
+   - Ensure all other transcript data displays correctly
 
-3. **Error Handling:**
-   - Test with invalid sourceId
-   - Verify error banner appears
-   - Verify error can be dismissed
+3. **Edge Cases**:
+   - Transcription with empty/invalid question_suggestions JSON
+   - Recording with custom title (should not be overwritten)
+   - Recording with filename-based title (should be updated)
 
-4. **Modal Interaction:**
-   - Test closing modal
-   - Test copy button
-   - Verify page remains functional after closing
+## Files Modified
 
-## Files Changed
+1. `apps/electron/electron/main/services/database.ts`
+2. `apps/electron/electron/main/types/database.ts`
+3. `apps/electron/electron/main/services/transcription.ts`
+4. `apps/electron/src/features/library/components/AssistantPanel.tsx`
+5. `apps/electron/src/pages/Library.tsx`
 
-1. `apps/electron/src/pages/Actionables.tsx` - Added full context integration
+## Commits
 
-## Commit
+1. `92eb310c` - feat(transcription): add database migration for AI title and question suggestions
+2. `b9533109` - feat(types): update Transcript interface with AI title and question fields
+3. `805c0929` - feat(transcription): generate AI title and question suggestions during analysis
+4. `47340352` - feat(ui): use dynamic AI-generated questions in AssistantPanel
+5. `0fda9b37` - feat(ui): pass transcript to AssistantPanel in Library
 
-```
-feat(actionables): add context integration for auto-generation
+## Notes
 
-- Import useLocation from react-router-dom
-- Add generation state (generating, generatedOutput, generationError, showOutputModal)
-- Implement rate limiting (max 3 generations/minute)
-- Add handleAutoGenerate function to trigger output generation
-- Add useEffect to extract sourceId and action from location.state
-- Auto-trigger generation when navigated from Library with action: 'generate'
-- Add loading overlay with spinner during generation
-- Add error banner with dismiss button for error handling
-- Add output modal with copy-to-clipboard functionality
-- Import Dialog components from @/components/ui/dialog
-```
-
-## Next Steps
-
-1. Test the implementation in the running application
-2. Verify Library → Actionables navigation flow
-3. Test edge cases (network errors, invalid IDs, rate limiting)
-4. Consider adding toast notifications for copy success
-5. Consider adding analytics tracking for generation events
+- The implementation follows the existing pattern in the codebase for JSON storage of arrays
+- Error handling is in place for JSON parsing failures
+- The feature degrades gracefully when AI doesn't generate suggestions
+- Migration uses the same pattern as previous schema updates (v11-v15)
