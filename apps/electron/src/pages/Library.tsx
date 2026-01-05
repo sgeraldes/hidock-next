@@ -39,6 +39,7 @@ export function Library() {
   // Centralized audio controls (persists across navigation)
   const audioControls = useAudioControls()
   const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
+  const playbackCurrentTime = useUIStore((state) => state.playbackCurrentTime)
 
   // Get download queue from app store to check download status
   const { downloadQueue, isDownloading } = useAppStore()
@@ -838,16 +839,17 @@ export function Library() {
               recording={selectedRecording ?? null}
               transcript={selectedTranscript}
               isPlaying={selectedRecording ? currentlyPlayingId === selectedRecording.id : false}
-              currentTimeMs={0}
+              currentTimeMs={playbackCurrentTime * 1000}
               onPlay={() => {
                 if (selectedRecording && hasLocalPath(selectedRecording)) {
                   handlePlayCallback(selectedRecording.id, selectedRecording.localPath)
                 }
               }}
               onStop={handleStopCallback}
-              onSeek={(startMs, endMs) => {
-                // TODO: Implement seek functionality
-                console.log('Seek to:', startMs, endMs)
+              onSeek={(startMs) => {
+                if (selectedRecording && hasLocalPath(selectedRecording)) {
+                  audioControls.seek(startMs / 1000)
+                }
               }}
             />
           }
