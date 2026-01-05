@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { RefreshCw, AlertCircle } from 'lucide-react'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
@@ -30,6 +30,7 @@ import { useLibraryStore } from '@/store/useLibraryStore'
 
 export function Library() {
   const navigate = useNavigate()
+  const location = useLocation()
   const { recordings, loading, error, refresh, deviceConnected, stats } = useUnifiedRecordings()
 
   // Selected source for center panel
@@ -103,6 +104,20 @@ export function Library() {
 
   // Accessibility announcements
   const { message: announcement, announce } = useAnnouncement()
+
+  // Handle navigation state for incoming selectedId
+  useEffect(() => {
+    const state = location.state as { selectedId?: string } | null
+    if (state?.selectedId) {
+      // Find the recording with this ID
+      const recording = recordings.find((r) => r.id === state.selectedId)
+      if (recording) {
+        setSelectedSourceId(recording.id)
+        // Clear the navigation state to prevent re-triggering on refresh
+        navigate(location.pathname, { replace: true, state: {} })
+      }
+    }
+  }, [location.state, recordings, setSelectedSourceId, navigate, location.pathname])
 
   // Device disconnect handling
   const [wasConnected, setWasConnected] = useState(deviceConnected)
