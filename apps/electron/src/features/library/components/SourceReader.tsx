@@ -12,7 +12,7 @@
 import { useState } from 'react'
 import { TranscriptViewer } from './TranscriptViewer'
 import { UnifiedRecording, hasLocalPath } from '@/types/unified-recording'
-import { Transcript } from '@/types'
+import { Transcript, parseJsonArray } from '@/types'
 import { Play, Pause, Volume2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
@@ -130,7 +130,7 @@ export function SourceReader({
             showSummary={true}
             showActionItems={true}
             summary={transcript.summary}
-            actionItems={transcript.action_items ? JSON.parse(transcript.action_items) : undefined}
+            actionItems={parseJsonArray<string>(transcript.action_items)}
           />
         ) : recording.transcriptionStatus === 'complete' ? (
           <div className="text-center text-muted-foreground py-8">
