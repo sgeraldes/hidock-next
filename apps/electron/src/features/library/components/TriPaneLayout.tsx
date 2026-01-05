@@ -31,7 +31,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
       {/* Left Panel: Recording List */}
       <ResizablePanel
         defaultSize={panelSizes[0] ?? 25}
-        minSize={15}
+        minSize={20}
         maxSize={35}
         id="left-panel"
       >
