@@ -18,9 +18,9 @@
 
 ---
 
-## Execution Order (FINAL)
+## Execution Order (FINAL - Updated 2026-01-05)
 
-**Phase 1: Foundation (Sequential - BLOCKING)**
+**Phase 1: Foundation (Sequential - BLOCKING)** ✅ COMPLETE
 ```
 TODO-002 → TODO-001 → TODO-003 → TODO-004-migrate
 (Note: TODO-003 creates useLibraryFilterManager hook)
@@ -31,29 +31,52 @@ TODO-002 → TODO-001 → TODO-003 → TODO-004-migrate
 TODO-012 || TODO-013 (Accessibility + Performance baseline)
 ```
 
-**Phases 3-7: Feature Implementation**
+**Phases 3-7: Feature Implementation (CORRECTED AFTER ARCHITECTURE REVIEW)**
 ```
-TODO-007 → TODO-004 → (TODO-005 || TODO-006) (Phase 3-4: Error & Bulk)
-TODO-008 || TODO-009 (Phase 6: Performance - can parallelize)
-TODO-010 → TODO-011 (Phase 7: Detail Drawer - sequential)
+Phase 3-4: Error & Bulk Operations
+  TODO-007 (AbortController - FOUNDATION, creates useBulkOperation hook)
+    ├── TODO-004 (Error Handling - uses parseError, integrates with components)
+    │     └── TODO-005 (BulkProgressModal - uses useBulkOperation + LibraryError)
+    │           └── TODO-006 (BulkResultSummary - receives BulkOperationResult)
+    └── TODO-009 (Enrichment Batching - uses AbortSignal for cancellation)
+
+Phase 6: Performance
+  TODO-008 (useTransition - INDEPENDENT, can parallelize with TODO-005/006)
+
+Phase 7: Detail Drawer (Sequential)
+  TODO-010 → TODO-011 (TimeAnchor → TranscriptViewer)
 ```
+
+**Corrected Dependency Graph (from Architecture Review):**
+- TODO-007 is now FOUNDATION (upgraded priority to HIGH)
+- TODO-009 depends on TODO-007 (needs AbortSignal)
+- TODO-005/006 both depend on TODO-004 AND TODO-007
+- TODO-008 is independent (can run in parallel)
 
 ---
 
 ## Phase 1: Foundation
 
+**Status: COMPLETE** ✅
+
 | # | Todo | Priority | Status | Description |
 |---|------|----------|--------|-------------|
-| 1 | [TODO-002](todo-002-update-recordings-tests.md) | HIGH | PENDING | Update tests from Recordings to Library |
-| 2 | [TODO-001](todo-001-delete-recordings-tsx.md) | HIGH | PENDING | Delete legacy Recordings.tsx |
-| 3 | [TODO-003](todo-003-create-useLibraryFilters-hook.md) | MEDIUM | PENDING | Create useLibraryFilterManager hook |
-| 4 | [TODO-004-migrate](todo-004-migrate-filter-state.md) | HIGH | PENDING | Migrate Library.tsx to store filters |
+| 1 | [TODO-002](todo-002-update-recordings-tests.md) | HIGH | ✅ DONE | Update tests from Recordings to Library |
+| 2 | [TODO-001](todo-001-delete-recordings-tsx.md) | HIGH | ✅ DONE | Delete legacy Recordings.tsx |
+| 3 | [TODO-003](todo-003-create-useLibraryFilters-hook.md) | MEDIUM | ✅ DONE | Create useLibraryFilterManager hook |
+| 4 | [TODO-004-migrate](todo-004-migrate-filter-state.md) | HIGH | ✅ DONE | Migrate Library.tsx to store filters |
 
 **Success Criteria:**
-- [ ] All existing functionality preserved
-- [ ] No visual regressions
-- [ ] Tests pass
-- [ ] Filter state persists during navigation
+- [x] All existing functionality preserved
+- [x] No visual regressions
+- [x] Tests pass
+- [x] Filter state persists during navigation
+
+**Commits:**
+- `a161fb94` test(library): rename and update tests
+- `8d4569f4` chore(library): delete legacy Recordings.tsx
+- `4603b05d` feat(library): add useLibraryFilterManager hook
+- `d5117f66` feat(library): migrate filter state to store
 
 ---
 
@@ -143,16 +166,18 @@ All Phase 5 components already implemented:
 
 | Phase | Status | Completion | Notes |
 |-------|--------|------------|-------|
-| Phase 1 | In Progress | 80% | 4 TODOs remaining |
-| Phase 2 | NEW | 0% | Validation (TODO-012, TODO-013) |
-| Phase 3 | Planned | 0% | TODO-004 has expanded checklist |
-| Phase 4 | Planned | 50% | BulkActionsBar exists |
-| Phase 5 | Pending Validation | 95% | Needs TODO-012 audit |
-| Phase 6 | Planned | 30% | React.memo, useDeferredValue exist |
-| Phase 7 | Planned | 60% | SourceDetailDrawer exists |
+| Phase 1 | ✅ COMPLETE | 100% | All 4 TODOs implemented |
+| Phase 2 | Pending | 0% | Validation (TODO-012, TODO-013) |
+| Phase 3 | Planning | 0% | Spec being created |
+| Phase 4 | Planning | 0% | Specs being created |
+| Phase 5 | ✅ COMPLETE | 100% | Already implemented |
+| Phase 6 | Planning | 0% | Specs being created |
+| Phase 7 | Planning | 0% | Specs being created |
 
 **Total TODOs**: 13 (TODO-001 through TODO-013)
-**Estimated Effort**: 22-25 hours with 2 parallel agents
+**Completed**: 4 (Phase 1)
+**Remaining**: 9
+**Current Stage**: Spec creation with ultrathink planning agents
 
 ---
 

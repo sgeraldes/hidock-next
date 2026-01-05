@@ -40,4 +40,49 @@ const enrichQueue = [
 - `apps/electron/src/pages/Library.tsx`
 
 ## Dependencies
-- None
+- TODO-007 (AbortController for cancelling enrichment when filter changes or navigation occurs)
+
+## Signal Integration with TODO-007
+
+Enrichment batching needs cancellation support for:
+1. **User navigates away** - Cancel pending enrichment queries
+2. **Filter changes** - Cancel current batch, re-prioritize for new visible set
+3. **Rapid scrolling** - Cancel off-screen enrichment, prioritize new visible range
+
+### Interface
+
+```typescript
+interface UseEnrichmentBatcherOptions {
+  visibleIds: string[]
+  allIds: string[]
+  batchSize?: number // default 100
+  signal?: AbortSignal // from parent component or useBulkOperation
+}
+
+interface EnrichmentState {
+  enrichedIds: Set<string>
+  pendingIds: Set<string>
+  isEnriching: boolean
+}
+
+function useEnrichmentBatcher(options: UseEnrichmentBatcherOptions): EnrichmentState
+```
+
+### Usage Pattern
+
+```typescript
+// In Library.tsx
+const abortController = useRef(new AbortController())
+
+// On filter change, cancel and restart enrichment
+useEffect(() => {
+  abortController.current.abort()
+  abortController.current = new AbortController()
+}, [filters])
+
+const enrichment = useEnrichmentBatcher({
+  visibleIds: virtualizer.getVirtualItems().map(v => recordings[v.index].id),
+  allIds: recordings.map(r => r.id),
+  signal: abortController.current.signal
+})
+```

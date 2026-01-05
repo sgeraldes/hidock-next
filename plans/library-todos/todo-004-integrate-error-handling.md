@@ -103,5 +103,87 @@ const handlePlayError = (error: Error, recording: UnifiedRecording) => {
 
 ---
 
+## Error State Architecture (CRITICAL - consumed by TODO-005, TODO-006)
+
+### Option A: Recording Error Map in LibraryStore (RECOMMENDED)
+
+```typescript
+// In apps/electron/src/store/useLibraryStore.ts
+
+import { LibraryError } from '@/features/library/utils/errorHandling'
+
+interface LibraryState {
+  // ... existing filter state from Phase 1 ...
+
+  // Error state (new)
+  recordingErrors: Map<string, LibraryError>
+
+  // Actions
+  setRecordingError: (id: string, error: LibraryError) => void
+  clearRecordingError: (id: string) => void
+  clearAllErrors: () => void
+}
+
+// Implementation
+setRecordingError: (id, error) => set(state => ({
+  recordingErrors: new Map(state.recordingErrors).set(id, error)
+})),
+clearRecordingError: (id) => set(state => {
+  const next = new Map(state.recordingErrors)
+  next.delete(id)
+  return { recordingErrors: next }
+}),
+clearAllErrors: () => set({ recordingErrors: new Map() })
+```
+
+### Why Option A over extending UnifiedRecording:
+
+1. **Separation of concerns** - Errors are UI state, not data model
+2. **Easier to clear** - Don't need to mutate recording objects
+3. **Testing** - Can mock error state independently
+4. **Performance** - Only re-renders components subscribed to error state
+
+### Usage in Components
+
+```typescript
+// In SourceRow.tsx
+const error = useLibraryStore(state => state.recordingErrors.get(recording.id))
+const showErrorBadge = !!error
+
+// In SourceCard.tsx
+const { recordingErrors, clearRecordingError } = useLibraryStore()
+const error = recordingErrors.get(recording.id)
+
+const handleRetry = () => {
+  clearRecordingError(recording.id)
+  onRetryDownload()
+}
+```
+
+### Integration with TODO-007 (useBulkOperation)
+
+The `onItemStatusChange` callback in useBulkOperation should update LibraryStore:
+
+```typescript
+// In Library.tsx
+const bulkOp = useBulkOperation({
+  // ...
+  onItemStatusChange: (id, status, error) => {
+    if (error) {
+      setRecordingError(id, error)
+    } else if (status === 'success') {
+      clearRecordingError(id)
+    }
+  }
+})
+```
+
+---
+
 ## Dependencies
 - None (utilities already exist)
+
+## Depended On By
+- TODO-005 (BulkProgressModal displays LibraryError from items)
+- TODO-006 (BulkResultSummary shows LibraryError with retryable flag)
+- TODO-007 (useBulkOperation uses parseError to create LibraryError)
