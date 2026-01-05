@@ -692,12 +692,14 @@ export function Chat() {
                         window.electronAPI.assistant.removeContext(activeConversation.id, id)
                       )
                     )
+                    // ONLY clear state after successful API calls
+                    setContextIds([])
+                    setContextItems([])
                   } catch (error) {
                     console.error('Failed to clear all context:', error)
+                    alert('Failed to clear all context. Please try again.')
                   }
                 }
-                setContextIds([])
-                setContextItems([])
               }}
               className="text-[10px] text-muted-foreground hover:text-foreground underline underline-offset-2 ml-auto"
             >
