@@ -8,35 +8,35 @@ export type KnowledgeCaptureStatus = 'processing' | 'ready' | 'enriched'
 export interface KnowledgeCapture {
   id: string
   title: string
-  summary?: string | null
-  category?: string | null
+  summary: string | null
+  category: string | null
 
   // Processing status (from spec)
-  status?: KnowledgeCaptureStatus
+  status: KnowledgeCaptureStatus | null
 
   // Quality assessment
   quality: QualityRating
-  qualityConfidence?: number | null
-  qualityAssessedAt?: string | null
+  qualityConfidence: number | null
+  qualityAssessedAt: string | null
 
   // Storage tier and retention
   storageTier: StorageTier
-  retentionDays?: number | null
-  expiresAt?: string | null
+  retentionDays: number | null
+  expiresAt: string | null
 
   // Meeting correlation
-  meetingId?: string | null
-  correlationConfidence?: number | null
-  correlationMethod?: string | null
+  meetingId: string | null
+  correlationConfidence: number | null
+  correlationMethod: string | null
 
   // Source tracking
-  sourceRecordingId?: string | null
+  sourceRecordingId: string | null
 
   // Timestamps
   capturedAt: string
-  createdAt?: string
-  updatedAt?: string
-  deletedAt?: string | null
+  createdAt: string | null
+  updatedAt: string | null
+  deletedAt: string | null
 }
 
 export interface AudioSource {
@@ -45,22 +45,22 @@ export interface AudioSource {
 
   // Source type and paths
   type: AudioSourceType
-  devicePath?: string | null
-  localPath?: string | null
-  cloudUrl?: string | null
+  devicePath: string | null
+  localPath: string | null
+  cloudUrl: string | null
 
   // File metadata
   filename: string
-  fileSize?: number | null
-  durationSeconds?: number | null
-  format?: string | null
+  fileSize: number | null
+  durationSeconds: number | null
+  format: string | null
 
   // Sync tracking
-  syncedFromDeviceAt?: string | null
-  uploadedToCloudAt?: string | null
+  syncedFromDeviceAt: string | null
+  uploadedToCloudAt: string | null
 
-  createdAt?: string
-  updatedAt?: string
+  createdAt: string | null
+  updatedAt: string | null
 }
 
 export interface ActionItem {
@@ -75,9 +75,9 @@ export interface ActionItem {
 
   content: string
 
-  assignee?: string | null
+  assignee: string | null
 
-  dueDate?: string | null
+  dueDate: string | null
 
 
 
@@ -91,15 +91,15 @@ export interface ActionItem {
 
   // Extraction metadata
 
-  extractedFrom?: string | null
+  extractedFrom: string | null
 
-  confidence?: number | null
+  confidence: number | null
 
 
 
   createdAt: string
 
-  updatedAt?: string
+  updatedAt: string | null
 
 }
 
@@ -109,7 +109,7 @@ export interface Conversation {
 
   id: string
 
-  title?: string
+  title: string | null
 
   contextIds: string[]
 
@@ -129,7 +129,7 @@ export interface Message {
 
 
 
-  conversationId?: string
+  conversationId: string | null
 
 
 
@@ -141,7 +141,7 @@ export interface Message {
 
 
 
-  sources?: string // JSON string of source info
+  sources: string | null // JSON string of source info
 
 
 
@@ -157,19 +157,19 @@ export interface Message {
 
 
 
-  editedAt?: string
+  editedAt: string | null
 
 
 
-  originalContent?: string
+  originalContent: string | null
 
 
 
-  createdOutputId?: string
+  createdOutputId: string | null
 
 
 
-  savedAsInsightId?: string
+  savedAsInsightId: string | null
 
 
 
@@ -213,7 +213,7 @@ export interface Person {
 
 
 
-  email?: string | null
+  email: string | null
 
 
 
@@ -229,7 +229,7 @@ export interface Person {
 
 
 
-  role?: string | null
+  role: string | null
 
 
 
@@ -237,7 +237,7 @@ export interface Person {
 
 
 
-  company?: string | null
+  company: string | null
 
 
 
@@ -245,7 +245,7 @@ export interface Person {
 
 
 
-  notes?: string | null
+  notes: string | null
 
 
 
@@ -413,7 +413,7 @@ export interface Project {
 
 
 
-  description?: string | null
+  description: string | null
 
 
 
@@ -637,7 +637,7 @@ export interface Actionable {
 
 
 
-  description?: string | null
+  description: string | null
 
 
 
@@ -669,7 +669,7 @@ export interface Actionable {
 
 
 
-  sourceActionItemId?: string | null
+  sourceActionItemId: string | null
 
 
 
@@ -685,7 +685,7 @@ export interface Actionable {
 
 
 
-  suggestedTemplate?: string | null
+  suggestedTemplate: string | null
 
 
 
@@ -733,7 +733,7 @@ export interface Actionable {
 
 
 
-  artifactId?: string | null
+  artifactId: string | null
 
 
 
@@ -749,7 +749,7 @@ export interface Actionable {
 
 
 
-  generatedAt?: string | null
+  generatedAt: string | null
 
 
 
@@ -765,7 +765,7 @@ export interface Actionable {
 
 
 
-  sharedAt?: string | null
+  sharedAt: string | null
 
 
 
