@@ -795,3 +795,173 @@ useEffect(() => {
 - Standard React Router patterns used throughout
 - Works with existing tri-pane layout without modifications
 - State cleanup prevents issues with browser navigation
+
+---
+
+# SPEC-004: Fix Null vs Undefined Inconsistency in Types
+
+## Summary
+
+Established consistent nullable type patterns across the codebase:
+- `| null` for database-backed fields (SQLite fields always exist, just may be null)
+- `?:` (optional undefined) for UI props and non-database types
+
+## Changes Made
+
+### 1. Core Type Definitions (`apps/electron/src/types/`)
+
+#### `index.ts`
+- **Meeting**: Converted 7 fields from `?: string | null` to `string | null`
+  - `location`, `organizer_name`, `organizer_email`, `attendees`, `description`, `recurrence_rule`, `meeting_url`
+
+- **Recording**: Converted 6 fields from `?: ... | null` to `... | null`
+  - `original_filename`, `file_size`, `duration_seconds`, `meeting_id`, `correlation_confidence`, `correlation_method`
+  - Added missing migration fields: `migration_status`, `migrated_to_capture_id`, `migrated_at`
+
+- **Transcript**: Converted 11 fields from `?: string | null` to `string | null`
+  - `summary`, `action_items`, `topics`, `key_points`, `sentiment`, `speakers`, `word_count`, `transcription_provider`, `transcription_model`, `title_suggestion`, `question_suggestions`
+
+- **QueueItem**: Converted 3 fields from `?: string` to `string | null`
+  - `error_message`, `started_at`, `completed_at`
+
+- **ChatMessage**: Converted `sources?: string` to `sources: string | null`
+
+#### `knowledge.ts`
+- **KnowledgeCapture**: Converted 13 fields to use `| null` pattern
+  - `summary`, `category`, `status`, `qualityConfidence`, `qualityAssessedAt`, `retentionDays`, `expiresAt`, `meetingId`, `correlationConfidence`, `correlationMethod`, `sourceRecordingId`, `createdAt`, `updatedAt`, `deletedAt`
+
+- **AudioSource**: Converted 10 fields to use `| null` pattern
+  - All path fields, metadata fields, and sync tracking fields
+
+- **ActionItem**: Converted 6 fields to use `| null` pattern
+  - `assignee`, `dueDate`, `extractedFrom`, `confidence`, `updatedAt`
+
+- **Conversation**: Converted `title?: string` to `title: string | null`
+
+- **Message**: Converted 6 fields to use `| null` pattern
+  - `conversationId`, `sources`, `editedAt`, `originalContent`, `createdOutputId`, `savedAsInsightId`
+
+- **Person**: Converted 4 fields to use `| null` pattern
+  - `email`, `role`, `company`, `notes`
+
+- **Project**: Converted `description?: string | null` to `description: string | null`
+
+- **Actionable**: Converted 4 fields to use `| null` pattern
+  - `sourceActionItemId`, `suggestedTemplate`, `artifactId`, `generatedAt`, `sharedAt`
+
+### 2. Implementation Fixes
+
+#### Database Layer
+- **`database.ts`**: Added migration fields to local Recording interface to match schema
+  - `migration_status`, `migrated_to_capture_id`, `migrated_at`
+
+#### IPC Handlers
+- **`assistant-handlers.ts`**: Updated Message mapper to include all required fields
+  - Added: `editedAt`, `originalContent`, `createdOutputId`, `savedAsInsightId`
+
+#### UI Components
+- **`SourceReader.tsx`**: Convert null to undefined with nullish coalescing (`??`)
+  - `transcript.summary ?? undefined`
+
+- **`SourceDetailDrawer.tsx`**: Updated local Transcript interface to match database type
+  - Changed from optional fields to `| null` pattern
+  - Added missing fields: `title_suggestion`, `question_suggestions`
+
+#### Hooks
+- **`useUnifiedRecordings.ts`**: Convert null to undefined for UI consumption
+  - `capture?.status ?? undefined`
+  - `capture?.summary ?? undefined`
+
+#### Pages
+- **`Calendar.tsx`**: Convert undefined to null for database consistency
+  - `recordingDurationSeconds ?? null`
+
+### 3. Test Updates
+
+- **`json-parsing.test.ts`**: Removed unused MeetingAttendee import
+- **`knowledge-types.test.ts`**: Updated test objects to include all required nullable fields
+  - KnowledgeCapture: Added 14 null fields
+  - AudioSource: Added 9 null fields
+  - ActionItem: Added 5 null fields
+
+## Pattern Established
+
+### Database Types (Always use `| null`)
+```typescript
+export interface DatabaseRecord {
+  id: string
+  required_field: string
+  nullable_field: string | null  // ✅ Correct: explicitly null
+  numeric_field: number | null   // ✅ Correct: explicitly null
+}
+```
+
+### UI Props (Use `?:` for optional)
+```typescript
+interface ComponentProps {
+  required: string
+  optional?: string  // ✅ Correct: undefined when not provided
+}
+```
+
+### Converting Between Patterns
+```typescript
+// Database (null) → UI (undefined)
+const uiValue = dbRecord.nullable_field ?? undefined
+
+// UI (undefined) → Database (null)
+const dbValue = uiProp ?? null
+```
+
+## Type Safety Improvements
+
+- **Before**: Mixed `?: T | null` patterns caused confusion and type errors
+- **After**: Clear distinction between database nullability and UI optionality
+- **Result**: TypeScript can now properly track which fields are truly optional vs just nullable
+
+## Commits
+
+1. **fix(types): standardize database type nullability - Meeting, Recording, Transcript, QueueItem, ChatMessage**
+   - Remove optional operator (?) from database-backed fields
+   - Use explicit '| null' for nullable database fields
+
+2. **fix(types): standardize database type nullability in knowledge.ts**
+   - Remove optional operator (?) from all database-backed fields
+   - Affected: KnowledgeCapture, AudioSource, ActionItem, Conversation, Message, Person, Project, Actionable
+
+3. **fix(types): add migration fields to Recording and fix type errors**
+   - Add migration_status, migrated_to_capture_id, migrated_at to Recording interface
+   - Fix Message mapper in assistant-handlers to include all required fields
+   - Remove unused imports and fix test objects
+
+4. **fix(database): add migration fields to local Recording interface**
+   - Makes database.ts Recording interface match types/index.ts
+   - Fixes TypeScript error in updateKnowledgeCaptureTitle function
+
+5. **fix(types): handle null to undefined conversions for UI components**
+   - SourceReader: Convert transcript.summary null to undefined with ??
+   - useUnifiedRecordings: Convert capture fields null to undefined
+   - Calendar: Convert recordingDurationSeconds undefined to null with ??
+   - SourceDetailDrawer: Update local Transcript interface to match database type
+
+## Verification
+
+All changes verified with:
+```bash
+npm run typecheck  # TypeScript compilation succeeds (after fixing remaining errors)
+```
+
+## Impact
+
+- **Files Modified**: 12
+- **Interfaces Updated**: 15
+- **Test Files Fixed**: 2
+- **Breaking Changes**: None (runtime behavior unchanged)
+- **Type Safety**: Significantly improved
+
+## Next Steps
+
+Going forward, all new database types should follow this pattern:
+1. SQLite fields → `field: Type | null` (never use `?:` with `| null`)
+2. UI props → `field?: Type` (optional undefined)
+3. Use `??` operator to convert between patterns at boundaries
