@@ -20,6 +20,7 @@ import { Sparkles, FileText, Lightbulb, AlertCircle } from 'lucide-react'
 
 interface AssistantPanelProps {
   recording: UnifiedRecording | null
+  transcript?: { question_suggestions?: string | null } | null
   onAskAssistant?: (recording: UnifiedRecording) => void
   onGenerateOutput?: (recording: UnifiedRecording) => void
 }
@@ -27,7 +28,7 @@ interface AssistantPanelProps {
 const MAX_QUERY_LENGTH = 500
 const MAX_QUERIES_PER_MINUTE = 10
 
-export function AssistantPanel({ recording, onAskAssistant, onGenerateOutput }: AssistantPanelProps) {
+export function AssistantPanel({ recording, transcript, onAskAssistant, onGenerateOutput }: AssistantPanelProps) {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
   const [queryCount, setQueryCount] = useState(0)
@@ -86,6 +87,26 @@ export function AssistantPanel({ recording, onAskAssistant, onGenerateOutput }: 
   const isRateLimited = queryCount >= MAX_QUERIES_PER_MINUTE
   const canQuery = recording && query.trim().length > 0 && !isRateLimited
 
+  // Parse dynamic questions from transcript, fallback to default questions
+  const suggestedQuestions = (() => {
+    if (transcript?.question_suggestions) {
+      try {
+        const parsed = JSON.parse(transcript.question_suggestions)
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed
+        }
+      } catch (e) {
+        console.warn('Failed to parse question_suggestions:', e)
+      }
+    }
+    // Fallback to default questions
+    return [
+      'What were the key topics discussed?',
+      'What action items were mentioned?',
+      'Summarize the main decisions made'
+    ]
+  })()
+
   return (
     <div className="flex flex-col h-full bg-background">
       {/* Header */}
@@ -134,24 +155,15 @@ export function AssistantPanel({ recording, onAskAssistant, onGenerateOutput }: 
             <div className="space-y-2">
               <h4 className="text-sm font-medium text-muted-foreground">Suggested Questions</h4>
               <div className="space-y-2 text-sm">
-                <button
-                  className="w-full text-left p-2 rounded hover:bg-muted transition-colors"
-                  onClick={() => setQuery('What were the key topics discussed?')}
-                >
-                  What were the key topics discussed?
-                </button>
-                <button
-                  className="w-full text-left p-2 rounded hover:bg-muted transition-colors"
-                  onClick={() => setQuery('What action items were mentioned?')}
-                >
-                  What action items were mentioned?
-                </button>
-                <button
-                  className="w-full text-left p-2 rounded hover:bg-muted transition-colors"
-                  onClick={() => setQuery('Summarize the main decisions made')}
-                >
-                  Summarize the main decisions made
-                </button>
+                {suggestedQuestions.map((question, index) => (
+                  <button
+                    key={index}
+                    className="w-full text-left p-2 rounded hover:bg-muted transition-colors"
+                    onClick={() => setQuery(question)}
+                  >
+                    {question}
+                  </button>
+                ))}
               </div>
             </div>
           </div>
