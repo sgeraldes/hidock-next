@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { parseJsonArray, parseAttendees } from '../index'
-import type { MeetingAttendee } from '../index'
 
 describe('parseJsonArray', () => {
   let consoleWarnSpy: ReturnType<typeof vi.spyOn>

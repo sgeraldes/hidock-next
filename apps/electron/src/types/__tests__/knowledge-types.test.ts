@@ -8,11 +8,23 @@ describe('Knowledge Domain Types', () => {
     const capture: KnowledgeCapture = {
       id: 'test-id',
       title: 'Test Capture',
-      capturedAt: new Date().toISOString(),
+      summary: null,
+      category: null,
       status: 'ready',
       quality: 'valuable',
+      qualityConfidence: null,
+      qualityAssessedAt: null,
       storageTier: 'hot',
-      sourceRecordingId: 'rec-123'
+      retentionDays: null,
+      expiresAt: null,
+      meetingId: null,
+      correlationConfidence: null,
+      correlationMethod: null,
+      sourceRecordingId: 'rec-123',
+      capturedAt: new Date().toISOString(),
+      createdAt: null,
+      updatedAt: null,
+      deletedAt: null
     }
 
     expect(capture.id).toBe('test-id')
@@ -24,8 +36,17 @@ describe('Knowledge Domain Types', () => {
       id: 'source-1',
       knowledgeCaptureId: 'test-id',
       type: 'device',
+      devicePath: null,
+      localPath: null,
+      cloudUrl: null,
       filename: 'rec.wav',
-      durationSeconds: 120
+      fileSize: null,
+      durationSeconds: 120,
+      format: null,
+      syncedFromDeviceAt: null,
+      uploadedToCloudAt: null,
+      createdAt: null,
+      updatedAt: null
     }
 
     expect(source.type).toBe('device')
@@ -37,9 +58,14 @@ describe('Knowledge Domain Types', () => {
       id: 'action-1',
       knowledgeCaptureId: 'test-id',
       content: 'Do something',
-      status: 'pending',
+      assignee: null,
+      dueDate: null,
       priority: 'medium',
-      createdAt: new Date().toISOString()
+      status: 'pending',
+      extractedFrom: null,
+      confidence: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: null
     }
 
     expect(action.content).toBe('Do something')

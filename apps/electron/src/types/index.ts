@@ -46,6 +46,10 @@ export interface Recording {
   correlation_method: string | null
   status: 'pending' | 'transcribing' | 'transcribed' | 'error'
   created_at: string
+  // Migration fields (for Phase 0 -> Phase 1 migration)
+  migration_status: 'pending' | 'migrated' | 'skipped' | 'error' | null
+  migrated_to_capture_id: string | null
+  migrated_at: string | null
 }
 
 export interface Transcript {

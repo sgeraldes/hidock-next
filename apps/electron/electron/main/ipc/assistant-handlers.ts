@@ -134,6 +134,10 @@ function mapToMessage(row: any): Message {
     role: row.role as 'user' | 'assistant',
     content: row.content,
     sources: row.sources,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    editedAt: row.edited_at || null,
+    originalContent: row.original_content || null,
+    createdOutputId: row.created_output_id || null,
+    savedAsInsightId: row.saved_as_insight_id || null
   }
 }
