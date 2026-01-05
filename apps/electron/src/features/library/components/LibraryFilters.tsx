@@ -41,7 +41,7 @@ export function LibraryFilters({
         {/* Location filter */}
         <div className="flex items-center gap-2">
           <Filter className="h-4 w-4 text-muted-foreground" />
-          <div className="flex rounded-lg border overflow-hidden">
+          <div className="flex rounded-lg border overflow-hidden" data-testid="location-filter">
             <button
               onClick={() => onLocationFilterChange('all')}
               className={`px-3 py-1.5 text-xs font-medium transition-colors ${

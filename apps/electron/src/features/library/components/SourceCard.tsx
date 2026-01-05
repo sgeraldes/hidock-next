@@ -84,7 +84,7 @@ export const SourceCard = memo(function SourceCard({
   }
 
   return (
-    <Card className={`${isSelected ? 'ring-2 ring-primary' : ''} cursor-pointer`} onClick={handleCardClick}>
+    <Card className={`${isSelected ? 'ring-2 ring-primary' : ''} cursor-pointer`} onClick={handleCardClick} data-testid="source-card">
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-3">

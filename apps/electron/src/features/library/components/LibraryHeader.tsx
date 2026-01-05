@@ -121,7 +121,7 @@ export function LibraryHeader({
           </Button>
 
           {/* View Toggle */}
-          <div className="flex items-center border rounded-md overflow-hidden ml-2">
+          <div className="flex items-center border rounded-md overflow-hidden ml-2" data-testid="grid-view-toggle">
             <Button
               variant={compactView ? 'ghost' : 'default'}
               size="sm"

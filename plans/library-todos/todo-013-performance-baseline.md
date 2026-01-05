@@ -25,24 +25,78 @@ Measure current Library performance to establish baseline before Phase 6 optimiz
 
 ## Implementation Steps
 
+### Step 0: Add data-testid Attributes to Components
+
+**Prerequisite**: Before performance tests can run, add `data-testid` attributes to Library components:
+
+```typescript
+// In apps/electron/src/pages/Library.tsx and related components
+<div data-testid="library-list">...</div>
+<button data-testid="location-filter">...</button>
+<button data-testid="grid-view-toggle">...</button>
+<div data-testid="source-card">...</div>
+```
+
+**Required test IDs**:
+- `library-list` - Main recording list container
+- `location-filter` - Location filter button/dropdown
+- `grid-view-toggle` - Grid/list view toggle button
+- `source-card` - Individual recording card in grid view
+
 ### Step 1: Create Mock Data Generator
 
 ```typescript
 // apps/electron/src/__tests__/performance/mockData.ts
 import { UnifiedRecording } from '@/types/unified-recording'
 
+/**
+ * Generate mock UnifiedRecording objects for performance testing.
+ * Creates a mix of device-only, local-only, and both-locations recordings.
+ */
 export function generateMockRecordings(count: number): UnifiedRecording[] {
-  return Array.from({ length: count }, (_, i) => ({
-    id: `mock-${i}`,
-    title: `Recording ${i + 1}`,
-    duration: Math.floor(Math.random() * 3600),
-    createdAt: new Date(Date.now() - i * 86400000).toISOString(),
-    status: 'local',
-    source: 'hidock',
-    category: ['meeting', 'note', 'memo'][i % 3],
-    quality: ['high', 'medium', 'low'][i % 3],
-    // ... other required fields
-  }))
+  return Array.from({ length: count }, (_, i) => {
+    const location = ['device-only', 'local-only', 'both'][i % 3] as const
+    const baseDate = new Date(Date.now() - i * 86400000)
+
+    // Base fields common to all recording types
+    const base = {
+      id: `mock-${i}`,
+      filename: `recording-${i + 1}.wav`,
+      size: 1024 * 1024 * (i % 50 + 1), // 1-50 MB
+      duration: Math.floor(Math.random() * 3600), // 0-3600 seconds
+      dateRecorded: baseDate,
+      transcriptionStatus: 'none' as const,
+      title: `Recording ${i + 1}`,
+      category: ['meeting', 'note', 'memo'][i % 3],
+      quality: ['high', 'medium', 'low'][i % 3] as 'high' | 'medium' | 'low',
+    }
+
+    // Return discriminated union based on location
+    if (location === 'device-only') {
+      return {
+        ...base,
+        location: 'device-only',
+        deviceFilename: `REC${String(i).padStart(4, '0')}.WAV`,
+        syncStatus: i % 2 === 0 ? 'not-synced' : 'syncing',
+      }
+    } else if (location === 'local-only') {
+      return {
+        ...base,
+        location: 'local-only',
+        localPath: `/path/to/recordings/${base.filename}`,
+        syncStatus: 'synced',
+        isImported: i % 10 === 0,
+      }
+    } else {
+      return {
+        ...base,
+        location: 'both',
+        deviceFilename: `REC${String(i).padStart(4, '0')}.WAV`,
+        localPath: `/path/to/recordings/${base.filename}`,
+        syncStatus: 'synced',
+      }
+    }
+  })
 }
 ```
 
@@ -50,9 +104,10 @@ export function generateMockRecordings(count: number): UnifiedRecording[] {
 
 ```typescript
 // apps/electron/src/__tests__/performance/library-performance.test.ts
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { Library } from '@/pages/Library'
 import { generateMockRecordings } from './mockData'
+import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 
 describe('Library Performance', () => {
   const testCases = [100, 1000, 5000]
@@ -62,7 +117,7 @@ describe('Library Performance', () => {
       const recordings = generateMockRecordings(count)
 
       // Mock the store/API to return our test data
-      vi.mocked(useRecordings).mockReturnValue({
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
         data: recordings,
         isLoading: false,
       })
@@ -86,10 +141,13 @@ describe('Library Performance', () => {
     })
   })
 
-  it('maintains 60fps during scroll with 5000 items', async () => {
+  // NOTE: Scroll FPS tests have limitations in jsdom
+  // jsdom doesn't trigger real browser rendering, so FPS measurements are synthetic
+  // For accurate scroll performance testing, use Playwright with real browser
+  it('measures scroll interaction timing (jsdom - limited)', async () => {
     const recordings = generateMockRecordings(5000)
 
-    vi.mocked(useRecordings).mockReturnValue({
+    vi.mocked(useUnifiedRecordings).mockReturnValue({
       data: recordings,
       isLoading: false,
     })
@@ -99,6 +157,8 @@ describe('Library Performance', () => {
     const list = screen.getByTestId('library-list')
 
     // Measure frame rate during scroll simulation
+    // NOTE: This is NOT real FPS - jsdom doesn't render pixels
+    // Use Playwright for real browser scroll testing
     const frames: number[] = []
     let lastTime = performance.now()
 
@@ -109,24 +169,25 @@ describe('Library Performance', () => {
       lastTime = now
     }
 
-    // Simulate scroll
+    // Simulate scroll events
     for (let i = 0; i < 100; i++) {
       list.scrollTop += 50
+      fireEvent.scroll(list)
       await new Promise(r => requestAnimationFrame(r))
       measureFrame()
     }
 
     const avgFps = frames.reduce((a, b) => a + b, 0) / frames.length
-    console.log(`Average scroll FPS: ${avgFps.toFixed(2)}`)
+    console.log(`Average simulated scroll FPS: ${avgFps.toFixed(2)} (jsdom - not real rendering)`)
 
-    // Should maintain at least 30fps (60fps is ideal)
-    expect(avgFps).toBeGreaterThan(30)
+    // This test provides timing data but not real FPS
+    // For production, implement Playwright scroll tests
   })
 
   it('applies filters within performance budget', async () => {
     const recordings = generateMockRecordings(1000)
 
-    vi.mocked(useRecordings).mockReturnValue({
+    vi.mocked(useUnifiedRecordings).mockReturnValue({
       data: recordings,
       isLoading: false,
     })
@@ -155,7 +216,7 @@ describe('Library Performance', () => {
   it('switches view modes within performance budget', async () => {
     const recordings = generateMockRecordings(1000)
 
-    vi.mocked(useRecordings).mockReturnValue({
+    vi.mocked(useUnifiedRecordings).mockReturnValue({
       data: recordings,
       isLoading: false,
     })
@@ -180,6 +241,12 @@ describe('Library Performance', () => {
   })
 })
 ```
+
+**Testing Limitation - Scroll FPS**:
+- jsdom (used by Vitest) doesn't perform real browser rendering
+- Cannot accurately measure scroll FPS in unit tests
+- Recommendation: Implement Playwright tests for real browser scroll performance measurement
+- The above test provides timing data but not true frame rates
 
 ### Step 3: Create Performance Report Template
 
@@ -269,6 +336,62 @@ npm run test:performance -- --reporter=json > performance-baseline.json
 ### CI Integration
 - [ ] Performance tests run on PR
 - [ ] Fail build if regression >20%
+- [ ] Baseline storage strategy implemented
+- [ ] Environment normalization configured
+
+**Baseline Storage Strategy**:
+1. **Initial Baseline Capture**
+   - Run performance tests on main branch
+   - Store baseline metrics in `docs/performance/baseline.json`
+   - Commit baseline to repository
+
+2. **Baseline Updates**
+   - Update baseline when intentional improvements are made
+   - Require manual review/approval for baseline changes
+   - Version baselines by date/commit hash
+
+3. **PR Comparison**
+   - Load baseline from `docs/performance/baseline.json`
+   - Compare PR metrics against baseline
+   - Fail if any metric regresses >20% from baseline
+   - Report percentage difference in CI output
+
+**Environment Normalization**:
+1. **CI Runner Consistency**
+   - Pin GitHub Actions runner type (e.g., ubuntu-latest with specific specs)
+   - Document runner CPU/RAM for baseline correlation
+
+2. **Resource Isolation**
+   - Run performance tests in isolated step (no parallel jobs)
+   - Clear caches/temp data before test run
+   - Disable CPU throttling if possible
+
+3. **Variance Handling**
+   - Run each test 3 times, take median value
+   - Allow ±10% variance for flaky network/disk I/O
+   - Flag >10% variance as unstable test
+
+4. **Baseline Format**
+   ```json
+   {
+     "version": "1.0.0",
+     "capturedAt": "2025-01-05T10:00:00Z",
+     "commit": "abc123",
+     "environment": {
+       "node": "20.x",
+       "runner": "ubuntu-latest",
+       "cpu": "2-core",
+       "ram": "7GB"
+     },
+     "metrics": {
+       "render_100": { "median": 45, "p95": 55 },
+       "render_1000": { "median": 95, "p95": 120 },
+       "render_5000": { "median": 180, "p95": 220 },
+       "filter_apply": { "median": 25, "p95": 40 },
+       "view_switch": { "median": 50, "p95": 70 }
+     }
+   }
+   ```
 
 ---
 

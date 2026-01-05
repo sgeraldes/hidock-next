@@ -682,6 +682,7 @@ export function Library() {
         className="flex-1 overflow-auto p-6"
         onKeyDown={handleKeyDown}
         tabIndex={0}
+        data-testid="library-list"
       >
         <div className={`max-w-4xl mx-auto transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
           {filteredRecordings.length === 0 ? (
