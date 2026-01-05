@@ -348,6 +348,10 @@ class HiDockDeviceService {
   disableAutoConnect(): void {
     this.autoConnectEnabled = false
     this.userInitiatedDisconnect = true
+    // CRITICAL: Update persistent config so setting survives app restart
+    this.autoConnectConfig.enabled = false
+    this.autoConnectConfig.connectOnStartup = false
+    this.saveAutoConnectConfig() // Persists to config.json
     this.stopAutoConnect()
     this.logActivity('info', 'Auto-connect disabled by user')
   }

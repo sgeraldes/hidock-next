@@ -357,6 +357,8 @@ export function Device() {
 
   const handleDisconnect = async () => {
     await deviceService.disconnect()
+    // Sync UI state after disconnect persists config
+    setAutoConnectConfig(deviceService.getAutoConnectConfig())
   }
 
   const handleResetDevice = async () => {
