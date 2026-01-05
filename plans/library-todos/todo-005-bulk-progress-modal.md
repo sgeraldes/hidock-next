@@ -47,4 +47,4 @@ interface BulkProgressModalProps {
 - `apps/electron/src/pages/Library.tsx` (integrate modal)
 
 ## Dependencies
-- TODO-007 (AbortController support for cancellation)
+- TODO-007 (MUST complete first - provides AbortController infrastructure for cancel button)

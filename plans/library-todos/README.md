@@ -1,17 +1,41 @@
 # Library Component Implementation - Todo Index
 
-## Execution Order
+## Architecture Review Status
 
-**Phase 1: Foundation (Extract & Reorganize)**
+**Last Review**: 2026-01-04
+**Status**: READY_FOR_EXECUTION (critical issues resolved)
+**Overall Score**: B+ (85/100) → A- (90/100 after fixes)
+
+### Critical Issues Status
+1. ~~Naming collision in TODO-003~~ ✅ RESOLVED (hook renamed to useLibraryFilterManager)
+2. ~~Backwards dependency between TODO-005/007~~ ✅ FIXED (TODO-007 now runs first)
+3. ~~Vague error integration in TODO-004~~ ✅ EXPANDED (specific checklist added)
+4. ~~Unvalidated accessibility claims~~ ✅ TODO-012 CREATED (validation task added)
+
+**See detailed analysis**:
+- [Architecture Review Report](ARCHITECTURE_REVIEW.md) - Full analysis
+- [Execution Matrix](EXECUTION_MATRIX.md) - Parallelization strategy
+
+---
+
+## Execution Order (FINAL)
+
+**Phase 1: Foundation (Sequential - BLOCKING)**
 ```
 TODO-002 → TODO-001 → TODO-003 → TODO-004-migrate
+(Note: TODO-003 creates useLibraryFilterManager hook)
+```
+
+**Phase 2: Validation (Parallel - NEW)**
+```
+TODO-012 || TODO-013 (Accessibility + Performance baseline)
 ```
 
 **Phases 3-7: Feature Implementation**
 ```
-TODO-004 → TODO-005 → TODO-006 → TODO-007 (Phase 3-4: Error & Bulk)
-TODO-008 → TODO-009 (Phase 6: Performance)
-TODO-010 → TODO-011 (Phase 7: Detail Drawer)
+TODO-007 → TODO-004 → (TODO-005 || TODO-006) (Phase 3-4: Error & Bulk)
+TODO-008 || TODO-009 (Phase 6: Performance - can parallelize)
+TODO-010 → TODO-011 (Phase 7: Detail Drawer - sequential)
 ```
 
 ---
@@ -30,6 +54,21 @@ TODO-010 → TODO-011 (Phase 7: Detail Drawer)
 - [ ] No visual regressions
 - [ ] Tests pass
 - [ ] Filter state persists during navigation
+
+---
+
+## Phase 2: Validation (NEW)
+
+| # | Todo | Priority | Status | Description |
+|---|------|----------|--------|-------------|
+| 12 | [TODO-012](todo-012-validate-accessibility.md) | HIGH | PENDING | Validate accessibility compliance |
+| 13 | [TODO-013](todo-013-performance-baseline.md) | HIGH | PENDING | Capture performance baseline |
+
+**Success Criteria:**
+- [ ] axe-core audit passes
+- [ ] Keyboard navigation tested
+- [ ] Performance metrics documented
+- [ ] WCAG 2.1 AA compliance verified
 
 ---
 
@@ -102,15 +141,18 @@ All Phase 5 components already implemented:
 
 ## Overall Progress
 
-| Phase | Status | Completion |
-|-------|--------|------------|
-| Phase 1 | In Progress | 80% |
-| Phase 2 | Complete | 100% |
-| Phase 3 | Planned | 0% |
-| Phase 4 | Planned | 50% (BulkActionsBar exists) |
-| Phase 5 | Complete | 100% |
-| Phase 6 | Planned | 30% (React.memo, useDeferredValue exist) |
-| Phase 7 | Planned | 60% (SourceDetailDrawer exists) |
+| Phase | Status | Completion | Notes |
+|-------|--------|------------|-------|
+| Phase 1 | In Progress | 80% | 4 TODOs remaining |
+| Phase 2 | NEW | 0% | Validation (TODO-012, TODO-013) |
+| Phase 3 | Planned | 0% | TODO-004 has expanded checklist |
+| Phase 4 | Planned | 50% | BulkActionsBar exists |
+| Phase 5 | Pending Validation | 95% | Needs TODO-012 audit |
+| Phase 6 | Planned | 30% | React.memo, useDeferredValue exist |
+| Phase 7 | Planned | 60% | SourceDetailDrawer exists |
+
+**Total TODOs**: 13 (TODO-001 through TODO-013)
+**Estimated Effort**: 22-25 hours with 2 parallel agents
 
 ---
 

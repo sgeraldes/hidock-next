@@ -40,4 +40,7 @@ abortController.abort()
 - `apps/electron/src/pages/Library.tsx` (cancel button handler)
 
 ## Dependencies
-- TODO-005 (BulkProgressModal provides cancel button)
+- None (must complete BEFORE TODO-005)
+
+## Depended On By
+- TODO-005 (BulkProgressModal uses AbortController for cancel button)
