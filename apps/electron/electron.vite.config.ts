@@ -18,7 +18,8 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve(__dirname, 'electron/preload/index.ts')
+          index: resolve(__dirname, 'electron/preload/index.ts'),
+          splash: resolve(__dirname, 'electron/preload/splash.ts')
         }
       }
     }

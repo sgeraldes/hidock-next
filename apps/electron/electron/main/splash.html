@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>HiDock - Loading</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #e8e8e8;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+    .logo {
+      font-size: 28px;
+      font-weight: 600;
+      margin-bottom: 24px;
+      color: #fff;
+    }
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: #4f8cff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 20px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .status {
+      font-size: 13px;
+      color: #a0a0a0;
+      text-align: center;
+      max-width: 280px;
+      min-height: 40px;
+    }
+    .progress-container {
+      width: 200px;
+      height: 4px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 2px;
+      margin: 16px 0;
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 100%;
+      background: #4f8cff;
+      border-radius: 2px;
+      transition: width 0.3s ease;
+      width: 0%;
+    }
+    .cancel-btn {
+      -webkit-app-region: no-drag;
+      margin-top: 24px;
+      padding: 8px 20px;
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #a0a0a0;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.2s;
+    }
+    .cancel-btn:hover {
+      background: rgba(255,255,255,0.05);
+      border-color: rgba(255,255,255,0.3);
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="logo">HiDock</div>
+  <div class="spinner"></div>
+  <div class="progress-container">
+    <div class="progress-bar" id="progress"></div>
+  </div>
+  <div class="status" id="status">Initializing...</div>
+  <button class="cancel-btn" id="cancelBtn">Cancel</button>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const progressEl = document.getElementById('progress');
+    const cancelBtn = document.getElementById('cancelBtn');
+
+    // Listen for status updates from main process
+    window.electronAPI?.onSplashStatus?.((status, progress) => {
+      statusEl.textContent = status;
+      if (progress !== undefined) {
+        progressEl.style.width = `${progress}%`;
+      }
+    });
+
+    // Cancel button quits the app
+    cancelBtn.addEventListener('click', () => {
+      window.electronAPI?.quitApp?.();
+    });
+  </script>
+</body>
+</html>
