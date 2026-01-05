@@ -112,21 +112,8 @@ export function Chat() {
     initialize()
   }, [])
 
-  // Load recording context from navigation state
-  useEffect(() => {
-    const state = location.state as { contextId?: string } | null
-    if (state?.contextId) {
-      loadRecordingContext(state.contextId)
-    }
-  }, [location.state])
-
-  // Auto-scroll to bottom
-  useEffect(() => {
-    scrollToBottom()
-  }, [messages])
-
   // Load recording context
-  const loadRecordingContext = async (contextId: string) => {
+  const loadRecordingContext = useCallback(async (contextId: string) => {
     setContextLoading(true)
     setContextError(null)
     try {
@@ -164,10 +151,38 @@ export function Chat() {
     } finally {
       setContextLoading(false)
     }
-  }
+  }, [activeConversation, contextIds])
+
+  // Load recording context from navigation state
+  useEffect(() => {
+    const state = location.state as { contextId?: string; initialQuery?: string } | null
+    if (state?.contextId) {
+      loadRecordingContext(state.contextId)
+    }
+    if (state?.initialQuery) {
+      setInput(state.initialQuery)
+    }
+  }, [location.state, loadRecordingContext])
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    scrollToBottom()
+  }, [messages])
 
   // Clear recording context
-  const clearRecordingContext = () => {
+  const clearRecordingContext = async () => {
+    if (contextRecording && activeConversation) {
+      try {
+        await window.electronAPI.assistant.removeContext(
+          activeConversation.id,
+          contextRecording.id
+        )
+        setContextIds(prev => prev.filter(id => id !== contextRecording.id))
+        setContextItems(prev => prev.filter(item => item.id !== contextRecording.id))
+      } catch (error) {
+        console.error('Failed to remove context:', error)
+      }
+    }
     setContextRecording(null)
     setContextError(null)
   }

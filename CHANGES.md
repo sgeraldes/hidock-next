@@ -93,3 +93,113 @@ To test the implementation:
 ## Commit
 - Commit SHA: 06789942
 - Branch: feature/todo-016-chat-context
+
+---
+
+# TODO-016 Fix: Chat Context Review Issues
+
+## Date
+2026-01-05
+
+## Summary
+Fixed three critical issues identified in Chat.tsx code review:
+1. clearRecordingContext now properly removes context from backend
+2. Added support for initialQuery from navigation state
+3. Fixed useEffect dependency issue with loadRecordingContext
+
+## Issues Fixed
+
+### 1. CRITICAL: clearRecordingContext Does Not Remove Context from Backend (Confidence: 88)
+
+**Problem**: The `clearRecordingContext` function only cleared local UI state but did NOT remove the context from the backend conversation. This meant the recording context would still be used in chat queries even after the user clicked "Clear context".
+
+**Solution**: Made the function async and added backend removal:
+```typescript
+const clearRecordingContext = async () => {
+  if (contextRecording && activeConversation) {
+    try {
+      await window.electronAPI.assistant.removeContext(
+        activeConversation.id,
+        contextRecording.id
+      )
+      setContextIds(prev => prev.filter(id => id !== contextRecording.id))
+      setContextItems(prev => prev.filter(item => item.id !== contextRecording.id))
+    } catch (error) {
+      console.error('Failed to remove context:', error)
+    }
+  }
+  setContextRecording(null)
+  setContextError(null)
+}
+```
+
+**Impact**:
+- Context is now properly removed from backend conversation
+- contextIds and contextItems state are synchronized with backend
+- Error handling prevents UI breakage if removal fails
+
+### 2. IMPORTANT: Missing initialQuery Support (Confidence: 80)
+
+**Problem**: AssistantPanel navigation includes `initialQuery` in state but Chat.tsx ignored it, losing the user's intended query when navigating.
+
+**Solution**: Updated location.state handling to support initialQuery:
+```typescript
+useEffect(() => {
+  const state = location.state as { contextId?: string; initialQuery?: string } | null
+  if (state?.contextId) {
+    loadRecordingContext(state.contextId)
+  }
+  if (state?.initialQuery) {
+    setInput(state.initialQuery)
+  }
+}, [location.state, loadRecordingContext])
+```
+
+**Impact**:
+- Users can now navigate with a pre-filled query
+- Supports future features like "Ask about..." with suggested questions
+- Type-safe state handling
+
+### 3. Potential useEffect Dependency Issue (Confidence: 82)
+
+**Problem**: `loadRecordingContext` function referenced state (`activeConversation`, `contextIds`) but wasn't in the dependency array, which could cause stale closure bugs.
+
+**Solution**: Wrapped `loadRecordingContext` in useCallback with proper dependencies:
+```typescript
+const loadRecordingContext = useCallback(async (contextId: string) => {
+  // ... existing implementation
+}, [activeConversation, contextIds])
+```
+
+**Impact**:
+- Prevents stale closure bugs
+- Function is properly memoized
+- Dependencies are explicit and tracked by React
+- useEffect can safely include it in dependency array
+
+## Files Modified
+- `apps/electron/src/pages/Chat.tsx`
+- `CHANGES.md` (this file)
+
+## Testing Recommendations
+1. Test clearRecordingContext:
+   - Navigate to Chat with recording context
+   - Send a query (verify contextual response)
+   - Click "Clear context"
+   - Send same query (verify generic response without context)
+
+2. Test initialQuery:
+   - Navigate to Chat with both contextId and initialQuery in state
+   - Verify input field is pre-filled with query
+   - Verify context banner shows recording
+
+3. Test dependency stability:
+   - Load recording context multiple times
+   - Switch between conversations
+   - Verify no duplicate context attachments
+
+## Technical Notes
+- useCallback is already imported in the file
+- All changes maintain backwards compatibility
+- Error handling preserves user experience
+- State updates are atomic and properly synchronized
