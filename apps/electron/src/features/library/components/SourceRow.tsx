@@ -85,7 +85,7 @@ export const SourceRow = memo(function SourceRow({
         <StatusIcon recording={recording} />
         <div className="min-w-0 flex-1">
           <p className="font-medium text-sm truncate">{recording.filename}</p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-xs text-muted-foreground truncate">
             {formatDateTime(recording.dateRecorded.toISOString())}
             {recording.duration ? ` • ${formatDuration(recording.duration)}` : ''}
             {meeting ? ` • ${meeting.subject}` : ''}
