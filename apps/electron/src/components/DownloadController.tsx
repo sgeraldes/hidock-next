@@ -15,6 +15,7 @@ import { useEffect, useRef, useCallback } from 'react'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
 import { toast } from '@/components/ui/toaster'
+import { parseError, getErrorMessage } from '@/features/library/utils/errorHandling'
 
 const DEBUG_DOWNLOAD_CONTROLLER = true
 
@@ -123,22 +124,23 @@ export function DownloadController() {
         }
         return true
       } else {
+        const libraryError = parseError(new Error(result.error || 'Save failed'), 'download')
         console.error(`[DownloadController] Save failed: ${item.filename} - ${result.error}`)
         toast({
           title: 'Save failed',
-          description: `Failed to save ${item.filename}: ${result.error}`,
+          description: getErrorMessage(libraryError.type),
           variant: 'error'
         })
         return false
       }
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+      const libraryError = parseError(error, 'download')
       console.error(`[DownloadController] Error downloading ${item.filename}:`, error)
-      await window.electronAPI.downloadService.markFailed(item.filename, errorMsg)
+      await window.electronAPI.downloadService.markFailed(item.filename, libraryError.message)
       removeFromDownloadQueue(item.filename)
       toast({
         title: 'Download error',
-        description: `Error downloading ${item.filename}: ${errorMsg}`,
+        description: getErrorMessage(libraryError.type),
         variant: 'error'
       })
       return false

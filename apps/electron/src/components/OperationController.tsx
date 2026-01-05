@@ -19,6 +19,7 @@ import { useAppStore } from '@/store/useAppStore'
 import { useUIStore } from '@/store/useUIStore'
 import { toast } from '@/components/ui/toaster'
 import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
+import { parseError, getErrorMessage } from '@/features/library/utils/errorHandling'
 
 const DEBUG = true
 
@@ -150,13 +151,13 @@ export function OperationController() {
         return false
       }
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+      const libraryError = parseError(error, 'download')
       console.error(`[QA-MONITOR][Operation] Error: ${item.filename}`, error)
-      await window.electronAPI.downloadService.markFailed(item.filename, errorMsg)
+      await window.electronAPI.downloadService.markFailed(item.filename, libraryError.message)
       removeFromDownloadQueue(item.filename)
       toast({
         title: 'Download error',
-        description: `Error: ${errorMsg}`,
+        description: getErrorMessage(libraryError.type),
         variant: 'error'
       })
       return false
@@ -290,8 +291,13 @@ export function OperationController() {
           setPlaybackProgress(0, 0)
         })
         audioRef.current.addEventListener('error', (e) => {
+          const libraryError = parseError(e, 'audio playback')
           console.error('[OperationController] Audio error:', e)
-          toast({ title: 'Playback error', description: 'Failed to play audio', variant: 'error' })
+          toast({
+            title: 'Playback error',
+            description: getErrorMessage(libraryError.type),
+            variant: 'error'
+          })
           setIsPlaying(false)
           setCurrentlyPlaying(null, null)
         })
@@ -307,8 +313,13 @@ export function OperationController() {
       audioRef.current.src = `data:${mimeType};base64,${base64}`
       await audioRef.current.play()
     } catch (error) {
+      const libraryError = parseError(error, 'audio playback')
       console.error('[OperationController] Play error:', error)
-      toast({ title: 'Playback error', description: 'Failed to play audio', variant: 'error' })
+      toast({
+        title: 'Playback error',
+        description: getErrorMessage(libraryError.type),
+        variant: 'error'
+      })
       setIsPlaying(false)
       setCurrentlyPlaying(null, null)
     }

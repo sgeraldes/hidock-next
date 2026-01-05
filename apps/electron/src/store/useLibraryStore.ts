@@ -8,6 +8,7 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { LocationFilter } from '@/types/unified-recording'
+import { LibraryError } from '@/features/library/utils/errorHandling'
 
 export type SortBy = 'date' | 'duration' | 'name' | 'quality'
 export type SortOrder = 'asc' | 'desc'
@@ -27,6 +28,9 @@ interface LibraryState {
 
   // Selection state (transient - not persisted)
   selectedIds: Set<string>
+
+  // Error state (transient - not persisted)
+  recordingErrors: Map<string, LibraryError>
 
   // Scroll position (transient)
   scrollOffset: number
@@ -57,6 +61,11 @@ interface LibraryActions {
   clearSelection: () => void
   isSelected: (id: string) => boolean
 
+  // Error management
+  setRecordingError: (id: string, error: LibraryError) => void
+  clearRecordingError: (id: string) => void
+  clearAllErrors: () => void
+
   // Scroll
   setScrollOffset: (offset: number) => void
 }
@@ -73,6 +82,7 @@ const initialState: LibraryState = {
   statusFilter: null,
   searchQuery: '',
   selectedIds: new Set(),
+  recordingErrors: new Map(),
   scrollOffset: 0
 }
 
@@ -137,6 +147,23 @@ export const useLibraryStore = create<LibraryStore>()(
       clearSelection: () => set({ selectedIds: new Set() }),
 
       isSelected: (id) => get().selectedIds.has(id),
+
+      // Error management
+      setRecordingError: (id, error) =>
+        set((state) => {
+          const newErrors = new Map(state.recordingErrors)
+          newErrors.set(id, error)
+          return { recordingErrors: newErrors }
+        }),
+
+      clearRecordingError: (id) =>
+        set((state) => {
+          const newErrors = new Map(state.recordingErrors)
+          newErrors.delete(id)
+          return { recordingErrors: newErrors }
+        }),
+
+      clearAllErrors: () => set({ recordingErrors: new Map() }),
 
       // Scroll
       setScrollOffset: (offset) => set({ scrollOffset: offset })
