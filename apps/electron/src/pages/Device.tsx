@@ -31,16 +31,14 @@ function formatEta(seconds: number | null): string {
 }
 
 export function Device() {
-  const {
-    deviceSyncing: storeSyncing,
-    deviceState,
-    connectionStatus,
-    activityLog,
-    setDeviceSyncState,
-    cancelDeviceSync,
-    deviceSyncProgress,
-    deviceSyncEta
-  } = useAppStore() as any
+  const storeSyncing = useAppStore(state => state.deviceSyncing)
+  const deviceState = useAppStore(state => state.deviceState)
+  const connectionStatus = useAppStore(state => state.connectionStatus)
+  const activityLog = useAppStore(state => state.activityLog)
+  const setDeviceSyncState = useAppStore(state => state.setDeviceSyncState)
+  const cancelDeviceSync = useAppStore(state => state.cancelDeviceSync)
+  const deviceSyncProgress = useAppStore(state => state.deviceSyncProgress)
+  const deviceSyncEta = useAppStore(state => state.deviceSyncEta)
 
   // Initialize service
   const deviceService = getHiDockDeviceService()
