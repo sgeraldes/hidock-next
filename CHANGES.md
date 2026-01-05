@@ -343,3 +343,236 @@ feat(actionables): add context integration for auto-generation
 3. Test edge cases (network errors, invalid IDs, rate limiting)
 4. Consider adding toast notifications for copy success
 5. Consider adding analytics tracking for generation events
+
+---
+
+# TODO-021: Bidirectional Page Links - Changes Summary
+
+## Overview
+Added navigation links from Chat and Actionables pages back to the Library page, allowing users to easily view the source recording that they're interacting with.
+
+## Changes Made
+
+### 1. Chat Page (Chat.tsx)
+
+**Added "View Recording" button to context banner:**
+- When a recording context is loaded, the context banner now shows two buttons:
+  - "View Recording" (new) - navigates to Library with the recording selected
+  - "Clear context" (existing)
+- Uses `navigate('/library', { state: { selectedId: contextRecording.id } })` to pass the selected recording ID
+
+**Code Changes:**
+```typescript
+<div className="flex items-center gap-2">
+  <Button
+    variant="outline"
+    size="sm"
+    onClick={() => navigate('/library', { state: { selectedId: contextRecording.id } })}
+  >
+    View Recording
+  </Button>
+  <Button variant="ghost" size="sm" onClick={clearRecordingContext}>
+    Clear context
+  </Button>
+</div>
+```
+
+### 2. Actionables Page (Actionables.tsx)
+
+**Added "View Source" button to output modal:**
+- Extended `generatedOutput` state to include `sourceId` field
+- Modified `handleAutoGenerate` to store the source ID when generating output
+- Added "View Source" button in the output modal's DialogFooter
+- Button only appears when `sourceId` is available
+- Uses `navigate('/library', { state: { selectedId: generatedOutput.sourceId } })` to navigate back to Library
+
+**Code Changes:**
+```typescript
+// Added sourceId to generatedOutput state type
+const [generatedOutput, setGeneratedOutput] = useState<{
+  content: string
+  templateId: string
+  generatedAt: string
+  sourceId?: string  // NEW
+} | null>(null)
+
+// Store sourceId when setting generated output
+if (result.success) {
+  setGeneratedOutput({ ...result.data, sourceId })
+  setShowOutputModal(true)
+}
+
+// Added View Source button in modal footer
+<DialogFooter className="gap-2">
+  {generatedOutput?.sourceId && (
+    <Button
+      variant="outline"
+      onClick={() => navigate('/library', { state: { selectedId: generatedOutput.sourceId } })}
+    >
+      <FileText className="h-4 w-4 mr-2" />
+      View Source
+    </Button>
+  )}
+  {/* ... other buttons ... */}
+</DialogFooter>
+```
+
+**Imports Added:**
+- `useNavigate` from 'react-router-dom'
+
+### 3. Library Page (Library.tsx)
+
+**Added navigation state handling:**
+- Added `useLocation` hook import
+- Created effect to handle incoming `selectedId` from navigation state
+- When a `selectedId` is received, the Library:
+  1. Finds the matching recording
+  2. Selects it in the center panel (via `setSelectedSourceId`)
+  3. Clears the navigation state to prevent re-triggering on refresh
+
+**Code Changes:**
+```typescript
+// Import useLocation
+import { useNavigate, useLocation } from 'react-router-dom'
+
+// Get location from hook
+const location = useLocation()
+
+// Handle navigation state for incoming selectedId
+useEffect(() => {
+  const state = location.state as { selectedId?: string } | null
+  if (state?.selectedId) {
+    // Find the recording with this ID
+    const recording = recordings.find((r) => r.id === state.selectedId)
+    if (recording) {
+      setSelectedSourceId(recording.id)
+      // Clear the navigation state to prevent re-triggering on refresh
+      navigate(location.pathname, { replace: true, state: {} })
+    }
+  }
+}, [location.state, recordings, setSelectedSourceId, navigate, location.pathname])
+```
+
+## User Flows
+
+### 1. From Chat to Library
+1. User is chatting about a recording (context loaded)
+2. Context banner shows "Chatting about: [Recording Title]"
+3. User clicks "View Recording" button
+4. Navigates to Library page
+5. Recording is automatically selected in center panel (SourceReader)
+6. User can now see full recording details, transcript, etc.
+
+### 2. From Actionables to Library
+1. User generates meeting minutes or other output
+2. Output modal displays with generated content
+3. Modal shows "View Source" button
+4. User clicks "View Source"
+5. Navigates to Library page
+6. Source recording is automatically selected in center panel
+7. User can review the original recording that was used for generation
+
+## Technical Implementation Details
+
+### Navigation Pattern
+- Uses React Router's `location.state` to pass data between routes
+- Pattern: `navigate(path, { state: { selectedId: recordingId } })`
+- Type-safe: `location.state as { selectedId?: string } | null`
+
+### State Management
+- Library uses existing `setSelectedSourceId` from `useLibraryStore`
+- No new state management needed - leverages existing tri-pane layout
+- Center panel (SourceReader) automatically updates when `selectedSourceId` changes
+
+### State Cleanup
+- Navigation state is cleared after processing using `navigate(path, { replace: true, state: {} })`
+- Prevents re-triggering the selection on browser refresh
+- Uses `replace: true` to avoid adding extra history entries
+
+### Browser Compatibility
+- Standard React Router navigation
+- Browser back button works as expected
+- No custom history manipulation needed
+
+## Testing Recommendations
+
+### Manual Testing
+- [ ] Test navigating from Chat context banner to Library
+- [ ] Test navigating from Actionables output modal to Library
+- [ ] Verify the correct recording is selected in Library after navigation
+- [ ] Test browser back button behavior (should return to Chat/Actionables)
+- [ ] Test browser refresh after navigation (state should be cleared)
+- [ ] Test with recordings that have transcripts vs without
+- [ ] Test with device-only vs local recordings
+- [ ] Test when recording ID doesn't exist (edge case)
+
+### Integration Testing
+- [ ] Verify tri-pane layout displays selected recording
+- [ ] Verify SourceReader shows correct content
+- [ ] Verify AssistantPanel updates for selected recording
+- [ ] Verify audio playback works for selected recording
+
+### Edge Cases
+- [ ] Navigate to Library with invalid `selectedId`
+- [ ] Navigate to Library with `selectedId` for recording not in current filter
+- [ ] Multiple rapid navigations (race conditions)
+- [ ] Navigation while Library is still loading recordings
+
+## Acceptance Criteria Status
+
+- [x] Chat shows "View Recording" button when context is loaded
+- [x] Clicking navigates to Library with recording selected
+- [x] Actionables shows "View Source" link in output modal
+- [x] Library receives selectedId from navigation state
+- [x] Library auto-selects the recording when navigated to
+- [x] Navigation history supports back button (standard react-router behavior)
+
+## Files Modified
+
+1. `apps/electron/src/pages/Chat.tsx`
+   - Added "View Recording" button to context banner
+   - Added navigate call with selectedId state
+
+2. `apps/electron/src/pages/Actionables.tsx`
+   - Extended generatedOutput state type to include sourceId
+   - Modified handleAutoGenerate to track sourceId
+   - Added useNavigate import
+   - Added "View Source" button to output modal
+   - Added navigate call with selectedId state
+
+3. `apps/electron/src/pages/Library.tsx`
+   - Added useLocation import
+   - Added useEffect to handle navigation state
+   - Auto-selects recording when selectedId received
+   - Clears navigation state after processing
+
+## Future Enhancements
+
+1. **Visual Feedback:**
+   - Add subtle animation/highlight when recording is selected via navigation
+   - Show toast notification: "Jumped to [Recording Title]"
+
+2. **Breadcrumb Navigation:**
+   - Show breadcrumb trail: "Chat > [Recording Title]" or "Actionables > [Recording Title]"
+   - Allow clicking breadcrumb to return to previous page
+
+3. **Scroll to Recording:**
+   - If recording is not in viewport, scroll it into view
+   - Useful when Library has many recordings
+
+4. **Filter Preservation:**
+   - Consider preserving Library filters when navigating from other pages
+   - Or clear filters to ensure selected recording is visible
+
+5. **Deep Linking:**
+   - Support URL parameters for direct linking to recordings
+   - Example: `/library?id=recording-123`
+   - Useful for sharing or bookmarking
+
+## Notes
+
+- Implementation is minimal and leverages existing infrastructure
+- No breaking changes to existing functionality
+- Standard React Router patterns used throughout
+- Works with existing tri-pane layout without modifications
+- State cleanup prevents issues with browser navigation
