@@ -857,6 +857,7 @@ export function Library() {
             /* Right Panel: AI Assistant */
             <AssistantPanel
               recording={selectedRecording ?? null}
+              transcript={selectedTranscript}
               onAskAssistant={handleAskAssistantCallback}
               onGenerateOutput={handleGenerateOutputCallback}
             />
