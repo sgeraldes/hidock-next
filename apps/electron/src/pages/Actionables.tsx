@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useLocation } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
 import {
   RefreshCw,
   FileText,
@@ -58,7 +59,7 @@ export function Actionables() {
     }
   }
 
-  const handleAutoGenerate = async (sourceId: string) => {
+  const handleAutoGenerate = useCallback(async (sourceId: string) => {
     // Check rate limiting (max 3/minute)
     const now = Date.now()
     const recentGenerations = generationHistory.filter(t => now - t < 60000)
@@ -79,7 +80,8 @@ export function Actionables() {
       if (result.success) {
         setGeneratedOutput(result.data)
         setShowOutputModal(true)
-        setGenerationHistory([...generationHistory, now])
+        // Use functional update to avoid stale closure and clean old entries
+        setGenerationHistory(prev => [...prev.filter(t => now - t < 60000), now])
       } else {
         setGenerationError(result.error.message || 'Failed to generate output')
       }
@@ -89,7 +91,7 @@ export function Actionables() {
     } finally {
       setGenerating(false)
     }
-  }
+  }, [generationHistory])
 
   const copyToClipboard = async (text?: string) => {
     if (!text) return
@@ -119,7 +121,7 @@ export function Actionables() {
     if (state?.sourceId && state?.action === 'generate') {
       handleAutoGenerate(state.sourceId)
     }
-  }, [location.state])
+  }, [location.state, handleAutoGenerate])
 
   const filteredActionables = useMemo(() => {
     return actionables.filter(a => {
@@ -322,8 +324,8 @@ export function Actionables() {
               Generated using {generatedOutput?.templateId} template
             </DialogDescription>
           </DialogHeader>
-          <div className="prose prose-sm max-w-none bg-muted/30 p-4 rounded-md border">
-            <pre className="whitespace-pre-wrap text-sm font-mono">{generatedOutput?.content || ''}</pre>
+          <div className="prose prose-sm max-w-none dark:prose-invert bg-muted/30 p-4 rounded-md border">
+            <ReactMarkdown>{generatedOutput?.content || ''}</ReactMarkdown>
           </div>
           <DialogFooter className="gap-2">
             <Button
