@@ -28,24 +28,39 @@ Incremental refactoring of the existing implementation into a modular, extensibl
 ```
 apps/electron/src/
 ├── pages/
-│   └── Library.tsx                    # Main route component (renamed from Recordings.tsx)
+│   └── Library.tsx                    # Main route component (tri-pane layout)
 ├── features/
 │   └── library/
 │       ├── components/
 │       │   ├── LibraryHeader.tsx      # Title, stats, refresh, import actions
 │       │   ├── LibraryFilters.tsx     # Search, filter dropdowns, view toggle
 │       │   ├── LibraryList.tsx        # Virtualized container with view modes
-│       │   ├── SourceRow.tsx          # Compact list item (52px)
+│       │   ├── SourceRow.tsx          # Compact list item (52px) with progress indicator
 │       │   ├── SourceCard.tsx         # Card view item (120px+)
 │       │   ├── SourceDetailDrawer.tsx # Right-side detail panel
+│       │   ├── SourceReader.tsx       # Unified viewer for all source types
+│       │   ├── AssistantPanel.tsx     # Context-aware AI chat panel
 │       │   ├── BulkActionsBar.tsx     # Selection toolbar
-│       │   └── EmptyState.tsx         # Zero-state messaging
+│       │   ├── EmptyState.tsx         # Zero-state messaging
+│       │   ├── ImportDropZone.tsx     # Drag-and-drop import area
+│       │   ├── ImportProgressModal.tsx # Import progress tracking
+│       │   └── viewers/
+│       │       ├── AudioViewer.tsx    # Waveform + transcript
+│       │       ├── PdfViewer.tsx      # PDF with annotations
+│       │       ├── MarkdownViewer.tsx # Rendered markdown
+│       │       ├── ImageViewer.tsx    # Zoomable image
+│       │       └── WebClipViewer.tsx  # Rendered HTML clip
 │       ├── hooks/
 │       │   ├── useLibrarySources.ts   # Data loading wrapper
 │       │   ├── useLibraryFilters.ts   # Filter state management
 │       │   └── useSourceSelection.ts  # Bulk selection logic
+│       ├── services/
+│       │   ├── pdfService.ts          # PDF import, OCR, thumbnails
+│       │   ├── markdownService.ts     # Markdown parsing, frontmatter
+│       │   ├── imageService.ts        # Image import, OCR, thumbnails
+│       │   └── webClipService.ts      # Web clipping, content fetch
 │       ├── types/
-│       │   └── source.ts              # Source type definitions
+│       │   └── source.ts              # All source type definitions (audio, pdf, markdown, image, web_clip)
 │       └── utils/
 │           └── filters.ts             # Filter logic functions
 ├── store/
@@ -586,7 +601,7 @@ apps/electron/src/
 ### Functional Requirements
 - [ ] Library displays all sources (local + device) in virtualized list
 - [ ] Compact and card views switch seamlessly
-- [ ] All 5 filters work correctly (location, category, quality, status, search)
+- [ ] All 6 filters work correctly (location, category, quality, status, type, search)
 - [ ] Search is debounced (300ms) and case-insensitive
 - [ ] Bulk selection works with checkbox, Ctrl+Click, Shift+Click
 - [ ] Bulk download queues all selected device-only items
@@ -595,6 +610,13 @@ apps/electron/src/
 - [ ] Audio playback works with global state (one at a time)
 - [ ] Detail drawer shows transcript, summary, and actions
 - [ ] Empty states show appropriate messaging
+- [ ] Tri-pane layout with resizable panels (Library List | Source Reader | Assistant)
+- [ ] All 5 source types supported: audio, PDF, markdown, image, web clip
+- [ ] Drag-and-drop import for all supported file types
+- [ ] Type-specific viewers render content correctly
+- [ ] AssistantPanel provides context-aware AI chat for selected source
+- [ ] Download progress indicator visible in list items
+- [ ] OCR extraction works for PDF and image sources
 
 ### Non-Functional Requirements
 - [ ] Initial render <100ms with 1000 items
@@ -604,14 +626,18 @@ apps/electron/src/
 - [ ] All errors show user-friendly messages with recovery options
 - [ ] Keyboard navigation works without mouse
 - [ ] Screen reader announces dynamic content changes
+- [ ] Panel resize state persists across sessions
+- [ ] Large files (>50MB PDFs, high-res images) load without blocking UI
 
 ### Quality Gates
 - [ ] Unit tests for filter logic (>80% coverage)
 - [ ] Integration tests for data loading
+- [ ] Integration tests for each source type import
 - [ ] Accessibility audit passes (axe-core)
 - [ ] Performance benchmark passes
 - [ ] No TypeScript errors
 - [ ] ESLint passes with no warnings
+- [ ] All viewers tested with representative content
 
 ## Dependencies & Prerequisites
 
@@ -621,14 +647,20 @@ apps/electron/src/
 - `useUIStore` for playback state (existing)
 - `useAppStore` for device state (existing)
 - shadcn/ui components (existing)
+- AI service abstraction for Assistant panel
 
 ### External Dependencies
 - `@tanstack/react-virtual` (existing)
 - `zustand` with persist middleware (existing)
 - `lucide-react` icons (existing)
+- `react-resizable-panels` - for tri-pane layout (to add)
+- `react-pdf` or `@react-pdf-viewer/core` - for PDF viewing (to add)
+- `react-markdown` + `remark-gfm` - for markdown rendering (to add)
+- `react-zoom-pan-pinch` - for image viewer (to add)
+- `tesseract.js` or cloud OCR API - for text extraction (to evaluate)
 
 ### Blockers
-- None identified - all dependencies exist
+- None identified - core dependencies exist, new packages are well-maintained
 
 ## Risk Analysis & Mitigation
 
@@ -637,8 +669,11 @@ apps/electron/src/
 | Breaking existing functionality | High | Medium | Incremental extraction, comprehensive tests |
 | Performance regression | High | Low | Benchmark before/after each phase |
 | Accessibility regressions | Medium | Medium | Test with screen reader after each phase |
-| State management complexity | Medium | Medium | Start simple, add persistence later |
-| Scope creep (tri-pane, new source types) | Medium | High | Strict phase boundaries, defer advanced features |
+| State management complexity | Medium | Medium | Start simple, add persistence incrementally |
+| Multi-source type complexity | Medium | Medium | Implement one source type at a time, reuse patterns |
+| Tri-pane layout responsiveness | Medium | Medium | Mobile-first approach, test all breakpoints |
+| OCR/AI service integration | Medium | Medium | Abstract service layer, graceful degradation |
+| Large file handling (PDFs, images) | Medium | Low | Streaming, lazy loading, memory management |
 
 ## Success Metrics
 
@@ -649,6 +684,11 @@ apps/electron/src/
 | Error recovery rate | 100% | Manual testing of all error scenarios |
 | Keyboard accessibility | Full | Manual testing without mouse |
 | Code maintainability | <300 LOC/file | Line count per component |
+| Source type coverage | 5/5 types | All viewers functional |
+| Import success rate | >95% | Automated import tests |
+| OCR accuracy | >90% | Sample document tests |
+| Assistant response time | <2s | Measure AI query latency |
+| Panel resize smoothness | 60fps | Chrome DevTools during resize |
 
 ## References & Research
 

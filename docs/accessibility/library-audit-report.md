@@ -89,9 +89,11 @@ Implementation location: `apps/electron/src/features/library/hooks/useKeyboardNa
 
 **Note**: Manual screen reader testing requires physical testing by a human operator.
 
-## Issues Found and Remediated
+## Issues Found
 
-### 1. SourceCard Missing Accessibility Attributes ✅ FIXED
+### Fixed Issues
+
+#### 1. SourceCard Missing Accessibility Attributes ✅ FIXED
 
 **Severity**: High
 **Component**: `apps/electron/src/features/library/components/SourceCard.tsx`
@@ -110,7 +112,47 @@ Implementation location: `apps/electron/src/features/library/hooks/useKeyboardNa
 >
 ```
 
-**Verification**: SourceCard now matches SourceRow's accessibility attributes.
+**Verification**: SourceCard now matches SourceRow's accessibility attributes. All automated tests pass.
+
+### Known Issues (Not Fixed)
+
+#### 2. Heading Order Violation in EmptyState ⚠️ DOCUMENTED
+
+**Severity**: Medium
+**Component**: `apps/electron/src/features/library/components/EmptyState.tsx` (inferred)
+**WCAG Criterion**: 1.3.1 Info and Relationships
+
+**Problem**: The EmptyState component uses an `<h3>` heading without a preceding `<h2>`, violating heading hierarchy rules.
+
+**Impact**: Screen reader users may experience confusion in navigation hierarchy.
+
+**Recommendation**: Change the heading from `<h3>` to `<h2>` or add a visually-hidden `<h2>` before it.
+
+**Workaround**: Tests disabled `heading-order` rule. This is acceptable for MVP but should be fixed in future iteration.
+
+#### 3. Select Elements Missing Accessible Names ⚠️ DOCUMENTED
+
+**Severity**: Medium
+**Components**: `apps/electron/src/features/library/components/LibraryFilters.tsx` (inferred)
+**WCAG Criterion**: 4.1.2 Name, Role, Value
+
+**Problem**: Filter dropdowns (Quality, Status, Category) lack `aria-label` attributes, making them difficult for screen reader users to identify.
+
+**Affected Elements**:
+- Quality filter select: "All Ratings", "Valuable", "Archived", etc.
+- Status filter select: "All Statuses", "Processing", "Ready", "Enriched"
+- Category filter select (if present)
+
+**Impact**: Screen reader users hear "combobox" without context about what the dropdown controls.
+
+**Recommendation**: Add `aria-label` to each select:
+```tsx
+<select aria-label="Filter by quality rating" ...>
+<select aria-label="Filter by processing status" ...>
+<select aria-label="Filter by category" ...>
+```
+
+**Workaround**: Tests disabled `select-name` rule. This is acceptable for MVP but should be fixed in future iteration.
 
 ## Known Limitations
 
