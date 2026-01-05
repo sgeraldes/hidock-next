@@ -19,7 +19,7 @@ import {
   LiveRegion,
   useAnnouncement
 } from '@/features/library/components'
-import { useSourceSelection, useKeyboardNavigation } from '@/features/library/hooks'
+import { useSourceSelection, useKeyboardNavigation, useLibraryFilterManager } from '@/features/library/hooks'
 
 export function Library() {
   const navigate = useNavigate()
@@ -34,11 +34,23 @@ export function Library() {
 
   // UI state
   const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set())
-  const [locationFilter, setLocationFilter] = useState<LocationFilter>('all')
-  const [categoryFilter, setCategoryFilter] = useState<string>('all')
-  const [qualityFilter, setQualityFilter] = useState<string>('all')
-  const [statusFilter, setStatusFilter] = useState<string>('all')
-  const [searchQuery, setSearchQuery] = useState('')
+
+  // Filter state - persisted in store across navigation
+  const {
+    locationFilter,
+    categoryFilter,
+    qualityFilter,
+    statusFilter,
+    searchQuery,
+    setLocationFilter,
+    setCategoryFilter,
+    setQualityFilter,
+    setStatusFilter,
+    setSearchQuery,
+    clearFilters,
+    hasActiveFilters,
+    activeFilterCount
+  } = useLibraryFilterManager()
   const deferredSearchQuery = useDeferredValue(searchQuery)
 
   // View mode persisted in store across navigation
@@ -152,9 +164,9 @@ export function Library() {
   const filteredRecordings = useMemo(() => {
     const filtered = recordings.filter((rec) => {
       if (locationFilter !== 'all' && rec.location !== locationFilter) return false
-      if (categoryFilter !== 'all' && rec.category !== categoryFilter) return false
-      if (qualityFilter !== 'all' && rec.quality !== qualityFilter) return false
-      if (statusFilter !== 'all' && rec.status !== statusFilter) return false
+      if (categoryFilter !== null && rec.category !== categoryFilter) return false
+      if (qualityFilter !== null && rec.quality !== qualityFilter) return false
+      if (statusFilter !== null && rec.status !== statusFilter) return false
       if (deferredSearchQuery) {
         const query = deferredSearchQuery.toLowerCase()
         const filename = rec.filename.toLowerCase()
