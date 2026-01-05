@@ -1052,7 +1052,7 @@ export function Calendar() {
                                   id: meeting.matchedRecordingId,
                                   filename: meeting.subject,
                                   date_recorded: meeting.start_time,
-                                  duration_seconds: meeting.recordingDurationSeconds
+                                  duration_seconds: meeting.recordingDurationSeconds ?? null
                                 })
                               }
                             } else {

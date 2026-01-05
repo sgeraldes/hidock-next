@@ -155,8 +155,8 @@ function buildRecordingMap(
         title: capture?.title,
         quality: capture?.quality,
         category: capture?.category ?? undefined,
-        status: capture?.status,
-        summary: capture?.summary || undefined
+        status: capture?.status ?? undefined,
+        summary: capture?.summary ?? undefined
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)
@@ -206,8 +206,8 @@ function buildRecordingMap(
         title: capture?.title,
         quality: capture?.quality,
         category: capture?.category ?? undefined,
-        status: capture?.status,
-        summary: capture?.summary || undefined
+        status: capture?.status ?? undefined,
+        summary: capture?.summary ?? undefined
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)

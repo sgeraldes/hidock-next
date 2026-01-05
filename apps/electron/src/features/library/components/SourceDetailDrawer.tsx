@@ -22,15 +22,17 @@ interface Transcript {
   recording_id: string
   full_text: string
   language: string
-  summary?: string
-  action_items?: string
-  topics?: string
-  key_points?: string
-  sentiment?: string
-  speakers?: string
-  word_count?: number
-  transcription_provider?: string
-  transcription_model?: string
+  summary: string | null
+  action_items: string | null
+  topics: string | null
+  key_points: string | null
+  sentiment: string | null
+  speakers: string | null
+  word_count: number | null
+  transcription_provider: string | null
+  transcription_model: string | null
+  title_suggestion: string | null
+  question_suggestions: string | null
   created_at: string
 }
 

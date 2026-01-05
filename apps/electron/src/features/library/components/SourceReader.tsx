@@ -129,7 +129,7 @@ export function SourceReader({
             onSeek={onSeek || (() => {})}
             showSummary={true}
             showActionItems={true}
-            summary={transcript.summary}
+            summary={transcript.summary ?? undefined}
             actionItems={parseJsonArray<string>(transcript.action_items)}
           />
         ) : recording.transcriptionStatus === 'complete' ? (
