@@ -38,6 +38,7 @@ temp/mypy_cache/
 # ===================================================================
 
 # Custom folders that should not be in the repository
+temp/
 archive/
 archived/
 reference/
@@ -162,3 +163,14 @@ apps/web/.vite/
 .venv.nix/
 .venv.win/
 NUL
+
+# ===================================================================
+# QA & Automation Artifacts
+# ===================================================================
+qa-artifacts/
+*.png.encrypted
+/docs/qa/screenshots/*.encrypted
+
+# System & Misc
+[Dd]esktop.ini
+nul

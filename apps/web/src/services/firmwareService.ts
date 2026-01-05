@@ -26,10 +26,19 @@ interface _FirmwareCheckRequest {
   model: string;
 }
 
-const FIRMWARE_API_BASE = 'https://hinotes.hidock.com';
-// API token should be set via environment variable VITE_HINOTES_API_TOKEN
-// See config/.hinotes.config.example for setup instructions
-const API_TOKEN = import.meta.env.VITE_HINOTES_API_TOKEN || '';
+// Configuration - API base URL can be overridden via environment variable
+const FIRMWARE_API_BASE = import.meta.env.VITE_FIRMWARE_API_BASE || 'https://hinotes.hidock.com';
+
+// API token is required - See config/.hinotes.config.example for setup instructions
+const API_TOKEN = import.meta.env.VITE_HINOTES_API_TOKEN;
+
+// Validate required environment variables at module load time
+if (!API_TOKEN) {
+  throw new Error(
+    'VITE_HINOTES_API_TOKEN environment variable is required for firmware updates. ' +
+    'See config/.hinotes.config.example for setup instructions.'
+  );
+}
 
 export class FirmwareService {
   /**
@@ -129,14 +138,20 @@ export class FirmwareService {
 
   /**
    * Step 3: Validate firmware integrity
+   *
+   * SECURITY NOTE: Uses MD5 hash as provided by the hinotes.hidock.com server.
+   * MD5 is cryptographically broken and vulnerable to collision attacks.
+   * However, we don't control the server (third-party), so we must use their hash format.
+   * This provides basic integrity checking against corrupted downloads but NOT against
+   * malicious firmware substitution attacks.
    */
   static async validateFirmware(data: ArrayBuffer, expectedSignature: string): Promise<boolean> {
-    // Calculate MD5 hash of downloaded firmware
+    // Calculate MD5 hash to match server-provided signature
     const hashBuffer = await crypto.subtle.digest('MD5', data);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 
-    return hashHex === expectedSignature;
+    return hashHex.toLowerCase() === expectedSignature.toLowerCase();
   }
 
   /**

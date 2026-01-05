@@ -2,57 +2,79 @@
 
 ## Overview
 
-This document provides the complete mapping of HiDock device models based on USB Product IDs, extracted from the website's jensen.94c3ea80.js file.
+This document provides the complete mapping of HiDock device models based on USB Product IDs, extracted from the official HiNotes jensen.js file (December 2025).
 
 ## Product ID to Model Mapping
 
-From the jensen.js source code:
+From the official jensen.js source code:
 ```javascript
-M.model = (a = p.productId) == 45068 ? "hidock-h1" : 
-          a == 45069 ? "hidock-h1e" : 
-          a == 45070 ? "hidock-p1" : 
-          a == 45071 ? "hidock-p1:mini" : 
-          a == 256 ? "hidock-h1" : 
-          a == 257 ? "hidock-h1e" : 
-          a == 258 ? "hidock-h1" : 
-          a == 259 ? "hidock-h1e" : 
-          a == 8256 ? "hidock-p1" : 
-          a == 8257 ? "hidock-p1:mini" : 
+M.model = (a = p.productId) == 45068 ? "hidock-h1" :
+          a == 45069 ? "hidock-h1e" :
+          a == 45070 ? "hidock-p1" :
+          a == 45071 ? "hidock-p1:mini" :
+          a == 256 ? "hidock-h1" :
+          a == 257 ? "hidock-h1e" :
+          a == 258 ? "hidock-h1" :
+          a == 259 ? "hidock-h1e" :
+          a == 8256 ? "hidock-p1" :
+          a == 8257 ? "hidock-p1:mini" :
           "unknown"
 ```
+
+**Note**: H1E and P1 models may have newer Product IDs (0xB00D for H1E, 0xB00E for P1).
 
 ## Complete Device Model Registry
 
 | Product ID | Hex Value | Model Name | Device Type | Notes |
 |------------|-----------|------------|-------------|-------|
-| 45068 | 0xAFFC | hidock-h1 | H1 Standard | Primary H1 product ID |
-| 45069 | 0xAFFD | hidock-h1e | H1 Enhanced | Primary H1E product ID |
-| 45070 | 0xAFFE | hidock-p1 | P1 Professional | Primary P1 product ID |
-| 45071 | 0xAFFF | hidock-p1:mini | P1 Mini | Compact P1 variant |
+| 45068 | 0xAF0C | hidock-h1 | H1 Standard | Primary H1 product ID |
+| 45069 | 0xAF0D | hidock-h1e | H1 Enhanced | Older H1E product ID |
+| 45101 | 0xB00D | hidock-h1e | H1 Enhanced | **Newer H1E product ID** |
+| 45070 | 0xAF0E | hidock-p1 | P1 Professional | Older P1 product ID |
+| 45070 | 0xB00E | hidock-p1 | P1 Professional | **Newer P1 product ID** |
+| 45071 | 0xAF0F | hidock-p1-mini | P1 Mini | Compact P1 variant |
 | 256 | 0x0100 | hidock-h1 | H1 Standard | Alternative H1 ID |
 | 257 | 0x0101 | hidock-h1e | H1 Enhanced | Alternative H1E ID |
 | 258 | 0x0102 | hidock-h1 | H1 Standard | Alternative H1 ID (duplicate) |
 | 259 | 0x0103 | hidock-h1e | H1 Enhanced | Alternative H1E ID (duplicate) |
 | 8256 | 0x2040 | hidock-p1 | P1 Professional | Alternative P1 ID |
-| 8257 | 0x2041 | hidock-p1:mini | P1 Mini | Alternative P1 Mini ID |
+| 8257 | 0x2041 | hidock-p1-mini | P1 Mini | Alternative P1 Mini ID |
 
 ## Device Model Categories
 
 ### H1 Series (Entry Level)
 - **hidock-h1**: Basic audio recording device
-- Product IDs: 45068 (0xAFFC), 256 (0x0100), 258 (0x0102)
+- Product IDs: 45068 (0xAF0C), 256 (0x0100), 258 (0x0102)
+- Capabilities: File storage, time sync, settings, firmware updates
 
-### H1E Series (Enhanced)  
+### H1E Series (Enhanced)
 - **hidock-h1e**: Enhanced version with additional features
-- Product IDs: 45069 (0xAFFD), 257 (0x0101), 259 (0x0103)
+- Product IDs: 45069 (0xAF0D), 45101 (0xB00D), 257 (0x0101), 259 (0x0103)
+- Capabilities: All H1 features + enhanced audio processing
 
 ### P1 Series (Professional)
 - **hidock-p1**: Professional-grade device with advanced capabilities
-- Product IDs: 45070 (0xAFFE), 8256 (0x2040)
+- Product IDs: 45070 (0xAF0E), 45070 (0xB00E), 8256 (0x2040)
+- **Exclusive Features (P1 only)**:
+  - Battery status monitoring (charging state, level, voltage)
+  - Bluetooth audio support (scan, connect, disconnect, paired devices)
 
 ### P1 Mini Series (Compact Professional)
-- **hidock-p1:mini**: Compact version of P1 with professional features
-- Product IDs: 45071 (0xAFFF), 8257 (0x2041)
+- **hidock-p1-mini**: Compact version of P1 with professional features
+- Product IDs: 45071 (0xAF0F), 8257 (0x2041)
+- Same capabilities as P1 (battery, Bluetooth)
+
+## Feature Availability by Model
+
+| Feature | H1 | H1E | P1 | P1 Mini |
+|---------|----|----|----|----|
+| File storage & transfer | Yes | Yes | Yes | Yes |
+| Time sync | Yes | Yes | Yes | Yes |
+| Device settings | Yes | Yes | Yes | Yes |
+| Firmware updates | Yes | Yes | Yes | Yes |
+| Realtime audio streaming | Yes | Yes | Yes | Yes |
+| Battery status | No | No | **Yes** | **Yes** |
+| Bluetooth audio | No | No | **Yes** | **Yes** |
 
 ## Serial Number Patterns
 
@@ -78,9 +100,9 @@ Different models support different firmware version ranges:
 
 ## USB Vendor Information
 
-- **Vendor ID**: 4310 (0x10E6) - All HiDock devices
-- **Manufacturer**: HiDock Technology
-- **Protocol**: WebUSB with custom command set
+- **Vendor ID**: 4310 (0x10D6) - Actions Semiconductor (used by all HiDock devices)
+- **Manufacturer**: HiDock Technology (using Actions Semiconductor chips)
+- **Protocol**: WebUSB with custom Jensen protocol command set
 
 ## Device Identification Override Strategy
 

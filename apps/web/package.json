@@ -18,6 +18,7 @@
     "@google/generative-ai": "*",
     "clsx": "*",
     "date-fns": "*",
+    "fft.js": "^4.0.4",
     "lucide-react": "*",
     "react": "*",
     "react-dom": "*",
