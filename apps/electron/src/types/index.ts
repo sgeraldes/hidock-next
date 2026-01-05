@@ -62,6 +62,8 @@ export interface Transcript {
   word_count?: number
   transcription_provider?: string
   transcription_model?: string
+  title_suggestion?: string
+  question_suggestions?: string // JSON string of suggested questions
   created_at: string
 }
 
