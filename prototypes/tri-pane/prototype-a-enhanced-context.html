@@ -1451,27 +1451,27 @@
       summarize: {
         icon: '✨', label: 'Summarize', loadingText: 'Generating summary...',
         generateResult: (s) => `<h3>📝 Executive Summary</h3><p>${s.summary || 'This source contains valuable insights and information.'}</p>
-          <h3>🎯 Main Topics</h3><ul><li><strong>Primary:</strong> ${s.insights?.keyPoints?.[0] || 'Key discussion points'}</li>
-          <li><strong>Secondary:</strong> ${s.insights?.keyPoints?.slice(1).join(', ') || 'Additional context'}</li></ul>
-          <h3>👥 People</h3><p>${s.people?.map(p => '<span class="highlight">' + p.name + '</span> (' + p.role + ')').join(', ') || 'No people identified'}</p>
+          <h3>🎯 Main Topics</h3><ul><li><strong>Primary:</strong> ${s.insights?.keyPoints?.[0]?.text || 'Key discussion points'}</li>
+          <li><strong>Secondary:</strong> ${s.insights?.keyPoints?.slice(1).map(k => k.text).join(', ') || 'Additional context'}</li></ul>
+          <h3>👥 People</h3><p>${s.links?.people?.map(p => '<span class="highlight">' + p.name + '</span> (' + p.detail + ')').join(', ') || 'No people identified'}</p>
           <h3>⏱️ Duration</h3><p>This ${s.type} spans ${s.duration} from ${s.date}.</p>`
       },
       keyPoints: {
         icon: '📌', label: 'Key Points', loadingText: 'Extracting key points...',
         generateResult: (s) => `<h3>💡 Key Points (${s.insights?.keyPoints?.length || 0})</h3>
-          <ul>${(s.insights?.keyPoints || []).map(p => '<li>' + p + '</li>').join('') || '<li>No key points extracted</li>'}</ul>
-          ${s.insights?.decisions?.length ? '<h3>✅ Decisions</h3><ul>' + s.insights.decisions.map(d => '<li>' + d + '</li>').join('') + '</ul>' : ''}`
+          <ul>${(s.insights?.keyPoints || []).map(p => '<li>' + p.text + ' <span style="color:#888;font-size:0.85em">' + (p.meta || '') + '</span></li>').join('') || '<li>No key points extracted</li>'}</ul>
+          ${s.insights?.decisions?.length ? '<h3>✅ Decisions</h3><ul>' + s.insights.decisions.map(d => '<li>' + d.text + '</li>').join('') + '</ul>' : ''}`
       },
       extractActions: {
         icon: '✅', label: 'Extract Actions', loadingText: 'Finding action items...',
         generateResult: (s) => `<h3>✅ Action Items (${s.insights?.actions?.length || 0})</h3>
-          <ul>${(s.insights?.actions || []).map(a => '<li>' + a + '</li>').join('') || '<li>No action items found</li>'}</ul>
+          <ul>${(s.insights?.actions || []).map(a => '<li>' + a.text + ' <span style="color:#888;font-size:0.85em">' + (a.meta || '') + '</span></li>').join('') || '<li>No action items found</li>'}</ul>
           ${s.followUp?.length ? '<h3>📅 Follow-ups</h3><ul>' + s.followUp.map(f => '<li>' + f.title + ' - ' + f.date + '</li>').join('') + '</ul>' : ''}`
       },
       findQuestions: {
         icon: '❓', label: 'Find Questions', loadingText: 'Identifying questions...',
         generateResult: (s) => `<h3>❓ Open Questions (${s.insights?.questions?.length || 0})</h3>
-          ${s.insights?.questions?.length ? '<ul>' + s.insights.questions.map(q => '<li>' + q + '</li>').join('') + '</ul>' : '<p>No explicit questions found.</p>'}
+          ${s.insights?.questions?.length ? '<ul>' + s.insights.questions.map(q => '<li>' + q.text + ' <span style="color:#888;font-size:0.85em">' + (q.meta || '') + '</span></li>').join('') + '</ul>' : '<p>No explicit questions found.</p>'}
           <h3>🤔 Suggested Questions</h3><ul><li>What are the next steps?</li><li>Who is responsible for follow-up?</li><li>What resources are needed?</li></ul>`
       }
     };
