@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { RefreshCw, AlertCircle } from 'lucide-react'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
-import { UnifiedRecording, LocationFilter, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
+import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting } from '@/types'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
@@ -19,7 +19,7 @@ import {
   LiveRegion,
   useAnnouncement
 } from '@/features/library/components'
-import { useSourceSelection, useKeyboardNavigation, useLibraryFilterManager } from '@/features/library/hooks'
+import { useSourceSelection, useKeyboardNavigation, useTransitionFilters } from '@/features/library/hooks'
 
 export function Library() {
   const navigate = useNavigate()
@@ -36,6 +36,7 @@ export function Library() {
   const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set())
 
   // Filter state - persisted in store across navigation
+  // Using useTransitionFilters for non-blocking filter updates
   const {
     locationFilter,
     categoryFilter,
@@ -47,11 +48,18 @@ export function Library() {
     setQualityFilter,
     setStatusFilter,
     setSearchQuery,
-    clearFilters,
-    hasActiveFilters,
-    activeFilterCount
-  } = useLibraryFilterManager()
+    isPending: isFilterPending
+  } = useTransitionFilters()
   const deferredSearchQuery = useDeferredValue(searchQuery)
+
+  // AbortController for cancelling enrichment on filter changes or navigation
+  const enrichmentAbortController = useRef(new AbortController())
+
+  // Reset abort controller when filters change
+  useEffect(() => {
+    enrichmentAbortController.current.abort()
+    enrichmentAbortController.current = new AbortController()
+  }, [locationFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
 
   // View mode persisted in store across navigation
   const compactView = useUIStore((state) => state.recordingsCompactView)
@@ -597,20 +605,27 @@ export function Library() {
       />
 
       {/* Filters */}
-      <div className="px-6">
-        <LibraryFilters
-          stats={stats}
-          locationFilter={locationFilter}
-          categoryFilter={categoryFilter}
-          qualityFilter={qualityFilter}
-          statusFilter={statusFilter}
-          searchQuery={searchQuery}
-          onLocationFilterChange={setLocationFilter}
-          onCategoryFilterChange={setCategoryFilter}
-          onQualityFilterChange={setQualityFilter}
-          onStatusFilterChange={setStatusFilter}
-          onSearchQueryChange={setSearchQuery}
-        />
+      <div className="px-6 relative">
+        <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>
+          <LibraryFilters
+            stats={stats}
+            locationFilter={locationFilter}
+            categoryFilter={categoryFilter ?? 'all'}
+            qualityFilter={qualityFilter ?? 'all'}
+            statusFilter={statusFilter ?? 'all'}
+            searchQuery={searchQuery}
+            onLocationFilterChange={setLocationFilter}
+            onCategoryFilterChange={setCategoryFilter}
+            onQualityFilterChange={setQualityFilter}
+            onStatusFilterChange={setStatusFilter}
+            onSearchQueryChange={setSearchQuery}
+          />
+        </div>
+        {isFilterPending && (
+          <div className="absolute top-2 right-2 pointer-events-none">
+            <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
+          </div>
+        )}
       </div>
 
       {/* Bulk Actions Bar */}
@@ -645,7 +660,7 @@ export function Library() {
         onKeyDown={handleKeyDown}
         tabIndex={0}
       >
-        <div className="max-w-4xl mx-auto">
+        <div className={`max-w-4xl mx-auto transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
           {filteredRecordings.length === 0 ? (
             <EmptyState
               hasRecordings={recordings.length > 0}

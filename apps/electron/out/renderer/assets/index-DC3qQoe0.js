@@ -7178,9 +7178,9 @@ function getUrlBasedHistory(getLocation, createHref, validateLocation, options) 
     let url = history.createHref(location);
     try {
       globalHistory.pushState(historyState, "", url);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "DataCloneError") {
-        throw error;
+    } catch (error2) {
+      if (error2 instanceof DOMException && error2.name === "DataCloneError") {
+        throw error2;
       }
       window2.location.assign(url);
     }
@@ -7490,8 +7490,8 @@ function compilePath(path, caseSensitive, end) {
 function decodePath(value) {
   try {
     return value.split("/").map((v2) => decodeURIComponent(v2).replace(/\//g, "%2F")).join("/");
-  } catch (error) {
-    warning(false, 'The URL path "' + value + '" could not be decoded because it is is a malformed URL segment. This is probably due to a bad percent ' + ("encoding (" + error + ")."));
+  } catch (error2) {
+    warning(false, 'The URL path "' + value + '" could not be decoded because it is is a malformed URL segment. This is probably due to a bad percent ' + ("encoding (" + error2 + ")."));
     return value;
   }
 }
@@ -7610,8 +7610,8 @@ const joinPaths = (paths) => paths.join("/").replace(/\/\/+/g, "/");
 const normalizePathname = (pathname) => pathname.replace(/\/+$/, "").replace(/^\/*/, "/");
 const normalizeSearch = (search) => !search || search === "?" ? "" : search.startsWith("?") ? search : "?" + search;
 const normalizeHash = (hash) => !hash || hash === "#" ? "" : hash.startsWith("#") ? hash : "#" + hash;
-function isRouteErrorResponse(error) {
-  return error != null && typeof error.status === "number" && typeof error.statusText === "string" && typeof error.internal === "boolean" && "data" in error;
+function isRouteErrorResponse(error2) {
+  return error2 != null && typeof error2.status === "number" && typeof error2.statusText === "string" && typeof error2.internal === "boolean" && "data" in error2;
 }
 const validMutationMethodsArr = ["post", "put", "patch", "delete"];
 new Set(validMutationMethodsArr);
@@ -7821,9 +7821,9 @@ function useRoutesImpl(routes, locationArg, dataRouterState, future) {
   return renderedMatches;
 }
 function DefaultErrorComponent() {
-  let error = useRouteError();
-  let message = isRouteErrorResponse(error) ? error.status + " " + error.statusText : error instanceof Error ? error.message : JSON.stringify(error);
-  let stack = error instanceof Error ? error.stack : null;
+  let error2 = useRouteError();
+  let message = isRouteErrorResponse(error2) ? error2.status + " " + error2.statusText : error2 instanceof Error ? error2.message : JSON.stringify(error2);
+  let stack = error2 instanceof Error ? error2.stack : null;
   let lightgrey = "rgba(200,200,200, 0.5)";
   let preStyles = {
     padding: "0.5rem",
@@ -7848,9 +7848,9 @@ class RenderErrorBoundary extends reactExports.Component {
       error: props.error
     };
   }
-  static getDerivedStateFromError(error) {
+  static getDerivedStateFromError(error2) {
     return {
-      error
+      error: error2
     };
   }
   static getDerivedStateFromProps(props, state) {
@@ -7867,8 +7867,8 @@ class RenderErrorBoundary extends reactExports.Component {
       revalidation: props.revalidation || state.revalidation
     };
   }
-  componentDidCatch(error, errorInfo) {
-    console.error("React Router caught the following error during render", error, errorInfo);
+  componentDidCatch(error2, errorInfo) {
+    console.error("React Router caught the following error during render", error2, errorInfo);
   }
   render() {
     return this.state.error !== void 0 ? /* @__PURE__ */ reactExports.createElement(RouteContext.Provider, {
@@ -7951,12 +7951,12 @@ function _renderMatches(matches, parentMatches, dataRouterState, future) {
     }
   }
   return renderedMatches.reduceRight((outlet, match, index2) => {
-    let error;
+    let error2;
     let shouldRenderHydrateFallback = false;
     let errorElement = null;
     let hydrateFallbackElement = null;
     if (dataRouterState) {
-      error = errors && match.route.id ? errors[match.route.id] : void 0;
+      error2 = errors && match.route.id ? errors[match.route.id] : void 0;
       errorElement = match.route.errorElement || defaultErrorElement;
       if (renderFallback) {
         if (fallbackIndex < 0 && index2 === 0) {
@@ -7972,7 +7972,7 @@ function _renderMatches(matches, parentMatches, dataRouterState, future) {
     let matches2 = parentMatches.concat(renderedMatches.slice(0, index2 + 1));
     let getChildren = () => {
       let children;
-      if (error) {
+      if (error2) {
         children = errorElement;
       } else if (shouldRenderHydrateFallback) {
         children = hydrateFallbackElement;
@@ -7997,7 +7997,7 @@ function _renderMatches(matches, parentMatches, dataRouterState, future) {
       location: dataRouterState.location,
       revalidation: dataRouterState.revalidation,
       component: errorElement,
-      error,
+      error: error2,
       children: getChildren(),
       routeContext: {
         outlet: null,
@@ -8049,11 +8049,11 @@ function useCurrentRouteId(hookName) {
 }
 function useRouteError() {
   var _state$errors;
-  let error = reactExports.useContext(RouteErrorContext);
+  let error2 = reactExports.useContext(RouteErrorContext);
   let state = useDataRouterState();
   let routeId = useCurrentRouteId();
-  if (error !== void 0) {
-    return error;
+  if (error2 !== void 0) {
+    return error2;
   }
   return (_state$errors = state.errors) == null ? void 0 : _state$errors[routeId];
 }
@@ -9307,6 +9307,28 @@ const Users = createLucideIcon("Users", [
   ["circle", { cx: "9", cy: "7", r: "4", key: "nufk8" }],
   ["path", { d: "M22 21v-2a4 4 0 0 0-3-3.87", key: "kshegd" }],
   ["path", { d: "M16 3.13a4 4 0 0 1 0 7.75", key: "1da9ce" }]
+]);
+/**
+ * @license lucide-react v0.460.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const WandSparkles = createLucideIcon("WandSparkles", [
+  [
+    "path",
+    {
+      d: "m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72",
+      key: "ul74o6"
+    }
+  ],
+  ["path", { d: "m14 7 3 3", key: "1r5n42" }],
+  ["path", { d: "M5 6v4", key: "ilb8ba" }],
+  ["path", { d: "M19 14v4", key: "blhpug" }],
+  ["path", { d: "M10 2v2", key: "7u0qdc" }],
+  ["path", { d: "M7 8H3", key: "zfb6yr" }],
+  ["path", { d: "M21 16h-4", key: "1cnmox" }],
+  ["path", { d: "M11 3H9", key: "1obp7u" }]
 ]);
 /**
  * @license lucide-react v0.460.0 - ISC
@@ -11879,13 +11901,13 @@ const createStoreImpl = (createState) => {
     }
   };
   const getState2 = () => state;
-  const getInitialState = () => initialState;
+  const getInitialState = () => initialState2;
   const subscribe = (listener) => {
     listeners.add(listener);
     return () => listeners.delete(listener);
   };
   const api = { setState, getState: getState2, getInitialState, subscribe };
-  const initialState = state = createState(setState, getState2, api);
+  const initialState2 = state = createState(setState, getState2, api);
   return api;
 };
 const createStore = (createState) => createState ? createStoreImpl(createState) : createStoreImpl;
@@ -11956,8 +11978,8 @@ const useAppStore = create((set, get) => ({
     try {
       const config = await window.electronAPI.config.get();
       set({ config, configLoading: false });
-    } catch (error) {
-      console.error("Failed to load config:", error);
+    } catch (error2) {
+      console.error("Failed to load config:", error2);
       set({ configLoading: false });
     }
   },
@@ -11965,8 +11987,8 @@ const useAppStore = create((set, get) => ({
     try {
       const newConfig = await window.electronAPI.config.updateSection(section, values);
       set({ config: newConfig });
-    } catch (error) {
-      console.error("Failed to update config:", error);
+    } catch (error2) {
+      console.error("Failed to update config:", error2);
     }
   },
   // Meeting actions
@@ -11976,8 +11998,8 @@ const useAppStore = create((set, get) => ({
     try {
       const meetings = await window.electronAPI.meetings.getAll(startDate, endDate);
       set({ meetings, meetingsLoading: false });
-    } catch (error) {
-      console.error("Failed to load meetings:", error);
+    } catch (error2) {
+      console.error("Failed to load meetings:", error2);
       set({ meetingsLoading: false });
     }
   },
@@ -11994,10 +12016,10 @@ const useAppStore = create((set, get) => ({
       }
       set({ calendarSyncing: false });
       return result;
-    } catch (error) {
-      console.error("Failed to sync calendar:", error);
+    } catch (error2) {
+      console.error("Failed to sync calendar:", error2);
       set({ calendarSyncing: false });
-      return { success: false, meetingsCount: 0, error: String(error) };
+      return { success: false, meetingsCount: 0, error: String(error2) };
     }
   },
   // Recording actions
@@ -12008,8 +12030,8 @@ const useAppStore = create((set, get) => ({
     try {
       const recordings = await window.electronAPI.recordings.getAll();
       set({ recordings, recordingsLoading: false });
-    } catch (error) {
-      console.error("Failed to load recordings:", error);
+    } catch (error2) {
+      console.error("Failed to load recordings:", error2);
       set({ recordingsLoading: false });
     }
   },
@@ -12018,15 +12040,15 @@ const useAppStore = create((set, get) => ({
     try {
       const recordings = await window.electronAPI.recordings.getAll();
       set({ recordings, recordingsLoading: false });
-    } catch (error) {
-      console.error("Failed to load all recordings:", error);
+    } catch (error2) {
+      console.error("Failed to load all recordings:", error2);
       set({ recordingsLoading: false });
     }
   },
   // Unified recordings actions
   setUnifiedRecordings: (recordings) => set({ unifiedRecordings: recordings }),
   setUnifiedRecordingsLoading: (loading) => set({ unifiedRecordingsLoading: loading }),
-  setUnifiedRecordingsError: (error) => set({ unifiedRecordingsError: error }),
+  setUnifiedRecordingsError: (error2) => set({ unifiedRecordingsError: error2 }),
   markUnifiedRecordingsLoaded: () => set({ unifiedRecordingsLoaded: true }),
   invalidateUnifiedRecordings: () => set({ unifiedRecordingsLoaded: false }),
   // UI actions
@@ -12911,11 +12933,11 @@ var Portal$2 = reactExports.forwardRef((props, forwardedRef) => {
   return container ? ReactDOM.createPortal(/* @__PURE__ */ jsxRuntimeExports.jsx(Primitive$1.div, { ...portalProps, ref: forwardedRef }), container) : null;
 });
 Portal$2.displayName = PORTAL_NAME$2;
-function useStateMachine(initialState, machine) {
+function useStateMachine(initialState2, machine) {
   return reactExports.useReducer((state, event) => {
     const nextState = machine[state][event];
     return nextState ?? state;
-  }, initialState);
+  }, initialState2);
 }
 var Presence = (props) => {
   const { present, children } = props;
@@ -12931,8 +12953,8 @@ function usePresence(present) {
   const stylesRef = reactExports.useRef(null);
   const prevPresentRef = reactExports.useRef(present);
   const prevAnimationNameRef = reactExports.useRef("none");
-  const initialState = present ? "mounted" : "unmounted";
-  const [state, send] = useStateMachine(initialState, {
+  const initialState2 = present ? "mounted" : "unmounted";
+  const [state, send] = useStateMachine(initialState2, {
     mounted: {
       UNMOUNT: "unmounted",
       ANIMATION_OUT: "unmountSuspended"
@@ -14153,8 +14175,8 @@ class JensenDevice {
       this.setupUsbDisconnectListener();
       this.onconnect?.();
       return true;
-    } catch (error) {
-      console.error("[Jensen] Connection failed:", error);
+    } catch (error2) {
+      console.error("[Jensen] Connection failed:", error2);
       return false;
     }
   }
@@ -14282,8 +14304,8 @@ class JensenDevice {
         }
       }
       return true;
-    } catch (error) {
-      console.error("[Jensen] Reset failed:", error);
+    } catch (error2) {
+      console.error("[Jensen] Reset failed:", error2);
       return false;
     }
   }
@@ -14311,16 +14333,16 @@ class JensenDevice {
         return true;
       }
       return false;
-    } catch (error) {
-      if (error instanceof DOMException) {
-        if (error.name === "NetworkError") {
+    } catch (error2) {
+      if (error2 instanceof DOMException) {
+        if (error2.name === "NetworkError") {
           return false;
-        } else if (error.name === "InvalidStateError") {
+        } else if (error2.name === "InvalidStateError") {
           console.error("[Jensen] Device connection lost");
           return false;
         }
       }
-      console.warn("[Jensen] USB read error:", error);
+      console.warn("[Jensen] USB read error:", error2);
       return false;
     }
   }
@@ -14391,17 +14413,17 @@ class JensenDevice {
             if (DEBUG_PROTOCOL) console.warn(`[Jensen] Unexpected seq: expected seq=${expectedSeqId}, got cmd=${msg.id} seq=${msg.sequence}. Discarding.`);
           }
         }
-      } catch (error) {
-        if (error instanceof DOMException) {
-          if (error.name === "NetworkError") {
+      } catch (error2) {
+        if (error2 instanceof DOMException) {
+          if (error2.name === "NetworkError") {
             continue;
-          } else if (error.name === "InvalidStateError") {
+          } else if (error2.name === "InvalidStateError") {
             console.error("[Jensen] Device connection lost");
             throw new Error("Device connection lost");
           }
         }
-        console.error(`[Jensen] receiveResponse: Unexpected error:`, error);
-        throw error;
+        console.error(`[Jensen] receiveResponse: Unexpected error:`, error2);
+        throw error2;
       }
       await this.delay(10);
     }
@@ -14526,9 +14548,9 @@ class JensenDevice {
     try {
       await this.device.transferOut(1, data);
       if (DEBUG_PROTOCOL) console.log(`[Jensen] Command sent: cmd=${msg.command}, seq=${seqId}`);
-    } catch (error) {
-      console.error(`[Jensen] Failed to send cmd=${msg.command}:`, error);
-      throw new Error(`Failed to send USB command: ${error instanceof Error ? error.message : String(error)}`);
+    } catch (error2) {
+      console.error(`[Jensen] Failed to send cmd=${msg.command}:`, error2);
+      throw new Error(`Failed to send USB command: ${error2 instanceof Error ? error2.message : String(error2)}`);
     }
     const response = await this.receiveResponse(msg.command, seqId, timeout);
     return this.parseResponse(response);
@@ -14567,8 +14589,8 @@ class JensenDevice {
           serialNumber: result.sn,
           model: this.model
         };
-      } catch (error) {
-        console.error("[Jensen] getDeviceInfo error:", error);
+      } catch (error2) {
+        console.error("[Jensen] getDeviceInfo error:", error2);
         return null;
       }
     });
@@ -14641,8 +14663,8 @@ class JensenDevice {
         const result = await this.send(new JensenMessage(CMD.GET_CARD_INFO), timeout);
         if (DEBUG_PROTOCOL) console.log("getCardInfo: Received result:", result);
         return result;
-      } catch (error) {
-        console.error("[Jensen] getCardInfo error:", error);
+      } catch (error2) {
+        console.error("[Jensen] getCardInfo error:", error2);
         return null;
       }
     });
@@ -14765,91 +14787,25 @@ class JensenDevice {
               break;
             }
           }
-        } catch (error) {
-          if (error instanceof DOMException) {
-            if (error.name === "NetworkError") {
+        } catch (error2) {
+          if (error2 instanceof DOMException) {
+            if (error2.name === "NetworkError") {
               if (allFiles.length > 0 && Date.now() - lastDataTime > 5e3) {
                 console.log(`[Jensen] listFiles: Idle timeout after 5s with ${allFiles.length} files`);
                 break;
               }
               continue;
-            } else if (error.name === "InvalidStateError") {
+            } else if (error2.name === "InvalidStateError") {
               console.error("[Jensen] listFiles: Device connection lost");
               throw new Error("Device connection lost");
             }
           }
-          throw error;
+          throw error2;
         }
       }
       console.log(`[Jensen] listFiles: Loop exited - ${allFiles.length} files from ${packetsReceived} packets, ${totalBytesReceived} bytes, elapsed: ${Date.now() - startTime}ms`);
       return allFiles;
     });
-  }
-  // Parse file list data from collected chunks
-  parseFileListData(chunks) {
-    const totalSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-    if (totalSize === 0) return [];
-    const buffer = new Uint8Array(totalSize);
-    let offset2 = 0;
-    for (const chunk of chunks) {
-      buffer.set(chunk, offset2);
-      offset2 += chunk.length;
-    }
-    return this.parseFileListBuffer(buffer);
-  }
-  // Parse file list data from a combined buffer
-  parseFileListBuffer(buffer) {
-    if (buffer.length === 0) return [];
-    const files = [];
-    let pos = 0;
-    let expectedCount = -1;
-    if (buffer.length >= 6 && buffer[0] === 255 && buffer[1] === 255) {
-      expectedCount = (buffer[2] & 255) << 24 | (buffer[3] & 255) << 16 | (buffer[4] & 255) << 8 | buffer[5] & 255;
-      pos = 6;
-    }
-    while (pos < buffer.length && (expectedCount === -1 || files.length < expectedCount)) {
-      try {
-        if (pos + 4 > buffer.length) break;
-        const fileVersion = buffer[pos++];
-        if (pos + 3 > buffer.length) break;
-        const nameLen = (buffer[pos] & 255) << 16 | (buffer[pos + 1] & 255) << 8 | buffer[pos + 2] & 255;
-        pos += 3;
-        if (pos + nameLen > buffer.length) break;
-        let filename = "";
-        for (let i = 0; i < nameLen; i++) {
-          const char = buffer[pos + i];
-          if (char > 0) filename += String.fromCharCode(char);
-        }
-        pos += nameLen;
-        if (pos + 4 > buffer.length) break;
-        const fileLength = (buffer[pos] & 255) << 24 | (buffer[pos + 1] & 255) << 16 | (buffer[pos + 2] & 255) << 8 | buffer[pos + 3] & 255;
-        pos += 4;
-        if (pos + 6 > buffer.length) break;
-        pos += 6;
-        if (pos + 16 > buffer.length) break;
-        let signature = "";
-        for (let i = 0; i < 16; i++) {
-          signature += buffer[pos + i].toString(16).padStart(2, "0");
-        }
-        pos += 16;
-        const { createDate, createTime, time } = this.parseFilenameDateTime(filename);
-        const duration = calculateDurationSeconds(fileLength, fileVersion);
-        files.push({
-          name: filename,
-          createDate,
-          createTime,
-          time,
-          duration,
-          version: fileVersion,
-          length: fileLength,
-          signature
-        });
-      } catch {
-        break;
-      }
-    }
-    console.log(`Parsed ${files.length} files from device`);
-    return files;
   }
   // Parse partial file list data, returning parsed files and remaining unparsed buffer
   parsePartialFileList(buffer, knownTotal) {
@@ -15351,8 +15307,8 @@ class HiDockDeviceService {
         console.warn("[HiDockDevice] electronAPI.config not available after waiting, auto-connect will be disabled");
         this.configLoaded = true;
       }
-    } catch (error) {
-      console.error("[HiDockDevice] Failed to load auto-connect config:", error);
+    } catch (error2) {
+      console.error("[HiDockDevice] Failed to load auto-connect config:", error2);
       this.configLoaded = true;
     }
   }
@@ -15367,8 +15323,8 @@ class HiDockDeviceService {
       } else {
         console.warn("electronAPI.config.updateSection not available");
       }
-    } catch (error) {
-      console.error("Failed to save auto-connect config:", error);
+    } catch (error2) {
+      console.error("Failed to save auto-connect config:", error2);
     }
   }
   // Get auto-connect configuration
@@ -15416,8 +15372,8 @@ class HiDockDeviceService {
     if (this.configLoadPromise) {
       try {
         await this.configLoadPromise;
-      } catch (error) {
-        console.error("[HiDockDevice] initAutoConnect: Config load promise failed:", error);
+      } catch (error2) {
+        console.error("[HiDockDevice] initAutoConnect: Config load promise failed:", error2);
       }
     }
     if (!this.configLoaded) {
@@ -15441,6 +15397,9 @@ class HiDockDeviceService {
   disableAutoConnect() {
     this.autoConnectEnabled = false;
     this.userInitiatedDisconnect = true;
+    this.autoConnectConfig.enabled = false;
+    this.autoConnectConfig.connectOnStartup = false;
+    this.saveAutoConnectConfig();
     this.stopAutoConnect();
     this.logActivity("info", "Auto-connect disabled by user");
   }
@@ -15520,8 +15479,8 @@ class HiDockDeviceService {
         this.logActivity("error", "Device reset failed");
       }
       return success;
-    } catch (error) {
-      this.logActivity("error", "Device reset error", error instanceof Error ? error.message : "Unknown error");
+    } catch (error2) {
+      this.logActivity("error", "Device reset error", error2 instanceof Error ? error2.message : "Unknown error");
       return false;
     }
   }
@@ -15678,9 +15637,9 @@ class HiDockDeviceService {
         this.notifyStateChange();
         return null;
       }
-    } catch (error) {
+    } catch (error2) {
       this.state.storage = { used: 0, capacity: 0, freePercent: 0 };
-      this.logActivity("error", "Failed to get card info", error instanceof Error ? error.message : "Unknown error");
+      this.logActivity("error", "Failed to get card info", error2 instanceof Error ? error2.message : "Unknown error");
       this.notifyStateChange();
       return null;
     }
@@ -15782,7 +15741,7 @@ class HiDockDeviceService {
         ]);
         onProgress?.(result.length, expectedFileCount);
         return result;
-      } catch (error) {
+      } catch (error2) {
         console.warn("[HiDockDevice] listRecordings: Existing request timed out, clearing and retrying");
         this.listRecordingsPromise = null;
         this.listRecordingsLock = false;
@@ -15822,11 +15781,11 @@ class HiDockDeviceService {
         this.cachedRecordings = recordings;
         this.cachedRecordingCount = expectedFileCount;
         return recordings;
-      } catch (error) {
+      } catch (error2) {
         animationCancelled = true;
         clearInterval(animationInterval);
-        console.error("[HiDockDevice] listRecordings error:", error);
-        this.logActivity("error", "Failed to list files", error instanceof Error ? error.message : "Unknown error");
+        console.error("[HiDockDevice] listRecordings error:", error2);
+        this.logActivity("error", "Failed to list files", error2 instanceof Error ? error2.message : "Unknown error");
         return [];
       } finally {
         this.listRecordingsLock = false;
@@ -15950,9 +15909,9 @@ class HiDockDeviceService {
       );
       this.logActivity("success", "File saved", filename);
       return true;
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : "Unknown error";
-      console.error(`[HiDockDevice] downloadRecordingToFile FAILED to save: ${filename} -`, error);
+    } catch (error2) {
+      const errorMsg = error2 instanceof Error ? error2.message : "Unknown error";
+      console.error(`[HiDockDevice] downloadRecordingToFile FAILED to save: ${filename} -`, error2);
       this.logActivity("error", "Failed to save file", `${filename}: ${errorMsg}`);
       return false;
     }
@@ -15974,11 +15933,11 @@ class HiDockDeviceService {
     try {
       await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, "Get device info");
       successCount++;
-    } catch (error) {
-      const isTimeout = error instanceof Error && error.message.includes("timed out");
+    } catch (error2) {
+      const isTimeout = error2 instanceof Error && error2.message.includes("timed out");
       if (isTimeout) timeoutCount++;
-      console.warn("[HiDockDevice] Failed to get device info:", error);
-      this.logActivity("error", "Failed to get device info", error instanceof Error ? error.message : "Unknown error");
+      console.warn("[HiDockDevice] Failed to get device info:", error2);
+      this.logActivity("error", "Failed to get device info", error2 instanceof Error ? error2.message : "Unknown error");
       if (isTimeout) {
         this.logActivity("warning", "Device may be unresponsive", "Try disconnecting and reconnecting your device");
       }
@@ -15994,11 +15953,11 @@ class HiDockDeviceService {
     try {
       await withTimeout(this.refreshStorageInfo(), INIT_STEP_TIMEOUT, "Get storage info");
       successCount++;
-    } catch (error) {
-      const isTimeout = error instanceof Error && error.message.includes("timed out");
+    } catch (error2) {
+      const isTimeout = error2 instanceof Error && error2.message.includes("timed out");
       if (isTimeout) timeoutCount++;
-      console.warn("[HiDockDevice] Failed to get storage info:", error);
-      this.logActivity("error", "Failed to get storage info", error instanceof Error ? error.message : "Unknown error");
+      console.warn("[HiDockDevice] Failed to get storage info:", error2);
+      this.logActivity("error", "Failed to get storage info", error2 instanceof Error ? error2.message : "Unknown error");
     }
     if (timeoutCount >= MAX_TIMEOUTS_BEFORE_FAIL) {
       this.logActivity("error", "Device initialization failed", "Device is not responding. Please disconnect and reconnect your device.");
@@ -16011,11 +15970,11 @@ class HiDockDeviceService {
     try {
       await withTimeout(this.refreshSettings(), INIT_STEP_TIMEOUT, "Get settings");
       successCount++;
-    } catch (error) {
-      const isTimeout = error instanceof Error && error.message.includes("timed out");
+    } catch (error2) {
+      const isTimeout = error2 instanceof Error && error2.message.includes("timed out");
       if (isTimeout) timeoutCount++;
-      console.warn("[HiDockDevice] Failed to get settings:", error);
-      this.logActivity("error", "Failed to get settings", error instanceof Error ? error.message : "Unknown error");
+      console.warn("[HiDockDevice] Failed to get settings:", error2);
+      this.logActivity("error", "Failed to get settings", error2 instanceof Error ? error2.message : "Unknown error");
     }
     if (timeoutCount >= MAX_TIMEOUTS_BEFORE_FAIL) {
       this.logActivity("error", "Device initialization failed", "Device is not responding. Please disconnect and reconnect your device.");
@@ -16028,11 +15987,11 @@ class HiDockDeviceService {
     try {
       await withTimeout(this.syncTime(), INIT_STEP_TIMEOUT, "Sync time");
       successCount++;
-    } catch (error) {
-      const isTimeout = error instanceof Error && error.message.includes("timed out");
+    } catch (error2) {
+      const isTimeout = error2 instanceof Error && error2.message.includes("timed out");
       if (isTimeout) timeoutCount++;
-      console.warn("[HiDockDevice] Failed to sync time:", error);
-      this.logActivity("error", "Failed to sync time", error instanceof Error ? error.message : "Unknown error");
+      console.warn("[HiDockDevice] Failed to sync time:", error2);
+      this.logActivity("error", "Failed to sync time", error2 instanceof Error ? error2.message : "Unknown error");
     }
     if (this.initAborted) return;
     if (successCount === 0) {
@@ -16227,7 +16186,7 @@ function OperationController() {
   const deviceService = getHiDockDeviceService();
   const isProcessingDownloads = reactExports.useRef(false);
   const audioRef = reactExports.useRef(null);
-  const downloadAbortRef = reactExports.useRef(false);
+  const downloadAbortControllerRef = reactExports.useRef(null);
   const autoSyncTriggeredRef = reactExports.useRef(false);
   const {
     setDeviceState,
@@ -16240,20 +16199,21 @@ function OperationController() {
     removeFromDownloadQueue,
     loadRecordings,
     loadMeetings,
-    syncCalendar,
     config
   } = useAppStore();
   const {
-    currentlyPlayingId,
     setCurrentlyPlaying,
     setPlaybackProgress,
     setIsPlaying
   } = useUIStore();
-  const processDownload = reactExports.useCallback(async (item) => {
+  const processDownload = reactExports.useCallback(async (item, signal) => {
     console.log(`[QA-MONITOR][Operation] Processing download: ${item.filename}`);
     if (!deviceService.isConnected()) {
       console.error("[OperationController] Device not connected");
       await window.electronAPI.downloadService.markFailed(item.filename, "Device not connected");
+      return false;
+    }
+    if (signal.aborted) {
       return false;
     }
     addToDownloadQueue(item.filename, item.filename, item.fileSize);
@@ -16264,6 +16224,9 @@ function OperationController() {
         item.filename,
         item.fileSize,
         (chunk) => {
+          if (signal.aborted) {
+            throw new Error("Download cancelled");
+          }
           chunks.push(chunk);
           totalReceived += chunk.length;
           window.electronAPI.downloadService.updateProgress(item.filename, totalReceived);
@@ -16304,9 +16267,9 @@ function OperationController() {
         });
         return false;
       }
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : "Unknown error";
-      console.error(`[QA-MONITOR][Operation] Error: ${item.filename}`, error);
+    } catch (error2) {
+      const errorMsg = error2 instanceof Error ? error2.message : "Unknown error";
+      console.error(`[QA-MONITOR][Operation] Error: ${item.filename}`, error2);
       await window.electronAPI.downloadService.markFailed(item.filename, errorMsg);
       removeFromDownloadQueue(item.filename);
       toast({
@@ -16323,7 +16286,8 @@ function OperationController() {
     const pendingItems = state.queue.filter((item) => item.status === "pending");
     if (pendingItems.length === 0 || !deviceService.isConnected()) return;
     isProcessingDownloads.current = true;
-    downloadAbortRef.current = false;
+    downloadAbortControllerRef.current = new AbortController();
+    const signal = downloadAbortControllerRef.current.signal;
     console.log(`[QA-MONITOR][Operation] Processing ${pendingItems.length} downloads`);
     setDeviceSyncState({
       deviceSyncing: true,
@@ -16334,7 +16298,7 @@ function OperationController() {
     let failed = 0;
     let aborted = false;
     for (const item of pendingItems) {
-      if (downloadAbortRef.current) {
+      if (signal.aborted) {
         console.log("[OperationController] Download aborted by user");
         aborted = true;
         break;
@@ -16355,7 +16319,7 @@ function OperationController() {
         deviceSyncProgress: { current: completed + failed, total: pendingItems.length },
         deviceFileProgress: 0
       });
-      const success = await processDownload(item);
+      const success = await processDownload(item, signal);
       success ? completed++ : failed++;
     }
     isProcessingDownloads.current = false;
@@ -16418,8 +16382,8 @@ function OperationController() {
       setCurrentlyPlaying(recordingId, filePath);
       audioRef.current.src = `data:${mimeType};base64,${base64}`;
       await audioRef.current.play();
-    } catch (error) {
-      console.error("[OperationController] Play error:", error);
+    } catch (error2) {
+      console.error("[OperationController] Play error:", error2);
       toast({ title: "Playback error", description: "Failed to play audio", variant: "error" });
       setIsPlaying(false);
       setCurrentlyPlaying(null, null);
@@ -16471,9 +16435,9 @@ function OperationController() {
     if (deviceSubscriptionsInitialized.current) return;
     deviceSubscriptionsInitialized.current = true;
     console.log("[OperationController] Subscribing to device state");
-    const initialState = deviceService.getState();
+    const initialState2 = deviceService.getState();
     const initialStatus = deviceService.getConnectionStatus();
-    setDeviceState(initialState);
+    setDeviceState(initialState2);
     setConnectionStatus(initialStatus);
     const unsubStateChange = deviceService.onStateChange((state) => {
       console.log("[OperationController] Device state changed:", state);
@@ -16604,7 +16568,7 @@ function OperationController() {
       } else if (!deviceState.connected) {
         if (isProcessingDownloads.current) {
           console.log("[OperationController] Device disconnected, aborting downloads");
-          downloadAbortRef.current = true;
+          downloadAbortControllerRef.current?.abort();
         }
         autoSyncTriggeredRef.current = false;
       }
@@ -16619,7 +16583,7 @@ function OperationController() {
     }, 5e3);
     return () => {
       console.log("[OperationController] Unmounting");
-      downloadAbortRef.current = true;
+      downloadAbortControllerRef.current?.abort();
       unsubDownloads();
       unsubDevice();
       clearInterval(transcriptionInterval);
@@ -16632,9 +16596,6 @@ function OperationController() {
   return null;
 }
 const useAudioControls = () => {
-  const {
-    startDownload
-  } = useAppStore();
   return {
     play: (recordingId, filePath) => {
       window.__audioControls?.play(recordingId, filePath);
@@ -16703,7 +16664,6 @@ function Layout({ children }) {
     toggleSidebar,
     loadConfig,
     loadMeetings,
-    loadRecordings,
     syncCalendar,
     lastCalendarSync,
     config,
@@ -16961,11 +16921,11 @@ class ErrorBoundary extends reactExports.Component {
     super(props);
     this.state = { hasError: false, error: null };
   }
-  static getDerivedStateFromError(error) {
-    return { hasError: true, error };
+  static getDerivedStateFromError(error2) {
+    return { hasError: true, error: error2 };
   }
-  componentDidCatch(error, errorInfo) {
-    console.error("ErrorBoundary caught an error:", error, errorInfo);
+  componentDidCatch(error2, errorInfo) {
+    console.error("ErrorBoundary caught an error:", error2, errorInfo);
   }
   render() {
     if (this.state.hasError) {
@@ -19954,9 +19914,9 @@ function __spreadArray(to, from, pack) {
   }
   return to.concat(ar || Array.prototype.slice.call(from));
 }
-typeof SuppressedError === "function" ? SuppressedError : function(error, suppressed, message) {
+typeof SuppressedError === "function" ? SuppressedError : function(error2, suppressed, message) {
   var e = new Error(message);
-  return e.name = "SuppressedError", e.error = error, e.suppressed = suppressed, e;
+  return e.name = "SuppressedError", e.error = error2, e.suppressed = suppressed, e;
 };
 var zeroRightClassName = "right-scroll-bar-position";
 var fullWidthClassName = "width-before-scroll-bar";
@@ -21680,7 +21640,7 @@ function RecordingLinkDialog({
   const [selectedId, setSelectedId] = reactExports.useState(null);
   const [saving, setSaving] = reactExports.useState(false);
   const [loading, setLoading] = reactExports.useState(false);
-  const [error, setError] = reactExports.useState(null);
+  const [error2, setError] = reactExports.useState(null);
   reactExports.useEffect(() => {
     if (!recording || !open) {
       setCandidates([]);
@@ -21767,8 +21727,8 @@ function RecordingLinkDialog({
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex-1 overflow-y-auto py-2", children: [
       loading && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "py-8 text-center text-muted-foreground", children: "Loading..." }),
-      error && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "py-4 px-3 text-sm text-destructive bg-destructive/10 rounded-md", children: error }),
-      !loading && !error && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      error2 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "py-4 px-3 text-sm text-destructive bg-destructive/10 rounded-md", children: error2 }),
+      !loading && !error2 && /* @__PURE__ */ jsxRuntimeExports.jsxs(
         RadioGroup,
         {
           value: selectedId || "",
@@ -21990,7 +21950,7 @@ function buildRecordingMap(deviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, i
         const cachedDate = new Date(cached.date_recorded);
         const dateRecorded = getBestDate(cached.filename, cachedDate, cachedDate);
         const recording = {
-          id: cached.id,
+          id: getBaseFilename(cached.filename),
           filename: cached.filename,
           size: cached.file_size ?? cached.size ?? 0,
           duration: cached.duration_seconds || 0,
@@ -22012,7 +21972,7 @@ function buildRecordingMap(deviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, i
 function useUnifiedRecordings() {
   const recordings = useAppStore((state) => state.unifiedRecordings);
   const loading = useAppStore((state) => state.unifiedRecordingsLoading);
-  const error = useAppStore((state) => state.unifiedRecordingsError);
+  const error2 = useAppStore((state) => state.unifiedRecordingsError);
   const loaded = useAppStore((state) => state.unifiedRecordingsLoaded);
   const setRecordings = useAppStore((state) => state.setUnifiedRecordings);
   const setLoading = useAppStore((state) => state.setUnifiedRecordingsLoading);
@@ -22132,7 +22092,7 @@ function useUnifiedRecordings() {
   return {
     recordings,
     loading,
-    error,
+    error: error2,
     refresh: loadRecordings,
     deviceConnected,
     stats
@@ -23032,7 +22992,7 @@ function groupByDay(items, getDate, viewDates) {
   }
   return grouped;
 }
-const StatusIcon = reactExports.memo(function StatusIcon2({ location }) {
+const StatusIcon$1 = reactExports.memo(function StatusIcon2({ location }) {
   switch (location) {
     case "device-only":
       return /* @__PURE__ */ jsxRuntimeExports.jsx(Cloud, { className: "h-3 w-3 text-orange-500" });
@@ -23078,7 +23038,7 @@ const RecordingTooltipContent = reactExports.memo(function RecordingTooltipConte
                 recording.location === "both" && "text-green-500"
               ),
               children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon, { location: recording.location }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon$1, { location: recording.location }),
                 recording.location === "device-only" && "On device only",
                 recording.location === "local-only" && "Downloaded",
                 recording.location === "both" && "Synced"
@@ -23206,10 +23166,10 @@ function Calendar() {
     navigateWeek,
     navigateMonth,
     goToToday,
+    setCurrentDate,
     setCalendarView,
     loadMeetings,
     lastCalendarSync: lastSync,
-    syncCalendar,
     calendarSyncing,
     config,
     loadConfig,
@@ -23396,7 +23356,7 @@ function Calendar() {
     const height = Math.max(20, (endHour - startHour) * HOUR_HEIGHT - 2);
     return { top, height };
   };
-  const monthYear = currentDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const monthYear = currentDate instanceof Date ? currentDate.toLocaleDateString("en-US", { month: "long", year: "numeric" }) : "";
   const formatLastSync = reactExports.useCallback(() => {
     if (!lastSync) return "";
     const syncDate = new Date(lastSync);
@@ -23466,8 +23426,8 @@ function Calendar() {
     try {
       await window.electronAPI.calendar.toggleAutoSync(enabled);
       loadConfig();
-    } catch (error) {
-      console.error("Failed to toggle auto-sync:", error);
+    } catch (error2) {
+      console.error("Failed to toggle auto-sync:", error2);
       setAutoSyncEnabled(!enabled);
     }
   }, [loadConfig]);
@@ -23747,7 +23707,7 @@ function Calendar() {
                   ),
                   children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "absolute top-2 right-2", children: isSelected ? /* @__PURE__ */ jsxRuntimeExports.jsx(SquareCheckBig, { className: "h-4 w-4 text-primary" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Square, { className: "h-4 w-4 text-muted-foreground/30" }) }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mb-2", children: /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon, { location: recording.location }) }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "mb-2", children: /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon$1, { location: recording.location }) }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-xs font-medium", children: formatShortDate(recording.dateRecorded) }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-xs text-muted-foreground", children: formatShortTime(recording.dateRecorded) }),
                     recording.duration > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-xs text-muted-foreground mt-1", children: formatDuration(recording.duration) }),
@@ -23855,7 +23815,7 @@ function Calendar() {
                   ),
                   children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => toggleSelection(recording.id), className: "flex-shrink-0", children: isSelected ? /* @__PURE__ */ jsxRuntimeExports.jsx(SquareCheckBig, { className: "h-4 w-4 text-primary" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Square, { className: "h-4 w-4 text-muted-foreground/50" }) }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon, { location: recording.location }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon$1, { location: recording.location }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "w-20 flex-shrink-0 text-muted-foreground text-xs", children: formatShortDate(recording.dateRecorded) }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "w-16 flex-shrink-0 text-muted-foreground text-xs", children: formatShortTime(recording.dateRecorded) }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "flex-1 truncate font-mono text-xs", title: recording.filename, children: recording.filename }),
@@ -24035,7 +23995,7 @@ function Calendar() {
                           meeting.hasConflicts && "ring-1 ring-orange-400"
                         ),
                         children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-1", children: [
-                          meeting.hasRecording && meeting.recordingLocation && /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon, { location: meeting.recordingLocation }),
+                          meeting.hasRecording && meeting.recordingLocation && /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon$1, { location: meeting.recordingLocation }),
                           meeting.hasRecording && !meeting.recordingLocation && /* @__PURE__ */ jsxRuntimeExports.jsx(Mic, { className: "h-3 w-3 flex-shrink-0" }),
                           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: meeting.subject })
                         ] })
@@ -24221,7 +24181,7 @@ function Calendar() {
                                   recording.durationSeconds > 0 && ` (${formatDurationStr(recording.durationSeconds)})`
                                 ] })
                               ] }),
-                              /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon, { location: recording.location })
+                              /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon$1, { location: recording.location })
                             ] })
                           }
                         ) }),
@@ -24311,8 +24271,8 @@ function MeetingDetail() {
     try {
       const data = await window.electronAPI.meetings.getDetails(meetingId);
       setDetails(data);
-    } catch (error) {
-      console.error("Failed to load meeting details:", error);
+    } catch (error2) {
+      console.error("Failed to load meeting details:", error2);
     } finally {
       setLoading(false);
     }
@@ -24498,8 +24458,8 @@ function ContextPicker({ onSelect, selectedIds, className }) {
       try {
         const data = await window.electronAPI.knowledge.getAll({ limit: 50 });
         setKnowledge(data);
-      } catch (error) {
-        console.error("Failed to load knowledge for picker:", error);
+      } catch (error2) {
+        console.error("Failed to load knowledge for picker:", error2);
       } finally {
         setLoading(false);
       }
@@ -24580,9 +24540,9 @@ function Chat() {
           loadConversations(),
           checkRAGStatus()
         ]);
-      } catch (error) {
-        console.error("Failed to initialize Chat:", error);
-        setInitError(error instanceof Error ? error.message : "Failed to initialize chat");
+      } catch (error2) {
+        console.error("Failed to initialize Chat:", error2);
+        setInitError(error2 instanceof Error ? error2.message : "Failed to initialize chat");
       } finally {
         setInitialLoading(false);
       }
@@ -24599,8 +24559,8 @@ function Chat() {
       if (history.length > 0 && !activeConversation) {
         handleSelectConversation(history[0]);
       }
-    } catch (error) {
-      console.error("Failed to load conversations:", error);
+    } catch (error2) {
+      console.error("Failed to load conversations:", error2);
     }
   };
   const handleSelectConversation = async (conv) => {
@@ -24619,8 +24579,8 @@ function Chat() {
         setContextItems([]);
       }
       setSources(/* @__PURE__ */ new Map());
-    } catch (error) {
-      console.error("Failed to load conversation details:", error);
+    } catch (error2) {
+      console.error("Failed to load conversation details:", error2);
     }
   };
   const handleNewChat = async () => {
@@ -24628,8 +24588,8 @@ function Chat() {
       const newConv = await window.electronAPI.assistant.createConversation("New Chat");
       setConversations((prev) => [newConv, ...prev]);
       handleSelectConversation(newConv);
-    } catch (error) {
-      console.error("Failed to create new chat:", error);
+    } catch (error2) {
+      console.error("Failed to create new chat:", error2);
     }
   };
   const handleDeleteConversation = async (e, id2) => {
@@ -24644,8 +24604,8 @@ function Chat() {
         setContextIds([]);
         setContextItems([]);
       }
-    } catch (error) {
-      console.error("Failed to delete conversation:", error);
+    } catch (error2) {
+      console.error("Failed to delete conversation:", error2);
     }
   };
   const handleToggleContext = async (id2) => {
@@ -24662,8 +24622,8 @@ function Chat() {
         const item = await window.electronAPI.knowledge.getById(id2);
         if (item) setContextItems((prev) => [...prev, item]);
       }
-    } catch (error) {
-      console.error("Failed to toggle context:", error);
+    } catch (error2) {
+      console.error("Failed to toggle context:", error2);
     }
   };
   const checkRAGStatus = async () => {
@@ -24674,7 +24634,7 @@ function Chat() {
       } else {
         setStatus({ ollamaAvailable: false, documentCount: 0, meetingCount: 0, ready: false });
       }
-    } catch (error) {
+    } catch (error2) {
       setStatus({ ollamaAvailable: false, documentCount: 0, meetingCount: 0, ready: false });
     }
   };
@@ -24683,8 +24643,8 @@ function Chat() {
     try {
       const data = await window.electronAPI.rag.getChunks();
       setChunks(data);
-    } catch (error) {
-      console.error("Failed to load chunks:", error);
+    } catch (error2) {
+      console.error("Failed to load chunks:", error2);
     } finally {
       setLoadingChunks(false);
     }
@@ -24741,8 +24701,8 @@ function Chat() {
       setConversations((prev) => prev.map(
         (c) => c.id === currentConv.id ? { ...c, updatedAt: (/* @__PURE__ */ new Date()).toISOString() } : c
       ).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()));
-    } catch (error) {
-      console.error("Chat error:", error);
+    } catch (error2) {
+      console.error("Chat error:", error2);
       const errorMsg = await window.electronAPI.assistant.addMessage(
         currentConv.id,
         "assistant",
@@ -25082,8 +25042,8 @@ function Explore() {
       } else {
         setResults(res || { knowledge: [], people: [], projects: [] });
       }
-    } catch (error) {
-      console.error("Search failed:", error);
+    } catch (error2) {
+      console.error("Search failed:", error2);
     } finally {
       setLoading(false);
     }
@@ -25283,10 +25243,6 @@ function formatEta(seconds) {
 }
 function Device() {
   const {
-    isDeviceConnected,
-    deviceInfo,
-    isScanning,
-    downloadQueue,
     deviceSyncing: storeSyncing,
     deviceState,
     connectionStatus,
@@ -25299,10 +25255,10 @@ function Device() {
   const deviceService = getHiDockDeviceService();
   const [connecting, setConnecting] = reactExports.useState(false);
   const [recordings, setRecordings] = reactExports.useState([]);
-  const [error, setError] = reactExports.useState(null);
+  const [error2, setError] = reactExports.useState(null);
   const [syncing, setSyncing] = reactExports.useState(false);
-  const [downloadProgress, setDownloadProgress] = reactExports.useState(null);
-  const [connectionStartTime, setConnectionStartTime] = reactExports.useState(null);
+  const [_downloadProgress, setDownloadProgress] = reactExports.useState(null);
+  const [_connectionStartTime, setConnectionStartTime] = reactExports.useState(null);
   const [connectionElapsed, setConnectionElapsed] = reactExports.useState(0);
   const connectionTimeoutRef = reactExports.useRef(null);
   const connectionTimerRef = reactExports.useRef(null);
@@ -25492,22 +25448,6 @@ function Device() {
       });
     }
   }, [activityLog.length]);
-  reactExports.useCallback(async (forceRefresh = false) => {
-    setLoadingRecordings(true);
-    setLoadingProgress(null);
-    try {
-      const recs = await deviceService.listRecordings((filesLoaded, expectedFiles) => {
-        setLoadingProgress({ filesLoaded, expectedFiles });
-      }, forceRefresh);
-      if (DEBUG_DEVICE_UI) ;
-      setRecordings(recs);
-    } catch (e) {
-      console.error("[Device.tsx] Failed to load recordings:", e);
-    } finally {
-      setLoadingRecordings(false);
-      setLoadingProgress(null);
-    }
-  }, [deviceService]);
   const handleConnect = async () => {
     setConnecting(true);
     setError(null);
@@ -25542,6 +25482,7 @@ function Device() {
   };
   const handleDisconnect = async () => {
     await deviceService.disconnect();
+    setAutoConnectConfig(deviceService.getAutoConnectConfig());
   };
   const handleResetDevice = async () => {
     setError(null);
@@ -25611,66 +25552,6 @@ function Device() {
       setSyncing(false);
     }
   };
-  reactExports.useCallback(async (recs, _syncedSet) => {
-    if (autoSyncTriggeredRef.current) {
-      deviceService.log("info", "Auto-sync skipped", "Already triggered for this session");
-      return;
-    }
-    if (recs.length === 0) {
-      deviceService.log("info", "Auto-sync skipped", "No recordings loaded yet");
-      return;
-    }
-    autoSyncTriggeredRef.current = true;
-    deviceService.log("info", "Auto-sync triggered", `${recs.length} recordings to check`);
-    if (!deviceService.isConnected()) {
-      deviceService.log("error", "Auto-sync aborted", "Device not connected");
-      autoSyncTriggeredRef.current = false;
-      return;
-    }
-    const filesToCheck = recs.map((rec) => ({
-      filename: rec.filename,
-      size: rec.size,
-      duration: rec.duration,
-      dateCreated: rec.dateCreated
-    }));
-    try {
-      deviceService.log("info", "Checking sync status", `Querying download service for ${filesToCheck.length} files...`);
-      const filesWithStatus = await window.electronAPI.downloadService.getFilesToSync(filesToCheck);
-      const toSync = filesWithStatus.filter((f2) => !f2.skipReason);
-      if (toSync.length === 0) {
-        deviceService.log("success", "All files already synced", "Nothing to download");
-        return;
-      }
-      deviceService.log("info", "Queueing downloads", `${toSync.length} files to sync`);
-      setSyncing(true);
-      const queuedIds = await window.electronAPI.downloadService.queueDownloads(
-        toSync.map((f2) => ({
-          filename: f2.filename,
-          size: f2.size,
-          dateCreated: typeof f2.dateCreated === "string" ? f2.dateCreated : f2.dateCreated?.toISOString()
-        }))
-      );
-      if (queuedIds.length > 0) {
-        deviceService.log("success", "Downloads queued", `${queuedIds.length} files queued for download`);
-        toast({
-          title: "Auto-sync started",
-          description: `Queued ${queuedIds.length} recording${queuedIds.length !== 1 ? "s" : ""} for download`,
-          variant: "default"
-        });
-      } else {
-        deviceService.log("info", "No files queued", "All files already in queue or downloaded");
-      }
-    } catch (e) {
-      const errorMsg = e instanceof Error ? e.message : "Unknown error";
-      deviceService.log("error", "Auto-sync failed", errorMsg);
-      toast({
-        title: "Auto-sync failed",
-        description: errorMsg,
-        variant: "error"
-      });
-      setSyncing(false);
-    }
-  }, [deviceService]);
   const handleAutoRecordToggle = async (enabled) => {
     try {
       await deviceService.setAutoRecord(enabled);
@@ -25839,9 +25720,9 @@ function Device() {
       /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm text-muted-foreground", children: "Manage your HiDock device and sync recordings" })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex-1 overflow-auto p-6", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "max-w-4xl mx-auto space-y-6", children: [
-      error && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 p-4 bg-destructive/10 text-destructive rounded-lg", children: [
+      error2 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 p-4 bg-destructive/10 text-destructive rounded-lg", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(CircleAlert, { className: "h-5 w-5" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: error }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: error2 }),
         /* @__PURE__ */ jsxRuntimeExports.jsx(Button, { variant: "ghost", size: "sm", onClick: () => setError(null), className: "ml-auto", children: "Dismiss" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs(Card, { children: [
@@ -27233,23 +27114,1450 @@ function useVirtualizer(options) {
     ...options
   });
 }
-function Recordings() {
+function LibraryHeader({
+  stats,
+  deviceConnected,
+  loading,
+  compactView,
+  downloadQueueSize,
+  bulkCounts,
+  bulkProcessing,
+  bulkProgress,
+  onAddRecording,
+  onOpenFolder,
+  onBulkDownload,
+  onBulkProcess,
+  onRefresh,
+  onSetCompactView
+}) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("header", { className: "border-b px-6 py-4", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { className: "text-2xl font-bold", children: "Knowledge Library" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-sm text-muted-foreground", children: [
+        stats.total,
+        " capture",
+        stats.total !== 1 ? "s" : "",
+        stats.unsynced > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "ml-2 text-orange-600 dark:text-orange-400", children: [
+          "(",
+          stats.unsynced,
+          " on device only)"
+        ] }),
+        !deviceConnected && stats.deviceOnly === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ml-2 text-muted-foreground", children: "(device not connected)" })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "outline", size: "sm", onClick: onAddRecording, title: "Import audio file", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Plus, { className: "h-4 w-4 mr-2" }),
+        "Add Capture"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "outline", size: "sm", onClick: onOpenFolder, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(FolderOpen, { className: "h-4 w-4 mr-2" }),
+        "Open Folder"
+      ] }),
+      bulkCounts.deviceOnly > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        Button,
+        {
+          variant: "outline",
+          size: "sm",
+          onClick: onBulkDownload,
+          disabled: downloadQueueSize > 0 || !deviceConnected,
+          title: `Download ${bulkCounts.deviceOnly} captures from device`,
+          children: downloadQueueSize > 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 mr-2 animate-spin" }),
+            "Syncing..."
+          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Download, { className: "h-4 w-4 mr-2" }),
+            "Download All (",
+            bulkCounts.deviceOnly,
+            ")"
+          ] })
+        }
+      ),
+      bulkCounts.needsTranscription > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        Button,
+        {
+          variant: "outline",
+          size: "sm",
+          onClick: onBulkProcess,
+          disabled: bulkProcessing,
+          title: `Queue ${bulkCounts.needsTranscription} captures for transcription`,
+          children: bulkProcessing ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 mr-2 animate-spin" }),
+            bulkProgress.current,
+            "/",
+            bulkProgress.total
+          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Zap, { className: "h-4 w-4 mr-2" }),
+            "Process All (",
+            bulkCounts.needsTranscription,
+            ")"
+          ] })
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "outline", size: "sm", onClick: onRefresh, disabled: loading, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: `h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}` }),
+        "Refresh"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center border rounded-md overflow-hidden ml-2", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Button,
+          {
+            variant: compactView ? "ghost" : "default",
+            size: "sm",
+            onClick: () => onSetCompactView(false),
+            className: "rounded-none border-0 px-2",
+            title: "Card view",
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(LayoutGrid, { className: "h-4 w-4" })
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Button,
+          {
+            variant: compactView ? "default" : "ghost",
+            size: "sm",
+            onClick: () => onSetCompactView(true),
+            className: "rounded-none border-0 border-l px-2",
+            title: "List view",
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(List, { className: "h-4 w-4" })
+          }
+        )
+      ] })
+    ] })
+  ] }) });
+}
+const CATEGORIES = ["all", "meeting", "interview", "1:1", "brainstorm", "note"];
+function LibraryFilters({
+  stats,
+  locationFilter,
+  categoryFilter,
+  qualityFilter,
+  statusFilter,
+  searchQuery,
+  onLocationFilterChange,
+  onCategoryFilterChange,
+  onQualityFilterChange,
+  onStatusFilterChange,
+  onSearchQueryChange
+}) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col gap-4 mt-4", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-4", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Filter, { className: "h-4 w-4 text-muted-foreground" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex rounded-lg border overflow-hidden", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              onClick: () => onLocationFilterChange("all"),
+              className: `px-3 py-1.5 text-xs font-medium transition-colors ${locationFilter === "all" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+              children: [
+                "All (",
+                stats.total,
+                ")"
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              onClick: () => onLocationFilterChange("device-only"),
+              className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${locationFilter === "device-only" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(Cloud, { className: "h-3 w-3 inline mr-1" }),
+                "Device (",
+                stats.deviceOnly,
+                ")"
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              onClick: () => onLocationFilterChange("local-only"),
+              className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${locationFilter === "local-only" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(HardDrive, { className: "h-3 w-3 inline mr-1" }),
+                "Downloaded (",
+                stats.localOnly,
+                ")"
+              ]
+            }
+          )
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex rounded-lg border overflow-hidden", children: CATEGORIES.map((cat) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => onCategoryFilterChange(cat),
+          className: `px-3 py-1.5 text-xs font-medium transition-colors ${cat !== "all" ? "border-l" : ""} ${categoryFilter === cat ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+          children: cat.charAt(0).toUpperCase() + cat.slice(1)
+        },
+        cat
+      )) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "relative flex-1 max-w-xs", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Search, { className: "absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Input,
+          {
+            placeholder: "Search captures...",
+            value: searchQuery,
+            onChange: (e) => onSearchQueryChange(e.target.value),
+            className: "pl-9 h-8"
+          }
+        )
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-4", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-xs font-medium text-muted-foreground", children: "Quality:" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "select",
+          {
+            value: qualityFilter,
+            onChange: (e) => onQualityFilterChange(e.target.value),
+            className: "h-8 rounded-md border border-input bg-background px-3 py-1 text-xs",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "all", children: "All Ratings" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "valuable", children: "Valuable" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "archived", children: "Archived" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "low-value", children: "Low-Value" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "unrated", children: "Unrated" })
+            ]
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-xs font-medium text-muted-foreground", children: "Status:" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "select",
+          {
+            value: statusFilter,
+            onChange: (e) => onStatusFilterChange(e.target.value),
+            className: "h-8 rounded-md border border-input bg-background px-3 py-1 text-xs",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "all", children: "All Statuses" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "processing", children: "Processing" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "ready", children: "Ready" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "enriched", children: "Enriched" })
+            ]
+          }
+        )
+      ] })
+    ] })
+  ] });
+}
+const Checkbox = reactExports.forwardRef(
+  ({ className, checked, onCheckedChange, onClick, ...props }, ref) => {
+    const handleClick = (e) => {
+      onClick?.(e);
+      onCheckedChange?.(!checked);
+    };
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "button",
+      {
+        type: "button",
+        role: "checkbox",
+        "aria-checked": checked,
+        ref,
+        className: cn(
+          "peer h-4 w-4 shrink-0 rounded-sm border border-primary ring-offset-background",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+          "disabled:cursor-not-allowed disabled:opacity-50",
+          checked && "bg-primary text-primary-foreground",
+          className
+        ),
+        onClick: handleClick,
+        ...props,
+        children: checked && /* @__PURE__ */ jsxRuntimeExports.jsx(Check, { className: "h-3.5 w-3.5" })
+      }
+    );
+  }
+);
+Checkbox.displayName = "Checkbox";
+function StatusIcon({ recording, showError = false }) {
+  if (showError && recording.transcriptionStatus === "error") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-1 text-destructive", title: "Processing error", children: /* @__PURE__ */ jsxRuntimeExports.jsx(CircleAlert, { className: "h-4 w-4" }) });
+  }
+  switch (recording.location) {
+    case "device-only":
+      return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-1 text-orange-600 dark:text-orange-400", title: "On device only", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Cloud, { className: "h-4 w-4" }) });
+    case "local-only":
+      return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-1 text-blue-600 dark:text-blue-400", title: "Downloaded", children: /* @__PURE__ */ jsxRuntimeExports.jsx(HardDrive, { className: "h-4 w-4" }) });
+    case "both":
+      return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-1 text-green-600 dark:text-green-400", title: "Synced", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Check, { className: "h-4 w-4" }) });
+    default:
+      return null;
+  }
+}
+const SourceRow = reactExports.memo(function SourceRow2({
+  recording,
+  meeting,
+  isPlaying,
+  isDownloading,
+  downloadProgress: _downloadProgress,
+  isDeleting,
+  deviceConnected,
+  isSelected = false,
+  onSelectionChange,
+  onPlay,
+  onStop,
+  onDownload,
+  onDelete,
+  onAskAssistant,
+  onGenerateOutput
+}) {
+  const canPlay = hasLocalPath(recording);
+  const handleCheckboxClick = (e) => {
+    e.stopPropagation();
+    onSelectionChange?.(recording.id, e.shiftKey);
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      className: `flex items-center justify-between p-3 hover:bg-muted/50 ${isSelected ? "bg-primary/5" : ""}`,
+      role: "option",
+      "aria-selected": isPlaying || isSelected,
+      tabIndex: 0,
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3 min-w-0 flex-1", children: [
+          onSelectionChange && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            Checkbox,
+            {
+              checked: isSelected,
+              onClick: handleCheckboxClick,
+              "aria-label": `Select ${recording.filename}`,
+              className: "shrink-0"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon, { recording }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-w-0 flex-1", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "font-medium text-sm truncate", children: recording.filename }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-xs text-muted-foreground", children: [
+              formatDateTime(recording.dateRecorded.toISOString()),
+              recording.duration ? ` • ${formatDuration(recording.duration)}` : "",
+              meeting ? ` • ${meeting.subject}` : ""
+            ] })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "span",
+            {
+              className: `text-xs px-2 py-0.5 rounded-full ${recording.transcriptionStatus === "complete" ? "bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300" : recording.transcriptionStatus === "pending" || recording.transcriptionStatus === "processing" ? "bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300" : recording.transcriptionStatus === "error" ? "bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300" : "bg-secondary"}`,
+              children: recording.transcriptionStatus === "none" ? "—" : recording.transcriptionStatus
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            Button,
+            {
+              variant: "ghost",
+              size: "icon",
+              className: "h-7 w-7",
+              onClick: onAskAssistant,
+              title: "Ask Assistant about this capture",
+              children: /* @__PURE__ */ jsxRuntimeExports.jsx(Mic, { className: "h-3 w-3" })
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            Button,
+            {
+              variant: "ghost",
+              size: "icon",
+              className: "h-7 w-7",
+              onClick: onGenerateOutput,
+              title: "Generate artifact from this capture",
+              children: /* @__PURE__ */ jsxRuntimeExports.jsx(FileText, { className: "h-3 w-3" })
+            }
+          ),
+          isDeviceOnly(recording) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            Button,
+            {
+              variant: "ghost",
+              size: "icon",
+              className: "h-7 w-7",
+              onClick: onDownload,
+              disabled: !deviceConnected || isDownloading,
+              children: isDownloading ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-3 w-3 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Download, { className: "h-3 w-3" })
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            Button,
+            {
+              variant: "ghost",
+              size: "icon",
+              className: "h-7 w-7",
+              onClick: isPlaying ? onStop : onPlay,
+              disabled: !canPlay,
+              children: isPlaying ? /* @__PURE__ */ jsxRuntimeExports.jsx(X, { className: "h-3 w-3" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Play, { className: "h-3 w-3" })
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            Button,
+            {
+              variant: "ghost",
+              size: "icon",
+              className: `h-7 w-7 ${recording.location === "device-only" ? "text-destructive hover:text-destructive" : recording.location === "local-only" ? "text-orange-500 hover:text-orange-600" : "text-muted-foreground hover:text-orange-500"}`,
+              onClick: onDelete,
+              disabled: recording.location === "device-only" && !deviceConnected || isDeleting,
+              title: recording.location === "device-only" ? "Delete from device" : recording.location === "local-only" ? "Delete local file" : "Delete local copy",
+              children: isDeleting ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-3 w-3 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-3 w-3" })
+            }
+          )
+        ] })
+      ]
+    }
+  );
+}, (prevProps, nextProps) => {
+  return prevProps.recording.id === nextProps.recording.id && prevProps.recording.transcriptionStatus === nextProps.recording.transcriptionStatus && prevProps.isPlaying === nextProps.isPlaying && prevProps.isDownloading === nextProps.isDownloading && prevProps.downloadProgress === nextProps.downloadProgress && prevProps.isDeleting === nextProps.isDeleting && prevProps.deviceConnected === nextProps.deviceConnected && prevProps.isSelected === nextProps.isSelected && prevProps.meeting?.subject === nextProps.meeting?.subject;
+});
+const SourceCard = reactExports.memo(function SourceCard2({
+  recording,
+  transcript,
+  meeting,
+  isPlaying,
+  isTranscriptExpanded,
+  isDownloading,
+  downloadProgress,
+  isDeleting,
+  deviceConnected,
+  isSelected = false,
+  onSelectionChange,
+  onPlay,
+  onStop,
+  onDownload,
+  onDelete,
+  onAskAssistant,
+  onGenerateOutput,
+  onToggleTranscript,
+  onNavigateToMeeting
+}) {
+  const canPlay = hasLocalPath(recording);
+  const handleCheckboxClick = (e) => {
+    e.stopPropagation();
+    onSelectionChange?.(recording.id, e.shiftKey);
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(Card, { className: isSelected ? "ring-2 ring-primary" : "", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx(CardHeader, { className: "pb-3", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-start justify-between", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
+        onSelectionChange && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Checkbox,
+          {
+            checked: isSelected,
+            onClick: handleCheckboxClick,
+            "aria-label": `Select ${recording.filename}`,
+            className: "shrink-0"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon, { recording }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(CardTitle, { className: "text-base", children: recording.title || recording.filename }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(CardDescription, { children: [
+            formatDateTime(recording.dateRecorded.toISOString()),
+            recording.size && ` • ${formatBytes(recording.size)}`,
+            recording.duration && ` • ${formatDuration(recording.duration)}`
+          ] })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+        recording.quality && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "span",
+          {
+            className: `text-xs px-2 py-1 rounded-full ${recording.quality === "valuable" ? "bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300" : recording.quality === "archived" ? "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300" : "bg-secondary"}`,
+            children: recording.quality
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Button, { variant: "ghost", size: "icon", onClick: onAskAssistant, title: "Ask Assistant about this capture", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Mic, { className: "h-4 w-4" }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Button, { variant: "ghost", size: "icon", onClick: onGenerateOutput, title: "Generate artifact from this capture", children: /* @__PURE__ */ jsxRuntimeExports.jsx(FileText, { className: "h-4 w-4" }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "span",
+          {
+            className: `text-xs px-2 py-1 rounded-full ${recording.transcriptionStatus === "complete" ? "bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300" : recording.transcriptionStatus === "pending" || recording.transcriptionStatus === "processing" ? "bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300" : recording.transcriptionStatus === "error" ? "bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300" : "bg-secondary"}`,
+            children: recording.transcriptionStatus === "none" ? "not transcribed" : recording.transcriptionStatus
+          }
+        ),
+        isDeviceOnly(recording) && (isDownloading ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 text-xs text-muted-foreground", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 animate-spin" }),
+          downloadProgress ?? 0,
+          "%"
+        ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Button,
+          {
+            variant: "ghost",
+            size: "icon",
+            onClick: onDownload,
+            disabled: !deviceConnected,
+            title: deviceConnected ? "Download to computer" : "Device not connected",
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(Download, { className: "h-4 w-4" })
+          }
+        )),
+        isPlaying ? /* @__PURE__ */ jsxRuntimeExports.jsx(Button, { variant: "ghost", size: "icon", onClick: onStop, children: /* @__PURE__ */ jsxRuntimeExports.jsx(X, { className: "h-4 w-4" }) }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Button,
+          {
+            variant: "ghost",
+            size: "icon",
+            onClick: onPlay,
+            disabled: !canPlay || error?.type === "audio_not_found",
+            title: error?.type === "audio_not_found" ? "File missing" : canPlay ? "Play capture" : "Download to play",
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(Play, { className: "h-4 w-4" })
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Button,
+          {
+            variant: "ghost",
+            size: "icon",
+            className: recording.location === "device-only" ? "text-destructive hover:text-destructive" : recording.location === "local-only" ? "text-orange-500 hover:text-orange-600" : "text-muted-foreground hover:text-orange-500",
+            onClick: onDelete,
+            disabled: recording.location === "device-only" && !deviceConnected || isDeleting,
+            title: recording.location === "device-only" ? "Delete from device" : recording.location === "local-only" ? "Delete local file" : "Delete local copy",
+            children: isDeleting ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-4 w-4" })
+          }
+        )
+      ] })
+    ] }) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(CardContent, { className: "space-y-4", children: [
+      isPlaying && hasLocalPath(recording) && /* @__PURE__ */ jsxRuntimeExports.jsx(AudioPlayer, { filename: recording.filename, onClose: onStop }),
+      meeting && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          className: "flex items-center gap-2 p-3 bg-muted rounded-lg cursor-pointer hover:bg-muted/80",
+          onClick: () => onNavigateToMeeting(meeting.id),
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Calendar$1, { className: "h-4 w-4 text-primary" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm font-medium", children: meeting.subject }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-muted-foreground", children: formatDateTime(meeting.start_time) })
+            ] })
+          ]
+        }
+      ),
+      transcript && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "border rounded-lg", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            className: "w-full flex items-center justify-between p-3 hover:bg-muted/50",
+            onClick: onToggleTranscript,
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(FileText, { className: "h-4 w-4" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-medium text-sm", children: "Transcript" }),
+                transcript.word_count && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-xs text-muted-foreground", children: [
+                  "(",
+                  transcript.word_count,
+                  " words)"
+                ] })
+              ] }),
+              isTranscriptExpanded ? /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronUp, { className: "h-4 w-4" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronDown, { className: "h-4 w-4" })
+            ]
+          }
+        ),
+        isTranscriptExpanded && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3 pt-0 space-y-3", children: [
+          transcript.summary && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3 bg-muted rounded-lg", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs font-medium text-muted-foreground mb-1", children: "Summary" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm", children: transcript.summary })
+          ] }),
+          transcript.action_items && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs font-medium text-muted-foreground mb-1", children: "Action Items" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "list-disc list-inside text-sm space-y-1", children: parseJsonArray(transcript.action_items).map((item, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: item }, i)) })
+          ] }),
+          transcript.key_points && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs font-medium text-muted-foreground mb-1", children: "Key Points" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "list-disc list-inside text-sm space-y-1", children: parseJsonArray(transcript.key_points).map((item, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: item }, i)) })
+          ] }),
+          transcript.topics && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs font-medium text-muted-foreground mb-1", children: "Topics" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex flex-wrap gap-1", children: parseJsonArray(transcript.topics).map((topic, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-2 py-0.5 bg-secondary text-xs rounded-full", children: topic }, i)) })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("details", { className: "mt-2", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("summary", { className: "text-sm text-primary cursor-pointer hover:underline", children: "View full transcript" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "mt-2 text-sm whitespace-pre-wrap bg-muted p-3 rounded-lg max-h-64 overflow-auto", children: transcript.full_text })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-4 text-xs text-muted-foreground pt-2 border-t", children: [
+            transcript.language && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "Language: ",
+              transcript.language
+            ] }),
+            transcript.transcription_provider && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "Provider: ",
+              transcript.transcription_provider
+            ] })
+          ] })
+        ] })
+      ] }),
+      isDeviceOnly(recording) && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-muted-foreground italic", children: "Download this capture to play it and generate a transcript." })
+    ] })
+  ] });
+}, (prevProps, nextProps) => {
+  return prevProps.recording.id === nextProps.recording.id && prevProps.recording.transcriptionStatus === nextProps.recording.transcriptionStatus && prevProps.recording.quality === nextProps.recording.quality && prevProps.isPlaying === nextProps.isPlaying && prevProps.isTranscriptExpanded === nextProps.isTranscriptExpanded && prevProps.isDownloading === nextProps.isDownloading && prevProps.downloadProgress === nextProps.downloadProgress && prevProps.isDeleting === nextProps.isDeleting && prevProps.deviceConnected === nextProps.deviceConnected && prevProps.isSelected === nextProps.isSelected && prevProps.transcript?.id === nextProps.transcript?.id && prevProps.meeting?.id === nextProps.meeting?.id;
+});
+function EmptyState({ hasRecordings, onNavigateToDevice, onAddRecording }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(Card, { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(CardContent, { className: "py-16 text-center", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx(Mic, { className: "h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" }),
+    !hasRecordings ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "text-lg font-medium mb-2", children: "No Knowledge Captured Yet" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-muted-foreground mb-4", children: "Connect your HiDock device to sync your captured conversations, or import audio files from your computer." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-2 justify-center", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Button, { onClick: onNavigateToDevice, children: "Go to Device" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "outline", onClick: onAddRecording, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Plus, { className: "h-4 w-4 mr-2" }),
+          "Import File"
+        ] })
+      ] })
+    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "text-lg font-medium mb-2", children: "No Matching Captures" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-muted-foreground", children: "Try changing your filter or search query." })
+    ] })
+  ] }) });
+}
+function DeviceDisconnectBanner({
+  show,
+  isReconnecting,
+  onNavigateToDevice,
+  onRetry
+}) {
+  if (!show) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between gap-4 px-6 py-3 bg-orange-50 dark:bg-orange-950/30 border-b border-orange-200 dark:border-orange-800", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
+      isReconnecting ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 text-orange-600 dark:text-orange-400 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(CircleAlert, { className: "h-4 w-4 text-orange-600 dark:text-orange-400" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm font-medium text-orange-800 dark:text-orange-200", children: isReconnecting ? "Reconnecting to device..." : "Device disconnected" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-orange-600 dark:text-orange-400", children: isReconnecting ? "Please wait while we reconnect to your HiDock." : "Downloads have been paused. Reconnect to continue." })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+      onRetry && !isReconnecting && /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "outline", size: "sm", onClick: onRetry, className: "border-orange-300 dark:border-orange-700", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 mr-2" }),
+        "Retry"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        Button,
+        {
+          variant: "outline",
+          size: "sm",
+          onClick: onNavigateToDevice,
+          className: "border-orange-300 dark:border-orange-700",
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Usb, { className: "h-4 w-4 mr-2" }),
+            "Go to Device"
+          ]
+        }
+      )
+    ] })
+  ] });
+}
+function BulkActionsBar({
+  selectedCount,
+  totalCount,
+  deviceConnected,
+  isProcessing,
+  progress,
+  disabledActions = {},
+  onSelectAll,
+  onDeselectAll,
+  onDownload,
+  onProcess,
+  onDelete
+}) {
+  if (selectedCount === 0) return null;
+  const allSelected = selectedCount === totalCount && totalCount > 0;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      className: cn(
+        "flex items-center justify-between gap-4 px-6 py-3",
+        "bg-primary/5 border-b border-primary/20",
+        "animate-in slide-in-from-top-2 duration-200"
+      ),
+      role: "toolbar",
+      "aria-label": "Bulk actions",
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            Button,
+            {
+              variant: "ghost",
+              size: "sm",
+              onClick: allSelected ? onDeselectAll : onSelectAll,
+              className: "gap-2",
+              "aria-label": allSelected ? "Deselect all" : "Select all",
+              children: [
+                allSelected ? /* @__PURE__ */ jsxRuntimeExports.jsx(SquareCheckBig, { className: "h-4 w-4 text-primary" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Square, { className: "h-4 w-4" }),
+                allSelected ? "Deselect All" : "Select All"
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-sm text-muted-foreground", children: [
+            selectedCount,
+            " of ",
+            totalCount,
+            " selected"
+          ] }),
+          isProcessing && progress && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 ml-4", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Progress, { value: progress.current / progress.total * 100, className: "w-32 h-2" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-xs text-muted-foreground", children: [
+              progress.current,
+              "/",
+              progress.total
+            ] })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            Button,
+            {
+              variant: "outline",
+              size: "sm",
+              onClick: onDownload,
+              disabled: !deviceConnected || isProcessing || disabledActions.download,
+              className: "gap-2",
+              title: !deviceConnected ? "Device not connected" : "Download selected from device",
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(Download, { className: "h-4 w-4" }),
+                "Download"
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            Button,
+            {
+              variant: "outline",
+              size: "sm",
+              onClick: onProcess,
+              disabled: isProcessing || disabledActions.process,
+              className: "gap-2",
+              title: "Transcribe selected recordings",
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(WandSparkles, { className: "h-4 w-4" }),
+                isProcessing ? "Processing..." : "Transcribe"
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            Button,
+            {
+              variant: "outline",
+              size: "sm",
+              onClick: onDelete,
+              disabled: isProcessing || disabledActions.delete,
+              className: "gap-2 text-destructive hover:text-destructive",
+              title: "Delete selected",
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-4 w-4" }),
+                "Delete"
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            Button,
+            {
+              variant: "ghost",
+              size: "sm",
+              onClick: onDeselectAll,
+              className: "ml-2",
+              "aria-label": "Clear selection",
+              children: /* @__PURE__ */ jsxRuntimeExports.jsx(X, { className: "h-4 w-4" })
+            }
+          )
+        ] })
+      ]
+    }
+  );
+}
+function LiveRegion({ message, politeness = "polite" }) {
+  const [announcement, setAnnouncement] = reactExports.useState("");
+  reactExports.useEffect(() => {
+    if (message) {
+      setAnnouncement("");
+      const timer = setTimeout(() => setAnnouncement(message), 100);
+      return () => clearTimeout(timer);
+    }
+    return void 0;
+  }, [message]);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      role: "status",
+      "aria-live": politeness,
+      "aria-atomic": "true",
+      className: "sr-only",
+      children: announcement
+    }
+  );
+}
+function useAnnouncement() {
+  const [message, setMessage] = reactExports.useState("");
+  const announce = (text) => {
+    setMessage(text);
+  };
+  const clear = () => {
+    setMessage("");
+  };
+  return { message, announce, clear };
+}
+const SheetContent = reactExports.forwardRef(({ className, children, side = "right", ...props }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+  "div",
+  {
+    ref,
+    className: cn(
+      "fixed z-50 gap-4 bg-background p-6 shadow-lg",
+      "transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out",
+      side === "right" && "inset-y-0 right-0 h-full border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right",
+      side === "left" && "inset-y-0 left-0 h-full border-r data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left",
+      side === "top" && "inset-x-0 top-0 border-b data-[state=closed]:slide-out-to-top data-[state=open]:slide-in-from-top",
+      side === "bottom" && "inset-x-0 bottom-0 border-t data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
+      className
+    ),
+    ...props,
+    children
+  }
+));
+SheetContent.displayName = "SheetContent";
+const SheetTitle = reactExports.forwardRef(
+  ({ className, ...props }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { ref, className: cn("text-lg font-semibold text-foreground", className), ...props })
+);
+SheetTitle.displayName = "SheetTitle";
+const SheetDescription = reactExports.forwardRef(
+  ({ className, ...props }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx("p", { ref, className: cn("text-sm text-muted-foreground", className), ...props })
+);
+SheetDescription.displayName = "SheetDescription";
+const TabsContext = reactExports.createContext(void 0);
+function useTabs() {
+  const context = reactExports.useContext(TabsContext);
+  if (!context) {
+    throw new Error("Tabs components must be used within a Tabs provider");
+  }
+  return context;
+}
+const Tabs = reactExports.forwardRef(
+  ({ className, defaultValue, value: controlledValue, onValueChange, children, ...props }, ref) => {
+    const [uncontrolledValue, setUncontrolledValue] = reactExports.useState(defaultValue || "");
+    const value = controlledValue !== void 0 ? controlledValue : uncontrolledValue;
+    const onChange = reactExports.useCallback(
+      (newValue) => {
+        if (controlledValue === void 0) {
+          setUncontrolledValue(newValue);
+        }
+        onValueChange?.(newValue);
+      },
+      [controlledValue, onValueChange]
+    );
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(TabsContext.Provider, { value: { value, onChange }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref, className: cn("", className), ...props, children }) });
+  }
+);
+Tabs.displayName = "Tabs";
+const TabsList = reactExports.forwardRef(
+  ({ className, ...props }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      ref,
+      role: "tablist",
+      className: cn(
+        "inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground",
+        className
+      ),
+      ...props
+    }
+  )
+);
+TabsList.displayName = "TabsList";
+const TabsTrigger = reactExports.forwardRef(
+  ({ className, value, ...props }, ref) => {
+    const { value: selectedValue, onChange } = useTabs();
+    const isSelected = value === selectedValue;
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "button",
+      {
+        ref,
+        type: "button",
+        role: "tab",
+        "aria-selected": isSelected,
+        "data-state": isSelected ? "active" : "inactive",
+        onClick: () => onChange(value),
+        className: cn(
+          "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5",
+          "text-sm font-medium ring-offset-background transition-all",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+          "disabled:pointer-events-none disabled:opacity-50",
+          isSelected && "bg-background text-foreground shadow-sm",
+          className
+        ),
+        ...props
+      }
+    );
+  }
+);
+TabsTrigger.displayName = "TabsTrigger";
+const TabsContent = reactExports.forwardRef(
+  ({ className, value, ...props }, ref) => {
+    const { value: selectedValue } = useTabs();
+    if (value !== selectedValue) return null;
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        ref,
+        role: "tabpanel",
+        "data-state": value === selectedValue ? "active" : "inactive",
+        className: cn(
+          "mt-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+          className
+        ),
+        ...props
+      }
+    );
+  }
+);
+TabsContent.displayName = "TabsContent";
+function createJSONStorage(getStorage, options) {
+  let storage;
+  try {
+    storage = getStorage();
+  } catch (e) {
+    return;
+  }
+  const persistStorage = {
+    getItem: (name) => {
+      var _a;
+      const parse2 = (str2) => {
+        if (str2 === null) {
+          return null;
+        }
+        return JSON.parse(str2, void 0);
+      };
+      const str = (_a = storage.getItem(name)) != null ? _a : null;
+      if (str instanceof Promise) {
+        return str.then(parse2);
+      }
+      return parse2(str);
+    },
+    setItem: (name, newValue) => storage.setItem(name, JSON.stringify(newValue, void 0)),
+    removeItem: (name) => storage.removeItem(name)
+  };
+  return persistStorage;
+}
+const toThenable = (fn) => (input) => {
+  try {
+    const result = fn(input);
+    if (result instanceof Promise) {
+      return result;
+    }
+    return {
+      then(onFulfilled) {
+        return toThenable(onFulfilled)(result);
+      },
+      catch(_onRejected) {
+        return this;
+      }
+    };
+  } catch (e) {
+    return {
+      then(_onFulfilled) {
+        return this;
+      },
+      catch(onRejected) {
+        return toThenable(onRejected)(e);
+      }
+    };
+  }
+};
+const persistImpl = (config, baseOptions) => (set, get, api) => {
+  let options = {
+    storage: createJSONStorage(() => localStorage),
+    partialize: (state) => state,
+    version: 0,
+    merge: (persistedState, currentState) => ({
+      ...currentState,
+      ...persistedState
+    }),
+    ...baseOptions
+  };
+  let hasHydrated = false;
+  const hydrationListeners = /* @__PURE__ */ new Set();
+  const finishHydrationListeners = /* @__PURE__ */ new Set();
+  let storage = options.storage;
+  if (!storage) {
+    return config(
+      (...args) => {
+        console.warn(
+          `[zustand persist middleware] Unable to update item '${options.name}', the given storage is currently unavailable.`
+        );
+        set(...args);
+      },
+      get,
+      api
+    );
+  }
+  const setItem = () => {
+    const state = options.partialize({ ...get() });
+    return storage.setItem(options.name, {
+      state,
+      version: options.version
+    });
+  };
+  const savedSetState = api.setState;
+  api.setState = (state, replace) => {
+    savedSetState(state, replace);
+    return setItem();
+  };
+  const configResult = config(
+    (...args) => {
+      set(...args);
+      return setItem();
+    },
+    get,
+    api
+  );
+  api.getInitialState = () => configResult;
+  let stateFromStorage;
+  const hydrate = () => {
+    var _a, _b;
+    if (!storage) return;
+    hasHydrated = false;
+    hydrationListeners.forEach((cb2) => {
+      var _a2;
+      return cb2((_a2 = get()) != null ? _a2 : configResult);
+    });
+    const postRehydrationCallback = ((_b = options.onRehydrateStorage) == null ? void 0 : _b.call(options, (_a = get()) != null ? _a : configResult)) || void 0;
+    return toThenable(storage.getItem.bind(storage))(options.name).then((deserializedStorageValue) => {
+      if (deserializedStorageValue) {
+        if (typeof deserializedStorageValue.version === "number" && deserializedStorageValue.version !== options.version) {
+          if (options.migrate) {
+            const migration = options.migrate(
+              deserializedStorageValue.state,
+              deserializedStorageValue.version
+            );
+            if (migration instanceof Promise) {
+              return migration.then((result) => [true, result]);
+            }
+            return [true, migration];
+          }
+          console.error(
+            `State loaded from storage couldn't be migrated since no migrate function was provided`
+          );
+        } else {
+          return [false, deserializedStorageValue.state];
+        }
+      }
+      return [false, void 0];
+    }).then((migrationResult) => {
+      var _a2;
+      const [migrated, migratedState] = migrationResult;
+      stateFromStorage = options.merge(
+        migratedState,
+        (_a2 = get()) != null ? _a2 : configResult
+      );
+      set(stateFromStorage, true);
+      if (migrated) {
+        return setItem();
+      }
+    }).then(() => {
+      postRehydrationCallback == null ? void 0 : postRehydrationCallback(stateFromStorage, void 0);
+      stateFromStorage = get();
+      hasHydrated = true;
+      finishHydrationListeners.forEach((cb2) => cb2(stateFromStorage));
+    }).catch((e) => {
+      postRehydrationCallback == null ? void 0 : postRehydrationCallback(void 0, e);
+    });
+  };
+  api.persist = {
+    setOptions: (newOptions) => {
+      options = {
+        ...options,
+        ...newOptions
+      };
+      if (newOptions.storage) {
+        storage = newOptions.storage;
+      }
+    },
+    clearStorage: () => {
+      storage == null ? void 0 : storage.removeItem(options.name);
+    },
+    getOptions: () => options,
+    rehydrate: () => hydrate(),
+    hasHydrated: () => hasHydrated,
+    onHydrate: (cb2) => {
+      hydrationListeners.add(cb2);
+      return () => {
+        hydrationListeners.delete(cb2);
+      };
+    },
+    onFinishHydration: (cb2) => {
+      finishHydrationListeners.add(cb2);
+      return () => {
+        finishHydrationListeners.delete(cb2);
+      };
+    }
+  };
+  if (!options.skipHydration) {
+    hydrate();
+  }
+  return stateFromStorage || configResult;
+};
+const persist = persistImpl;
+const initialState = {
+  viewMode: "compact",
+  sortBy: "date",
+  sortOrder: "desc",
+  locationFilter: "all",
+  categoryFilter: null,
+  qualityFilter: null,
+  statusFilter: null,
+  searchQuery: "",
+  selectedIds: /* @__PURE__ */ new Set(),
+  scrollOffset: 0
+};
+const useLibraryStore = create()(
+  persist(
+    (set, get) => ({
+      ...initialState,
+      // View mode
+      setViewMode: (mode) => set({ viewMode: mode }),
+      toggleViewMode: () => set((state) => ({ viewMode: state.viewMode === "compact" ? "card" : "compact" })),
+      // Sorting
+      setSortBy: (sortBy) => set({ sortBy }),
+      setSortOrder: (order) => set({ sortOrder: order }),
+      toggleSortOrder: () => set((state) => ({ sortOrder: state.sortOrder === "asc" ? "desc" : "asc" })),
+      // Filters
+      setLocationFilter: (filter) => set({ locationFilter: filter }),
+      setCategoryFilter: (filter) => set({ categoryFilter: filter }),
+      setQualityFilter: (filter) => set({ qualityFilter: filter }),
+      setStatusFilter: (filter) => set({ statusFilter: filter }),
+      setSearchQuery: (query) => set({ searchQuery: query }),
+      clearFilters: () => set({
+        locationFilter: "all",
+        categoryFilter: null,
+        qualityFilter: null,
+        statusFilter: null,
+        searchQuery: ""
+      }),
+      // Selection
+      toggleSelection: (id2) => set((state) => {
+        const newSelected = new Set(state.selectedIds);
+        if (newSelected.has(id2)) {
+          newSelected.delete(id2);
+        } else {
+          newSelected.add(id2);
+        }
+        return { selectedIds: newSelected };
+      }),
+      selectAll: (ids) => set({ selectedIds: new Set(ids) }),
+      selectRange: (ids, startId, endId) => {
+        const startIndex = ids.indexOf(startId);
+        const endIndex = ids.indexOf(endId);
+        if (startIndex === -1 || endIndex === -1) return;
+        const [from, to] = startIndex < endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
+        const rangeIds = ids.slice(from, to + 1);
+        set((state) => {
+          const newSelected = new Set(state.selectedIds);
+          rangeIds.forEach((id2) => newSelected.add(id2));
+          return { selectedIds: newSelected };
+        });
+      },
+      clearSelection: () => set({ selectedIds: /* @__PURE__ */ new Set() }),
+      isSelected: (id2) => get().selectedIds.has(id2),
+      // Scroll
+      setScrollOffset: (offset2) => set({ scrollOffset: offset2 })
+    }),
+    {
+      name: "hidock-library-store",
+      storage: createJSONStorage(() => localStorage),
+      // Only persist view preferences and filters, not selection or scroll
+      partialize: (state) => ({
+        viewMode: state.viewMode,
+        sortBy: state.sortBy,
+        sortOrder: state.sortOrder,
+        locationFilter: state.locationFilter,
+        categoryFilter: state.categoryFilter,
+        qualityFilter: state.qualityFilter,
+        statusFilter: state.statusFilter
+        // searchQuery intentionally not persisted - should start fresh
+        // selectedIds intentionally not persisted - transient
+        // scrollOffset intentionally not persisted - transient
+      })
+    }
+  )
+);
+function useSourceSelection() {
+  const lastSelectedRef = reactExports.useRef(null);
+  const selectedIds = useLibraryStore((state) => state.selectedIds);
+  const toggleSelection = useLibraryStore((state) => state.toggleSelection);
+  const selectAll = useLibraryStore((state) => state.selectAll);
+  const selectRange = useLibraryStore((state) => state.selectRange);
+  const clearSelection = useLibraryStore((state) => state.clearSelection);
+  const isSelected = useLibraryStore((state) => state.isSelected);
+  const handleSelectionClick = reactExports.useCallback(
+    (id2, shiftKey, allIds) => {
+      if (shiftKey && lastSelectedRef.current) {
+        selectRange(allIds, lastSelectedRef.current, id2);
+      } else {
+        toggleSelection(id2);
+        lastSelectedRef.current = id2;
+      }
+    },
+    [selectRange, toggleSelection]
+  );
+  const handleClearSelection = reactExports.useCallback(() => {
+    clearSelection();
+    lastSelectedRef.current = null;
+  }, [clearSelection]);
+  return {
+    selectedIds,
+    selectedCount: selectedIds.size,
+    toggleSelection,
+    selectAll,
+    clearSelection: handleClearSelection,
+    isSelected,
+    handleSelectionClick
+  };
+}
+function useKeyboardNavigation({
+  items,
+  selectedIds,
+  onToggleSelection,
+  onSelectAll,
+  onClearSelection,
+  onOpenDetail,
+  isEnabled = true
+}) {
+  const [focusedIndex, setFocusedIndex] = reactExports.useState(-1);
+  const containerRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    if (focusedIndex >= items.length) {
+      setFocusedIndex(Math.max(0, items.length - 1));
+    }
+  }, [items.length, focusedIndex]);
+  const handleKeyDown = reactExports.useCallback(
+    (event) => {
+      if (!isEnabled || items.length === 0) return;
+      const { key, ctrlKey, metaKey } = event;
+      const modKey = ctrlKey || metaKey;
+      switch (key) {
+        case "ArrowDown":
+          event.preventDefault();
+          setFocusedIndex((prev) => {
+            const next = prev < items.length - 1 ? prev + 1 : prev;
+            return next;
+          });
+          break;
+        case "ArrowUp":
+          event.preventDefault();
+          setFocusedIndex((prev) => {
+            const next = prev > 0 ? prev - 1 : 0;
+            return next;
+          });
+          break;
+        case "Home":
+          event.preventDefault();
+          setFocusedIndex(0);
+          break;
+        case "End":
+          event.preventDefault();
+          setFocusedIndex(items.length - 1);
+          break;
+        case " ":
+          event.preventDefault();
+          if (focusedIndex >= 0 && focusedIndex < items.length) {
+            onToggleSelection(items[focusedIndex]);
+          }
+          break;
+        case "Enter":
+          event.preventDefault();
+          if (focusedIndex >= 0 && focusedIndex < items.length && onOpenDetail) {
+            onOpenDetail(items[focusedIndex]);
+          }
+          break;
+        case "Escape":
+          event.preventDefault();
+          if (selectedIds.size > 0) {
+            onClearSelection();
+          }
+          break;
+        case "a":
+        case "A":
+          if (modKey) {
+            event.preventDefault();
+            onSelectAll(items);
+          }
+          break;
+      }
+    },
+    [items, focusedIndex, selectedIds.size, onToggleSelection, onSelectAll, onClearSelection, onOpenDetail, isEnabled]
+  );
+  return {
+    focusedIndex,
+    setFocusedIndex,
+    handleKeyDown,
+    containerRef
+  };
+}
+function useLibraryFilterManager() {
+  const locationFilter = useLibraryStore((state) => state.locationFilter);
+  const categoryFilter = useLibraryStore((state) => state.categoryFilter);
+  const qualityFilter = useLibraryStore((state) => state.qualityFilter);
+  const statusFilter = useLibraryStore((state) => state.statusFilter);
+  const searchQuery = useLibraryStore((state) => state.searchQuery);
+  const setLocationFilter = useLibraryStore((state) => state.setLocationFilter);
+  const setCategoryFilter = useLibraryStore((state) => state.setCategoryFilter);
+  const setQualityFilter = useLibraryStore((state) => state.setQualityFilter);
+  const setStatusFilter = useLibraryStore((state) => state.setStatusFilter);
+  const setSearchQuery = useLibraryStore((state) => state.setSearchQuery);
+  const clearFilters = useLibraryStore((state) => state.clearFilters);
+  const { hasActiveFilters, activeFilterCount } = reactExports.useMemo(() => {
+    let count2 = 0;
+    if (locationFilter !== "all") count2++;
+    if (categoryFilter !== null) count2++;
+    if (qualityFilter !== null) count2++;
+    if (statusFilter !== null) count2++;
+    if (searchQuery.trim() !== "") count2++;
+    return {
+      hasActiveFilters: count2 > 0,
+      activeFilterCount: count2
+    };
+  }, [locationFilter, categoryFilter, qualityFilter, statusFilter, searchQuery]);
+  return {
+    // State
+    locationFilter,
+    categoryFilter,
+    qualityFilter,
+    statusFilter,
+    searchQuery,
+    // Derived state
+    hasActiveFilters,
+    activeFilterCount,
+    // Actions
+    setLocationFilter,
+    setCategoryFilter,
+    setQualityFilter,
+    setStatusFilter,
+    setSearchQuery,
+    clearFilters
+  };
+}
+function useTransitionFilters() {
+  const filterManager = useLibraryFilterManager();
+  const [isPending, startTransition] = reactExports.useTransition();
+  const setLocationFilter = reactExports.useCallback(
+    (filter) => {
+      startTransition(() => {
+        filterManager.setLocationFilter(filter);
+      });
+    },
+    [filterManager]
+  );
+  const setCategoryFilter = reactExports.useCallback(
+    (filter) => {
+      startTransition(() => {
+        filterManager.setCategoryFilter(filter);
+      });
+    },
+    [filterManager]
+  );
+  const setQualityFilter = reactExports.useCallback(
+    (filter) => {
+      startTransition(() => {
+        filterManager.setQualityFilter(filter);
+      });
+    },
+    [filterManager]
+  );
+  const setStatusFilter = reactExports.useCallback(
+    (filter) => {
+      startTransition(() => {
+        filterManager.setStatusFilter(filter);
+      });
+    },
+    [filterManager]
+  );
+  const setSearchQuery = reactExports.useCallback(
+    (query) => {
+      startTransition(() => {
+        filterManager.setSearchQuery(query);
+      });
+    },
+    [filterManager]
+  );
+  const clearFilters = reactExports.useCallback(() => {
+    startTransition(() => {
+      filterManager.clearFilters();
+    });
+  }, [filterManager]);
+  return {
+    // State (read directly, no transition needed)
+    locationFilter: filterManager.locationFilter,
+    categoryFilter: filterManager.categoryFilter,
+    qualityFilter: filterManager.qualityFilter,
+    statusFilter: filterManager.statusFilter,
+    searchQuery: filterManager.searchQuery,
+    // Derived state
+    hasActiveFilters: filterManager.hasActiveFilters,
+    activeFilterCount: filterManager.activeFilterCount,
+    // Transition state
+    isPending,
+    // Actions (wrapped)
+    setLocationFilter,
+    setCategoryFilter,
+    setQualityFilter,
+    setStatusFilter,
+    setSearchQuery,
+    clearFilters
+  };
+}
+function Library() {
   const navigate = useNavigate();
-  const { recordings, loading, error, refresh, deviceConnected, stats } = useUnifiedRecordings();
+  const { recordings, loading, error: error2, refresh, deviceConnected, stats } = useUnifiedRecordings();
   const audioControls = useAudioControls();
   const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId);
   const { downloadQueue, isDownloading } = useAppStore();
   const [expandedTranscripts, setExpandedTranscripts] = reactExports.useState(/* @__PURE__ */ new Set());
-  const [locationFilter, setLocationFilter] = reactExports.useState("all");
-  const [categoryFilter, setCategoryFilter] = reactExports.useState("all");
-  const [qualityFilter, setQualityFilter] = reactExports.useState("all");
-  const [statusFilter, setStatusFilter] = reactExports.useState("all");
-  const [searchQuery, setSearchQuery] = reactExports.useState("");
+  const {
+    locationFilter,
+    categoryFilter,
+    qualityFilter,
+    statusFilter,
+    searchQuery,
+    setLocationFilter,
+    setCategoryFilter,
+    setQualityFilter,
+    setStatusFilter,
+    setSearchQuery
+  } = useTransitionFilters();
+  const deferredSearchQuery = reactExports.useDeferredValue(searchQuery);
   const compactView = useUIStore((state) => state.recordingsCompactView);
   const setCompactView = useUIStore((state) => state.setRecordingsCompactView);
   const [bulkProcessing, setBulkProcessing] = reactExports.useState(false);
   const [bulkProgress, setBulkProgress] = reactExports.useState({ current: 0, total: 0 });
   const [deleting, setDeleting] = reactExports.useState(null);
+  const {
+    selectedIds,
+    selectedCount,
+    toggleSelection,
+    selectAll,
+    clearSelection,
+    isSelected,
+    handleSelectionClick
+  } = useSourceSelection();
+  const { message: announcement, announce } = useAnnouncement();
+  const [wasConnected, setWasConnected] = reactExports.useState(deviceConnected);
+  const [isReconnecting, setIsReconnecting] = reactExports.useState(false);
+  const showDisconnectBanner = wasConnected && !deviceConnected;
+  const deviceConnectedRef = reactExports.useRef(deviceConnected);
+  reactExports.useEffect(() => {
+    deviceConnectedRef.current = deviceConnected;
+    if (deviceConnected) {
+      setWasConnected(true);
+      setIsReconnecting(false);
+    }
+  }, [deviceConnected]);
+  const handleRetryConnection = reactExports.useCallback(async () => {
+    setIsReconnecting(true);
+    try {
+      await refresh(true);
+    } finally {
+      setTimeout(() => {
+        if (!deviceConnectedRef.current) {
+          setIsReconnecting(false);
+        }
+      }, 5e3);
+    }
+  }, [refresh]);
   const [transcripts, setTranscripts] = reactExports.useState(/* @__PURE__ */ new Map());
   const [meetings, setMeetings] = reactExports.useState(/* @__PURE__ */ new Map());
   const enrichmentKey = reactExports.useMemo(() => {
@@ -27266,16 +28574,12 @@ function Recordings() {
           recordingIdsForTranscripts.length > 0 ? window.electronAPI.transcripts.getByRecordingIds(recordingIdsForTranscripts) : Promise.resolve({}),
           meetingIds.length > 0 ? window.electronAPI.meetings.getByIds(meetingIds) : Promise.resolve({})
         ]);
-        const newTranscripts = new Map(
-          Object.entries(transcriptsObj)
-        );
-        const newMeetings = new Map(
-          Object.entries(meetingsObj)
-        );
+        const newTranscripts = new Map(Object.entries(transcriptsObj));
+        const newMeetings = new Map(Object.entries(meetingsObj));
         setTranscripts(newTranscripts);
         setMeetings(newMeetings);
       } catch (e) {
-        console.error("[Recordings] Failed to load enrichment data:", e);
+        console.error("[Library] Failed to load enrichment data:", e);
       }
     };
     if (recordings.length > 0) {
@@ -27283,21 +28587,13 @@ function Recordings() {
     }
   }, [enrichmentKey]);
   const filteredRecordings = reactExports.useMemo(() => {
-    return recordings.filter((rec) => {
-      if (locationFilter !== "all" && rec.location !== locationFilter) {
-        return false;
-      }
-      if (categoryFilter !== "all" && rec.category !== categoryFilter) {
-        return false;
-      }
-      if (qualityFilter !== "all" && rec.quality !== qualityFilter) {
-        return false;
-      }
-      if (statusFilter !== "all" && rec.status !== statusFilter) {
-        return false;
-      }
-      if (searchQuery) {
-        const query = searchQuery.toLowerCase();
+    const filtered = recordings.filter((rec) => {
+      if (locationFilter !== "all" && rec.location !== locationFilter) return false;
+      if (categoryFilter !== null && rec.category !== categoryFilter) return false;
+      if (qualityFilter !== null && rec.quality !== qualityFilter) return false;
+      if (statusFilter !== null && rec.status !== statusFilter) return false;
+      if (deferredSearchQuery) {
+        const query = deferredSearchQuery.toLowerCase();
         const filename = rec.filename.toLowerCase();
         const meetingSubject = rec.meetingSubject?.toLowerCase() || "";
         const title = rec.title?.toLowerCase() || "";
@@ -27305,8 +28601,30 @@ function Recordings() {
       }
       return true;
     });
-  }, [recordings, locationFilter, categoryFilter, qualityFilter, statusFilter, searchQuery]);
-  const toggleTranscript = (id2) => {
+    return filtered;
+  }, [recordings, locationFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery]);
+  reactExports.useEffect(() => {
+    if (!loading && filteredRecordings.length !== recordings.length) {
+      announce(`Showing ${filteredRecordings.length} of ${recordings.length} captures`);
+    }
+  }, [filteredRecordings.length, recordings.length, loading, announce]);
+  const itemIds = reactExports.useMemo(() => filteredRecordings.map((r2) => r2.id), [filteredRecordings]);
+  const { handleKeyDown } = useKeyboardNavigation({
+    items: itemIds,
+    selectedIds,
+    onToggleSelection: toggleSelection,
+    onSelectAll: selectAll,
+    onClearSelection: clearSelection,
+    isEnabled: filteredRecordings.length > 0
+  });
+  const bulkCounts = reactExports.useMemo(() => {
+    const deviceOnly = filteredRecordings.filter((r2) => isDeviceOnly(r2)).length;
+    const needsTranscription = filteredRecordings.filter(
+      (r2) => hasLocalPath(r2) && (r2.transcriptionStatus === "none" || r2.transcriptionStatus === "error")
+    ).length;
+    return { deviceOnly, needsTranscription };
+  }, [filteredRecordings]);
+  const toggleTranscript = reactExports.useCallback((id2) => {
     setExpandedTranscripts((prev) => {
       const next = new Set(prev);
       if (next.has(id2)) {
@@ -27316,31 +28634,28 @@ function Recordings() {
       }
       return next;
     });
-  };
-  const formatBytes2 = (bytes) => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-  };
+  }, []);
   const openRecordingsFolder = async () => {
     await window.electronAPI.storage.openFolder("recordings");
   };
-  const handleDownload = async (recording) => {
-    if (!isDeviceOnly(recording)) return;
-    if (!deviceConnected) return;
-    try {
-      await window.electronAPI.downloadService.queueDownloads([
-        {
-          filename: recording.deviceFilename,
-          size: recording.size,
-          dateCreated: recording.dateRecorded.toISOString()
-        }
-      ]);
-    } catch (e) {
-      console.error("Failed to queue download:", e);
-    }
-  };
+  const handleDownload = reactExports.useCallback(
+    async (recording) => {
+      if (!isDeviceOnly(recording)) return;
+      if (!deviceConnected) return;
+      try {
+        await window.electronAPI.downloadService.queueDownloads([
+          {
+            filename: recording.deviceFilename,
+            size: recording.size,
+            dateCreated: recording.dateRecorded.toISOString()
+          }
+        ]);
+      } catch (e) {
+        console.error("Failed to queue download:", e);
+      }
+    },
+    [deviceConnected]
+  );
   const handleAddRecording = async () => {
     try {
       const result = await window.electronAPI.recordings.addExternal();
@@ -27353,12 +28668,18 @@ function Recordings() {
       console.error("Failed to import recording:", e);
     }
   };
-  const handleAskAssistant = (recording) => {
-    navigate("/assistant", { state: { contextId: recording.knowledgeCaptureId || recording.id } });
-  };
-  const handleGenerateOutput = (recording) => {
-    navigate("/actionables", { state: { sourceId: recording.knowledgeCaptureId || recording.id, action: "generate" } });
-  };
+  const handleAskAssistant = reactExports.useCallback(
+    (recording) => {
+      navigate("/assistant", { state: { contextId: recording.knowledgeCaptureId || recording.id } });
+    },
+    [navigate]
+  );
+  const handleGenerateOutput = reactExports.useCallback(
+    (recording) => {
+      navigate("/actionables", { state: { sourceId: recording.knowledgeCaptureId || recording.id, action: "generate" } });
+    },
+    [navigate]
+  );
   const handleBulkDownload = async () => {
     const deviceOnlyRecordings = filteredRecordings.filter((r2) => isDeviceOnly(r2));
     if (deviceOnlyRecordings.length === 0) return;
@@ -27398,13 +28719,80 @@ function Recordings() {
       setBulkProgress({ current: 0, total: 0 });
     }
   };
-  const bulkCounts = reactExports.useMemo(() => {
-    const deviceOnly = filteredRecordings.filter((r2) => isDeviceOnly(r2)).length;
-    const needsTranscription = filteredRecordings.filter(
-      (r2) => hasLocalPath(r2) && (r2.transcriptionStatus === "none" || r2.transcriptionStatus === "error")
-    ).length;
-    return { deviceOnly, needsTranscription };
-  }, [filteredRecordings]);
+  const handleSelectedDownload = reactExports.useCallback(async () => {
+    const selectedRecordings = filteredRecordings.filter((r2) => selectedIds.has(r2.id) && isDeviceOnly(r2));
+    if (selectedRecordings.length === 0) return;
+    if (!deviceConnected) return;
+    try {
+      await window.electronAPI.downloadService.queueDownloads(
+        selectedRecordings.map((r2) => ({
+          filename: "deviceFilename" in r2 ? r2.deviceFilename : r2.filename,
+          size: r2.size,
+          dateCreated: r2.dateRecorded.toISOString()
+        }))
+      );
+      clearSelection();
+    } catch (e) {
+      console.error("Failed to queue selected downloads:", e);
+    }
+  }, [filteredRecordings, selectedIds, deviceConnected, clearSelection]);
+  const handleSelectedProcess = reactExports.useCallback(async () => {
+    const selectedRecordings = filteredRecordings.filter(
+      (r2) => selectedIds.has(r2.id) && hasLocalPath(r2) && (r2.transcriptionStatus === "none" || r2.transcriptionStatus === "error")
+    );
+    if (selectedRecordings.length === 0) return;
+    setBulkProcessing(true);
+    setBulkProgress({ current: 0, total: selectedRecordings.length });
+    try {
+      for (let i = 0; i < selectedRecordings.length; i++) {
+        const recording = selectedRecordings[i];
+        setBulkProgress({ current: i + 1, total: selectedRecordings.length });
+        try {
+          await window.electronAPI.recordings.updateStatus(recording.id, "pending");
+        } catch (e) {
+          console.error("Failed to queue:", recording.filename, e);
+        }
+      }
+      await refresh(false);
+      clearSelection();
+    } finally {
+      setBulkProcessing(false);
+      setBulkProgress({ current: 0, total: 0 });
+    }
+  }, [filteredRecordings, selectedIds, refresh, clearSelection]);
+  const handleSelectedDelete = reactExports.useCallback(async () => {
+    const selectedRecordings = filteredRecordings.filter((r2) => selectedIds.has(r2.id));
+    if (selectedRecordings.length === 0) return;
+    const hasLocalFiles = selectedRecordings.some((r2) => hasLocalPath(r2));
+    const hasDeviceFiles = selectedRecordings.some((r2) => isDeviceOnly(r2));
+    let message = `Delete ${selectedRecordings.length} selected item${selectedRecordings.length > 1 ? "s" : ""}?`;
+    if (hasLocalFiles && hasDeviceFiles) {
+      message += " This includes both local files and device recordings.";
+    } else if (hasLocalFiles) {
+      message += " This will remove local files and any transcripts.";
+    } else {
+      message += " This cannot be undone.";
+    }
+    if (!window.confirm(message)) return;
+    setBulkProcessing(true);
+    setBulkProgress({ current: 0, total: selectedRecordings.length });
+    try {
+      for (let i = 0; i < selectedRecordings.length; i++) {
+        const recording = selectedRecordings[i];
+        setBulkProgress({ current: i + 1, total: selectedRecordings.length });
+        try {
+          await window.electronAPI.recordings.delete(recording.id);
+        } catch (e) {
+          console.error("Failed to delete:", recording.filename, e);
+        }
+      }
+      await refresh(false);
+      clearSelection();
+    } finally {
+      setBulkProcessing(false);
+      setBulkProgress({ current: 0, total: 0 });
+    }
+  }, [filteredRecordings, selectedIds, refresh, clearSelection]);
   const handleDeleteFromDevice = async (recording) => {
     if (!deviceConnected) return;
     if (!("deviceFilename" in recording)) return;
@@ -27434,42 +28822,86 @@ function Recordings() {
       setDeleting(null);
     }
   };
-  const StatusIcon3 = ({ recording }) => {
-    switch (recording.location) {
-      case "device-only":
-        return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-1 text-orange-600 dark:text-orange-400", title: "On device only", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Cloud, { className: "h-4 w-4" }) });
-      case "local-only":
-        return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-1 text-blue-600 dark:text-blue-400", title: "Downloaded", children: /* @__PURE__ */ jsxRuntimeExports.jsx(HardDrive, { className: "h-4 w-4" }) });
-      case "both":
-        return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-1 text-green-600 dark:text-green-400", title: "Synced", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Check, { className: "h-4 w-4" }) });
-    }
-  };
-  const parentRef = reactExports.useRef(null);
-  const estimateSize = reactExports.useCallback((index2) => {
-    if (compactView) {
-      return 52;
-    }
-    const recording = filteredRecordings[index2];
-    if (!recording) return 200;
-    let height = 120;
-    if (currentlyPlayingId === recording.id) height += 80;
-    if (recording.meetingId && meetings.get(recording.meetingId)) height += 70;
-    const transcript = transcripts.get(recording.id);
-    if (transcript) {
-      height += 50;
-      if (expandedTranscripts.has(recording.id)) {
-        height += 400;
+  const handleDelete = reactExports.useCallback(
+    (recording) => {
+      if (recording.location === "device-only") {
+        handleDeleteFromDevice(recording);
+      } else {
+        handleDeleteLocal(recording);
       }
-    }
-    if (isDeviceOnly(recording)) height += 30;
-    return height;
-  }, [compactView, filteredRecordings, currentlyPlayingId, meetings, transcripts, expandedTranscripts]);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [deviceConnected, transcripts]
+  );
+  const handlePlayCallback = reactExports.useCallback(
+    (recordingId, localPath) => {
+      audioControls.play(recordingId, localPath);
+    },
+    [audioControls]
+  );
+  const handleStopCallback = reactExports.useCallback(() => {
+    audioControls.stop();
+  }, [audioControls]);
+  const handleNavigateToMeeting = reactExports.useCallback(
+    (meetingId) => {
+      navigate(`/meeting/${meetingId}`);
+    },
+    [navigate]
+  );
+  const handleDownloadCallback = reactExports.useCallback(
+    (recording) => {
+      handleDownload(recording);
+    },
+    [handleDownload]
+  );
+  const handleDeleteCallback = reactExports.useCallback(
+    (recording) => {
+      handleDelete(recording);
+    },
+    [handleDelete]
+  );
+  const handleAskAssistantCallback = reactExports.useCallback(
+    (recording) => {
+      handleAskAssistant(recording);
+    },
+    [handleAskAssistant]
+  );
+  const handleGenerateOutputCallback = reactExports.useCallback(
+    (recording) => {
+      handleGenerateOutput(recording);
+    },
+    [handleGenerateOutput]
+  );
+  const handleToggleTranscriptCallback = reactExports.useCallback(
+    (recordingId) => {
+      toggleTranscript(recordingId);
+    },
+    [toggleTranscript]
+  );
+  const parentRef = reactExports.useRef(null);
+  const estimateSize = reactExports.useCallback(
+    (index2) => {
+      if (compactView) return 52;
+      const recording = filteredRecordings[index2];
+      if (!recording) return 200;
+      let height = 120;
+      if (currentlyPlayingId === recording.id) height += 80;
+      if (recording.meetingId && meetings.get(recording.meetingId)) height += 70;
+      const transcript = transcripts.get(recording.id);
+      if (transcript) {
+        height += 50;
+        if (expandedTranscripts.has(recording.id)) height += 400;
+      }
+      if (isDeviceOnly(recording)) height += 30;
+      return height;
+    },
+    [compactView, filteredRecordings, currentlyPlayingId, meetings, transcripts, expandedTranscripts]
+  );
   const rowVirtualizer = useVirtualizer({
     count: filteredRecordings.length,
     getScrollElement: () => parentRef.current,
     estimateSize,
     overscan: 5
-    // Render 5 extra items above/below viewport for smoother scrolling
   });
   if (loading && recordings.length === 0) {
     return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col h-full", children: [
@@ -27481,565 +28913,199 @@ function Recordings() {
     ] });
   }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col h-full", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("header", { className: "border-b px-6 py-4", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { className: "text-2xl font-bold", children: "Knowledge Library" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-sm text-muted-foreground", children: [
-            stats.total,
-            " capture",
-            stats.total !== 1 ? "s" : "",
-            stats.unsynced > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "ml-2 text-orange-600 dark:text-orange-400", children: [
-              "(",
-              stats.unsynced,
-              " on device only)"
-            ] }),
-            !deviceConnected && stats.deviceOnly === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ml-2 text-muted-foreground", children: "(device not connected)" })
-          ] })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "outline", size: "sm", onClick: handleAddRecording, title: "Import audio file", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(Plus, { className: "h-4 w-4 mr-2" }),
-            "Add Capture"
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "outline", size: "sm", onClick: openRecordingsFolder, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(FolderOpen, { className: "h-4 w-4 mr-2" }),
-            "Open Folder"
-          ] }),
-          bulkCounts.deviceOnly > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
-            Button,
-            {
-              variant: "outline",
-              size: "sm",
-              onClick: handleBulkDownload,
-              disabled: downloadQueue.size > 0 || !deviceConnected,
-              title: `Download ${bulkCounts.deviceOnly} captures from device`,
-              children: downloadQueue.size > 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 mr-2 animate-spin" }),
-                "Syncing..."
-              ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(Download, { className: "h-4 w-4 mr-2" }),
-                "Download All (",
-                bulkCounts.deviceOnly,
-                ")"
-              ] })
-            }
-          ),
-          bulkCounts.needsTranscription > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
-            Button,
-            {
-              variant: "outline",
-              size: "sm",
-              onClick: handleBulkProcess,
-              disabled: bulkProcessing,
-              title: `Queue ${bulkCounts.needsTranscription} captures for transcription`,
-              children: bulkProcessing ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 mr-2 animate-spin" }),
-                bulkProgress.current,
-                "/",
-                bulkProgress.total
-              ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(Zap, { className: "h-4 w-4 mr-2" }),
-                "Process All (",
-                bulkCounts.needsTranscription,
-                ")"
-              ] })
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "outline", size: "sm", onClick: () => refresh(true), disabled: loading, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: `h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}` }),
-            "Refresh"
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center border rounded-md overflow-hidden ml-2", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              Button,
-              {
-                variant: compactView ? "ghost" : "default",
-                size: "sm",
-                onClick: () => setCompactView(false),
-                className: "rounded-none border-0 px-2",
-                title: "Card view",
-                children: /* @__PURE__ */ jsxRuntimeExports.jsx(LayoutGrid, { className: "h-4 w-4" })
-              }
-            ),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              Button,
-              {
-                variant: compactView ? "default" : "ghost",
-                size: "sm",
-                onClick: () => setCompactView(true),
-                className: "rounded-none border-0 border-l px-2",
-                title: "List view",
-                children: /* @__PURE__ */ jsxRuntimeExports.jsx(List, { className: "h-4 w-4" })
-              }
-            )
-          ] })
-        ] })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col gap-4 mt-4", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-4", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(Filter, { className: "h-4 w-4 text-muted-foreground" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex rounded-lg border overflow-hidden", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "button",
-                {
-                  onClick: () => setLocationFilter("all"),
-                  className: `px-3 py-1.5 text-xs font-medium transition-colors ${locationFilter === "all" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
-                  children: [
-                    "All (",
-                    stats.total,
-                    ")"
-                  ]
-                }
-              ),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "button",
-                {
-                  onClick: () => setLocationFilter("device-only"),
-                  className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${locationFilter === "device-only" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(Cloud, { className: "h-3 w-3 inline mr-1" }),
-                    "Device (",
-                    stats.deviceOnly,
-                    ")"
-                  ]
-                }
-              ),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "button",
-                {
-                  onClick: () => setLocationFilter("local-only"),
-                  className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${locationFilter === "local-only" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(HardDrive, { className: "h-3 w-3 inline mr-1" }),
-                    "Downloaded (",
-                    stats.localOnly,
-                    ")"
-                  ]
-                }
-              )
-            ] })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex rounded-lg border overflow-hidden", children: ["all", "meeting", "interview", "1:1", "brainstorm", "note"].map((cat) => /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              onClick: () => setCategoryFilter(cat),
-              className: `px-3 py-1.5 text-xs font-medium transition-colors ${cat !== "all" ? "border-l" : ""} ${categoryFilter === cat ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
-              children: cat.charAt(0).toUpperCase() + cat.slice(1)
-            },
-            cat
-          )) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "relative flex-1 max-w-xs", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(Search, { className: "absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              Input,
-              {
-                placeholder: "Search captures...",
-                value: searchQuery,
-                onChange: (e) => setSearchQuery(e.target.value),
-                className: "pl-9 h-8"
-              }
-            )
-          ] })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-4", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-xs font-medium text-muted-foreground", children: "Quality:" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs(
-              "select",
-              {
-                value: qualityFilter,
-                onChange: (e) => setQualityFilter(e.target.value),
-                className: "h-8 rounded-md border border-input bg-background px-3 py-1 text-xs",
-                children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "all", children: "All Ratings" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "valuable", children: "Valuable" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "archived", children: "Archived" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "low-value", children: "Low-Value" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "unrated", children: "Unrated" })
-                ]
-              }
-            )
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-xs font-medium text-muted-foreground", children: "Status:" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs(
-              "select",
-              {
-                value: statusFilter,
-                onChange: (e) => setStatusFilter(e.target.value),
-                className: "h-8 rounded-md border border-input bg-background px-3 py-1 text-xs",
-                children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "all", children: "All Statuses" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "processing", children: "Processing" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "ready", children: "Ready" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "enriched", children: "Enriched" })
-                ]
-              }
-            )
-          ] })
-        ] })
-      ] })
-    ] }),
-    error && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 px-6 py-3 bg-destructive/10 text-destructive", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      LibraryHeader,
+      {
+        stats,
+        deviceConnected,
+        loading,
+        compactView,
+        downloadQueueSize: downloadQueue.size,
+        bulkCounts,
+        bulkProcessing,
+        bulkProgress,
+        onAddRecording: handleAddRecording,
+        onOpenFolder: openRecordingsFolder,
+        onBulkDownload: handleBulkDownload,
+        onBulkProcess: handleBulkProcess,
+        onRefresh: () => refresh(true),
+        onSetCompactView: setCompactView
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      DeviceDisconnectBanner,
+      {
+        show: showDisconnectBanner,
+        isReconnecting,
+        onNavigateToDevice: () => navigate("/device"),
+        onRetry: handleRetryConnection
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "px-6", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+      LibraryFilters,
+      {
+        stats,
+        locationFilter,
+        categoryFilter,
+        qualityFilter,
+        statusFilter,
+        searchQuery,
+        onLocationFilterChange: setLocationFilter,
+        onCategoryFilterChange: setCategoryFilter,
+        onQualityFilterChange: setQualityFilter,
+        onStatusFilterChange: setStatusFilter,
+        onSearchQueryChange: setSearchQuery
+      }
+    ) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      BulkActionsBar,
+      {
+        selectedCount,
+        totalCount: filteredRecordings.length,
+        deviceConnected,
+        isProcessing: bulkProcessing,
+        progress: bulkProgress.total > 0 ? bulkProgress : void 0,
+        onSelectAll: () => selectAll(filteredRecordings.map((r2) => r2.id)),
+        onDeselectAll: clearSelection,
+        onDownload: handleSelectedDownload,
+        onProcess: handleSelectedProcess,
+        onDelete: handleSelectedDelete
+      }
+    ),
+    error2 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 px-6 py-3 bg-destructive/10 text-destructive", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(CircleAlert, { className: "h-4 w-4" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm", children: error })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm", children: error2 })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: parentRef, className: "flex-1 overflow-auto p-6", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "max-w-4xl mx-auto", children: filteredRecordings.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx(Card, { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(CardContent, { className: "py-16 text-center", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(Mic, { className: "h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" }),
-      recordings.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "text-lg font-medium mb-2", children: "No Knowledge Captured Yet" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-muted-foreground mb-4", children: "Connect your HiDock device to sync your captured conversations, or import audio files from your computer." }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-2 justify-center", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(Button, { onClick: () => navigate("/device"), children: "Go to Device" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "outline", onClick: handleAddRecording, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(Plus, { className: "h-4 w-4 mr-2" }),
-            "Import File"
-          ] })
-        ] })
-      ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "text-lg font-medium mb-2", children: "No Matching Captures" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-muted-foreground", children: "Try changing your filter or search query." })
-      ] })
-    ] }) }) : (
-      /* Virtualized List - renders only visible items */
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "div",
-        {
-          style: {
-            height: `${rowVirtualizer.getTotalSize()}px`,
-            width: "100%",
-            position: "relative"
-          },
-          children: compactView ? (
-            /* Compact List View - Virtualized */
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "border rounded-lg overflow-hidden", children: rowVirtualizer.getVirtualItems().map((virtualRow) => {
-              const recording = filteredRecordings[virtualRow.index];
-              const canPlay = hasLocalPath(recording);
-              const meeting = recording.meetingId ? meetings.get(recording.meetingId) : void 0;
-              return /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "div",
-                {
-                  style: {
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    height: `${virtualRow.size}px`,
-                    transform: `translateY(${virtualRow.start}px)`
+    /* @__PURE__ */ jsxRuntimeExports.jsx(LiveRegion, { message: announcement }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        ref: parentRef,
+        className: "flex-1 overflow-auto p-6",
+        onKeyDown: handleKeyDown,
+        tabIndex: 0,
+        children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "max-w-4xl mx-auto", children: filteredRecordings.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+          EmptyState,
+          {
+            hasRecordings: recordings.length > 0,
+            onNavigateToDevice: () => navigate("/device"),
+            onAddRecording: handleAddRecording
+          }
+        ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              height: `${rowVirtualizer.getTotalSize()}px`,
+              width: "100%",
+              position: "relative"
+            },
+            role: "listbox",
+            "aria-label": "Knowledge Library",
+            "aria-rowcount": filteredRecordings.length,
+            children: compactView ? (
+              // Compact List View
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "border rounded-lg overflow-hidden", children: rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                const recording = filteredRecordings[virtualRow.index];
+                const meeting = recording.meetingId ? meetings.get(recording.meetingId) : void 0;
+                return /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "div",
+                  {
+                    "data-index": virtualRow.index,
+                    ref: rowVirtualizer.measureElement,
+                    style: {
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      height: `${virtualRow.size}px`,
+                      transform: `translateY(${virtualRow.start}px)`
+                    },
+                    className: virtualRow.index > 0 ? "border-t" : "",
+                    "aria-rowindex": virtualRow.index + 1,
+                    children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      SourceRow,
+                      {
+                        recording,
+                        meeting,
+                        isPlaying: currentlyPlayingId === recording.id,
+                        isDownloading: isDeviceOnly(recording) && isDownloading(recording.deviceFilename),
+                        downloadProgress: isDeviceOnly(recording) ? downloadQueue.get(recording.deviceFilename)?.progress : void 0,
+                        isDeleting: deleting === recording.id,
+                        deviceConnected,
+                        isSelected: isSelected(recording.id),
+                        onSelectionChange: (id2, shiftKey) => handleSelectionClick(id2, shiftKey, filteredRecordings.map((r2) => r2.id)),
+                        onPlay: () => {
+                          if (hasLocalPath(recording)) {
+                            handlePlayCallback(recording.id, recording.localPath);
+                          }
+                        },
+                        onStop: handleStopCallback,
+                        onDownload: () => handleDownloadCallback(recording),
+                        onDelete: () => handleDeleteCallback(recording),
+                        onAskAssistant: () => handleAskAssistantCallback(recording),
+                        onGenerateOutput: () => handleGenerateOutputCallback(recording)
+                      }
+                    )
                   },
-                  className: `flex items-center justify-between p-3 hover:bg-muted/50 ${virtualRow.index > 0 ? "border-t" : ""}`,
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3 min-w-0 flex-1", children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon3, { recording }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-w-0 flex-1", children: [
-                        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "font-medium text-sm truncate", children: recording.filename }),
-                        /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-xs text-muted-foreground", children: [
-                          formatDateTime(recording.dateRecorded.toISOString()),
-                          recording.duration ? ` • ${formatDuration(recording.duration)}` : "",
-                          meeting ? ` • ${meeting.subject}` : ""
-                        ] })
-                      ] })
-                    ] }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-xs px-2 py-0.5 rounded-full ${recording.transcriptionStatus === "complete" ? "bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300" : recording.transcriptionStatus === "pending" || recording.transcriptionStatus === "processing" ? "bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300" : recording.transcriptionStatus === "error" ? "bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300" : "bg-secondary"}`, children: recording.transcriptionStatus === "none" ? "—" : recording.transcriptionStatus }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        Button,
-                        {
-                          variant: "ghost",
-                          size: "icon",
-                          className: "h-7 w-7",
-                          onClick: () => handleAskAssistant(recording),
-                          title: "Ask Assistant about this capture",
-                          children: /* @__PURE__ */ jsxRuntimeExports.jsx(Mic, { className: "h-3 w-3" })
-                        }
-                      ),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        Button,
-                        {
-                          variant: "ghost",
-                          size: "icon",
-                          className: "h-7 w-7",
-                          onClick: () => handleGenerateOutput(recording),
-                          title: "Generate artifact from this capture",
-                          children: /* @__PURE__ */ jsxRuntimeExports.jsx(FileText, { className: "h-3 w-3" })
-                        }
-                      ),
-                      isDeviceOnly(recording) && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        Button,
-                        {
-                          variant: "ghost",
-                          size: "icon",
-                          className: "h-7 w-7",
-                          onClick: () => handleDownload(recording),
-                          disabled: !deviceConnected || isDownloading(recording.deviceFilename),
-                          children: isDownloading(recording.deviceFilename) ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-3 w-3 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Download, { className: "h-3 w-3" })
-                        }
-                      ),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        Button,
-                        {
-                          variant: "ghost",
-                          size: "icon",
-                          className: "h-7 w-7",
-                          onClick: () => currentlyPlayingId === recording.id ? audioControls.stop() : audioControls.play(recording.id, "localPath" in recording ? recording.localPath : ""),
-                          disabled: !canPlay,
-                          children: currentlyPlayingId === recording.id ? /* @__PURE__ */ jsxRuntimeExports.jsx(X, { className: "h-3 w-3" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Play, { className: "h-3 w-3" })
-                        }
-                      ),
-                      recording.location === "device-only" && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        Button,
-                        {
-                          variant: "ghost",
-                          size: "icon",
-                          className: "h-7 w-7 text-destructive hover:text-destructive",
-                          onClick: () => handleDeleteFromDevice(recording),
-                          disabled: !deviceConnected || deleting === recording.id,
-                          children: deleting === recording.id ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-3 w-3 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-3 w-3" })
-                        }
-                      ),
-                      recording.location === "local-only" && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        Button,
-                        {
-                          variant: "ghost",
-                          size: "icon",
-                          className: "h-7 w-7 text-orange-500 hover:text-orange-600",
-                          onClick: () => handleDeleteLocal(recording),
-                          disabled: deleting === recording.id,
-                          children: deleting === recording.id ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-3 w-3 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-3 w-3" })
-                        }
-                      ),
-                      recording.location === "both" && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        Button,
-                        {
-                          variant: "ghost",
-                          size: "icon",
-                          className: "h-7 w-7 text-muted-foreground hover:text-orange-500",
-                          onClick: () => handleDeleteLocal(recording),
-                          disabled: deleting === recording.id,
-                          children: deleting === recording.id ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-3 w-3 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-3 w-3" })
-                        }
-                      )
-                    ] })
-                  ]
-                },
-                recording.id
-              );
-            }) })
-          ) : (
-            /* Card View - Virtualized */
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "space-y-4", children: rowVirtualizer.getVirtualItems().map((virtualRow) => {
-              const recording = filteredRecordings[virtualRow.index];
-              const transcript = transcripts.get(recording.id);
-              const meeting = recording.meetingId ? meetings.get(recording.meetingId) : void 0;
-              const canPlay = hasLocalPath(recording);
-              return /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "div",
-                {
-                  "data-index": virtualRow.index,
-                  ref: rowVirtualizer.measureElement,
-                  style: {
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    transform: `translateY(${virtualRow.start}px)`
+                  recording.id
+                );
+              }) }, "compact-view")
+            ) : (
+              // Card View
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "space-y-4", children: rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                const recording = filteredRecordings[virtualRow.index];
+                const transcript = transcripts.get(recording.id);
+                const meeting = recording.meetingId ? meetings.get(recording.meetingId) : void 0;
+                return /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "div",
+                  {
+                    "data-index": virtualRow.index,
+                    ref: rowVirtualizer.measureElement,
+                    style: {
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      transform: `translateY(${virtualRow.start}px)`
+                    },
+                    "aria-rowindex": virtualRow.index + 1,
+                    children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      SourceCard,
+                      {
+                        recording,
+                        transcript,
+                        meeting,
+                        isPlaying: currentlyPlayingId === recording.id,
+                        isTranscriptExpanded: expandedTranscripts.has(recording.id),
+                        isDownloading: isDeviceOnly(recording) && isDownloading(recording.deviceFilename),
+                        downloadProgress: isDeviceOnly(recording) ? downloadQueue.get(recording.deviceFilename)?.progress : void 0,
+                        isDeleting: deleting === recording.id,
+                        deviceConnected,
+                        isSelected: isSelected(recording.id),
+                        onSelectionChange: (id2, shiftKey) => handleSelectionClick(id2, shiftKey, filteredRecordings.map((r2) => r2.id)),
+                        onPlay: () => {
+                          if (hasLocalPath(recording)) {
+                            handlePlayCallback(recording.id, recording.localPath);
+                          }
+                        },
+                        onStop: handleStopCallback,
+                        onDownload: () => handleDownloadCallback(recording),
+                        onDelete: () => handleDeleteCallback(recording),
+                        onAskAssistant: () => handleAskAssistantCallback(recording),
+                        onGenerateOutput: () => handleGenerateOutputCallback(recording),
+                        onToggleTranscript: () => handleToggleTranscriptCallback(recording.id),
+                        onNavigateToMeeting: handleNavigateToMeeting
+                      }
+                    )
                   },
-                  children: /* @__PURE__ */ jsxRuntimeExports.jsxs(Card, { children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(CardHeader, { className: "pb-3", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-start justify-between", children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
-                        /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIcon3, { recording }),
-                        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                          /* @__PURE__ */ jsxRuntimeExports.jsx(CardTitle, { className: "text-base", children: recording.title || recording.filename }),
-                          /* @__PURE__ */ jsxRuntimeExports.jsxs(CardDescription, { children: [
-                            formatDateTime(recording.dateRecorded.toISOString()),
-                            recording.size && ` • ${formatBytes2(recording.size)}`,
-                            recording.duration && ` • ${formatDuration(recording.duration)}`
-                          ] })
-                        ] })
-                      ] }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-                        recording.quality && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-xs px-2 py-1 rounded-full ${recording.quality === "valuable" ? "bg-purple-100 dark:bg-purple-900 text-purple-700 dark:text-purple-300" : recording.quality === "archived" ? "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300" : "bg-secondary"}`, children: recording.quality }),
-                        /* @__PURE__ */ jsxRuntimeExports.jsx(
-                          Button,
-                          {
-                            variant: "ghost",
-                            size: "icon",
-                            onClick: () => handleAskAssistant(recording),
-                            title: "Ask Assistant about this capture",
-                            children: /* @__PURE__ */ jsxRuntimeExports.jsx(Mic, { className: "h-4 w-4" })
-                          }
-                        ),
-                        /* @__PURE__ */ jsxRuntimeExports.jsx(
-                          Button,
-                          {
-                            variant: "ghost",
-                            size: "icon",
-                            onClick: () => handleGenerateOutput(recording),
-                            title: "Generate artifact from this capture",
-                            children: /* @__PURE__ */ jsxRuntimeExports.jsx(FileText, { className: "h-4 w-4" })
-                          }
-                        ),
-                        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-xs px-2 py-1 rounded-full ${recording.transcriptionStatus === "complete" ? "bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300" : recording.transcriptionStatus === "pending" || recording.transcriptionStatus === "processing" ? "bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300" : recording.transcriptionStatus === "error" ? "bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300" : "bg-secondary"}`, children: recording.transcriptionStatus === "none" ? "not transcribed" : recording.transcriptionStatus }),
-                        isDeviceOnly(recording) && (isDownloading(recording.deviceFilename) ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 text-xs text-muted-foreground", children: [
-                          /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 animate-spin" }),
-                          downloadQueue.get(recording.deviceFilename)?.progress ?? 0,
-                          "%"
-                        ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
-                          Button,
-                          {
-                            variant: "ghost",
-                            size: "icon",
-                            onClick: () => handleDownload(recording),
-                            disabled: !deviceConnected,
-                            title: deviceConnected ? "Download to computer" : "Device not connected",
-                            children: /* @__PURE__ */ jsxRuntimeExports.jsx(Download, { className: "h-4 w-4" })
-                          }
-                        )),
-                        currentlyPlayingId === recording.id ? /* @__PURE__ */ jsxRuntimeExports.jsx(
-                          Button,
-                          {
-                            variant: "ghost",
-                            size: "icon",
-                            onClick: () => audioControls.stop(),
-                            children: /* @__PURE__ */ jsxRuntimeExports.jsx(X, { className: "h-4 w-4" })
-                          }
-                        ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
-                          Button,
-                          {
-                            variant: "ghost",
-                            size: "icon",
-                            onClick: () => audioControls.play(recording.id, "localPath" in recording ? recording.localPath : ""),
-                            disabled: !canPlay,
-                            title: canPlay ? "Play capture" : "Download to play",
-                            children: /* @__PURE__ */ jsxRuntimeExports.jsx(Play, { className: "h-4 w-4" })
-                          }
-                        ),
-                        recording.location === "device-only" && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                          Button,
-                          {
-                            variant: "ghost",
-                            size: "icon",
-                            className: "text-destructive hover:text-destructive",
-                            onClick: () => handleDeleteFromDevice(recording),
-                            disabled: !deviceConnected || deleting === recording.id,
-                            title: "Delete from device",
-                            children: deleting === recording.id ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-4 w-4" })
-                          }
-                        ),
-                        recording.location === "local-only" && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                          Button,
-                          {
-                            variant: "ghost",
-                            size: "icon",
-                            className: "text-orange-500 hover:text-orange-600",
-                            onClick: () => handleDeleteLocal(recording),
-                            disabled: deleting === recording.id,
-                            title: "Delete local file",
-                            children: deleting === recording.id ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-4 w-4" })
-                          }
-                        ),
-                        recording.location === "both" && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                          Button,
-                          {
-                            variant: "ghost",
-                            size: "icon",
-                            className: "text-muted-foreground hover:text-orange-500",
-                            onClick: () => handleDeleteLocal(recording),
-                            disabled: deleting === recording.id,
-                            title: "Delete local copy",
-                            children: deleting === recording.id ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-4 w-4 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-4 w-4" })
-                          }
-                        )
-                      ] })
-                    ] }) }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsxs(CardContent, { className: "space-y-4", children: [
-                      currentlyPlayingId === recording.id && hasLocalPath(recording) && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        AudioPlayer,
-                        {
-                          filename: recording.filename,
-                          onClose: () => audioControls.stop()
-                        }
-                      ),
-                      meeting && /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                        "div",
-                        {
-                          className: "flex items-center gap-2 p-3 bg-muted rounded-lg cursor-pointer hover:bg-muted/80",
-                          onClick: () => navigate(`/meeting/${meeting.id}`),
-                          children: [
-                            /* @__PURE__ */ jsxRuntimeExports.jsx(Calendar$1, { className: "h-4 w-4 text-primary" }),
-                            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm font-medium", children: meeting.subject }),
-                              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-muted-foreground", children: formatDateTime(meeting.start_time) })
-                            ] })
-                          ]
-                        }
-                      ),
-                      transcript && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "border rounded-lg", children: [
-                        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                          "button",
-                          {
-                            className: "w-full flex items-center justify-between p-3 hover:bg-muted/50",
-                            onClick: () => toggleTranscript(recording.id),
-                            children: [
-                              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-                                /* @__PURE__ */ jsxRuntimeExports.jsx(FileText, { className: "h-4 w-4" }),
-                                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-medium text-sm", children: "Transcript" }),
-                                transcript.word_count && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-xs text-muted-foreground", children: [
-                                  "(",
-                                  transcript.word_count,
-                                  " words)"
-                                ] })
-                              ] }),
-                              expandedTranscripts.has(recording.id) ? /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronUp, { className: "h-4 w-4" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronDown, { className: "h-4 w-4" })
-                            ]
-                          }
-                        ),
-                        expandedTranscripts.has(recording.id) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3 pt-0 space-y-3", children: [
-                          transcript.summary && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3 bg-muted rounded-lg", children: [
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs font-medium text-muted-foreground mb-1", children: "Summary" }),
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm", children: transcript.summary })
-                          ] }),
-                          transcript.action_items && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs font-medium text-muted-foreground mb-1", children: "Action Items" }),
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "list-disc list-inside text-sm space-y-1", children: parseJsonArray(transcript.action_items).map((item, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: item }, i)) })
-                          ] }),
-                          transcript.key_points && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs font-medium text-muted-foreground mb-1", children: "Key Points" }),
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("ul", { className: "list-disc list-inside text-sm space-y-1", children: parseJsonArray(transcript.key_points).map((item, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: item }, i)) })
-                          ] }),
-                          transcript.topics && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs font-medium text-muted-foreground mb-1", children: "Topics" }),
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex flex-wrap gap-1", children: parseJsonArray(transcript.topics).map((topic, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-2 py-0.5 bg-secondary text-xs rounded-full", children: topic }, i)) })
-                          ] }),
-                          /* @__PURE__ */ jsxRuntimeExports.jsxs("details", { className: "mt-2", children: [
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("summary", { className: "text-sm text-primary cursor-pointer hover:underline", children: "View full transcript" }),
-                            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "mt-2 text-sm whitespace-pre-wrap bg-muted p-3 rounded-lg max-h-64 overflow-auto", children: transcript.full_text })
-                          ] }),
-                          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-4 text-xs text-muted-foreground pt-2 border-t", children: [
-                            transcript.language && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-                              "Language: ",
-                              transcript.language
-                            ] }),
-                            transcript.transcription_provider && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-                              "Provider: ",
-                              transcript.transcription_provider
-                            ] })
-                          ] })
-                        ] })
-                      ] }),
-                      isDeviceOnly(recording) && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-muted-foreground italic", children: "Download this capture to play it and generate a transcript." })
-                    ] })
-                  ] })
-                },
-                recording.id
-              );
-            }) })
-          )
-        }
-      )
-    ) }) })
+                  recording.id
+                );
+              }) }, "card-view")
+            )
+          }
+        ) })
+      }
+    )
   ] });
 }
 function People() {
@@ -28064,8 +29130,8 @@ function People() {
         }));
         setPeople(mappedPeople);
       }
-    } catch (error) {
-      console.error("Failed to load people:", error);
+    } catch (error2) {
+      console.error("Failed to load people:", error2);
     } finally {
       setLoading(false);
     }
@@ -28215,7 +29281,7 @@ function PersonDetail() {
   const { id: id2 } = useParams();
   const navigate = useNavigate();
   const [person, setPerson] = reactExports.useState(null);
-  const [meetings, setMeetings] = reactExports.useState([]);
+  const [meetings, _setMeetings] = reactExports.useState([]);
   const [loading, setLoading] = reactExports.useState(true);
   const [activeTab, setActiveTab] = reactExports.useState("timeline");
   const loadDetails = async () => {
@@ -28235,8 +29301,8 @@ function PersonDetail() {
           createdAt: c.created_at || c.createdAt || (/* @__PURE__ */ new Date()).toISOString()
         });
       }
-    } catch (error) {
-      console.error("Failed to load person details:", error);
+    } catch (error2) {
+      console.error("Failed to load person details:", error2);
     } finally {
       setLoading(false);
     }
@@ -28427,8 +29493,8 @@ function Projects() {
         }));
         setProjects(mapped);
       }
-    } catch (error) {
-      console.error("Failed to load projects:", error);
+    } catch (error2) {
+      console.error("Failed to load projects:", error2);
     } finally {
       setLoading(false);
     }
@@ -28457,8 +29523,8 @@ function Projects() {
         setProjects((prev) => [mapped, ...prev]);
         setActiveConversation(mapped);
       }
-    } catch (error) {
-      console.error("Failed to create project:", error);
+    } catch (error2) {
+      console.error("Failed to create project:", error2);
     }
   };
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex h-full bg-background", children: [
@@ -28615,8 +29681,8 @@ function Actionables() {
     try {
       const data = await window.electronAPI.actionables.getAll();
       setActionables(data);
-    } catch (error) {
-      console.error("Failed to load actionables:", error);
+    } catch (error2) {
+      console.error("Failed to load actionables:", error2);
     } finally {
       setLoading(false);
     }
@@ -28639,8 +29705,8 @@ function Actionables() {
       });
       console.log("Generation result:", result);
       loadActionables();
-    } catch (error) {
-      console.error("Failed to generate output:", error);
+    } catch (error2) {
+      console.error("Failed to generate output:", error2);
     }
   };
   const getStatusIcon = (status) => {
@@ -28757,7 +29823,7 @@ function HealthCheck() {
   const [purgeResult, setPurgeResult] = reactExports.useState(null);
   const [showDetails, setShowDetails] = reactExports.useState(false);
   const [showAdvanced, setShowAdvanced] = reactExports.useState(false);
-  const [error, setError] = reactExports.useState(null);
+  const [error2, setError] = reactExports.useState(null);
   const runScan = async () => {
     setScanning(true);
     setError(null);
@@ -28858,7 +29924,7 @@ function HealthCheck() {
           repairing ? "Repairing..." : `Repair All (${report.autoRepairableCount})`
         ] })
       ] }),
-      error && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 rounded-lg text-red-700 dark:text-red-400 text-sm", children: error }),
+      error2 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 rounded-lg text-red-700 dark:text-red-400 text-sm", children: error2 }),
       repairResults.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3 bg-green-50 dark:bg-green-950/50 border border-green-200 dark:border-green-900 rounded-lg text-sm", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "font-medium text-green-700 dark:text-green-400 mb-1", children: "Repair Complete" }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-green-600 dark:text-green-500", children: [
@@ -29093,8 +30159,8 @@ function Settings() {
       } else {
         console.error("Failed to load storage info:", result.error);
       }
-    } catch (error) {
-      console.error("Failed to load storage info:", error);
+    } catch (error2) {
+      console.error("Failed to load storage info:", error2);
     }
   };
   const handleSaveCalendar = async () => {
@@ -29400,7 +30466,7 @@ function App() {
       /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/assistant", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Chat, {}) }) }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/explore", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Explore, {}) }) }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/sync", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Device, {}) }) }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/library", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Recordings, {}) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/library", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Library, {}) }) }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/people", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(People, {}) }) }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/person/:id", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(PersonDetail, {}) }) }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(Route, { path: "/projects", element: /* @__PURE__ */ jsxRuntimeExports.jsx(ErrorBoundary, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Projects, {}) }) }),

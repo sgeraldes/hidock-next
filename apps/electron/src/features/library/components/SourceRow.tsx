@@ -1,11 +1,13 @@
 import { memo } from 'react'
-import { Mic, FileText, Play, X, Download, RefreshCw, Trash2 } from 'lucide-react'
+import { Mic, FileText, Play, X, Download, RefreshCw, Trash2, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { formatDateTime, formatDuration } from '@/lib/utils'
 import { Meeting } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
+import { useLibraryStore } from '@/store/useLibraryStore'
 
 interface SourceRowProps {
   recording: UnifiedRecording
@@ -45,6 +47,7 @@ export const SourceRow = memo(function SourceRow({
   // downloadProgress could be used for a progress indicator in the future
   void _downloadProgress
   const canPlay = hasLocalPath(recording)
+  const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
 
   const handleCheckboxClick = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -78,6 +81,24 @@ export const SourceRow = memo(function SourceRow({
         </div>
       </div>
       <div className="flex items-center gap-2">
+        {/* Error badge */}
+        {error && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300">
+                  <AlertCircle className="h-3 w-3" />
+                  <span>Error</span>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>{error.message}</p>
+                {error.details && <p className="text-xs text-muted-foreground mt-1">{error.details}</p>}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
+
         {/* Transcription status badge */}
         <span
           className={`text-xs px-2 py-0.5 rounded-full ${

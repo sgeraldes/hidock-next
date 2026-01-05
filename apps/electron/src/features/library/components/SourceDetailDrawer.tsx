@@ -5,8 +5,8 @@
  * Shows transcript, summary, metadata, and provides actions.
  */
 
-import { useEffect, useRef } from 'react'
-import { Play, Pause, FileText, Wand2, Calendar, Download, Trash2, ExternalLink } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Play, Pause, FileText, Wand2, Calendar, Download, Trash2, ExternalLink, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -14,6 +14,8 @@ import { AudioPlayer } from '@/components/AudioPlayer'
 import { formatDateTime, formatDuration } from '@/lib/utils'
 import { parseJsonArray } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
+import { useLibraryStore } from '@/store/useLibraryStore'
+import { getRecoveryAction } from '@/features/library/utils/errorHandling'
 
 interface Transcript {
   id: string
@@ -79,6 +81,12 @@ export function SourceDetailDrawer({
   deviceConnected
 }: SourceDetailDrawerProps) {
   const previousFocusRef = useRef<HTMLElement | null>(null)
+  const [errorDetailsExpanded, setErrorDetailsExpanded] = useState(false)
+
+  const error = useLibraryStore((state) => (source ? state.recordingErrors.get(source.id) : undefined))
+  const clearRecordingError = useLibraryStore((state) => state.clearRecordingError)
+
+  const recoveryAction = error ? getRecoveryAction(error.type) : null
 
   // Focus management: store focus and restore on close
   useEffect(() => {
@@ -96,6 +104,18 @@ export function SourceDetailDrawer({
   const needsDownload = isDeviceOnly(source)
   const needsTranscription =
     hasLocalPath(source) && (source.transcriptionStatus === 'none' || source.transcriptionStatus === 'error')
+
+  const handleRetry = () => {
+    if (!source) return
+    clearRecordingError(source.id)
+    if (recoveryAction?.action === 'retry') {
+      if (error?.type.includes('transcription')) {
+        onTranscribe()
+      } else if (error?.type.includes('download')) {
+        onDownload()
+      }
+    }
+  }
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>
@@ -218,6 +238,42 @@ export function SourceDetailDrawer({
             Delete
           </Button>
         </div>
+
+        {/* Error message with retry */}
+        {error && (
+          <div className="mt-4 border-t pt-4">
+            <div className="flex items-start gap-3 p-3 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-lg">
+              <AlertCircle className="h-5 w-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-red-900 dark:text-red-100">{error.message}</p>
+                {error.details && <p className="text-xs text-red-700 dark:text-red-300 mt-1">{error.details}</p>}
+
+                {/* Expandable error details */}
+                <button
+                  onClick={() => setErrorDetailsExpanded(!errorDetailsExpanded)}
+                  className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400 mt-2 hover:underline"
+                >
+                  {errorDetailsExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                  {errorDetailsExpanded ? 'Hide details' : 'Show details'}
+                </button>
+
+                {errorDetailsExpanded && (
+                  <div className="mt-2 p-2 bg-red-100 dark:bg-red-900 rounded text-xs space-y-1">
+                    <div><span className="font-medium">Type:</span> {error.type}</div>
+                    <div><span className="font-medium">Recoverable:</span> {error.recoverable ? 'Yes' : 'No'}</div>
+                    <div><span className="font-medium">Retryable:</span> {error.retryable ? 'Yes' : 'No'}</div>
+                    {error.sourceId && <div><span className="font-medium">Source ID:</span> {error.sourceId}</div>}
+                  </div>
+                )}
+              </div>
+              {error.retryable && recoveryAction && (
+                <Button variant="outline" size="sm" onClick={handleRetry} className="shrink-0">
+                  {recoveryAction.label}
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Audio Player (sticky when playing) */}
         {isPlaying && canPlay && (

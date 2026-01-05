@@ -6,8 +6,8 @@ const initSqlJs = require("sql.js");
 const fs = require("fs");
 const ICAL = require("ical.js");
 const zod = require("zod");
-const generativeAi = require("@google/generative-ai");
 const crypto$1 = require("crypto");
+const generativeAi = require("@google/generative-ai");
 const uuid = require("uuid");
 const events = require("events");
 const DEFAULT_CONFIG = {
@@ -3939,6 +3939,67 @@ function registerRecordingHandlers() {
     } catch (error2) {
       console.error("recordings:getMeetingsNearDate error:", error2);
       return [];
+    }
+  });
+  electron.ipcMain.handle("recordings:addExternal", async () => {
+    try {
+      const focusedWindow = electron.BrowserWindow.getFocusedWindow();
+      const result = await electron.dialog.showOpenDialog(focusedWindow || electron.BrowserWindow.getAllWindows()[0], {
+        title: "Select Audio File",
+        filters: [
+          { name: "Audio Files", extensions: ["mp3", "m4a", "wav", "ogg", "flac"] }
+        ],
+        properties: ["openFile"]
+      });
+      if (result.canceled || result.filePaths.length === 0) {
+        return { success: false, error: "No file selected" };
+      }
+      const sourcePath = result.filePaths[0];
+      if (!fs.existsSync(sourcePath)) {
+        return { success: false, error: "Selected file does not exist" };
+      }
+      const stats = fs.statSync(sourcePath);
+      const originalFilename = path.basename(sourcePath);
+      const fileExtension = path.extname(originalFilename);
+      const recordingsPath = getRecordingsPath();
+      const timestamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").split("T");
+      const newFilename = `external-${timestamp[0]}-${timestamp[1].substring(0, 8)}${fileExtension}`;
+      const destinationPath = path.join(recordingsPath, newFilename);
+      fs.copyFileSync(sourcePath, destinationPath);
+      const recordingId = crypto$1.randomUUID();
+      const recording = {
+        id: recordingId,
+        filename: newFilename,
+        original_filename: originalFilename,
+        file_path: destinationPath,
+        file_size: stats.size,
+        duration_seconds: void 0,
+        // Will be populated later if needed
+        date_recorded: stats.mtime.toISOString(),
+        meeting_id: void 0,
+        correlation_confidence: void 0,
+        correlation_method: void 0,
+        status: "ready",
+        location: "local-only",
+        transcription_status: "none",
+        on_device: 0,
+        device_last_seen: void 0,
+        on_local: 1,
+        source: "external",
+        is_imported: 1
+      };
+      insertRecording(recording);
+      const insertedRecording = getRecordingById(recordingId);
+      if (!insertedRecording) {
+        return { success: false, error: "Failed to retrieve recording after insert" };
+      }
+      return { success: true, recording: insertedRecording };
+    } catch (error2) {
+      console.error("recordings:addExternal error:", error2);
+      return {
+        success: false,
+        error: error2 instanceof Error ? error2.message : "Unknown error occurred"
+      };
     }
   });
   console.log("Recording IPC handlers registered");

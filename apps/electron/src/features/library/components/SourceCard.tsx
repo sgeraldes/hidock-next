@@ -161,8 +161,14 @@ export const SourceCard = memo(function SourceCard({
                 variant="ghost"
                 size="icon"
                 onClick={onPlay}
-                disabled={!canPlay}
-                title={canPlay ? 'Play capture' : 'Download to play'}
+                disabled={!canPlay || error?.type === 'audio_not_found'}
+                title={
+                  error?.type === 'audio_not_found'
+                    ? 'File missing'
+                    : canPlay
+                      ? 'Play capture'
+                      : 'Download to play'
+                }
               >
                 <Play className="h-4 w-4" />
               </Button>

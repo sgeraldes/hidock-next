@@ -44,9 +44,9 @@ interface LibraryActions {
 
   // Filters
   setLocationFilter: (filter: LocationFilter) => void
-  setCategoryFilter: (filter: string) => void
-  setQualityFilter: (filter: string) => void
-  setStatusFilter: (filter: string) => void
+  setCategoryFilter: (filter: string | null) => void
+  setQualityFilter: (filter: string | null) => void
+  setStatusFilter: (filter: string | null) => void
   setSearchQuery: (query: string) => void
   clearFilters: () => void
 
