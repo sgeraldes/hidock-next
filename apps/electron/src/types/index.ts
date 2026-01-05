@@ -309,8 +309,24 @@ export type RAGFilter =
 export function parseAttendees(attendeesJson?: string | null): MeetingAttendee[] {
   if (!attendeesJson) return []
   try {
-    return JSON.parse(attendeesJson)
-  } catch {
+    const parsed = JSON.parse(attendeesJson)
+
+    // Validate that parsed result is an array
+    if (!Array.isArray(parsed)) {
+      console.warn('[parseAttendees] Parsed JSON is not an array, returning empty array', { parsed })
+      return []
+    }
+
+    // Filter out invalid attendee objects
+    return parsed.filter((item): item is MeetingAttendee => {
+      if (!item || typeof item !== 'object') {
+        console.warn('[parseAttendees] Skipping non-object attendee', { item })
+        return false
+      }
+      return true
+    })
+  } catch (error) {
+    console.warn('[parseAttendees] Failed to parse attendees JSON', { error })
     return []
   }
 }
@@ -319,8 +335,17 @@ export function parseAttendees(attendeesJson?: string | null): MeetingAttendee[]
 export function parseJsonArray<T>(json?: string | null): T[] {
   if (!json) return []
   try {
-    return JSON.parse(json)
-  } catch {
+    const parsed = JSON.parse(json)
+
+    // Validate that parsed result is an array
+    if (!Array.isArray(parsed)) {
+      console.warn('[parseJsonArray] Parsed JSON is not an array, returning empty array', { parsed })
+      return []
+    }
+
+    return parsed
+  } catch (error) {
+    console.warn('[parseJsonArray] Failed to parse JSON', { error })
     return []
   }
 }
