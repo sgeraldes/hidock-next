@@ -79,8 +79,8 @@ export function Device() {
   const [autoConnectConfig, setAutoConnectConfig] = useState(() => deviceService.getAutoConnectConfig())
 
   // Auto-download and auto-transcribe configuration state
-  const [autoDownload, setAutoDownload] = useState(true)
-  const [autoTranscribe, setAutoTranscribe] = useState(true)
+  const [autoDownload, setAutoDownload] = useState<boolean | null>(null)
+  const [autoTranscribe, setAutoTranscribe] = useState<boolean | null>(null)
 
   // Activity log UI state
   const [logExpanded, setLogExpanded] = useState(true)
@@ -769,7 +769,8 @@ export function Device() {
                           </Label>
                           <Switch
                             id="auto-download-disconnected"
-                            checked={autoDownload}
+                            checked={autoDownload === true}
+                            disabled={autoDownload === null}
                             onCheckedChange={handleAutoDownloadToggle}
                           />
                         </div>
@@ -779,7 +780,8 @@ export function Device() {
                           </Label>
                           <Switch
                             id="auto-transcribe-disconnected"
-                            checked={autoTranscribe}
+                            checked={autoTranscribe === true}
+                            disabled={autoTranscribe === null}
                             onCheckedChange={handleAutoTranscribeToggle}
                           />
                         </div>
@@ -895,7 +897,8 @@ export function Device() {
                       </Label>
                       <Switch
                         id="auto-download"
-                        checked={autoDownload}
+                        checked={autoDownload === true}
+                        disabled={autoDownload === null}
                         onCheckedChange={handleAutoDownloadToggle}
                       />
                     </div>
@@ -905,7 +908,8 @@ export function Device() {
                       </Label>
                       <Switch
                         id="auto-transcribe"
-                        checked={autoTranscribe}
+                        checked={autoTranscribe === true}
+                        disabled={autoTranscribe === null}
                         onCheckedChange={handleAutoTranscribeToggle}
                       />
                     </div>
