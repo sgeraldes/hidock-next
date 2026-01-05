@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import { useLocation } from 'react-router-dom'
 import {
   RefreshCw,
   FileText,
@@ -10,17 +11,40 @@ import {
   Users,
   Sparkles,
   Trash2,
-  Bot
+  Bot,
+  Loader2,
+  AlertCircle,
+  Copy
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog'
 import { cn, formatDateTime } from '@/lib/utils'
 import type { Actionable, ActionableStatus } from '@/types/knowledge'
 
 export function Actionables() {
+  const location = useLocation()
   const [actionables, setActionables] = useState<Actionable[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState<ActionableStatus | 'all'>('pending')
+
+  // Generation state
+  const [generating, setGenerating] = useState(false)
+  const [generatedOutput, setGeneratedOutput] = useState<{
+    content: string
+    templateId: string
+    generatedAt: string
+  } | null>(null)
+  const [generationError, setGenerationError] = useState<string | null>(null)
+  const [showOutputModal, setShowOutputModal] = useState(false)
+  const [generationHistory, setGenerationHistory] = useState<number[]>([])
 
   const loadActionables = async () => {
     setLoading(true)
@@ -34,9 +58,68 @@ export function Actionables() {
     }
   }
 
+  const handleAutoGenerate = async (sourceId: string) => {
+    // Check rate limiting (max 3/minute)
+    const now = Date.now()
+    const recentGenerations = generationHistory.filter(t => now - t < 60000)
+    if (recentGenerations.length >= 3) {
+      setGenerationError('Rate limit reached. Please wait a minute before generating again.')
+      return
+    }
+
+    setGenerating(true)
+    setGenerationError(null)
+
+    try {
+      const result = await window.electronAPI.outputs.generate({
+        templateId: 'meeting_minutes',
+        knowledgeCaptureId: sourceId
+      })
+
+      if (result.success) {
+        setGeneratedOutput(result.data)
+        setShowOutputModal(true)
+        setGenerationHistory([...generationHistory, now])
+      } else {
+        setGenerationError(result.error.message || 'Failed to generate output')
+      }
+    } catch (error: any) {
+      setGenerationError(error.message || 'Failed to generate output')
+      console.error('Output generation failed:', error)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  const copyToClipboard = async (text?: string) => {
+    if (!text) return
+    try {
+      const result = await window.electronAPI.outputs.copyToClipboard(text)
+      if (result.success) {
+        console.log('Copied to clipboard')
+      } else {
+        console.error('Failed to copy:', result.error.message)
+      }
+    } catch (error) {
+      console.error('Failed to copy to clipboard:', error)
+    }
+  }
+
   useEffect(() => {
     loadActionables()
   }, [])
+
+  // Handle navigation state from Library
+  useEffect(() => {
+    const state = location.state as {
+      sourceId?: string
+      action?: 'generate'
+    } | null
+
+    if (state?.sourceId && state?.action === 'generate') {
+      handleAutoGenerate(state.sourceId)
+    }
+  }, [location.state])
 
   const filteredActionables = useMemo(() => {
     return actionables.filter(a => {
@@ -191,13 +274,69 @@ export function Actionables() {
                 <h3 className="font-bold text-sm uppercase tracking-wider">How suggestions work</h3>
               </div>
               <p className="text-sm text-muted-foreground leading-relaxed">
-                HiDock automatically detects the intent to share information or follow up. 
+                HiDock automatically detects the intent to share information or follow up.
                 For example, after a meeting with a candidate, I'll suggest generating **Interview Feedback**.
               </p>
             </CardContent>
           </Card>
         </div>
       </div>
+
+      {/* Error Banner */}
+      {generationError && (
+        <div className="fixed top-0 left-0 right-0 z-40 px-4 py-3 bg-destructive/10 border-b border-destructive/20 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2 flex-1">
+            <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
+            <span className="text-sm text-destructive font-medium">{generationError}</span>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setGenerationError(null)}
+            className="text-destructive hover:text-destructive"
+          >
+            Dismiss
+          </Button>
+        </div>
+      )}
+
+      {/* Loading Overlay */}
+      {generating && (
+        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="text-center space-y-4 bg-card p-8 rounded-lg shadow-lg border">
+            <Loader2 className="h-12 w-12 animate-spin mx-auto text-primary" />
+            <div>
+              <h3 className="text-lg font-semibold mb-1">Generating Meeting Minutes</h3>
+              <p className="text-sm text-muted-foreground">This may take a few moments...</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Output Modal */}
+      <Dialog open={showOutputModal} onOpenChange={setShowOutputModal}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-auto">
+          <DialogHeader>
+            <DialogTitle>Generated Output</DialogTitle>
+            <DialogDescription>
+              Generated using {generatedOutput?.templateId} template
+            </DialogDescription>
+          </DialogHeader>
+          <div className="prose prose-sm max-w-none bg-muted/30 p-4 rounded-md border">
+            <pre className="whitespace-pre-wrap text-sm font-mono">{generatedOutput?.content || ''}</pre>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => copyToClipboard(generatedOutput?.content)}
+            >
+              <Copy className="h-4 w-4 mr-2" />
+              Copy to Clipboard
+            </Button>
+            <Button onClick={() => setShowOutputModal(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
