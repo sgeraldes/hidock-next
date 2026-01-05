@@ -1096,6 +1096,88 @@
       }
       closeModal('task-modal');
     }
+
+    // ==== AI ACTIONS ====
+    let currentAIAction = null;
+    let currentAIResult = '';
+
+    const aiActionConfigs = {
+      summarize: {
+        icon: '✨', label: 'Summarize', loadingText: 'Generating summary...',
+        generateResult: (s) => `<h3>📝 Summary</h3><p>${s.summary || 'Analysis of ' + s.title}</p>
+          <h3>🎯 Main Topics</h3><ul><li><strong>Primary:</strong> ${s.insights?.keyPoints?.[0] || 'Key points'}</li>
+          <li><strong>Secondary:</strong> ${s.insights?.keyPoints?.slice(1).join(', ') || 'Additional context'}</li></ul>
+          <h3>👥 People</h3><p>${s.links?.people?.map(p => '<span class="highlight">' + p.name + '</span> (' + p.role + ')').join(', ') || 'No people identified'}</p>`
+      },
+      keyPoints: {
+        icon: '💡', label: 'Key Points', loadingText: 'Extracting key points...',
+        generateResult: (s) => `<h3>💡 Key Points (${s.insights?.keyPoints?.length || 0})</h3>
+          <ul>${(s.insights?.keyPoints || []).map(p => '<li>' + p + '</li>').join('') || '<li>No key points</li>'}</ul>
+          ${s.insights?.decisions?.length ? '<h3>✅ Decisions</h3><ul>' + s.insights.decisions.map(d => '<li>' + d + '</li>').join('') + '</ul>' : ''}`
+      },
+      extractActions: {
+        icon: '✅', label: 'Action Items', loadingText: 'Finding actions...',
+        generateResult: (s) => `<h3>✅ Action Items (${s.insights?.actions?.length || 0})</h3>
+          <ul>${(s.insights?.actions || []).map(a => '<li>' + a + '</li>').join('') || '<li>No actions found</li>'}</ul>
+          ${s.links?.actions?.length ? '<h3>📋 Tasks</h3><ul>' + s.links.actions.map(a => '<li>' + a.text + ' - ' + a.assignee + '</li>').join('') + '</ul>' : ''}`
+      }
+    };
+
+    function triggerAIAction(actionType) {
+      const s = sourcesData[currentSourceId];
+      if (!s) return;
+      currentAIAction = actionType;
+      const config = aiActionConfigs[actionType];
+      document.getElementById('ai-modal-type').textContent = config.icon + ' ' + config.label;
+      document.getElementById('ai-modal-source').textContent = s.title || s.original;
+      document.getElementById('ai-modal-body').innerHTML = '<div class="ai-loading"><div class="ai-loading-dots"><span class="ai-loading-dot"></span><span class="ai-loading-dot"></span><span class="ai-loading-dot"></span></div><div class="ai-loading-text">' + config.loadingText + '</div></div>';
+      document.getElementById('ai-modal').classList.add('active');
+      setTimeout(() => {
+        currentAIResult = config.generateResult(s);
+        document.getElementById('ai-modal-body').innerHTML = '<div class="ai-result-content">' + currentAIResult + '</div>';
+      }, 1500 + Math.random() * 1000);
+    }
+
+    function closeAIModal() { document.getElementById('ai-modal').classList.remove('active'); }
+    function regenerateAI() { if (currentAIAction) triggerAIAction(currentAIAction); }
+    function copyAIResult() {
+      const temp = document.createElement('div');
+      temp.innerHTML = currentAIResult;
+      navigator.clipboard.writeText(temp.textContent || temp.innerText).then(() => {
+        const el = document.getElementById('ai-copy-success');
+        el.classList.add('visible');
+        setTimeout(() => el.classList.remove('visible'), 2000);
+      });
+    }
+
+    function sendSidebarChat() {
+      const input = document.getElementById('sidebar-chat-input');
+      const response = document.getElementById('sidebar-chat-response');
+      const message = input.value.trim();
+      if (!message) return;
+      const s = sourcesData[currentSourceId];
+      input.value = '';
+      response.textContent = 'Thinking...';
+      response.style.display = 'block';
+      setTimeout(() => {
+        let answer;
+        const lowerMsg = message.toLowerCase();
+        if (lowerMsg.includes('summary') || lowerMsg.includes('summarize')) {
+          answer = s.summary || 'This source covers important topics related to ' + s.title;
+        } else if (lowerMsg.includes('who') || lowerMsg.includes('people')) {
+          answer = 'People: ' + (s.links?.people?.map(p => p.name + ' (' + p.role + ')').join(', ') || 'None identified');
+        } else if (lowerMsg.includes('action') || lowerMsg.includes('todo')) {
+          answer = s.insights?.actions?.length ? 'Actions: ' + s.insights.actions.join('; ') : 'No specific actions.';
+        } else if (lowerMsg.includes('key') || lowerMsg.includes('point') || lowerMsg.includes('decision')) {
+          answer = s.insights?.keyPoints?.length ? 'Key points: ' + s.insights.keyPoints.join('; ') : 'No key points.';
+        } else {
+          answer = 'Based on "' + s.title + '": ' + (s.summary?.split('.')[0] || 'This contains relevant information') + '.';
+        }
+        response.textContent = answer;
+      }, 1000 + Math.random() * 500);
+    }
+
+    document.getElementById('ai-modal').addEventListener('click', function(e) { if (e.target === this) closeAIModal(); });
   </script>
 </body>
 </html>
