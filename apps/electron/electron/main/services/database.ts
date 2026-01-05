@@ -1678,6 +1678,8 @@ export interface Transcript {
   word_count?: number
   transcription_provider?: string
   transcription_model?: string
+  title_suggestion?: string
+  question_suggestions?: string
   created_at: string
 }
 

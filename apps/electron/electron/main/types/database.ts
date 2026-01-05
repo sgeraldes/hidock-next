@@ -82,6 +82,8 @@ export interface Transcript {
   word_count: number | null
   transcription_provider: string | null
   transcription_model: string | null
+  title_suggestion: string | null // AI-generated title (3-8 words)
+  question_suggestions: string | null // JSON string of string[] - 4-5 context-aware questions
   created_at: string
 }
 
