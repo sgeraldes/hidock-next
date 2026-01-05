@@ -5,8 +5,9 @@ import { UnifiedRecording } from '@/types/unified-recording'
  * Creates a mix of device-only, local-only, and both-locations recordings.
  */
 export function generateMockRecordings(count: number): UnifiedRecording[] {
+  const locations = ['device-only', 'local-only', 'both'] as const
   return Array.from({ length: count }, (_, i) => {
-    const location = ['device-only', 'local-only', 'both'][i % 3] as const
+    const location = locations[i % 3]
     const baseDate = new Date(Date.now() - i * 86400000)
 
     // Base fields common to all recording types

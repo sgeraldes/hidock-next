@@ -3,13 +3,14 @@ import { render } from '@testing-library/react'
 import { axe, toHaveNoViolations } from 'jest-axe'
 import { MemoryRouter } from 'react-router-dom'
 import { Library } from '@/pages/Library'
+import type { UnifiedRecording } from '@/types/unified-recording'
 
 // Extend Vitest's expect with jest-axe matchers
 expect.extend(toHaveNoViolations)
 
 // Create a mock function we can override per-test
 const mockUseUnifiedRecordings = vi.fn(() => ({
-  recordings: [],
+  recordings: [] as UnifiedRecording[],
   loading: false,
   error: null,
   refresh: vi.fn(),
@@ -131,22 +132,32 @@ describe('Library Accessibility', () => {
 
   it('should have proper ARIA for listbox elements when recordings exist', async () => {
     // Override the mock to return recordings data for this test
+    // Must match UnifiedRecording discriminated union type
     const mockRecordings = [
       {
         id: 'test-1',
-        title: 'Test Recording 1',
+        filename: 'recording-1.wav',
+        size: 1024000,
         duration: 120,
-        date: new Date('2026-01-01'),
+        dateRecorded: new Date('2026-01-01'),
+        transcriptionStatus: 'complete' as const,
+        title: 'Test Recording 1',
         location: 'both' as const,
-        status: 'ready' as const
+        deviceFilename: 'REC0001.WAV',
+        localPath: '/path/to/recording-1.wav',
+        syncStatus: 'synced' as const
       },
       {
         id: 'test-2',
-        title: 'Test Recording 2',
+        filename: 'recording-2.wav',
+        size: 2048000,
         duration: 180,
-        date: new Date('2026-01-02'),
+        dateRecorded: new Date('2026-01-02'),
+        transcriptionStatus: 'none' as const,
+        title: 'Test Recording 2',
         location: 'device-only' as const,
-        status: 'processing' as const
+        deviceFilename: 'REC0002.WAV',
+        syncStatus: 'not-synced' as const
       }
     ]
 
