@@ -426,6 +426,7 @@ export function Library() {
     }
   }, [filteredRecordings, selectedIds, refresh, clearSelection])
 
+  // PESSIMISTIC UPDATE: Server-first bulk delete with transaction boundary
   const handleSelectedDelete = useCallback(async () => {
     const selectedRecordings = filteredRecordings.filter((r) => selectedIds.has(r.id))
     if (selectedRecordings.length === 0) return
@@ -447,7 +448,10 @@ export function Library() {
     setBulkProcessing(true)
     setBulkProgress({ current: 0, total: selectedRecordings.length })
 
+    const errors: Array<{ filename: string; error: any }> = []
+
     try {
+      // Step 1: Delete all recordings on server FIRST
       for (let i = 0; i < selectedRecordings.length; i++) {
         const recording = selectedRecordings[i]
         setBulkProgress({ current: i + 1, total: selectedRecordings.length })
@@ -456,16 +460,30 @@ export function Library() {
           await window.electronAPI.recordings.delete(recording.id)
         } catch (e) {
           console.error('Failed to delete:', recording.filename, e)
+          errors.push({ filename: recording.filename, error: e })
         }
       }
-      await refresh(false)
+
+      // Step 2: Refresh data from server to update UI (only if some deletions succeeded)
+      const successCount = selectedRecordings.length - errors.length
+      if (successCount > 0) {
+        await refresh(false)
+      }
+
+      // Step 3: Clear selection ONLY after successful refresh
       clearSelection()
+
+      // Step 4: Show summary to user
+      if (errors.length > 0) {
+        alert(`Deleted ${successCount} of ${selectedRecordings.length} items. ${errors.length} failed.`)
+      }
     } finally {
       setBulkProcessing(false)
       setBulkProgress({ current: 0, total: 0 })
     }
   }, [filteredRecordings, selectedIds, refresh, clearSelection])
 
+  // PESSIMISTIC UPDATE: Server-first delete with proper error handling
   const handleDeleteFromDevice = useCallback(async (recording: UnifiedRecording) => {
     if (!deviceConnected) return
     if (!('deviceFilename' in recording)) return
@@ -473,15 +491,21 @@ export function Library() {
 
     setDeleting(recording.id)
     try {
+      // Step 1: Delete on server FIRST
       await window.electronAPI.recordings.delete(recording.id)
+
+      // Step 2: Refresh data from server to update UI ONLY on success
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete from device:', e)
+      // User feedback on error (no rollback needed since we never updated state)
+      alert(`Failed to delete "${recording.filename}" from device. Please try again.`)
     } finally {
       setDeleting(null)
     }
   }, [deviceConnected, refresh])
 
+  // PESSIMISTIC UPDATE: Server-first delete with proper error handling
   const handleDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
     if (!hasLocalPath(recording)) return
     const hasTranscript = transcripts.has(recording.id)
@@ -492,10 +516,15 @@ export function Library() {
 
     setDeleting(recording.id)
     try {
+      // Step 1: Delete on server FIRST
       await window.electronAPI.recordings.delete(recording.id)
+
+      // Step 2: Refresh data from server to update UI ONLY on success
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete local file:', e)
+      // User feedback on error (no rollback needed since we never updated state)
+      alert(`Failed to delete "${recording.filename}". Please try again.`)
     } finally {
       setDeleting(null)
     }

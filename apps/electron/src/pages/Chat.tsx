@@ -170,19 +170,28 @@ export function Chat() {
   }, [messages])
 
   // Clear recording context
+  // PESSIMISTIC UPDATE: Server-first approach - only update store on success
   const clearRecordingContext = async () => {
     if (contextRecording && activeConversation) {
       try {
+        // Step 1: Remove context on server FIRST
         await window.electronAPI.assistant.removeContext(
           activeConversation.id,
           contextRecording.id
         )
+
+        // Step 2: Update store ONLY on success
         setContextIds(prev => prev.filter(id => id !== contextRecording.id))
         setContextItems(prev => prev.filter(item => item.id !== contextRecording.id))
       } catch (error) {
         console.error('Failed to remove context:', error)
+        // User feedback on error (no rollback needed since we never updated state)
+        alert('Failed to remove context. Please try again.')
+        // Don't clear UI if server operation failed
+        return
       }
     }
+    // Clear UI state only after successful server operation (or if no context to remove)
     setContextRecording(null)
     setContextError(null)
   }
@@ -241,12 +250,16 @@ export function Chat() {
   }
 
   // Delete conversation
+  // PESSIMISTIC UPDATE: Server-first approach - only update store on success
   const handleDeleteConversation = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation()
     if (!confirm('Are you sure you want to delete this conversation?')) return
-    
+
     try {
+      // Step 1: Delete on server FIRST
       await window.electronAPI.assistant.deleteConversation(id)
+
+      // Step 2: Update store ONLY on success
       setConversations(prev => prev.filter(c => c.id !== id))
       if (activeConversation?.id === id) {
         setActiveConversation(null)
@@ -256,29 +269,40 @@ export function Chat() {
       }
     } catch (error) {
       console.error('Failed to delete conversation:', error)
+      // User feedback on error (no rollback needed since we never updated state)
+      alert('Failed to delete conversation. Please try again.')
     }
   }
 
   // Context management
+  // PESSIMISTIC UPDATE: Server-first approach - only update store on success
   const handleToggleContext = async (id: string) => {
     if (!activeConversation) return
 
     const isAttached = contextIds.includes(id)
     try {
       if (isAttached) {
+        // Step 1: Remove context on server FIRST
         await window.electronAPI.assistant.removeContext(activeConversation.id, id)
+
+        // Step 2: Update store ONLY on success
         setContextIds(prev => prev.filter(ctxId => ctxId !== id))
         setContextItems(prev => prev.filter(item => item.id !== id))
       } else {
+        // Step 1: Add context on server FIRST
         await window.electronAPI.assistant.addContext(activeConversation.id, id)
-        setContextIds(prev => [...prev, id])
-        
-        // Fetch and add metadata
+
+        // Step 2: Fetch metadata BEFORE updating store
         const item = await window.electronAPI.knowledge.getById(id)
+
+        // Step 3: Update store ONLY after both operations succeed
+        setContextIds(prev => [...prev, id])
         if (item) setContextItems(prev => [...prev, item])
       }
     } catch (error) {
       console.error('Failed to toggle context:', error)
+      // User feedback on error (no rollback needed since we never updated state)
+      alert(`Failed to ${isAttached ? 'remove' : 'add'} context. Please try again.`)
     }
   }
 
