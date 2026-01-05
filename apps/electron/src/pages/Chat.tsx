@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   Send,
   Plus,
@@ -14,7 +15,8 @@ import {
   Layers,
   BookOpen,
   Bot,
-  User
+  User,
+  FileAudio
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -56,13 +58,22 @@ interface Source {
 }
 
 export function Chat() {
+  // Hooks
+  const location = useLocation()
+  const navigate = useNavigate()
+
   // Chat state
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [contextIds, setContextIds] = useState<string[]>([])
   const [contextItems, setContextItems] = useState<KnowledgeCapture[]>([])
-  
+
+  // Recording context state (from Library navigation)
+  const [contextRecording, setContextRecording] = useState<KnowledgeCapture | null>(null)
+  const [contextLoading, setContextLoading] = useState(false)
+  const [contextError, setContextError] = useState<string | null>(null)
+
   // UI state
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -74,7 +85,7 @@ export function Chat() {
   const [showChunks, setShowChunks] = useState(false)
   const [loadingChunks, setLoadingChunks] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
-  
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Initialize
@@ -101,10 +112,65 @@ export function Chat() {
     initialize()
   }, [])
 
+  // Load recording context from navigation state
+  useEffect(() => {
+    const state = location.state as { contextId?: string } | null
+    if (state?.contextId) {
+      loadRecordingContext(state.contextId)
+    }
+  }, [location.state])
+
   // Auto-scroll to bottom
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  // Load recording context
+  const loadRecordingContext = async (contextId: string) => {
+    setContextLoading(true)
+    setContextError(null)
+    try {
+      // Validate knowledge capture exists
+      const capture = await window.electronAPI.knowledge.getById(contextId)
+      if (!capture) {
+        setContextError('Recording not found')
+        return
+      }
+      setContextRecording(capture)
+
+      // Auto-create or select conversation for this context
+      if (!activeConversation) {
+        const newConv = await window.electronAPI.assistant.createConversation(
+          capture.title || 'Chat about recording'
+        )
+        setConversations(prev => [newConv, ...prev])
+        setActiveConversation(newConv)
+
+        // Attach context to the new conversation
+        await window.electronAPI.assistant.addContext(newConv.id, contextId)
+        setContextIds([contextId])
+        setContextItems([capture])
+      } else {
+        // Attach to existing conversation
+        if (!contextIds.includes(contextId)) {
+          await window.electronAPI.assistant.addContext(activeConversation.id, contextId)
+          setContextIds(prev => [...prev, contextId])
+          setContextItems(prev => [...prev, capture])
+        }
+      }
+    } catch (error) {
+      setContextError('Failed to load recording context')
+      console.error('Context loading failed:', error)
+    } finally {
+      setContextLoading(false)
+    }
+  }
+
+  // Clear recording context
+  const clearRecordingContext = () => {
+    setContextRecording(null)
+    setContextError(null)
+  }
 
   // Load conversations
   const loadConversations = async () => {
@@ -468,6 +534,42 @@ export function Chat() {
             </Button>
           </div>
         </header>
+
+        {/* Recording Context Loading */}
+        {contextLoading && (
+          <div className="px-4 py-2 bg-muted/30 border-b flex items-center gap-2">
+            <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
+            <span className="text-sm text-muted-foreground">Loading recording context...</span>
+          </div>
+        )}
+
+        {/* Recording Context Banner */}
+        {contextRecording && !contextLoading && (
+          <div className="px-4 py-2 bg-primary/10 border-b flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <FileAudio className="h-4 w-4 text-primary" />
+              <span className="text-sm">
+                Chatting about: <strong>{contextRecording.title || 'Recording'}</strong>
+              </span>
+            </div>
+            <Button variant="ghost" size="sm" onClick={clearRecordingContext}>
+              Clear context
+            </Button>
+          </div>
+        )}
+
+        {/* Context Error Banner */}
+        {contextError && (
+          <div className="px-4 py-2 bg-destructive/10 border-b flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 text-destructive" />
+              <span className="text-sm text-destructive">{contextError}</span>
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => navigate('/library')}>
+              Return to Library
+            </Button>
+          </div>
+        )}
 
         {/* Chunks Viewer Panel */}
         {showChunks && (
