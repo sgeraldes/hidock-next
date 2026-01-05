@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import {
   RefreshCw,
@@ -32,6 +32,7 @@ import type { Actionable, ActionableStatus } from '@/types/knowledge'
 
 export function Actionables() {
   const location = useLocation()
+  const navigate = useNavigate()
   const [actionables, setActionables] = useState<Actionable[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState<ActionableStatus | 'all'>('pending')
@@ -42,6 +43,7 @@ export function Actionables() {
     content: string
     templateId: string
     generatedAt: string
+    sourceId?: string
   } | null>(null)
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [showOutputModal, setShowOutputModal] = useState(false)
@@ -78,7 +80,7 @@ export function Actionables() {
       })
 
       if (result.success) {
-        setGeneratedOutput(result.data)
+        setGeneratedOutput({ ...result.data, sourceId })
         setShowOutputModal(true)
         // Use functional update to avoid stale closure and clean old entries
         setGenerationHistory(prev => [...prev.filter(t => now - t < 60000), now])
@@ -328,6 +330,15 @@ export function Actionables() {
             <ReactMarkdown>{generatedOutput?.content || ''}</ReactMarkdown>
           </div>
           <DialogFooter className="gap-2">
+            {generatedOutput?.sourceId && (
+              <Button
+                variant="outline"
+                onClick={() => navigate('/library', { state: { selectedId: generatedOutput.sourceId } })}
+              >
+                <FileText className="h-4 w-4 mr-2" />
+                View Source
+              </Button>
+            )}
             <Button
               variant="outline"
               onClick={() => copyToClipboard(generatedOutput?.content)}
