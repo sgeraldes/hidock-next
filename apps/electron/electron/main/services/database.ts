@@ -6,7 +6,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 15
+const SCHEMA_VERSION = 16
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -249,6 +249,8 @@ CREATE TABLE IF NOT EXISTS transcripts (
     word_count INTEGER,
     transcription_provider TEXT,
     transcription_model TEXT,
+    title_suggestion TEXT,
+    question_suggestions TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
 );
@@ -918,6 +920,27 @@ const MIGRATIONS: Record<number, () => void> = {
     // v15: Actionables table handled by SCHEMA CREATE TABLE IF NOT EXISTS
     console.log('Running migration to schema v15: Actionables architecture')
     console.log('Migration v15 complete: Actionables table created')
+  },
+  16: () => {
+    // v16: Add title_suggestion and question_suggestions to transcripts table
+    console.log('Running migration to schema v16: Adding AI-generated title and question suggestions to transcripts')
+    const database = getDatabase()
+
+    const columnsToAdd = [
+      "ALTER TABLE transcripts ADD COLUMN title_suggestion TEXT",
+      "ALTER TABLE transcripts ADD COLUMN question_suggestions TEXT"
+    ]
+
+    for (const sql of columnsToAdd) {
+      try {
+        database.run(sql)
+      } catch (e) {
+        // Column likely already exists, ignore
+        console.log(`Column may already exist: ${sql}`)
+      }
+    }
+
+    console.log('Migration v16 complete: AI title and question suggestions added to transcripts')
   }
 
 }
@@ -1067,6 +1090,40 @@ export function closeDatabase(): void {
     saveDatabase()
     db.close()
     db = null
+  }
+}
+
+/**
+ * Update knowledge_capture title based on title_suggestion
+ * Only updates if the current title matches the filename pattern
+ */
+export function updateKnowledgeCaptureTitle(recordingId: string, titleSuggestion: string): void {
+  try {
+    // Get the recording to find the knowledge_capture
+    const recording = getRecordingById(recordingId)
+    if (!recording) return
+
+    // Get the knowledge capture via migrated_to_capture_id
+    const captureId = recording.migrated_to_capture_id
+    if (!captureId) return
+
+    // Get the knowledge capture
+    const capture = queryOne<{ id: string; title: string }>(
+      'SELECT id, title FROM knowledge_captures WHERE id = ?',
+      [captureId]
+    )
+    if (!capture) return
+
+    // Only update if title looks like a filename (contains .hda or similar)
+    if (capture.title.includes('.') || capture.title === 'Untitled') {
+      run(
+        'UPDATE knowledge_captures SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [titleSuggestion, captureId]
+      )
+      console.log(`Updated knowledge_capture title: "${capture.title}" -> "${titleSuggestion}"`)
+    }
+  } catch (error) {
+    console.warn('Failed to update knowledge_capture title:', error)
   }
 }
 
@@ -1657,8 +1714,9 @@ export function getTranscriptsByRecordingIds(recordingIds: string[]): Map<string
 export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): void {
   run(
     `INSERT INTO transcripts (id, recording_id, full_text, language, summary, action_items,
-      topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model,
+      title_suggestion, question_suggestions)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       transcript.id,
       transcript.recording_id,
@@ -1672,7 +1730,9 @@ export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): vo
       transcript.speakers ?? null,
       transcript.word_count ?? null,
       transcript.transcription_provider ?? null,
-      transcript.transcription_model ?? null
+      transcript.transcription_model ?? null,
+      transcript.title_suggestion ?? null,
+      transcript.question_suggestions ?? null
     ]
   )
 }
