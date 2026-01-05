@@ -795,3 +795,211 @@ useEffect(() => {
 - Standard React Router patterns used throughout
 - Works with existing tri-pane layout without modifications
 - State cleanup prevents issues with browser navigation
+
+---
+
+# SPEC-019: Transaction Boundaries Implementation
+
+**Date:** 2026-01-05
+**Branch:** spec/transaction-boundaries
+**Status:** Complete
+
+## Overview
+
+Implemented pessimistic update pattern across async operations to ensure atomic store updates with proper transaction boundaries. This prevents orphaned UI state when API calls fail.
+
+## Problem Statement
+
+Multi-step operations were updating local state after API calls but without proper error handling and rollback. If API calls failed, the UI state could become inconsistent with the server state. The goal was to ensure all operations follow a server-first pattern where state updates only occur after successful API responses.
+
+## Solution: Pessimistic Updates (Server-First Pattern)
+
+Instead of optimistic updates (update UI first, rollback on error), we now use pessimistic updates:
+
+1. **Call API first** - Perform server operation
+2. **Update store only on success** - Modify local state after successful response
+3. **User feedback on errors** - Alert user when operations fail
+4. **No rollback needed** - State never updated on failure
+
+## Changes Made
+
+### Modified Files
+
+#### `apps/electron/src/pages/Chat.tsx`
+
+**`handleDeleteConversation`**
+- Added explicit comments marking pessimistic update pattern
+- Delete conversation on server FIRST
+- Update local state (conversations, activeConversation, messages, contextIds, contextItems) ONLY on success
+- Show alert on failure
+- No rollback needed since state never updated on failure
+
+**`handleToggleContext`**
+- Remove/add context on server FIRST
+- Fetch knowledge capture metadata BEFORE updating store (for add operation)
+- Update local state (contextIds, contextItems) ONLY after all operations succeed
+- Show alert on failure with specific action (add/remove)
+- No rollback needed since state never updated on failure
+
+**`clearRecordingContext`**
+- Remove context on server FIRST
+- Update local state (contextIds, contextItems) ONLY on success
+- Early return on failure to prevent clearing UI state
+- Show alert on failure
+- Clear UI state (contextRecording, contextError) only after successful server operation
+
+#### `apps/electron/src/pages/Library.tsx`
+
+**`handleSelectedDelete` (bulk operation)**
+- Track errors separately during deletion loop
+- Delete all recordings on server FIRST
+- Refresh data from server ONLY if some deletions succeeded
+- Clear selection ONLY after successful refresh
+- Show summary to user if any deletions failed
+- No rollback needed since refresh pulls server state
+
+**`handleDeleteFromDevice`**
+- Delete on server FIRST
+- Refresh data from server ONLY on success
+- Show alert on failure with specific filename
+- No rollback needed since refresh pulls server state
+
+**`handleDeleteLocal`**
+- Delete on server FIRST
+- Refresh data from server ONLY on success
+- Show alert on failure with specific filename
+- No rollback needed since refresh pulls server state
+
+## Benefits
+
+### 1. Atomic Operations
+- Multi-step operations complete fully or not at all
+- No partial state updates visible to user
+- Server is source of truth
+
+### 2. No Orphaned State
+- If API fails, UI state remains unchanged
+- User sees accurate representation of server state
+- No inconsistency between UI and backend
+
+### 3. Clear Error Handling
+- All operations have explicit error handling
+- User receives feedback when operations fail
+- Console logging preserved for debugging
+
+### 4. Simplified Logic
+- No complex rollback logic required
+- State updates are straightforward (server succeeded → update UI)
+- Easier to reason about and maintain
+
+## Code Examples
+
+### Before (Problematic Pattern)
+
+```typescript
+// State updated after API call, but no rollback on error
+try {
+  await window.electronAPI.assistant.deleteConversation(id)
+  setConversations(prev => prev.filter(c => c.id !== id))
+  if (activeConversation?.id === id) {
+    setActiveConversation(null)
+    setMessages([])
+  }
+} catch (error) {
+  console.error('Failed to delete conversation:', error)
+  // ERROR: State was not updated, but no user feedback
+}
+```
+
+### After (Pessimistic Pattern)
+
+```typescript
+// PESSIMISTIC UPDATE: Server-first approach
+try {
+  // Step 1: Delete on server FIRST
+  await window.electronAPI.assistant.deleteConversation(id)
+
+  // Step 2: Update store ONLY on success
+  setConversations(prev => prev.filter(c => c.id !== id))
+  if (activeConversation?.id === id) {
+    setActiveConversation(null)
+    setMessages([])
+  }
+} catch (error) {
+  console.error('Failed to delete conversation:', error)
+  // User feedback on error (no rollback needed since we never updated state)
+  alert('Failed to delete conversation. Please try again.')
+}
+```
+
+## Testing Recommendations
+
+### 1. Network Failure Scenarios
+- Disconnect device/network during delete operations
+- Verify UI remains unchanged on API failure
+- Verify error messages shown to user
+
+### 2. Bulk Operations
+- Delete multiple items with some API failures
+- Verify partial success handled correctly
+- Verify error summary shown to user
+
+### 3. Context Management
+- Add/remove context with API failures
+- Verify context list remains consistent
+- Verify metadata fetched before state update
+
+## Acceptance Criteria Status
+
+- ✅ Identified all multi-step store operations
+- ✅ Converted to pessimistic (server-first) pattern
+- ✅ Added error handling with user feedback
+- ✅ No orphaned UI state on API failure
+
+## TypeScript Verification
+
+Ran `npm run typecheck:web` in apps/electron directory. No new type errors introduced by these changes. Pre-existing type errors unrelated to transaction boundaries:
+- `OperationController.tsx`: Missing module `@/utils/autoSyncGuard`
+- Test files: Incorrect `LocationFilter` type usage
+- Test files: Missing properties in mock data
+
+## Commit
+
+```
+feat(store): add transaction boundaries with pessimistic updates
+
+Implement server-first update pattern to ensure atomic operations:
+
+Chat.tsx:
+- handleDeleteConversation: Delete on server first, update store only on success
+- handleToggleContext: Add/remove context on server first, fetch metadata, then update store
+- clearRecordingContext: Remove context on server first, update UI only on success
+
+Library.tsx:
+- handleSelectedDelete: Track errors, refresh only if some deletions succeeded
+- handleDeleteFromDevice: Delete on server first, refresh only on success
+- handleDeleteLocal: Delete on server first, refresh only on success
+
+All operations now:
+1. Call API first (server operation)
+2. Update store/UI only after successful API response
+3. Provide user feedback on errors
+4. No rollback needed since state never updated on failure
+
+This ensures no orphaned UI state when API calls fail.
+```
+
+## Future Enhancements
+
+Consider implementing:
+1. **Loading States:** Show spinners or disabled buttons during async operations
+2. **Toast Notifications:** Replace alerts with non-blocking toast messages for better UX
+3. **Retry Mechanisms:** Automatic retry for transient failures (network issues)
+4. **Batch API Operations:** Combine multiple API calls to reduce network overhead
+5. **Optimistic Updates:** For non-critical operations where UX benefits outweigh consistency risks
+
+## Related Specifications
+
+- SPEC-023: Filter State Cleanup (completed)
+- TODO-017: Actionables Context Integration (completed)
+- TODO-021: Bidirectional Page Links (completed)
