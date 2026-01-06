@@ -1,7 +1,7 @@
 ---
 id: "016"
 title: "Fix missing useCallback dependencies"
-status: pending
+status: completed
 priority: P2
 category: bug
 source: typescript-reviewer

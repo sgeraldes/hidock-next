@@ -1,7 +1,7 @@
 ---
 id: "018"
 title: "Add validation for JSON parsing"
-status: pending
+status: completed
 priority: P3
 category: reliability
 source: data-integrity-guardian
