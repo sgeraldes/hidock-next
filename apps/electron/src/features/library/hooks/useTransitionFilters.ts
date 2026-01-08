@@ -10,11 +10,17 @@
 
 import { useTransition, useCallback } from 'react'
 import { useLibraryFilterManager } from './useLibraryFilterManager'
-import { LocationFilter } from '@/types/unified-recording'
+import {
+  FilterMode,
+  SemanticLocationFilter,
+  ExclusiveLocationFilter
+} from '@/types/unified-recording'
 
 interface UseTransitionFiltersResult {
   // State
-  locationFilter: LocationFilter
+  filterMode: FilterMode
+  semanticFilter: SemanticLocationFilter
+  exclusiveFilter: ExclusiveLocationFilter
   categoryFilter: string | null
   qualityFilter: string | null
   statusFilter: string | null
@@ -28,7 +34,9 @@ interface UseTransitionFiltersResult {
   isPending: boolean
 
   // Actions (wrapped in transition)
-  setLocationFilter: (filter: LocationFilter) => void
+  setFilterMode: (mode: FilterMode) => void
+  setSemanticFilter: (filter: SemanticLocationFilter) => void
+  setExclusiveFilter: (filter: ExclusiveLocationFilter) => void
   setCategoryFilter: (filter: string | null) => void
   setQualityFilter: (filter: string | null) => void
   setStatusFilter: (filter: string | null) => void
@@ -47,10 +55,28 @@ export function useTransitionFilters(): UseTransitionFiltersResult {
   const [isPending, startTransition] = useTransition()
 
   // Wrap filter setters in startTransition
-  const setLocationFilter = useCallback(
-    (filter: LocationFilter) => {
+  const setFilterMode = useCallback(
+    (mode: FilterMode) => {
       startTransition(() => {
-        filterManager.setLocationFilter(filter)
+        filterManager.setFilterMode(mode)
+      })
+    },
+    [filterManager]
+  )
+
+  const setSemanticFilter = useCallback(
+    (filter: SemanticLocationFilter) => {
+      startTransition(() => {
+        filterManager.setSemanticFilter(filter)
+      })
+    },
+    [filterManager]
+  )
+
+  const setExclusiveFilter = useCallback(
+    (filter: ExclusiveLocationFilter) => {
+      startTransition(() => {
+        filterManager.setExclusiveFilter(filter)
       })
     },
     [filterManager]
@@ -100,7 +126,9 @@ export function useTransitionFilters(): UseTransitionFiltersResult {
 
   return {
     // State (read directly, no transition needed)
-    locationFilter: filterManager.locationFilter,
+    filterMode: filterManager.filterMode,
+    semanticFilter: filterManager.semanticFilter,
+    exclusiveFilter: filterManager.exclusiveFilter,
     categoryFilter: filterManager.categoryFilter,
     qualityFilter: filterManager.qualityFilter,
     statusFilter: filterManager.statusFilter,
@@ -114,7 +142,9 @@ export function useTransitionFilters(): UseTransitionFiltersResult {
     isPending,
 
     // Actions (wrapped)
-    setLocationFilter,
+    setFilterMode,
+    setSemanticFilter,
+    setExclusiveFilter,
     setCategoryFilter,
     setQualityFilter,
     setStatusFilter,

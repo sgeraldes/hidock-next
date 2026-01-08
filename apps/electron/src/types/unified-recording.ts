@@ -97,6 +97,66 @@ export type SyncStatus = 'not-synced' | 'syncing' | 'synced'
 export type LocationFilter = 'all' | 'device-only' | 'local-only' | 'both'
 
 /**
+ * Filter mode: semantic (show all matching) or exclusive (show only exact)
+ */
+export type FilterMode = 'semantic' | 'exclusive'
+
+/**
+ * Semantic location filter for UI (composite matching)
+ * - 'on-source': Shows all files from a source (device-only + both)
+ * - 'locally-available': Shows all downloaded files (local-only + both)
+ * - 'synced': Shows files on both source and local (both only)
+ */
+export type SemanticLocationFilter = 'all' | 'on-source' | 'locally-available' | 'synced'
+
+/**
+ * Exclusive location filter for UI (exact matching)
+ * - 'source-only': Shows ONLY files on source, not downloaded
+ * - 'local-only': Shows ONLY files downloaded, not on source
+ * - 'synced': Shows files on both source and local (both only)
+ */
+export type ExclusiveLocationFilter = 'all' | 'source-only' | 'local-only' | 'synced'
+
+/**
+ * Combined filter state for Library page
+ */
+export interface LibraryFilterState {
+  mode: FilterMode
+  semantic: SemanticLocationFilter
+  exclusive: ExclusiveLocationFilter
+}
+
+/**
+ * Helper to map semantic filters to actual location types
+ * Used for composite filtering in the Library page
+ */
+export function matchesSemanticFilter(
+  location: UnifiedRecording['location'],
+  filter: SemanticLocationFilter
+): boolean {
+  if (filter === 'all') return true
+  if (filter === 'on-source') return location === 'device-only' || location === 'both'
+  if (filter === 'locally-available') return location === 'local-only' || location === 'both'
+  if (filter === 'synced') return location === 'both'
+  return false
+}
+
+/**
+ * Helper to map exclusive filters to actual location types
+ * Used for exact filtering in the Library page
+ */
+export function matchesExclusiveFilter(
+  location: UnifiedRecording['location'],
+  filter: ExclusiveLocationFilter
+): boolean {
+  if (filter === 'all') return true
+  if (filter === 'source-only') return location === 'device-only'
+  if (filter === 'local-only') return location === 'local-only'
+  if (filter === 'synced') return location === 'both'
+  return false
+}
+
+/**
  * Helper type guard functions
  */
 export function isDeviceOnly(rec: UnifiedRecording): rec is DeviceOnlyRecording {

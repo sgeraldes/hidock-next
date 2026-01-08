@@ -88,6 +88,47 @@ export function getDatabasePath(): string {
   return join(getDataPath(), 'data', 'hidock.db')
 }
 
+/**
+ * Create a WAV header for raw PCM audio data.
+ * HiDock devices output 16kHz, mono, 16-bit PCM audio.
+ */
+function createWavHeader(dataLength: number, sampleRate = 16000, channels = 1, bitsPerSample = 16): Buffer {
+  const byteRate = sampleRate * channels * (bitsPerSample / 8)
+  const blockAlign = channels * (bitsPerSample / 8)
+  const header = Buffer.alloc(44)
+
+  // RIFF chunk descriptor
+  header.write('RIFF', 0)
+  header.writeUInt32LE(36 + dataLength, 4) // File size - 8
+  header.write('WAVE', 8)
+
+  // fmt sub-chunk
+  header.write('fmt ', 12)
+  header.writeUInt32LE(16, 16) // Subchunk1 size (16 for PCM)
+  header.writeUInt16LE(1, 20) // Audio format (1 = PCM)
+  header.writeUInt16LE(channels, 22)
+  header.writeUInt32LE(sampleRate, 24)
+  header.writeUInt32LE(byteRate, 28)
+  header.writeUInt16LE(blockAlign, 32)
+  header.writeUInt16LE(bitsPerSample, 34)
+
+  // data sub-chunk
+  header.write('data', 36)
+  header.writeUInt32LE(dataLength, 40)
+
+  return header
+}
+
+/**
+ * Check if a buffer already has a valid WAV header.
+ */
+function hasWavHeader(data: Buffer): boolean {
+  if (data.length < 44) return false
+  const riff = data.toString('ascii', 0, 4)
+  const wave = data.toString('ascii', 8, 12)
+  return riff === 'RIFF' && wave === 'WAVE'
+}
+
 export async function saveRecording(
   filename: string,
   data: Buffer,
@@ -106,7 +147,8 @@ export async function saveRecording(
   // Device format: 2025Dec15-100105-Rec22.hda -> 2025Dec15-100105-Rec22.wav
   let cleanFilename = baseFilename
   const ext = extname(baseFilename).toLowerCase()
-  if (ext === '.hda') {
+  const isHdaFile = ext === '.hda'
+  if (isHdaFile) {
     cleanFilename = baseFilename.slice(0, -4) + '.wav'
   }
 
@@ -125,7 +167,16 @@ export async function saveRecording(
     }
   }
 
-  writeFileSync(filePath, data)
+  // For HDA files (raw PCM from HiDock device), add WAV header if not already present
+  // HiDock outputs 16kHz, mono, 16-bit PCM audio
+  let dataToWrite = data
+  if (isHdaFile && !hasWavHeader(data)) {
+    const wavHeader = createWavHeader(data.length)
+    dataToWrite = Buffer.concat([wavHeader, data])
+    console.log(`[FileStorage] Added WAV header to ${cleanFilename} (${data.length} bytes PCM -> ${dataToWrite.length} bytes WAV)`)
+  }
+
+  writeFileSync(filePath, dataToWrite)
 
   // Set the file's modification time to the original recording date
   // This ensures file explorer shows the correct date
@@ -204,12 +255,19 @@ export function getStorageInfo(): StorageInfo {
   // Calculate recordings size
   if (existsSync(recordingsPath)) {
     const files = readdirSync(recordingsPath)
-    recordingsCount = files.length
+
+    // Count unique recordings by base filename (pair .hda + .wav = 1 recording)
+    const recordingMap = new Set<string>()
     for (const file of files) {
       const filePath = join(recordingsPath, file)
       const stats = statSync(filePath)
       totalSizeBytes += stats.size
+
+      // Extract base filename without extension to count unique recordings
+      const baseName = file.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac|webm|pptx|docx|md|txt|pdf)$/i, '')
+      recordingMap.add(baseName)
     }
+    recordingsCount = recordingMap.size
   }
 
   // Add transcripts size
@@ -322,7 +380,18 @@ export function readRecordingFile(filePath: string): Buffer | null {
     }
 
     if (existsSync(filePath)) {
-      return readFileSync(filePath)
+      let data = readFileSync(filePath)
+
+      // For .wav files that are missing WAV header (legacy HiDock downloads),
+      // add header on-the-fly to make them playable
+      const ext = extname(filePath).toLowerCase()
+      if (ext === '.wav' && !hasWavHeader(data)) {
+        console.log(`[FileStorage] Adding WAV header on-the-fly for playback: ${basename(filePath)}`)
+        const wavHeader = createWavHeader(data.length)
+        data = Buffer.concat([wavHeader, data])
+      }
+
+      return data
     }
     return null
   } catch (error) {

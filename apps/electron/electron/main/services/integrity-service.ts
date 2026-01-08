@@ -844,6 +844,7 @@ class IntegrityService {
 
   /**
    * Repair all auto-repairable issues
+   * Optimized: batches all repairs and saves database once at the end
    */
   async repairAllAuto(): Promise<RepairResult[]> {
     if (!this.lastReport) {
@@ -851,20 +852,53 @@ class IntegrityService {
       return []
     }
 
-    const results: RepairResult[] = []
     const autoRepairable = this.lastReport.issues.filter(i => i.autoRepairable)
     console.log(`[IntegrityService] repairAllAuto: Found ${autoRepairable.length} auto-repairable issues`)
 
-    for (const issue of autoRepairable) {
-      console.log(`[IntegrityService] Repairing issue: ${issue.id} (type: ${issue.type}, recordingId: ${issue.recordingId})`)
-      const result = await this.repairIssue(issue.id)
-      console.log(`[IntegrityService] Repair result:`, result.success ? 'SUCCESS' : `FAILED: ${result.error}`)
-      results.push(result)
+    if (autoRepairable.length === 0) {
+      return []
     }
 
+    const startTime = Date.now()
+
+    // Batch repair: run all repairs without individual saves
+    const results = autoRepairable.map(issue => this.repairIssueBatch(issue))
+
+    // Save database once at the end
+    saveDatabase()
+
     const successCount = results.filter(r => r.success).length
-    console.log(`[IntegrityService] repairAllAuto complete: ${successCount}/${results.length} succeeded`)
+    const elapsed = Date.now() - startTime
+    console.log(`[IntegrityService] repairAllAuto complete: ${successCount}/${results.length} succeeded in ${elapsed}ms`)
+
     return results
+  }
+
+  /**
+   * Repair a single issue without saving database (for batch operations)
+   */
+  private repairIssueBatch(issue: IntegrityIssue): RepairResult {
+    try {
+      switch (issue.type) {
+        case 'orphaned_download':
+          return this.repairOrphanedDownloadBatch(issue)
+        case 'missing_file':
+          return this.repairMissingFileBatch(issue)
+        case 'orphaned_file':
+          return this.repairOrphanedFileBatch(issue)
+        case 'date_mismatch':
+          return this.repairDateMismatchBatch(issue)
+        case 'size_mismatch':
+          return this.repairSizeMismatchBatch(issue)
+        case 'incomplete_download':
+          return this.repairIncompleteDownloadBatch(issue)
+        default:
+          return { issueId: issue.id, success: false, action: 'none', error: 'Unknown issue type' }
+      }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+      return { issueId: issue.id, success: false, action: 'repair', error: errorMsg }
+    }
   }
 
   // ==========================================================================
@@ -1001,6 +1035,120 @@ class IntegrityService {
         WHERE id = ?`, [recording.id])
     }
     saveDatabase()
+
+    return { issueId: issue.id, success: true, action: 'Deleted incomplete file and reset tracking' }
+  }
+
+  // ==========================================================================
+  // Batch Repair Methods (no saveDatabase - for bulk operations)
+  // ==========================================================================
+
+  private repairOrphanedDownloadBatch(issue: IntegrityIssue): RepairResult {
+    if (!issue.recordingId) {
+      return { issueId: issue.id, success: false, action: 'repair', error: 'No recording ID' }
+    }
+
+    try {
+      run(`DELETE FROM recordings WHERE id = ?`, [issue.recordingId])
+      return { issueId: issue.id, success: true, action: 'Deleted orphaned recording record' }
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+      return { issueId: issue.id, success: false, action: 'repair', error: errorMsg }
+    }
+  }
+
+  private repairMissingFileBatch(issue: IntegrityIssue): RepairResult {
+    if (!issue.filename) {
+      return { issueId: issue.id, success: false, action: 'repair', error: 'No filename' }
+    }
+
+    removeSyncedFile(issue.filename)
+
+    const recording = getRecordingByFilename(issue.filename)
+    if (recording) {
+      run(`UPDATE recordings SET file_path = NULL, on_local = 0, location =
+        CASE WHEN on_device = 1 THEN 'device-only' ELSE 'deleted' END
+        WHERE id = ?`, [recording.id])
+    }
+
+    return { issueId: issue.id, success: true, action: 'Removed missing file from database tracking' }
+  }
+
+  private repairOrphanedFileBatch(issue: IntegrityIssue): RepairResult {
+    if (!issue.filename || !issue.filePath) {
+      return { issueId: issue.id, success: false, action: 'repair', error: 'No filename or path' }
+    }
+
+    const stats = statSync(issue.filePath)
+    addSyncedFile(issue.filename, issue.filename, issue.filePath, stats.size)
+
+    return { issueId: issue.id, success: true, action: 'Added orphaned file to database' }
+  }
+
+  private repairDateMismatchBatch(issue: IntegrityIssue): RepairResult {
+    if (issue.id.startsWith('file_mtime_')) {
+      if (!issue.filePath || !issue.details?.filename_date) {
+        return { issueId: issue.id, success: false, action: 'repair', error: 'No file path or filename date' }
+      }
+
+      try {
+        const correctDate = new Date(issue.details.filename_date as string)
+        utimesSync(issue.filePath, correctDate, correctDate)
+
+        if (issue.filename) {
+          const recording = getRecordingByFilename(issue.filename)
+          if (recording) {
+            run(`UPDATE recordings SET date_recorded = ? WHERE id = ?`, [correctDate.toISOString(), recording.id])
+          }
+        }
+
+        return { issueId: issue.id, success: true, action: `Fixed file mtime to ${correctDate.toISOString()}` }
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+        return { issueId: issue.id, success: false, action: 'repair', error: errorMsg }
+      }
+    }
+
+    if (!issue.recordingId || !issue.details?.suggested_date) {
+      return { issueId: issue.id, success: false, action: 'repair', error: 'No recording ID or suggested date' }
+    }
+
+    const suggestedDate = issue.details.suggested_date as string
+    run(`UPDATE recordings SET date_recorded = ? WHERE id = ?`, [suggestedDate, issue.recordingId])
+
+    return { issueId: issue.id, success: true, action: `Updated date to ${suggestedDate}` }
+  }
+
+  private repairSizeMismatchBatch(issue: IntegrityIssue): RepairResult {
+    if (!issue.recordingId || !issue.details?.disk_size) {
+      return { issueId: issue.id, success: false, action: 'repair', error: 'No recording ID or disk size' }
+    }
+
+    const diskSize = issue.details.disk_size as number
+    run(`UPDATE recordings SET file_size = ? WHERE id = ?`, [diskSize, issue.recordingId])
+
+    return { issueId: issue.id, success: true, action: `Updated size to ${diskSize} bytes` }
+  }
+
+  private repairIncompleteDownloadBatch(issue: IntegrityIssue): RepairResult {
+    if (!issue.filePath || !issue.filename) {
+      return { issueId: issue.id, success: false, action: 'repair', error: 'No file path' }
+    }
+
+    try {
+      unlinkSync(issue.filePath)
+    } catch {
+      // File may already be gone
+    }
+
+    removeSyncedFile(issue.filename)
+
+    const recording = getRecordingByFilename(issue.filename)
+    if (recording) {
+      run(`UPDATE recordings SET file_path = NULL, on_local = 0, location =
+        CASE WHEN on_device = 1 THEN 'device-only' ELSE 'deleted' END
+        WHERE id = ?`, [recording.id])
+    }
 
     return { issueId: issue.id, success: true, action: 'Deleted incomplete file and reset tracking' }
   }

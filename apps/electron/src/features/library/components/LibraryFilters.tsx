@@ -1,19 +1,30 @@
-import { Filter, Cloud, HardDrive, Search } from 'lucide-react'
+import { Filter, Cloud, HardDrive, Check, Search } from 'lucide-react'
 import { Input } from '@/components/ui/input'
-import { LocationFilter } from '@/types/unified-recording'
+import {
+  FilterMode,
+  SemanticLocationFilter,
+  ExclusiveLocationFilter
+} from '@/types/unified-recording'
 
 interface LibraryFiltersProps {
   stats: {
     total: number
     deviceOnly: number
     localOnly: number
+    both: number
+    onSource: number
+    locallyAvailable: number
   }
-  locationFilter: LocationFilter
+  filterMode: FilterMode
+  semanticFilter: SemanticLocationFilter
+  exclusiveFilter: ExclusiveLocationFilter
   categoryFilter: string
   qualityFilter: string
   statusFilter: string
   searchQuery: string
-  onLocationFilterChange: (filter: LocationFilter) => void
+  onFilterModeChange: (mode: FilterMode) => void
+  onSemanticFilterChange: (filter: SemanticLocationFilter) => void
+  onExclusiveFilterChange: (filter: ExclusiveLocationFilter) => void
   onCategoryFilterChange: (filter: string) => void
   onQualityFilterChange: (filter: string) => void
   onStatusFilterChange: (filter: string) => void
@@ -24,56 +35,145 @@ const CATEGORIES = ['all', 'meeting', 'interview', '1:1', 'brainstorm', 'note'] 
 
 export function LibraryFilters({
   stats,
-  locationFilter,
+  filterMode,
+  semanticFilter,
+  exclusiveFilter,
   categoryFilter,
   qualityFilter,
   statusFilter,
   searchQuery,
-  onLocationFilterChange,
+  onFilterModeChange,
+  onSemanticFilterChange,
+  onExclusiveFilterChange,
   onCategoryFilterChange,
   onQualityFilterChange,
   onStatusFilterChange,
   onSearchQueryChange
 }: LibraryFiltersProps) {
+  // Determine active filter value based on mode
+  const activeFilter = filterMode === 'semantic' ? semanticFilter : exclusiveFilter
+  const handleFilterChange =
+    filterMode === 'semantic' ? onSemanticFilterChange : onExclusiveFilterChange
+
   return (
     <div className="flex flex-col gap-4 mt-4">
       <div className="flex items-center gap-4">
+        {/* Filter mode toggle */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium text-muted-foreground">Mode:</span>
+          <div className="flex gap-1 p-1 bg-muted rounded-lg">
+            <button
+              onClick={() => onFilterModeChange('semantic')}
+              className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
+                filterMode === 'semantic'
+                  ? 'bg-background shadow-sm'
+                  : 'hover:bg-background/50'
+              }`}
+              title="Show all files matching the filter (e.g., Source shows all files from any source)"
+            >
+              All Matching
+            </button>
+            <button
+              onClick={() => onFilterModeChange('exclusive')}
+              className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
+                filterMode === 'exclusive'
+                  ? 'bg-background shadow-sm'
+                  : 'hover:bg-background/50'
+              }`}
+              title="Show only files in exact location (e.g., Source Only shows files not downloaded)"
+            >
+              Exact Only
+            </button>
+          </div>
+        </div>
+
         {/* Location filter */}
         <div className="flex items-center gap-2">
           <Filter className="h-4 w-4 text-muted-foreground" />
           <div className="flex rounded-lg border overflow-hidden" data-testid="location-filter">
             <button
-              onClick={() => onLocationFilterChange('all')}
+              onClick={() => handleFilterChange('all' as any)}
               className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                locationFilter === 'all'
+                activeFilter === 'all'
                   ? 'bg-primary text-primary-foreground'
                   : 'hover:bg-muted'
               }`}
             >
               All ({stats.total})
             </button>
-            <button
-              onClick={() => onLocationFilterChange('device-only')}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                locationFilter === 'device-only'
-                  ? 'bg-primary text-primary-foreground'
-                  : 'hover:bg-muted'
-              }`}
-            >
-              <Cloud className="h-3 w-3 inline mr-1" />
-              Device ({stats.deviceOnly})
-            </button>
-            <button
-              onClick={() => onLocationFilterChange('local-only')}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
-                locationFilter === 'local-only'
-                  ? 'bg-primary text-primary-foreground'
-                  : 'hover:bg-muted'
-              }`}
-            >
-              <HardDrive className="h-3 w-3 inline mr-1" />
-              Downloaded ({stats.localOnly})
-            </button>
+            {filterMode === 'semantic' ? (
+              <>
+                <button
+                  onClick={() => onSemanticFilterChange('on-source')}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
+                    semanticFilter === 'on-source'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  <Cloud className="h-3 w-3 inline mr-1" />
+                  Source ({stats.onSource})
+                </button>
+                <button
+                  onClick={() => onSemanticFilterChange('locally-available')}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
+                    semanticFilter === 'locally-available'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  <HardDrive className="h-3 w-3 inline mr-1" />
+                  Locally Available ({stats.locallyAvailable})
+                </button>
+                <button
+                  onClick={() => onSemanticFilterChange('synced')}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
+                    semanticFilter === 'synced'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  <Check className="h-3 w-3 inline mr-1" />
+                  Synced ({stats.both})
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => onExclusiveFilterChange('source-only')}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
+                    exclusiveFilter === 'source-only'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  <Cloud className="h-3 w-3 inline mr-1" />
+                  Source Only ({stats.deviceOnly})
+                </button>
+                <button
+                  onClick={() => onExclusiveFilterChange('local-only')}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
+                    exclusiveFilter === 'local-only'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  <HardDrive className="h-3 w-3 inline mr-1" />
+                  Local Only ({stats.localOnly})
+                </button>
+                <button
+                  onClick={() => onExclusiveFilterChange('synced')}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors border-l ${
+                    exclusiveFilter === 'synced'
+                      ? 'bg-primary text-primary-foreground'
+                      : 'hover:bg-muted'
+                  }`}
+                >
+                  <Check className="h-3 w-3 inline mr-1" />
+                  Synced ({stats.both})
+                </button>
+              </>
+            )}
           </div>
         </div>
 

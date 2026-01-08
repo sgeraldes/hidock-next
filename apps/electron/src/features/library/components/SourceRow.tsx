@@ -191,10 +191,10 @@ export const SourceRow = memo(function SourceRow({
           }
           title={
             recording.location === 'device-only'
-              ? 'Delete from device'
+              ? '🗑️ Delete from device (cannot be undone)'
               : recording.location === 'local-only'
-              ? 'Delete local file'
-              : 'Delete local copy'
+              ? '🗑️ Delete local file and transcript'
+              : '🗑️ Delete local copy only (keeps device copy)'
           }
         >
           {isDeleting ? (

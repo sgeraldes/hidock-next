@@ -3,7 +3,13 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { RefreshCw, AlertCircle } from 'lucide-react'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
-import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
+import {
+  UnifiedRecording,
+  hasLocalPath,
+  isDeviceOnly,
+  matchesSemanticFilter,
+  matchesExclusiveFilter
+} from '@/types/unified-recording'
 import { Transcript, Meeting } from '@/types'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
@@ -51,12 +57,16 @@ export function Library() {
   // Filter state - persisted in store across navigation
   // Using useTransitionFilters for non-blocking filter updates
   const {
-    locationFilter,
+    filterMode,
+    semanticFilter,
+    exclusiveFilter,
     categoryFilter,
     qualityFilter,
     statusFilter,
     searchQuery,
-    setLocationFilter,
+    setFilterMode,
+    setSemanticFilter,
+    setExclusiveFilter,
     setCategoryFilter,
     setQualityFilter,
     setStatusFilter,
@@ -72,7 +82,7 @@ export function Library() {
   useEffect(() => {
     enrichmentAbortController.current.abort()
     enrichmentAbortController.current = new AbortController()
-  }, [locationFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
+  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
 
   // View mode persisted in store across navigation
   const compactView = useUIStore((state) => state.recordingsCompactView)
@@ -208,7 +218,14 @@ export function Library() {
   // Filter recordings based on location and search
   const filteredRecordings = useMemo(() => {
     const filtered = recordings.filter((rec) => {
-      if (locationFilter !== 'all' && rec.location !== locationFilter) return false
+      // Use dual-mode filter matching (semantic or exclusive)
+      const activeFilter = filterMode === 'semantic' ? semanticFilter : exclusiveFilter
+      const locationMatches =
+        filterMode === 'semantic'
+          ? matchesSemanticFilter(rec.location, semanticFilter)
+          : matchesExclusiveFilter(rec.location, exclusiveFilter)
+
+      if (!locationMatches) return false
       if (categoryFilter !== null && rec.category !== categoryFilter) return false
       if (qualityFilter !== null && rec.quality !== qualityFilter) return false
       if (statusFilter !== null && rec.status !== statusFilter) return false
@@ -238,7 +255,7 @@ export function Library() {
     }
 
     return filtered
-  }, [recordings, locationFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery])
+  }, [recordings, filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery])
 
   // Announce filter result changes (after filteredRecordings is declared)
   useEffect(() => {
@@ -689,15 +706,19 @@ export function Library() {
         <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>
           <LibraryFilters
             stats={stats}
-            locationFilter={locationFilter}
+            filterMode={filterMode}
+            semanticFilter={semanticFilter}
+            exclusiveFilter={exclusiveFilter}
             categoryFilter={categoryFilter ?? 'all'}
             qualityFilter={qualityFilter ?? 'all'}
             statusFilter={statusFilter ?? 'all'}
             searchQuery={searchQuery}
-            onLocationFilterChange={setLocationFilter}
-            onCategoryFilterChange={setCategoryFilter}
-            onQualityFilterChange={setQualityFilter}
-            onStatusFilterChange={setStatusFilter}
+            onFilterModeChange={setFilterMode}
+            onSemanticFilterChange={setSemanticFilter}
+            onExclusiveFilterChange={setExclusiveFilter}
+            onCategoryFilterChange={(filter) => setCategoryFilter(filter === 'all' ? null : filter)}
+            onQualityFilterChange={(filter) => setQualityFilter(filter === 'all' ? null : filter)}
+            onStatusFilterChange={(filter) => setStatusFilter(filter === 'all' ? null : filter)}
             onSearchQueryChange={setSearchQuery}
           />
         </div>

@@ -87,6 +87,46 @@ function getBestDate(filename: string, deviceDate: Date | null | undefined, fall
   return fallback
 }
 
+/**
+ * Try to match a device recording with a local recording by date/time proximity
+ * Used as fallback when filename matching fails (for wrongly-named downloads)
+ */
+function findMatchByDateTime(
+  deviceRec: HiDockRecording,
+  dbRecs: DatabaseRecording[],
+  syncedFiles: SyncedFile[],
+  matchedBaseNames: Set<string>,
+  toleranceSeconds: number = 60
+): { dbRec?: DatabaseRecording; synced?: SyncedFile; localBaseName?: string } | null {
+  // Parse device file date from filename
+  const deviceDate = parseDateFromFilename(deviceRec.filename)
+  if (!deviceDate || isNaN(deviceDate.getTime())) return null
+
+  // Search through unmatched database recordings
+  for (const dbRec of dbRecs) {
+    const baseName = getBaseFilename(dbRec.filename)
+    if (matchedBaseNames.has(baseName)) continue // Already matched
+
+    // Try to parse date from local filename or use db date_recorded
+    const localDate = parseDateFromFilename(dbRec.filename) ||
+                     (dbRec.date_recorded ? new Date(dbRec.date_recorded) : null)
+    if (!localDate || isNaN(localDate.getTime())) continue
+
+    // Check if dates are within tolerance
+    const diffSeconds = Math.abs(deviceDate.getTime() - localDate.getTime()) / 1000
+    if (diffSeconds <= toleranceSeconds) {
+      // Found a match! Also find corresponding synced file entry
+      const synced = syncedFiles.find(sf =>
+        sf.local_filename === dbRec.filename ||
+        getBaseFilename(sf.local_filename) === baseName
+      )
+      return { dbRec, synced, localBaseName: baseName }
+    }
+  }
+
+  return null
+}
+
 // Build unified recordings from multiple sources
 function buildRecordingMap(
   deviceRecs: HiDockRecording[],
@@ -131,8 +171,21 @@ function buildRecordingMap(
     const baseName = getBaseFilename(deviceRec.filename)
 
     // Look up by base filename to match .hda with .wav
-    const synced = syncedMapByOriginal.get(deviceRec.filename) || syncedMapByBase.get(baseName)
-    const dbRec = dbMapByFilename.get(deviceRec.filename) || dbMapByBase.get(baseName)
+    let synced = syncedMapByOriginal.get(deviceRec.filename) || syncedMapByBase.get(baseName)
+    let dbRec = dbMapByFilename.get(deviceRec.filename) || dbMapByBase.get(baseName)
+
+    // NEW: If no exact match, try date/time matching (fallback for wrongly-named files)
+    let localBaseName: string | undefined
+    if (!synced && !dbRec) {
+      const dateMatch = findMatchByDateTime(deviceRec, dbRecs, syncedFiles, processedBaseNames)
+      if (dateMatch) {
+        dbRec = dateMatch.dbRec
+        synced = dateMatch.synced
+        localBaseName = dateMatch.localBaseName
+        console.log(`[buildRecordingMap] Matched by date: ${deviceRec.filename} ←→ ${dbRec?.filename}`)
+      }
+    }
+
     const dateRecorded = getBestDate(deviceRec.filename, deviceRec.dateCreated, new Date())
 
     if (synced || dbRec) {
@@ -160,6 +213,10 @@ function buildRecordingMap(
       }
       recordingMap.set(baseName, recording)
       processedBaseNames.add(baseName)
+      // IMPORTANT: If matched by date, also track the local file's baseName to prevent duplicate processing
+      if (localBaseName && localBaseName !== baseName) {
+        processedBaseNames.add(localBaseName)
+      }
     } else {
       const recording: DeviceOnlyRecording = {
         id: deviceRec.id,
@@ -446,13 +503,20 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       else unsynced++
     }
 
+    // Semantic stats for composite filters
+    const onSource = deviceOnly + both          // All files from any source
+    const locallyAvailable = localOnly + both   // All files downloaded
+
     return {
       total: recordings.length,
       deviceOnly,
       localOnly,
       both,
       synced,
-      unsynced
+      unsynced,
+      // Semantic counts for dual-mode filter UI
+      onSource,
+      locallyAvailable
     }
   }, [recordings])
 

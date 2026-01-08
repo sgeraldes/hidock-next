@@ -9,11 +9,17 @@
 
 import { useMemo } from 'react'
 import { useLibraryStore } from '@/store/useLibraryStore'
-import { LocationFilter } from '@/types/unified-recording'
+import {
+  FilterMode,
+  SemanticLocationFilter,
+  ExclusiveLocationFilter
+} from '@/types/unified-recording'
 
 interface UseLibraryFilterManagerResult {
   // State
-  locationFilter: LocationFilter
+  filterMode: FilterMode
+  semanticFilter: SemanticLocationFilter
+  exclusiveFilter: ExclusiveLocationFilter
   categoryFilter: string | null
   qualityFilter: string | null
   statusFilter: string | null
@@ -24,7 +30,9 @@ interface UseLibraryFilterManagerResult {
   activeFilterCount: number
 
   // Actions
-  setLocationFilter: (filter: LocationFilter) => void
+  setFilterMode: (mode: FilterMode) => void
+  setSemanticFilter: (filter: SemanticLocationFilter) => void
+  setExclusiveFilter: (filter: ExclusiveLocationFilter) => void
   setCategoryFilter: (filter: string | null) => void
   setQualityFilter: (filter: string | null) => void
   setStatusFilter: (filter: string | null) => void
@@ -40,14 +48,18 @@ interface UseLibraryFilterManagerResult {
  */
 export function useLibraryFilterManager(): UseLibraryFilterManagerResult {
   // Get filter state from store
-  const locationFilter = useLibraryStore((state) => state.locationFilter)
+  const filterMode = useLibraryStore((state) => state.filterMode)
+  const semanticFilter = useLibraryStore((state) => state.semanticFilter)
+  const exclusiveFilter = useLibraryStore((state) => state.exclusiveFilter)
   const categoryFilter = useLibraryStore((state) => state.categoryFilter)
   const qualityFilter = useLibraryStore((state) => state.qualityFilter)
   const statusFilter = useLibraryStore((state) => state.statusFilter)
   const searchQuery = useLibraryStore((state) => state.searchQuery)
 
   // Get filter actions from store
-  const setLocationFilter = useLibraryStore((state) => state.setLocationFilter)
+  const setFilterMode = useLibraryStore((state) => state.setFilterMode)
+  const setSemanticFilter = useLibraryStore((state) => state.setSemanticFilter)
+  const setExclusiveFilter = useLibraryStore((state) => state.setExclusiveFilter)
   const setCategoryFilter = useLibraryStore((state) => state.setCategoryFilter)
   const setQualityFilter = useLibraryStore((state) => state.setQualityFilter)
   const setStatusFilter = useLibraryStore((state) => state.setStatusFilter)
@@ -56,8 +68,9 @@ export function useLibraryFilterManager(): UseLibraryFilterManagerResult {
 
   // Compute derived state
   const { hasActiveFilters, activeFilterCount } = useMemo(() => {
+    const activeFilter = filterMode === 'semantic' ? semanticFilter : exclusiveFilter
     let count = 0
-    if (locationFilter !== 'all') count++
+    if (activeFilter !== 'all') count++
     if (categoryFilter !== null) count++
     if (qualityFilter !== null) count++
     if (statusFilter !== null) count++
@@ -67,11 +80,13 @@ export function useLibraryFilterManager(): UseLibraryFilterManagerResult {
       hasActiveFilters: count > 0,
       activeFilterCount: count
     }
-  }, [locationFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
+  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
 
   return {
     // State
-    locationFilter,
+    filterMode,
+    semanticFilter,
+    exclusiveFilter,
     categoryFilter,
     qualityFilter,
     statusFilter,
@@ -82,7 +97,9 @@ export function useLibraryFilterManager(): UseLibraryFilterManagerResult {
     activeFilterCount,
 
     // Actions
-    setLocationFilter,
+    setFilterMode,
+    setSemanticFilter,
+    setExclusiveFilter,
     setCategoryFilter,
     setQualityFilter,
     setStatusFilter,

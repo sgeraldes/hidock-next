@@ -111,6 +111,17 @@ export function Device() {
     deviceService.stopAutoConnect()
   }, [clearConnectionTimers, deviceService])
 
+  // Helper to refresh synced filenames (used after syncs complete)
+  const refreshSyncedFilenames = useCallback(async () => {
+    try {
+      const filenames = await window.electronAPI.syncedFiles.getFilenames()
+      setSyncedFilenames(new Set(filenames))
+      if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Refreshed ${filenames.length} synced filenames`)
+    } catch (e) {
+      console.error('[Device.tsx] Failed to refresh synced filenames:', e)
+    }
+  }, [])
+
   // Set up listeners
   useEffect(() => {
     // Mounted flag to prevent state updates after unmount
@@ -312,6 +323,13 @@ export function Device() {
     }
   }, [activityLog.length])
 
+  // Refresh synced filenames when recordings list changes (catches new syncs)
+  useEffect(() => {
+    if (deviceState.connected && recordings.length > 0) {
+      refreshSyncedFilenames()
+    }
+  }, [recordings.length, deviceState.connected, refreshSyncedFilenames])
+
   const handleConnect = async () => {
     setConnecting(true)
     setError(null)
@@ -423,6 +441,9 @@ export function Device() {
       )
 
       if (queuedIds.length > 0) {
+        // Refresh synced filenames to update button count
+        await refreshSyncedFilenames()
+
         toast({
           title: 'Sync started',
           description: `Queued ${queuedIds.length} recording${queuedIds.length !== 1 ? 's' : ''} for download`,
@@ -497,10 +518,7 @@ export function Device() {
   const handleAutoConnectToggle = (enabled: boolean) => {
     deviceService.setAutoConnectConfig({ enabled })
     setAutoConnectConfig(deviceService.getAutoConnectConfig())
-    // If enabling and not connected, start auto-connect
-    if (enabled && !deviceState.connected) {
-      deviceService.startAutoConnect()
-    }
+    // Setting will take effect on next app startup
   }
 
   const handleAutoDownloadToggle = async (enabled: boolean) => {

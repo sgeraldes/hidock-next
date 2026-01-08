@@ -7,7 +7,11 @@
 
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import { LocationFilter } from '@/types/unified-recording'
+import {
+  FilterMode,
+  SemanticLocationFilter,
+  ExclusiveLocationFilter
+} from '@/types/unified-recording'
 import { LibraryError } from '@/features/library/utils/errorHandling'
 
 export type SortBy = 'date' | 'duration' | 'name' | 'quality'
@@ -20,7 +24,9 @@ interface LibraryState {
   sortOrder: SortOrder
 
   // Filter state (persisted)
-  locationFilter: LocationFilter
+  filterMode: FilterMode
+  semanticFilter: SemanticLocationFilter
+  exclusiveFilter: ExclusiveLocationFilter
   categoryFilter: string | null
   qualityFilter: string | null
   statusFilter: string | null
@@ -51,7 +57,9 @@ interface LibraryActions {
   toggleSortOrder: () => void
 
   // Filters
-  setLocationFilter: (filter: LocationFilter) => void
+  setFilterMode: (mode: FilterMode) => void
+  setSemanticFilter: (filter: SemanticLocationFilter) => void
+  setExclusiveFilter: (filter: ExclusiveLocationFilter) => void
   setCategoryFilter: (filter: string | null) => void
   setQualityFilter: (filter: string | null) => void
   setStatusFilter: (filter: string | null) => void
@@ -84,7 +92,9 @@ const initialState: LibraryState = {
   viewMode: 'compact',
   sortBy: 'date',
   sortOrder: 'desc',
-  locationFilter: 'all',
+  filterMode: 'semantic',
+  semanticFilter: 'all',
+  exclusiveFilter: 'all',
   categoryFilter: null,
   qualityFilter: null,
   statusFilter: null,
@@ -111,14 +121,18 @@ export const useLibraryStore = create<LibraryStore>()(
       toggleSortOrder: () => set((state) => ({ sortOrder: state.sortOrder === 'asc' ? 'desc' : 'asc' })),
 
       // Filters
-      setLocationFilter: (filter) => set({ locationFilter: filter }),
+      setFilterMode: (mode) => set({ filterMode: mode }),
+      setSemanticFilter: (filter) => set({ semanticFilter: filter }),
+      setExclusiveFilter: (filter) => set({ exclusiveFilter: filter }),
       setCategoryFilter: (filter) => set({ categoryFilter: filter }),
       setQualityFilter: (filter) => set({ qualityFilter: filter }),
       setStatusFilter: (filter) => set({ statusFilter: filter }),
       setSearchQuery: (query) => set({ searchQuery: query }),
       clearFilters: () =>
         set({
-          locationFilter: 'all',
+          filterMode: 'semantic',
+          semanticFilter: 'all',
+          exclusiveFilter: 'all',
           categoryFilter: null,
           qualityFilter: null,
           statusFilter: null,
@@ -190,7 +204,9 @@ export const useLibraryStore = create<LibraryStore>()(
         viewMode: state.viewMode,
         sortBy: state.sortBy,
         sortOrder: state.sortOrder,
-        locationFilter: state.locationFilter,
+        filterMode: state.filterMode,
+        semanticFilter: state.semanticFilter,
+        exclusiveFilter: state.exclusiveFilter,
         categoryFilter: state.categoryFilter,
         qualityFilter: state.qualityFilter,
         statusFilter: state.statusFilter,

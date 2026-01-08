@@ -184,6 +184,35 @@ export function SourceDetailDrawer({
           )}
         </div>
 
+        {/* Location details - expanded */}
+        <div className="space-y-2 mt-4 p-3 border rounded-lg bg-muted/30">
+          <h4 className="text-sm font-medium">File Location</h4>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <span className="text-muted-foreground">On Device:</span>
+              <span className="ml-2 font-medium">
+                {source.location === 'device-only' || source.location === 'both' ? '✓ Yes' : '✗ No'}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Downloaded:</span>
+              <span className="ml-2 font-medium">
+                {source.location === 'local-only' || source.location === 'both' ? '✓ Yes' : '✗ No'}
+              </span>
+            </div>
+          </div>
+          {source.location === 'device-only' && 'deviceFilename' in source && (
+            <p className="text-xs text-muted-foreground mt-2">
+              <span className="font-medium">Device:</span> {source.deviceFilename}
+            </p>
+          )}
+          {('localPath' in source) && source.localPath && (
+            <p className="text-xs text-muted-foreground break-all mt-2">
+              <span className="font-medium">Local:</span> {source.localPath}
+            </p>
+          )}
+        </div>
+
         {/* Action buttons */}
         <div className="flex flex-wrap gap-2 mt-4 border-b pb-4">
           {/* Play/Stop */}
