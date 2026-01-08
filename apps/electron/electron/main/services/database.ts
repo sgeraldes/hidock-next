@@ -6,7 +6,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 16
+const SCHEMA_VERSION = 17
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -455,6 +455,7 @@ CREATE TABLE IF NOT EXISTS actionables (
     suggested_template TEXT,
     suggested_recipients TEXT, -- JSON array
     status TEXT CHECK(status IN ('pending', 'in_progress', 'generated', 'shared', 'dismissed')) DEFAULT 'pending',
+    confidence REAL CHECK(confidence >= 0.0 AND confidence <= 1.0),
     artifact_id TEXT, -- Links to outputs table
     generated_at TEXT,
     shared_at TEXT,
@@ -941,6 +942,29 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v16 complete: AI title and question suggestions added to transcripts')
+  },
+  17: () => {
+    // v17: Add confidence column to actionables table for AI detection confidence scoring
+    console.log('Running migration to schema v17: Adding confidence column to actionables')
+    const database = getDatabase()
+
+    // Check if confidence column already exists
+    const tableInfo = database.exec('PRAGMA table_info(actionables)')
+    if (tableInfo.length > 0 && tableInfo[0].values) {
+      const columns = tableInfo[0].values.map((row: any) => row[1])
+      if (!columns.includes('confidence')) {
+        try {
+          database.run('ALTER TABLE actionables ADD COLUMN confidence REAL CHECK(confidence >= 0.0 AND confidence <= 1.0)')
+          console.log('[Migration v17] Added confidence column to actionables table')
+        } catch (e) {
+          console.warn('[Migration v17] Failed to add confidence column:', e)
+        }
+      } else {
+        console.log('[Migration v17] Confidence column already exists, skipping')
+      }
+    }
+
+    console.log('Migration v17 complete: Confidence column added to actionables')
   }
 
 }

@@ -155,13 +155,39 @@ function getCachePath() {
 function getDatabasePath() {
   return path.join(getDataPath(), "data", "hidock.db");
 }
+function createWavHeader(dataLength, sampleRate = 16e3, channels = 1, bitsPerSample = 16) {
+  const byteRate = sampleRate * channels * (bitsPerSample / 8);
+  const blockAlign = channels * (bitsPerSample / 8);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + dataLength, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(dataLength, 40);
+  return header;
+}
+function hasWavHeader(data) {
+  if (data.length < 44) return false;
+  const riff = data.toString("ascii", 0, 4);
+  const wave = data.toString("ascii", 8, 12);
+  return riff === "RIFF" && wave === "WAVE";
+}
 async function saveRecording(filename, data, _meetingSubject, originalDate) {
   const recordingsPath = getRecordingsPath();
   const baseFilename = path.basename(filename);
   validateFilename(baseFilename);
   let cleanFilename = baseFilename;
   const ext = path.extname(baseFilename).toLowerCase();
-  if (ext === ".hda") {
+  const isHdaFile = ext === ".hda";
+  if (isHdaFile) {
     cleanFilename = baseFilename.slice(0, -4) + ".wav";
   }
   let filePath = validatePath(recordingsPath, cleanFilename);
@@ -175,7 +201,13 @@ async function saveRecording(filename, data, _meetingSubject, originalDate) {
       counter++;
     }
   }
-  fs.writeFileSync(filePath, data);
+  let dataToWrite = data;
+  if (isHdaFile && !hasWavHeader(data)) {
+    const wavHeader = createWavHeader(data.length);
+    dataToWrite = Buffer.concat([wavHeader, data]);
+    console.log(`[FileStorage] Added WAV header to ${cleanFilename} (${data.length} bytes PCM -> ${dataToWrite.length} bytes WAV)`);
+  }
+  fs.writeFileSync(filePath, dataToWrite);
   if (originalDate) {
     try {
       fs.utimesSync(filePath, originalDate, originalDate);
@@ -205,12 +237,15 @@ function getStorageInfo() {
   let recordingsCount = 0;
   if (fs.existsSync(recordingsPath)) {
     const files = fs.readdirSync(recordingsPath);
-    recordingsCount = files.length;
+    const recordingMap = /* @__PURE__ */ new Set();
     for (const file of files) {
       const filePath = path.join(recordingsPath, file);
       const stats = fs.statSync(filePath);
       totalSizeBytes += stats.size;
+      const baseName = file.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac|webm|pptx|docx|md|txt|pdf)$/i, "");
+      recordingMap.add(baseName);
     }
+    recordingsCount = recordingMap.size;
   }
   if (fs.existsSync(transcriptsPath)) {
     const files = fs.readdirSync(transcriptsPath);
@@ -293,7 +328,14 @@ function readRecordingFile(filePath) {
       return null;
     }
     if (fs.existsSync(filePath)) {
-      return fs.readFileSync(filePath);
+      let data = fs.readFileSync(filePath);
+      const ext = path.extname(filePath).toLowerCase();
+      if (ext === ".wav" && !hasWavHeader(data)) {
+        console.log(`[FileStorage] Adding WAV header on-the-fly for playback: ${path.basename(filePath)}`);
+        const wavHeader = createWavHeader(data.length);
+        data = Buffer.concat([wavHeader, data]);
+      }
+      return data;
     }
     return null;
   } catch (error2) {
@@ -3075,16 +3117,35 @@ async function scanExistingRecordings() {
   const recordingsPath = getRecordingsPath();
   if (!fs.existsSync(recordingsPath)) return;
   const files = fs.readdirSync(recordingsPath);
-  for (const file of files) {
+  const audioFiles = files.filter((file) => {
     const ext = path.extname(file).toLowerCase();
-    if (!AUDIO_EXTENSIONS.includes(ext)) continue;
+    return AUDIO_EXTENSIONS.includes(ext);
+  });
+  if (audioFiles.length === 0) return;
+  console.log(`[RecordingWatcher] Scanning ${audioFiles.length} existing recordings...`);
+  const filesToProcess = [];
+  for (const file of audioFiles) {
     const filePath = path.join(recordingsPath, file);
     const recordingId = generateRecordingId(filePath);
     const existing = getRecordingById(recordingId);
     if (!existing) {
-      await processNewRecording(filePath);
+      filesToProcess.push(filePath);
     }
   }
+  if (filesToProcess.length === 0) {
+    console.log("[RecordingWatcher] All recordings already in database");
+    return;
+  }
+  console.log(`[RecordingWatcher] Processing ${filesToProcess.length} new recordings...`);
+  const batchSize = 50;
+  for (let i = 0; i < filesToProcess.length; i += batchSize) {
+    const batch = filesToProcess.slice(i, i + batchSize);
+    await Promise.all(batch.map((filePath) => processNewRecording(filePath)));
+    if (filesToProcess.length > 100 && (i + batchSize) % 100 === 0) {
+      console.log(`[RecordingWatcher] Processed ${Math.min(i + batchSize, filesToProcess.length)}/${filesToProcess.length} recordings...`);
+    }
+  }
+  console.log(`[RecordingWatcher] Finished scanning ${filesToProcess.length} recordings`);
 }
 function generateRecordingId(filePath) {
   const filename = path.basename(filePath);
@@ -3100,7 +3161,6 @@ async function processNewRecording(filePath) {
       const { getRecordingByFilename: getRecordingByFilename2, updateRecordingLifecycle: updateRecordingLifecycle2 } = await Promise.resolve().then(() => database);
       existing = getRecordingByFilename2(filename);
       if (existing) {
-        console.log("Recording found by filename:", filename, "updating status");
         if (!existing.file_path) {
           updateRecordingLifecycle2(existing.id, {
             file_path: filePath,
@@ -3108,15 +3168,12 @@ async function processNewRecording(filePath) {
             // If it was device-only, now it's both. If it was deleted/unknown, now local-only.
             location: existing.on_device ? "both" : "local-only"
           });
-          console.log("Updated existing recording path via watcher:", existing.id);
         }
         return;
       }
     } else {
-      console.log("Recording already in database by ID:", filename);
       return;
     }
-    console.log("Processing new recording:", filename);
     const dateMatch = filename.match(/^(\d{4}-\d{2}-\d{2})_(\d{4})/);
     let dateRecorded;
     if (dateMatch) {
@@ -3148,14 +3205,11 @@ async function processNewRecording(filePath) {
       is_imported: 0
     };
     insertRecording(recording);
-    console.log("Recording added to database:", recordingId);
     correlateWithMeeting(recordingId, new Date(dateRecorded));
     const config2 = getConfig();
     if (config2.transcription.autoTranscribe) {
       addToQueue(recordingId);
-      console.log("Recording added to transcription queue:", recordingId);
     } else {
-      console.log("Auto-transcribe disabled, skipping queue for:", recordingId);
     }
     notifyRenderer$1("recording:new", { recording });
   } catch (error2) {
@@ -7199,6 +7253,8 @@ class IntegrityService {
   /**
    * Reset downloads that are stuck in 'downloading' status
    * This happens when the app crashes during a download
+   *
+   * Performance optimized: Uses batch updates instead of individual queries
    */
   resetOrphanedDownloads() {
     console.log("[IntegrityService] Checking for orphaned downloads...");
@@ -7208,37 +7264,73 @@ class IntegrityService {
         AND file_path IS NOT NULL
         AND file_path != ''
     `);
-    let fixed = 0;
+    if (stuckRecordings.length === 0) {
+      console.log("[IntegrityService] No orphaned downloads found");
+      return { found: 0, fixed: 0 };
+    }
+    console.log(`[IntegrityService] Found ${stuckRecordings.length} recordings to check...`);
+    const existingFileIds = [];
+    const missingFileIds = [];
     for (const rec of stuckRecordings) {
       if (!rec.file_path) continue;
       if (fs.existsSync(rec.file_path)) {
-        console.log(`[IntegrityService] Fixing on_local flag for: ${rec.filename}`);
-        try {
-          run(`UPDATE recordings SET on_local = 1, location = 'both' WHERE id = ?`, [rec.id]);
-          fixed++;
-        } catch (error2) {
-          console.error(`[IntegrityService] Failed to fix on_local for ${rec.filename}:`, error2);
-        }
+        existingFileIds.push(rec.id);
       } else {
-        console.log(`[IntegrityService] Resetting orphaned download: ${rec.filename}`);
-        try {
-          run(`UPDATE recordings SET file_path = NULL, on_local = 0, location = 'device-only' WHERE id = ?`, [rec.id]);
-          fixed++;
-        } catch (error2) {
-          console.warn(`[IntegrityService] Could not set NULL, trying empty string: ${error2}`);
+        missingFileIds.push(rec.id);
+      }
+    }
+    let fixed = 0;
+    if (existingFileIds.length > 0) {
+      console.log(`[IntegrityService] Fixing on_local flag for ${existingFileIds.length} recordings with existing files...`);
+      try {
+        const chunkSize = 500;
+        for (let i = 0; i < existingFileIds.length; i += chunkSize) {
+          const chunk = existingFileIds.slice(i, i + chunkSize);
+          const placeholders = chunk.map(() => "?").join(",");
+          run(`UPDATE recordings SET on_local = 1, location = 'both' WHERE id IN (${placeholders})`, chunk);
+        }
+        fixed += existingFileIds.length;
+      } catch (error2) {
+        console.error("[IntegrityService] Batch update failed, falling back to individual updates:", error2);
+        for (const id of existingFileIds) {
           try {
-            run(`UPDATE recordings SET file_path = '', on_local = 0, location = 'device-only' WHERE id = ?`, [rec.id]);
+            run(`UPDATE recordings SET on_local = 1, location = 'both' WHERE id = ?`, [id]);
             fixed++;
-          } catch (innerError) {
-            console.error(`[IntegrityService] Failed to reset recording ${rec.filename}:`, innerError);
+          } catch (err) {
+            console.error(`[IntegrityService] Failed to fix on_local for id ${id}:`, err);
           }
+        }
+      }
+    }
+    if (missingFileIds.length > 0) {
+      console.log(`[IntegrityService] Resetting ${missingFileIds.length} recordings with missing files...`);
+      try {
+        const chunkSize = 500;
+        for (let i = 0; i < missingFileIds.length; i += chunkSize) {
+          const chunk = missingFileIds.slice(i, i + chunkSize);
+          const placeholders = chunk.map(() => "?").join(",");
+          run(`UPDATE recordings SET file_path = NULL, on_local = 0, location = 'device-only' WHERE id IN (${placeholders})`, chunk);
+        }
+        fixed += missingFileIds.length;
+      } catch (error2) {
+        console.warn("[IntegrityService] Batch NULL update failed, trying empty string:", error2);
+        try {
+          const chunkSize = 500;
+          for (let i = 0; i < missingFileIds.length; i += chunkSize) {
+            const chunk = missingFileIds.slice(i, i + chunkSize);
+            const placeholders = chunk.map(() => "?").join(",");
+            run(`UPDATE recordings SET file_path = '', on_local = 0, location = 'device-only' WHERE id IN (${placeholders})`, chunk);
+          }
+          fixed += missingFileIds.length;
+        } catch (innerError) {
+          console.error("[IntegrityService] Batch update failed completely:", innerError);
         }
       }
     }
     if (fixed > 0) {
       saveDatabase();
     }
-    console.log(`[IntegrityService] Orphaned downloads: ${stuckRecordings.length} checked, ${fixed} fixed`);
+    console.log(`[IntegrityService] Orphaned downloads: ${stuckRecordings.length} checked, ${fixed} fixed (${existingFileIds.length} files exist, ${missingFileIds.length} missing)`);
     return { found: stuckRecordings.length, fixed };
   }
   /**
@@ -7680,24 +7772,51 @@ class IntegrityService {
   }
   /**
    * Repair all auto-repairable issues
+   * Optimized: batches all repairs and saves database once at the end
    */
   async repairAllAuto() {
     if (!this.lastReport) {
       console.log("[IntegrityService] repairAllAuto: No report available");
       return [];
     }
-    const results = [];
     const autoRepairable = this.lastReport.issues.filter((i) => i.autoRepairable);
     console.log(`[IntegrityService] repairAllAuto: Found ${autoRepairable.length} auto-repairable issues`);
-    for (const issue of autoRepairable) {
-      console.log(`[IntegrityService] Repairing issue: ${issue.id} (type: ${issue.type}, recordingId: ${issue.recordingId})`);
-      const result = await this.repairIssue(issue.id);
-      console.log(`[IntegrityService] Repair result:`, result.success ? "SUCCESS" : `FAILED: ${result.error}`);
-      results.push(result);
+    if (autoRepairable.length === 0) {
+      return [];
     }
+    const startTime = Date.now();
+    const results = autoRepairable.map((issue) => this.repairIssueBatch(issue));
+    saveDatabase();
     const successCount = results.filter((r) => r.success).length;
-    console.log(`[IntegrityService] repairAllAuto complete: ${successCount}/${results.length} succeeded`);
+    const elapsed = Date.now() - startTime;
+    console.log(`[IntegrityService] repairAllAuto complete: ${successCount}/${results.length} succeeded in ${elapsed}ms`);
     return results;
+  }
+  /**
+   * Repair a single issue without saving database (for batch operations)
+   */
+  repairIssueBatch(issue) {
+    try {
+      switch (issue.type) {
+        case "orphaned_download":
+          return this.repairOrphanedDownloadBatch(issue);
+        case "missing_file":
+          return this.repairMissingFileBatch(issue);
+        case "orphaned_file":
+          return this.repairOrphanedFileBatch(issue);
+        case "date_mismatch":
+          return this.repairDateMismatchBatch(issue);
+        case "size_mismatch":
+          return this.repairSizeMismatchBatch(issue);
+        case "incomplete_download":
+          return this.repairIncompleteDownloadBatch(issue);
+        default:
+          return { issueId: issue.id, success: false, action: "none", error: "Unknown issue type" };
+      }
+    } catch (error2) {
+      const errorMsg = error2 instanceof Error ? error2.message : "Unknown error";
+      return { issueId: issue.id, success: false, action: "repair", error: errorMsg };
+    }
   }
   // ==========================================================================
   // Repair Methods
@@ -7796,6 +7915,94 @@ class IntegrityService {
         WHERE id = ?`, [recording.id]);
     }
     saveDatabase();
+    return { issueId: issue.id, success: true, action: "Deleted incomplete file and reset tracking" };
+  }
+  // ==========================================================================
+  // Batch Repair Methods (no saveDatabase - for bulk operations)
+  // ==========================================================================
+  repairOrphanedDownloadBatch(issue) {
+    if (!issue.recordingId) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No recording ID" };
+    }
+    try {
+      run(`DELETE FROM recordings WHERE id = ?`, [issue.recordingId]);
+      return { issueId: issue.id, success: true, action: "Deleted orphaned recording record" };
+    } catch (error2) {
+      const errorMsg = error2 instanceof Error ? error2.message : "Unknown error";
+      return { issueId: issue.id, success: false, action: "repair", error: errorMsg };
+    }
+  }
+  repairMissingFileBatch(issue) {
+    if (!issue.filename) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No filename" };
+    }
+    removeSyncedFile(issue.filename);
+    const recording = getRecordingByFilename(issue.filename);
+    if (recording) {
+      run(`UPDATE recordings SET file_path = NULL, on_local = 0, location =
+        CASE WHEN on_device = 1 THEN 'device-only' ELSE 'deleted' END
+        WHERE id = ?`, [recording.id]);
+    }
+    return { issueId: issue.id, success: true, action: "Removed missing file from database tracking" };
+  }
+  repairOrphanedFileBatch(issue) {
+    if (!issue.filename || !issue.filePath) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No filename or path" };
+    }
+    const stats = fs.statSync(issue.filePath);
+    addSyncedFile(issue.filename, issue.filename, issue.filePath, stats.size);
+    return { issueId: issue.id, success: true, action: "Added orphaned file to database" };
+  }
+  repairDateMismatchBatch(issue) {
+    if (issue.id.startsWith("file_mtime_")) {
+      if (!issue.filePath || !issue.details?.filename_date) {
+        return { issueId: issue.id, success: false, action: "repair", error: "No file path or filename date" };
+      }
+      try {
+        const correctDate = new Date(issue.details.filename_date);
+        fs.utimesSync(issue.filePath, correctDate, correctDate);
+        if (issue.filename) {
+          const recording = getRecordingByFilename(issue.filename);
+          if (recording) {
+            run(`UPDATE recordings SET date_recorded = ? WHERE id = ?`, [correctDate.toISOString(), recording.id]);
+          }
+        }
+        return { issueId: issue.id, success: true, action: `Fixed file mtime to ${correctDate.toISOString()}` };
+      } catch (error2) {
+        const errorMsg = error2 instanceof Error ? error2.message : "Unknown error";
+        return { issueId: issue.id, success: false, action: "repair", error: errorMsg };
+      }
+    }
+    if (!issue.recordingId || !issue.details?.suggested_date) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No recording ID or suggested date" };
+    }
+    const suggestedDate = issue.details.suggested_date;
+    run(`UPDATE recordings SET date_recorded = ? WHERE id = ?`, [suggestedDate, issue.recordingId]);
+    return { issueId: issue.id, success: true, action: `Updated date to ${suggestedDate}` };
+  }
+  repairSizeMismatchBatch(issue) {
+    if (!issue.recordingId || !issue.details?.disk_size) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No recording ID or disk size" };
+    }
+    const diskSize = issue.details.disk_size;
+    run(`UPDATE recordings SET file_size = ? WHERE id = ?`, [diskSize, issue.recordingId]);
+    return { issueId: issue.id, success: true, action: `Updated size to ${diskSize} bytes` };
+  }
+  repairIncompleteDownloadBatch(issue) {
+    if (!issue.filePath || !issue.filename) {
+      return { issueId: issue.id, success: false, action: "repair", error: "No file path" };
+    }
+    try {
+      fs.unlinkSync(issue.filePath);
+    } catch {
+    }
+    removeSyncedFile(issue.filename);
+    const recording = getRecordingByFilename(issue.filename);
+    if (recording) {
+      run(`UPDATE recordings SET file_path = NULL, on_local = 0, location =
+        CASE WHEN on_device = 1 THEN 'device-only' ELSE 'deleted' END
+        WHERE id = ?`, [recording.id]);
+    }
     return { issueId: issue.id, success: true, action: "Deleted incomplete file and reset tracking" };
   }
   /**
@@ -8095,7 +8302,11 @@ function mapToMessage(row) {
     role: row.role,
     content: row.content,
     sources: row.sources,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    editedAt: row.edited_at ?? null,
+    originalContent: row.original_content ?? null,
+    createdOutputId: row.created_output_id ?? null,
+    savedAsInsightId: row.saved_as_insight_id ?? null
   };
 }
 function registerActionablesHandlers() {
@@ -8205,6 +8416,7 @@ cancelBtn.addEventListener('click',()=>{window.electronAPI?.quitApp?.();});
 <\/script>
 </body></html>`;
 function createSplashWindow() {
+  console.log("[Splash] Creating splash window...");
   const splash = new electron.BrowserWindow({
     width: 340,
     height: 280,
@@ -8214,6 +8426,10 @@ function createSplashWindow() {
     center: true,
     alwaysOnTop: true,
     skipTaskbar: false,
+    show: true,
+    // Show immediately
+    backgroundColor: "#1a1a2e",
+    // Match splash background to avoid flash
     webPreferences: {
       preload: path.join(__dirname, "../preload/splash.js"),
       contextIsolation: true,
@@ -8221,6 +8437,7 @@ function createSplashWindow() {
     }
   });
   splash.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(SPLASH_HTML));
+  console.log("[Splash] Window created and loading content");
   return splash;
 }
 function updateSplashStatus(status, progress) {

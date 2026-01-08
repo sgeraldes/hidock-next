@@ -719,6 +719,8 @@ export interface Actionable {
 
   status: ActionableStatus
 
+  confidence?: number
+
 
 
 
