@@ -124,7 +124,7 @@ async function transcribeRecording(recordingId: string): Promise<void> {
     '.m4a': 'audio/mp4',
     '.ogg': 'audio/ogg',
     '.webm': 'audio/webm',
-    '.hda': 'audio/wav' // HiDock Audio format - treat as WAV
+    '.hda': 'audio/mp3' // HiDock H1E outputs MPEG MP3 format
   }
   const mimeType = mimeTypes[ext] || 'audio/wav'
 
