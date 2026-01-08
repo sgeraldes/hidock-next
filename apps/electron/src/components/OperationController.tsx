@@ -305,7 +305,11 @@ export function OperationController() {
 
       // Determine MIME type from file extension
       const ext = filePath.split('.').pop()?.toLowerCase()
-      const mimeType = ext === 'mp3' ? 'audio/mpeg' : ext === 'm4a' ? 'audio/mp4' : 'audio/wav'
+      const mimeType =
+        ext === 'mp3' ? 'audio/mpeg' :
+        ext === 'hda' ? 'audio/mpeg' :  // HDA files are MPEG MP3
+        ext === 'm4a' ? 'audio/mp4' :
+        'audio/wav'
 
       // Set currently playing BEFORE loading to show loading state
       setCurrentlyPlaying(recordingId, filePath)
