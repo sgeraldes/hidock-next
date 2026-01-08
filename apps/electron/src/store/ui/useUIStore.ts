@@ -24,6 +24,8 @@ export const useUIStore = create<UIStore>((set) => ({
   playbackCurrentTime: 0,
   playbackDuration: 0,
   isPlaying: false,
+  playbackWaveformData: null,
+  playbackSentimentData: null,
 
   // Actions
   toggleSidebar: () => {
@@ -70,6 +72,14 @@ export const useUIStore = create<UIStore>((set) => ({
 
   setIsPlaying: (playing: boolean) => {
     set({ isPlaying: playing })
+  },
+
+  setWaveformData: (waveformData: Float32Array | null) => {
+    set({ playbackWaveformData: waveformData })
+  },
+
+  setSentimentData: (sentimentData) => {
+    set({ playbackSentimentData: sentimentData })
   }
 }))
 
