@@ -141,6 +141,7 @@ export interface ElectronAPI {
   actionables: {
     getAll: (options?: { status?: string }) => Promise<Actionable[]>
     updateStatus: (id: string, status: string) => Promise<{ success: boolean; error?: string }>
+    generateOutput: (actionableId: string) => Promise<{ success: boolean; error?: string; data?: any }>
   }
 
   // Assistant
@@ -465,7 +466,8 @@ const electronAPI: ElectronAPI = {
 
   actionables: {
     getAll: (options) => callIPC('actionables:getAll', options),
-    updateStatus: (id, status) => callIPC('actionables:updateStatus', id, status)
+    updateStatus: (id, status) => callIPC('actionables:updateStatus', id, status),
+    generateOutput: (actionableId) => callIPC('actionables:generateOutput', actionableId)
   },
 
   assistant: {

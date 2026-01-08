@@ -84,7 +84,8 @@ const electronAPI = {
   },
   actionables: {
     getAll: (options) => callIPC("actionables:getAll", options),
-    updateStatus: (id, status) => callIPC("actionables:updateStatus", id, status)
+    updateStatus: (id, status) => callIPC("actionables:updateStatus", id, status),
+    generateOutput: (actionableId) => callIPC("actionables:generateOutput", actionableId)
   },
   assistant: {
     getConversations: () => callIPC("assistant:getConversations"),

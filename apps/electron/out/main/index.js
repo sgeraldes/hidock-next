@@ -155,31 +155,6 @@ function getCachePath() {
 function getDatabasePath() {
   return path.join(getDataPath(), "data", "hidock.db");
 }
-function createWavHeader(dataLength, sampleRate = 16e3, channels = 1, bitsPerSample = 16) {
-  const byteRate = sampleRate * channels * (bitsPerSample / 8);
-  const blockAlign = channels * (bitsPerSample / 8);
-  const header = Buffer.alloc(44);
-  header.write("RIFF", 0);
-  header.writeUInt32LE(36 + dataLength, 4);
-  header.write("WAVE", 8);
-  header.write("fmt ", 12);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(channels, 22);
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(byteRate, 28);
-  header.writeUInt16LE(blockAlign, 32);
-  header.writeUInt16LE(bitsPerSample, 34);
-  header.write("data", 36);
-  header.writeUInt32LE(dataLength, 40);
-  return header;
-}
-function hasWavHeader(data) {
-  if (data.length < 44) return false;
-  const riff = data.toString("ascii", 0, 4);
-  const wave = data.toString("ascii", 8, 12);
-  return riff === "RIFF" && wave === "WAVE";
-}
 async function saveRecording(filename, data, _meetingSubject, originalDate) {
   const recordingsPath = getRecordingsPath();
   const baseFilename = path.basename(filename);
@@ -201,12 +176,7 @@ async function saveRecording(filename, data, _meetingSubject, originalDate) {
       counter++;
     }
   }
-  let dataToWrite = data;
-  if (isHdaFile && !hasWavHeader(data)) {
-    const wavHeader = createWavHeader(data.length);
-    dataToWrite = Buffer.concat([wavHeader, data]);
-    console.log(`[FileStorage] Added WAV header to ${cleanFilename} (${data.length} bytes PCM -> ${dataToWrite.length} bytes WAV)`);
-  }
+  const dataToWrite = data;
   fs.writeFileSync(filePath, dataToWrite);
   if (originalDate) {
     try {
@@ -328,13 +298,7 @@ function readRecordingFile(filePath) {
       return null;
     }
     if (fs.existsSync(filePath)) {
-      let data = fs.readFileSync(filePath);
-      const ext = path.extname(filePath).toLowerCase();
-      if (ext === ".wav" && !hasWavHeader(data)) {
-        console.log(`[FileStorage] Adding WAV header on-the-fly for playback: ${path.basename(filePath)}`);
-        const wavHeader = createWavHeader(data.length);
-        data = Buffer.concat([wavHeader, data]);
-      }
+      const data = fs.readFileSync(filePath);
       return data;
     }
     return null;
@@ -345,7 +309,7 @@ function readRecordingFile(filePath) {
 }
 let db = null;
 let dbPath = "";
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 17;
 const SCHEMA = `
 -- Calendar events from ICS
 CREATE TABLE IF NOT EXISTS meetings (
@@ -793,6 +757,7 @@ CREATE TABLE IF NOT EXISTS actionables (
     suggested_template TEXT,
     suggested_recipients TEXT, -- JSON array
     status TEXT CHECK(status IN ('pending', 'in_progress', 'generated', 'shared', 'dismissed')) DEFAULT 'pending',
+    confidence REAL CHECK(confidence >= 0.0 AND confidence <= 1.0),
     artifact_id TEXT, -- Links to outputs table
     generated_at TEXT,
     shared_at TEXT,
@@ -1190,6 +1155,25 @@ const MIGRATIONS = {
       }
     }
     console.log("Migration v16 complete: AI title and question suggestions added to transcripts");
+  },
+  17: () => {
+    console.log("Running migration to schema v17: Adding confidence column to actionables");
+    const database2 = getDatabase();
+    const tableInfo = database2.exec("PRAGMA table_info(actionables)");
+    if (tableInfo.length > 0 && tableInfo[0].values) {
+      const columns = tableInfo[0].values.map((row) => row[1]);
+      if (!columns.includes("confidence")) {
+        try {
+          database2.run("ALTER TABLE actionables ADD COLUMN confidence REAL CHECK(confidence >= 0.0 AND confidence <= 1.0)");
+          console.log("[Migration v17] Added confidence column to actionables table");
+        } catch (e) {
+          console.warn("[Migration v17] Failed to add confidence column:", e);
+        }
+      } else {
+        console.log("[Migration v17] Confidence column already exists, skipping");
+      }
+    }
+    console.log("Migration v17 complete: Confidence column added to actionables");
   }
 };
 function runMigrations(currentVersion) {
@@ -3659,6 +3643,64 @@ async function processQueue() {
   }
   isProcessing = false;
 }
+async function detectActionables(transcriptText, knowledgeCaptureId, metadata) {
+  const config2 = getConfig();
+  if (!config2.transcription.geminiApiKey) {
+    console.log("[Actionable Detection] Gemini API key not configured, skipping");
+    return [];
+  }
+  const wordCount = transcriptText.split(/\s+/).filter((w) => w.length > 0).length;
+  if (wordCount < 100) {
+    console.log("[Actionable Detection] Transcript too short (<100 words), skipping");
+    return [];
+  }
+  const words = transcriptText.split(/\s+/);
+  const truncatedText = words.length > 5e3 ? words.slice(-5e3).join(" ") : transcriptText;
+  const prompt = `Analyze this meeting transcript and detect if the speaker intends to create any outputs or documents.
+
+Transcript:
+${truncatedText}
+
+Meeting Title: ${metadata.title || "Unknown"}
+Questions: ${metadata.questions?.join(", ") || "None"}
+
+Detect if speaker mentions need to:
+1. Send meeting minutes/notes
+2. Write interview feedback/evaluation
+3. Create status report/update
+4. Document decisions
+5. Share action items
+6. Compile research/findings
+
+For each detected intent, return:
+- type: The type of actionable (meeting_minutes, interview_feedback, status_report, decision_log, action_items, research_summary)
+- confidence: 0.0-1.0 (how confident you are)
+- suggestedTitle: Brief title for the actionable (e.g., "Send meeting notes to team")
+- reason: Why you detected this (quote from transcript)
+- suggestedTemplate: Template name to use (e.g., "meeting_minutes", "interview_feedback")
+- suggestedRecipients: Who should receive it (if mentioned)
+
+Return as JSON array. If no actionables detected, return empty array [].
+Only include detections with confidence >= 0.6.`;
+  try {
+    const genAI = new generativeAi.GoogleGenerativeAI(config2.transcription.geminiApiKey);
+    const model = genAI.getGenerativeModel({ model: config2.transcription.geminiModel || "gemini-2.0-flash-exp" });
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text();
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      console.log("[Actionable Detection] No JSON array found in response");
+      return [];
+    }
+    const detections = JSON.parse(jsonMatch[0]);
+    const filtered = detections.filter((d) => d.confidence >= 0.6);
+    console.log(`[Actionable Detection] Detected ${filtered.length} actionables for ${knowledgeCaptureId}`);
+    return filtered;
+  } catch (error2) {
+    console.error("[Actionable Detection] Failed:", error2);
+    return [];
+  }
+}
 async function transcribeRecording(recordingId) {
   const recording = getRecordingById(recordingId);
   if (!recording || !recording.file_path) {
@@ -3682,8 +3724,8 @@ async function transcribeRecording(recordingId) {
     ".m4a": "audio/mp4",
     ".ogg": "audio/ogg",
     ".webm": "audio/webm",
-    ".hda": "audio/wav"
-    // HiDock Audio format - treat as WAV
+    ".hda": "audio/mp3"
+    // HiDock H1E outputs MPEG MP3 format
   };
   const mimeType = mimeTypes[ext] || "audio/wav";
   const genAI = new generativeAi.GoogleGenerativeAI(config2.transcription.geminiApiKey);
@@ -3820,6 +3862,38 @@ Respond in JSON format:
   updateRecordingStatus(recordingId, "transcribed");
   if (analysis.title_suggestion) {
     updateKnowledgeCaptureTitle(recordingId, analysis.title_suggestion);
+  }
+  try {
+    const detections = await detectActionables(fullText, recordingId, {
+      title: analysis.title_suggestion,
+      questions: analysis.question_suggestions
+    });
+    for (const detection of detections) {
+      const actionableId = `act_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      run(
+        `INSERT INTO actionables (
+          id, source_knowledge_id, type, title, description, status,
+          confidence, suggested_template, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          actionableId,
+          recordingId,
+          // source_knowledge_id references knowledge_captures.id
+          detection.type,
+          detection.suggestedTitle,
+          detection.reason,
+          "pending",
+          detection.confidence,
+          detection.suggestedTemplate || null,
+          (/* @__PURE__ */ new Date()).toISOString()
+        ]
+      );
+    }
+    if (detections.length > 0) {
+      console.log(`[Actionable Detection] Created ${detections.length} actionables for ${recordingId}`);
+    }
+  } catch (error2) {
+    console.error("[Actionable Detection] Failed to create actionables:", error2);
   }
   try {
     const vectorStore = getVectorStore();
@@ -8328,10 +8402,59 @@ function registerActionablesHandlers() {
   });
   electron.ipcMain.handle("actionables:updateStatus", async (_, id, status) => {
     try {
+      const actionable = queryAll("SELECT * FROM actionables WHERE id = ?", [id])[0];
+      if (!actionable) {
+        return { success: false, error: `Actionable ${id} not found` };
+      }
+      const validTransitions = {
+        "pending": ["in_progress", "dismissed"],
+        "in_progress": ["generated", "pending"],
+        "generated": ["shared", "pending"],
+        "shared": [],
+        "dismissed": ["pending"]
+      };
+      const allowedTransitions = validTransitions[actionable.status] || [];
+      if (!allowedTransitions.includes(status)) {
+        return {
+          success: false,
+          error: `Invalid status transition: ${actionable.status} → ${status}`
+        };
+      }
       run("UPDATE actionables SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [status, id]);
       return { success: true };
     } catch (error2) {
       console.error("Failed to update actionable status:", error2);
+      return { success: false, error: error2.message };
+    }
+  });
+  electron.ipcMain.handle("actionables:generateOutput", async (_, actionableId) => {
+    try {
+      const actionable = queryAll("SELECT * FROM actionables WHERE id = ?", [actionableId])[0];
+      if (!actionable) {
+        return { success: false, error: `Actionable ${actionableId} not found` };
+      }
+      if (actionable.status !== "pending") {
+        return { success: false, error: "Only pending actionables can be generated" };
+      }
+      run(
+        "UPDATE actionables SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        ["in_progress", actionableId]
+      );
+      return {
+        success: true,
+        data: {
+          actionableId,
+          sourceKnowledgeId: actionable.source_knowledge_id,
+          suggestedTemplate: actionable.suggested_template
+        }
+      };
+    } catch (error2) {
+      console.error("Failed to generate output:", error2);
+      try {
+        run("UPDATE actionables SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", ["pending", actionableId]);
+      } catch (revertError) {
+        console.error("Failed to revert status:", revertError);
+      }
       return { success: false, error: error2.message };
     }
   });
@@ -8355,6 +8478,7 @@ function mapToActionable(row) {
     suggestedTemplate: row.suggested_template,
     suggestedRecipients: recipients,
     status: row.status,
+    confidence: row.confidence,
     artifactId: row.artifact_id,
     generatedAt: row.generated_at,
     sharedAt: row.shared_at,

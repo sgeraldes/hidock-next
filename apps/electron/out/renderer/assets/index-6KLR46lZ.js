@@ -16089,9 +16089,8 @@ class HiDockDeviceService {
     this.state.firmwareVersion = null;
     this.state.storage = null;
     this.state.settings = null;
-    this.state.recordingCount = 0;
     this.notifyStateChange();
-    this.logActivity("info", "USB device disconnected", "Recording cache preserved for quick reconnect");
+    this.logActivity("info", "USB device disconnected", "Recording count and cache preserved for quick reconnect");
     this.updateStatus("idle", "Device disconnected");
     this.notifyConnectionChange(false);
   }
@@ -22136,6 +22135,24 @@ function getBestDate(filename, deviceDate, fallback) {
   }
   return fallback;
 }
+function findMatchByDateTime(deviceRec, dbRecs, syncedFiles, matchedBaseNames, toleranceSeconds = 60) {
+  const deviceDate = parseDateFromFilename(deviceRec.filename);
+  if (!deviceDate || isNaN(deviceDate.getTime())) return null;
+  for (const dbRec of dbRecs) {
+    const baseName = getBaseFilename(dbRec.filename);
+    if (matchedBaseNames.has(baseName)) continue;
+    const localDate = parseDateFromFilename(dbRec.filename) || (dbRec.date_recorded ? new Date(dbRec.date_recorded) : null);
+    if (!localDate || isNaN(localDate.getTime())) continue;
+    const diffSeconds = Math.abs(deviceDate.getTime() - localDate.getTime()) / 1e3;
+    if (diffSeconds <= toleranceSeconds) {
+      const synced = syncedFiles.find(
+        (sf2) => sf2.local_filename === dbRec.filename || getBaseFilename(sf2.local_filename) === baseName
+      );
+      return { dbRec, synced, localBaseName: baseName };
+    }
+  }
+  return null;
+}
 function buildRecordingMap(deviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, isConnected, knowledgeCaptures = []) {
   const syncedMapByBase = /* @__PURE__ */ new Map();
   const syncedMapByOriginal = /* @__PURE__ */ new Map();
@@ -22161,8 +22178,18 @@ function buildRecordingMap(deviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, i
   const recordingMap = /* @__PURE__ */ new Map();
   for (const deviceRec of deviceRecs) {
     const baseName = getBaseFilename(deviceRec.filename);
-    const synced = syncedMapByOriginal.get(deviceRec.filename) || syncedMapByBase.get(baseName);
-    const dbRec = dbMapByFilename.get(deviceRec.filename) || dbMapByBase.get(baseName);
+    let synced = syncedMapByOriginal.get(deviceRec.filename) || syncedMapByBase.get(baseName);
+    let dbRec = dbMapByFilename.get(deviceRec.filename) || dbMapByBase.get(baseName);
+    let localBaseName;
+    if (!synced && !dbRec) {
+      const dateMatch = findMatchByDateTime(deviceRec, dbRecs, syncedFiles, processedBaseNames);
+      if (dateMatch) {
+        dbRec = dateMatch.dbRec;
+        synced = dateMatch.synced;
+        localBaseName = dateMatch.localBaseName;
+        console.log(`[buildRecordingMap] Matched by date: ${deviceRec.filename} ←→ ${dbRec?.filename}`);
+      }
+    }
     const dateRecorded = getBestDate(deviceRec.filename, deviceRec.dateCreated, /* @__PURE__ */ new Date());
     if (synced || dbRec) {
       const dbId = dbRec?.id || synced.id;
@@ -22188,6 +22215,9 @@ function buildRecordingMap(deviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, i
       };
       recordingMap.set(baseName, recording);
       processedBaseNames.add(baseName);
+      if (localBaseName && localBaseName !== baseName) {
+        processedBaseNames.add(localBaseName);
+      }
     } else {
       const recording = {
         id: deviceRec.id,
@@ -22381,13 +22411,18 @@ function useUnifiedRecordings() {
       if (r2.syncStatus === "synced") synced++;
       else unsynced++;
     }
+    const onSource = deviceOnly + both;
+    const locallyAvailable = localOnly + both;
     return {
       total: recordings.length,
       deviceOnly,
       localOnly,
       both,
       synced,
-      unsynced
+      unsynced,
+      // Semantic counts for dual-mode filter UI
+      onSource,
+      locallyAvailable
     };
   }, [recordings]);
   return {
@@ -22420,6 +22455,20 @@ function mapTranscriptionStatus(status, captureStatus) {
     default:
       return "none";
   }
+}
+function matchesSemanticFilter(location, filter) {
+  if (filter === "all") return true;
+  if (filter === "on-source") return location === "device-only" || location === "both";
+  if (filter === "locally-available") return location === "local-only" || location === "both";
+  if (filter === "synced") return location === "both";
+  return false;
+}
+function matchesExclusiveFilter(location, filter) {
+  if (filter === "all") return true;
+  if (filter === "source-only") return location === "device-only";
+  if (filter === "local-only") return location === "local-only";
+  if (filter === "synced") return location === "both";
+  return false;
 }
 function isDeviceOnly(rec) {
   return rec.location === "device-only";
@@ -25732,6 +25781,15 @@ function Device() {
     setError("Connection cancelled");
     deviceService.stopAutoConnect();
   }, [clearConnectionTimers, deviceService]);
+  const refreshSyncedFilenames = reactExports.useCallback(async () => {
+    try {
+      const filenames = await window.electronAPI.syncedFiles.getFilenames();
+      setSyncedFilenames(new Set(filenames));
+      if (DEBUG_DEVICE_UI) ;
+    } catch (e) {
+      console.error("[Device.tsx] Failed to refresh synced filenames:", e);
+    }
+  }, []);
   reactExports.useEffect(() => {
     let mounted = true;
     const loadSyncedFilenames = async () => {
@@ -25883,6 +25941,11 @@ function Device() {
       });
     }
   }, [activityLog.length]);
+  reactExports.useEffect(() => {
+    if (deviceState.connected && recordings.length > 0) {
+      refreshSyncedFilenames();
+    }
+  }, [recordings.length, deviceState.connected, refreshSyncedFilenames]);
   const handleConnect = async () => {
     setConnecting(true);
     setError(null);
@@ -25964,6 +26027,7 @@ function Device() {
         }))
       );
       if (queuedIds.length > 0) {
+        await refreshSyncedFilenames();
         toast({
           title: "Sync started",
           description: `Queued ${queuedIds.length} recording${queuedIds.length !== 1 ? "s" : ""} for download`,
@@ -25997,9 +26061,6 @@ function Device() {
   const handleAutoConnectToggle = (enabled) => {
     deviceService.setAutoConnectConfig({ enabled });
     setAutoConnectConfig(deviceService.getAutoConnectConfig());
-    if (enabled && !deviceState.connected) {
-      deviceService.startAutoConnect();
-    }
   };
   const handleAutoDownloadToggle = async (enabled) => {
     try {
@@ -27667,27 +27728,56 @@ function LibraryHeader({
 const CATEGORIES = ["all", "meeting", "interview", "1:1", "brainstorm", "note"];
 function LibraryFilters({
   stats,
-  locationFilter,
+  filterMode,
+  semanticFilter,
+  exclusiveFilter,
   categoryFilter,
   qualityFilter,
   statusFilter,
   searchQuery,
-  onLocationFilterChange,
+  onFilterModeChange,
+  onSemanticFilterChange,
+  onExclusiveFilterChange,
   onCategoryFilterChange,
   onQualityFilterChange,
   onStatusFilterChange,
   onSearchQueryChange
 }) {
+  const activeFilter = filterMode === "semantic" ? semanticFilter : exclusiveFilter;
+  const handleFilterChange = filterMode === "semantic" ? onSemanticFilterChange : onExclusiveFilterChange;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col gap-4 mt-4", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-4", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-xs font-medium text-muted-foreground", children: "Mode:" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-1 p-1 bg-muted rounded-lg", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: () => onFilterModeChange("semantic"),
+              className: `px-2 py-1 text-xs font-medium rounded transition-colors ${filterMode === "semantic" ? "bg-background shadow-sm" : "hover:bg-background/50"}`,
+              title: "Show all files matching the filter (e.g., Source shows all files from any source)",
+              children: "All Matching"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: () => onFilterModeChange("exclusive"),
+              className: `px-2 py-1 text-xs font-medium rounded transition-colors ${filterMode === "exclusive" ? "bg-background shadow-sm" : "hover:bg-background/50"}`,
+              title: "Show only files in exact location (e.g., Source Only shows files not downloaded)",
+              children: "Exact Only"
+            }
+          )
+        ] })
+      ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(Filter, { className: "h-4 w-4 text-muted-foreground" }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex rounded-lg border overflow-hidden", "data-testid": "location-filter", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs(
             "button",
             {
-              onClick: () => onLocationFilterChange("all"),
-              className: `px-3 py-1.5 text-xs font-medium transition-colors ${locationFilter === "all" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+              onClick: () => handleFilterChange("all"),
+              className: `px-3 py-1.5 text-xs font-medium transition-colors ${activeFilter === "all" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
               children: [
                 "All (",
                 stats.total,
@@ -27695,32 +27785,87 @@ function LibraryFilters({
               ]
             }
           ),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
-            {
-              onClick: () => onLocationFilterChange("device-only"),
-              className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${locationFilter === "device-only" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(Cloud, { className: "h-3 w-3 inline mr-1" }),
-                "Device (",
-                stats.deviceOnly,
-                ")"
-              ]
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
-            {
-              onClick: () => onLocationFilterChange("local-only"),
-              className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${locationFilter === "local-only" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(HardDrive, { className: "h-3 w-3 inline mr-1" }),
-                "Downloaded (",
-                stats.localOnly,
-                ")"
-              ]
-            }
-          )
+          filterMode === "semantic" ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                onClick: () => onSemanticFilterChange("on-source"),
+                className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${semanticFilter === "on-source" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(Cloud, { className: "h-3 w-3 inline mr-1" }),
+                  "Source (",
+                  stats.onSource,
+                  ")"
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                onClick: () => onSemanticFilterChange("locally-available"),
+                className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${semanticFilter === "locally-available" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(HardDrive, { className: "h-3 w-3 inline mr-1" }),
+                  "Locally Available (",
+                  stats.locallyAvailable,
+                  ")"
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                onClick: () => onSemanticFilterChange("synced"),
+                className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${semanticFilter === "synced" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(Check, { className: "h-3 w-3 inline mr-1" }),
+                  "Synced (",
+                  stats.both,
+                  ")"
+                ]
+              }
+            )
+          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                onClick: () => onExclusiveFilterChange("source-only"),
+                className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${exclusiveFilter === "source-only" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(Cloud, { className: "h-3 w-3 inline mr-1" }),
+                  "Source Only (",
+                  stats.deviceOnly,
+                  ")"
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                onClick: () => onExclusiveFilterChange("local-only"),
+                className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${exclusiveFilter === "local-only" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(HardDrive, { className: "h-3 w-3 inline mr-1" }),
+                  "Local Only (",
+                  stats.localOnly,
+                  ")"
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                onClick: () => onExclusiveFilterChange("synced"),
+                className: `px-3 py-1.5 text-xs font-medium transition-colors border-l ${exclusiveFilter === "synced" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`,
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(Check, { className: "h-3 w-3 inline mr-1" }),
+                  "Synced (",
+                  stats.both,
+                  ")"
+                ]
+              }
+            )
+          ] })
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex rounded-lg border overflow-hidden", children: CATEGORIES.map((cat) => /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -28055,7 +28200,9 @@ const initialState = {
   viewMode: "compact",
   sortBy: "date",
   sortOrder: "desc",
-  locationFilter: "all",
+  filterMode: "semantic",
+  semanticFilter: "all",
+  exclusiveFilter: "all",
   categoryFilter: null,
   qualityFilter: null,
   statusFilter: null,
@@ -28078,13 +28225,17 @@ const useLibraryStore = create$1()(
       setSortOrder: (order2) => set({ sortOrder: order2 }),
       toggleSortOrder: () => set((state) => ({ sortOrder: state.sortOrder === "asc" ? "desc" : "asc" })),
       // Filters
-      setLocationFilter: (filter) => set({ locationFilter: filter }),
+      setFilterMode: (mode) => set({ filterMode: mode }),
+      setSemanticFilter: (filter) => set({ semanticFilter: filter }),
+      setExclusiveFilter: (filter) => set({ exclusiveFilter: filter }),
       setCategoryFilter: (filter) => set({ categoryFilter: filter }),
       setQualityFilter: (filter) => set({ qualityFilter: filter }),
       setStatusFilter: (filter) => set({ statusFilter: filter }),
       setSearchQuery: (query) => set({ searchQuery: query }),
       clearFilters: () => set({
-        locationFilter: "all",
+        filterMode: "semantic",
+        semanticFilter: "all",
+        exclusiveFilter: "all",
         categoryFilter: null,
         qualityFilter: null,
         statusFilter: null,
@@ -28141,7 +28292,9 @@ const useLibraryStore = create$1()(
         viewMode: state.viewMode,
         sortBy: state.sortBy,
         sortOrder: state.sortOrder,
-        locationFilter: state.locationFilter,
+        filterMode: state.filterMode,
+        semanticFilter: state.semanticFilter,
+        exclusiveFilter: state.exclusiveFilter,
         categoryFilter: state.categoryFilter,
         qualityFilter: state.qualityFilter,
         statusFilter: state.statusFilter,
@@ -28284,7 +28437,7 @@ const SourceRow = reactExports.memo(function SourceRow2({
               className: `h-7 w-7 ${recording.location === "device-only" ? "text-destructive hover:text-destructive" : recording.location === "local-only" ? "text-orange-500 hover:text-orange-600" : "text-muted-foreground hover:text-orange-500"}`,
               onClick: onDelete,
               disabled: recording.location === "device-only" && !deviceConnected || isDeleting,
-              title: recording.location === "device-only" ? "Delete from device" : recording.location === "local-only" ? "Delete local file" : "Delete local copy",
+              title: recording.location === "device-only" ? "🗑️ Delete from device (cannot be undone)" : recording.location === "local-only" ? "🗑️ Delete local file and transcript" : "🗑️ Delete local copy only (keeps device copy)",
               children: isDeleting ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "h-3 w-3 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-3 w-3" })
             }
           )
@@ -28927,6 +29080,29 @@ function SourceDetailDrawer({
               children: source.quality
             }
           )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "space-y-2 mt-4 p-3 border rounded-lg bg-muted/30", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { className: "text-sm font-medium", children: "File Location" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-2 gap-2 text-xs", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-muted-foreground", children: "On Device:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ml-2 font-medium", children: source.location === "device-only" || source.location === "both" ? "✓ Yes" : "✗ No" })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-muted-foreground", children: "Downloaded:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "ml-2 font-medium", children: source.location === "local-only" || source.location === "both" ? "✓ Yes" : "✗ No" })
+            ] })
+          ] }),
+          source.location === "device-only" && "deviceFilename" in source && /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-xs text-muted-foreground mt-2", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-medium", children: "Device:" }),
+            " ",
+            source.deviceFilename
+          ] }),
+          "localPath" in source && source.localPath && /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-xs text-muted-foreground break-all mt-2", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-medium", children: "Local:" }),
+            " ",
+            source.localPath
+          ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap gap-2 mt-4 border-b pb-4", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs(
@@ -31707,9 +31883,209 @@ const ResizableHandle = ({
     children: withHandle && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "z-10 flex h-4 w-3 items-center justify-center rounded-sm border bg-border", children: /* @__PURE__ */ jsxRuntimeExports.jsx(GripVertical, { className: "h-2.5 w-2.5" }) })
   }
 );
+function useMediaQuery(query) {
+  const [matches, setMatches] = reactExports.useState(() => {
+    if (typeof window !== "undefined") {
+      return window.matchMedia(query).matches;
+    }
+    return false;
+  });
+  reactExports.useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const mediaQuery = window.matchMedia(query);
+    const handleChange = (event) => {
+      setMatches(event.matches);
+    };
+    mediaQuery.addEventListener("change", handleChange);
+    setMatches(mediaQuery.matches);
+    return () => {
+      mediaQuery.removeEventListener("change", handleChange);
+    };
+  }, [query]);
+  return matches;
+}
+function useIsMobile() {
+  return useMediaQuery("(max-width: 767px)");
+}
+function useIsTablet() {
+  return useMediaQuery("(min-width: 768px) and (max-width: 1023px)");
+}
 function TriPaneLayout({ leftPanel, centerPanel, rightPanel }) {
   const panelSizes = useLibraryStore((state) => state.panelSizes);
   const setPanelSizes = useLibraryStore((state) => state.setPanelSizes);
+  const isMobile = useIsMobile();
+  const isTablet = useIsTablet();
+  const [activeMobilePane, setActiveMobilePane] = reactExports.useState("center");
+  const [showRightPanelTablet, setShowRightPanelTablet] = reactExports.useState(false);
+  reactExports.useEffect(() => {
+    const saved = localStorage.getItem("mobile-active-pane");
+    if (saved && isMobile) {
+      setActiveMobilePane(saved);
+    }
+  }, [isMobile]);
+  reactExports.useEffect(() => {
+    if (isMobile) {
+      localStorage.setItem("mobile-active-pane", activeMobilePane);
+    }
+  }, [activeMobilePane, isMobile]);
+  if (isMobile) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col h-full", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex border-b border-gray-200 bg-white", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: () => setActiveMobilePane("left"),
+            className: `flex-1 px-4 py-3 text-sm font-medium transition-colors ${activeMobilePane === "left" ? "border-b-2 border-blue-500 text-blue-600" : "text-gray-600 hover:text-gray-900"}`,
+            "aria-label": "Show recording list",
+            "aria-pressed": activeMobilePane === "left",
+            children: "Recordings"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: () => setActiveMobilePane("center"),
+            className: `flex-1 px-4 py-3 text-sm font-medium transition-colors ${activeMobilePane === "center" ? "border-b-2 border-blue-500 text-blue-600" : "text-gray-600 hover:text-gray-900"}`,
+            "aria-label": "Show source content",
+            "aria-pressed": activeMobilePane === "center",
+            children: "Content"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: () => setActiveMobilePane("right"),
+            className: `flex-1 px-4 py-3 text-sm font-medium transition-colors ${activeMobilePane === "right" ? "border-b-2 border-blue-500 text-blue-600" : "text-gray-600 hover:text-gray-900"}`,
+            "aria-label": "Show AI assistant",
+            "aria-pressed": activeMobilePane === "right",
+            children: "Assistant"
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex-1 overflow-hidden", children: [
+        activeMobilePane === "left" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            role: "region",
+            "aria-label": "Recording list",
+            className: "h-full overflow-auto",
+            children: leftPanel
+          }
+        ),
+        activeMobilePane === "center" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            role: "region",
+            "aria-label": "Source content viewer",
+            className: "h-full overflow-hidden",
+            children: centerPanel
+          }
+        ),
+        activeMobilePane === "right" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            role: "region",
+            "aria-label": "AI Assistant",
+            className: "h-full overflow-hidden",
+            children: rightPanel
+          }
+        )
+      ] })
+    ] });
+  }
+  if (isTablet) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex h-full relative", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "div",
+        {
+          role: "region",
+          "aria-label": "Recording list",
+          className: "w-64 border-r border-gray-200 overflow-y-auto flex-shrink-0",
+          children: leftPanel
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "div",
+        {
+          role: "region",
+          "aria-label": "Source content viewer",
+          className: "flex-1 overflow-hidden",
+          children: centerPanel
+        }
+      ),
+      showRightPanelTablet && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          role: "region",
+          "aria-label": "AI Assistant",
+          className: "w-80 border-l border-gray-200 overflow-y-auto shadow-lg bg-white flex-shrink-0",
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex justify-between items-center p-3 border-b border-gray-200 bg-gray-50", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "font-semibold text-gray-900", children: "AI Assistant" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  onClick: () => setShowRightPanelTablet(false),
+                  className: "p-1.5 hover:bg-gray-200 rounded-md transition-colors",
+                  "aria-label": "Close AI assistant panel",
+                  children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "svg",
+                    {
+                      className: "w-4 h-4 text-gray-600",
+                      fill: "none",
+                      stroke: "currentColor",
+                      viewBox: "0 0 24 24",
+                      children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "path",
+                        {
+                          strokeLinecap: "round",
+                          strokeLinejoin: "round",
+                          strokeWidth: 2,
+                          d: "M6 18L18 6M6 6l12 12"
+                        }
+                      )
+                    }
+                  )
+                }
+              )
+            ] }),
+            rightPanel
+          ]
+        }
+      ),
+      !showRightPanelTablet && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          onClick: () => setShowRightPanelTablet(true),
+          className: "fixed bottom-6 right-6 bg-blue-500 text-white px-4 py-3 rounded-full shadow-lg hover:bg-blue-600 transition-colors flex items-center gap-2",
+          "aria-label": "Open AI assistant panel",
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "svg",
+              {
+                className: "w-5 h-5",
+                fill: "none",
+                stroke: "currentColor",
+                viewBox: "0 0 24 24",
+                children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "path",
+                  {
+                    strokeLinecap: "round",
+                    strokeLinejoin: "round",
+                    strokeWidth: 2,
+                    d: "M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  }
+                )
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-sm font-medium", children: "Assistant" })
+          ]
+        }
+      )
+    ] });
+  }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(
     ResizablePanelGroup,
     {
@@ -32150,20 +32526,25 @@ function useKeyboardNavigation({
   };
 }
 function useLibraryFilterManager() {
-  const locationFilter = useLibraryStore((state) => state.locationFilter);
+  const filterMode = useLibraryStore((state) => state.filterMode);
+  const semanticFilter = useLibraryStore((state) => state.semanticFilter);
+  const exclusiveFilter = useLibraryStore((state) => state.exclusiveFilter);
   const categoryFilter = useLibraryStore((state) => state.categoryFilter);
   const qualityFilter = useLibraryStore((state) => state.qualityFilter);
   const statusFilter = useLibraryStore((state) => state.statusFilter);
   const searchQuery = useLibraryStore((state) => state.searchQuery);
-  const setLocationFilter = useLibraryStore((state) => state.setLocationFilter);
+  const setFilterMode = useLibraryStore((state) => state.setFilterMode);
+  const setSemanticFilter = useLibraryStore((state) => state.setSemanticFilter);
+  const setExclusiveFilter = useLibraryStore((state) => state.setExclusiveFilter);
   const setCategoryFilter = useLibraryStore((state) => state.setCategoryFilter);
   const setQualityFilter = useLibraryStore((state) => state.setQualityFilter);
   const setStatusFilter = useLibraryStore((state) => state.setStatusFilter);
   const setSearchQuery = useLibraryStore((state) => state.setSearchQuery);
   const clearFilters = useLibraryStore((state) => state.clearFilters);
   const { hasActiveFilters, activeFilterCount } = reactExports.useMemo(() => {
+    const activeFilter = filterMode === "semantic" ? semanticFilter : exclusiveFilter;
     let count2 = 0;
-    if (locationFilter !== "all") count2++;
+    if (activeFilter !== "all") count2++;
     if (categoryFilter !== null) count2++;
     if (qualityFilter !== null) count2++;
     if (statusFilter !== null) count2++;
@@ -32172,10 +32553,12 @@ function useLibraryFilterManager() {
       hasActiveFilters: count2 > 0,
       activeFilterCount: count2
     };
-  }, [locationFilter, categoryFilter, qualityFilter, statusFilter, searchQuery]);
+  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, searchQuery]);
   return {
     // State
-    locationFilter,
+    filterMode,
+    semanticFilter,
+    exclusiveFilter,
     categoryFilter,
     qualityFilter,
     statusFilter,
@@ -32184,7 +32567,9 @@ function useLibraryFilterManager() {
     hasActiveFilters,
     activeFilterCount,
     // Actions
-    setLocationFilter,
+    setFilterMode,
+    setSemanticFilter,
+    setExclusiveFilter,
     setCategoryFilter,
     setQualityFilter,
     setStatusFilter,
@@ -32195,10 +32580,26 @@ function useLibraryFilterManager() {
 function useTransitionFilters() {
   const filterManager = useLibraryFilterManager();
   const [isPending, startTransition] = reactExports.useTransition();
-  const setLocationFilter = reactExports.useCallback(
+  const setFilterMode = reactExports.useCallback(
+    (mode) => {
+      startTransition(() => {
+        filterManager.setFilterMode(mode);
+      });
+    },
+    [filterManager]
+  );
+  const setSemanticFilter = reactExports.useCallback(
     (filter) => {
       startTransition(() => {
-        filterManager.setLocationFilter(filter);
+        filterManager.setSemanticFilter(filter);
+      });
+    },
+    [filterManager]
+  );
+  const setExclusiveFilter = reactExports.useCallback(
+    (filter) => {
+      startTransition(() => {
+        filterManager.setExclusiveFilter(filter);
       });
     },
     [filterManager]
@@ -32242,7 +32643,9 @@ function useTransitionFilters() {
   }, [filterManager]);
   return {
     // State (read directly, no transition needed)
-    locationFilter: filterManager.locationFilter,
+    filterMode: filterManager.filterMode,
+    semanticFilter: filterManager.semanticFilter,
+    exclusiveFilter: filterManager.exclusiveFilter,
     categoryFilter: filterManager.categoryFilter,
     qualityFilter: filterManager.qualityFilter,
     statusFilter: filterManager.statusFilter,
@@ -32253,7 +32656,9 @@ function useTransitionFilters() {
     // Transition state
     isPending,
     // Actions (wrapped)
-    setLocationFilter,
+    setFilterMode,
+    setSemanticFilter,
+    setExclusiveFilter,
     setCategoryFilter,
     setQualityFilter,
     setStatusFilter,
@@ -32273,12 +32678,16 @@ function Library() {
   const { downloadQueue, isDownloading } = useAppStore();
   const [expandedTranscripts, setExpandedTranscripts] = reactExports.useState(/* @__PURE__ */ new Set());
   const {
-    locationFilter,
+    filterMode,
+    semanticFilter,
+    exclusiveFilter,
     categoryFilter,
     qualityFilter,
     statusFilter,
     searchQuery,
-    setLocationFilter,
+    setFilterMode,
+    setSemanticFilter,
+    setExclusiveFilter,
     setCategoryFilter,
     setQualityFilter,
     setStatusFilter,
@@ -32290,7 +32699,7 @@ function Library() {
   reactExports.useEffect(() => {
     enrichmentAbortController.current.abort();
     enrichmentAbortController.current = new AbortController();
-  }, [locationFilter, categoryFilter, qualityFilter, statusFilter, searchQuery]);
+  }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, searchQuery]);
   const compactView = useUIStore((state) => state.recordingsCompactView);
   const setCompactView = useUIStore((state) => state.setRecordingsCompactView);
   const [bulkProcessing, setBulkProcessing] = reactExports.useState(false);
@@ -32375,7 +32784,8 @@ function Library() {
   }, [enrichmentKey]);
   const filteredRecordings = reactExports.useMemo(() => {
     const filtered = recordings.filter((rec) => {
-      if (locationFilter !== "all" && rec.location !== locationFilter) return false;
+      const locationMatches = filterMode === "semantic" ? matchesSemanticFilter(rec.location, semanticFilter) : matchesExclusiveFilter(rec.location, exclusiveFilter);
+      if (!locationMatches) return false;
       if (categoryFilter !== null && rec.category !== categoryFilter) return false;
       if (qualityFilter !== null && rec.quality !== qualityFilter) return false;
       if (statusFilter !== null && rec.status !== statusFilter) return false;
@@ -32389,7 +32799,7 @@ function Library() {
       return true;
     });
     return filtered;
-  }, [recordings, locationFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery]);
+  }, [recordings, filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery]);
   reactExports.useEffect(() => {
     if (!loading && filteredRecordings.length !== recordings.length) {
       announce(`Showing ${filteredRecordings.length} of ${recordings.length} captures`);
@@ -32751,12 +33161,16 @@ function Library() {
         LibraryFilters,
         {
           stats,
-          locationFilter,
+          filterMode,
+          semanticFilter,
+          exclusiveFilter,
           categoryFilter: categoryFilter ?? "all",
           qualityFilter: qualityFilter ?? "all",
           statusFilter: statusFilter ?? "all",
           searchQuery,
-          onLocationFilterChange: setLocationFilter,
+          onFilterModeChange: setFilterMode,
+          onSemanticFilterChange: setSemanticFilter,
+          onExclusiveFilterChange: setExclusiveFilter,
           onCategoryFilterChange: (filter) => setCategoryFilter(filter === "all" ? null : filter),
           onQualityFilterChange: (filter) => setQualityFilter(filter === "all" ? null : filter),
           onStatusFilterChange: (filter) => setStatusFilter(filter === "all" ? null : filter),
@@ -43278,17 +43692,48 @@ function Actionables() {
       return true;
     });
   }, [actionables, statusFilter]);
-  const handleGenerate = async (a) => {
+  const handleApprove = async (actionable) => {
     try {
+      setGenerating(true);
+      setGenerationError(null);
+      const approvalResult = await window.electronAPI.actionables.generateOutput(actionable.id);
+      if (!approvalResult.success) {
+        setGenerationError(approvalResult.error || "Failed to approve actionable");
+        return;
+      }
       const result = await window.electronAPI.outputs.generate({
-        templateId: a.suggestedTemplate || "minutes",
-        sourceId: a.sourceKnowledgeId,
-        title: `Output for ${a.title}`
+        templateId: actionable.suggestedTemplate || "meeting_minutes",
+        knowledgeCaptureId: actionable.sourceKnowledgeId
       });
-      console.log("Generation result:", result);
-      loadActionables();
+      if (result.success) {
+        setGeneratedOutput({ ...result.data, sourceId: actionable.sourceKnowledgeId });
+        setShowOutputModal(true);
+        await window.electronAPI.actionables.updateStatus(actionable.id, "generated");
+        await loadActionables();
+      } else {
+        setGenerationError(result.error.message || "Failed to generate output");
+        await loadActionables();
+      }
     } catch (error) {
-      console.error("Failed to generate output:", error);
+      setGenerationError(error.message || "Failed to generate output");
+      console.error("Output generation failed:", error);
+      await loadActionables();
+    } finally {
+      setGenerating(false);
+    }
+  };
+  const handleDismiss = async (actionableId) => {
+    try {
+      const result = await window.electronAPI.actionables.updateStatus(actionableId, "dismissed");
+      if (result.success) {
+        await loadActionables();
+      } else {
+        console.error("Failed to dismiss actionable:", result.error);
+        setGenerationError(result.error || "Failed to dismiss actionable");
+      }
+    } catch (error) {
+      console.error("Error dismissing actionable:", error);
+      setGenerationError(error.message || "Failed to dismiss actionable");
     }
   };
   const getStatusIcon = (status) => {
@@ -43361,6 +43806,15 @@ function Actionables() {
                 /* @__PURE__ */ jsxRuntimeExports.jsx(Clock, { className: "h-3 w-3" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: formatDateTime(actionable.createdAt) })
               ] }),
+              actionable.confidence && actionable.status === "pending" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-1 text-[10px] font-medium bg-muted/50 px-2 py-0.5 rounded-full", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(Sparkles, { className: "h-3 w-3 text-amber-500" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: cn(
+                  actionable.confidence >= 0.8 ? "text-emerald-600" : actionable.confidence >= 0.6 ? "text-amber-600" : "text-red-600"
+                ), children: [
+                  Math.round(actionable.confidence * 100),
+                  "% confidence"
+                ] })
+              ] }),
               actionable.suggestedRecipients.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-1 text-[10px] text-muted-foreground font-medium bg-muted/50 px-2 py-0.5 rounded-full", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx(Users, { className: "h-3 w-3" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
@@ -43371,15 +43825,29 @@ function Actionables() {
             ] })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 flex-shrink-0 w-full sm:w-auto border-t sm:border-0 pt-4 sm:pt-0", children: [
-            actionable.status === "pending" && /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { onClick: () => handleGenerate(actionable), size: "sm", className: "flex-1 sm:flex-none gap-2 shadow-sm", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(Sparkles, { className: "h-4 w-4" }),
-              "Generate Now"
+            actionable.status === "pending" && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { onClick: () => handleApprove(actionable), size: "sm", className: "flex-1 sm:flex-none gap-2 shadow-sm", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(Sparkles, { className: "h-4 w-4" }),
+                "Approve & Generate"
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                Button,
+                {
+                  onClick: () => handleDismiss(actionable.id),
+                  variant: "ghost",
+                  size: "sm",
+                  className: "flex-1 sm:flex-none gap-2 text-muted-foreground hover:text-destructive",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(X, { className: "h-4 w-4" }),
+                    "Dismiss"
+                  ]
+                }
+              )
             ] }),
             actionable.status === "generated" && /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "outline", size: "sm", className: "flex-1 sm:flex-none gap-2", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx(FileText, { className: "h-4 w-4" }),
-              "View Artifact"
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(Button, { variant: "ghost", size: "icon", className: "h-9 w-9 text-muted-foreground hover:text-destructive transition-colors", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "h-4 w-4" }) })
+              "View Output"
+            ] })
           ] })
         ] })
       ] }) }, actionable.id)) }),

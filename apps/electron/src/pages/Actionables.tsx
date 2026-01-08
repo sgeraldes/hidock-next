@@ -132,21 +132,59 @@ export function Actionables() {
     })
   }, [actionables, statusFilter])
 
-  const handleGenerate = async (a: Actionable) => {
+  const handleApprove = async (actionable: Actionable) => {
     try {
-      // Trigger generation
-      const result = await window.electronAPI.outputs.generate({
-        templateId: (a.suggestedTemplate as any) || 'minutes',
-        sourceId: a.sourceKnowledgeId,
-        title: `Output for ${a.title}`
-      } as any)
-      console.log('Generation result:', result)
+      setGenerating(true)
+      setGenerationError(null)
 
-      
-      // Reload
-      loadActionables()
-    } catch (error) {
-      console.error('Failed to generate output:', error)
+      // Call generateOutput handler to update status to in_progress
+      const approvalResult = await window.electronAPI.actionables.generateOutput(actionable.id)
+
+      if (!approvalResult.success) {
+        setGenerationError(approvalResult.error || 'Failed to approve actionable')
+        return
+      }
+
+      // Now trigger actual output generation
+      const result = await window.electronAPI.outputs.generate({
+        templateId: actionable.suggestedTemplate || 'meeting_minutes',
+        knowledgeCaptureId: actionable.sourceKnowledgeId
+      })
+
+      if (result.success) {
+        setGeneratedOutput({ ...result.data, sourceId: actionable.sourceKnowledgeId })
+        setShowOutputModal(true)
+
+        // Update actionable status to generated
+        await window.electronAPI.actionables.updateStatus(actionable.id, 'generated')
+        await loadActionables()
+      } else {
+        setGenerationError(result.error.message || 'Failed to generate output')
+        // Status will be reverted to pending by backend
+        await loadActionables()
+      }
+    } catch (error: any) {
+      setGenerationError(error.message || 'Failed to generate output')
+      console.error('Output generation failed:', error)
+      await loadActionables()
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  const handleDismiss = async (actionableId: string) => {
+    try {
+      const result = await window.electronAPI.actionables.updateStatus(actionableId, 'dismissed')
+
+      if (result.success) {
+        await loadActionables()
+      } else {
+        console.error('Failed to dismiss actionable:', result.error)
+        setGenerationError(result.error || 'Failed to dismiss actionable')
+      }
+    } catch (error: any) {
+      console.error('Error dismissing actionable:', error)
+      setGenerationError(error.message || 'Failed to dismiss actionable')
     }
   }
 
@@ -238,6 +276,18 @@ export function Actionables() {
                             <Clock className="h-3 w-3" />
                             <span>{formatDateTime(actionable.createdAt)}</span>
                           </div>
+                          {actionable.confidence && actionable.status === 'pending' && (
+                            <div className="flex items-center gap-1 text-[10px] font-medium bg-muted/50 px-2 py-0.5 rounded-full">
+                              <Sparkles className="h-3 w-3 text-amber-500" />
+                              <span className={cn(
+                                actionable.confidence >= 0.8 ? "text-emerald-600" :
+                                actionable.confidence >= 0.6 ? "text-amber-600" :
+                                "text-red-600"
+                              )}>
+                                {Math.round(actionable.confidence * 100)}% confidence
+                              </span>
+                            </div>
+                          )}
                           {actionable.suggestedRecipients.length > 0 && (
                             <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-medium bg-muted/50 px-2 py-0.5 rounded-full">
                               <Users className="h-3 w-3" />
@@ -248,20 +298,28 @@ export function Actionables() {
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0 w-full sm:w-auto border-t sm:border-0 pt-4 sm:pt-0">
                         {actionable.status === 'pending' && (
-                          <Button onClick={() => handleGenerate(actionable)} size="sm" className="flex-1 sm:flex-none gap-2 shadow-sm">
-                            <Sparkles className="h-4 w-4" />
-                            Generate Now
-                          </Button>
+                          <>
+                            <Button onClick={() => handleApprove(actionable)} size="sm" className="flex-1 sm:flex-none gap-2 shadow-sm">
+                              <Sparkles className="h-4 w-4" />
+                              Approve & Generate
+                            </Button>
+                            <Button
+                              onClick={() => handleDismiss(actionable.id)}
+                              variant="ghost"
+                              size="sm"
+                              className="flex-1 sm:flex-none gap-2 text-muted-foreground hover:text-destructive"
+                            >
+                              <X className="h-4 w-4" />
+                              Dismiss
+                            </Button>
+                          </>
                         )}
                         {actionable.status === 'generated' && (
                           <Button variant="outline" size="sm" className="flex-1 sm:flex-none gap-2">
                             <FileText className="h-4 w-4" />
-                            View Artifact
+                            View Output
                           </Button>
                         )}
-                        <Button variant="ghost" size="icon" className="h-9 w-9 text-muted-foreground hover:text-destructive transition-colors">
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
                       </div>
                     </div>
                   </div>
