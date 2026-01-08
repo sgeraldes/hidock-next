@@ -26,57 +26,14 @@ if not exist ".venv.win" (
     echo   setup-windows.bat
     pause
     exit /b 1
-    REM Resolve per-platform virtual environment using selector
-    setlocal ENABLEDELAYEDEXPANSION
-    for /f "usebackq delims=" %%I in (`python scripts\env\select_venv.py --print 2^>nul`) do set VENV_PATH=%%I
+)
 
-    if not defined VENV_PATH (
-        echo Could not determine virtual environment path. Attempting to create...
-        for /f "usebackq delims=" %%I in (`python scripts\env\select_venv.py --ensure --print 2^>nul`) do set VENV_PATH=%%I
-    )
-
-    if not defined VENV_PATH (
-        echo Error: Failed to resolve virtual environment path.
-        echo Run: python scripts\env\select_venv.py --ensure --print
-        pause
-        exit /b 1
-    )
-
-    if not exist "%VENV_PATH%" (
-        echo Creating virtual environment at: %VENV_PATH%
-        python scripts\env\select_venv.py --ensure >nul
-    )
-
-    REM Legacy migration warning
-    if exist "apps\desktop\.venv" if not exist "%VENV_PATH%" (
-        echo Detected legacy apps\desktop\.venv directory.
-        echo New per-platform environments are documented in docs\VENV.md
-    )
-
-    REM Activate environment
-    set ACTIVATE_PATH=%VENV_PATH%\Scripts\activate.bat
-    if exist "%ACTIVATE_PATH%" (
-        echo Activating environment: %VENV_PATH%
-        call "%ACTIVATE_PATH%"
-    ) else (
-        echo Error: Activation script not found at %ACTIVATE_PATH%
-        echo Environment may be corrupted. Recreating...
-        python scripts\env\select_venv.py --ensure >nul
-        if exist "%ACTIVATE_PATH%" (
-            call "%ACTIVATE_PATH%"
-        ) else (
-            echo Failed to activate environment.
-            echo See docs\VENV.md for manual recovery steps.
-            pause
-            exit /b 1
-        )
-    )
-
-    REM Navigate to desktop app directory after activation (PYTHONPATH unaffected)
-    cd apps\desktop
-    echo   setup-windows.bat
-    echo or
-    echo   python setup.py
+REM Activate the virtual environment
+echo Activating virtual environment...
+call .venv.win\Scripts\activate.bat
+if errorlevel 1 (
+    echo Error: Failed to activate virtual environment!
+    echo Try running setup again: setup-windows.bat
     pause
     exit /b 1
 )
@@ -109,4 +66,3 @@ if errorlevel 1 (
     echo Application exited with an error.
     pause
 )
-endlocal
