@@ -88,46 +88,6 @@ export function getDatabasePath(): string {
   return join(getDataPath(), 'data', 'hidock.db')
 }
 
-/**
- * Create a WAV header for raw PCM audio data.
- * HiDock devices output 16kHz, mono, 16-bit PCM audio.
- */
-function createWavHeader(dataLength: number, sampleRate = 16000, channels = 1, bitsPerSample = 16): Buffer {
-  const byteRate = sampleRate * channels * (bitsPerSample / 8)
-  const blockAlign = channels * (bitsPerSample / 8)
-  const header = Buffer.alloc(44)
-
-  // RIFF chunk descriptor
-  header.write('RIFF', 0)
-  header.writeUInt32LE(36 + dataLength, 4) // File size - 8
-  header.write('WAVE', 8)
-
-  // fmt sub-chunk
-  header.write('fmt ', 12)
-  header.writeUInt32LE(16, 16) // Subchunk1 size (16 for PCM)
-  header.writeUInt16LE(1, 20) // Audio format (1 = PCM)
-  header.writeUInt16LE(channels, 22)
-  header.writeUInt32LE(sampleRate, 24)
-  header.writeUInt32LE(byteRate, 28)
-  header.writeUInt16LE(blockAlign, 32)
-  header.writeUInt16LE(bitsPerSample, 34)
-
-  // data sub-chunk
-  header.write('data', 36)
-  header.writeUInt32LE(dataLength, 40)
-
-  return header
-}
-
-/**
- * Check if a buffer already has a valid WAV header.
- */
-function hasWavHeader(data: Buffer): boolean {
-  if (data.length < 44) return false
-  const riff = data.toString('ascii', 0, 4)
-  const wave = data.toString('ascii', 8, 12)
-  return riff === 'RIFF' && wave === 'WAVE'
-}
 
 export async function saveRecording(
   filename: string,
@@ -167,14 +127,8 @@ export async function saveRecording(
     }
   }
 
-  // For HDA files (raw PCM from HiDock device), add WAV header if not already present
-  // HiDock outputs 16kHz, mono, 16-bit PCM audio
-  let dataToWrite = data
-  if (isHdaFile && !hasWavHeader(data)) {
-    const wavHeader = createWavHeader(data.length)
-    dataToWrite = Buffer.concat([wavHeader, data])
-    console.log(`[FileStorage] Added WAV header to ${cleanFilename} (${data.length} bytes PCM -> ${dataToWrite.length} bytes WAV)`)
-  }
+  // Write the data as-is without modifications
+  const dataToWrite = data
 
   writeFileSync(filePath, dataToWrite)
 
@@ -380,17 +334,7 @@ export function readRecordingFile(filePath: string): Buffer | null {
     }
 
     if (existsSync(filePath)) {
-      let data = readFileSync(filePath)
-
-      // For .wav files that are missing WAV header (legacy HiDock downloads),
-      // add header on-the-fly to make them playable
-      const ext = extname(filePath).toLowerCase()
-      if (ext === '.wav' && !hasWavHeader(data)) {
-        console.log(`[FileStorage] Adding WAV header on-the-fly for playback: ${basename(filePath)}`)
-        const wavHeader = createWavHeader(data.length)
-        data = Buffer.concat([wavHeader, data])
-      }
-
+      const data = readFileSync(filePath)
       return data
     }
     return null
