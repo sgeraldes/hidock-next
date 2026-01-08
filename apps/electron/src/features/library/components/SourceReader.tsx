@@ -13,7 +13,7 @@ import { useState } from 'react'
 import { TranscriptViewer } from './TranscriptViewer'
 import { UnifiedRecording, hasLocalPath } from '@/types/unified-recording'
 import { Transcript, parseJsonArray } from '@/types'
-import { Play, Pause, Volume2 } from 'lucide-react'
+import { Play, Pause, Volume2, Calendar, Clock, HardDrive, Tag, ExternalLink } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
 import { formatDuration } from '@/lib/utils'
@@ -52,22 +52,57 @@ export function SourceReader({
 
   const canPlay = hasLocalPath(recording)
 
+  const fileSize = recording.size > 0 ? `${(recording.size / 1024 / 1024).toFixed(1)} MB` : null
+
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header with recording metadata */}
-      <div className="p-4 border-b space-y-2">
-        <h2 className="text-lg font-semibold truncate" title={recording.filename}>
-          {recording.title || recording.filename}
-        </h2>
-        <div className="flex items-center gap-4 text-sm text-muted-foreground">
-          <span>{formatDuration(recording.duration)}</span>
-          <span>•</span>
-          <span>{new Date(recording.dateRecorded).toLocaleDateString()}</span>
+      <div className="p-6 border-b space-y-4">
+        <div>
+          <h2 className="text-xl font-semibold mb-2" title={recording.filename}>
+            {recording.title || recording.filename}
+          </h2>
+
+          {/* Tags/Category */}
+          {recording.category && (
+            <div className="flex items-center gap-2 mb-3">
+              <Tag className="h-4 w-4 text-muted-foreground" />
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary">
+                {recording.category}
+              </span>
+            </div>
+          )}
+
+          {/* Metadata Grid */}
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            {/* Duration */}
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Clock className="h-4 w-4" />
+              <span>{formatDuration(recording.duration)}</span>
+            </div>
+
+            {/* Date */}
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Calendar className="h-4 w-4" />
+              <span>{new Date(recording.dateRecorded).toLocaleDateString()}</span>
+            </div>
+
+            {/* File Size */}
+            {fileSize && (
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <HardDrive className="h-4 w-4" />
+                <span>{fileSize}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Linked Meeting */}
           {recording.meetingSubject && (
-            <>
-              <span>•</span>
-              <span className="truncate">{recording.meetingSubject}</span>
-            </>
+            <div className="mt-3 flex items-center gap-2 text-sm">
+              <ExternalLink className="h-4 w-4 text-muted-foreground" />
+              <span className="text-muted-foreground">Meeting:</span>
+              <span className="font-medium truncate">{recording.meetingSubject}</span>
+            </div>
           )}
         </div>
       </div>
