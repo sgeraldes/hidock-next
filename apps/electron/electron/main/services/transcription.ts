@@ -13,6 +13,7 @@ import {
   addRecordingMeetingCandidate,
   linkRecordingToMeeting,
   updateKnowledgeCaptureTitle,
+  run,
   type Transcript
 } from './database'
 import { BrowserWindow } from 'electron'
@@ -92,6 +93,92 @@ async function processQueue(): Promise<void> {
   }
 
   isProcessing = false
+}
+
+interface ActionableDetection {
+  type: 'meeting_minutes' | 'interview_feedback' | 'status_report' |
+        'decision_log' | 'action_items' | 'research_summary'
+  confidence: number // 0.0 to 1.0
+  suggestedTitle: string
+  reason: string // Why detected
+  suggestedTemplate?: string
+  suggestedRecipients?: string[]
+}
+
+async function detectActionables(
+  transcriptText: string,
+  knowledgeCaptureId: string,
+  metadata: { title?: string; questions?: string[] }
+): Promise<ActionableDetection[]> {
+  const config = getConfig()
+  if (!config.transcription.geminiApiKey) {
+    console.log('[Actionable Detection] Gemini API key not configured, skipping')
+    return []
+  }
+
+  // Skip very short transcripts
+  const wordCount = transcriptText.split(/\s+/).filter(w => w.length > 0).length
+  if (wordCount < 100) {
+    console.log('[Actionable Detection] Transcript too short (<100 words), skipping')
+    return []
+  }
+
+  // Truncate very long transcripts to last 5000 words
+  const words = transcriptText.split(/\s+/)
+  const truncatedText = words.length > 5000 ? words.slice(-5000).join(' ') : transcriptText
+
+  const prompt = `Analyze this meeting transcript and detect if the speaker intends to create any outputs or documents.
+
+Transcript:
+${truncatedText}
+
+Meeting Title: ${metadata.title || 'Unknown'}
+Questions: ${metadata.questions?.join(', ') || 'None'}
+
+Detect if speaker mentions need to:
+1. Send meeting minutes/notes
+2. Write interview feedback/evaluation
+3. Create status report/update
+4. Document decisions
+5. Share action items
+6. Compile research/findings
+
+For each detected intent, return:
+- type: The type of actionable (meeting_minutes, interview_feedback, status_report, decision_log, action_items, research_summary)
+- confidence: 0.0-1.0 (how confident you are)
+- suggestedTitle: Brief title for the actionable (e.g., "Send meeting notes to team")
+- reason: Why you detected this (quote from transcript)
+- suggestedTemplate: Template name to use (e.g., "meeting_minutes", "interview_feedback")
+- suggestedRecipients: Who should receive it (if mentioned)
+
+Return as JSON array. If no actionables detected, return empty array [].
+Only include detections with confidence >= 0.6.`
+
+  try {
+    const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
+    const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.0-flash-exp' })
+
+    const result = await model.generateContent(prompt)
+    const responseText = result.response.text()
+
+    // Extract JSON from response (might be wrapped in markdown code blocks)
+    const jsonMatch = responseText.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) {
+      console.log('[Actionable Detection] No JSON array found in response')
+      return []
+    }
+
+    const detections = JSON.parse(jsonMatch[0]) as ActionableDetection[]
+
+    // Filter out low-confidence detections
+    const filtered = detections.filter(d => d.confidence >= 0.6)
+    console.log(`[Actionable Detection] Detected ${filtered.length} actionables for ${knowledgeCaptureId}`)
+
+    return filtered
+  } catch (error) {
+    console.error('[Actionable Detection] Failed:', error)
+    return [] // Fail gracefully
+  }
 }
 
 async function transcribeRecording(recordingId: string): Promise<void> {
@@ -304,6 +391,44 @@ Respond in JSON format:
   // Auto-update recording title if we have a title suggestion
   if (analysis.title_suggestion) {
     updateKnowledgeCaptureTitle(recordingId, analysis.title_suggestion)
+  }
+
+  // Detect actionables from transcript
+  try {
+    const detections = await detectActionables(fullText, recordingId, {
+      title: analysis.title_suggestion,
+      questions: analysis.question_suggestions
+    })
+
+    // Create actionable entries with TEXT IDs
+    for (const detection of detections) {
+      const actionableId = `act_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+
+      run(
+        `INSERT INTO actionables (
+          id, source_knowledge_id, type, title, description, status,
+          confidence, suggested_template, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          actionableId,
+          recordingId, // source_knowledge_id references knowledge_captures.id
+          detection.type,
+          detection.suggestedTitle,
+          detection.reason,
+          'pending',
+          detection.confidence,
+          detection.suggestedTemplate || null,
+          new Date().toISOString()
+        ]
+      )
+    }
+
+    if (detections.length > 0) {
+      console.log(`[Actionable Detection] Created ${detections.length} actionables for ${recordingId}`)
+    }
+  } catch (error) {
+    console.error('[Actionable Detection] Failed to create actionables:', error)
+    // Don't fail the transcription if actionable detection fails
   }
 
   // Index transcript into vector store for RAG
