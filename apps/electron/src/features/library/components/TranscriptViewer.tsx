@@ -24,6 +24,27 @@ interface TranscriptSegment {
   startMs: number
   endMs?: number
   text: string
+  speaker?: string
+}
+
+/**
+ * Parse speaker name from text.
+ * Supports formats: "Speaker Name:" or "[Speaker Name]" at the start of text
+ */
+function parseSpeaker(text: string): { speaker: string | undefined; remainingText: string } {
+  // Try "Speaker Name:" format
+  const colonMatch = text.match(/^([A-Z][^:]*?):\s*(.*)/)
+  if (colonMatch) {
+    return { speaker: colonMatch[1].trim(), remainingText: colonMatch[2].trim() }
+  }
+
+  // Try "[Speaker Name]" format
+  const bracketMatch = text.match(/^\[([^\]]+)\]\s*(.*)/)
+  if (bracketMatch) {
+    return { speaker: bracketMatch[1].trim(), remainingText: bracketMatch[2].trim() }
+  }
+
+  return { speaker: undefined, remainingText: text }
 }
 
 /**
@@ -81,9 +102,13 @@ function parseTranscriptSegments(transcript: string): TranscriptSegment[] {
         segments[segments.length - 1].endMs = startMs
       }
 
+      // Parse speaker name from text
+      const { speaker, remainingText } = parseSpeaker(text.trim())
+
       segments.push({
         startMs,
-        text: text.trim()
+        text: remainingText,
+        speaker
       })
     }
   }
@@ -211,22 +236,31 @@ export function TranscriptViewer({
         {transcriptExpanded && (
           <div ref={containerRef} className="p-3 mt-2 bg-muted rounded-lg max-h-96 overflow-y-auto">
             {hasTimestamps ? (
-              <div className="space-y-3">
+              <div className="space-y-4">
                 {segments.map((segment, i) => (
                   <div
                     key={i}
                     ref={i === currentSegmentIndex ? activeSegmentRef : null}
-                    className="text-sm"
+                    className={`text-sm p-3 rounded-lg transition-colors ${
+                      i === currentSegmentIndex ? 'bg-primary/5 border-l-2 border-primary' : ''
+                    }`}
                   >
-                    <TimeAnchor
-                      startMs={segment.startMs}
-                      endMs={segment.endMs}
-                      isActive={i === currentSegmentIndex}
-                      onSeek={onSeek}
-                    >
-                      {null}
-                    </TimeAnchor>
-                    <p className="mt-1 whitespace-pre-wrap">{segment.text}</p>
+                    <div className="flex items-center gap-2 mb-2">
+                      <TimeAnchor
+                        startMs={segment.startMs}
+                        endMs={segment.endMs}
+                        isActive={i === currentSegmentIndex}
+                        onSeek={onSeek}
+                      >
+                        {null}
+                      </TimeAnchor>
+                      {segment.speaker && (
+                        <span className="font-semibold text-foreground">
+                          {segment.speaker}
+                        </span>
+                      )}
+                    </div>
+                    <p className="whitespace-pre-wrap leading-relaxed">{segment.text}</p>
                   </div>
                 ))}
               </div>
