@@ -64,7 +64,7 @@ export { useCalendarUIStore, useViewDateRange, useIsDateInView, useIsMeetingSele
 export type { CalendarUIStore, CalendarViewMode } from './ui/useCalendarUIStore'
 
 export { useUIStore } from './ui/useUIStore'
-export type { UIStore, SidebarContent, PlaybackState } from '@/types/stores'
+export type { UIStore, SidebarContent, PlaybackState, SentimentSegment } from '@/types/stores'
 
 // =============================================================================
 // Legacy Store - Backwards Compatibility

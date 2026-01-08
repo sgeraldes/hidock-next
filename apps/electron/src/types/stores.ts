@@ -115,6 +115,12 @@ export interface FilterStore {
 
 export type SidebarContent = 'calendar' | 'contact' | 'project' | 'chat' | 'none'
 
+export interface SentimentSegment {
+  startTime: number // Seconds
+  endTime: number // Seconds
+  sentiment: 'positive' | 'negative' | 'neutral'
+}
+
 export interface PlaybackState {
   recordingId: string | null
   filePath: string | null
@@ -140,6 +146,8 @@ export interface UIStore {
   playbackCurrentTime: number
   playbackDuration: number
   isPlaying: boolean
+  playbackWaveformData: Float32Array | null
+  playbackSentimentData: SentimentSegment[] | null
 
   // Actions
   toggleSidebar: () => void
@@ -157,6 +165,8 @@ export interface UIStore {
   setCurrentlyPlaying: (recordingId: string | null, filePath: string | null) => void
   setPlaybackProgress: (currentTime: number, duration: number) => void
   setIsPlaying: (playing: boolean) => void
+  setWaveformData: (waveformData: Float32Array | null) => void
+  setSentimentData: (sentimentData: SentimentSegment[] | null) => void
 }
 
 // =============================================================================
