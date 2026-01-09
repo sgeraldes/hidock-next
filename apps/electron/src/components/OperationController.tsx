@@ -474,13 +474,14 @@ export function OperationController() {
       pause: pauseAudio,
       resume: resumeAudio,
       stop: stopAudio,
-      seek: seekAudio
+      seek: seekAudio,
+      loadWaveformOnly: loadWaveformOnly
     }
 
     return () => {
       delete (window as any).__audioControls
     }
-  }, [playAudio, pauseAudio, resumeAudio, stopAudio, seekAudio])
+  }, [playAudio, pauseAudio, resumeAudio, stopAudio, seekAudio, loadWaveformOnly])
 
   // ==========================================================================
   // Calendar Sync Operations
@@ -754,6 +755,9 @@ export const useAudioControls = () => {
     },
     seek: (time: number) => {
       (window as any).__audioControls?.seek(time)
+    },
+    loadWaveformOnly: (recordingId: string, filePath: string) => {
+      (window as any).__audioControls?.loadWaveformOnly(recordingId, filePath)
     }
   }
 }
