@@ -220,9 +220,78 @@ Implemented inline row expansion for the Library view, allowing users to expand 
    - Filter with expanded rows
    - Sort with expanded rows
 
+## Code Review Fixes (2026-01-09)
+
+After code review, the following issues were identified and fixed:
+
+### Fix #1: Animation CSS Class Application (HIGH Priority)
+**Problem**: The expand container div was only rendered when `isExpanded` was true, preventing CSS transitions from working properly.
+
+**Solution**:
+- Changed the container to always render when `onToggleExpand` exists
+- Moved the conditional rendering inside the container to the `SourceRowExpanded` component
+- Applied `expanded` class conditionally based on `isExpanded` state
+- This allows the CSS `grid-template-rows` transition to animate smoothly between collapsed and expanded states
+
+**Commit**: `f0caece5` - fix: correct CSS class application for row expansion animation
+
+### Fix #2: Test Coverage Created (HIGH Priority)
+**Problem**: Spec required comprehensive test coverage but no test files were created during initial implementation.
+
+**Solution**: Created two test files:
+1. `apps/electron/src/__tests__/components/SourceRowExpanded.test.tsx`
+   - Tests metadata rendering
+   - Tests action button presence and states
+   - Tests conditional rendering (transcript, meeting, download)
+   - Tests button disable states based on recording location
+   - 13 test cases covering core functionality
+
+2. `apps/electron/src/__tests__/store/useLibraryStore.expansion.test.ts`
+   - Tests toggle, expand, and collapse operations
+   - Tests multiple rows expanded simultaneously
+   - Tests ID validation (prototype pollution prevention)
+   - Tests edge cases (rapid toggles, invalid IDs, duplicate operations)
+   - 11 test cases covering state management
+
+**Commit**: `054bf91d` - test: add basic test coverage for inline row expansion
+
+### Fix #3: Screen Reader Announcements (MEDIUM Priority)
+**Problem**: Design Review Issue #6 required LiveRegion announcements for expansion state changes, but none were implemented.
+
+**Solution**:
+- Imported existing `LiveRegion` component and `useAnnouncement` hook
+- Added announcement hook to SourceRow component
+- Announce "Recording details expanded. [Date], [Duration]" on expand
+- Announce "Recording details collapsed" on collapse
+- LiveRegion renders at top of component fragment
+
+**Commit**: `2628f5da` - feat: add screen reader announcements for row expansion
+
+### Fix #4: Test Mocks Updated (MEDIUM Priority)
+**Problem**: Adding new `expandedRowIds` state to useLibraryStore broke existing test mocks.
+
+**Solution**: Updated useLibraryStore mocks in 2 test files:
+- `apps/electron/src/__tests__/accessibility/library-a11y.test.tsx`
+- `apps/electron/src/__tests__/performance/library-performance.test.tsx`
+
+Added to mocked state:
+- `expandedRowIds: new Set()`
+- `toggleRowExpansion: vi.fn()`
+- `expandRow: vi.fn()`
+- `collapseRow: vi.fn()`
+- `collapseAllRows: vi.fn()`
+
+**Commit**: `65875724` - test: update store mocks to include expandedRowIds
+
+### Code Review Status
+- **Initial Review**: NEEDS_FIXES
+- **Fixes Applied**: 4/4 issues resolved
+- **Ready for**: QA Testing
+
 ## Notes
 
 - No push to remote (working in local worktree)
 - All TypeScript types properly defined
 - No breaking changes to existing functionality
 - Follows existing code patterns and conventions
+- Code review fixes completed and committed locally
