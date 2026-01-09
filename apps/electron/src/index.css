@@ -87,3 +87,26 @@
 .titlebar-no-drag {
   -webkit-app-region: no-drag;
 }
+
+/* Row expansion animation */
+.source-row__expand-container {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 200ms ease-out;
+}
+
+.source-row__expand-container.expanded {
+  grid-template-rows: 1fr;
+}
+
+.source-row__expand-content {
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* Respect user's motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  .source-row__expand-container {
+    transition: none;
+  }
+}
