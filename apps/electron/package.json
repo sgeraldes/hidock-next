@@ -53,7 +53,7 @@
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^2.1.9",
-    "react-router-dom": "^6.28.0",
+    "react-router-dom": "^6.30.3",
     "sql.js": "^1.11.0",
     "tailwind-merge": "^2.5.4",
     "tailwindcss-animate": "^1.0.7",
