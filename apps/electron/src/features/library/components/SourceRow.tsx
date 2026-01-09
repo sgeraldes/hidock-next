@@ -8,6 +8,7 @@ import { Meeting, Transcript } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
 import { SourceRowExpanded } from './SourceRowExpanded'
+import { LiveRegion, useAnnouncement } from './LiveRegion'
 import { useLibraryStore } from '@/store/useLibraryStore'
 
 interface SourceRowProps {
@@ -61,6 +62,7 @@ export const SourceRow = memo(function SourceRow({
   void _downloadProgress
   const canPlay = hasLocalPath(recording)
   const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
+  const { message: announcement, announce } = useAnnouncement()
 
   const handleCheckboxClick = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -78,11 +80,24 @@ export const SourceRow = memo(function SourceRow({
 
   const handleExpandClick = (e: React.MouseEvent) => {
     e.stopPropagation()
+
+    // Announce expansion state change to screen readers
+    if (!isExpanded) {
+      const date = recording.dateRecorded
+        ? new Date(recording.dateRecorded).toLocaleDateString()
+        : 'Unknown date'
+      const duration = recording.duration ? formatDuration(recording.duration) : 'Unknown duration'
+      announce(`Recording details expanded. ${date}, ${duration}`)
+    } else {
+      announce('Recording details collapsed')
+    }
+
     onToggleExpand?.()
   }
 
   return (
     <>
+      <LiveRegion message={announcement} />
       <div
         className={`flex items-center justify-between p-3 hover:bg-muted/50 cursor-pointer ${isSelected ? 'bg-primary/5' : ''}`}
         role="option"
