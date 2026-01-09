@@ -57,9 +57,9 @@ export function LibraryFilters({
 
   return (
     <div className="flex flex-col gap-4 mt-4">
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-4">
         {/* Filter mode toggle */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" role="group" aria-label="Filter mode">
           <span className="text-xs font-medium text-muted-foreground">Mode:</span>
           <div className="flex gap-1 p-1 bg-muted rounded-lg">
             <button
@@ -69,7 +69,9 @@ export function LibraryFilters({
                   ? 'bg-background shadow-sm'
                   : 'hover:bg-background/50'
               }`}
-              title="Show all files matching the filter (e.g., Source shows all files from any source)"
+              title="Show all files matching the filter (e.g., Device shows all files from any device)"
+              aria-pressed={filterMode === 'semantic'}
+              aria-label="Show all matching files"
             >
               All Matching
             </button>
@@ -80,7 +82,9 @@ export function LibraryFilters({
                   ? 'bg-background shadow-sm'
                   : 'hover:bg-background/50'
               }`}
-              title="Show only files in exact location (e.g., Source Only shows files not downloaded)"
+              title="Show only files in exact location (e.g., Device Only shows files not downloaded)"
+              aria-pressed={filterMode === 'exclusive'}
+              aria-label="Show exact location only"
             >
               Exact Only
             </button>
@@ -88,7 +92,7 @@ export function LibraryFilters({
         </div>
 
         {/* Location filter */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" role="group" aria-label="Location filter">
           <Filter className="h-4 w-4 text-muted-foreground" />
           <div className="flex rounded-lg border overflow-hidden" data-testid="location-filter">
             <button
@@ -98,6 +102,8 @@ export function LibraryFilters({
                   ? 'bg-primary text-primary-foreground'
                   : 'hover:bg-muted'
               }`}
+              aria-pressed={activeFilter === 'all'}
+              aria-label="All locations"
             >
               All ({stats.total})
             </button>
@@ -110,9 +116,11 @@ export function LibraryFilters({
                       ? 'bg-primary text-primary-foreground'
                       : 'hover:bg-muted'
                   }`}
+                  aria-pressed={semanticFilter === 'on-source'}
+                  aria-label="On device"
                 >
                   <Cloud className="h-3 w-3 inline mr-1" />
-                  Source ({stats.onSource})
+                  Device ({stats.onSource})
                 </button>
                 <button
                   onClick={() => onSemanticFilterChange('locally-available')}
@@ -121,6 +129,8 @@ export function LibraryFilters({
                       ? 'bg-primary text-primary-foreground'
                       : 'hover:bg-muted'
                   }`}
+                  aria-pressed={semanticFilter === 'locally-available'}
+                  aria-label="Locally available"
                 >
                   <HardDrive className="h-3 w-3 inline mr-1" />
                   Locally Available ({stats.locallyAvailable})
@@ -132,6 +142,8 @@ export function LibraryFilters({
                       ? 'bg-primary text-primary-foreground'
                       : 'hover:bg-muted'
                   }`}
+                  aria-pressed={semanticFilter === 'synced'}
+                  aria-label="Synced to both"
                 >
                   <Check className="h-3 w-3 inline mr-1" />
                   Synced ({stats.both})
@@ -146,9 +158,11 @@ export function LibraryFilters({
                       ? 'bg-primary text-primary-foreground'
                       : 'hover:bg-muted'
                   }`}
+                  aria-pressed={exclusiveFilter === 'source-only'}
+                  aria-label="Device only"
                 >
                   <Cloud className="h-3 w-3 inline mr-1" />
-                  Source Only ({stats.deviceOnly})
+                  Device Only ({stats.deviceOnly})
                 </button>
                 <button
                   onClick={() => onExclusiveFilterChange('local-only')}
@@ -157,6 +171,8 @@ export function LibraryFilters({
                       ? 'bg-primary text-primary-foreground'
                       : 'hover:bg-muted'
                   }`}
+                  aria-pressed={exclusiveFilter === 'local-only'}
+                  aria-label="Local only"
                 >
                   <HardDrive className="h-3 w-3 inline mr-1" />
                   Local Only ({stats.localOnly})
@@ -168,6 +184,8 @@ export function LibraryFilters({
                       ? 'bg-primary text-primary-foreground'
                       : 'hover:bg-muted'
                   }`}
+                  aria-pressed={exclusiveFilter === 'synced'}
+                  aria-label="Synced to both"
                 >
                   <Check className="h-3 w-3 inline mr-1" />
                   Synced ({stats.both})
@@ -178,7 +196,7 @@ export function LibraryFilters({
         </div>
 
         {/* Category filter */}
-        <div className="flex rounded-lg border overflow-hidden">
+        <div className="flex rounded-lg border overflow-hidden" role="group" aria-label="Category filter">
           {CATEGORIES.map((cat) => (
             <button
               key={cat}
@@ -190,6 +208,8 @@ export function LibraryFilters({
                   ? 'bg-primary text-primary-foreground'
                   : 'hover:bg-muted'
               }`}
+              aria-pressed={categoryFilter === cat}
+              aria-label={`Filter by ${cat}`}
             >
               {cat.charAt(0).toUpperCase() + cat.slice(1)}
             </button>
@@ -204,11 +224,12 @@ export function LibraryFilters({
             value={searchQuery}
             onChange={(e) => onSearchQueryChange(e.target.value)}
             className="pl-9 h-8"
+            aria-label="Search captures"
           />
         </div>
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-4">
         {/* Quality Filter */}
         <div className="flex items-center gap-2">
           <span className="text-xs font-medium text-muted-foreground">Quality:</span>

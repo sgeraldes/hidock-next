@@ -79,7 +79,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
                 ? 'border-b-2 border-blue-500 text-blue-600'
                 : 'text-gray-600 hover:text-gray-900'
             }`}
-            aria-label="Show source content"
+            aria-label="Show recording content"
             aria-pressed={activeMobilePane === 'center'}
           >
             Content
@@ -112,7 +112,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
           {activeMobilePane === 'center' && (
             <div
               role="region"
-              aria-label="Source content viewer"
+              aria-label="Recording content viewer"
               className="h-full overflow-hidden"
             >
               {centerPanel}
@@ -148,7 +148,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
         {/* Center Panel: Source Reader - Flexible */}
         <div
           role="region"
-          aria-label="Source content viewer"
+          aria-label="Recording content viewer"
           className="flex-1 overflow-hidden"
         >
           {centerPanel}
@@ -247,7 +247,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
       >
         <div
           role="region"
-          aria-label="Source content viewer"
+          aria-label="Recording content viewer"
           className="h-full overflow-hidden"
         >
           {centerPanel}
