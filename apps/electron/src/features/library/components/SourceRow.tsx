@@ -237,26 +237,28 @@ export const SourceRow = memo(function SourceRow({
     </div>
 
     {/* Expanded Content */}
-    {isExpanded && onToggleExpand && (
-      <div className="source-row__expand-container expanded">
+    {onToggleExpand && (
+      <div className={`source-row__expand-container ${isExpanded ? 'expanded' : ''}`}>
         <div className="source-row__expand-content">
-          <SourceRowExpanded
-            recording={recording}
-            transcript={transcript}
-            meeting={meeting}
-            isPlaying={isPlaying}
-            isDownloading={isDownloading}
-            isDeleting={isDeleting}
-            deviceConnected={deviceConnected}
-            onPlay={onPlay}
-            onStop={onStop}
-            onDownload={onDownload}
-            onDelete={onDelete}
-            onTranscribe={onTranscribe || (() => {})}
-            onAskAssistant={onAskAssistant}
-            onGenerateOutput={onGenerateOutput}
-            onNavigateToMeeting={onNavigateToMeeting || (() => {})}
-          />
+          {isExpanded && (
+            <SourceRowExpanded
+              recording={recording}
+              transcript={transcript}
+              meeting={meeting}
+              isPlaying={isPlaying}
+              isDownloading={isDownloading}
+              isDeleting={isDeleting}
+              deviceConnected={deviceConnected}
+              onPlay={onPlay}
+              onStop={onStop}
+              onDownload={onDownload}
+              onDelete={onDelete}
+              onTranscribe={onTranscribe || (() => {})}
+              onAskAssistant={onAskAssistant}
+              onGenerateOutput={onGenerateOutput}
+              onNavigateToMeeting={onNavigateToMeeting || (() => {})}
+            />
+          )}
         </div>
       </div>
     )}
