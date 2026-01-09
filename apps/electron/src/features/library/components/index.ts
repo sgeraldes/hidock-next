@@ -1,6 +1,7 @@
 export { LibraryHeader } from './LibraryHeader'
 export { LibraryFilters } from './LibraryFilters'
 export { SourceRow } from './SourceRow'
+export { SourceRowExpanded } from './SourceRowExpanded'
 export { SourceCard } from './SourceCard'
 export { StatusIcon } from './StatusIcon'
 export { EmptyState } from './EmptyState'

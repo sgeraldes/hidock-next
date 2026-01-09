@@ -1,50 +1,61 @@
 import { memo } from 'react'
-import { Mic, FileText, Play, X, Download, RefreshCw, Trash2, AlertCircle } from 'lucide-react'
+import { Mic, FileText, Play, X, Download, RefreshCw, Trash2, AlertCircle, ChevronDown, ChevronRight } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { formatDateTime, formatDuration } from '@/lib/utils'
-import { Meeting } from '@/types'
+import { Meeting, Transcript } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
+import { SourceRowExpanded } from './SourceRowExpanded'
 import { useLibraryStore } from '@/store/useLibraryStore'
 
 interface SourceRowProps {
   recording: UnifiedRecording
   meeting?: Meeting
+  transcript?: Transcript
   isPlaying: boolean
   isDownloading: boolean
   downloadProgress?: number
   isDeleting: boolean
   deviceConnected: boolean
   isSelected?: boolean
+  isExpanded?: boolean
   onSelectionChange?: (id: string, shiftKey: boolean) => void
   onClick?: () => void
+  onToggleExpand?: () => void
   onPlay: () => void
   onStop: () => void
   onDownload: () => void
   onDelete: () => void
+  onTranscribe?: () => void
   onAskAssistant: () => void
   onGenerateOutput: () => void
+  onNavigateToMeeting?: (meetingId: string) => void
 }
 
 export const SourceRow = memo(function SourceRow({
   recording,
   meeting,
+  transcript,
   isPlaying,
   isDownloading,
   downloadProgress: _downloadProgress,
   isDeleting,
   deviceConnected,
   isSelected = false,
+  isExpanded = false,
   onSelectionChange,
   onClick,
+  onToggleExpand,
   onPlay,
   onStop,
   onDownload,
   onDelete,
+  onTranscribe,
   onAskAssistant,
-  onGenerateOutput
+  onGenerateOutput,
+  onNavigateToMeeting
 }: SourceRowProps) {
   // downloadProgress could be used for a progress indicator in the future
   void _downloadProgress
@@ -65,24 +76,43 @@ export const SourceRow = memo(function SourceRow({
     onClick?.()
   }
 
+  const handleExpandClick = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    onToggleExpand?.()
+  }
+
   return (
-    <div
-      className={`flex items-center justify-between p-3 hover:bg-muted/50 cursor-pointer ${isSelected ? 'bg-primary/5' : ''}`}
-      role="option"
-      onClick={handleRowClick}
-      aria-selected={isPlaying || isSelected}
-      tabIndex={0}
-    >
-      <div className="flex items-center gap-3 min-w-0 flex-1">
-        {onSelectionChange && (
-          <Checkbox
-            checked={isSelected}
-            onClick={handleCheckboxClick}
-            aria-label={`Select ${recording.filename}`}
-            className="shrink-0"
-          />
-        )}
-        <StatusIcon recording={recording} />
+    <>
+      <div
+        className={`flex items-center justify-between p-3 hover:bg-muted/50 cursor-pointer ${isSelected ? 'bg-primary/5' : ''}`}
+        role="option"
+        onClick={handleRowClick}
+        aria-selected={isPlaying || isSelected}
+        tabIndex={0}
+      >
+        <div className="flex items-center gap-3 min-w-0 flex-1">
+          {onToggleExpand && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0"
+              onClick={handleExpandClick}
+              aria-expanded={isExpanded}
+              aria-controls={`expanded-${recording.id}`}
+              aria-label={isExpanded ? 'Collapse row' : 'Expand row'}
+            >
+              {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+            </Button>
+          )}
+          {onSelectionChange && (
+            <Checkbox
+              checked={isSelected}
+              onClick={handleCheckboxClick}
+              aria-label={`Select ${recording.filename}`}
+              className="shrink-0"
+            />
+          )}
+          <StatusIcon recording={recording} />
         <div className="min-w-0 flex-1">
           <p className="font-medium text-sm truncate">{recording.filename}</p>
           <p className="text-xs text-muted-foreground truncate">
@@ -205,6 +235,32 @@ export const SourceRow = memo(function SourceRow({
         </Button>
       </div>
     </div>
+
+    {/* Expanded Content */}
+    {isExpanded && onToggleExpand && (
+      <div className="source-row__expand-container expanded">
+        <div className="source-row__expand-content">
+          <SourceRowExpanded
+            recording={recording}
+            transcript={transcript}
+            meeting={meeting}
+            isPlaying={isPlaying}
+            isDownloading={isDownloading}
+            isDeleting={isDeleting}
+            deviceConnected={deviceConnected}
+            onPlay={onPlay}
+            onStop={onStop}
+            onDownload={onDownload}
+            onDelete={onDelete}
+            onTranscribe={onTranscribe || (() => {})}
+            onAskAssistant={onAskAssistant}
+            onGenerateOutput={onGenerateOutput}
+            onNavigateToMeeting={onNavigateToMeeting || (() => {})}
+          />
+        </div>
+      </div>
+    )}
+  </>
   )
 }, (prevProps, nextProps) => {
   // Custom comparison for performance
@@ -217,6 +273,8 @@ export const SourceRow = memo(function SourceRow({
     prevProps.isDeleting === nextProps.isDeleting &&
     prevProps.deviceConnected === nextProps.deviceConnected &&
     prevProps.isSelected === nextProps.isSelected &&
-    prevProps.meeting?.subject === nextProps.meeting?.subject
+    prevProps.isExpanded === nextProps.isExpanded &&
+    prevProps.transcript?.id === nextProps.transcript?.id &&
+    prevProps.meeting?.id === nextProps.meeting?.id
   )
 })
