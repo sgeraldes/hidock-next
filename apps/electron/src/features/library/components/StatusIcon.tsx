@@ -4,9 +4,10 @@ import { UnifiedRecording } from '@/types/unified-recording'
 interface StatusIconProps {
   recording: UnifiedRecording
   showError?: boolean
+  showLabel?: boolean
 }
 
-export function StatusIcon({ recording, showError = false }: StatusIconProps) {
+export function StatusIcon({ recording, showError = false, showLabel = false }: StatusIconProps) {
   // Show error state if applicable
   if (showError) {
     return (
@@ -17,6 +18,7 @@ export function StatusIcon({ recording, showError = false }: StatusIconProps) {
         title="Processing error"
       >
         <AlertCircle className="h-4 w-4" aria-hidden="true" />
+        {showLabel && <span className="text-xs hidden sm:inline">Error</span>}
       </div>
     )
   }
@@ -31,6 +33,7 @@ export function StatusIcon({ recording, showError = false }: StatusIconProps) {
           title="On device only"
         >
           <Cloud className="h-4 w-4" aria-hidden="true" />
+          {showLabel && <span className="text-xs hidden sm:inline">On Device</span>}
         </div>
       )
     case 'local-only':
@@ -42,6 +45,7 @@ export function StatusIcon({ recording, showError = false }: StatusIconProps) {
           title="Downloaded"
         >
           <HardDrive className="h-4 w-4" aria-hidden="true" />
+          {showLabel && <span className="text-xs hidden sm:inline">Downloaded</span>}
         </div>
       )
     case 'both':
@@ -53,6 +57,7 @@ export function StatusIcon({ recording, showError = false }: StatusIconProps) {
           title="Synced"
         >
           <Check className="h-4 w-4" aria-hidden="true" />
+          {showLabel && <span className="text-xs hidden sm:inline">Synced</span>}
         </div>
       )
     default:
