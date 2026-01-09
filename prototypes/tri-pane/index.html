@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HiDock Library Prototypes</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      min-height: 100vh;
+      color: #fff;
+    }
+    .container { max-width: 1100px; margin: 0 auto; padding: 48px 24px; }
+    header { text-align: center; margin-bottom: 48px; }
+    h1 {
+      font-size: 40px; font-weight: 700; margin-bottom: 12px;
+      background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .subtitle { font-size: 16px; color: #94a3b8; max-width: 600px; margin: 0 auto; line-height: 1.6; }
+    .features { display: flex; justify-content: center; gap: 32px; margin-top: 32px; flex-wrap: wrap; }
+    .feature { text-align: center; }
+    .feature-icon { font-size: 28px; margin-bottom: 6px; }
+    .feature-text { font-size: 12px; color: #64748b; }
+
+    .section-title { font-size: 14px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 20px; padding-left: 4px; }
+    .prototypes { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; margin-bottom: 48px; }
+
+    .prototype-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      overflow: hidden;
+      transition: all 0.3s ease;
+    }
+    .prototype-card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(255, 255, 255, 0.15);
+      box-shadow: 0 16px 32px rgba(0, 0, 0, 0.2);
+    }
+    .prototype-preview {
+      height: 160px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .preview-layout {
+      display: flex;
+      width: 85%;
+      height: 70%;
+      border-radius: 6px;
+      overflow: hidden;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+      background: #1e293b;
+    }
+    .preview-pane { height: 100%; }
+    .preview-pane.sidebar { width: 15%; background: #0f172a; border-right: 1px solid #334155; }
+    .preview-pane.list { width: 25%; background: #fff; border-right: 1px solid #e2e8f0; }
+    .preview-pane.main { flex: 1; background: #fff; }
+    .preview-pane.context { width: 22%; background: #f8fafc; border-left: 1px solid #e2e8f0; }
+
+    .prototype-card.a .prototype-preview { background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%); }
+    .prototype-card.b .prototype-preview { background: linear-gradient(135deg, #1a2744 0%, #0f172a 100%); }
+    .prototype-card.c .prototype-preview { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); }
+
+    .badge { position: absolute; top: 12px; right: 12px; padding: 4px 10px; font-size: 10px; font-weight: 600; border-radius: 12px; background: rgba(59, 130, 246, 0.2); color: #60a5fa; text-transform: uppercase; }
+    .badge.new { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+
+    .prototype-info { padding: 20px; }
+    .prototype-name { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+    .prototype-desc { font-size: 13px; color: #94a3b8; line-height: 1.5; margin-bottom: 14px; }
+    .prototype-highlights { margin-bottom: 16px; }
+    .highlight { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #cbd5e1; margin-bottom: 6px; }
+    .highlight-icon { font-size: 14px; }
+    .open-btn {
+      display: block; width: 100%; padding: 10px 20px; text-align: center;
+      background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+      color: white; text-decoration: none; border-radius: 8px; font-weight: 500; font-size: 13px;
+      transition: all 0.2s;
+    }
+    .open-btn:hover { transform: scale(1.02); box-shadow: 0 4px 16px rgba(59, 130, 246, 0.3); }
+
+    .legacy-section { margin-top: 32px; padding-top: 32px; border-top: 1px solid rgba(255,255,255,0.1); }
+    .legacy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+    .legacy-card {
+      padding: 16px;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 10px;
+      text-decoration: none;
+      color: inherit;
+      transition: all 0.2s;
+    }
+    .legacy-card:hover { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.1); }
+    .legacy-title { font-size: 14px; font-weight: 500; margin-bottom: 4px; }
+    .legacy-desc { font-size: 11px; color: #64748b; }
+
+    footer { text-align: center; margin-top: 48px; padding-top: 32px; border-top: 1px solid rgba(255,255,255,0.1); color: #475569; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Knowledge Library Prototypes</h1>
+      <p class="subtitle">
+        Explore different approaches to the tri-pane Library interface with Links, Outline, Insights generation, and enhanced filtering capabilities.
+      </p>
+      <div class="features">
+        <div class="feature">
+          <div class="feature-icon">🔗</div>
+          <div class="feature-text">Links &amp; Relations</div>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">📑</div>
+          <div class="feature-text">Document Outline</div>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">✨</div>
+          <div class="feature-text">Generated Insights</div>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">🏷️</div>
+          <div class="feature-text">Rename + Original</div>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">🔍</div>
+          <div class="feature-text">Advanced Filters</div>
+        </div>
+      </div>
+    </header>
+
+    <div class="section-title">New Prototypes</div>
+    <div class="prototypes">
+      <div class="prototype-card a">
+        <div class="prototype-preview">
+          <span class="badge new">New</span>
+          <div class="preview-layout">
+            <div class="preview-pane sidebar"></div>
+            <div class="preview-pane list"></div>
+            <div class="preview-pane main"></div>
+            <div class="preview-pane context"></div>
+          </div>
+        </div>
+        <div class="prototype-info">
+          <h2 class="prototype-name">A: Enhanced Context Panel</h2>
+          <p class="prototype-desc">
+            Four-tab context panel (Assistant, Outline, Links, Insights) with comprehensive filtering including "Has Insights" and "Linked to" options.
+          </p>
+          <div class="prototype-highlights">
+            <div class="highlight"><span class="highlight-icon">📑</span> Outline with timestamps and icons</div>
+            <div class="highlight"><span class="highlight-icon">🔗</span> Links to People, Projects, Calendar, Actions</div>
+            <div class="highlight"><span class="highlight-icon">✨</span> Categorized insights (Key Points, Actions, Decisions, Questions)</div>
+            <div class="highlight"><span class="highlight-icon">🏷️</span> Editable title with original filename preserved</div>
+          </div>
+          <a href="prototype-a-enhanced-context.html" class="open-btn">Open Prototype A</a>
+        </div>
+      </div>
+
+      <div class="prototype-card b">
+        <div class="prototype-preview">
+          <span class="badge new">New</span>
+          <div class="preview-layout">
+            <div class="preview-pane sidebar"></div>
+            <div class="preview-pane list"></div>
+            <div class="preview-pane main" style="flex: 0.7;"></div>
+            <div class="preview-pane context" style="width: 25%; background: #f1f5f9;"></div>
+          </div>
+        </div>
+        <div class="prototype-info">
+          <h2 class="prototype-name">B: Inline Metadata</h2>
+          <p class="prototype-desc">
+            Split viewer with inline entity chips, sidebar sections, and transcript segments that highlight insight-rich moments.
+          </p>
+          <div class="prototype-highlights">
+            <div class="highlight"><span class="highlight-icon">🏷️</span> Entity chips inline in header (People, Projects, Calendar)</div>
+            <div class="highlight"><span class="highlight-icon">📊</span> Compact list with insight/link badges</div>
+            <div class="highlight"><span class="highlight-icon">💡</span> Transcript segments with insight markers</div>
+            <div class="highlight"><span class="highlight-icon">🤖</span> Embedded AI chat in sidebar</div>
+          </div>
+          <a href="prototype-b-inline-metadata.html" class="open-btn">Open Prototype B</a>
+        </div>
+      </div>
+
+      <div class="prototype-card c">
+        <div class="prototype-preview">
+          <span class="badge new">New</span>
+          <div class="preview-layout">
+            <div class="preview-pane sidebar"></div>
+            <div class="preview-pane list" style="width: 28%;"></div>
+            <div class="preview-pane main" style="flex: 1;"></div>
+          </div>
+        </div>
+        <div class="prototype-info">
+          <h2 class="prototype-name">C: Knowledge Graph</h2>
+          <p class="prototype-desc">
+            Relationship-focused view with connection cards, filter by linked entities, and transcript highlighting for insights and actions.
+          </p>
+          <div class="prototype-highlights">
+            <div class="highlight"><span class="highlight-icon">🕸️</span> Mini relationship graph in source cards</div>
+            <div class="highlight"><span class="highlight-icon">🔍</span> Filter by "Linked to Person/Project"</div>
+            <div class="highlight"><span class="highlight-icon">🎯</span> Highlighted text for insights/actions in transcript</div>
+            <div class="highlight"><span class="highlight-icon">📊</span> Connection cards grid (People, Projects, Calendar, Actions)</div>
+          </div>
+          <a href="prototype-c-knowledge-graph.html" class="open-btn">Open Prototype C</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="legacy-section">
+      <div class="section-title">Previous Prototypes (Visual Exploration)</div>
+      <div class="legacy-grid">
+        <a href="prototype-functional.html" class="legacy-card">
+          <div class="legacy-title">Functional Prototype</div>
+          <div class="legacy-desc">Full feature demo with all source types</div>
+        </a>
+        <a href="prototype-1-minimal.html" class="legacy-card">
+          <div class="legacy-title">Minimal (Light)</div>
+          <div class="legacy-desc">Clean, Notion-inspired style</div>
+        </a>
+        <a href="prototype-2-rich.html" class="legacy-card">
+          <div class="legacy-title">Rich (Dark)</div>
+          <div class="legacy-desc">Gradient, Spotify-inspired style</div>
+        </a>
+        <a href="prototype-3-compact.html" class="legacy-card">
+          <div class="legacy-title">Compact (IDE)</div>
+          <div class="legacy-desc">VS Code-inspired density</div>
+        </a>
+      </div>
+    </div>
+
+    <footer>
+      <p>HiDock Knowledge Library Prototypes</p>
+      <p style="margin-top: 6px;">All prototypes use mocked data for UI demonstration purposes.</p>
+    </footer>
+  </div>
+</body>
+</html>

@@ -11,10 +11,12 @@ echo This will set up HiDock apps for immediate use.
 echo:
 
 echo:
-echo [1/4] Checking Python...
+echo [1/4] Checking Python 3.12...
 py -3.12 --version >nul 2>&1
 if errorlevel 1 goto pyfail
 echo Python 3.12 found!
+for /f "tokens=2" %%i in ('py -3.12 --version 2^>^&1') do set PYTHON_VERSION=%%i
+echo Using Python %PYTHON_VERSION%
 goto afterpy
 
 :pyfail
@@ -37,22 +39,38 @@ exit /b 1
 
 echo:
 echo [2/4] Setting up Desktop App...
-cd apps\desktop
-if not exist .venv (
-    echo Creating Python environment...
-    py -3.12 -m venv .venv
+REM Resolve per-platform venv path
+for /f "usebackq delims=" %%I in (`py -3.12 scripts\env\select_venv.py --print`) do set VENV_PATH=%%I
+if not defined VENV_PATH (
+    echo Creating environment...
+    for /f "usebackq delims=" %%I in (`py -3.12 scripts\env\select_venv.py --ensure --print`) do set VENV_PATH=%%I
+)
+if not defined VENV_PATH (
+    echo ERROR: Could not resolve/create virtual environment.
+    exit /b 1
+)
+
+echo Using environment: %VENV_PATH%
+if not exist "%VENV_PATH%" (
+    py -3.12 scripts\env\select_venv.py --ensure || goto venvfail
+)
+
+REM Determine python inside venv
+set VENV_PY=%VENV_PATH%\Scripts\python.exe
+if not exist "%VENV_PY%" (
+    echo ERROR: python.exe not found in %VENV_PATH%\Scripts
+    goto venvfail
 )
 
 echo Upgrading pip and installing build tools...
-.venv\Scripts\python -m pip install --upgrade pip setuptools wheel
+"%VENV_PY%" -m pip install --upgrade pip setuptools wheel >nul 2>&1
 
 echo Installing dependencies (this may take a few minutes)...
-.venv\Scripts\pip install -e ".[dev]"
+"%VENV_PY%" -m pip install --only-binary :all: pygame pillow numpy scipy 2>nul
+"%VENV_PY%" -m pip install -e "apps/desktop[dev]"
 if errorlevel 1 goto depfail
 
 echo Desktop app setup complete!
-
-cd ..\..
 
 echo:
 echo [3/4] Checking Node.js for Web Apps...
@@ -94,10 +112,20 @@ echo.
 :afterweb
 goto end
 
+:venvfail
+echo ERROR: Failed to create virtual environment!
+echo Make sure Python 3.12 is properly installed.
+exit /b 1
+
 :depfail
 echo.
 echo ERROR: Failed to install dependencies!
 echo Check your internet connection and try again.
+echo.
+echo TROUBLESHOOTING:
+echo   1. Make sure you have Python 3.12 (not 3.14 or other versions)
+echo   2. Try running: %VENV_PATH%\Scripts\pip install -e "apps\desktop" (without dev deps)
+echo   3. Check internet connection
 echo.
 exit /b 1
 
@@ -111,7 +139,7 @@ echo HOW TO RUN:
 echo:
 echo Desktop App:
 echo   1. cd apps\desktop
-echo   2. .venv\Scripts\activate
+echo   2. %VENV_PATH%\Scripts\activate
 echo   3. python main.py
 echo:
 echo Web App (if Node.js installed):

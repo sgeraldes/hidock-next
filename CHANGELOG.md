@@ -5,6 +5,23 @@ All notable changes to HiDock Next will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Database**: Fixed critical initialization crash on fresh installs by re-ordering `SCHEMA` to satisfy foreign key constraints.
+- **Database**: Automated V11 migration logic to correctly apply schema changes (`knowledge_captures`, `audio_sources`, etc.) and migration columns to existing databases.
+- **Database**: Added missing migration tracking columns (`migrated_to_capture_id`, `migration_status`, `migrated_at`) to the base `recordings` table definition.
+- **Knowledge App**: Fixed implementation gaps in Knowledge Capture architecture by identifying missing tables in base schema.
+- **Knowledge App**: Fixed `TypeError` in `json-parsers.ts` during action item parsing for non-string arrays.
+- **Knowledge App**: Fixed missing `category` and `status` fields in `KnowledgeCapture` type definition and database schema.
+
+### Added
+- **Knowledge App**: Added advanced filtering to Knowledge Library by Source (Meetings, Interviews, etc.), Quality, and Status.
+- **Knowledge App**: Implemented "Ask Assistant" and "Generate Output" actions for individual knowledge items with context preservation.
+
+### Changed
+- **Database**: Refactored `MIGRATIONS[11]` to be idempotent and robust, using `v11-knowledge-captures.sql` as the single source of truth for schema updates.
+
 ## [1.0-RC1] - 2025-09-01
 
 ### Added

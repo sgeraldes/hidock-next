@@ -1,4 +1,4 @@
-# HiDock H1E Documentation Index - Organized Edition
+# HiDock H1E Documentation Index
 
 **Version:** 3.0 - Fully Organized  
 **Date:** 2025-08-31  

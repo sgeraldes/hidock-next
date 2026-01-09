@@ -45,14 +45,14 @@ exit /b 1
 echo:
 echo [2/4] Setting up Desktop App...
 REM Resolve per-platform venv path (will not create yet)
-for /f "usebackq delims=" %%I in (`python scripts\env\select_venv.py --print`) do set VENV_PATH=%%I
+for /f "usebackq delims=" %%I in (`py -3.12 scripts\env\select_venv.py --print`) do set VENV_PATH=%%I
 if not defined VENV_PATH (
     echo Resolving environment path ^(creating^)...
-    for /f "usebackq delims=" %%I in (`python scripts\env\select_venv.py --ensure --print`) do set VENV_PATH=%%I
+    for /f "usebackq delims=" %%I in (`py -3.12 scripts\env\select_venv.py --ensure --print`) do set VENV_PATH=%%I
 )
 if not defined VENV_PATH (
     echo ERROR: Could not resolve/create virtual environment.
-    echo Run manually: python scripts\env\select_venv.py --ensure --print
+    echo Run manually: py -3.12 scripts\env\select_venv.py --ensure --print
     pause
     exit /b 1
 )
@@ -60,7 +60,7 @@ if not defined VENV_PATH (
 echo Using environment: %VENV_PATH%
 if not exist "%VENV_PATH%" (
     echo Creating environment directory...
-    python scripts\env\select_venv.py --ensure || goto venvfail
+    py -3.12 scripts\env\select_venv.py --ensure || goto venvfail
 )
 
 REM Determine python inside venv
@@ -77,6 +77,8 @@ if errorlevel 1 (
 )
 
 echo Installing desktop dependencies (editable with dev extras)...
+echo Note: Using pre-built wheels where possible to avoid build issues...
+"%VENV_PY%" -m pip install --only-binary :all: pygame pillow numpy scipy 2>nul
 "%VENV_PY%" -m pip install -e "apps/desktop[dev]"
 if errorlevel 1 goto depfail
 
@@ -149,7 +151,11 @@ exit /b 1
 echo.
 echo ERROR: Failed to install dependencies!
 echo Check your internet connection and try again.
-echo You may also try running: .venv.win\Scripts\pip install -e "." (without dev deps)
+echo.
+echo TROUBLESHOOTING:
+echo   1. Make sure you have Python 3.12 (not 3.14 or other versions)
+echo   2. Try running: %VENV_PATH%\Scripts\pip install -e "apps\desktop" (without dev deps)
+echo   3. Check internet connection
 echo.
 pause
 exit /b 1
