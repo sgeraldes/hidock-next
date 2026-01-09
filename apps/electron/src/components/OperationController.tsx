@@ -320,15 +320,21 @@ export function OperationController() {
       // Set currently playing BEFORE loading to show loading state
       setCurrentlyPlaying(recordingId, filePath)
 
-      // Generate waveform data for visualization
-      try {
-        const audioBuffer = await decodeAudioData(base64, mimeType)
-        const waveformData = await generateWaveformData(audioBuffer, 1000)
-        setWaveformData(waveformData)
-      } catch (waveformError) {
-        console.warn('[OperationController] Failed to generate waveform:', waveformError)
-        // Continue with playback even if waveform generation fails
-        setWaveformData(null)
+      // Generate waveform data for visualization (skip if already loaded)
+      const { waveformLoadedForId } = useUIStore.getState()
+      if (waveformLoadedForId !== recordingId) {
+        try {
+          const audioBuffer = await decodeAudioData(base64, mimeType)
+          const waveformData = await generateWaveformData(audioBuffer, 1000)
+          setWaveformData(waveformData)
+          useUIStore.getState().setWaveformLoadedFor(recordingId)
+        } catch (waveformError) {
+          console.warn('[OperationController] Failed to generate waveform:', waveformError)
+          setWaveformData(null)
+          useUIStore.getState().setWaveformLoadingError(recordingId, 'Failed to generate waveform')
+        }
+      } else {
+        if (DEBUG) console.log('[OperationController] Skipping waveform generation - already loaded')
       }
 
       audioRef.current.src = `data:${mimeType};base64,${base64}`
