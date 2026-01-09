@@ -82,9 +82,9 @@ export const SourceRow = memo(function SourceRow({
             className="shrink-0"
           />
         )}
-        <StatusIcon recording={recording} />
+        <StatusIcon recording={recording} showLabel={true} />
         <div className="min-w-0 flex-1">
-          <p className="font-medium text-sm truncate">{recording.filename}</p>
+          <p className="font-medium text-sm truncate text-foreground">{recording.filename}</p>
           <p className="text-xs text-muted-foreground truncate">
             {formatDateTime(recording.dateRecorded.toISOString())}
             {recording.duration ? ` • ${formatDuration(recording.duration)}` : ''}
@@ -120,7 +120,7 @@ export const SourceRow = memo(function SourceRow({
               ? 'bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300'
               : recording.transcriptionStatus === 'error'
               ? 'bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300'
-              : 'bg-secondary'
+              : 'bg-secondary text-secondary-foreground'
           }`}
         >
           {recording.transcriptionStatus === 'none' ? '—' : recording.transcriptionStatus}
@@ -129,56 +129,62 @@ export const SourceRow = memo(function SourceRow({
         {/* Action buttons */}
         <Button
           variant="ghost"
-          size="icon"
-          className="h-7 w-7"
+          size="sm"
+          className="h-7 gap-1.5"
           onClick={onAskAssistant}
           title="Ask Assistant about this capture"
         >
           <Mic className="h-3 w-3" />
+          <span className="hidden sm:inline text-xs">Ask</span>
         </Button>
         <Button
           variant="ghost"
-          size="icon"
-          className="h-7 w-7"
+          size="sm"
+          className="h-7 gap-1.5"
           onClick={onGenerateOutput}
           title="Generate artifact from this capture"
         >
           <FileText className="h-3 w-3" />
+          <span className="hidden sm:inline text-xs">Generate</span>
         </Button>
 
         {/* Download button for device-only recordings */}
         {isDeviceOnly(recording) && (
           <Button
             variant="ghost"
-            size="icon"
-            className="h-7 w-7"
+            size="sm"
+            className="h-7 gap-1.5"
             onClick={onDownload}
             disabled={!deviceConnected || isDownloading}
+            title="Download from device"
           >
             {isDownloading ? (
               <RefreshCw className="h-3 w-3 animate-spin" />
             ) : (
               <Download className="h-3 w-3" />
             )}
+            <span className="hidden sm:inline text-xs">{isDownloading ? 'Downloading' : 'Download'}</span>
           </Button>
         )}
 
         {/* Play/Stop button */}
         <Button
           variant="ghost"
-          size="icon"
-          className="h-7 w-7"
+          size="sm"
+          className="h-7 gap-1.5"
           onClick={isPlaying ? onStop : onPlay}
           disabled={!canPlay}
+          title={isPlaying ? 'Stop playback' : 'Play recording'}
         >
           {isPlaying ? <X className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+          <span className="hidden sm:inline text-xs">{isPlaying ? 'Stop' : 'Play'}</span>
         </Button>
 
         {/* Delete button */}
         <Button
           variant="ghost"
-          size="icon"
-          className={`h-7 w-7 ${
+          size="sm"
+          className={`h-7 gap-1.5 ${
             recording.location === 'device-only'
               ? 'text-destructive hover:text-destructive'
               : recording.location === 'local-only'
@@ -191,10 +197,10 @@ export const SourceRow = memo(function SourceRow({
           }
           title={
             recording.location === 'device-only'
-              ? '🗑️ Delete from device (cannot be undone)'
+              ? 'Delete from device (cannot be undone)'
               : recording.location === 'local-only'
-              ? '🗑️ Delete local file and transcript'
-              : '🗑️ Delete local copy only (keeps device copy)'
+              ? 'Delete local file and transcript'
+              : 'Delete local copy only (keeps device copy)'
           }
         >
           {isDeleting ? (
@@ -202,6 +208,7 @@ export const SourceRow = memo(function SourceRow({
           ) : (
             <Trash2 className="h-3 w-3" />
           )}
+          <span className="hidden sm:inline text-xs">{isDeleting ? 'Deleting' : 'Delete'}</span>
         </Button>
       </div>
     </div>
