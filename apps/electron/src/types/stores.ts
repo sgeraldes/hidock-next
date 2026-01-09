@@ -149,6 +149,11 @@ export interface UIStore {
   playbackWaveformData: Float32Array | null
   playbackSentimentData: SentimentSegment[] | null
 
+  // Waveform loading state (independent of playback)
+  waveformLoadingId: string | null
+  waveformLoadingError: string | null
+  waveformLoadedForId: string | null
+
   // Actions
   toggleSidebar: () => void
   setSidebarOpen: (open: boolean) => void
@@ -167,6 +172,11 @@ export interface UIStore {
   setIsPlaying: (playing: boolean) => void
   setWaveformData: (waveformData: Float32Array | null) => void
   setSentimentData: (sentimentData: SentimentSegment[] | null) => void
+
+  // Waveform loading actions
+  setWaveformLoading: (recordingId: string | null) => void
+  setWaveformLoadingError: (recordingId: string | null, error: string | null) => void
+  setWaveformLoadedFor: (recordingId: string | null) => void
 }
 
 // =============================================================================
