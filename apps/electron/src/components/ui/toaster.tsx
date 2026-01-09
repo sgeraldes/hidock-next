@@ -8,7 +8,7 @@ interface Toast {
   id: string
   title?: string
   description?: string
-  variant?: 'default' | 'success' | 'error' | 'warning'
+  variant?: 'default' | 'success' | 'error' | 'warning' | 'info'
   duration?: number
 }
 
@@ -35,6 +35,19 @@ export function toast(options: Omit<Toast, 'id'>) {
     globalToastFn(options)
   }
 }
+
+// Convenience helpers for common toast types
+toast.success = (title: string, description?: string) =>
+  toast({ variant: 'success', title, description })
+
+toast.error = (title: string, description?: string) =>
+  toast({ variant: 'error', title, description })
+
+toast.warning = (title: string, description?: string) =>
+  toast({ variant: 'warning', title, description })
+
+toast.info = (title: string, description?: string) =>
+  toast({ variant: 'info', title, description })
 
 let globalToastFn: ((options: Omit<Toast, 'id'>) => void) | null = null
 
@@ -84,14 +97,16 @@ function ToastItem({ toast: t, onClose }: { toast: Toast; onClose: () => void })
     default: Info,
     success: CheckCircle2,
     error: AlertCircle,
-    warning: AlertCircle
+    warning: AlertCircle,
+    info: Info
   }[t.variant || 'default']
 
   const iconColor = {
     default: 'text-muted-foreground',
     success: 'text-green-500',
     error: 'text-destructive',
-    warning: 'text-yellow-500'
+    warning: 'text-yellow-500',
+    info: 'text-blue-500'
   }[t.variant || 'default']
 
   return (
@@ -103,7 +118,8 @@ function ToastItem({ toast: t, onClose }: { toast: Toast; onClose: () => void })
         'data-[state=closed]:slide-out-to-right-full',
         t.variant === 'error' && 'border-destructive/50',
         t.variant === 'success' && 'border-green-500/50',
-        t.variant === 'warning' && 'border-yellow-500/50'
+        t.variant === 'warning' && 'border-yellow-500/50',
+        t.variant === 'info' && 'border-blue-500/50'
       )}
       duration={t.duration}
     >

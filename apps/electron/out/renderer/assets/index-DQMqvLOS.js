@@ -8452,7 +8452,7 @@ var defaultAttributes = {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const Icon = reactExports.forwardRef(
+const Icon$1 = reactExports.forwardRef(
   ({
     color: color2 = "currentColor",
     size: size2 = 24,
@@ -8490,7 +8490,7 @@ const Icon = reactExports.forwardRef(
  */
 const createLucideIcon = (iconName, iconNode) => {
   const Component = reactExports.forwardRef(
-    ({ className, ...props2 }, ref) => reactExports.createElement(Icon, {
+    ({ className, ...props2 }, ref) => reactExports.createElement(Icon$1, {
       ref,
       iconNode,
       className: mergeClasses(`lucide-${toKebabCase(iconName)}`, className),
@@ -9182,6 +9182,26 @@ const Settings$1 = createLucideIcon("Settings", [
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
+const SkipBack = createLucideIcon("SkipBack", [
+  ["polygon", { points: "19 20 9 12 19 4 19 20", key: "o2sva" }],
+  ["line", { x1: "5", x2: "5", y1: "19", y2: "5", key: "1ocqjk" }]
+]);
+/**
+ * @license lucide-react v0.460.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const SkipForward = createLucideIcon("SkipForward", [
+  ["polygon", { points: "5 4 15 12 5 20 5 4", key: "16p6eg" }],
+  ["line", { x1: "19", x2: "19", y1: "5", y2: "19", key: "futhcm" }]
+]);
+/**
+ * @license lucide-react v0.460.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
 const Sparkles = createLucideIcon("Sparkles", [
   [
     "path",
@@ -9359,23 +9379,6 @@ const Users = createLucideIcon("Users", [
   ["circle", { cx: "9", cy: "7", r: "4", key: "nufk8" }],
   ["path", { d: "M22 21v-2a4 4 0 0 0-3-3.87", key: "kshegd" }],
   ["path", { d: "M16 3.13a4 4 0 0 1 0 7.75", key: "1da9ce" }]
-]);
-/**
- * @license lucide-react v0.460.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */
-const Volume2 = createLucideIcon("Volume2", [
-  [
-    "path",
-    {
-      d: "M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z",
-      key: "uqj9uw"
-    }
-  ],
-  ["path", { d: "M16 9a5 5 0 0 1 0 6", key: "1q6k2b" }],
-  ["path", { d: "M19.364 18.364a9 9 0 0 0 0-12.728", key: "ijwkga" }]
 ]);
 /**
  * @license lucide-react v0.460.0 - ISC
@@ -12268,15 +12271,15 @@ function isLazyComponent(element2) {
   return element2 != null && typeof element2 === "object" && "$$typeof" in element2 && element2.$$typeof === REACT_LAZY_TYPE && "_payload" in element2 && isPromiseLike(element2._payload);
 }
 // @__NO_SIDE_EFFECTS__
-function createSlot$3(ownerName) {
-  const SlotClone = /* @__PURE__ */ createSlotClone$3(ownerName);
+function createSlot$4(ownerName) {
+  const SlotClone = /* @__PURE__ */ createSlotClone$4(ownerName);
   const Slot2 = reactExports.forwardRef((props2, forwardedRef) => {
     let { children, ...slotProps } = props2;
     if (isLazyComponent(children) && typeof use === "function") {
       children = use(children._payload);
     }
     const childrenArray = reactExports.Children.toArray(children);
-    const slottable = childrenArray.find(isSlottable$3);
+    const slottable = childrenArray.find(isSlottable$4);
     if (slottable) {
       const newElement = slottable.props.children;
       const newChildren = childrenArray.map((child) => {
@@ -12294,17 +12297,17 @@ function createSlot$3(ownerName) {
   Slot2.displayName = `${ownerName}.Slot`;
   return Slot2;
 }
-var Slot$1 = /* @__PURE__ */ createSlot$3("Slot");
+var Slot$2 = /* @__PURE__ */ createSlot$4("Slot");
 // @__NO_SIDE_EFFECTS__
-function createSlotClone$3(ownerName) {
+function createSlotClone$4(ownerName) {
   const SlotClone = reactExports.forwardRef((props2, forwardedRef) => {
     let { children, ...slotProps } = props2;
     if (isLazyComponent(children) && typeof use === "function") {
       children = use(children._payload);
     }
     if (reactExports.isValidElement(children)) {
-      const childrenRef = getElementRef$4(children);
-      const props22 = mergeProps$3(slotProps, children.props);
+      const childrenRef = getElementRef$5(children);
+      const props22 = mergeProps$4(slotProps, children.props);
       if (children.type !== reactExports.Fragment) {
         props22.ref = forwardedRef ? composeRefs(forwardedRef, childrenRef) : childrenRef;
       }
@@ -12315,11 +12318,11 @@ function createSlotClone$3(ownerName) {
   SlotClone.displayName = `${ownerName}.SlotClone`;
   return SlotClone;
 }
-var SLOTTABLE_IDENTIFIER$4 = Symbol("radix.slottable");
-function isSlottable$3(child) {
-  return reactExports.isValidElement(child) && typeof child.type === "function" && "__radixId" in child.type && child.type.__radixId === SLOTTABLE_IDENTIFIER$4;
+var SLOTTABLE_IDENTIFIER$5 = Symbol("radix.slottable");
+function isSlottable$4(child) {
+  return reactExports.isValidElement(child) && typeof child.type === "function" && "__radixId" in child.type && child.type.__radixId === SLOTTABLE_IDENTIFIER$5;
 }
-function mergeProps$3(slotProps, childProps) {
+function mergeProps$4(slotProps, childProps) {
   const overrideProps = { ...childProps };
   for (const propName in childProps) {
     const slotPropValue = slotProps[propName];
@@ -12343,7 +12346,7 @@ function mergeProps$3(slotProps, childProps) {
   }
   return { ...slotProps, ...overrideProps };
 }
-function getElementRef$4(element2) {
+function getElementRef$5(element2) {
   let getter = Object.getOwnPropertyDescriptor(element2.props, "ref")?.get;
   let mayWarn = getter && "isReactWarning" in getter && getter.isReactWarning;
   if (mayWarn) {
@@ -12423,7 +12426,7 @@ const buttonVariants = cva(
 );
 const Button = reactExports.forwardRef(
   ({ className, variant, size: size2, asChild = false, ...props2 }, ref) => {
-    const Comp = asChild ? Slot$1 : "button";
+    const Comp = asChild ? Slot$2 : "button";
     return /* @__PURE__ */ jsxRuntimeExports.jsx(Comp, { className: cn(buttonVariants({ variant, size: size2, className })), ref, ...props2 });
   }
 );
@@ -12510,6 +12513,150 @@ function composeContextScopes(...scopes) {
   return createScope;
 }
 // @__NO_SIDE_EFFECTS__
+function createSlot$3(ownerName) {
+  const SlotClone = /* @__PURE__ */ createSlotClone$3(ownerName);
+  const Slot2 = reactExports.forwardRef((props2, forwardedRef) => {
+    const { children, ...slotProps } = props2;
+    const childrenArray = reactExports.Children.toArray(children);
+    const slottable = childrenArray.find(isSlottable$3);
+    if (slottable) {
+      const newElement = slottable.props.children;
+      const newChildren = childrenArray.map((child) => {
+        if (child === slottable) {
+          if (reactExports.Children.count(newElement) > 1) return reactExports.Children.only(null);
+          return reactExports.isValidElement(newElement) ? newElement.props.children : null;
+        } else {
+          return child;
+        }
+      });
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(SlotClone, { ...slotProps, ref: forwardedRef, children: reactExports.isValidElement(newElement) ? reactExports.cloneElement(newElement, void 0, newChildren) : null });
+    }
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(SlotClone, { ...slotProps, ref: forwardedRef, children });
+  });
+  Slot2.displayName = `${ownerName}.Slot`;
+  return Slot2;
+}
+// @__NO_SIDE_EFFECTS__
+function createSlotClone$3(ownerName) {
+  const SlotClone = reactExports.forwardRef((props2, forwardedRef) => {
+    const { children, ...slotProps } = props2;
+    if (reactExports.isValidElement(children)) {
+      const childrenRef = getElementRef$4(children);
+      const props22 = mergeProps$3(slotProps, children.props);
+      if (children.type !== reactExports.Fragment) {
+        props22.ref = forwardedRef ? composeRefs(forwardedRef, childrenRef) : childrenRef;
+      }
+      return reactExports.cloneElement(children, props22);
+    }
+    return reactExports.Children.count(children) > 1 ? reactExports.Children.only(null) : null;
+  });
+  SlotClone.displayName = `${ownerName}.SlotClone`;
+  return SlotClone;
+}
+var SLOTTABLE_IDENTIFIER$4 = Symbol("radix.slottable");
+function isSlottable$3(child) {
+  return reactExports.isValidElement(child) && typeof child.type === "function" && "__radixId" in child.type && child.type.__radixId === SLOTTABLE_IDENTIFIER$4;
+}
+function mergeProps$3(slotProps, childProps) {
+  const overrideProps = { ...childProps };
+  for (const propName in childProps) {
+    const slotPropValue = slotProps[propName];
+    const childPropValue = childProps[propName];
+    const isHandler = /^on[A-Z]/.test(propName);
+    if (isHandler) {
+      if (slotPropValue && childPropValue) {
+        overrideProps[propName] = (...args) => {
+          const result = childPropValue(...args);
+          slotPropValue(...args);
+          return result;
+        };
+      } else if (slotPropValue) {
+        overrideProps[propName] = slotPropValue;
+      }
+    } else if (propName === "style") {
+      overrideProps[propName] = { ...slotPropValue, ...childPropValue };
+    } else if (propName === "className") {
+      overrideProps[propName] = [slotPropValue, childPropValue].filter(Boolean).join(" ");
+    }
+  }
+  return { ...slotProps, ...overrideProps };
+}
+function getElementRef$4(element2) {
+  let getter = Object.getOwnPropertyDescriptor(element2.props, "ref")?.get;
+  let mayWarn = getter && "isReactWarning" in getter && getter.isReactWarning;
+  if (mayWarn) {
+    return element2.ref;
+  }
+  getter = Object.getOwnPropertyDescriptor(element2, "ref")?.get;
+  mayWarn = getter && "isReactWarning" in getter && getter.isReactWarning;
+  if (mayWarn) {
+    return element2.props.ref;
+  }
+  return element2.props.ref || element2.ref;
+}
+function createCollection(name2) {
+  const PROVIDER_NAME2 = name2 + "CollectionProvider";
+  const [createCollectionContext, createCollectionScope2] = createContextScope(PROVIDER_NAME2);
+  const [CollectionProviderImpl, useCollectionContext] = createCollectionContext(
+    PROVIDER_NAME2,
+    { collectionRef: { current: null }, itemMap: /* @__PURE__ */ new Map() }
+  );
+  const CollectionProvider = (props2) => {
+    const { scope, children } = props2;
+    const ref = React.useRef(null);
+    const itemMap = React.useRef(/* @__PURE__ */ new Map()).current;
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(CollectionProviderImpl, { scope, itemMap, collectionRef: ref, children });
+  };
+  CollectionProvider.displayName = PROVIDER_NAME2;
+  const COLLECTION_SLOT_NAME = name2 + "CollectionSlot";
+  const CollectionSlotImpl = /* @__PURE__ */ createSlot$3(COLLECTION_SLOT_NAME);
+  const CollectionSlot = React.forwardRef(
+    (props2, forwardedRef) => {
+      const { scope, children } = props2;
+      const context = useCollectionContext(COLLECTION_SLOT_NAME, scope);
+      const composedRefs = useComposedRefs(forwardedRef, context.collectionRef);
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(CollectionSlotImpl, { ref: composedRefs, children });
+    }
+  );
+  CollectionSlot.displayName = COLLECTION_SLOT_NAME;
+  const ITEM_SLOT_NAME = name2 + "CollectionItemSlot";
+  const ITEM_DATA_ATTR = "data-radix-collection-item";
+  const CollectionItemSlotImpl = /* @__PURE__ */ createSlot$3(ITEM_SLOT_NAME);
+  const CollectionItemSlot = React.forwardRef(
+    (props2, forwardedRef) => {
+      const { scope, children, ...itemData } = props2;
+      const ref = React.useRef(null);
+      const composedRefs = useComposedRefs(forwardedRef, ref);
+      const context = useCollectionContext(ITEM_SLOT_NAME, scope);
+      React.useEffect(() => {
+        context.itemMap.set(ref, { ref, ...itemData });
+        return () => void context.itemMap.delete(ref);
+      });
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(CollectionItemSlotImpl, { ...{ [ITEM_DATA_ATTR]: "" }, ref: composedRefs, children });
+    }
+  );
+  CollectionItemSlot.displayName = ITEM_SLOT_NAME;
+  function useCollection2(scope) {
+    const context = useCollectionContext(name2 + "CollectionConsumer", scope);
+    const getItems = React.useCallback(() => {
+      const collectionNode = context.collectionRef.current;
+      if (!collectionNode) return [];
+      const orderedNodes = Array.from(collectionNode.querySelectorAll(`[${ITEM_DATA_ATTR}]`));
+      const items = Array.from(context.itemMap.values());
+      const orderedItems = items.sort(
+        (a, b) => orderedNodes.indexOf(a.ref.current) - orderedNodes.indexOf(b.ref.current)
+      );
+      return orderedItems;
+    }, [context.collectionRef, context.itemMap]);
+    return getItems;
+  }
+  return [
+    { Provider: CollectionProvider, Slot: CollectionSlot, ItemSlot: CollectionItemSlot },
+    useCollection2,
+    createCollectionScope2
+  ];
+}
+// @__NO_SIDE_EFFECTS__
 function createSlot$2(ownerName) {
   const SlotClone = /* @__PURE__ */ createSlotClone$2(ownerName);
   const Slot2 = reactExports.forwardRef((props2, forwardedRef) => {
@@ -12591,150 +12738,6 @@ function getElementRef$3(element2) {
   }
   return element2.props.ref || element2.ref;
 }
-function createCollection(name2) {
-  const PROVIDER_NAME2 = name2 + "CollectionProvider";
-  const [createCollectionContext, createCollectionScope2] = createContextScope(PROVIDER_NAME2);
-  const [CollectionProviderImpl, useCollectionContext] = createCollectionContext(
-    PROVIDER_NAME2,
-    { collectionRef: { current: null }, itemMap: /* @__PURE__ */ new Map() }
-  );
-  const CollectionProvider = (props2) => {
-    const { scope, children } = props2;
-    const ref = React.useRef(null);
-    const itemMap = React.useRef(/* @__PURE__ */ new Map()).current;
-    return /* @__PURE__ */ jsxRuntimeExports.jsx(CollectionProviderImpl, { scope, itemMap, collectionRef: ref, children });
-  };
-  CollectionProvider.displayName = PROVIDER_NAME2;
-  const COLLECTION_SLOT_NAME = name2 + "CollectionSlot";
-  const CollectionSlotImpl = /* @__PURE__ */ createSlot$2(COLLECTION_SLOT_NAME);
-  const CollectionSlot = React.forwardRef(
-    (props2, forwardedRef) => {
-      const { scope, children } = props2;
-      const context = useCollectionContext(COLLECTION_SLOT_NAME, scope);
-      const composedRefs = useComposedRefs(forwardedRef, context.collectionRef);
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(CollectionSlotImpl, { ref: composedRefs, children });
-    }
-  );
-  CollectionSlot.displayName = COLLECTION_SLOT_NAME;
-  const ITEM_SLOT_NAME = name2 + "CollectionItemSlot";
-  const ITEM_DATA_ATTR = "data-radix-collection-item";
-  const CollectionItemSlotImpl = /* @__PURE__ */ createSlot$2(ITEM_SLOT_NAME);
-  const CollectionItemSlot = React.forwardRef(
-    (props2, forwardedRef) => {
-      const { scope, children, ...itemData } = props2;
-      const ref = React.useRef(null);
-      const composedRefs = useComposedRefs(forwardedRef, ref);
-      const context = useCollectionContext(ITEM_SLOT_NAME, scope);
-      React.useEffect(() => {
-        context.itemMap.set(ref, { ref, ...itemData });
-        return () => void context.itemMap.delete(ref);
-      });
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(CollectionItemSlotImpl, { ...{ [ITEM_DATA_ATTR]: "" }, ref: composedRefs, children });
-    }
-  );
-  CollectionItemSlot.displayName = ITEM_SLOT_NAME;
-  function useCollection2(scope) {
-    const context = useCollectionContext(name2 + "CollectionConsumer", scope);
-    const getItems = React.useCallback(() => {
-      const collectionNode = context.collectionRef.current;
-      if (!collectionNode) return [];
-      const orderedNodes = Array.from(collectionNode.querySelectorAll(`[${ITEM_DATA_ATTR}]`));
-      const items = Array.from(context.itemMap.values());
-      const orderedItems = items.sort(
-        (a, b) => orderedNodes.indexOf(a.ref.current) - orderedNodes.indexOf(b.ref.current)
-      );
-      return orderedItems;
-    }, [context.collectionRef, context.itemMap]);
-    return getItems;
-  }
-  return [
-    { Provider: CollectionProvider, Slot: CollectionSlot, ItemSlot: CollectionItemSlot },
-    useCollection2,
-    createCollectionScope2
-  ];
-}
-// @__NO_SIDE_EFFECTS__
-function createSlot$1(ownerName) {
-  const SlotClone = /* @__PURE__ */ createSlotClone$1(ownerName);
-  const Slot2 = reactExports.forwardRef((props2, forwardedRef) => {
-    const { children, ...slotProps } = props2;
-    const childrenArray = reactExports.Children.toArray(children);
-    const slottable = childrenArray.find(isSlottable$1);
-    if (slottable) {
-      const newElement = slottable.props.children;
-      const newChildren = childrenArray.map((child) => {
-        if (child === slottable) {
-          if (reactExports.Children.count(newElement) > 1) return reactExports.Children.only(null);
-          return reactExports.isValidElement(newElement) ? newElement.props.children : null;
-        } else {
-          return child;
-        }
-      });
-      return /* @__PURE__ */ jsxRuntimeExports.jsx(SlotClone, { ...slotProps, ref: forwardedRef, children: reactExports.isValidElement(newElement) ? reactExports.cloneElement(newElement, void 0, newChildren) : null });
-    }
-    return /* @__PURE__ */ jsxRuntimeExports.jsx(SlotClone, { ...slotProps, ref: forwardedRef, children });
-  });
-  Slot2.displayName = `${ownerName}.Slot`;
-  return Slot2;
-}
-// @__NO_SIDE_EFFECTS__
-function createSlotClone$1(ownerName) {
-  const SlotClone = reactExports.forwardRef((props2, forwardedRef) => {
-    const { children, ...slotProps } = props2;
-    if (reactExports.isValidElement(children)) {
-      const childrenRef = getElementRef$2(children);
-      const props22 = mergeProps$1(slotProps, children.props);
-      if (children.type !== reactExports.Fragment) {
-        props22.ref = forwardedRef ? composeRefs(forwardedRef, childrenRef) : childrenRef;
-      }
-      return reactExports.cloneElement(children, props22);
-    }
-    return reactExports.Children.count(children) > 1 ? reactExports.Children.only(null) : null;
-  });
-  SlotClone.displayName = `${ownerName}.SlotClone`;
-  return SlotClone;
-}
-var SLOTTABLE_IDENTIFIER$2 = Symbol("radix.slottable");
-function isSlottable$1(child) {
-  return reactExports.isValidElement(child) && typeof child.type === "function" && "__radixId" in child.type && child.type.__radixId === SLOTTABLE_IDENTIFIER$2;
-}
-function mergeProps$1(slotProps, childProps) {
-  const overrideProps = { ...childProps };
-  for (const propName in childProps) {
-    const slotPropValue = slotProps[propName];
-    const childPropValue = childProps[propName];
-    const isHandler = /^on[A-Z]/.test(propName);
-    if (isHandler) {
-      if (slotPropValue && childPropValue) {
-        overrideProps[propName] = (...args) => {
-          const result = childPropValue(...args);
-          slotPropValue(...args);
-          return result;
-        };
-      } else if (slotPropValue) {
-        overrideProps[propName] = slotPropValue;
-      }
-    } else if (propName === "style") {
-      overrideProps[propName] = { ...slotPropValue, ...childPropValue };
-    } else if (propName === "className") {
-      overrideProps[propName] = [slotPropValue, childPropValue].filter(Boolean).join(" ");
-    }
-  }
-  return { ...slotProps, ...overrideProps };
-}
-function getElementRef$2(element2) {
-  let getter = Object.getOwnPropertyDescriptor(element2.props, "ref")?.get;
-  let mayWarn = getter && "isReactWarning" in getter && getter.isReactWarning;
-  if (mayWarn) {
-    return element2.ref;
-  }
-  getter = Object.getOwnPropertyDescriptor(element2, "ref")?.get;
-  mayWarn = getter && "isReactWarning" in getter && getter.isReactWarning;
-  if (mayWarn) {
-    return element2.props.ref;
-  }
-  return element2.props.ref || element2.ref;
-}
 var NODES$1 = [
   "a",
   "button",
@@ -12755,7 +12758,7 @@ var NODES$1 = [
   "ul"
 ];
 var Primitive$1 = NODES$1.reduce((primitive, node2) => {
-  const Slot2 = /* @__PURE__ */ createSlot$1(`Primitive.${node2}`);
+  const Slot2 = /* @__PURE__ */ createSlot$2(`Primitive.${node2}`);
   const Node2 = reactExports.forwardRef((props2, forwardedRef) => {
     const { asChild, ...primitiveProps } = props2;
     const Comp = asChild ? Slot2 : node2;
@@ -12994,15 +12997,15 @@ var Root$6 = DismissableLayer;
 var Branch = DismissableLayerBranch;
 var useLayoutEffect2 = globalThis?.document ? reactExports.useLayoutEffect : () => {
 };
-var PORTAL_NAME$2 = "Portal";
-var Portal$2 = reactExports.forwardRef((props2, forwardedRef) => {
+var PORTAL_NAME$3 = "Portal";
+var Portal$3 = reactExports.forwardRef((props2, forwardedRef) => {
   const { container: containerProp, ...portalProps } = props2;
   const [mounted, setMounted] = reactExports.useState(false);
   useLayoutEffect2(() => setMounted(true), []);
   const container = containerProp || mounted && globalThis?.document?.body;
   return container ? ReactDOM.createPortal(/* @__PURE__ */ jsxRuntimeExports.jsx(Primitive$1.div, { ...portalProps, ref: forwardedRef }), container) : null;
 });
-Portal$2.displayName = PORTAL_NAME$2;
+Portal$3.displayName = PORTAL_NAME$3;
 function useStateMachine(initialState2, machine) {
   return reactExports.useReducer((state, event) => {
     const nextState = machine[state][event];
@@ -13013,7 +13016,7 @@ var Presence = (props2) => {
   const { present, children } = props2;
   const presence = usePresence(present);
   const child = typeof children === "function" ? children({ present: presence.isPresent }) : reactExports.Children.only(children);
-  const ref = useComposedRefs(presence.ref, getElementRef$1(child));
+  const ref = useComposedRefs(presence.ref, getElementRef$2(child));
   const forceMount = typeof children === "function";
   return forceMount || presence.isPresent ? reactExports.cloneElement(child, { ref }) : null;
 };
@@ -13112,7 +13115,7 @@ function usePresence(present) {
 function getAnimationName(styles) {
   return styles?.animationName || "none";
 }
-function getElementRef$1(element2) {
+function getElementRef$2(element2) {
   let getter = Object.getOwnPropertyDescriptor(element2.props, "ref")?.get;
   let mayWarn = getter && "isReactWarning" in getter && getter.isReactWarning;
   if (mayWarn) {
@@ -13218,8 +13221,8 @@ var VisuallyHidden = reactExports.forwardRef(
 VisuallyHidden.displayName = NAME$2;
 var Root$5 = VisuallyHidden;
 var PROVIDER_NAME$1 = "ToastProvider";
-var [Collection$1, useCollection$1, createCollectionScope$1] = createCollection("Toast");
-var [createToastContext] = createContextScope("Toast", [createCollectionScope$1]);
+var [Collection$2, useCollection$2, createCollectionScope$2] = createCollection("Toast");
+var [createToastContext] = createContextScope("Toast", [createCollectionScope$2]);
 var [ToastProviderProvider, useToastProviderContext] = createToastContext(PROVIDER_NAME$1);
 var ToastProvider$1 = (props2) => {
   const {
@@ -13239,7 +13242,7 @@ var ToastProvider$1 = (props2) => {
       `Invalid prop \`label\` supplied to \`${PROVIDER_NAME$1}\`. Expected non-empty \`string\`.`
     );
   }
-  return /* @__PURE__ */ jsxRuntimeExports.jsx(Collection$1.Provider, { scope: __scopeToast, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(Collection$2.Provider, { scope: __scopeToast, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
     ToastProviderProvider,
     {
       scope: __scopeToast,
@@ -13259,7 +13262,7 @@ var ToastProvider$1 = (props2) => {
   ) });
 };
 ToastProvider$1.displayName = PROVIDER_NAME$1;
-var VIEWPORT_NAME = "ToastViewport";
+var VIEWPORT_NAME$1 = "ToastViewport";
 var VIEWPORT_DEFAULT_HOTKEY = ["F8"];
 var VIEWPORT_PAUSE = "toast.viewportPause";
 var VIEWPORT_RESUME = "toast.viewportResume";
@@ -13271,8 +13274,8 @@ var ToastViewport = reactExports.forwardRef(
       label = "Notifications ({hotkey})",
       ...viewportProps
     } = props2;
-    const context = useToastProviderContext(VIEWPORT_NAME, __scopeToast);
-    const getItems = useCollection$1(__scopeToast);
+    const context = useToastProviderContext(VIEWPORT_NAME$1, __scopeToast);
+    const getItems = useCollection$2(__scopeToast);
     const wrapperRef = reactExports.useRef(null);
     const headFocusProxyRef = reactExports.useRef(null);
     const tailFocusProxyRef = reactExports.useRef(null);
@@ -13391,7 +13394,7 @@ var ToastViewport = reactExports.forwardRef(
               }
             }
           ),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(Collection$1.Slot, { scope: __scopeToast, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Primitive$1.ol, { tabIndex: -1, ...viewportProps, ref: composedRefs }) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Collection$2.Slot, { scope: __scopeToast, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Primitive$1.ol, { tabIndex: -1, ...viewportProps, ref: composedRefs }) }),
           hasToasts && /* @__PURE__ */ jsxRuntimeExports.jsx(
             FocusProxy,
             {
@@ -13409,7 +13412,7 @@ var ToastViewport = reactExports.forwardRef(
     );
   }
 );
-ToastViewport.displayName = VIEWPORT_NAME;
+ToastViewport.displayName = VIEWPORT_NAME$1;
 var FOCUS_PROXY_NAME = "ToastFocusProxy";
 var FocusProxy = reactExports.forwardRef(
   (props2, forwardedRef) => {
@@ -13573,7 +13576,7 @@ var ToastImpl = reactExports.forwardRef(
         }
       ),
       /* @__PURE__ */ jsxRuntimeExports.jsx(ToastInteractiveProvider, { scope: __scopeToast, onClose: handleClose, children: reactDomExports.createPortal(
-        /* @__PURE__ */ jsxRuntimeExports.jsx(Collection$1.ItemSlot, { scope: __scopeToast, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Collection$2.ItemSlot, { scope: __scopeToast, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
           Root$6,
           {
             asChild: true,
@@ -13678,7 +13681,7 @@ var ToastAnnounce = (props2) => {
     const timer = window.setTimeout(() => setIsAnnounced(true), 1e3);
     return () => window.clearTimeout(timer);
   }, []);
-  return isAnnounced ? null : /* @__PURE__ */ jsxRuntimeExports.jsx(Portal$2, { asChild: true, children: /* @__PURE__ */ jsxRuntimeExports.jsx(VisuallyHidden, { ...announceProps, children: renderAnnounceText && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+  return isAnnounced ? null : /* @__PURE__ */ jsxRuntimeExports.jsx(Portal$3, { asChild: true, children: /* @__PURE__ */ jsxRuntimeExports.jsx(VisuallyHidden, { ...announceProps, children: renderAnnounceText && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
     context.label,
     " ",
     children
@@ -13820,8 +13823,8 @@ function focusFirst$2(candidates) {
   });
 }
 var Provider$1 = ToastProvider$1;
-var Viewport = ToastViewport;
-var Root2$2 = Toast;
+var Viewport$1 = ToastViewport;
+var Root2$3 = Toast;
 var Title$1 = ToastTitle;
 var Description$1 = ToastDescription;
 var Close$1 = ToastClose;
@@ -13856,7 +13859,7 @@ function ToastProvider({ children }) {
   return /* @__PURE__ */ jsxRuntimeExports.jsx(ToastContext.Provider, { value: { toasts, addToast, removeToast }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs(Provider$1, { swipeDirection: "right", children: [
     children,
     toasts.map((t2) => /* @__PURE__ */ jsxRuntimeExports.jsx(ToastItem, { toast: t2, onClose: () => removeToast(t2.id) }, t2.id)),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(Viewport, { className: "fixed bottom-0 right-0 flex flex-col p-4 gap-2 w-[390px] max-w-[100vw] m-0 list-none z-50 outline-none" })
+    /* @__PURE__ */ jsxRuntimeExports.jsx(Viewport$1, { className: "fixed bottom-0 right-0 flex flex-col p-4 gap-2 w-[390px] max-w-[100vw] m-0 list-none z-50 outline-none" })
   ] }) });
 }
 function ToastItem({ toast: t2, onClose }) {
@@ -13873,7 +13876,7 @@ function ToastItem({ toast: t2, onClose }) {
     warning: "text-yellow-500"
   }[t2.variant || "default"];
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(
-    Root2$2,
+    Root2$3,
     {
       className: cn(
         "bg-background border rounded-lg shadow-lg p-4 flex items-start gap-3",
@@ -16213,6 +16216,8 @@ const useUIStore = create$1((set) => ({
   playbackCurrentTime: 0,
   playbackDuration: 0,
   isPlaying: false,
+  playbackWaveformData: null,
+  playbackSentimentData: null,
   // Actions
   toggleSidebar: () => {
     set((state) => ({ sidebarOpen: !state.sidebarOpen }));
@@ -16248,6 +16253,12 @@ const useUIStore = create$1((set) => ({
   },
   setIsPlaying: (playing) => {
     set({ isPlaying: playing });
+  },
+  setWaveformData: (waveformData) => {
+    set({ playbackWaveformData: waveformData });
+  },
+  setSentimentData: (sentimentData) => {
+    set({ playbackSentimentData: sentimentData });
   }
 }));
 function checkAutoSyncAllowed() {
@@ -16458,6 +16469,42 @@ function getRecoveryAction(type) {
       return null;
   }
 }
+async function generateWaveformData(audioBuffer, sampleCount = 1e3) {
+  const rawData = audioBuffer.getChannelData(0);
+  const blockSize = Math.floor(rawData.length / sampleCount);
+  const waveformData = new Float32Array(sampleCount);
+  for (let i = 0; i < sampleCount; i++) {
+    const start = i * blockSize;
+    const end = start + blockSize;
+    let max2 = 0;
+    for (let j = start; j < end && j < rawData.length; j++) {
+      const abs = Math.abs(rawData[j]);
+      if (abs > max2) max2 = abs;
+    }
+    waveformData[i] = max2;
+  }
+  return waveformData;
+}
+async function decodeAudioData(base64Data, _mimeType) {
+  const audioContext = new AudioContext();
+  const binaryData = atob(base64Data);
+  const arrayBuffer = new ArrayBuffer(binaryData.length);
+  const uint8Array = new Uint8Array(arrayBuffer);
+  for (let i = 0; i < binaryData.length; i++) {
+    uint8Array[i] = binaryData.charCodeAt(i);
+  }
+  return await audioContext.decodeAudioData(arrayBuffer);
+}
+function formatTimestamp$1(seconds) {
+  if (!isFinite(seconds) || isNaN(seconds)) return "0:00";
+  const hours = Math.floor(seconds / 3600);
+  const mins = Math.floor(seconds % 3600 / 60);
+  const secs = Math.floor(seconds % 60);
+  if (hours > 0) {
+    return `${hours}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  }
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
+}
 const DEBUG = true;
 function OperationController() {
   const deviceService = getHiDockDeviceService();
@@ -16481,7 +16528,8 @@ function OperationController() {
   const {
     setCurrentlyPlaying,
     setPlaybackProgress,
-    setIsPlaying
+    setIsPlaying,
+    setWaveformData
   } = useUIStore();
   const processDownload = reactExports.useCallback(async (item, signal) => {
     console.log(`[QA-MONITOR][Operation] Processing download: ${item.filename}`);
@@ -16624,7 +16672,8 @@ function OperationController() {
       }
       setIsPlaying(false);
       setPlaybackProgress(0, 0);
-      const base64 = await window.electronAPI.storage.readRecording(filePath);
+      const response = await window.electronAPI.storage.readRecording(filePath);
+      const base64 = response?.data;
       if (!base64) {
         toast({ title: "Error", description: "Failed to load audio file", variant: "error" });
         return;
@@ -16646,6 +16695,7 @@ function OperationController() {
           setIsPlaying(false);
           setCurrentlyPlaying(null, null);
           setPlaybackProgress(0, 0);
+          setWaveformData(null);
         });
         audioRef.current.addEventListener("error", (e) => {
           const libraryError = parseError(e, "audio playback");
@@ -16657,11 +16707,23 @@ function OperationController() {
           });
           setIsPlaying(false);
           setCurrentlyPlaying(null, null);
+          setWaveformData(null);
         });
       }
       const ext = filePath.split(".").pop()?.toLowerCase();
-      const mimeType = ext === "mp3" ? "audio/mpeg" : ext === "m4a" ? "audio/mp4" : "audio/wav";
+      const mimeType = ext === "mp3" ? "audio/mpeg" : ext === "hda" ? "audio/mpeg" : (
+        // HDA files are MPEG MP3
+        ext === "m4a" ? "audio/mp4" : "audio/wav"
+      );
       setCurrentlyPlaying(recordingId, filePath);
+      try {
+        const audioBuffer = await decodeAudioData(base64, mimeType);
+        const waveformData = await generateWaveformData(audioBuffer, 1e3);
+        setWaveformData(waveformData);
+      } catch (waveformError) {
+        console.warn("[OperationController] Failed to generate waveform:", waveformError);
+        setWaveformData(null);
+      }
       audioRef.current.src = `data:${mimeType};base64,${base64}`;
       await audioRef.current.play();
     } catch (error) {
@@ -16674,8 +16736,9 @@ function OperationController() {
       });
       setIsPlaying(false);
       setCurrentlyPlaying(null, null);
+      setWaveformData(null);
     }
-  }, [setCurrentlyPlaying, setPlaybackProgress, setIsPlaying]);
+  }, [setCurrentlyPlaying, setPlaybackProgress, setIsPlaying, setWaveformData]);
   const pauseAudio = reactExports.useCallback(() => {
     if (audioRef.current) {
       audioRef.current.pause();
@@ -16694,7 +16757,8 @@ function OperationController() {
     setIsPlaying(false);
     setCurrentlyPlaying(null, null);
     setPlaybackProgress(0, 0);
-  }, [setCurrentlyPlaying, setIsPlaying, setPlaybackProgress]);
+    setWaveformData(null);
+  }, [setCurrentlyPlaying, setIsPlaying, setPlaybackProgress, setWaveformData]);
   const seekAudio = reactExports.useCallback((time) => {
     if (audioRef.current) {
       audioRef.current.currentTime = time;
@@ -17269,7 +17333,7 @@ const oppositeAlignmentMap = {
   start: "end",
   end: "start"
 };
-function clamp(start, value, end) {
+function clamp$1(start, value, end) {
   return max(start, min(value, end));
 }
 function evaluate(value, param) {
@@ -17620,7 +17684,7 @@ const arrow$3 = (options) => ({
     const min$1 = minPadding;
     const max2 = clientSize - arrowDimensions[length] - maxPadding;
     const center = clientSize / 2 - arrowDimensions[length] / 2 + centerToReference;
-    const offset2 = clamp(min$1, center, max2);
+    const offset2 = clamp$1(min$1, center, max2);
     const shouldAddOffset = !middlewareData.arrow && getAlignment(placement) != null && center !== offset2 && rects.reference[length] / 2 - (center < min$1 ? minPadding : maxPadding) - arrowDimensions[length] / 2 < 0;
     const alignmentOffset = shouldAddOffset ? center < min$1 ? center - min$1 : center - max2 : 0;
     return {
@@ -17917,14 +17981,14 @@ const shift$2 = function(options) {
         const maxSide = mainAxis === "y" ? "bottom" : "right";
         const min2 = mainAxisCoord + overflow[minSide];
         const max2 = mainAxisCoord - overflow[maxSide];
-        mainAxisCoord = clamp(min2, mainAxisCoord, max2);
+        mainAxisCoord = clamp$1(min2, mainAxisCoord, max2);
       }
       if (checkCrossAxis) {
         const minSide = crossAxis === "y" ? "top" : "left";
         const maxSide = crossAxis === "y" ? "bottom" : "right";
         const min2 = crossAxisCoord + overflow[minSide];
         const max2 = crossAxisCoord - overflow[maxSide];
-        crossAxisCoord = clamp(min2, crossAxisCoord, max2);
+        crossAxisCoord = clamp$1(min2, crossAxisCoord, max2);
       }
       const limitedCoords = limiter.fn({
         ...state,
@@ -19207,8 +19271,8 @@ var PopperAnchor = reactExports.forwardRef(
   }
 );
 PopperAnchor.displayName = ANCHOR_NAME;
-var CONTENT_NAME$2 = "PopperContent";
-var [PopperContentProvider, useContentContext] = createPopperContext(CONTENT_NAME$2);
+var CONTENT_NAME$3 = "PopperContent";
+var [PopperContentProvider, useContentContext] = createPopperContext(CONTENT_NAME$3);
 var PopperContent = reactExports.forwardRef(
   (props2, forwardedRef) => {
     const {
@@ -19227,7 +19291,7 @@ var PopperContent = reactExports.forwardRef(
       onPlaced,
       ...contentProps
     } = props2;
-    const context = usePopperContext(CONTENT_NAME$2, __scopePopper);
+    const context = usePopperContext(CONTENT_NAME$3, __scopePopper);
     const [content2, setContent] = reactExports.useState(null);
     const composedRefs = useComposedRefs(forwardedRef, (node2) => setContent(node2));
     const [arrow$12, setArrow] = reactExports.useState(null);
@@ -19350,8 +19414,8 @@ var PopperContent = reactExports.forwardRef(
     );
   }
 );
-PopperContent.displayName = CONTENT_NAME$2;
-var ARROW_NAME$1 = "PopperArrow";
+PopperContent.displayName = CONTENT_NAME$3;
+var ARROW_NAME$2 = "PopperArrow";
 var OPPOSITE_SIDE = {
   top: "bottom",
   right: "left",
@@ -19360,7 +19424,7 @@ var OPPOSITE_SIDE = {
 };
 var PopperArrow = reactExports.forwardRef(function PopperArrow2(props2, forwardedRef) {
   const { __scopePopper, ...arrowProps } = props2;
-  const contentContext = useContentContext(ARROW_NAME$1, __scopePopper);
+  const contentContext = useContentContext(ARROW_NAME$2, __scopePopper);
   const baseSide = OPPOSITE_SIDE[contentContext.placedSide];
   return (
     // we have to use an extra wrapper because `ResizeObserver` (used by `useSize`)
@@ -19405,7 +19469,7 @@ var PopperArrow = reactExports.forwardRef(function PopperArrow2(props2, forwarde
     )
   );
 });
-PopperArrow.displayName = ARROW_NAME$1;
+PopperArrow.displayName = ARROW_NAME$2;
 function isNotNull(value) {
   return value !== null;
 }
@@ -19444,24 +19508,24 @@ function getSideAndAlignFromPlacement(placement) {
   const [side, align = "center"] = placement.split("-");
   return [side, align];
 }
-var Root2$1 = Popper;
+var Root2$2 = Popper;
 var Anchor = PopperAnchor;
 var Content$1 = PopperContent;
 var Arrow = PopperArrow;
-var SLOTTABLE_IDENTIFIER$1 = Symbol("radix.slottable");
+var SLOTTABLE_IDENTIFIER$2 = Symbol("radix.slottable");
 // @__NO_SIDE_EFFECTS__
 function createSlottable(ownerName) {
   const Slottable2 = ({ children }) => {
     return /* @__PURE__ */ jsxRuntimeExports.jsx(jsxRuntimeExports.Fragment, { children });
   };
   Slottable2.displayName = `${ownerName}.Slottable`;
-  Slottable2.__radixId = SLOTTABLE_IDENTIFIER$1;
+  Slottable2.__radixId = SLOTTABLE_IDENTIFIER$2;
   return Slottable2;
 }
 var [createTooltipContext] = createContextScope("Tooltip", [
   createPopperScope
 ]);
-var usePopperScope = createPopperScope();
+var usePopperScope$1 = createPopperScope();
 var PROVIDER_NAME = "TooltipProvider";
 var DEFAULT_DELAY_DURATION = 700;
 var TOOLTIP_OPEN = "tooltip.open";
@@ -19521,7 +19585,7 @@ var Tooltip$1 = (props2) => {
     delayDuration: delayDurationProp
   } = props2;
   const providerContext = useTooltipProviderContext(TOOLTIP_NAME, props2.__scopeTooltip);
-  const popperScope = usePopperScope(__scopeTooltip);
+  const popperScope = usePopperScope$1(__scopeTooltip);
   const [trigger, setTrigger] = reactExports.useState(null);
   const contentId = useId$1();
   const openTimerRef = reactExports.useRef(0);
@@ -19572,7 +19636,7 @@ var Tooltip$1 = (props2) => {
       }
     };
   }, []);
-  return /* @__PURE__ */ jsxRuntimeExports.jsx(Root2$1, { ...popperScope, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(Root2$2, { ...popperScope, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
     TooltipContextProvider,
     {
       scope: __scopeTooltip,
@@ -19601,13 +19665,13 @@ var Tooltip$1 = (props2) => {
   ) });
 };
 Tooltip$1.displayName = TOOLTIP_NAME;
-var TRIGGER_NAME$1 = "TooltipTrigger";
+var TRIGGER_NAME$2 = "TooltipTrigger";
 var TooltipTrigger$1 = reactExports.forwardRef(
   (props2, forwardedRef) => {
     const { __scopeTooltip, ...triggerProps } = props2;
-    const context = useTooltipContext(TRIGGER_NAME$1, __scopeTooltip);
-    const providerContext = useTooltipProviderContext(TRIGGER_NAME$1, __scopeTooltip);
-    const popperScope = usePopperScope(__scopeTooltip);
+    const context = useTooltipContext(TRIGGER_NAME$2, __scopeTooltip);
+    const providerContext = useTooltipProviderContext(TRIGGER_NAME$2, __scopeTooltip);
+    const popperScope = usePopperScope$1(__scopeTooltip);
     const ref = reactExports.useRef(null);
     const composedRefs = useComposedRefs(forwardedRef, ref, context.onTriggerChange);
     const isPointerDownRef = reactExports.useRef(false);
@@ -19650,29 +19714,29 @@ var TooltipTrigger$1 = reactExports.forwardRef(
     ) });
   }
 );
-TooltipTrigger$1.displayName = TRIGGER_NAME$1;
-var PORTAL_NAME$1 = "TooltipPortal";
-var [PortalProvider$1, usePortalContext$1] = createTooltipContext(PORTAL_NAME$1, {
+TooltipTrigger$1.displayName = TRIGGER_NAME$2;
+var PORTAL_NAME$2 = "TooltipPortal";
+var [PortalProvider$1, usePortalContext$1] = createTooltipContext(PORTAL_NAME$2, {
   forceMount: void 0
 });
 var TooltipPortal = (props2) => {
   const { __scopeTooltip, forceMount, children, container } = props2;
-  const context = useTooltipContext(PORTAL_NAME$1, __scopeTooltip);
-  return /* @__PURE__ */ jsxRuntimeExports.jsx(PortalProvider$1, { scope: __scopeTooltip, forceMount, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Presence, { present: forceMount || context.open, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Portal$2, { asChild: true, container, children }) }) });
+  const context = useTooltipContext(PORTAL_NAME$2, __scopeTooltip);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(PortalProvider$1, { scope: __scopeTooltip, forceMount, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Presence, { present: forceMount || context.open, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Portal$3, { asChild: true, container, children }) }) });
 };
-TooltipPortal.displayName = PORTAL_NAME$1;
-var CONTENT_NAME$1 = "TooltipContent";
+TooltipPortal.displayName = PORTAL_NAME$2;
+var CONTENT_NAME$2 = "TooltipContent";
 var TooltipContent$1 = reactExports.forwardRef(
   (props2, forwardedRef) => {
-    const portalContext = usePortalContext$1(CONTENT_NAME$1, props2.__scopeTooltip);
+    const portalContext = usePortalContext$1(CONTENT_NAME$2, props2.__scopeTooltip);
     const { forceMount = portalContext.forceMount, side = "top", ...contentProps } = props2;
-    const context = useTooltipContext(CONTENT_NAME$1, props2.__scopeTooltip);
+    const context = useTooltipContext(CONTENT_NAME$2, props2.__scopeTooltip);
     return /* @__PURE__ */ jsxRuntimeExports.jsx(Presence, { present: forceMount || context.open, children: context.disableHoverableContent ? /* @__PURE__ */ jsxRuntimeExports.jsx(TooltipContentImpl, { side, ...contentProps, ref: forwardedRef }) : /* @__PURE__ */ jsxRuntimeExports.jsx(TooltipContentHoverable, { side, ...contentProps, ref: forwardedRef }) });
   }
 );
 var TooltipContentHoverable = reactExports.forwardRef((props2, forwardedRef) => {
-  const context = useTooltipContext(CONTENT_NAME$1, props2.__scopeTooltip);
-  const providerContext = useTooltipProviderContext(CONTENT_NAME$1, props2.__scopeTooltip);
+  const context = useTooltipContext(CONTENT_NAME$2, props2.__scopeTooltip);
+  const providerContext = useTooltipProviderContext(CONTENT_NAME$2, props2.__scopeTooltip);
   const ref = reactExports.useRef(null);
   const composedRefs = useComposedRefs(forwardedRef, ref);
   const [pointerGraceArea, setPointerGraceArea] = reactExports.useState(null);
@@ -19743,8 +19807,8 @@ var TooltipContentImpl = reactExports.forwardRef(
       onPointerDownOutside,
       ...contentProps
     } = props2;
-    const context = useTooltipContext(CONTENT_NAME$1, __scopeTooltip);
-    const popperScope = usePopperScope(__scopeTooltip);
+    const context = useTooltipContext(CONTENT_NAME$2, __scopeTooltip);
+    const popperScope = usePopperScope$1(__scopeTooltip);
     const { onClose } = context;
     reactExports.useEffect(() => {
       document.addEventListener(TOOLTIP_OPEN, onClose);
@@ -19797,20 +19861,20 @@ var TooltipContentImpl = reactExports.forwardRef(
     );
   }
 );
-TooltipContent$1.displayName = CONTENT_NAME$1;
-var ARROW_NAME = "TooltipArrow";
+TooltipContent$1.displayName = CONTENT_NAME$2;
+var ARROW_NAME$1 = "TooltipArrow";
 var TooltipArrow = reactExports.forwardRef(
   (props2, forwardedRef) => {
     const { __scopeTooltip, ...arrowProps } = props2;
-    const popperScope = usePopperScope(__scopeTooltip);
+    const popperScope = usePopperScope$1(__scopeTooltip);
     const visuallyHiddenContentContext = useVisuallyHiddenContentContext(
-      ARROW_NAME,
+      ARROW_NAME$1,
       __scopeTooltip
     );
     return visuallyHiddenContentContext.isInside ? null : /* @__PURE__ */ jsxRuntimeExports.jsx(Arrow, { ...popperScope, ...arrowProps, ref: forwardedRef });
   }
 );
-TooltipArrow.displayName = ARROW_NAME;
+TooltipArrow.displayName = ARROW_NAME$1;
 function getExitSideFromRect(point2, rect) {
   const top = Math.abs(rect.top - point2.y);
   const bottom = Math.abs(rect.bottom - point2.y);
@@ -19928,14 +19992,14 @@ function getHullPresorted(points) {
 }
 var Provider = TooltipProvider$1;
 var Root3 = Tooltip$1;
-var Trigger$1 = TooltipTrigger$1;
-var Portal$1 = TooltipPortal;
-var Content2 = TooltipContent$1;
+var Trigger$2 = TooltipTrigger$1;
+var Portal$2 = TooltipPortal;
+var Content2$1 = TooltipContent$1;
 const TooltipProvider = Provider;
 const Tooltip = Root3;
-const TooltipTrigger = Trigger$1;
-const TooltipContent = reactExports.forwardRef(({ className, sideOffset = 4, ...props2 }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx(Portal$1, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-  Content2,
+const TooltipTrigger = Trigger$2;
+const TooltipContent = reactExports.forwardRef(({ className, sideOffset = 4, ...props2 }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx(Portal$2, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+  Content2$1,
   {
     ref,
     sideOffset,
@@ -19951,7 +20015,7 @@ const TooltipContent = reactExports.forwardRef(({ className, sideOffset = 4, ...
     ...props2
   }
 ) }));
-TooltipContent.displayName = Content2.displayName;
+TooltipContent.displayName = Content2$1.displayName;
 var AUTOFOCUS_ON_MOUNT = "focusScope.autoFocusOnMount";
 var AUTOFOCUS_ON_UNMOUNT = "focusScope.autoFocusOnUnmount";
 var EVENT_OPTIONS$1 = { bubbles: false, cancelable: true };
@@ -20956,12 +21020,12 @@ var hideOthers = function(originalTarget, parentNode, markerName) {
   return applyAttributeToOthers(targets, activeParentNode, markerName, "aria-hidden");
 };
 // @__NO_SIDE_EFFECTS__
-function createSlot(ownerName) {
-  const SlotClone = /* @__PURE__ */ createSlotClone(ownerName);
+function createSlot$1(ownerName) {
+  const SlotClone = /* @__PURE__ */ createSlotClone$1(ownerName);
   const Slot2 = reactExports.forwardRef((props2, forwardedRef) => {
     const { children, ...slotProps } = props2;
     const childrenArray = reactExports.Children.toArray(children);
-    const slottable = childrenArray.find(isSlottable);
+    const slottable = childrenArray.find(isSlottable$1);
     if (slottable) {
       const newElement = slottable.props.children;
       const newChildren = childrenArray.map((child) => {
@@ -20980,12 +21044,12 @@ function createSlot(ownerName) {
   return Slot2;
 }
 // @__NO_SIDE_EFFECTS__
-function createSlotClone(ownerName) {
+function createSlotClone$1(ownerName) {
   const SlotClone = reactExports.forwardRef((props2, forwardedRef) => {
     const { children, ...slotProps } = props2;
     if (reactExports.isValidElement(children)) {
-      const childrenRef = getElementRef(children);
-      const props22 = mergeProps(slotProps, children.props);
+      const childrenRef = getElementRef$1(children);
+      const props22 = mergeProps$1(slotProps, children.props);
       if (children.type !== reactExports.Fragment) {
         props22.ref = forwardedRef ? composeRefs(forwardedRef, childrenRef) : childrenRef;
       }
@@ -20996,11 +21060,11 @@ function createSlotClone(ownerName) {
   SlotClone.displayName = `${ownerName}.SlotClone`;
   return SlotClone;
 }
-var SLOTTABLE_IDENTIFIER = Symbol("radix.slottable");
-function isSlottable(child) {
-  return reactExports.isValidElement(child) && typeof child.type === "function" && "__radixId" in child.type && child.type.__radixId === SLOTTABLE_IDENTIFIER;
+var SLOTTABLE_IDENTIFIER$1 = Symbol("radix.slottable");
+function isSlottable$1(child) {
+  return reactExports.isValidElement(child) && typeof child.type === "function" && "__radixId" in child.type && child.type.__radixId === SLOTTABLE_IDENTIFIER$1;
 }
-function mergeProps(slotProps, childProps) {
+function mergeProps$1(slotProps, childProps) {
   const overrideProps = { ...childProps };
   for (const propName in childProps) {
     const slotPropValue = slotProps[propName];
@@ -21024,7 +21088,7 @@ function mergeProps(slotProps, childProps) {
   }
   return { ...slotProps, ...overrideProps };
 }
-function getElementRef(element2) {
+function getElementRef$1(element2) {
   let getter = Object.getOwnPropertyDescriptor(element2.props, "ref")?.get;
   let mayWarn = getter && "isReactWarning" in getter && getter.isReactWarning;
   if (mayWarn) {
@@ -21075,11 +21139,11 @@ var Dialog$1 = (props2) => {
   );
 };
 Dialog$1.displayName = DIALOG_NAME;
-var TRIGGER_NAME = "DialogTrigger";
+var TRIGGER_NAME$1 = "DialogTrigger";
 var DialogTrigger$1 = reactExports.forwardRef(
   (props2, forwardedRef) => {
     const { __scopeDialog, ...triggerProps } = props2;
-    const context = useDialogContext(TRIGGER_NAME, __scopeDialog);
+    const context = useDialogContext(TRIGGER_NAME$1, __scopeDialog);
     const composedTriggerRef = useComposedRefs(forwardedRef, context.triggerRef);
     return /* @__PURE__ */ jsxRuntimeExports.jsx(
       Primitive$1.button,
@@ -21096,17 +21160,17 @@ var DialogTrigger$1 = reactExports.forwardRef(
     );
   }
 );
-DialogTrigger$1.displayName = TRIGGER_NAME;
-var PORTAL_NAME = "DialogPortal";
-var [PortalProvider, usePortalContext] = createDialogContext(PORTAL_NAME, {
+DialogTrigger$1.displayName = TRIGGER_NAME$1;
+var PORTAL_NAME$1 = "DialogPortal";
+var [PortalProvider, usePortalContext] = createDialogContext(PORTAL_NAME$1, {
   forceMount: void 0
 });
 var DialogPortal$1 = (props2) => {
   const { __scopeDialog, forceMount, children, container } = props2;
-  const context = useDialogContext(PORTAL_NAME, __scopeDialog);
-  return /* @__PURE__ */ jsxRuntimeExports.jsx(PortalProvider, { scope: __scopeDialog, forceMount, children: reactExports.Children.map(children, (child) => /* @__PURE__ */ jsxRuntimeExports.jsx(Presence, { present: forceMount || context.open, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Portal$2, { asChild: true, container, children: child }) })) });
+  const context = useDialogContext(PORTAL_NAME$1, __scopeDialog);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(PortalProvider, { scope: __scopeDialog, forceMount, children: reactExports.Children.map(children, (child) => /* @__PURE__ */ jsxRuntimeExports.jsx(Presence, { present: forceMount || context.open, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Portal$3, { asChild: true, container, children: child }) })) });
 };
-DialogPortal$1.displayName = PORTAL_NAME;
+DialogPortal$1.displayName = PORTAL_NAME$1;
 var OVERLAY_NAME = "DialogOverlay";
 var DialogOverlay$1 = reactExports.forwardRef(
   (props2, forwardedRef) => {
@@ -21117,7 +21181,7 @@ var DialogOverlay$1 = reactExports.forwardRef(
   }
 );
 DialogOverlay$1.displayName = OVERLAY_NAME;
-var Slot = /* @__PURE__ */ createSlot("DialogOverlay.RemoveScroll");
+var Slot$1 = /* @__PURE__ */ createSlot$1("DialogOverlay.RemoveScroll");
 var DialogOverlayImpl = reactExports.forwardRef(
   (props2, forwardedRef) => {
     const { __scopeDialog, ...overlayProps } = props2;
@@ -21125,7 +21189,7 @@ var DialogOverlayImpl = reactExports.forwardRef(
     return (
       // Make sure `Content` is scrollable even when it doesn't live inside `RemoveScroll`
       // ie. when `Overlay` and `Content` are siblings
-      /* @__PURE__ */ jsxRuntimeExports.jsx(ReactRemoveScroll, { as: Slot, allowPinchZoom: true, shards: [context.contentRef], children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+      /* @__PURE__ */ jsxRuntimeExports.jsx(ReactRemoveScroll, { as: Slot$1, allowPinchZoom: true, shards: [context.contentRef], children: /* @__PURE__ */ jsxRuntimeExports.jsx(
         Primitive$1.div,
         {
           "data-state": getState$2(context.open),
@@ -21137,19 +21201,19 @@ var DialogOverlayImpl = reactExports.forwardRef(
     );
   }
 );
-var CONTENT_NAME = "DialogContent";
+var CONTENT_NAME$1 = "DialogContent";
 var DialogContent$1 = reactExports.forwardRef(
   (props2, forwardedRef) => {
-    const portalContext = usePortalContext(CONTENT_NAME, props2.__scopeDialog);
+    const portalContext = usePortalContext(CONTENT_NAME$1, props2.__scopeDialog);
     const { forceMount = portalContext.forceMount, ...contentProps } = props2;
-    const context = useDialogContext(CONTENT_NAME, props2.__scopeDialog);
+    const context = useDialogContext(CONTENT_NAME$1, props2.__scopeDialog);
     return /* @__PURE__ */ jsxRuntimeExports.jsx(Presence, { present: forceMount || context.open, children: context.modal ? /* @__PURE__ */ jsxRuntimeExports.jsx(DialogContentModal, { ...contentProps, ref: forwardedRef }) : /* @__PURE__ */ jsxRuntimeExports.jsx(DialogContentNonModal, { ...contentProps, ref: forwardedRef }) });
   }
 );
-DialogContent$1.displayName = CONTENT_NAME;
+DialogContent$1.displayName = CONTENT_NAME$1;
 var DialogContentModal = reactExports.forwardRef(
   (props2, forwardedRef) => {
-    const context = useDialogContext(CONTENT_NAME, props2.__scopeDialog);
+    const context = useDialogContext(CONTENT_NAME$1, props2.__scopeDialog);
     const contentRef = reactExports.useRef(null);
     const composedRefs = useComposedRefs(forwardedRef, context.contentRef, contentRef);
     reactExports.useEffect(() => {
@@ -21183,7 +21247,7 @@ var DialogContentModal = reactExports.forwardRef(
 );
 var DialogContentNonModal = reactExports.forwardRef(
   (props2, forwardedRef) => {
-    const context = useDialogContext(CONTENT_NAME, props2.__scopeDialog);
+    const context = useDialogContext(CONTENT_NAME$1, props2.__scopeDialog);
     const hasInteractedOutsideRef = reactExports.useRef(false);
     const hasPointerDownOutsideRef = reactExports.useRef(false);
     return /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -21224,7 +21288,7 @@ var DialogContentNonModal = reactExports.forwardRef(
 var DialogContentImpl = reactExports.forwardRef(
   (props2, forwardedRef) => {
     const { __scopeDialog, trapFocus, onOpenAutoFocus, onCloseAutoFocus, ...contentProps } = props2;
-    const context = useDialogContext(CONTENT_NAME, __scopeDialog);
+    const context = useDialogContext(CONTENT_NAME$1, __scopeDialog);
     const contentRef = reactExports.useRef(null);
     const composedRefs = useComposedRefs(forwardedRef, contentRef);
     useFocusGuards();
@@ -21299,7 +21363,7 @@ function getState$2(open) {
 }
 var TITLE_WARNING_NAME = "DialogTitleWarning";
 var [WarningProvider, useWarningContext] = createContext2(TITLE_WARNING_NAME, {
-  contentName: CONTENT_NAME,
+  contentName: CONTENT_NAME$1,
   titleName: TITLE_NAME,
   docsSlug: "dialog"
 });
@@ -21332,16 +21396,16 @@ var DescriptionWarning = ({ contentRef, descriptionId }) => {
   return null;
 };
 var Root$3 = Dialog$1;
-var Trigger = DialogTrigger$1;
-var Portal = DialogPortal$1;
+var Trigger$1 = DialogTrigger$1;
+var Portal$1 = DialogPortal$1;
 var Overlay = DialogOverlay$1;
 var Content = DialogContent$1;
 var Title = DialogTitle$1;
 var Description = DialogDescription$1;
 var Close = DialogClose;
 const Dialog = Root$3;
-const DialogTrigger = Trigger;
-const DialogPortal = Portal;
+const DialogTrigger = Trigger$1;
+const DialogPortal = Portal$1;
 const DialogOverlay = reactExports.forwardRef(({ className, ...props2 }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx(
   Overlay,
   {
@@ -21411,19 +21475,19 @@ function useDirection(localDir) {
 }
 var ENTRY_FOCUS = "rovingFocusGroup.onEntryFocus";
 var EVENT_OPTIONS = { bubbles: false, cancelable: true };
-var GROUP_NAME = "RovingFocusGroup";
-var [Collection, useCollection, createCollectionScope] = createCollection(GROUP_NAME);
+var GROUP_NAME$1 = "RovingFocusGroup";
+var [Collection$1, useCollection$1, createCollectionScope$1] = createCollection(GROUP_NAME$1);
 var [createRovingFocusGroupContext, createRovingFocusGroupScope] = createContextScope(
-  GROUP_NAME,
-  [createCollectionScope]
+  GROUP_NAME$1,
+  [createCollectionScope$1]
 );
-var [RovingFocusProvider, useRovingFocusContext] = createRovingFocusGroupContext(GROUP_NAME);
+var [RovingFocusProvider, useRovingFocusContext] = createRovingFocusGroupContext(GROUP_NAME$1);
 var RovingFocusGroup = reactExports.forwardRef(
   (props2, forwardedRef) => {
-    return /* @__PURE__ */ jsxRuntimeExports.jsx(Collection.Provider, { scope: props2.__scopeRovingFocusGroup, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Collection.Slot, { scope: props2.__scopeRovingFocusGroup, children: /* @__PURE__ */ jsxRuntimeExports.jsx(RovingFocusGroupImpl, { ...props2, ref: forwardedRef }) }) });
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(Collection$1.Provider, { scope: props2.__scopeRovingFocusGroup, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Collection$1.Slot, { scope: props2.__scopeRovingFocusGroup, children: /* @__PURE__ */ jsxRuntimeExports.jsx(RovingFocusGroupImpl, { ...props2, ref: forwardedRef }) }) });
   }
 );
-RovingFocusGroup.displayName = GROUP_NAME;
+RovingFocusGroup.displayName = GROUP_NAME$1;
 var RovingFocusGroupImpl = reactExports.forwardRef((props2, forwardedRef) => {
   const {
     __scopeRovingFocusGroup,
@@ -21444,11 +21508,11 @@ var RovingFocusGroupImpl = reactExports.forwardRef((props2, forwardedRef) => {
     prop: currentTabStopIdProp,
     defaultProp: defaultCurrentTabStopId ?? null,
     onChange: onCurrentTabStopIdChange,
-    caller: GROUP_NAME
+    caller: GROUP_NAME$1
   });
   const [isTabbingBackOut, setIsTabbingBackOut] = reactExports.useState(false);
   const handleEntryFocus = useCallbackRef$1(onEntryFocus);
-  const getItems = useCollection(__scopeRovingFocusGroup);
+  const getItems = useCollection$1(__scopeRovingFocusGroup);
   const isClickFocusRef = reactExports.useRef(false);
   const [focusableItemsCount, setFocusableItemsCount] = reactExports.useState(0);
   reactExports.useEffect(() => {
@@ -21514,7 +21578,7 @@ var RovingFocusGroupImpl = reactExports.forwardRef((props2, forwardedRef) => {
     }
   );
 });
-var ITEM_NAME$1 = "RovingFocusGroupItem";
+var ITEM_NAME$2 = "RovingFocusGroupItem";
 var RovingFocusGroupItem = reactExports.forwardRef(
   (props2, forwardedRef) => {
     const {
@@ -21527,9 +21591,9 @@ var RovingFocusGroupItem = reactExports.forwardRef(
     } = props2;
     const autoId = useId$1();
     const id2 = tabStopId || autoId;
-    const context = useRovingFocusContext(ITEM_NAME$1, __scopeRovingFocusGroup);
+    const context = useRovingFocusContext(ITEM_NAME$2, __scopeRovingFocusGroup);
     const isCurrentTabStop = context.currentTabStopId === id2;
-    const getItems = useCollection(__scopeRovingFocusGroup);
+    const getItems = useCollection$1(__scopeRovingFocusGroup);
     const { onFocusableItemAdd, onFocusableItemRemove, currentTabStopId } = context;
     reactExports.useEffect(() => {
       if (focusable) {
@@ -21538,7 +21602,7 @@ var RovingFocusGroupItem = reactExports.forwardRef(
       }
     }, [focusable, onFocusableItemAdd, onFocusableItemRemove]);
     return /* @__PURE__ */ jsxRuntimeExports.jsx(
-      Collection.ItemSlot,
+      Collection$1.ItemSlot,
       {
         scope: __scopeRovingFocusGroup,
         id: id2,
@@ -21572,7 +21636,7 @@ var RovingFocusGroupItem = reactExports.forwardRef(
                 else if (focusIntent === "prev" || focusIntent === "next") {
                   if (focusIntent === "prev") candidateNodes.reverse();
                   const currentIndex = candidateNodes.indexOf(event.currentTarget);
-                  candidateNodes = context.loop ? wrapArray(candidateNodes, currentIndex + 1) : candidateNodes.slice(currentIndex + 1);
+                  candidateNodes = context.loop ? wrapArray$1(candidateNodes, currentIndex + 1) : candidateNodes.slice(currentIndex + 1);
                 }
                 setTimeout(() => focusFirst(candidateNodes));
               }
@@ -21584,7 +21648,7 @@ var RovingFocusGroupItem = reactExports.forwardRef(
     );
   }
 );
-RovingFocusGroupItem.displayName = ITEM_NAME$1;
+RovingFocusGroupItem.displayName = ITEM_NAME$2;
 var MAP_KEY_TO_FOCUS_INTENT = {
   ArrowLeft: "prev",
   ArrowUp: "prev",
@@ -21613,11 +21677,11 @@ function focusFirst(candidates, preventScroll = false) {
     if (document.activeElement !== PREVIOUSLY_FOCUSED_ELEMENT) return;
   }
 }
-function wrapArray(array, startIndex) {
+function wrapArray$1(array, startIndex) {
   return array.map((_, index2) => array[(startIndex + index2) % array.length]);
 }
 var Root$2 = RovingFocusGroup;
-var Item = RovingFocusGroupItem;
+var Item$1 = RovingFocusGroupItem;
 function usePrevious(value) {
   const ref = reactExports.useRef({ value, previous: value });
   return reactExports.useMemo(() => {
@@ -21705,7 +21769,7 @@ var RadioIndicator = reactExports.forwardRef(
   }
 );
 RadioIndicator.displayName = INDICATOR_NAME;
-var BUBBLE_INPUT_NAME$1 = "RadioBubbleInput";
+var BUBBLE_INPUT_NAME$2 = "RadioBubbleInput";
 var RadioBubbleInput = reactExports.forwardRef(
   ({
     __scopeRadio,
@@ -21754,7 +21818,7 @@ var RadioBubbleInput = reactExports.forwardRef(
     );
   }
 );
-RadioBubbleInput.displayName = BUBBLE_INPUT_NAME$1;
+RadioBubbleInput.displayName = BUBBLE_INPUT_NAME$2;
 function getState$1(checked) {
   return checked ? "checked" : "unchecked";
 }
@@ -21826,11 +21890,11 @@ var RadioGroup$1 = reactExports.forwardRef(
   }
 );
 RadioGroup$1.displayName = RADIO_GROUP_NAME;
-var ITEM_NAME = "RadioGroupItem";
+var ITEM_NAME$1 = "RadioGroupItem";
 var RadioGroupItem$1 = reactExports.forwardRef(
   (props2, forwardedRef) => {
     const { __scopeRadioGroup, disabled, ...itemProps } = props2;
-    const context = useRadioGroupContext(ITEM_NAME, __scopeRadioGroup);
+    const context = useRadioGroupContext(ITEM_NAME$1, __scopeRadioGroup);
     const isDisabled = context.disabled || disabled;
     const rovingFocusGroupScope = useRovingFocusGroupScope(__scopeRadioGroup);
     const radioScope = useRadioScope(__scopeRadioGroup);
@@ -21853,7 +21917,7 @@ var RadioGroupItem$1 = reactExports.forwardRef(
       };
     }, []);
     return /* @__PURE__ */ jsxRuntimeExports.jsx(
-      Item,
+      Item$1,
       {
         asChild: true,
         ...rovingFocusGroupScope,
@@ -21882,7 +21946,7 @@ var RadioGroupItem$1 = reactExports.forwardRef(
     );
   }
 );
-RadioGroupItem$1.displayName = ITEM_NAME;
+RadioGroupItem$1.displayName = ITEM_NAME$1;
 var INDICATOR_NAME2 = "RadioGroupIndicator";
 var RadioGroupIndicator = reactExports.forwardRef(
   (props2, forwardedRef) => {
@@ -21892,12 +21956,12 @@ var RadioGroupIndicator = reactExports.forwardRef(
   }
 );
 RadioGroupIndicator.displayName = INDICATOR_NAME2;
-var Root2 = RadioGroup$1;
+var Root2$1 = RadioGroup$1;
 var Item2 = RadioGroupItem$1;
 var Indicator = RadioGroupIndicator;
 const RadioGroup = reactExports.forwardRef(({ className, ...props2 }, ref) => {
   return /* @__PURE__ */ jsxRuntimeExports.jsx(
-    Root2,
+    Root2$1,
     {
       className: cn("grid gap-2", className),
       ...props2,
@@ -21905,7 +21969,7 @@ const RadioGroup = reactExports.forwardRef(({ className, ...props2 }, ref) => {
     }
   );
 });
-RadioGroup.displayName = Root2.displayName;
+RadioGroup.displayName = Root2$1.displayName;
 const RadioGroupItem = reactExports.forwardRef(({ className, ...props2 }, ref) => {
   return /* @__PURE__ */ jsxRuntimeExports.jsx(
     Item2,
@@ -22476,137 +22540,1401 @@ function isDeviceOnly(rec) {
 function hasLocalPath(rec) {
   return rec.location === "local-only" || rec.location === "both";
 }
-const Slider = reactExports.forwardRef(
-  ({
-    className,
-    value,
-    defaultValue = [0],
-    min: min2 = 0,
-    max: max2 = 100,
-    step = 1,
-    onValueChange,
-    disabled = false,
-    ...props2
-  }, ref) => {
-    const [internalValue, setInternalValue] = reactExports.useState(defaultValue);
-    const currentValue = value ?? internalValue;
-    const trackRef = reactExports.useRef(null);
-    const percentage = Math.min(100, Math.max(0, (currentValue[0] - min2) / (max2 - min2) * 100));
-    const updateValue = reactExports.useCallback(
-      (clientX) => {
-        if (disabled || !trackRef.current) return;
-        const rect = trackRef.current.getBoundingClientRect();
-        const percent = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-        const rawValue = min2 + percent * (max2 - min2);
-        const steppedValue = Math.round(rawValue / step) * step;
-        const clampedValue = Math.max(min2, Math.min(max2, steppedValue));
-        const newValue = [clampedValue];
-        setInternalValue(newValue);
-        onValueChange?.(newValue);
-      },
-      [disabled, min2, max2, step, onValueChange]
-    );
-    const handleMouseDown = reactExports.useCallback(
-      (e) => {
-        if (disabled) return;
-        e.preventDefault();
-        updateValue(e.clientX);
-        const handleMouseMove = (e2) => {
-          updateValue(e2.clientX);
-        };
-        const handleMouseUp = () => {
-          document.removeEventListener("mousemove", handleMouseMove);
-          document.removeEventListener("mouseup", handleMouseUp);
-        };
-        document.addEventListener("mousemove", handleMouseMove);
-        document.addEventListener("mouseup", handleMouseUp);
-      },
-      [disabled, updateValue]
-    );
-    const handleKeyDown = reactExports.useCallback(
-      (e) => {
-        if (disabled) return;
-        let newValue = currentValue[0];
-        switch (e.key) {
-          case "ArrowRight":
-          case "ArrowUp":
-            newValue = Math.min(max2, currentValue[0] + step);
-            break;
-          case "ArrowLeft":
-          case "ArrowDown":
-            newValue = Math.max(min2, currentValue[0] - step);
-            break;
-          case "Home":
-            newValue = min2;
-            break;
-          case "End":
-            newValue = max2;
-            break;
-          default:
-            return;
+function clamp(value, [min2, max2]) {
+  return Math.min(max2, Math.max(min2, value));
+}
+// @__NO_SIDE_EFFECTS__
+function createSlot(ownerName) {
+  const SlotClone = /* @__PURE__ */ createSlotClone(ownerName);
+  const Slot2 = reactExports.forwardRef((props2, forwardedRef) => {
+    const { children, ...slotProps } = props2;
+    const childrenArray = reactExports.Children.toArray(children);
+    const slottable = childrenArray.find(isSlottable);
+    if (slottable) {
+      const newElement = slottable.props.children;
+      const newChildren = childrenArray.map((child) => {
+        if (child === slottable) {
+          if (reactExports.Children.count(newElement) > 1) return reactExports.Children.only(null);
+          return reactExports.isValidElement(newElement) ? newElement.props.children : null;
+        } else {
+          return child;
         }
-        e.preventDefault();
-        const newValueArray = [newValue];
-        setInternalValue(newValueArray);
-        onValueChange?.(newValueArray);
-      },
-      [disabled, currentValue, min2, max2, step, onValueChange]
-    );
-    return /* @__PURE__ */ jsxRuntimeExports.jsxs(
-      "div",
+      });
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(SlotClone, { ...slotProps, ref: forwardedRef, children: reactExports.isValidElement(newElement) ? reactExports.cloneElement(newElement, void 0, newChildren) : null });
+    }
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(SlotClone, { ...slotProps, ref: forwardedRef, children });
+  });
+  Slot2.displayName = `${ownerName}.Slot`;
+  return Slot2;
+}
+// @__NO_SIDE_EFFECTS__
+function createSlotClone(ownerName) {
+  const SlotClone = reactExports.forwardRef((props2, forwardedRef) => {
+    const { children, ...slotProps } = props2;
+    if (reactExports.isValidElement(children)) {
+      const childrenRef = getElementRef(children);
+      const props22 = mergeProps(slotProps, children.props);
+      if (children.type !== reactExports.Fragment) {
+        props22.ref = forwardedRef ? composeRefs(forwardedRef, childrenRef) : childrenRef;
+      }
+      return reactExports.cloneElement(children, props22);
+    }
+    return reactExports.Children.count(children) > 1 ? reactExports.Children.only(null) : null;
+  });
+  SlotClone.displayName = `${ownerName}.SlotClone`;
+  return SlotClone;
+}
+var SLOTTABLE_IDENTIFIER = Symbol("radix.slottable");
+function isSlottable(child) {
+  return reactExports.isValidElement(child) && typeof child.type === "function" && "__radixId" in child.type && child.type.__radixId === SLOTTABLE_IDENTIFIER;
+}
+function mergeProps(slotProps, childProps) {
+  const overrideProps = { ...childProps };
+  for (const propName in childProps) {
+    const slotPropValue = slotProps[propName];
+    const childPropValue = childProps[propName];
+    const isHandler = /^on[A-Z]/.test(propName);
+    if (isHandler) {
+      if (slotPropValue && childPropValue) {
+        overrideProps[propName] = (...args) => {
+          const result = childPropValue(...args);
+          slotPropValue(...args);
+          return result;
+        };
+      } else if (slotPropValue) {
+        overrideProps[propName] = slotPropValue;
+      }
+    } else if (propName === "style") {
+      overrideProps[propName] = { ...slotPropValue, ...childPropValue };
+    } else if (propName === "className") {
+      overrideProps[propName] = [slotPropValue, childPropValue].filter(Boolean).join(" ");
+    }
+  }
+  return { ...slotProps, ...overrideProps };
+}
+function getElementRef(element2) {
+  let getter = Object.getOwnPropertyDescriptor(element2.props, "ref")?.get;
+  let mayWarn = getter && "isReactWarning" in getter && getter.isReactWarning;
+  if (mayWarn) {
+    return element2.ref;
+  }
+  getter = Object.getOwnPropertyDescriptor(element2, "ref")?.get;
+  mayWarn = getter && "isReactWarning" in getter && getter.isReactWarning;
+  if (mayWarn) {
+    return element2.props.ref;
+  }
+  return element2.props.ref || element2.ref;
+}
+var OPEN_KEYS = [" ", "Enter", "ArrowUp", "ArrowDown"];
+var SELECTION_KEYS = [" ", "Enter"];
+var SELECT_NAME = "Select";
+var [Collection, useCollection, createCollectionScope] = createCollection(SELECT_NAME);
+var [createSelectContext] = createContextScope(SELECT_NAME, [
+  createCollectionScope,
+  createPopperScope
+]);
+var usePopperScope = createPopperScope();
+var [SelectProvider, useSelectContext] = createSelectContext(SELECT_NAME);
+var [SelectNativeOptionsProvider, useSelectNativeOptionsContext] = createSelectContext(SELECT_NAME);
+var Select$1 = (props2) => {
+  const {
+    __scopeSelect,
+    children,
+    open: openProp,
+    defaultOpen,
+    onOpenChange,
+    value: valueProp,
+    defaultValue,
+    onValueChange,
+    dir,
+    name: name2,
+    autoComplete,
+    disabled,
+    required,
+    form
+  } = props2;
+  const popperScope = usePopperScope(__scopeSelect);
+  const [trigger, setTrigger] = reactExports.useState(null);
+  const [valueNode, setValueNode] = reactExports.useState(null);
+  const [valueNodeHasChildren, setValueNodeHasChildren] = reactExports.useState(false);
+  const direction = useDirection(dir);
+  const [open, setOpen] = useControllableState({
+    prop: openProp,
+    defaultProp: defaultOpen ?? false,
+    onChange: onOpenChange,
+    caller: SELECT_NAME
+  });
+  const [value, setValue] = useControllableState({
+    prop: valueProp,
+    defaultProp: defaultValue,
+    onChange: onValueChange,
+    caller: SELECT_NAME
+  });
+  const triggerPointerDownPosRef = reactExports.useRef(null);
+  const isFormControl = trigger ? form || !!trigger.closest("form") : true;
+  const [nativeOptionsSet, setNativeOptionsSet] = reactExports.useState(/* @__PURE__ */ new Set());
+  const nativeSelectKey = Array.from(nativeOptionsSet).map((option) => option.props.value).join(";");
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(Root2$2, { ...popperScope, children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    SelectProvider,
+    {
+      required,
+      scope: __scopeSelect,
+      trigger,
+      onTriggerChange: setTrigger,
+      valueNode,
+      onValueNodeChange: setValueNode,
+      valueNodeHasChildren,
+      onValueNodeHasChildrenChange: setValueNodeHasChildren,
+      contentId: useId$1(),
+      value,
+      onValueChange: setValue,
+      open,
+      onOpenChange: setOpen,
+      dir: direction,
+      triggerPointerDownPosRef,
+      disabled,
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Collection.Provider, { scope: __scopeSelect, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+          SelectNativeOptionsProvider,
+          {
+            scope: props2.__scopeSelect,
+            onNativeOptionAdd: reactExports.useCallback((option) => {
+              setNativeOptionsSet((prev) => new Set(prev).add(option));
+            }, []),
+            onNativeOptionRemove: reactExports.useCallback((option) => {
+              setNativeOptionsSet((prev) => {
+                const optionsSet = new Set(prev);
+                optionsSet.delete(option);
+                return optionsSet;
+              });
+            }, []),
+            children
+          }
+        ) }),
+        isFormControl ? /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          SelectBubbleInput,
+          {
+            "aria-hidden": true,
+            required,
+            tabIndex: -1,
+            name: name2,
+            autoComplete,
+            value,
+            onChange: (event) => setValue(event.target.value),
+            disabled,
+            form,
+            children: [
+              value === void 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "" }) : null,
+              Array.from(nativeOptionsSet)
+            ]
+          },
+          nativeSelectKey
+        ) : null
+      ]
+    }
+  ) });
+};
+Select$1.displayName = SELECT_NAME;
+var TRIGGER_NAME = "SelectTrigger";
+var SelectTrigger$1 = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const { __scopeSelect, disabled = false, ...triggerProps } = props2;
+    const popperScope = usePopperScope(__scopeSelect);
+    const context = useSelectContext(TRIGGER_NAME, __scopeSelect);
+    const isDisabled = context.disabled || disabled;
+    const composedRefs = useComposedRefs(forwardedRef, context.onTriggerChange);
+    const getItems = useCollection(__scopeSelect);
+    const pointerTypeRef = reactExports.useRef("touch");
+    const [searchRef, handleTypeaheadSearch, resetTypeahead] = useTypeaheadSearch((search2) => {
+      const enabledItems = getItems().filter((item) => !item.disabled);
+      const currentItem = enabledItems.find((item) => item.value === context.value);
+      const nextItem = findNextItem(enabledItems, search2, currentItem);
+      if (nextItem !== void 0) {
+        context.onValueChange(nextItem.value);
+      }
+    });
+    const handleOpen = (pointerEvent) => {
+      if (!isDisabled) {
+        context.onOpenChange(true);
+        resetTypeahead();
+      }
+      if (pointerEvent) {
+        context.triggerPointerDownPosRef.current = {
+          x: Math.round(pointerEvent.pageX),
+          y: Math.round(pointerEvent.pageY)
+        };
+      }
+    };
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(Anchor, { asChild: true, ...popperScope, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+      Primitive$1.button,
       {
-        ref,
-        role: "slider",
-        "aria-valuemin": min2,
-        "aria-valuemax": max2,
-        "aria-valuenow": currentValue[0],
-        "aria-disabled": disabled,
-        tabIndex: disabled ? -1 : 0,
-        className: cn(
-          "relative flex w-full touch-none select-none items-center",
-          disabled && "opacity-50 cursor-not-allowed",
-          className
-        ),
-        onMouseDown: handleMouseDown,
-        onKeyDown: handleKeyDown,
-        ...props2,
-        children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "div",
-            {
-              ref: trackRef,
-              className: "relative h-1.5 w-full grow overflow-hidden rounded-full bg-primary/20",
-              children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "div",
-                {
-                  className: "absolute h-full bg-primary transition-all",
-                  style: { width: `${percentage}%` }
-                }
-              )
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "div",
-            {
-              className: cn(
-                "absolute block h-4 w-4 rounded-full border border-primary/50 bg-background shadow transition-colors",
-                "hover:border-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                disabled && "pointer-events-none"
-              ),
-              style: { left: `calc(${percentage}% - 8px)` }
-            }
-          )
-        ]
+        type: "button",
+        role: "combobox",
+        "aria-controls": context.contentId,
+        "aria-expanded": context.open,
+        "aria-required": context.required,
+        "aria-autocomplete": "none",
+        dir: context.dir,
+        "data-state": context.open ? "open" : "closed",
+        disabled: isDisabled,
+        "data-disabled": isDisabled ? "" : void 0,
+        "data-placeholder": shouldShowPlaceholder(context.value) ? "" : void 0,
+        ...triggerProps,
+        ref: composedRefs,
+        onClick: composeEventHandlers(triggerProps.onClick, (event) => {
+          event.currentTarget.focus();
+          if (pointerTypeRef.current !== "mouse") {
+            handleOpen(event);
+          }
+        }),
+        onPointerDown: composeEventHandlers(triggerProps.onPointerDown, (event) => {
+          pointerTypeRef.current = event.pointerType;
+          const target = event.target;
+          if (target.hasPointerCapture(event.pointerId)) {
+            target.releasePointerCapture(event.pointerId);
+          }
+          if (event.button === 0 && event.ctrlKey === false && event.pointerType === "mouse") {
+            handleOpen(event);
+            event.preventDefault();
+          }
+        }),
+        onKeyDown: composeEventHandlers(triggerProps.onKeyDown, (event) => {
+          const isTypingAhead = searchRef.current !== "";
+          const isModifierKey = event.ctrlKey || event.altKey || event.metaKey;
+          if (!isModifierKey && event.key.length === 1) handleTypeaheadSearch(event.key);
+          if (isTypingAhead && event.key === " ") return;
+          if (OPEN_KEYS.includes(event.key)) {
+            handleOpen();
+            event.preventDefault();
+          }
+        })
+      }
+    ) });
+  }
+);
+SelectTrigger$1.displayName = TRIGGER_NAME;
+var VALUE_NAME = "SelectValue";
+var SelectValue$1 = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const { __scopeSelect, className, style, children, placeholder = "", ...valueProps } = props2;
+    const context = useSelectContext(VALUE_NAME, __scopeSelect);
+    const { onValueNodeHasChildrenChange } = context;
+    const hasChildren = children !== void 0;
+    const composedRefs = useComposedRefs(forwardedRef, context.onValueNodeChange);
+    useLayoutEffect2(() => {
+      onValueNodeHasChildrenChange(hasChildren);
+    }, [onValueNodeHasChildrenChange, hasChildren]);
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      Primitive$1.span,
+      {
+        ...valueProps,
+        ref: composedRefs,
+        style: { pointerEvents: "none" },
+        children: shouldShowPlaceholder(context.value) ? /* @__PURE__ */ jsxRuntimeExports.jsx(jsxRuntimeExports.Fragment, { children: placeholder }) : children
       }
     );
   }
 );
-Slider.displayName = "Slider";
+SelectValue$1.displayName = VALUE_NAME;
+var ICON_NAME = "SelectIcon";
+var SelectIcon = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const { __scopeSelect, children, ...iconProps } = props2;
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(Primitive$1.span, { "aria-hidden": true, ...iconProps, ref: forwardedRef, children: children || "▼" });
+  }
+);
+SelectIcon.displayName = ICON_NAME;
+var PORTAL_NAME = "SelectPortal";
+var SelectPortal = (props2) => {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(Portal$3, { asChild: true, ...props2 });
+};
+SelectPortal.displayName = PORTAL_NAME;
+var CONTENT_NAME = "SelectContent";
+var SelectContent$1 = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const context = useSelectContext(CONTENT_NAME, props2.__scopeSelect);
+    const [fragment, setFragment] = reactExports.useState();
+    useLayoutEffect2(() => {
+      setFragment(new DocumentFragment());
+    }, []);
+    if (!context.open) {
+      const frag = fragment;
+      return frag ? reactDomExports.createPortal(
+        /* @__PURE__ */ jsxRuntimeExports.jsx(SelectContentProvider, { scope: props2.__scopeSelect, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Collection.Slot, { scope: props2.__scopeSelect, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: props2.children }) }) }),
+        frag
+      ) : null;
+    }
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(SelectContentImpl, { ...props2, ref: forwardedRef });
+  }
+);
+SelectContent$1.displayName = CONTENT_NAME;
+var CONTENT_MARGIN = 10;
+var [SelectContentProvider, useSelectContentContext] = createSelectContext(CONTENT_NAME);
+var CONTENT_IMPL_NAME = "SelectContentImpl";
+var Slot = /* @__PURE__ */ createSlot("SelectContent.RemoveScroll");
+var SelectContentImpl = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const {
+      __scopeSelect,
+      position: position2 = "item-aligned",
+      onCloseAutoFocus,
+      onEscapeKeyDown,
+      onPointerDownOutside,
+      //
+      // PopperContent props
+      side,
+      sideOffset,
+      align,
+      alignOffset,
+      arrowPadding,
+      collisionBoundary,
+      collisionPadding,
+      sticky,
+      hideWhenDetached,
+      avoidCollisions,
+      //
+      ...contentProps
+    } = props2;
+    const context = useSelectContext(CONTENT_NAME, __scopeSelect);
+    const [content2, setContent] = reactExports.useState(null);
+    const [viewport, setViewport] = reactExports.useState(null);
+    const composedRefs = useComposedRefs(forwardedRef, (node2) => setContent(node2));
+    const [selectedItem, setSelectedItem] = reactExports.useState(null);
+    const [selectedItemText, setSelectedItemText] = reactExports.useState(
+      null
+    );
+    const getItems = useCollection(__scopeSelect);
+    const [isPositioned, setIsPositioned] = reactExports.useState(false);
+    const firstValidItemFoundRef = reactExports.useRef(false);
+    reactExports.useEffect(() => {
+      if (content2) return hideOthers(content2);
+    }, [content2]);
+    useFocusGuards();
+    const focusFirst2 = reactExports.useCallback(
+      (candidates) => {
+        const [firstItem, ...restItems] = getItems().map((item) => item.ref.current);
+        const [lastItem] = restItems.slice(-1);
+        const PREVIOUSLY_FOCUSED_ELEMENT = document.activeElement;
+        for (const candidate of candidates) {
+          if (candidate === PREVIOUSLY_FOCUSED_ELEMENT) return;
+          candidate?.scrollIntoView({ block: "nearest" });
+          if (candidate === firstItem && viewport) viewport.scrollTop = 0;
+          if (candidate === lastItem && viewport) viewport.scrollTop = viewport.scrollHeight;
+          candidate?.focus();
+          if (document.activeElement !== PREVIOUSLY_FOCUSED_ELEMENT) return;
+        }
+      },
+      [getItems, viewport]
+    );
+    const focusSelectedItem = reactExports.useCallback(
+      () => focusFirst2([selectedItem, content2]),
+      [focusFirst2, selectedItem, content2]
+    );
+    reactExports.useEffect(() => {
+      if (isPositioned) {
+        focusSelectedItem();
+      }
+    }, [isPositioned, focusSelectedItem]);
+    const { onOpenChange, triggerPointerDownPosRef } = context;
+    reactExports.useEffect(() => {
+      if (content2) {
+        let pointerMoveDelta = { x: 0, y: 0 };
+        const handlePointerMove2 = (event) => {
+          pointerMoveDelta = {
+            x: Math.abs(Math.round(event.pageX) - (triggerPointerDownPosRef.current?.x ?? 0)),
+            y: Math.abs(Math.round(event.pageY) - (triggerPointerDownPosRef.current?.y ?? 0))
+          };
+        };
+        const handlePointerUp2 = (event) => {
+          if (pointerMoveDelta.x <= 10 && pointerMoveDelta.y <= 10) {
+            event.preventDefault();
+          } else {
+            if (!content2.contains(event.target)) {
+              onOpenChange(false);
+            }
+          }
+          document.removeEventListener("pointermove", handlePointerMove2);
+          triggerPointerDownPosRef.current = null;
+        };
+        if (triggerPointerDownPosRef.current !== null) {
+          document.addEventListener("pointermove", handlePointerMove2);
+          document.addEventListener("pointerup", handlePointerUp2, { capture: true, once: true });
+        }
+        return () => {
+          document.removeEventListener("pointermove", handlePointerMove2);
+          document.removeEventListener("pointerup", handlePointerUp2, { capture: true });
+        };
+      }
+    }, [content2, onOpenChange, triggerPointerDownPosRef]);
+    reactExports.useEffect(() => {
+      const close = () => onOpenChange(false);
+      window.addEventListener("blur", close);
+      window.addEventListener("resize", close);
+      return () => {
+        window.removeEventListener("blur", close);
+        window.removeEventListener("resize", close);
+      };
+    }, [onOpenChange]);
+    const [searchRef, handleTypeaheadSearch] = useTypeaheadSearch((search2) => {
+      const enabledItems = getItems().filter((item) => !item.disabled);
+      const currentItem = enabledItems.find((item) => item.ref.current === document.activeElement);
+      const nextItem = findNextItem(enabledItems, search2, currentItem);
+      if (nextItem) {
+        setTimeout(() => nextItem.ref.current.focus());
+      }
+    });
+    const itemRefCallback = reactExports.useCallback(
+      (node2, value, disabled) => {
+        const isFirstValidItem = !firstValidItemFoundRef.current && !disabled;
+        const isSelectedItem = context.value !== void 0 && context.value === value;
+        if (isSelectedItem || isFirstValidItem) {
+          setSelectedItem(node2);
+          if (isFirstValidItem) firstValidItemFoundRef.current = true;
+        }
+      },
+      [context.value]
+    );
+    const handleItemLeave = reactExports.useCallback(() => content2?.focus(), [content2]);
+    const itemTextRefCallback = reactExports.useCallback(
+      (node2, value, disabled) => {
+        const isFirstValidItem = !firstValidItemFoundRef.current && !disabled;
+        const isSelectedItem = context.value !== void 0 && context.value === value;
+        if (isSelectedItem || isFirstValidItem) {
+          setSelectedItemText(node2);
+        }
+      },
+      [context.value]
+    );
+    const SelectPosition = position2 === "popper" ? SelectPopperPosition : SelectItemAlignedPosition;
+    const popperContentProps = SelectPosition === SelectPopperPosition ? {
+      side,
+      sideOffset,
+      align,
+      alignOffset,
+      arrowPadding,
+      collisionBoundary,
+      collisionPadding,
+      sticky,
+      hideWhenDetached,
+      avoidCollisions
+    } : {};
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      SelectContentProvider,
+      {
+        scope: __scopeSelect,
+        content: content2,
+        viewport,
+        onViewportChange: setViewport,
+        itemRefCallback,
+        selectedItem,
+        onItemLeave: handleItemLeave,
+        itemTextRefCallback,
+        focusSelectedItem,
+        selectedItemText,
+        position: position2,
+        isPositioned,
+        searchRef,
+        children: /* @__PURE__ */ jsxRuntimeExports.jsx(ReactRemoveScroll, { as: Slot, allowPinchZoom: true, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+          FocusScope,
+          {
+            asChild: true,
+            trapped: context.open,
+            onMountAutoFocus: (event) => {
+              event.preventDefault();
+            },
+            onUnmountAutoFocus: composeEventHandlers(onCloseAutoFocus, (event) => {
+              context.trigger?.focus({ preventScroll: true });
+              event.preventDefault();
+            }),
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+              DismissableLayer,
+              {
+                asChild: true,
+                disableOutsidePointerEvents: true,
+                onEscapeKeyDown,
+                onPointerDownOutside,
+                onFocusOutside: (event) => event.preventDefault(),
+                onDismiss: () => context.onOpenChange(false),
+                children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  SelectPosition,
+                  {
+                    role: "listbox",
+                    id: context.contentId,
+                    "data-state": context.open ? "open" : "closed",
+                    dir: context.dir,
+                    onContextMenu: (event) => event.preventDefault(),
+                    ...contentProps,
+                    ...popperContentProps,
+                    onPlaced: () => setIsPositioned(true),
+                    ref: composedRefs,
+                    style: {
+                      // flex layout so we can place the scroll buttons properly
+                      display: "flex",
+                      flexDirection: "column",
+                      // reset the outline by default as the content MAY get focused
+                      outline: "none",
+                      ...contentProps.style
+                    },
+                    onKeyDown: composeEventHandlers(contentProps.onKeyDown, (event) => {
+                      const isModifierKey = event.ctrlKey || event.altKey || event.metaKey;
+                      if (event.key === "Tab") event.preventDefault();
+                      if (!isModifierKey && event.key.length === 1) handleTypeaheadSearch(event.key);
+                      if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+                        const items = getItems().filter((item) => !item.disabled);
+                        let candidateNodes = items.map((item) => item.ref.current);
+                        if (["ArrowUp", "End"].includes(event.key)) {
+                          candidateNodes = candidateNodes.slice().reverse();
+                        }
+                        if (["ArrowUp", "ArrowDown"].includes(event.key)) {
+                          const currentElement = event.target;
+                          const currentIndex = candidateNodes.indexOf(currentElement);
+                          candidateNodes = candidateNodes.slice(currentIndex + 1);
+                        }
+                        setTimeout(() => focusFirst2(candidateNodes));
+                        event.preventDefault();
+                      }
+                    })
+                  }
+                )
+              }
+            )
+          }
+        ) })
+      }
+    );
+  }
+);
+SelectContentImpl.displayName = CONTENT_IMPL_NAME;
+var ITEM_ALIGNED_POSITION_NAME = "SelectItemAlignedPosition";
+var SelectItemAlignedPosition = reactExports.forwardRef((props2, forwardedRef) => {
+  const { __scopeSelect, onPlaced, ...popperProps } = props2;
+  const context = useSelectContext(CONTENT_NAME, __scopeSelect);
+  const contentContext = useSelectContentContext(CONTENT_NAME, __scopeSelect);
+  const [contentWrapper, setContentWrapper] = reactExports.useState(null);
+  const [content2, setContent] = reactExports.useState(null);
+  const composedRefs = useComposedRefs(forwardedRef, (node2) => setContent(node2));
+  const getItems = useCollection(__scopeSelect);
+  const shouldExpandOnScrollRef = reactExports.useRef(false);
+  const shouldRepositionRef = reactExports.useRef(true);
+  const { viewport, selectedItem, selectedItemText, focusSelectedItem } = contentContext;
+  const position2 = reactExports.useCallback(() => {
+    if (context.trigger && context.valueNode && contentWrapper && content2 && viewport && selectedItem && selectedItemText) {
+      const triggerRect = context.trigger.getBoundingClientRect();
+      const contentRect = content2.getBoundingClientRect();
+      const valueNodeRect = context.valueNode.getBoundingClientRect();
+      const itemTextRect = selectedItemText.getBoundingClientRect();
+      if (context.dir !== "rtl") {
+        const itemTextOffset = itemTextRect.left - contentRect.left;
+        const left = valueNodeRect.left - itemTextOffset;
+        const leftDelta = triggerRect.left - left;
+        const minContentWidth = triggerRect.width + leftDelta;
+        const contentWidth = Math.max(minContentWidth, contentRect.width);
+        const rightEdge = window.innerWidth - CONTENT_MARGIN;
+        const clampedLeft = clamp(left, [
+          CONTENT_MARGIN,
+          // Prevents the content from going off the starting edge of the
+          // viewport. It may still go off the ending edge, but this can be
+          // controlled by the user since they may want to manage overflow in a
+          // specific way.
+          // https://github.com/radix-ui/primitives/issues/2049
+          Math.max(CONTENT_MARGIN, rightEdge - contentWidth)
+        ]);
+        contentWrapper.style.minWidth = minContentWidth + "px";
+        contentWrapper.style.left = clampedLeft + "px";
+      } else {
+        const itemTextOffset = contentRect.right - itemTextRect.right;
+        const right = window.innerWidth - valueNodeRect.right - itemTextOffset;
+        const rightDelta = window.innerWidth - triggerRect.right - right;
+        const minContentWidth = triggerRect.width + rightDelta;
+        const contentWidth = Math.max(minContentWidth, contentRect.width);
+        const leftEdge = window.innerWidth - CONTENT_MARGIN;
+        const clampedRight = clamp(right, [
+          CONTENT_MARGIN,
+          Math.max(CONTENT_MARGIN, leftEdge - contentWidth)
+        ]);
+        contentWrapper.style.minWidth = minContentWidth + "px";
+        contentWrapper.style.right = clampedRight + "px";
+      }
+      const items = getItems();
+      const availableHeight = window.innerHeight - CONTENT_MARGIN * 2;
+      const itemsHeight = viewport.scrollHeight;
+      const contentStyles = window.getComputedStyle(content2);
+      const contentBorderTopWidth = parseInt(contentStyles.borderTopWidth, 10);
+      const contentPaddingTop = parseInt(contentStyles.paddingTop, 10);
+      const contentBorderBottomWidth = parseInt(contentStyles.borderBottomWidth, 10);
+      const contentPaddingBottom = parseInt(contentStyles.paddingBottom, 10);
+      const fullContentHeight = contentBorderTopWidth + contentPaddingTop + itemsHeight + contentPaddingBottom + contentBorderBottomWidth;
+      const minContentHeight = Math.min(selectedItem.offsetHeight * 5, fullContentHeight);
+      const viewportStyles = window.getComputedStyle(viewport);
+      const viewportPaddingTop = parseInt(viewportStyles.paddingTop, 10);
+      const viewportPaddingBottom = parseInt(viewportStyles.paddingBottom, 10);
+      const topEdgeToTriggerMiddle = triggerRect.top + triggerRect.height / 2 - CONTENT_MARGIN;
+      const triggerMiddleToBottomEdge = availableHeight - topEdgeToTriggerMiddle;
+      const selectedItemHalfHeight = selectedItem.offsetHeight / 2;
+      const itemOffsetMiddle = selectedItem.offsetTop + selectedItemHalfHeight;
+      const contentTopToItemMiddle = contentBorderTopWidth + contentPaddingTop + itemOffsetMiddle;
+      const itemMiddleToContentBottom = fullContentHeight - contentTopToItemMiddle;
+      const willAlignWithoutTopOverflow = contentTopToItemMiddle <= topEdgeToTriggerMiddle;
+      if (willAlignWithoutTopOverflow) {
+        const isLastItem = items.length > 0 && selectedItem === items[items.length - 1].ref.current;
+        contentWrapper.style.bottom = "0px";
+        const viewportOffsetBottom = content2.clientHeight - viewport.offsetTop - viewport.offsetHeight;
+        const clampedTriggerMiddleToBottomEdge = Math.max(
+          triggerMiddleToBottomEdge,
+          selectedItemHalfHeight + // viewport might have padding bottom, include it to avoid a scrollable viewport
+          (isLastItem ? viewportPaddingBottom : 0) + viewportOffsetBottom + contentBorderBottomWidth
+        );
+        const height = contentTopToItemMiddle + clampedTriggerMiddleToBottomEdge;
+        contentWrapper.style.height = height + "px";
+      } else {
+        const isFirstItem = items.length > 0 && selectedItem === items[0].ref.current;
+        contentWrapper.style.top = "0px";
+        const clampedTopEdgeToTriggerMiddle = Math.max(
+          topEdgeToTriggerMiddle,
+          contentBorderTopWidth + viewport.offsetTop + // viewport might have padding top, include it to avoid a scrollable viewport
+          (isFirstItem ? viewportPaddingTop : 0) + selectedItemHalfHeight
+        );
+        const height = clampedTopEdgeToTriggerMiddle + itemMiddleToContentBottom;
+        contentWrapper.style.height = height + "px";
+        viewport.scrollTop = contentTopToItemMiddle - topEdgeToTriggerMiddle + viewport.offsetTop;
+      }
+      contentWrapper.style.margin = `${CONTENT_MARGIN}px 0`;
+      contentWrapper.style.minHeight = minContentHeight + "px";
+      contentWrapper.style.maxHeight = availableHeight + "px";
+      onPlaced?.();
+      requestAnimationFrame(() => shouldExpandOnScrollRef.current = true);
+    }
+  }, [
+    getItems,
+    context.trigger,
+    context.valueNode,
+    contentWrapper,
+    content2,
+    viewport,
+    selectedItem,
+    selectedItemText,
+    context.dir,
+    onPlaced
+  ]);
+  useLayoutEffect2(() => position2(), [position2]);
+  const [contentZIndex, setContentZIndex] = reactExports.useState();
+  useLayoutEffect2(() => {
+    if (content2) setContentZIndex(window.getComputedStyle(content2).zIndex);
+  }, [content2]);
+  const handleScrollButtonChange = reactExports.useCallback(
+    (node2) => {
+      if (node2 && shouldRepositionRef.current === true) {
+        position2();
+        focusSelectedItem?.();
+        shouldRepositionRef.current = false;
+      }
+    },
+    [position2, focusSelectedItem]
+  );
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    SelectViewportProvider,
+    {
+      scope: __scopeSelect,
+      contentWrapper,
+      shouldExpandOnScrollRef,
+      onScrollButtonChange: handleScrollButtonChange,
+      children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "div",
+        {
+          ref: setContentWrapper,
+          style: {
+            display: "flex",
+            flexDirection: "column",
+            position: "fixed",
+            zIndex: contentZIndex
+          },
+          children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+            Primitive$1.div,
+            {
+              ...popperProps,
+              ref: composedRefs,
+              style: {
+                // When we get the height of the content, it includes borders. If we were to set
+                // the height without having `boxSizing: 'border-box'` it would be too big.
+                boxSizing: "border-box",
+                // We need to ensure the content doesn't get taller than the wrapper
+                maxHeight: "100%",
+                ...popperProps.style
+              }
+            }
+          )
+        }
+      )
+    }
+  );
+});
+SelectItemAlignedPosition.displayName = ITEM_ALIGNED_POSITION_NAME;
+var POPPER_POSITION_NAME = "SelectPopperPosition";
+var SelectPopperPosition = reactExports.forwardRef((props2, forwardedRef) => {
+  const {
+    __scopeSelect,
+    align = "start",
+    collisionPadding = CONTENT_MARGIN,
+    ...popperProps
+  } = props2;
+  const popperScope = usePopperScope(__scopeSelect);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    Content$1,
+    {
+      ...popperScope,
+      ...popperProps,
+      ref: forwardedRef,
+      align,
+      collisionPadding,
+      style: {
+        // Ensure border-box for floating-ui calculations
+        boxSizing: "border-box",
+        ...popperProps.style,
+        // re-namespace exposed content custom properties
+        ...{
+          "--radix-select-content-transform-origin": "var(--radix-popper-transform-origin)",
+          "--radix-select-content-available-width": "var(--radix-popper-available-width)",
+          "--radix-select-content-available-height": "var(--radix-popper-available-height)",
+          "--radix-select-trigger-width": "var(--radix-popper-anchor-width)",
+          "--radix-select-trigger-height": "var(--radix-popper-anchor-height)"
+        }
+      }
+    }
+  );
+});
+SelectPopperPosition.displayName = POPPER_POSITION_NAME;
+var [SelectViewportProvider, useSelectViewportContext] = createSelectContext(CONTENT_NAME, {});
+var VIEWPORT_NAME = "SelectViewport";
+var SelectViewport = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const { __scopeSelect, nonce, ...viewportProps } = props2;
+    const contentContext = useSelectContentContext(VIEWPORT_NAME, __scopeSelect);
+    const viewportContext = useSelectViewportContext(VIEWPORT_NAME, __scopeSelect);
+    const composedRefs = useComposedRefs(forwardedRef, contentContext.onViewportChange);
+    const prevScrollTopRef = reactExports.useRef(0);
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "style",
+        {
+          dangerouslySetInnerHTML: {
+            __html: `[data-radix-select-viewport]{scrollbar-width:none;-ms-overflow-style:none;-webkit-overflow-scrolling:touch;}[data-radix-select-viewport]::-webkit-scrollbar{display:none}`
+          },
+          nonce
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Collection.Slot, { scope: __scopeSelect, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        Primitive$1.div,
+        {
+          "data-radix-select-viewport": "",
+          role: "presentation",
+          ...viewportProps,
+          ref: composedRefs,
+          style: {
+            // we use position: 'relative' here on the `viewport` so that when we call
+            // `selectedItem.offsetTop` in calculations, the offset is relative to the viewport
+            // (independent of the scrollUpButton).
+            position: "relative",
+            flex: 1,
+            // Viewport should only be scrollable in the vertical direction.
+            // This won't work in vertical writing modes, so we'll need to
+            // revisit this if/when that is supported
+            // https://developer.chrome.com/blog/vertical-form-controls
+            overflow: "hidden auto",
+            ...viewportProps.style
+          },
+          onScroll: composeEventHandlers(viewportProps.onScroll, (event) => {
+            const viewport = event.currentTarget;
+            const { contentWrapper, shouldExpandOnScrollRef } = viewportContext;
+            if (shouldExpandOnScrollRef?.current && contentWrapper) {
+              const scrolledBy = Math.abs(prevScrollTopRef.current - viewport.scrollTop);
+              if (scrolledBy > 0) {
+                const availableHeight = window.innerHeight - CONTENT_MARGIN * 2;
+                const cssMinHeight = parseFloat(contentWrapper.style.minHeight);
+                const cssHeight = parseFloat(contentWrapper.style.height);
+                const prevHeight = Math.max(cssMinHeight, cssHeight);
+                if (prevHeight < availableHeight) {
+                  const nextHeight = prevHeight + scrolledBy;
+                  const clampedNextHeight = Math.min(availableHeight, nextHeight);
+                  const heightDiff = nextHeight - clampedNextHeight;
+                  contentWrapper.style.height = clampedNextHeight + "px";
+                  if (contentWrapper.style.bottom === "0px") {
+                    viewport.scrollTop = heightDiff > 0 ? heightDiff : 0;
+                    contentWrapper.style.justifyContent = "flex-end";
+                  }
+                }
+              }
+            }
+            prevScrollTopRef.current = viewport.scrollTop;
+          })
+        }
+      ) })
+    ] });
+  }
+);
+SelectViewport.displayName = VIEWPORT_NAME;
+var GROUP_NAME = "SelectGroup";
+var [SelectGroupContextProvider, useSelectGroupContext] = createSelectContext(GROUP_NAME);
+var SelectGroup = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const { __scopeSelect, ...groupProps } = props2;
+    const groupId = useId$1();
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(SelectGroupContextProvider, { scope: __scopeSelect, id: groupId, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Primitive$1.div, { role: "group", "aria-labelledby": groupId, ...groupProps, ref: forwardedRef }) });
+  }
+);
+SelectGroup.displayName = GROUP_NAME;
+var LABEL_NAME = "SelectLabel";
+var SelectLabel$1 = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const { __scopeSelect, ...labelProps } = props2;
+    const groupContext = useSelectGroupContext(LABEL_NAME, __scopeSelect);
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(Primitive$1.div, { id: groupContext.id, ...labelProps, ref: forwardedRef });
+  }
+);
+SelectLabel$1.displayName = LABEL_NAME;
+var ITEM_NAME = "SelectItem";
+var [SelectItemContextProvider, useSelectItemContext] = createSelectContext(ITEM_NAME);
+var SelectItem$1 = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const {
+      __scopeSelect,
+      value,
+      disabled = false,
+      textValue: textValueProp,
+      ...itemProps
+    } = props2;
+    const context = useSelectContext(ITEM_NAME, __scopeSelect);
+    const contentContext = useSelectContentContext(ITEM_NAME, __scopeSelect);
+    const isSelected = context.value === value;
+    const [textValue, setTextValue] = reactExports.useState(textValueProp ?? "");
+    const [isFocused, setIsFocused] = reactExports.useState(false);
+    const composedRefs = useComposedRefs(
+      forwardedRef,
+      (node2) => contentContext.itemRefCallback?.(node2, value, disabled)
+    );
+    const textId = useId$1();
+    const pointerTypeRef = reactExports.useRef("touch");
+    const handleSelect = () => {
+      if (!disabled) {
+        context.onValueChange(value);
+        context.onOpenChange(false);
+      }
+    };
+    if (value === "") {
+      throw new Error(
+        "A <Select.Item /> must have a value prop that is not an empty string. This is because the Select value can be set to an empty string to clear the selection and show the placeholder."
+      );
+    }
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      SelectItemContextProvider,
+      {
+        scope: __scopeSelect,
+        value,
+        disabled,
+        textId,
+        isSelected,
+        onItemTextChange: reactExports.useCallback((node2) => {
+          setTextValue((prevTextValue) => prevTextValue || (node2?.textContent ?? "").trim());
+        }, []),
+        children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Collection.ItemSlot,
+          {
+            scope: __scopeSelect,
+            value,
+            disabled,
+            textValue,
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+              Primitive$1.div,
+              {
+                role: "option",
+                "aria-labelledby": textId,
+                "data-highlighted": isFocused ? "" : void 0,
+                "aria-selected": isSelected && isFocused,
+                "data-state": isSelected ? "checked" : "unchecked",
+                "aria-disabled": disabled || void 0,
+                "data-disabled": disabled ? "" : void 0,
+                tabIndex: disabled ? void 0 : -1,
+                ...itemProps,
+                ref: composedRefs,
+                onFocus: composeEventHandlers(itemProps.onFocus, () => setIsFocused(true)),
+                onBlur: composeEventHandlers(itemProps.onBlur, () => setIsFocused(false)),
+                onClick: composeEventHandlers(itemProps.onClick, () => {
+                  if (pointerTypeRef.current !== "mouse") handleSelect();
+                }),
+                onPointerUp: composeEventHandlers(itemProps.onPointerUp, () => {
+                  if (pointerTypeRef.current === "mouse") handleSelect();
+                }),
+                onPointerDown: composeEventHandlers(itemProps.onPointerDown, (event) => {
+                  pointerTypeRef.current = event.pointerType;
+                }),
+                onPointerMove: composeEventHandlers(itemProps.onPointerMove, (event) => {
+                  pointerTypeRef.current = event.pointerType;
+                  if (disabled) {
+                    contentContext.onItemLeave?.();
+                  } else if (pointerTypeRef.current === "mouse") {
+                    event.currentTarget.focus({ preventScroll: true });
+                  }
+                }),
+                onPointerLeave: composeEventHandlers(itemProps.onPointerLeave, (event) => {
+                  if (event.currentTarget === document.activeElement) {
+                    contentContext.onItemLeave?.();
+                  }
+                }),
+                onKeyDown: composeEventHandlers(itemProps.onKeyDown, (event) => {
+                  const isTypingAhead = contentContext.searchRef?.current !== "";
+                  if (isTypingAhead && event.key === " ") return;
+                  if (SELECTION_KEYS.includes(event.key)) handleSelect();
+                  if (event.key === " ") event.preventDefault();
+                })
+              }
+            )
+          }
+        )
+      }
+    );
+  }
+);
+SelectItem$1.displayName = ITEM_NAME;
+var ITEM_TEXT_NAME = "SelectItemText";
+var SelectItemText = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const { __scopeSelect, className, style, ...itemTextProps } = props2;
+    const context = useSelectContext(ITEM_TEXT_NAME, __scopeSelect);
+    const contentContext = useSelectContentContext(ITEM_TEXT_NAME, __scopeSelect);
+    const itemContext = useSelectItemContext(ITEM_TEXT_NAME, __scopeSelect);
+    const nativeOptionsContext = useSelectNativeOptionsContext(ITEM_TEXT_NAME, __scopeSelect);
+    const [itemTextNode, setItemTextNode] = reactExports.useState(null);
+    const composedRefs = useComposedRefs(
+      forwardedRef,
+      (node2) => setItemTextNode(node2),
+      itemContext.onItemTextChange,
+      (node2) => contentContext.itemTextRefCallback?.(node2, itemContext.value, itemContext.disabled)
+    );
+    const textContent = itemTextNode?.textContent;
+    const nativeOption = reactExports.useMemo(
+      () => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: itemContext.value, disabled: itemContext.disabled, children: textContent }, itemContext.value),
+      [itemContext.disabled, itemContext.value, textContent]
+    );
+    const { onNativeOptionAdd, onNativeOptionRemove } = nativeOptionsContext;
+    useLayoutEffect2(() => {
+      onNativeOptionAdd(nativeOption);
+      return () => onNativeOptionRemove(nativeOption);
+    }, [onNativeOptionAdd, onNativeOptionRemove, nativeOption]);
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Primitive$1.span, { id: itemContext.textId, ...itemTextProps, ref: composedRefs }),
+      itemContext.isSelected && context.valueNode && !context.valueNodeHasChildren ? reactDomExports.createPortal(itemTextProps.children, context.valueNode) : null
+    ] });
+  }
+);
+SelectItemText.displayName = ITEM_TEXT_NAME;
+var ITEM_INDICATOR_NAME = "SelectItemIndicator";
+var SelectItemIndicator = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const { __scopeSelect, ...itemIndicatorProps } = props2;
+    const itemContext = useSelectItemContext(ITEM_INDICATOR_NAME, __scopeSelect);
+    return itemContext.isSelected ? /* @__PURE__ */ jsxRuntimeExports.jsx(Primitive$1.span, { "aria-hidden": true, ...itemIndicatorProps, ref: forwardedRef }) : null;
+  }
+);
+SelectItemIndicator.displayName = ITEM_INDICATOR_NAME;
+var SCROLL_UP_BUTTON_NAME = "SelectScrollUpButton";
+var SelectScrollUpButton$1 = reactExports.forwardRef((props2, forwardedRef) => {
+  const contentContext = useSelectContentContext(SCROLL_UP_BUTTON_NAME, props2.__scopeSelect);
+  const viewportContext = useSelectViewportContext(SCROLL_UP_BUTTON_NAME, props2.__scopeSelect);
+  const [canScrollUp, setCanScrollUp] = reactExports.useState(false);
+  const composedRefs = useComposedRefs(forwardedRef, viewportContext.onScrollButtonChange);
+  useLayoutEffect2(() => {
+    if (contentContext.viewport && contentContext.isPositioned) {
+      let handleScroll2 = function() {
+        const canScrollUp2 = viewport.scrollTop > 0;
+        setCanScrollUp(canScrollUp2);
+      };
+      const viewport = contentContext.viewport;
+      handleScroll2();
+      viewport.addEventListener("scroll", handleScroll2);
+      return () => viewport.removeEventListener("scroll", handleScroll2);
+    }
+  }, [contentContext.viewport, contentContext.isPositioned]);
+  return canScrollUp ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+    SelectScrollButtonImpl,
+    {
+      ...props2,
+      ref: composedRefs,
+      onAutoScroll: () => {
+        const { viewport, selectedItem } = contentContext;
+        if (viewport && selectedItem) {
+          viewport.scrollTop = viewport.scrollTop - selectedItem.offsetHeight;
+        }
+      }
+    }
+  ) : null;
+});
+SelectScrollUpButton$1.displayName = SCROLL_UP_BUTTON_NAME;
+var SCROLL_DOWN_BUTTON_NAME = "SelectScrollDownButton";
+var SelectScrollDownButton$1 = reactExports.forwardRef((props2, forwardedRef) => {
+  const contentContext = useSelectContentContext(SCROLL_DOWN_BUTTON_NAME, props2.__scopeSelect);
+  const viewportContext = useSelectViewportContext(SCROLL_DOWN_BUTTON_NAME, props2.__scopeSelect);
+  const [canScrollDown, setCanScrollDown] = reactExports.useState(false);
+  const composedRefs = useComposedRefs(forwardedRef, viewportContext.onScrollButtonChange);
+  useLayoutEffect2(() => {
+    if (contentContext.viewport && contentContext.isPositioned) {
+      let handleScroll2 = function() {
+        const maxScroll = viewport.scrollHeight - viewport.clientHeight;
+        const canScrollDown2 = Math.ceil(viewport.scrollTop) < maxScroll;
+        setCanScrollDown(canScrollDown2);
+      };
+      const viewport = contentContext.viewport;
+      handleScroll2();
+      viewport.addEventListener("scroll", handleScroll2);
+      return () => viewport.removeEventListener("scroll", handleScroll2);
+    }
+  }, [contentContext.viewport, contentContext.isPositioned]);
+  return canScrollDown ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+    SelectScrollButtonImpl,
+    {
+      ...props2,
+      ref: composedRefs,
+      onAutoScroll: () => {
+        const { viewport, selectedItem } = contentContext;
+        if (viewport && selectedItem) {
+          viewport.scrollTop = viewport.scrollTop + selectedItem.offsetHeight;
+        }
+      }
+    }
+  ) : null;
+});
+SelectScrollDownButton$1.displayName = SCROLL_DOWN_BUTTON_NAME;
+var SelectScrollButtonImpl = reactExports.forwardRef((props2, forwardedRef) => {
+  const { __scopeSelect, onAutoScroll, ...scrollIndicatorProps } = props2;
+  const contentContext = useSelectContentContext("SelectScrollButton", __scopeSelect);
+  const autoScrollTimerRef = reactExports.useRef(null);
+  const getItems = useCollection(__scopeSelect);
+  const clearAutoScrollTimer = reactExports.useCallback(() => {
+    if (autoScrollTimerRef.current !== null) {
+      window.clearInterval(autoScrollTimerRef.current);
+      autoScrollTimerRef.current = null;
+    }
+  }, []);
+  reactExports.useEffect(() => {
+    return () => clearAutoScrollTimer();
+  }, [clearAutoScrollTimer]);
+  useLayoutEffect2(() => {
+    const activeItem = getItems().find((item) => item.ref.current === document.activeElement);
+    activeItem?.ref.current?.scrollIntoView({ block: "nearest" });
+  }, [getItems]);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    Primitive$1.div,
+    {
+      "aria-hidden": true,
+      ...scrollIndicatorProps,
+      ref: forwardedRef,
+      style: { flexShrink: 0, ...scrollIndicatorProps.style },
+      onPointerDown: composeEventHandlers(scrollIndicatorProps.onPointerDown, () => {
+        if (autoScrollTimerRef.current === null) {
+          autoScrollTimerRef.current = window.setInterval(onAutoScroll, 50);
+        }
+      }),
+      onPointerMove: composeEventHandlers(scrollIndicatorProps.onPointerMove, () => {
+        contentContext.onItemLeave?.();
+        if (autoScrollTimerRef.current === null) {
+          autoScrollTimerRef.current = window.setInterval(onAutoScroll, 50);
+        }
+      }),
+      onPointerLeave: composeEventHandlers(scrollIndicatorProps.onPointerLeave, () => {
+        clearAutoScrollTimer();
+      })
+    }
+  );
+});
+var SEPARATOR_NAME = "SelectSeparator";
+var SelectSeparator$1 = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const { __scopeSelect, ...separatorProps } = props2;
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(Primitive$1.div, { "aria-hidden": true, ...separatorProps, ref: forwardedRef });
+  }
+);
+SelectSeparator$1.displayName = SEPARATOR_NAME;
+var ARROW_NAME = "SelectArrow";
+var SelectArrow = reactExports.forwardRef(
+  (props2, forwardedRef) => {
+    const { __scopeSelect, ...arrowProps } = props2;
+    const popperScope = usePopperScope(__scopeSelect);
+    const context = useSelectContext(ARROW_NAME, __scopeSelect);
+    const contentContext = useSelectContentContext(ARROW_NAME, __scopeSelect);
+    return context.open && contentContext.position === "popper" ? /* @__PURE__ */ jsxRuntimeExports.jsx(Arrow, { ...popperScope, ...arrowProps, ref: forwardedRef }) : null;
+  }
+);
+SelectArrow.displayName = ARROW_NAME;
+var BUBBLE_INPUT_NAME$1 = "SelectBubbleInput";
+var SelectBubbleInput = reactExports.forwardRef(
+  ({ __scopeSelect, value, ...props2 }, forwardedRef) => {
+    const ref = reactExports.useRef(null);
+    const composedRefs = useComposedRefs(forwardedRef, ref);
+    const prevValue = usePrevious(value);
+    reactExports.useEffect(() => {
+      const select = ref.current;
+      if (!select) return;
+      const selectProto = window.HTMLSelectElement.prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        selectProto,
+        "value"
+      );
+      const setValue = descriptor.set;
+      if (prevValue !== value && setValue) {
+        const event = new Event("change", { bubbles: true });
+        setValue.call(select, value);
+        select.dispatchEvent(event);
+      }
+    }, [prevValue, value]);
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      Primitive$1.select,
+      {
+        ...props2,
+        style: { ...VISUALLY_HIDDEN_STYLES, ...props2.style },
+        ref: composedRefs,
+        defaultValue: value
+      }
+    );
+  }
+);
+SelectBubbleInput.displayName = BUBBLE_INPUT_NAME$1;
+function shouldShowPlaceholder(value) {
+  return value === "" || value === void 0;
+}
+function useTypeaheadSearch(onSearchChange) {
+  const handleSearchChange = useCallbackRef$1(onSearchChange);
+  const searchRef = reactExports.useRef("");
+  const timerRef = reactExports.useRef(0);
+  const handleTypeaheadSearch = reactExports.useCallback(
+    (key) => {
+      const search2 = searchRef.current + key;
+      handleSearchChange(search2);
+      (function updateSearch(value) {
+        searchRef.current = value;
+        window.clearTimeout(timerRef.current);
+        if (value !== "") timerRef.current = window.setTimeout(() => updateSearch(""), 1e3);
+      })(search2);
+    },
+    [handleSearchChange]
+  );
+  const resetTypeahead = reactExports.useCallback(() => {
+    searchRef.current = "";
+    window.clearTimeout(timerRef.current);
+  }, []);
+  reactExports.useEffect(() => {
+    return () => window.clearTimeout(timerRef.current);
+  }, []);
+  return [searchRef, handleTypeaheadSearch, resetTypeahead];
+}
+function findNextItem(items, search2, currentItem) {
+  const isRepeated = search2.length > 1 && Array.from(search2).every((char) => char === search2[0]);
+  const normalizedSearch = isRepeated ? search2[0] : search2;
+  const currentItemIndex = currentItem ? items.indexOf(currentItem) : -1;
+  let wrappedItems = wrapArray(items, Math.max(currentItemIndex, 0));
+  const excludeCurrentItem = normalizedSearch.length === 1;
+  if (excludeCurrentItem) wrappedItems = wrappedItems.filter((v2) => v2 !== currentItem);
+  const nextItem = wrappedItems.find(
+    (item) => item.textValue.toLowerCase().startsWith(normalizedSearch.toLowerCase())
+  );
+  return nextItem !== currentItem ? nextItem : void 0;
+}
+function wrapArray(array, startIndex) {
+  return array.map((_, index2) => array[(startIndex + index2) % array.length]);
+}
+var Root2 = Select$1;
+var Trigger = SelectTrigger$1;
+var Value = SelectValue$1;
+var Icon = SelectIcon;
+var Portal = SelectPortal;
+var Content2 = SelectContent$1;
+var Viewport = SelectViewport;
+var Label$2 = SelectLabel$1;
+var Item = SelectItem$1;
+var ItemText = SelectItemText;
+var ItemIndicator = SelectItemIndicator;
+var ScrollUpButton = SelectScrollUpButton$1;
+var ScrollDownButton = SelectScrollDownButton$1;
+var Separator = SelectSeparator$1;
+const Select = Root2;
+const SelectValue = Value;
+const SelectTrigger = reactExports.forwardRef(({ className, children, ...props2 }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+  Trigger,
+  {
+    ref,
+    className: cn(
+      "flex h-9 w-full items-center justify-between whitespace-nowrap rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+      className
+    ),
+    ...props2,
+    children: [
+      children,
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Icon, { asChild: true, children: /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronDown, { className: "h-4 w-4 opacity-50" }) })
+    ]
+  }
+));
+SelectTrigger.displayName = Trigger.displayName;
+const SelectScrollUpButton = reactExports.forwardRef(({ className, ...props2 }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+  ScrollUpButton,
+  {
+    ref,
+    className: cn("flex cursor-default items-center justify-center py-1", className),
+    ...props2,
+    children: /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronUp, { className: "h-4 w-4" })
+  }
+));
+SelectScrollUpButton.displayName = ScrollUpButton.displayName;
+const SelectScrollDownButton = reactExports.forwardRef(({ className, ...props2 }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+  ScrollDownButton,
+  {
+    ref,
+    className: cn("flex cursor-default items-center justify-center py-1", className),
+    ...props2,
+    children: /* @__PURE__ */ jsxRuntimeExports.jsx(ChevronDown, { className: "h-4 w-4" })
+  }
+));
+SelectScrollDownButton.displayName = ScrollDownButton.displayName;
+const SelectContent = reactExports.forwardRef(({ className, children, position: position2 = "popper", ...props2 }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx(Portal, { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+  Content2,
+  {
+    ref,
+    className: cn(
+      "relative z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+      position2 === "popper" && "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
+      className
+    ),
+    position: position2,
+    ...props2,
+    children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(SelectScrollUpButton, {}),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        Viewport,
+        {
+          className: cn(
+            "p-1",
+            position2 === "popper" && "h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)]"
+          ),
+          children
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(SelectScrollDownButton, {})
+    ]
+  }
+) }));
+SelectContent.displayName = Content2.displayName;
+const SelectLabel = reactExports.forwardRef(({ className, ...props2 }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+  Label$2,
+  {
+    ref,
+    className: cn("px-2 py-1.5 text-sm font-semibold", className),
+    ...props2
+  }
+));
+SelectLabel.displayName = Label$2.displayName;
+const SelectItem = reactExports.forwardRef(({ className, children, ...props2 }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+  Item,
+  {
+    ref,
+    className: cn(
+      "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      className
+    ),
+    ...props2,
+    children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "absolute right-2 flex h-3.5 w-3.5 items-center justify-center", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ItemIndicator, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(Check, { className: "h-4 w-4" }) }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(ItemText, { children })
+    ]
+  }
+));
+SelectItem.displayName = Item.displayName;
+const SelectSeparator = reactExports.forwardRef(({ className, ...props2 }, ref) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+  Separator,
+  {
+    ref,
+    className: cn("-mx-1 my-1 h-px bg-muted", className),
+    ...props2
+  }
+));
+SelectSeparator.displayName = Separator.displayName;
+function WaveformCanvas({
+  audioData,
+  sentimentData,
+  currentTime,
+  duration,
+  onSeek,
+  height = 60,
+  width = 800
+}) {
+  const canvasRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    if (!canvasRef.current || !audioData) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const barWidth = 3;
+    const barGap = 1;
+    const barCount = Math.floor(width / (barWidth + barGap));
+    ctx.clearRect(0, 0, width, height);
+    const defaultColor = "#94A3B8";
+    for (let i = 0; i < barCount; i++) {
+      const dataIndex = Math.floor(i / barCount * audioData.length);
+      const amplitude = Math.abs(audioData[dataIndex] || 0);
+      const barHeight = Math.max(2, amplitude * height * 0.9);
+      const x2 = i * (barWidth + barGap);
+      const y2 = (height - barHeight) / 2;
+      let barColor = defaultColor;
+      if (sentimentData && sentimentData.length > 0) {
+        const timeForBar = i / barCount * duration;
+        const segment = sentimentData.find(
+          (s) => timeForBar >= s.startTime && timeForBar < s.endTime
+        );
+        if (segment) {
+          if (segment.sentiment === "positive") {
+            barColor = "#22C55E";
+          } else if (segment.sentiment === "negative") {
+            barColor = "#EF4444";
+          }
+        }
+      }
+      ctx.fillStyle = barColor;
+      ctx.fillRect(x2, y2, barWidth, barHeight);
+    }
+    if (currentTime !== void 0 && currentTime > 0 && duration > 0) {
+      const playheadX = currentTime / duration * width;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.3)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(playheadX, 0);
+      ctx.lineTo(playheadX, height);
+      ctx.stroke();
+    }
+  }, [audioData, sentimentData, currentTime, duration, height, width]);
+  const handleClick = (e) => {
+    if (!duration) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const seekTime = clickX / rect.width * duration;
+    onSeek(seekTime);
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "canvas",
+    {
+      ref: canvasRef,
+      width,
+      height,
+      onClick: handleClick,
+      className: "w-full cursor-pointer",
+      style: { imageRendering: "crisp-edges" }
+    }
+  );
+}
 function AudioPlayer({ filename, onClose }) {
   const isPlaying = useUIStore((state) => state.isPlaying);
   const currentTime = useUIStore((state) => state.playbackCurrentTime);
   const duration = useUIStore((state) => state.playbackDuration);
+  const waveformData = useUIStore((state) => state.playbackWaveformData);
+  const sentimentData = useUIStore((state) => state.playbackSentimentData);
   const audioControls = useAudioControls();
+  const [playbackRate, setPlaybackRate] = reactExports.useState("1");
   const togglePlay = reactExports.useCallback(() => {
     if (isPlaying) {
       audioControls.pause();
@@ -22618,38 +23946,57 @@ function AudioPlayer({ filename, onClose }) {
     audioControls.stop();
     onClose?.();
   }, [audioControls, onClose]);
-  const seek = reactExports.useCallback((value) => {
-    if (!duration || duration <= 0) return;
-    const newTime = value[0] / 100 * duration;
+  const seekAudio = reactExports.useCallback(
+    (time) => {
+      if (!duration || duration <= 0) return;
+      audioControls.seek(time);
+    },
+    [duration, audioControls]
+  );
+  const skipBackward = reactExports.useCallback(() => {
+    const newTime = Math.max(0, currentTime - 10);
     audioControls.seek(newTime);
-  }, [duration, audioControls]);
-  const formatTime2 = (seconds) => {
-    if (!isFinite(seconds) || isNaN(seconds)) return "0:00";
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
-  const progress = duration > 0 ? currentTime / duration * 100 : 0;
+  }, [currentTime, audioControls]);
+  const skipForward = reactExports.useCallback(() => {
+    const newTime = Math.min(duration, currentTime + 10);
+    audioControls.seek(newTime);
+  }, [currentTime, duration, audioControls]);
+  const handlePlaybackRateChange = reactExports.useCallback(
+    (value) => {
+      setPlaybackRate(value);
+      console.log("Playback rate changed to:", value);
+    },
+    []
+  );
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 bg-muted rounded-lg space-y-3", children: [
     filename && /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-sm font-medium truncate", children: filename }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "space-y-1", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        Slider,
-        {
-          value: [progress],
-          onValueChange: seek,
-          max: 100,
-          step: 0.1,
-          className: "cursor-pointer"
-        }
-      ),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex justify-between text-xs text-muted-foreground", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: formatTime2(currentTime) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: formatTime2(duration) })
-      ] })
+    waveformData ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+      WaveformCanvas,
+      {
+        audioData: waveformData,
+        sentimentData: sentimentData || void 0,
+        currentTime,
+        duration,
+        onSeek: seekAudio,
+        height: 80
+      }
+    ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "h-20 bg-background rounded flex items-center justify-center text-sm text-muted-foreground", children: "Loading waveform..." }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex justify-between text-xs text-muted-foreground", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: formatTimestamp$1(currentTime) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: formatTimestamp$1(duration) })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Button,
+          {
+            variant: "ghost",
+            size: "sm",
+            onClick: skipBackward,
+            disabled: currentTime <= 0,
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(SkipBack, { className: "h-4 w-4" })
+          }
+        ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           Button,
           {
@@ -22660,11 +24007,32 @@ function AudioPlayer({ filename, onClose }) {
             children: isPlaying ? /* @__PURE__ */ jsxRuntimeExports.jsx(Pause, { className: "h-5 w-5" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Play, { className: "h-5 w-5" })
           }
         ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Button,
+          {
+            variant: "ghost",
+            size: "sm",
+            onClick: skipForward,
+            disabled: currentTime >= duration,
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(SkipForward, { className: "h-4 w-4" })
+          }
+        ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(Button, { variant: "ghost", size: "icon", onClick: handleStop, children: /* @__PURE__ */ jsxRuntimeExports.jsx(Square, { className: "h-4 w-4" }) })
       ] }),
-      onClose && /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "ghost", size: "sm", onClick: onClose, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(X, { className: "h-4 w-4 mr-1" }),
-        "Close"
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(Select, { value: playbackRate, onValueChange: handlePlaybackRateChange, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(SelectTrigger, { className: "w-20", children: /* @__PURE__ */ jsxRuntimeExports.jsx(SelectValue, {}) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(SelectContent, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(SelectItem, { value: "0.5", children: "0.5×" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(SelectItem, { value: "1", children: "1×" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(SelectItem, { value: "1.5", children: "1.5×" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(SelectItem, { value: "2", children: "2×" })
+          ] })
+        ] }),
+        onClose && /* @__PURE__ */ jsxRuntimeExports.jsxs(Button, { variant: "ghost", size: "sm", onClick: onClose, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(X, { className: "h-4 w-4 mr-1" }),
+          "Close"
+        ] })
       ] })
     ] })
   ] });
@@ -22849,7 +24217,7 @@ var NODES = [
   "ul"
 ];
 var Primitive = NODES.reduce((primitive, node2) => {
-  const Slot2 = /* @__PURE__ */ createSlot$3(`Primitive.${node2}`);
+  const Slot2 = /* @__PURE__ */ createSlot$4(`Primitive.${node2}`);
   const Node2 = reactExports.forwardRef((props2, forwardedRef) => {
     const { asChild, ...primitiveProps } = props2;
     const Comp = asChild ? Slot2 : node2;
@@ -29616,6 +30984,17 @@ function TimeAnchor({
     }
   );
 }
+function parseSpeaker(text2) {
+  const colonMatch = text2.match(/^([A-Z][^:]*?):\s*(.*)/);
+  if (colonMatch) {
+    return { speaker: colonMatch[1].trim(), remainingText: colonMatch[2].trim() };
+  }
+  const bracketMatch = text2.match(/^\[([^\]]+)\]\s*(.*)/);
+  if (bracketMatch) {
+    return { speaker: bracketMatch[1].trim(), remainingText: bracketMatch[2].trim() };
+  }
+  return { speaker: void 0, remainingText: text2 };
+}
 function parseTimestamp(timestampStr) {
   const cleaned = timestampStr.replace(/[\[\]]/g, "").trim();
   const parts = cleaned.split(":").map((part) => parseInt(part, 10));
@@ -29645,9 +31024,11 @@ function parseTranscriptSegments(transcript) {
       if (segments.length > 0) {
         segments[segments.length - 1].endMs = startMs;
       }
+      const { speaker, remainingText } = parseSpeaker(text2.trim());
       segments.push({
         startMs,
-        text: text2.trim()
+        text: remainingText,
+        speaker
       });
     }
   }
@@ -29735,23 +31116,26 @@ function TranscriptViewer({
           ]
         }
       ),
-      transcriptExpanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: containerRef, className: "p-3 mt-2 bg-muted rounded-lg max-h-96 overflow-y-auto", children: hasTimestamps ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "space-y-3", children: segments.map((segment, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      transcriptExpanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: containerRef, className: "p-3 mt-2 bg-muted rounded-lg max-h-96 overflow-y-auto", children: hasTimestamps ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "space-y-4", children: segments.map((segment, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
         "div",
         {
           ref: i === currentSegmentIndex ? activeSegmentRef : null,
-          className: "text-sm",
+          className: `text-sm p-3 rounded-lg transition-colors ${i === currentSegmentIndex ? "bg-primary/5 border-l-2 border-primary" : ""}`,
           children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              TimeAnchor,
-              {
-                startMs: segment.startMs,
-                endMs: segment.endMs,
-                isActive: i === currentSegmentIndex,
-                onSeek,
-                children: null
-              }
-            ),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "mt-1 whitespace-pre-wrap", children: segment.text })
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 mb-2", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                TimeAnchor,
+                {
+                  startMs: segment.startMs,
+                  endMs: segment.endMs,
+                  isActive: i === currentSegmentIndex,
+                  onSeek,
+                  children: null
+                }
+              ),
+              segment.speaker && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-semibold text-foreground", children: segment.speaker })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "whitespace-pre-wrap leading-relaxed", children: segment.text })
           ]
         },
         i
@@ -32161,7 +33545,6 @@ function SourceReader({
   onStop,
   onSeek
 }) {
-  const [volume, setVolume] = reactExports.useState(100);
   if (!recording) {
     return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center justify-center h-full text-muted-foreground", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-center space-y-2", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-lg font-medium", children: "No recording selected" }),
@@ -32169,60 +33552,35 @@ function SourceReader({
     ] }) });
   }
   const canPlay = hasLocalPath(recording);
+  const fileSize = recording.size > 0 ? `${(recording.size / 1024 / 1024).toFixed(1)} MB` : null;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col h-full overflow-hidden", children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 border-b space-y-2", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { className: "text-lg font-semibold truncate", title: recording.filename, children: recording.title || recording.filename }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-4 text-sm text-muted-foreground", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: formatDuration(recording.duration) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "•" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: new Date(recording.dateRecorded).toLocaleDateString() }),
-        recording.meetingSubject && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "•" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: recording.meetingSubject })
-        ] })
-      ] })
-    ] }),
-    canPlay && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "p-4 border-b bg-muted/30", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        Button,
-        {
-          size: "sm",
-          variant: "outline",
-          onClick: isPlaying ? onStop : onPlay,
-          className: "flex-shrink-0",
-          children: isPlaying ? /* @__PURE__ */ jsxRuntimeExports.jsx(Pause, { className: "h-4 w-4" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Play, { className: "h-4 w-4" })
-        }
-      ),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex-1", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-xs text-muted-foreground mb-1", children: [
-          formatDuration(currentTimeMs / 1e3),
-          " / ",
-          recording.duration > 0 ? formatDuration(recording.duration) : "--:--"
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "h-1 bg-muted rounded-full overflow-hidden", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "div",
-          {
-            className: "h-full bg-primary transition-all",
-            style: {
-              width: `${recording.duration > 0 ? currentTimeMs / (recording.duration * 1e3) * 100 : 0}%`
-            }
-          }
-        ) })
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "p-6 border-b space-y-4", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { className: "text-xl font-semibold mb-2", title: recording.filename, children: recording.title || recording.filename }),
+      recording.category && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 mb-3", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Tag, { className: "h-4 w-4 text-muted-foreground" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary", children: recording.category })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 flex-shrink-0 w-32", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(Volume2, { className: "h-4 w-4 text-muted-foreground" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          Slider,
-          {
-            value: [volume],
-            onValueChange: (values) => setVolume(values[0]),
-            max: 100,
-            step: 1,
-            className: "flex-1"
-          }
-        )
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-2 gap-3 text-sm", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 text-muted-foreground", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Clock, { className: "h-4 w-4" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: formatDuration(recording.duration) })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 text-muted-foreground", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Calendar$1, { className: "h-4 w-4" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: new Date(recording.dateRecorded).toLocaleDateString() })
+        ] }),
+        fileSize && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 text-muted-foreground", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(HardDrive, { className: "h-4 w-4" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: fileSize })
+        ] })
+      ] }),
+      recording.meetingSubject && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mt-3 flex items-center gap-2 text-sm", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(ExternalLink, { className: "h-4 w-4 text-muted-foreground" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-muted-foreground", children: "Meeting:" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-medium truncate", children: recording.meetingSubject })
       ] })
     ] }) }),
+    canPlay && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sticky top-0 bg-background z-10 border-b", children: /* @__PURE__ */ jsxRuntimeExports.jsx(AudioPlayer, { filename: recording.filename, onClose: onStop }, recording.id) }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex-1 overflow-auto p-4", children: transcript ? /* @__PURE__ */ jsxRuntimeExports.jsx(
       TranscriptViewer,
       {
@@ -33048,6 +34406,10 @@ function Library() {
   const handleStopCallback = reactExports.useCallback(() => {
     audioControls.stop();
   }, [audioControls]);
+  const handleClosePlayer = reactExports.useCallback(() => {
+    audioControls.stop();
+    setSelectedSourceId(null);
+  }, [audioControls, setSelectedSourceId]);
   const handleNavigateToMeeting = reactExports.useCallback(
     (meetingId) => {
       navigate(`/meeting/${meetingId}`);
@@ -33085,8 +34447,9 @@ function Library() {
     [toggleTranscript]
   );
   const handleRowClick = reactExports.useCallback((recording) => {
+    audioControls.stop();
     setSelectedSourceId(recording.id);
-  }, [setSelectedSourceId]);
+  }, [setSelectedSourceId, audioControls]);
   const selectedRecording = selectedSourceId ? recordings.find((r2) => r2.id === selectedSourceId) : null;
   const selectedTranscript = selectedRecording ? transcripts.get(selectedRecording.id) : void 0;
   const handleCloseDrawer = reactExports.useCallback(() => {
@@ -33265,6 +34628,7 @@ function Library() {
                               onClick: () => handleRowClick(recording),
                               onPlay: () => {
                                 if (hasLocalPath(recording)) {
+                                  handleRowClick(recording);
                                   handlePlayCallback(recording.id, recording.localPath);
                                 }
                               },
@@ -33315,6 +34679,7 @@ function Library() {
                               onClick: () => handleRowClick(recording),
                               onPlay: () => {
                                 if (hasLocalPath(recording)) {
+                                  handleRowClick(recording);
                                   handlePlayCallback(recording.id, recording.localPath);
                                 }
                               },
@@ -33351,7 +34716,7 @@ function Library() {
                   handlePlayCallback(selectedRecording.id, selectedRecording.localPath);
                 }
               },
-              onStop: handleStopCallback,
+              onStop: handleClosePlayer,
               onSeek: (startMs) => {
                 if (selectedRecording && hasLocalPath(selectedRecording)) {
                   audioControls.seek(startMs / 1e3);

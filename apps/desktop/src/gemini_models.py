@@ -172,14 +172,14 @@ def fetch_models_from_api(api_key: str) -> Optional[List[Dict[str, Any]]]:
         List of model info dictionaries, or None if fetch fails
     """
     try:
-        import google.generativeai as genai
+        from google import genai
 
-        # Configure API
-        genai.configure(api_key=api_key)
+        # Create client
+        client = genai.Client(api_key=api_key)
 
         # List models
         models = []
-        for model in genai.list_models():
+        for model in client.models.list():
             model_info = {
                 "name": model.name,
                 "display_name": model.display_name,
@@ -192,7 +192,7 @@ def fetch_models_from_api(api_key: str) -> Optional[List[Dict[str, Any]]]:
         return models
 
     except ImportError:
-        logger.error("GeminiModels", "fetch_models_from_api", "google-generativeai not installed")
+        logger.error("GeminiModels", "fetch_models_from_api", "google-genai not installed")
         return None
     except Exception as e:
         logger.error("GeminiModels", "fetch_models_from_api", f"Error fetching models: {e}")

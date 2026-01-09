@@ -190,10 +190,19 @@ export function Device() {
       if (!mounted) return
       const failedCount = state.queue.filter((item) => item.status === 'failed').length
       setFailedDownloadCount(failedCount)
+
+      // Track completed downloads to refresh sync count
+      const completedCount = state.queue.filter((item) => item.status === 'completed').length
+
       // Also update syncing state when queue is empty or all complete
       const pendingOrDownloading = state.queue.filter((item) => item.status === 'pending' || item.status === 'downloading').length
       if (pendingOrDownloading === 0) {
         setSyncing(false)
+
+        // Refresh synced filenames after downloads complete (sync count fix)
+        if (completedCount > 0) {
+          refreshSyncedFilenames()
+        }
       }
     })
 
@@ -298,6 +307,13 @@ export function Device() {
     // NOTE: We do NOT start auto-connect here. Auto-connect is managed at the app level.
     // Starting it here would reset user's disconnect decision when navigating pages.
 
+    // Periodic sync count validation (refresh every 60 seconds to catch external changes)
+    const syncCountInterval = setInterval(() => {
+      if (mounted) {
+        refreshSyncedFilenames()
+      }
+    }, 60000)
+
     return () => {
       mounted = false  // Mark as unmounted to prevent state updates
       unsubscribe()
@@ -309,8 +325,10 @@ export function Device() {
       }
       // Clean up download service listener
       unsubscribeDownloadService()
+      // Clean up sync count validation interval
+      clearInterval(syncCountInterval)
     }
-  }, [clearConnectionTimers, connectionStatus.step, connectionStatus.message])
+  }, [clearConnectionTimers, connectionStatus.step, connectionStatus.message, refreshSyncedFilenames])
 
   // Separate effect for auto-scrolling activity log - does NOT trigger re-renders
   useEffect(() => {

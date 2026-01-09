@@ -570,6 +570,11 @@ export function Library() {
     audioControls.stop()
   }, [audioControls])
 
+  const handleClosePlayer = useCallback(() => {
+    audioControls.stop()
+    setSelectedSourceId(null)
+  }, [audioControls, setSelectedSourceId])
+
   const handleNavigateToMeeting = useCallback(
     (meetingId: string) => {
       navigate(`/meeting/${meetingId}`)
@@ -615,8 +620,10 @@ export function Library() {
 
   // Handle row click for tri-pane layout
   const handleRowClick = useCallback((recording: UnifiedRecording) => {
+    // Stop any currently playing audio before switching to new recording
+    audioControls.stop()
     setSelectedSourceId(recording.id)
-  }, [setSelectedSourceId])
+  }, [setSelectedSourceId, audioControls])
 
   // Get selected recording and its data for SourceReader
   const selectedRecording = selectedSourceId ? recordings.find((r) => r.id === selectedSourceId) : null
@@ -824,6 +831,7 @@ export function Library() {
                           onClick={() => handleRowClick(recording)}
                           onPlay={() => {
                             if (hasLocalPath(recording)) {
+                              handleRowClick(recording)  // Select the recording first
                               handlePlayCallback(recording.id, recording.localPath)
                             }
                           }}
@@ -878,6 +886,7 @@ export function Library() {
                           onClick={() => handleRowClick(recording)}
                           onPlay={() => {
                             if (hasLocalPath(recording)) {
+                              handleRowClick(recording)  // Select the recording first
                               handlePlayCallback(recording.id, recording.localPath)
                             }
                           }}
@@ -911,7 +920,7 @@ export function Library() {
                   handlePlayCallback(selectedRecording.id, selectedRecording.localPath)
                 }
               }}
-              onStop={handleStopCallback}
+              onStop={handleClosePlayer}
               onSeek={(startMs) => {
                 if (selectedRecording && hasLocalPath(selectedRecording)) {
                   audioControls.seek(startMs / 1000)

@@ -26,7 +26,7 @@ from config_and_logger import logger
 
 
 try:
-    import google.generativeai as genai
+    from google import genai
 except ImportError:
     genai = None
 
@@ -83,15 +83,18 @@ def _call_gemini_api(payload: Dict[str, Any], api_key: str = "") -> Optional[Dic
         logger.error(
             "GeminiAPI",
             "_call_gemini_api",
-            "google.generativeai not available. Install with: pip install google-generativeai",
+            "google-genai not available. Install with: pip install google-genai",
         )
         return None
     try:
-        genai.configure(api_key=api_key)
+        client = genai.Client(api_key=api_key)
         # Use model from payload config if provided, otherwise use gemini-2.0-flash-exp
         model_name = payload.get("model", "gemini-2.0-flash-exp")
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(payload.get("contents"), generation_config=payload.get("generationConfig"))
+        response = client.models.generate_content(
+            model=model_name,
+            contents=payload.get("contents"),
+            config=payload.get("generationConfig")
+        )
         return response.to_dict()
     except Exception as e:
         logger.error("GeminiAPI", "_call_gemini_api", f"Exception during Gemini API call: {e}")

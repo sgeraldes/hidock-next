@@ -23,7 +23,7 @@ from gemini_models import is_valid_model_name, normalize_model_name, validate_mo
 
 # Provider-specific imports with fallbacks
 try:
-    import google.generativeai as genai
+    from google import genai
 
     GEMINI_AVAILABLE = True
 except ImportError:
@@ -91,15 +91,16 @@ class GeminiProvider(AIProvider):
 
     def __init__(self, api_key: str, config: Dict[str, Any] = None):
         super().__init__(api_key, config)
+        self.client = None
         if GEMINI_AVAILABLE and api_key and genai is not None:
-            genai.configure(api_key=api_key)
+            self.client = genai.Client(api_key=api_key)
 
     def is_available(self) -> bool:
         return GEMINI_AVAILABLE and bool(self.api_key)
 
     def validate_api_key(self) -> bool:
         """Validate Gemini API key by making a test request"""
-        if not self.is_available():
+        if not self.is_available() or not self.client:
             return False
 
         try:
@@ -116,8 +117,10 @@ class GeminiProvider(AIProvider):
 
             logger.info("GeminiProvider", "validate_api_key", f"Validating API key with model: {model_name}")
 
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content("Test validation message")
+            response = self.client.models.generate_content(
+                model=model_name,
+                contents="Test validation message"
+            )
             return bool(response and response.text)
         except Exception as e:
             logger.error("GeminiProvider", "validate_api_key", f"API validation failed: {e}")
@@ -144,12 +147,9 @@ class GeminiProvider(AIProvider):
             # Upload audio file to Gemini
             logger.info("GeminiProvider", "transcribe_and_analyze", f"Uploading audio file: {audio_file_path}")
 
-            audio_file = genai.upload_file(audio_file_path)
+            audio_file = self.client.files.upload(file=audio_file_path)
 
             logger.info("GeminiProvider", "transcribe_and_analyze", f"File uploaded successfully: {audio_file.uri}")
-
-            # Create model
-            model = genai.GenerativeModel(model_name)
 
             # Combined prompt for transcription + analysis
             prompt = """
@@ -228,13 +228,16 @@ Provide structured meeting insights in strict JSON format:
             """
 
             # Generate content with the uploaded audio file
-            response = model.generate_content([prompt, audio_file])
+            response = self.client.models.generate_content(
+                model=model_name,
+                contents=[prompt, audio_file]
+            )
 
             # Get response text
             response_text = response.text.strip()
 
             # Clean up: delete the uploaded file
-            genai.delete_file(audio_file.name)
+            self.client.files.delete(name=audio_file.name)
             logger.info("GeminiProvider", "transcribe_and_analyze", "Uploaded file deleted")
 
             # Parse response: split into transcription and analysis
@@ -305,12 +308,9 @@ Provide structured meeting insights in strict JSON format:
             # Upload audio file to Gemini
             logger.info("GeminiProvider", "transcribe_audio", f"Uploading audio file: {audio_file_path}")
 
-            audio_file = genai.upload_file(audio_file_path)
+            audio_file = self.client.files.upload(file=audio_file_path)
 
             logger.info("GeminiProvider", "transcribe_audio", f"File uploaded successfully: {audio_file.uri}")
-
-            # Create model
-            model = genai.GenerativeModel(model_name)
 
             # Create prompt with uploaded file reference
             prompt = """
@@ -333,13 +333,16 @@ Do NOT include any JSON formatting or explanatory text.
             """
 
             # Generate content with the uploaded audio file
-            response = model.generate_content([prompt, audio_file])
+            response = self.client.models.generate_content(
+                model=model_name,
+                contents=[prompt, audio_file]
+            )
 
             # Get transcription text
             transcription_text = response.text.strip()
 
             # Clean up: delete the uploaded file
-            genai.delete_file(audio_file.name)
+            self.client.files.delete(name=audio_file.name)
             logger.info("GeminiProvider", "transcribe_audio", "Uploaded file deleted")
 
             return {
@@ -366,9 +369,6 @@ Do NOT include any JSON formatting or explanatory text.
 
             logger.info("GeminiProvider", "analyze_text", f"Using model: {model_name}")
 
-            # Create model
-            model = genai.GenerativeModel(model_name)
-
             prompt = f"""
 Analyze this meeting transcription and extract actionable insights.
 
@@ -394,7 +394,10 @@ Analyze this meeting transcription and extract actionable insights.
 Return ONLY valid JSON, no markdown formatting or explanatory text.
             """
 
-            response = model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
             response_text = response.text.strip()
 
             if response_text.startswith("```json"):

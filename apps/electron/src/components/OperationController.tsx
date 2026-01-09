@@ -20,6 +20,7 @@ import { useUIStore } from '@/store/useUIStore'
 import { toast } from '@/components/ui/toaster'
 import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
 import { parseError, getErrorMessage } from '@/features/library/utils/errorHandling'
+import { generateWaveformData, decodeAudioData } from '@/utils/audioUtils'
 
 const DEBUG = true
 
@@ -69,7 +70,8 @@ export function OperationController() {
   const {
     setCurrentlyPlaying,
     setPlaybackProgress,
-    setIsPlaying
+    setIsPlaying,
+    setWaveformData
   } = useUIStore()
 
   // ==========================================================================
@@ -265,7 +267,8 @@ export function OperationController() {
       setPlaybackProgress(0, 0)
 
       // Load audio file
-      const base64 = await window.electronAPI.storage.readRecording(filePath)
+      const response = await window.electronAPI.storage.readRecording(filePath)
+      const base64 = response?.data
       if (!base64) {
         toast({ title: 'Error', description: 'Failed to load audio file', variant: 'error' })
         return
@@ -289,6 +292,7 @@ export function OperationController() {
           setIsPlaying(false)
           setCurrentlyPlaying(null, null)
           setPlaybackProgress(0, 0)
+          setWaveformData(null)
         })
         audioRef.current.addEventListener('error', (e) => {
           const libraryError = parseError(e, 'audio playback')
@@ -300,6 +304,7 @@ export function OperationController() {
           })
           setIsPlaying(false)
           setCurrentlyPlaying(null, null)
+          setWaveformData(null)
         })
       }
 
@@ -314,6 +319,17 @@ export function OperationController() {
       // Set currently playing BEFORE loading to show loading state
       setCurrentlyPlaying(recordingId, filePath)
 
+      // Generate waveform data for visualization
+      try {
+        const audioBuffer = await decodeAudioData(base64, mimeType)
+        const waveformData = await generateWaveformData(audioBuffer, 1000)
+        setWaveformData(waveformData)
+      } catch (waveformError) {
+        console.warn('[OperationController] Failed to generate waveform:', waveformError)
+        // Continue with playback even if waveform generation fails
+        setWaveformData(null)
+      }
+
       audioRef.current.src = `data:${mimeType};base64,${base64}`
       await audioRef.current.play()
     } catch (error) {
@@ -326,8 +342,9 @@ export function OperationController() {
       })
       setIsPlaying(false)
       setCurrentlyPlaying(null, null)
+      setWaveformData(null)
     }
-  }, [setCurrentlyPlaying, setPlaybackProgress, setIsPlaying])
+  }, [setCurrentlyPlaying, setPlaybackProgress, setIsPlaying, setWaveformData])
 
   const pauseAudio = useCallback(() => {
     if (audioRef.current) {
@@ -349,7 +366,8 @@ export function OperationController() {
     setIsPlaying(false)
     setCurrentlyPlaying(null, null)
     setPlaybackProgress(0, 0)
-  }, [setCurrentlyPlaying, setIsPlaying, setPlaybackProgress])
+    setWaveformData(null)
+  }, [setCurrentlyPlaying, setIsPlaying, setPlaybackProgress, setWaveformData])
 
   const seekAudio = useCallback((time: number) => {
     if (audioRef.current) {

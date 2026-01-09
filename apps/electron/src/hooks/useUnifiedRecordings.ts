@@ -485,6 +485,78 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     return unsubscribe
   }, [loaded, loadRecordings, deviceService])
 
+  // Subscribe to recording watcher events for auto-refresh
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onRecordingAdded((data) => {
+      console.log('[useUnifiedRecordings] New recording detected:', data.recording.filename)
+
+      // Import toast at runtime to avoid circular dependencies
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.success('New Recording Detected', data.recording.filename)
+      })
+
+      // Auto-refresh without forcing device fetch (use cached data for speed)
+      loadRecordings(false)
+    })
+
+    return unsubscribe
+  }, [loadRecordings])
+
+  // Poll device for file count changes (detect new recordings on device)
+  useEffect(() => {
+    if (!deviceConnected) return
+
+    let previousRecordingCount = 0
+    let isInitialized = false
+
+    const checkDeviceChanges = async () => {
+      try {
+        if (!deviceService.isConnected()) return
+
+        // Get current device recordings count
+        const deviceRecs = deviceService.getCachedRecordings()
+        const currentCount = deviceRecs.length
+
+        // Initialize on first run
+        if (!isInitialized) {
+          previousRecordingCount = currentCount
+          isInitialized = true
+          return
+        }
+
+        // Check for changes
+        if (currentCount !== previousRecordingCount) {
+          const diff = currentCount - previousRecordingCount
+          console.log(`[useUnifiedRecordings] Device recording count changed: ${previousRecordingCount} → ${currentCount}`)
+
+          if (diff > 0) {
+            // New recordings detected
+            import('@/components/ui/toaster').then(({ toast }) => {
+              toast.info(
+                `${diff} New Recording${diff > 1 ? 's' : ''} on Device`,
+                `Detected ${diff} new recording${diff > 1 ? 's' : ''}`
+              )
+            })
+          }
+
+          // Force device refresh when count changes
+          loadRecordings(true)
+          previousRecordingCount = currentCount
+        }
+      } catch (error) {
+        console.error('[useUnifiedRecordings] Error checking device changes:', error)
+      }
+    }
+
+    // Check immediately on connection
+    checkDeviceChanges()
+
+    // Then check every 30 seconds
+    const interval = setInterval(checkDeviceChanges, 30000)
+
+    return () => clearInterval(interval)
+  }, [deviceConnected, deviceService, loadRecordings])
+
   // Memoize stats calculation - only recalculate when recordings change
   const stats = useMemo(() => {
     let deviceOnly = 0

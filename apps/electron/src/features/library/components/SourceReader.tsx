@@ -9,13 +9,12 @@
  * Shows a placeholder message when no recording is selected.
  */
 
-import { useState } from 'react'
 import { TranscriptViewer } from './TranscriptViewer'
+import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath } from '@/types/unified-recording'
 import { Transcript, parseJsonArray } from '@/types'
-import { Play, Pause, Volume2, Calendar, Clock, HardDrive, Tag, ExternalLink } from 'lucide-react'
+import { Calendar, Clock, HardDrive, Tag, ExternalLink, Play } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Slider } from '@/components/ui/slider'
 import { formatDuration } from '@/lib/utils'
 
 interface SourceReaderProps {
@@ -37,7 +36,6 @@ export function SourceReader({
   onStop,
   onSeek
 }: SourceReaderProps) {
-  const [volume, setVolume] = useState(100)
 
   if (!recording) {
     return (
@@ -107,51 +105,11 @@ export function SourceReader({
         </div>
       </div>
 
-      {/* Audio Player Controls */}
+      {/* Audio Player */}
       {canPlay && (
-        <div className="p-4 border-b bg-muted/30">
-          <div className="flex items-center gap-3">
-            {/* Play/Pause Button */}
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={isPlaying ? onStop : onPlay}
-              className="flex-shrink-0"
-            >
-              {isPlaying ? (
-                <Pause className="h-4 w-4" />
-              ) : (
-                <Play className="h-4 w-4" />
-              )}
-            </Button>
-
-            {/* Progress Bar */}
-            <div className="flex-1">
-              <div className="text-xs text-muted-foreground mb-1">
-                {formatDuration(currentTimeMs / 1000)} / {recording.duration > 0 ? formatDuration(recording.duration) : '--:--'}
-              </div>
-              <div className="h-1 bg-muted rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-primary transition-all"
-                  style={{
-                    width: `${recording.duration > 0 ? (currentTimeMs / (recording.duration * 1000)) * 100 : 0}%`
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* Volume Control */}
-            <div className="flex items-center gap-2 flex-shrink-0 w-32">
-              <Volume2 className="h-4 w-4 text-muted-foreground" />
-              <Slider
-                value={[volume]}
-                onValueChange={(values) => setVolume(values[0])}
-                max={100}
-                step={1}
-                className="flex-1"
-              />
-            </div>
-          </div>
+        <div className="sticky top-0 bg-background z-10 border-b">
+          {/* Always show AudioPlayer when file is selected - key forces remount on file change */}
+          <AudioPlayer key={recording.id} filename={recording.filename} onClose={onStop} />
         </div>
       )}
 

@@ -386,6 +386,9 @@ export interface ElectronAPI {
 
   // Domain Events - Event-driven architecture
   onDomainEvent: (callback: (event: any) => void) => () => void
+
+  // Recording Watcher Events
+  onRecordingAdded: (callback: (data: { recording: any }) => void) => () => void
 }
 
 // Expose the API to the renderer process
@@ -630,6 +633,15 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('domain-event', handler)
     return () => {
       ipcRenderer.removeListener('domain-event', handler)
+    }
+  },
+
+  // Recording Watcher Event Listener
+  onRecordingAdded: (callback: (data: { recording: any }) => void) => {
+    const handler = (_event: any, data: { recording: any }) => callback(data)
+    ipcRenderer.on('recording:new', handler)
+    return () => {
+      ipcRenderer.removeListener('recording:new', handler)
     }
   }
 }
