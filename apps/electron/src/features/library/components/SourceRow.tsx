@@ -64,6 +64,9 @@ export const SourceRow = memo(function SourceRow({
   const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
   const { message: announcement, announce } = useAnnouncement()
 
+  // DEBUG: Log onToggleExpand prop to verify it's being received
+  console.log('[SourceRow] Recording:', recording.filename, 'onToggleExpand:', typeof onToggleExpand, 'exists:', !!onToggleExpand)
+
   const handleCheckboxClick = (e: React.MouseEvent) => {
     e.stopPropagation()
     onSelectionChange?.(recording.id, e.shiftKey)
@@ -292,6 +295,10 @@ export const SourceRow = memo(function SourceRow({
     prevProps.isSelected === nextProps.isSelected &&
     prevProps.isExpanded === nextProps.isExpanded &&
     prevProps.transcript?.id === nextProps.transcript?.id &&
-    prevProps.meeting?.id === nextProps.meeting?.id
+    prevProps.meeting?.id === nextProps.meeting?.id &&
+    // Include callback props to detect when they change
+    prevProps.onToggleExpand === nextProps.onToggleExpand &&
+    prevProps.onSelectionChange === nextProps.onSelectionChange &&
+    prevProps.onClick === nextProps.onClick
   )
 })
