@@ -325,3 +325,134 @@ SPEC-018 has been successfully implemented and tested. All acceptance criteria a
 **Implementation Date:** 2026-01-05
 **Branch:** spec/ai-title-questions
 **Status:** ✅ Complete and verified
+
+---
+
+# Phase 1: Row Visibility & Label Improvements
+
+## Summary
+
+Fixed text visibility issues in SourceRow component and added clear text labels to action buttons and location status indicators. Implemented responsive behavior for narrow screens to maintain usability across all viewport sizes.
+
+## Implementation Status
+
+✅ **COMPLETE** - All changes implemented and ready for testing
+
+## Changes Made
+
+### 1. Text Visibility Fix (SourceRow.tsx)
+
+**Problem:** Recording filename text could be invisible due to missing explicit text color.
+
+**Solution:** Added `text-foreground` class to ensure consistent text visibility across themes.
+
+```tsx
+// Before
+<p className="font-medium text-sm truncate">{recording.filename}</p>
+
+// After
+<p className="font-medium text-sm truncate text-foreground">{recording.filename}</p>
+```
+
+**Location:** `apps/electron/src/features/library/components/SourceRow.tsx:87`
+
+### 2. Badge Contrast Fix (SourceRow.tsx)
+
+**Problem:** Default transcription status badge (`'none'` state) lacked explicit text color, potentially causing low contrast issues.
+
+**Solution:** Added `text-secondary-foreground` class to default badge state.
+
+```tsx
+// Before
+: 'bg-secondary'
+
+// After
+: 'bg-secondary text-secondary-foreground'
+```
+
+**Location:** `apps/electron/src/features/library/components/SourceRow.tsx:123`
+
+### 3. Responsive Button Labels (SourceRow.tsx)
+
+**Problem:** Action buttons only showed icons, making their purpose unclear.
+
+**Solution:** Added text labels to all action buttons with responsive hiding on narrow screens.
+
+**Changes:**
+- Changed button `size` from `"icon"` to `"sm"`
+- Added `gap-1.5` class for spacing between icon and text
+- Added text labels with `hidden sm:inline` pattern for responsive behavior
+- Added descriptive `title` attributes
+
+**Buttons Updated:**
+1. **Ask Assistant**: Shows "Ask" label on screens ≥640px
+2. **Generate Output**: Shows "Generate" label on screens ≥640px
+3. **Download**: Shows "Download" or "Downloading" label on screens ≥640px
+4. **Play/Stop**: Shows "Play" or "Stop" label on screens ≥640px
+5. **Delete**: Shows "Delete" or "Deleting" label on screens ≥640px
+
+**Locations:** `apps/electron/src/features/library/components/SourceRow.tsx:130-212`
+
+### 4. Location Status Labels (StatusIcon.tsx)
+
+**Problem:** StatusIcon only showed icons without text labels for location status.
+
+**Solution:** Extended StatusIcon component with optional `showLabel` prop.
+
+**Changes:**
+- Added `showLabel?: boolean` prop to `StatusIconProps`
+- Added conditional text labels with `hidden sm:inline` pattern
+- Labels show: "On Device", "Downloaded", "Synced", or "Error"
+
+**Location:** `apps/electron/src/features/library/components/StatusIcon.tsx:7,10,21,36,48,60`
+
+**Usage in SourceRow:**
+```tsx
+<StatusIcon recording={recording} showLabel={true} />
+```
+
+## Responsive Behavior
+
+**Breakpoint:** 640px (Tailwind's `sm:` breakpoint)
+
+| Screen Width | Button Labels | Status Labels |
+|--------------|---------------|---------------|
+| < 640px      | Hidden (icon-only) | Hidden (icon-only) |
+| ≥ 640px      | Visible        | Visible        |
+
+## Accessibility
+
+- **Text Contrast:** All text uses design system color tokens that meet WCAG 2.1 AA (4.5:1 minimum)
+- **Screen Readers:** `aria-label` and `title` attributes maintained on all interactive elements
+- **Keyboard Navigation:** No changes to existing keyboard support
+
+## Testing Recommendations
+
+1. **Visual Testing:**
+   - Test at screen widths: 400px, 600px, 800px, 1200px
+   - Verify text visibility in both light and dark modes
+   - Check button label appearance/disappearance at 640px breakpoint
+
+2. **Accessibility Testing:**
+   - Run contrast ratio checks in both themes
+   - Test keyboard navigation
+   - Test screen reader announcements
+
+3. **Functional Testing:**
+   - Verify all buttons remain clickable in both icon-only and labeled modes
+   - Test responsive layout doesn't cause text overflow or wrapping
+
+## Files Modified
+
+1. `apps/electron/src/features/library/components/SourceRow.tsx` (87, 123, 130-212)
+2. `apps/electron/src/features/library/components/StatusIcon.tsx` (7, 10, 21, 36, 48, 60)
+
+## Breaking Changes
+
+None. All changes are backwards-compatible. The `showLabel` prop is optional and defaults to `false`.
+
+---
+
+**Implementation Date:** 2026-01-09
+**Branch:** vk/9cdb-phase-1-fix-row
+**Status:** ✅ Complete - Ready for testing
