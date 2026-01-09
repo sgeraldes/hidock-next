@@ -276,9 +276,14 @@ export function Library() {
   const { handleKeyDown } = useKeyboardNavigation({
     items: itemIds,
     selectedIds,
+    expandedIds: expandedRowIds,
     onToggleSelection: toggleSelection,
     onSelectAll: selectAll,
     onClearSelection: clearSelection,
+    onToggleExpand: toggleRowExpansion,
+    onExpandRow: useLibraryStore((state) => state.expandRow),
+    onCollapseRow: useLibraryStore((state) => state.collapseRow),
+    onCollapseAllRows: useLibraryStore((state) => state.collapseAllRows),
     isEnabled: filteredRecordings.length > 0
   })
 
