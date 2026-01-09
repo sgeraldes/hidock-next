@@ -93,3 +93,18 @@ export function getRelativeTime(date: Date | string): string {
   if (diffDays < 7) return `${diffDays}d ago`
   return formatDate(d)
 }
+
+/**
+ * Validates that an ID is a safe string for use in Set operations
+ * Prevents prototype pollution and malformed IDs
+ */
+export function validateId(id: unknown): id is string {
+  return (
+    typeof id === 'string' &&
+    id.length > 0 &&
+    id.length < 100 &&
+    !id.includes('__proto__') &&
+    !id.includes('constructor') &&
+    !id.includes('prototype')
+  )
+}

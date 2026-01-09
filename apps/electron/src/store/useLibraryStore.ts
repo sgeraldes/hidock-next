@@ -13,6 +13,7 @@ import {
   ExclusiveLocationFilter
 } from '@/types/unified-recording'
 import { LibraryError } from '@/features/library/utils/errorHandling'
+import { validateId } from '@/lib/utils'
 
 export type SortBy = 'date' | 'duration' | 'name' | 'quality'
 export type SortOrder = 'asc' | 'desc'
@@ -34,6 +35,9 @@ interface LibraryState {
 
   // Selection state (transient - not persisted)
   selectedIds: Set<string>
+
+  // Expansion state (transient - not persisted)
+  expandedRowIds: Set<string>
 
   // Panel state (persisted)
   panelSizes: number[]
@@ -73,6 +77,12 @@ interface LibraryActions {
   clearSelection: () => void
   isSelected: (id: string) => boolean
 
+  // Row expansion
+  toggleRowExpansion: (id: string) => void
+  expandRow: (id: string) => void
+  collapseRow: (id: string) => void
+  collapseAllRows: () => void
+
   // Error management
   setRecordingError: (id: string, error: LibraryError) => void
   clearRecordingError: (id: string) => void
@@ -100,6 +110,7 @@ const initialState: LibraryState = {
   statusFilter: null,
   searchQuery: '',
   selectedIds: new Set(),
+  expandedRowIds: new Set(),
   panelSizes: [25, 45, 30],
   selectedSourceId: null,
   recordingErrors: new Map(),
@@ -172,6 +183,49 @@ export const useLibraryStore = create<LibraryStore>()(
 
       isSelected: (id) => get().selectedIds.has(id),
 
+      // Row expansion
+      toggleRowExpansion: (id) => {
+        if (!validateId(id)) {
+          console.warn('[LibraryStore] Invalid ID for expansion:', id)
+          return
+        }
+        set((state) => {
+          const newExpanded = new Set(state.expandedRowIds)
+          if (newExpanded.has(id)) {
+            newExpanded.delete(id)
+          } else {
+            newExpanded.add(id)
+          }
+          return { expandedRowIds: newExpanded }
+        })
+      },
+
+      expandRow: (id) => {
+        if (!validateId(id)) {
+          console.warn('[LibraryStore] Invalid ID for expansion:', id)
+          return
+        }
+        set((state) => {
+          const newExpanded = new Set(state.expandedRowIds)
+          newExpanded.add(id)
+          return { expandedRowIds: newExpanded }
+        })
+      },
+
+      collapseRow: (id) => {
+        if (!validateId(id)) {
+          console.warn('[LibraryStore] Invalid ID for collapse:', id)
+          return
+        }
+        set((state) => {
+          const newExpanded = new Set(state.expandedRowIds)
+          newExpanded.delete(id)
+          return { expandedRowIds: newExpanded }
+        })
+      },
+
+      collapseAllRows: () => set({ expandedRowIds: new Set() }),
+
       // Error management
       setRecordingError: (id, error) =>
         set((state) => {
@@ -213,6 +267,7 @@ export const useLibraryStore = create<LibraryStore>()(
         panelSizes: state.panelSizes
         // searchQuery intentionally not persisted - should start fresh
         // selectedIds intentionally not persisted - transient
+        // expandedRowIds intentionally not persisted - transient
         // selectedSourceId intentionally not persisted - should start fresh
         // scrollOffset intentionally not persisted - transient
       })
