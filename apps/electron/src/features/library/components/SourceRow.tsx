@@ -82,7 +82,7 @@ export const SourceRow = memo(function SourceRow({
             className="shrink-0"
           />
         )}
-        <StatusIcon recording={recording} showLabel={true} />
+        <StatusIcon recording={recording} />
         <div className="min-w-0 flex-1">
           <p className="font-medium text-sm truncate text-foreground">{recording.filename}</p>
           <p className="text-xs text-muted-foreground truncate">
