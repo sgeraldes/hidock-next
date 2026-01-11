@@ -67,7 +67,7 @@ export const SourceRow = memo(function SourceRow({
 
   return (
     <div
-      className={`flex items-center justify-between p-3 hover:bg-muted/50 cursor-pointer ${isSelected ? 'bg-primary/5' : ''}`}
+      className={`@container flex items-center justify-between p-3 hover:bg-muted/50 cursor-pointer ${isSelected ? 'bg-primary/5' : ''}`}
       role="option"
       onClick={handleRowClick}
       aria-selected={isPlaying || isSelected}
@@ -83,7 +83,7 @@ export const SourceRow = memo(function SourceRow({
           />
         )}
         <StatusIcon recording={recording} />
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 min-w-[100px]">
           <p className="font-medium text-sm truncate text-foreground">{recording.filename}</p>
           <p className="text-xs text-muted-foreground truncate">
             {formatDateTime(recording.dateRecorded.toISOString())}
@@ -92,7 +92,7 @@ export const SourceRow = memo(function SourceRow({
           </p>
         </div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1.5 shrink-0">
         {/* Error badge */}
         {error && (
           <TooltipProvider>
@@ -135,7 +135,7 @@ export const SourceRow = memo(function SourceRow({
           title="Ask Assistant about this capture"
         >
           <Mic className="h-3 w-3" />
-          <span className="hidden sm:inline text-xs">Ask</span>
+          <span className="hidden @[450px]:inline text-xs">Ask</span>
         </Button>
         <Button
           variant="ghost"
@@ -145,7 +145,7 @@ export const SourceRow = memo(function SourceRow({
           title="Generate artifact from this capture"
         >
           <FileText className="h-3 w-3" />
-          <span className="hidden sm:inline text-xs">Generate</span>
+          <span className="hidden @[500px]:inline text-xs">Generate</span>
         </Button>
 
         {/* Download button for device-only recordings */}
@@ -163,7 +163,7 @@ export const SourceRow = memo(function SourceRow({
             ) : (
               <Download className="h-3 w-3" />
             )}
-            <span className="hidden sm:inline text-xs">{isDownloading ? 'Downloading' : 'Download'}</span>
+            <span className="hidden @[550px]:inline text-xs">{isDownloading ? 'Downloading' : 'Download'}</span>
           </Button>
         )}
 
@@ -177,7 +177,7 @@ export const SourceRow = memo(function SourceRow({
           title={isPlaying ? 'Stop playback' : 'Play recording'}
         >
           {isPlaying ? <X className="h-3 w-3" /> : <Play className="h-3 w-3" />}
-          <span className="hidden sm:inline text-xs">{isPlaying ? 'Stop' : 'Play'}</span>
+          <span className="hidden @[450px]:inline text-xs">{isPlaying ? 'Stop' : 'Play'}</span>
         </Button>
 
         {/* Delete button */}
@@ -208,7 +208,7 @@ export const SourceRow = memo(function SourceRow({
           ) : (
             <Trash2 className="h-3 w-3" />
           )}
-          <span className="hidden sm:inline text-xs">{isDeleting ? 'Deleting' : 'Delete'}</span>
+          <span className="hidden @[450px]:inline text-xs">{isDeleting ? 'Deleting' : 'Delete'}</span>
         </Button>
       </div>
     </div>
