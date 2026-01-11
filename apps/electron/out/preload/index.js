@@ -226,6 +226,14 @@ const electronAPI = {
     return () => {
       electron.ipcRenderer.removeListener("domain-event", handler);
     };
+  },
+  // Recording Watcher Event Listener
+  onRecordingAdded: (callback) => {
+    const handler = (_event, data) => callback(data);
+    electron.ipcRenderer.on("recording:new", handler);
+    return () => {
+      electron.ipcRenderer.removeListener("recording:new", handler);
+    };
   }
 };
 electron.contextBridge.exposeInMainWorld("electronAPI", electronAPI);
