@@ -50,6 +50,7 @@ export function OperationController() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const downloadAbortControllerRef = useRef<AbortController | null>(null)
   const autoSyncTriggeredRef = useRef(false) // Prevent duplicate auto-sync triggers
+  const waveformAbortControllerRef = useRef<AbortController | null>(null)
 
   // Global store actions
   const {
@@ -319,15 +320,21 @@ export function OperationController() {
       // Set currently playing BEFORE loading to show loading state
       setCurrentlyPlaying(recordingId, filePath)
 
-      // Generate waveform data for visualization
-      try {
-        const audioBuffer = await decodeAudioData(base64, mimeType)
-        const waveformData = await generateWaveformData(audioBuffer, 1000)
-        setWaveformData(waveformData)
-      } catch (waveformError) {
-        console.warn('[OperationController] Failed to generate waveform:', waveformError)
-        // Continue with playback even if waveform generation fails
-        setWaveformData(null)
+      // Generate waveform data for visualization (skip if already loaded)
+      const { waveformLoadedForId } = useUIStore.getState()
+      if (waveformLoadedForId !== recordingId) {
+        try {
+          const audioBuffer = await decodeAudioData(base64, mimeType)
+          const waveformData = await generateWaveformData(audioBuffer, 1000)
+          setWaveformData(waveformData)
+          useUIStore.getState().setWaveformLoadedFor(recordingId)
+        } catch (waveformError) {
+          console.warn('[OperationController] Failed to generate waveform:', waveformError)
+          setWaveformData(null)
+          useUIStore.getState().setWaveformLoadingError(recordingId, 'Failed to generate waveform')
+        }
+      } else {
+        if (DEBUG) console.log('[OperationController] Skipping waveform generation - already loaded')
       }
 
       audioRef.current.src = `data:${mimeType};base64,${base64}`
@@ -345,6 +352,97 @@ export function OperationController() {
       setWaveformData(null)
     }
   }, [setCurrentlyPlaying, setPlaybackProgress, setIsPlaying, setWaveformData])
+
+  const loadWaveformOnly = useCallback(async (recordingId: string, filePath: string) => {
+    if (DEBUG) console.log(`[QA-MONITOR][Operation] Loading waveform only: ${recordingId}`)
+
+    // Cancel any in-flight waveform loading
+    if (waveformAbortControllerRef.current) {
+      waveformAbortControllerRef.current.abort()
+    }
+
+    // Create new AbortController for this load operation
+    waveformAbortControllerRef.current = new AbortController()
+    const signal = waveformAbortControllerRef.current.signal
+
+    // Set loading state
+    const { setWaveformLoading, setWaveformLoadingError, setWaveformLoadedFor, setWaveformData } = useUIStore.getState()
+    setWaveformLoading(recordingId)
+
+    try {
+      // Check if aborted early
+      if (signal.aborted) {
+        if (DEBUG) console.log('[OperationController] Waveform load aborted (early)')
+        return
+      }
+
+      // Load audio file - IPC returns { success: boolean, data?: string, error?: string }
+      const response = await window.electronAPI.storage.readRecording(filePath)
+
+      if (!response.success || !response.data) {
+        throw new Error(response.error || 'Failed to read audio file')
+      }
+
+      const base64 = response.data
+      const fileSizeBytes = Math.ceil((base64.length * 3) / 4) // Approximate decoded size
+
+      // Check file size limit (100MB)
+      const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100MB
+      if (fileSizeBytes > MAX_FILE_SIZE) {
+        throw new Error(`File too large (${Math.round(fileSizeBytes / (1024 * 1024))}MB). Maximum size is 100MB.`)
+      }
+
+      // Check if aborted after file read
+      if (signal.aborted) {
+        if (DEBUG) console.log('[OperationController] Waveform load aborted (after file read)')
+        return
+      }
+
+      // Determine MIME type from file extension
+      const ext = filePath.split('.').pop()?.toLowerCase()
+      const mimeType =
+        ext === 'mp3' ? 'audio/mpeg' :
+        ext === 'hda' ? 'audio/mpeg' :  // HDA files are MPEG MP3
+        ext === 'm4a' ? 'audio/mp4' :
+        'audio/wav'
+
+      // Decode and generate waveform
+      const audioBuffer = await decodeAudioData(base64, mimeType)
+
+      // Check if aborted after decode
+      if (signal.aborted) {
+        if (DEBUG) console.log('[OperationController] Waveform load aborted (after decode)')
+        return
+      }
+
+      const waveformData = await generateWaveformData(audioBuffer, 1000)
+
+      // Check if aborted after waveform generation
+      if (signal.aborted) {
+        if (DEBUG) console.log('[OperationController] Waveform load aborted (after generation)')
+        return
+      }
+
+      // Update UI with waveform data
+      setWaveformData(waveformData)
+      setWaveformLoadedFor(recordingId)
+
+      if (DEBUG) console.log(`[QA-MONITOR][Operation] Waveform loaded successfully: ${recordingId}`)
+    } catch (error) {
+      // Check if error is due to abort
+      if (signal.aborted) {
+        if (DEBUG) console.log('[OperationController] Waveform load aborted (during error)')
+        return
+      }
+
+      const libraryError = parseError(error, 'waveform generation')
+      console.error('[OperationController] Waveform load error:', error)
+
+      // Set error state
+      setWaveformLoadingError(recordingId, getErrorMessage(libraryError.type))
+      setWaveformData(null)
+    }
+  }, [])
 
   const pauseAudio = useCallback(() => {
     if (audioRef.current) {
@@ -382,13 +480,14 @@ export function OperationController() {
       pause: pauseAudio,
       resume: resumeAudio,
       stop: stopAudio,
-      seek: seekAudio
+      seek: seekAudio,
+      loadWaveformOnly: loadWaveformOnly
     }
 
     return () => {
       delete (window as any).__audioControls
     }
-  }, [playAudio, pauseAudio, resumeAudio, stopAudio, seekAudio])
+  }, [playAudio, pauseAudio, resumeAudio, stopAudio, seekAudio, loadWaveformOnly])
 
   // ==========================================================================
   // Calendar Sync Operations
@@ -662,6 +761,9 @@ export const useAudioControls = () => {
     },
     seek: (time: number) => {
       (window as any).__audioControls?.seek(time)
+    },
+    loadWaveformOnly: (recordingId: string, filePath: string) => {
+      (window as any).__audioControls?.loadWaveformOnly(recordingId, filePath)
     }
   }
 }

@@ -27,6 +27,11 @@ export const useUIStore = create<UIStore>((set) => ({
   playbackWaveformData: null,
   playbackSentimentData: null,
 
+  // Waveform loading state
+  waveformLoadingId: null,
+  waveformLoadingError: null,
+  waveformLoadedForId: null,
+
   // Actions
   toggleSidebar: () => {
     set((state) => ({ sidebarOpen: !state.sidebarOpen }))
@@ -80,6 +85,29 @@ export const useUIStore = create<UIStore>((set) => ({
 
   setSentimentData: (sentimentData) => {
     set({ playbackSentimentData: sentimentData })
+  },
+
+  // Waveform loading actions
+  setWaveformLoading: (recordingId: string | null) => {
+    set({
+      waveformLoadingId: recordingId,
+      waveformLoadingError: null  // Clear error when starting new load
+    })
+  },
+
+  setWaveformLoadingError: (recordingId: string | null, error: string | null) => {
+    set({
+      waveformLoadingId: null,
+      waveformLoadingError: error
+    })
+  },
+
+  setWaveformLoadedFor: (recordingId: string | null) => {
+    set({
+      waveformLoadingId: null,
+      waveformLoadingError: null,
+      waveformLoadedForId: recordingId
+    })
   }
 }))
 

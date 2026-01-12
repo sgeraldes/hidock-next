@@ -4,6 +4,20 @@
  * Provides utilities for audio decoding and waveform data generation.
  */
 
+// Create singleton AudioContext (prevents exhausting browser's ~6 context limit)
+let audioContext: AudioContext | null = null
+
+/**
+ * Get or create the singleton AudioContext
+ * Reuses the same context to avoid exhausting browser's context limit (~6)
+ */
+function getAudioContext(): AudioContext {
+  if (!audioContext) {
+    audioContext = new AudioContext()
+  }
+  return audioContext
+}
+
 /**
  * Generate waveform data from an AudioBuffer by sampling amplitude peaks
  *
@@ -49,8 +63,8 @@ export async function decodeAudioData(
   base64Data: string,
   _mimeType: string
 ): Promise<AudioBuffer> {
-  // Create audio context
-  const audioContext = new AudioContext()
+  // Use singleton audio context instead of creating new one
+  const audioContext = getAudioContext()
 
   // Decode base64 to binary
   const binaryData = atob(base64Data)
