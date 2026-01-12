@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Mic, FileText, Play, X, Download, RefreshCw, Trash2, AlertCircle } from 'lucide-react'
+import { Mic, FileText, Play, X, Download, RefreshCw, Trash2, AlertCircle, Check, Clock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -83,8 +83,10 @@ export const SourceRow = memo(function SourceRow({
           />
         )}
         <StatusIcon recording={recording} />
-        <div className="min-w-0 flex-1 min-w-[100px]">
-          <p className="font-medium text-sm truncate text-foreground">{recording.filename}</p>
+        <div className="flex-1 shrink min-w-0" style={{ flexBasis: '150px' }}>
+          <p className="font-medium text-sm truncate text-foreground">
+            {recording.title || recording.filename}
+          </p>
           <p className="text-xs text-muted-foreground truncate">
             {formatDateTime(recording.dateRecorded.toISOString())}
             {recording.duration ? ` • ${formatDuration(recording.duration)}` : ''}
@@ -92,7 +94,7 @@ export const SourceRow = memo(function SourceRow({
           </p>
         </div>
       </div>
-      <div className="flex items-center gap-1.5 shrink-0">
+      <div className="hidden @[200px]:flex items-center gap-[3px] @[400px]:gap-1.5">
         {/* Error badge */}
         {error && (
           <TooltipProvider>
@@ -111,9 +113,9 @@ export const SourceRow = memo(function SourceRow({
           </TooltipProvider>
         )}
 
-        {/* Transcription status badge */}
+        {/* Transcription status badge - icon-only at narrow, full at wide */}
         <span
-          className={`text-xs px-2 py-0.5 rounded-full ${
+          className={`flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${
             recording.transcriptionStatus === 'complete'
               ? 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300'
               : recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'
@@ -123,7 +125,16 @@ export const SourceRow = memo(function SourceRow({
               : 'bg-secondary text-secondary-foreground'
           }`}
         >
-          {recording.transcriptionStatus === 'none' ? '—' : recording.transcriptionStatus}
+          {/* Icon always visible */}
+          {recording.transcriptionStatus === 'complete' && <Check className="h-3 w-3" />}
+          {(recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing') && (
+            <Clock className="h-3 w-3" />
+          )}
+          {recording.transcriptionStatus === 'error' && <AlertCircle className="h-3 w-3" />}
+          {/* Text hidden at narrow widths */}
+          <span className="hidden @[300px]:inline">
+            {recording.transcriptionStatus === 'none' ? '—' : recording.transcriptionStatus}
+          </span>
         </span>
 
         {/* Action buttons */}
@@ -135,7 +146,7 @@ export const SourceRow = memo(function SourceRow({
           title="Ask Assistant about this capture"
         >
           <Mic className="h-3 w-3" />
-          <span className="hidden @[450px]:inline text-xs">Ask</span>
+          <span className="hidden @[400px]:inline text-xs">Ask</span>
         </Button>
         <Button
           variant="ghost"
@@ -145,7 +156,7 @@ export const SourceRow = memo(function SourceRow({
           title="Generate artifact from this capture"
         >
           <FileText className="h-3 w-3" />
-          <span className="hidden @[500px]:inline text-xs">Generate</span>
+          <span className="hidden @[400px]:inline text-xs">Generate</span>
         </Button>
 
         {/* Download button for device-only recordings */}
@@ -163,7 +174,7 @@ export const SourceRow = memo(function SourceRow({
             ) : (
               <Download className="h-3 w-3" />
             )}
-            <span className="hidden @[550px]:inline text-xs">{isDownloading ? 'Downloading' : 'Download'}</span>
+            <span className="hidden @[400px]:inline text-xs">{isDownloading ? 'Downloading' : 'Download'}</span>
           </Button>
         )}
 
@@ -177,7 +188,7 @@ export const SourceRow = memo(function SourceRow({
           title={isPlaying ? 'Stop playback' : 'Play recording'}
         >
           {isPlaying ? <X className="h-3 w-3" /> : <Play className="h-3 w-3" />}
-          <span className="hidden @[450px]:inline text-xs">{isPlaying ? 'Stop' : 'Play'}</span>
+          <span className="hidden @[400px]:inline text-xs">{isPlaying ? 'Stop' : 'Play'}</span>
         </Button>
 
         {/* Delete button */}
@@ -208,7 +219,7 @@ export const SourceRow = memo(function SourceRow({
           ) : (
             <Trash2 className="h-3 w-3" />
           )}
-          <span className="hidden @[450px]:inline text-xs">{isDeleting ? 'Deleting' : 'Delete'}</span>
+          <span className="hidden @[400px]:inline text-xs">{isDeleting ? 'Deleting' : 'Delete'}</span>
         </Button>
       </div>
     </div>
