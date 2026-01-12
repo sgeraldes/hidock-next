@@ -639,6 +639,12 @@ export function Library() {
     // Stop any currently playing audio before switching to new recording
     audioControls.stop()
     setSelectedSourceId(recording.id)
+
+    // Load waveform if recording has local file (skip if already loaded for this recording)
+    const { waveformLoadedForId } = useUIStore.getState()
+    if (hasLocalPath(recording) && waveformLoadedForId !== recording.id) {
+      audioControls.loadWaveformOnly(recording.id, recording.localPath)
+    }
   }, [setSelectedSourceId, audioControls])
 
   // Get selected recording and its data for SourceReader

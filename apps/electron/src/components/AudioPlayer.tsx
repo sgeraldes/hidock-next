@@ -32,6 +32,11 @@ export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
   const waveformData = useUIStore((state) => state.playbackWaveformData)
   const sentimentData = useUIStore((state) => state.playbackSentimentData)
 
+  // Read waveform loading state from UIStore
+  const waveformLoadingId = useUIStore((state) => state.waveformLoadingId)
+  const waveformLoadingError = useUIStore((state) => state.waveformLoadingError)
+  const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
+
   // Get audio controls from OperationController
   const audioControls = useAudioControls()
 
@@ -94,9 +99,29 @@ export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
           onSeek={seekAudio}
           height={80}
         />
+      ) : waveformLoadingError && currentlyPlayingId ? (
+        <div className="h-20 bg-destructive/10 rounded flex flex-col items-center justify-center gap-1 text-sm">
+          <p className="text-destructive">Failed to load waveform</p>
+          <p className="text-xs text-muted-foreground">{waveformLoadingError}</p>
+        </div>
+      ) : waveformLoadingId && currentlyPlayingId ? (
+        <div className="h-20 bg-background rounded flex items-center justify-center">
+          <div className="flex gap-1 items-end h-12">
+            {Array.from({ length: 40 }).map((_, i) => (
+              <div
+                key={i}
+                className="w-1 bg-muted-foreground/30 rounded animate-pulse"
+                style={{
+                  height: `${Math.random() * 100}%`,
+                  animationDelay: `${i * 20}ms`
+                }}
+              />
+            ))}
+          </div>
+        </div>
       ) : (
         <div className="h-20 bg-background rounded flex items-center justify-center text-sm text-muted-foreground">
-          Loading waveform...
+          Select a recording to view waveform
         </div>
       )}
 

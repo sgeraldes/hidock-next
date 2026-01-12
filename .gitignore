@@ -104,6 +104,11 @@ build/
 apps/desktop/*.egg-info/
 apps/desktop/build/
 apps/desktop/dist/
+apps/electron/out/
+apps/web/dist/
+apps/web/build/
+**/out/
+**/dist/
 
 # Project-specific generated files
 _version.py
