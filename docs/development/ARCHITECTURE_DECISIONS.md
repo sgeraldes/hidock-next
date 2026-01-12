@@ -126,7 +126,7 @@ useEffect(() => {
 - `apps/electron/src/features/library/utils/adapters.ts:53,98`
 
 **Violated By:**
-- `apps/electron/src/features/library/components/SourceRow.tsx:87` ❌ (to be fixed in Phase 1)
+- ~~`apps/electron/src/features/library/components/SourceRow.tsx:87`~~ ✅ FIXED in Phase 1 (2026-01-12)
 
 ---
 
@@ -202,7 +202,7 @@ Secondary: formatDateTime(dateRecorded) + duration + meeting.subject
 
 **Files Using This Pattern:**
 - `apps/electron/tailwind.config.js` (plugin enabled)
-- `apps/electron/src/features/library/components/SourceRow.tsx` (to be fully implemented)
+- `apps/electron/src/features/library/components/SourceRow.tsx` ✅ Implemented in Phase 1 (2026-01-12)
 
 ### UX-002: Responsive Content Priority
 **Date:** 2026-01-11
@@ -464,6 +464,37 @@ module.exports = {
 - Stop hook will BLOCK completion if testing is missing
 
 **Lesson:** "Manual testing delays are unacceptable. The app MUST actually run before claiming success."
+
+---
+
+## Technical Debt
+
+### TD-001: SourceRow Responsive Fine-Tuning
+**Date:** 2026-01-12
+**Context:** Phase 1 - Fix Row Visibility
+**Status:** NEEDS FINE-TUNING
+**Priority:** Medium
+
+**What Was Implemented:**
+- ✅ Primary text uses `recording.title || recording.filename` pattern
+- ✅ Content container uses `flex-basis: 150px` for minimum space
+- ✅ Button container hidden below 200px (`hidden @[200px]:flex`)
+- ✅ Button gap responsive (3px narrow, 6px wide)
+- ✅ Transcription badge icon-only at narrow widths
+- ✅ All button labels hide at @[400px] breakpoint
+
+**What Needs Fine-Tuning:**
+1. **Breakpoint calibration** - Current breakpoints (@[200px], @[300px], @[400px]) may need adjustment based on real-world usage
+2. **Hover behavior for buttons** - Buttons below 200px should show on row hover (not yet implemented)
+3. **Visual polish** - Spacing and alignment may need minor adjustments after user testing
+
+**Files Affected:**
+- `apps/electron/src/features/library/components/SourceRow.tsx`
+
+**Acceptance Criteria for Resolution:**
+- User confirms breakpoints feel natural across panel widths
+- Hover behavior works as expected
+- No visual regressions at any width
 
 ---
 
