@@ -88,11 +88,10 @@
   -webkit-app-region: no-drag;
 }
 
-/* Row expansion animation */
+/* Row expansion - no animation to ensure virtualizer measures correctly */
 .source-row__expand-container {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 200ms ease-out;
 }
 
 .source-row__expand-container.expanded {
@@ -106,9 +105,3 @@
   z-index: 10;
 }
 
-/* Respect user's motion preferences */
-@media (prefers-reduced-motion: reduce) {
-  .source-row__expand-container {
-    transition: none;
-  }
-}
