@@ -49,6 +49,7 @@ export const SourceRowExpanded = memo(function SourceRowExpanded({
       id={`expanded-${recording.id}`}
       role="region"
       aria-label={`Details for ${recording.filename}`}
+      className="bg-muted/30 mx-3 mb-3 p-4 rounded-lg border border-border"
     >
       <div className="space-y-4">
         {/* Metadata Grid */}
