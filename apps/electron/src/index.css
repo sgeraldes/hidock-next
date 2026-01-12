@@ -102,11 +102,8 @@
 .source-row__expand-content {
   overflow: hidden;
   min-height: 0;
-  background-color: hsl(var(--muted) / 0.3);
-  margin: 0 0.75rem 0.75rem 0.75rem;
-  padding: 1rem;
-  border-radius: 0.5rem;
-  border: 1px solid hsl(var(--border));
+  position: relative;
+  z-index: 10;
 }
 
 /* Respect user's motion preferences */
