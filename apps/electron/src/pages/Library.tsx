@@ -695,7 +695,11 @@ export function Library() {
 
   // Re-measure all rows when expansion state changes
   useEffect(() => {
-    rowVirtualizer.measure()
+    // Delay to allow CSS animation to complete
+    const timer = setTimeout(() => {
+      rowVirtualizer.measure()
+    }, 250)
+    return () => clearTimeout(timer)
   }, [expandedRowIds, rowVirtualizer])
 
   // Loading state
