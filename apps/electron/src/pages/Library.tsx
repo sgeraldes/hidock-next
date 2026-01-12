@@ -693,6 +693,11 @@ export function Library() {
     overscan: 5
   })
 
+  // Re-measure all rows when expansion state changes
+  useEffect(() => {
+    rowVirtualizer.measure()
+  }, [expandedRowIds, rowVirtualizer])
+
   // Loading state
   if (loading && recordings.length === 0) {
     return (
