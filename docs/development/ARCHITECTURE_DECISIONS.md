@@ -4,7 +4,7 @@
 
 **Maintainer:** HiDock-Next Expert Agent
 **Created:** 2026-01-11
-**Last Updated:** 2026-01-11
+**Last Updated:** 2026-01-12
 
 ---
 
@@ -36,6 +36,53 @@
 ---
 
 ## Core Architecture Decisions
+
+### CAD-002: Inline Row Expansion with Virtualizer
+**Date:** 2026-01-12
+**Context:** Phase 2 - Inline Row Expansion
+**Decision:** Use CSS Grid animation combined with proper virtualizer re-measurement for expandable rows
+
+**Details:**
+- **Approach:** Expand content inline within the virtualized list, not in a separate panel
+- **Animation:** CSS Grid `grid-template-rows: 0fr → 1fr` for smooth expand/collapse
+- **Virtualizer:** @tanstack/react-virtual with dynamic height via `measureElement`
+- **State Management:** Zustand store with `expandedRowIds` Set for multi-expansion support
+
+**Implementation Pattern:**
+```tsx
+// SourceRow.tsx - Single wrapper div (NOT Fragment) for proper measurement
+return (
+  <div>
+    <div className="source-row-content">...</div>
+    {isExpanded && (
+      <div className="source-row__expand-container expanded">
+        <SourceRowExpanded ... />
+      </div>
+    )}
+  </div>
+)
+
+// Library.tsx - Re-measure after expansion state changes
+useEffect(() => {
+  requestAnimationFrame(() => {
+    rowVirtualizer.measure()
+  })
+}, [expandedRowIds, rowVirtualizer])
+```
+
+**Critical Lessons:**
+1. **No CSS animation duration** - Animations break virtualizer height measurement
+2. **Single wrapper div** - React Fragments break `measureElement` ref
+3. **requestAnimationFrame** - Required before `measure()` for accurate DOM measurement
+4. **Theme-aware styling** - Use `bg-muted` not hard-coded colors
+
+**Files:**
+- `apps/electron/src/features/library/components/SourceRow.tsx`
+- `apps/electron/src/features/library/components/SourceRowExpanded.tsx`
+- `apps/electron/src/pages/Library.tsx`
+- `apps/electron/src/index.css`
+
+---
 
 ### CAD-001: Generic Artifact Title Architecture
 **Date:** 2026-01-11
@@ -237,6 +284,122 @@ Secondary: formatDateTime(dateRecorded) + duration + meeting.subject
 3. Verify with user before assuming complex logic
 
 **Lesson:** When unsure about data model, look at how other components use the same types. Consistency is key.
+
+### ERR-004: Virtualizer Row Overlap with Animated Expansion
+**Date:** 2026-01-12
+**Error:** Expanded rows overlapped with rows below them in virtualized list
+**Impact:** CRITICAL - Made entire feature unusable
+
+**What Happened:**
+1. Implemented CSS Grid animation (`transition: grid-template-rows 200ms`)
+2. Expanded content animated smoothly
+3. BUT virtualizer measured height DURING animation, not after
+4. Virtual rows positioned based on mid-animation height
+5. Result: Rows overlapped visually
+
+**Root Cause:**
+- `@tanstack/react-virtual` calls `measureElement` immediately
+- CSS animation means DOM height is changing over 200ms
+- Virtualizer gets wrong height, positions next rows incorrectly
+
+**Solution:**
+```css
+/* REMOVE animation - instant height change */
+.source-row__expand-container {
+  display: grid;
+  grid-template-rows: 0fr;
+  /* NO transition property */
+}
+.source-row__expand-container.expanded {
+  grid-template-rows: 1fr;
+}
+```
+
+```tsx
+// Re-measure after expansion state changes
+useEffect(() => {
+  requestAnimationFrame(() => {
+    rowVirtualizer.measure()
+  })
+}, [expandedRowIds, rowVirtualizer])
+```
+
+**Lesson:** With virtualized lists, animation and dynamic measurement are incompatible. Choose one. If you need smooth UX, consider alternatives like opacity fade instead of height animation.
+
+### ERR-005: React Fragment Breaks Virtualizer measureElement
+**Date:** 2026-01-12
+**Error:** Virtualizer couldn't measure row height properly
+**Impact:** Row heights were wrong, causing overlap
+
+**What Happened:**
+1. SourceRow returned `<>...</>` (React Fragment) as root
+2. Virtualizer's `measureElement` ref was attached to Fragment
+3. Fragments have no DOM node, so `getBoundingClientRect()` fails
+4. Virtualizer fell back to estimated height (wrong)
+
+**Solution:**
+```tsx
+// WRONG - Fragment has no DOM node
+return (
+  <>
+    <div className="row-content">...</div>
+    <div className="expanded-content">...</div>
+  </>
+)
+
+// CORRECT - Single wrapper div for measureElement
+return (
+  <div>
+    <div className="row-content">...</div>
+    <div className="expanded-content">...</div>
+  </div>
+)
+```
+
+**Lesson:** When using virtualization with `measureElement`, ALWAYS use a single wrapper element as root. Never use React Fragments.
+
+### ERR-006: Hard-coded Colors Don't Match Theme
+**Date:** 2026-01-12
+**Error:** Used inline styles with hard-coded colors (#e5e7eb)
+**Impact:** Colors didn't match dark/light theme system
+
+**What Happened:**
+1. Tailwind classes weren't applying (suspected HMR issue)
+2. Tried inline styles: `style={{backgroundColor: '#e5e7eb'}}`
+3. Colors looked wrong in dark mode
+4. User pointed out inconsistency with rest of app
+
+**Solution:**
+Use theme-aware Tailwind classes:
+```tsx
+// WRONG - hard-coded color
+<div style={{backgroundColor: '#e5e7eb'}}>
+
+// CORRECT - theme-aware
+<div className="bg-muted shadow-md">
+```
+
+**Lesson:** NEVER use hard-coded colors. Always use Tailwind theme classes (`bg-muted`, `bg-background`, `bg-card`, etc.) that respect the color scheme.
+
+### ERR-007: Git Rebase Instead of Merge
+**Date:** 2026-01-12
+**Error:** Used `git rebase origin/main` when user explicitly asked to "pull changes from main"
+**Impact:** User frustration, had to reset and redo properly
+
+**What Happened:**
+1. User said: "pull changes from main"
+2. I ran: `git rebase origin/main`
+3. This rewrote branch history instead of creating a merge commit
+4. User was furious: "rebase? why rebase? explain this to me"
+
+**Solution:**
+1. Reset to before rebase: `git reset --hard <commit-before-rebase>`
+2. Proper merge: `git fetch origin main && git merge origin/main`
+
+**Lesson:**
+- "pull changes" means MERGE, not rebase
+- NEVER rebase unless explicitly requested
+- A hook has been added to prevent accidental rebase
 
 ---
 
