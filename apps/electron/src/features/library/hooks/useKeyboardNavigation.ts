@@ -10,10 +10,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 interface UseKeyboardNavigationOptions {
   items: string[]
   selectedIds: Set<string>
+  expandedIds?: Set<string>
   onToggleSelection: (id: string) => void
   onSelectAll: (ids: string[]) => void
   onClearSelection: () => void
   onOpenDetail?: (id: string) => void
+  onToggleExpand?: (id: string) => void
+  onExpandRow?: (id: string) => void
+  onCollapseRow?: (id: string) => void
+  onCollapseAllRows?: () => void
   isEnabled?: boolean
 }
 
@@ -27,10 +32,15 @@ interface UseKeyboardNavigationResult {
 export function useKeyboardNavigation({
   items,
   selectedIds,
+  expandedIds,
   onToggleSelection,
   onSelectAll,
   onClearSelection,
   onOpenDetail,
+  onToggleExpand,
+  onExpandRow,
+  onCollapseRow,
+  onCollapseAllRows,
   isEnabled = true
 }: UseKeyboardNavigationOptions): UseKeyboardNavigationResult {
   const [focusedIndex, setFocusedIndex] = useState(-1)
@@ -49,6 +59,7 @@ export function useKeyboardNavigation({
 
       const { key, ctrlKey, metaKey } = event
       const modKey = ctrlKey || metaKey
+      const currentItemId = focusedIndex >= 0 && focusedIndex < items.length ? items[focusedIndex] : null
 
       switch (key) {
         case 'ArrowDown':
@@ -65,6 +76,22 @@ export function useKeyboardNavigation({
             const next = prev > 0 ? prev - 1 : 0
             return next
           })
+          break
+
+        case 'ArrowRight':
+          // Expand row when collapsed
+          event.preventDefault()
+          if (currentItemId && onExpandRow && expandedIds && !expandedIds.has(currentItemId)) {
+            onExpandRow(currentItemId)
+          }
+          break
+
+        case 'ArrowLeft':
+          // Collapse row when expanded
+          event.preventDefault()
+          if (currentItemId && onCollapseRow && expandedIds && expandedIds.has(currentItemId)) {
+            onCollapseRow(currentItemId)
+          }
           break
 
         case 'Home':
@@ -85,15 +112,22 @@ export function useKeyboardNavigation({
           break
 
         case 'Enter':
+          // Ctrl+Enter: Toggle expansion
+          // Enter alone: Open detail (existing behavior)
           event.preventDefault()
-          if (focusedIndex >= 0 && focusedIndex < items.length && onOpenDetail) {
+          if (modKey && currentItemId && onToggleExpand) {
+            onToggleExpand(currentItemId)
+          } else if (focusedIndex >= 0 && focusedIndex < items.length && onOpenDetail) {
             onOpenDetail(items[focusedIndex])
           }
           break
 
         case 'Escape':
           event.preventDefault()
-          if (selectedIds.size > 0) {
+          // Collapse all expanded rows if any exist, otherwise clear selection
+          if (expandedIds && expandedIds.size > 0 && onCollapseAllRows) {
+            onCollapseAllRows()
+          } else if (selectedIds.size > 0) {
             onClearSelection()
           }
           break
@@ -110,7 +144,21 @@ export function useKeyboardNavigation({
           break
       }
     },
-    [items, focusedIndex, selectedIds.size, onToggleSelection, onSelectAll, onClearSelection, onOpenDetail, isEnabled]
+    [
+      items,
+      focusedIndex,
+      selectedIds.size,
+      expandedIds,
+      onToggleSelection,
+      onSelectAll,
+      onClearSelection,
+      onOpenDetail,
+      onToggleExpand,
+      onExpandRow,
+      onCollapseRow,
+      onCollapseAllRows,
+      isEnabled
+    ]
   )
 
   return {

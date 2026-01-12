@@ -87,3 +87,21 @@
 .titlebar-no-drag {
   -webkit-app-region: no-drag;
 }
+
+/* Row expansion - no animation to ensure virtualizer measures correctly */
+.source-row__expand-container {
+  display: grid;
+  grid-template-rows: 0fr;
+}
+
+.source-row__expand-container.expanded {
+  grid-template-rows: 1fr;
+}
+
+.source-row__expand-content {
+  overflow: hidden;
+  min-height: 0;
+  position: relative;
+  z-index: 10;
+}
+

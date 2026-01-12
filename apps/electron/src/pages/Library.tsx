@@ -75,6 +75,11 @@ export function Library() {
   } = useTransitionFilters()
   const deferredSearchQuery = useDeferredValue(searchQuery)
 
+  // Row expansion state
+  const expandedRowIds = useLibraryStore((state) => state.expandedRowIds)
+  const toggleRowExpansion = useLibraryStore((state) => state.toggleRowExpansion)
+  const collapseRow = useLibraryStore((state) => state.collapseRow)
+
   // AbortController for cancelling enrichment on filter changes or navigation
   const enrichmentAbortController = useRef(new AbortController())
 
@@ -271,9 +276,14 @@ export function Library() {
   const { handleKeyDown } = useKeyboardNavigation({
     items: itemIds,
     selectedIds,
+    expandedIds: expandedRowIds,
     onToggleSelection: toggleSelection,
     onSelectAll: selectAll,
     onClearSelection: clearSelection,
+    onToggleExpand: toggleRowExpansion,
+    onExpandRow: useLibraryStore((state) => state.expandRow),
+    onCollapseRow: useLibraryStore((state) => state.collapseRow),
+    onCollapseAllRows: useLibraryStore((state) => state.collapseAllRows),
     isEnabled: filteredRecordings.length > 0
   })
 
@@ -511,7 +521,10 @@ export function Library() {
       // Step 1: Delete on server FIRST
       await window.electronAPI.recordings.delete(recording.id)
 
-      // Step 2: Refresh data from server to update UI ONLY on success
+      // Step 2: Clean up expanded state
+      collapseRow(recording.id)
+
+      // Step 3: Refresh data from server to update UI ONLY on success
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete from device:', e)
@@ -520,7 +533,7 @@ export function Library() {
     } finally {
       setDeleting(null)
     }
-  }, [deviceConnected, refresh])
+  }, [deviceConnected, refresh, collapseRow])
 
   // PESSIMISTIC UPDATE: Server-first delete with proper error handling
   const handleDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
@@ -536,7 +549,10 @@ export function Library() {
       // Step 1: Delete on server FIRST
       await window.electronAPI.recordings.delete(recording.id)
 
-      // Step 2: Refresh data from server to update UI ONLY on success
+      // Step 2: Clean up expanded state
+      collapseRow(recording.id)
+
+      // Step 3: Refresh data from server to update UI ONLY on success
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete local file:', e)
@@ -545,7 +561,7 @@ export function Library() {
     } finally {
       setDeleting(null)
     }
-  }, [transcripts, refresh])
+  }, [transcripts, refresh, collapseRow])
 
   const handleDelete = useCallback(
     (recording: UnifiedRecording) => {
@@ -646,22 +662,34 @@ export function Library() {
 
   const estimateSize = useCallback(
     (index: number) => {
-      if (compactView) return 52
       const recording = filteredRecordings[index]
-      if (!recording) return 200
+      if (!recording) return compactView ? 52 : 200
 
-      let height = 120
-      if (currentlyPlayingId === recording.id) height += 80
-      if (recording.meetingId && meetings.get(recording.meetingId)) height += 70
-      const transcript = transcripts.get(recording.id)
-      if (transcript) {
-        height += 50
-        if (expandedTranscripts.has(recording.id)) height += 400
+      // Base height
+      let height = compactView ? 52 : 120
+
+      // Card view specific additions
+      if (!compactView) {
+        if (currentlyPlayingId === recording.id) height += 80
+        if (recording.meetingId && meetings.get(recording.meetingId)) height += 70
+        const transcript = transcripts.get(recording.id)
+        if (transcript) {
+          height += 50
+          if (expandedTranscripts.has(recording.id)) height += 400
+        }
+        if (isDeviceOnly(recording)) height += 30
       }
-      if (isDeviceOnly(recording)) height += 30
+
+      // Add expanded content height for compact view
+      if (compactView && expandedRowIds.has(recording.id)) {
+        height += 280 // Base expanded content height
+        if (transcripts.get(recording.id)?.summary) height += 120 // Transcript summary
+        if (recording.meetingId && meetings.get(recording.meetingId)) height += 60 // Meeting card
+      }
+
       return height
     },
-    [compactView, filteredRecordings, currentlyPlayingId, meetings, transcripts, expandedTranscripts]
+    [compactView, filteredRecordings, currentlyPlayingId, meetings, transcripts, expandedTranscripts, expandedRowIds]
   )
 
   const rowVirtualizer = useVirtualizer({
@@ -670,6 +698,14 @@ export function Library() {
     estimateSize,
     overscan: 5
   })
+
+  // Re-measure all rows when expansion state changes
+  useEffect(() => {
+    // Use requestAnimationFrame to ensure DOM has updated before measuring
+    requestAnimationFrame(() => {
+      rowVirtualizer.measure()
+    })
+  }, [expandedRowIds, rowVirtualizer])
 
   // Loading state
   if (loading && recordings.length === 0) {
@@ -814,7 +850,6 @@ export function Library() {
                           top: 0,
                           left: 0,
                           width: '100%',
-                          height: `${virtualRow.size}px`,
                           transform: `translateY(${virtualRow.start}px)`
                         }}
                         className={virtualRow.index > 0 ? 'border-t' : ''}
@@ -823,6 +858,7 @@ export function Library() {
                         <SourceRow
                           recording={recording}
                           meeting={meeting}
+                          transcript={expandedRowIds.has(recording.id) ? transcripts.get(recording.id) : undefined}
                           isPlaying={currentlyPlayingId === recording.id}
                           isDownloading={isDeviceOnly(recording) && isDownloading(recording.deviceFilename)}
                           downloadProgress={
@@ -831,10 +867,12 @@ export function Library() {
                           isDeleting={deleting === recording.id}
                           deviceConnected={deviceConnected}
                           isSelected={isSelected(recording.id)}
+                          isExpanded={expandedRowIds.has(recording.id)}
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
                           onClick={() => handleRowClick(recording)}
+                          onToggleExpand={() => toggleRowExpansion(recording.id)}
                           onPlay={() => {
                             if (hasLocalPath(recording)) {
                               handleRowClick(recording)  // Select the recording first
@@ -844,8 +882,14 @@ export function Library() {
                           onStop={handleStopCallback}
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
+                          onTranscribe={() => {
+                            window.electronAPI.recordings.updateStatus(recording.id, 'pending').catch((e) => {
+                              console.error('Failed to queue transcription:', e)
+                            })
+                          }}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
                           onGenerateOutput={() => handleGenerateOutputCallback(recording)}
+                          onNavigateToMeeting={handleNavigateToMeeting}
                         />
                       </div>
                     )

@@ -82,7 +82,13 @@ vi.mock('@/store/useLibraryStore', () => ({
       panelSizes: [25, 45, 30],
       setPanelSizes: vi.fn(),
       selectedSourceId: null,
-      setSelectedSourceId: vi.fn()
+      setSelectedSourceId: vi.fn(),
+      // Expansion state
+      expandedRowIds: new Set<string>(),
+      toggleRowExpansion: vi.fn(),
+      expandRow: vi.fn(),
+      collapseRow: vi.fn(),
+      collapseAllRows: vi.fn()
     }
     return selector(state)
   }
