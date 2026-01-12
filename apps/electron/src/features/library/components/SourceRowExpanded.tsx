@@ -47,7 +47,6 @@ export const SourceRowExpanded = memo(function SourceRowExpanded({
   return (
     <div
       id={`expanded-${recording.id}`}
-      className="px-6 py-4 border-t bg-muted/30"
       role="region"
       aria-label={`Details for ${recording.filename}`}
     >
