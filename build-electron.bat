@@ -20,7 +20,13 @@ cd apps\electron
 
 REM Install/update dependencies
 echo Installing dependencies...
-call npm install
+REM Use npm ci for clean, reproducible installs from package-lock.json
+REM Falls back to npm install if package-lock.json doesn't exist
+if exist "package-lock.json" (
+    call npm ci
+) else (
+    call npm install
+)
 if errorlevel 1 (
     echo.
     echo Failed to install dependencies.

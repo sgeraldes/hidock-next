@@ -21,7 +21,13 @@ cd apps/electron
 
 # Install/update dependencies
 echo "Installing dependencies..."
-npm install
+# Use npm ci for clean, reproducible installs from package-lock.json
+# Falls back to npm install if package-lock.json doesn't exist
+if [ -f "package-lock.json" ]; then
+    npm ci
+else
+    npm install
+fi
 if [ $? -ne 0 ]; then
     echo
     echo "Failed to install dependencies."
