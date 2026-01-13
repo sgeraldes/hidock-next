@@ -16,6 +16,7 @@ import { parseJsonArray } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { useLibraryStore } from '@/store/useLibraryStore'
 import { getRecoveryAction } from '@/features/library/utils/errorHandling'
+import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 
 interface Transcript {
   id: string
@@ -154,19 +155,7 @@ export function SourceDetailDrawer({
           </span>
 
           {/* Transcription status badge */}
-          <span
-            className={`text-xs px-2 py-1 rounded-full ${
-              source.transcriptionStatus === 'complete'
-                ? 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300'
-                : source.transcriptionStatus === 'pending' || source.transcriptionStatus === 'processing'
-                  ? 'bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300'
-                  : source.transcriptionStatus === 'error'
-                    ? 'bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300'
-                    : 'bg-secondary'
-            }`}
-          >
-            {source.transcriptionStatus === 'none' ? 'Not transcribed' : source.transcriptionStatus}
-          </span>
+          <TranscriptionStatusBadge status={source.transcriptionStatus} />
 
           {/* Quality badge */}
           {source.quality && (

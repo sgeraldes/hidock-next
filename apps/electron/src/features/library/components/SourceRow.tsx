@@ -7,6 +7,7 @@ import { formatDateTime, formatDuration } from '@/lib/utils'
 import { Meeting, Transcript } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
+import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { SourceRowExpanded } from './SourceRowExpanded'
 import { LiveRegion, useAnnouncement } from './LiveRegion'
 import { useLibraryStore } from '@/store/useLibraryStore'
@@ -158,29 +159,8 @@ export const SourceRow = memo(function SourceRow({
             </TooltipProvider>
           )}
 
-          {/* Transcription status badge - icon-only at narrow, full at wide */}
-          <span
-            className={`flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${
-              recording.transcriptionStatus === 'complete'
-                ? 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300'
-                : recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'
-                ? 'bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300'
-                : recording.transcriptionStatus === 'error'
-                ? 'bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300'
-                : 'bg-secondary text-secondary-foreground'
-            }`}
-          >
-            {/* Icon always visible */}
-            {recording.transcriptionStatus === 'complete' && <Check className="h-3 w-3" />}
-            {(recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing') && (
-              <Clock className="h-3 w-3" />
-            )}
-            {recording.transcriptionStatus === 'error' && <AlertCircle className="h-3 w-3" />}
-            {/* Text hidden at narrow widths */}
-            <span className="hidden @[300px]:inline">
-              {recording.transcriptionStatus === 'none' ? '—' : recording.transcriptionStatus}
-            </span>
-          </span>
+          {/* Transcription status badge */}
+          <TranscriptionStatusBadge status={recording.transcriptionStatus} />
 
           {/* Action buttons */}
           <Button

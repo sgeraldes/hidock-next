@@ -976,6 +976,28 @@ export function Library() {
                   audioControls.seek(startMs / 1000)
                 }
               }}
+              // NEW: Action button callbacks
+              onDownload={() => {
+                if (selectedRecording) handleDownloadCallback(selectedRecording)
+              }}
+              onTranscribe={() => {
+                if (selectedRecording) {
+                  window.electronAPI.recordings.updateStatus(selectedRecording.id, 'pending')
+                    .catch(e => console.error('Failed to queue transcription:', e))
+                }
+              }}
+              onDelete={() => {
+                if (selectedRecording) handleDeleteCallback(selectedRecording)
+              }}
+              // NEW: State for button disabling
+              deviceConnected={deviceConnected}
+              isDownloading={selectedRecording && isDeviceOnly(selectedRecording)
+                ? isDownloading(selectedRecording.deviceFilename)
+                : false}
+              downloadProgress={selectedRecording && isDeviceOnly(selectedRecording)
+                ? downloadQueue.get(selectedRecording.deviceFilename)?.progress
+                : undefined}
+              isDeleting={selectedRecording ? deleting === selectedRecording.id : false}
             />
           }
           rightPanel={

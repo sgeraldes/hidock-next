@@ -19,6 +19,7 @@ import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
 import { parseJsonArray, Transcript, Meeting } from '@/types'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
+import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { useLibraryStore } from '@/store/useLibraryStore'
 
 interface SourceCardProps {
@@ -138,19 +139,7 @@ export const SourceCard = memo(function SourceCard({
             </Button>
 
             {/* Transcription status badge */}
-            <span
-              className={`text-xs px-2 py-1 rounded-full ${
-                recording.transcriptionStatus === 'complete'
-                  ? 'bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300'
-                  : recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'
-                  ? 'bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300'
-                  : recording.transcriptionStatus === 'error'
-                  ? 'bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300'
-                  : 'bg-secondary'
-              }`}
-            >
-              {recording.transcriptionStatus === 'none' ? 'not transcribed' : recording.transcriptionStatus}
-            </span>
+            <TranscriptionStatusBadge status={recording.transcriptionStatus} />
 
             {/* Download button for device-only recordings */}
             {isDeviceOnly(recording) &&

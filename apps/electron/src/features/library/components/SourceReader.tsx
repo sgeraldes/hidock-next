@@ -11,9 +11,9 @@
 
 import { TranscriptViewer } from './TranscriptViewer'
 import { AudioPlayer } from '@/components/AudioPlayer'
-import { UnifiedRecording, hasLocalPath } from '@/types/unified-recording'
+import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, parseJsonArray } from '@/types'
-import { Calendar, Clock, HardDrive, Tag, ExternalLink, Play } from 'lucide-react'
+import { Calendar, Clock, HardDrive, Tag, ExternalLink, Play, Download, Trash2, Wand2, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { formatDuration } from '@/lib/utils'
 
@@ -25,6 +25,15 @@ interface SourceReaderProps {
   onPlay?: () => void
   onStop?: () => void
   onSeek?: (startMs: number, endMs?: number) => void
+  // New: Action button callbacks
+  onDownload?: () => void
+  onTranscribe?: () => void
+  onDelete?: () => void
+  // New: State for button enabling/disabling
+  deviceConnected?: boolean
+  isDownloading?: boolean
+  downloadProgress?: number
+  isDeleting?: boolean
 }
 
 export function SourceReader({
@@ -34,7 +43,14 @@ export function SourceReader({
   currentTimeMs = 0,
   onPlay,
   onStop,
-  onSeek
+  onSeek,
+  onDownload,
+  onTranscribe,
+  onDelete,
+  deviceConnected = false,
+  isDownloading = false,
+  downloadProgress,
+  isDeleting = false
 }: SourceReaderProps) {
 
   if (!recording) {
@@ -103,6 +119,89 @@ export function SourceReader({
             </div>
           )}
         </div>
+      </div>
+
+      {/* Action Buttons Section */}
+      <div className="flex flex-wrap gap-2 px-6 py-3 border-b bg-muted/30">
+        {/* Download Button - only for device-only recordings */}
+        {isDeviceOnly(recording) && onDownload && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onDownload}
+            disabled={!deviceConnected || isDownloading}
+            className="gap-2"
+            title={!deviceConnected ? "Device not connected" : "Download recording from device"}
+          >
+            {isDownloading ? (
+              <>
+                <RefreshCw className="h-4 w-4 animate-spin" />
+                {downloadProgress !== undefined ? `${downloadProgress}%` : 'Downloading...'}
+              </>
+            ) : (
+              <>
+                <Download className="h-4 w-4" />
+                Download
+              </>
+            )}
+          </Button>
+        )}
+
+        {/* Transcribe Button - only for local recordings without transcript */}
+        {hasLocalPath(recording) && recording.transcriptionStatus !== 'complete' && onTranscribe && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onTranscribe}
+            disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
+            className="gap-2"
+            title={
+              recording.transcriptionStatus === 'pending' ? "Transcription queued" :
+              recording.transcriptionStatus === 'processing' ? "Transcription in progress" :
+              "Start AI transcription"
+            }
+          >
+            {recording.transcriptionStatus === 'processing' ? (
+              <>
+                <RefreshCw className="h-4 w-4 animate-spin" />
+                In Progress
+              </>
+            ) : recording.transcriptionStatus === 'pending' ? (
+              <>
+                <RefreshCw className="h-4 w-4" />
+                Queued
+              </>
+            ) : (
+              <>
+                <Wand2 className="h-4 w-4" />
+                Transcribe
+              </>
+            )}
+          </Button>
+        )}
+
+        {/* Delete Button - always available */}
+        {onDelete && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onDelete}
+            disabled={(isDeviceOnly(recording) && !deviceConnected) || isDeleting}
+            className="gap-2 text-destructive hover:text-destructive"
+            title={
+              isDeviceOnly(recording) && !deviceConnected ? "Device not connected" :
+              isDeleting ? "Deleting..." :
+              "Delete recording"
+            }
+          >
+            {isDeleting ? (
+              <RefreshCw className="h-4 w-4 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4" />
+            )}
+            Delete
+          </Button>
+        )}
       </div>
 
       {/* Audio Player */}
