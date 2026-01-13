@@ -24,6 +24,7 @@
     "react-dom": "*",
     "react-router-dom": "*",
     "tailwindcss": "^3.4.17",
+    "vibe-kanban-web-companion": "^0.0.5",
     "zustand": "*"
   },
   "devDependencies": {
