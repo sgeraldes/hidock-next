@@ -12,7 +12,9 @@ ease of modification.
 # constants.py
 
 # --- USB Device Constants ---
-DEFAULT_VENDOR_ID = 0x10D6  # Actions Semiconductor
+DEFAULT_VENDOR_ID = 0x10D6  # Actions Semiconductor (older devices)
+ALTERNATE_VENDOR_ID = 0x3887  # HiDock (newer P1 Mini devices)
+ALL_VENDOR_IDS = [DEFAULT_VENDOR_ID, ALTERNATE_VENDOR_ID]
 
 # All known HiDock device PIDs (no hierarchy - all devices are equal)
 # Source: Official HiDock HiNotes jensen.js (December 2025)

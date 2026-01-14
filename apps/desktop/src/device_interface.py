@@ -662,10 +662,17 @@ def detect_device_model(vendor_id: int, product_id: int) -> DeviceModel:
     """
     model_map = {
         0xAF0C: DeviceModel.H1,
+        0x0100: DeviceModel.H1,  # H1 alt
+        0x0102: DeviceModel.H1,  # H1 alt
         0xAF0D: DeviceModel.H1E,
         0xB00D: DeviceModel.H1E,  # H1E device
+        0x0101: DeviceModel.H1E,  # H1E alt
+        0x0103: DeviceModel.H1E,  # H1E alt
         0xAF0E: DeviceModel.P1,
         0xB00E: DeviceModel.P1,  # P1 device (newer PID)
+        0x2040: DeviceModel.P1,  # P1 alt
+        0xAF0F: DeviceModel.P1,  # P1 Mini
+        0x2041: DeviceModel.P1,  # P1 Mini (newer devices with VID 0x3887)
     }
 
     return model_map.get(product_id, DeviceModel.UNKNOWN)
