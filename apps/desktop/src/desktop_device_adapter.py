@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional  # Removed Any - not used
 
 from config_and_logger import logger
-from constants import DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID, HIDOCK_PRODUCT_IDS
+from constants import ALL_VENDOR_IDS, DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID, HIDOCK_PRODUCT_IDS
 from device_interface import (  # DeviceModel,  # Commented out - not used directly, but detect_device_model returns it
     AudioRecording,
     ConnectionStats,
@@ -61,38 +61,39 @@ class DesktopDeviceAdapter(IDeviceInterface):
             # to scan USB devices more systematically
             devices = []
 
-            # Try all known HiDock product IDs
-            # Use the comprehensive list from constants
+            # Try all known HiDock vendor IDs and product IDs
+            # Use the comprehensive lists from constants
             product_ids = HIDOCK_PRODUCT_IDS
 
-            for pid in product_ids:
-                try:
-                    test_device = HiDockJensen(self.jensen_device.usb_backend)
-                    found_device = test_device._find_device(DEFAULT_VENDOR_ID, pid)
+            for vid in ALL_VENDOR_IDS:
+                for pid in product_ids:
+                    try:
+                        test_device = HiDockJensen(self.jensen_device.usb_backend)
+                        found_device = test_device._find_device(vid, pid)
 
-                    if found_device:
-                        model = detect_device_model(DEFAULT_VENDOR_ID, pid)
+                        if found_device:
+                            model = detect_device_model(vid, pid)
 
-                        device_info = DeviceInfo(
-                            id=f"{DEFAULT_VENDOR_ID:04x}:{pid:04x}",
-                            name=f"HiDock {model.value}",
-                            model=model,
-                            serial_number=getattr(found_device, "serial_number", "Unknown"),
-                            firmware_version="1.0.0",  # Would need to be queried
-                            vendor_id=DEFAULT_VENDOR_ID,
-                            product_id=pid,
-                            connected=False,
-                            last_seen=datetime.now(),
+                            device_info = DeviceInfo(
+                                id=f"{vid:04x}:{pid:04x}",
+                                name=f"HiDock {model.value}",
+                                model=model,
+                                serial_number=getattr(found_device, "serial_number", "Unknown"),
+                                firmware_version="1.0.0",  # Would need to be queried
+                                vendor_id=vid,
+                                product_id=pid,
+                                connected=False,
+                                last_seen=datetime.now(),
+                            )
+                            devices.append(device_info)
+
+                    except Exception as e:
+                        logger.debug(
+                            "DesktopDeviceAdapter",
+                            "discover_devices",
+                            f"No device found for VID {vid:04x} PID {pid:04x}: {e}",
                         )
-                        devices.append(device_info)
-
-                except Exception as e:
-                    logger.debug(
-                        "DesktopDeviceAdapter",
-                        "discover_devices",
-                        f"No device found for PID {pid:04x}: {e}",
-                    )
-                    continue
+                        continue
 
             return devices
 
