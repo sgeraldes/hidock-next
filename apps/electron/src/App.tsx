@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { Layout } from '@/components/layout/Layout'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { SecurityWarningBanner } from '@/components/SecurityWarningBanner'
 import { Calendar } from '@/pages/Calendar'
 import { MeetingDetail } from '@/pages/MeetingDetail'
 import { Chat } from '@/pages/Chat'
@@ -51,6 +52,7 @@ function App(): React.ReactElement {
 
   return (
     <ToastProvider>
+      <SecurityWarningBanner />
       <Layout>
         <NavigationLogger />
         <Routes>
