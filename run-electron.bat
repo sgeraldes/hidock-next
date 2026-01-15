@@ -1,4 +1,5 @@
 @echo off
+REM HiDock Meeting Intelligence - Launch Script
 setlocal
 echo Starting HiDock Meeting Intelligence...
 echo.

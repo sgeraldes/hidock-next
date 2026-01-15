@@ -1,4 +1,5 @@
 #!/bin/bash
+# HiDock Web - Launch Script
 echo "Starting HiDock Web Application..."
 echo
 

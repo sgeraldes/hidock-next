@@ -1,4 +1,5 @@
 @echo off
+REM HiDock Desktop - Launch Script
 setlocal
 echo Starting HiDock Desktop Application...
 echo.

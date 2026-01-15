@@ -1,4 +1,6 @@
 @echo off
+REM HiDock - Pre-commit Hook Setup Script
+setlocal
 echo:
 echo ================================
 echo   Setting up Pre-commit Hooks

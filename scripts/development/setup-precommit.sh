@@ -1,4 +1,5 @@
 #!/bin/bash
+# HiDock - Pre-commit Hook Setup Script
 
 echo ""
 echo "================================"

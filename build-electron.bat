@@ -1,4 +1,5 @@
 @echo off
+REM HiDock Meeting Intelligence - Build Script
 setlocal
 echo Building HiDock Meeting Intelligence...
 echo.

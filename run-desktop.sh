@@ -1,4 +1,5 @@
 #!/bin/bash
+# HiDock Desktop - Launch Script
 echo "Starting HiDock Desktop Application..."
 echo
 
