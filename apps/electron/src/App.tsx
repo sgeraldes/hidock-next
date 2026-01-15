@@ -1,21 +1,26 @@
-import { useEffect } from 'react'
+import { useEffect, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { Layout } from '@/components/layout/Layout'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
-import { Calendar } from '@/pages/Calendar'
-import { MeetingDetail } from '@/pages/MeetingDetail'
-import { Chat } from '@/pages/Chat'
-import { Explore } from '@/pages/Explore'
-import { Device } from '@/pages/Device'
-import { Library } from '@/pages/Library'
-import { People } from '@/pages/People'
-import { PersonDetail } from '@/pages/PersonDetail'
-import { Projects } from '@/pages/Projects'
-import { Actionables } from '@/pages/Actionables'
-import { Settings } from '@/pages/Settings'
+import { LoadingSpinner } from '@/components/LoadingSpinner'
 import { ToastProvider } from '@/components/ui/toaster'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { NavigationLogger, initInteractionLogger, initErrorLogger } from '@/services/qa-monitor'
+import { lazyWithRetry } from '@/lib/lazyWithRetry'
+
+// Lazy load all page components for code splitting
+// Each page becomes a separate chunk, reducing initial bundle size
+const Calendar = lazyWithRetry(() => import('@/pages/Calendar'))
+const MeetingDetail = lazyWithRetry(() => import('@/pages/MeetingDetail'))
+const Chat = lazyWithRetry(() => import('@/pages/Chat'))
+const Explore = lazyWithRetry(() => import('@/pages/Explore'))
+const Device = lazyWithRetry(() => import('@/pages/Device'))
+const Library = lazyWithRetry(() => import('@/pages/Library'))
+const People = lazyWithRetry(() => import('@/pages/People'))
+const PersonDetail = lazyWithRetry(() => import('@/pages/PersonDetail'))
+const Projects = lazyWithRetry(() => import('@/pages/Projects'))
+const Actionables = lazyWithRetry(() => import('@/pages/Actionables'))
+const Settings = lazyWithRetry(() => import('@/pages/Settings'))
 
 function App(): React.ReactElement {
   // Initialize QA monitoring and auto-connect
@@ -55,17 +60,116 @@ function App(): React.ReactElement {
         <NavigationLogger />
         <Routes>
           <Route path="/" element={<Navigate to="/library" replace />} />
-          <Route path="/calendar" element={<ErrorBoundary><Calendar /></ErrorBoundary>} />
-          <Route path="/meeting/:id" element={<ErrorBoundary><MeetingDetail /></ErrorBoundary>} />
-          <Route path="/assistant" element={<ErrorBoundary><Chat /></ErrorBoundary>} />
-          <Route path="/explore" element={<ErrorBoundary><Explore /></ErrorBoundary>} />
-          <Route path="/sync" element={<ErrorBoundary><Device /></ErrorBoundary>} />
-          <Route path="/library" element={<ErrorBoundary><Library /></ErrorBoundary>} />
-          <Route path="/people" element={<ErrorBoundary><People /></ErrorBoundary>} />
-          <Route path="/person/:id" element={<ErrorBoundary><PersonDetail /></ErrorBoundary>} />
-          <Route path="/projects" element={<ErrorBoundary><Projects /></ErrorBoundary>} />
-          <Route path="/actionables" element={<ErrorBoundary><Actionables /></ErrorBoundary>} />
-          <Route path="/settings" element={<ErrorBoundary><Settings /></ErrorBoundary>} />
+          <Route
+            path="/calendar"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading calendar..." />}>
+                  <Calendar />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/meeting/:id"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading meeting..." />}>
+                  <MeetingDetail />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/assistant"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading assistant..." />}>
+                  <Chat />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/explore"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading explore..." />}>
+                  <Explore />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/sync"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading device sync..." />}>
+                  <Device />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/library"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading library..." />}>
+                  <Library />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/people"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading people..." />}>
+                  <People />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/person/:id"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading person details..." />}>
+                  <PersonDetail />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/projects"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading projects..." />}>
+                  <Projects />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/actionables"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading actionables..." />}>
+                  <Actionables />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading settings..." />}>
+                  <Settings />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
         </Routes>
       </Layout>
     </ToastProvider>

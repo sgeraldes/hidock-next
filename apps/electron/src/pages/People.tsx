@@ -227,3 +227,4 @@ export function People() {
     </div>
   )
 }
+export default People
