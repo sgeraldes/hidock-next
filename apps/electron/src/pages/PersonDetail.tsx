@@ -281,3 +281,4 @@ export function PersonDetail() {
     </div>
   )
 }
+export default PersonDetail

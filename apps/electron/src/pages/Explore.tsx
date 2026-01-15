@@ -244,3 +244,4 @@ export function Explore() {
     </div>
   )
 }
+export default Explore

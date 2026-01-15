@@ -1335,3 +1335,5 @@ export function Calendar() {
     </TooltipProvider>
   )
 }
+
+export default Calendar

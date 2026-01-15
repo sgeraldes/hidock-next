@@ -411,3 +411,4 @@ export function Actionables() {
     </div>
   )
 }
+export default Actionables

@@ -262,3 +262,5 @@ export function MeetingDetail() {
     </div>
   )
 }
+
+export default MeetingDetail

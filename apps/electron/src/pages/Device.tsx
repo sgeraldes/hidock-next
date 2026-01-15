@@ -1397,3 +1397,5 @@ export function Device() {
     </div>
   )
 }
+
+export default Device
