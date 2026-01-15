@@ -30,6 +30,27 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/index.html')
+        },
+        output: {
+          // Manual chunks for better caching and bundle organization
+          manualChunks: {
+            // Core React runtime - rarely changes
+            'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+            // UI component library - changes occasionally
+            'vendor-radix': [
+              '@radix-ui/react-dialog',
+              '@radix-ui/react-dropdown-menu',
+              '@radix-ui/react-popover',
+              '@radix-ui/react-select',
+              '@radix-ui/react-tooltip',
+              '@radix-ui/react-tabs',
+              '@radix-ui/react-toast',
+              '@radix-ui/react-scroll-area',
+              '@radix-ui/react-slider'
+            ],
+            // State management
+            'vendor-state': ['zustand']
+          }
         }
       }
     },
