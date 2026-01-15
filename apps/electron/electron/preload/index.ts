@@ -389,6 +389,9 @@ export interface ElectronAPI {
 
   // Recording Watcher Events
   onRecordingAdded: (callback: (data: { recording: any }) => void) => () => void
+
+  // Security Warning Events
+  onSecurityWarning: (callback: (data: { type: string; message: string }) => void) => () => void
 }
 
 // Expose the API to the renderer process
@@ -642,6 +645,15 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('recording:new', handler)
     return () => {
       ipcRenderer.removeListener('recording:new', handler)
+    }
+  },
+
+  // Security Warning Listener
+  onSecurityWarning: (callback: (data: { type: string; message: string }) => void) => {
+    const handler = (_event: any, data: { type: string; message: string }) => callback(data)
+    ipcRenderer.on('security-warning', handler)
+    return () => {
+      ipcRenderer.removeListener('security-warning', handler)
     }
   }
 }

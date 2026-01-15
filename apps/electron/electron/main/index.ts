@@ -154,14 +154,16 @@ async function initializeServices(): Promise<void> {
   updateSplashStatus('Starting application...', 100)
 }
 
-app.commandLine.appendSwitch('remote-debugging-port', '9222')
+// Conditionally enable remote debugging (dev mode or explicit opt-in)
+const enableRemoteDebugging = is.dev || process.env.ENABLE_REMOTE_DEBUGGING === 'true'
+if (enableRemoteDebugging) {
+  app.commandLine.appendSwitch('remote-debugging-port', '9222')
+  console.warn('[SECURITY] Remote debugging enabled on port 9222')
+}
 
 app.whenReady().then(async () => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.hidock.meeting-intelligence')
-
-  // Enable remote debugging for MCP tools
-  app.commandLine.appendSwitch('remote-debugging-port', '9222')
 
   // Show splash screen immediately
   splashWindow = createSplashWindow()
@@ -231,6 +233,17 @@ app.whenReady().then(async () => {
   startRecordingWatcher()
   startTranscriptionProcessor()
   console.log('Background services started')
+
+  // Show security warning in production when remote debugging is explicitly enabled
+  if (!is.dev && process.env.ENABLE_REMOTE_DEBUGGING === 'true' && mainWindow) {
+    // Wait for window to be ready before sending the warning
+    mainWindow.webContents.on('did-finish-load', () => {
+      mainWindow?.webContents.send('security-warning', {
+        type: 'remote-debugging-enabled',
+        message: 'Remote debugging is enabled. This should only be used for troubleshooting.'
+      })
+    })
+  }
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
