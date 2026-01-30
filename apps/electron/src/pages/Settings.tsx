@@ -18,8 +18,31 @@ export function Settings() {
   const [syncEnabled, setSyncEnabled] = useState(true)
   const [syncInterval, setSyncInterval] = useState(15)
   const [geminiApiKey, setGeminiApiKey] = useState('')
+  const [geminiModel, setGeminiModel] = useState('gemini-3-pro-preview')
   const [chatProvider, setChatProvider] = useState<'gemini' | 'ollama'>('gemini')
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434')
+
+  // Available Gemini models for transcription (audio-capable)
+  // From: https://ai.google.dev/gemini-api/docs/models
+  const GEMINI_MODELS = [
+    // Gemini 3 Series
+    { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro Preview (Best quality)' },
+    { value: 'gemini-3-pro-image-preview', label: 'Gemini 3 Pro Image Preview' },
+    { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview (Fast)' },
+    // Gemini 2.5 Pro Series
+    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Stable)' },
+    { value: 'gemini-2.5-pro-preview-tts', label: 'Gemini 2.5 Pro TTS Preview' },
+    // Gemini 2.5 Flash Series
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Stable)' },
+    { value: 'gemini-2.5-flash-preview-09-2025', label: 'Gemini 2.5 Flash Preview' },
+    { value: 'gemini-2.5-flash-image', label: 'Gemini 2.5 Flash Image' },
+    { value: 'gemini-2.5-flash-native-audio-preview-12-2025', label: 'Gemini 2.5 Flash Native Audio (Dec 2025)' },
+    { value: 'gemini-2.5-flash-native-audio-preview-09-2025', label: 'Gemini 2.5 Flash Native Audio (Sep 2025)' },
+    { value: 'gemini-2.5-flash-preview-tts', label: 'Gemini 2.5 Flash TTS Preview' },
+    // Gemini 2.5 Flash-Lite Series
+    { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite (Stable)' },
+    { value: 'gemini-2.5-flash-lite-preview-09-2025', label: 'Gemini 2.5 Flash Lite Preview' },
+  ]
 
   useEffect(() => {
     loadConfig()
@@ -32,6 +55,7 @@ export function Settings() {
       setSyncEnabled(config.calendar.syncEnabled)
       setSyncInterval(config.calendar.syncIntervalMinutes)
       setGeminiApiKey(config.transcription.geminiApiKey)
+      setGeminiModel(config.transcription.geminiModel || 'gemini-3-pro-preview')
       setChatProvider(config.chat.provider)
       setOllamaUrl(config.embeddings.ollamaBaseUrl)
     }
@@ -67,7 +91,8 @@ export function Settings() {
     setSaving(true)
     try {
       await updateConfig('transcription', {
-        geminiApiKey
+        geminiApiKey,
+        geminiModel
       })
     } finally {
       setSaving(false)
@@ -188,6 +213,24 @@ export function Settings() {
                   >
                     Google AI Studio
                   </a>
+                </p>
+              </div>
+
+              <div>
+                <label className="text-sm font-medium">Transcription Model</label>
+                <select
+                  value={geminiModel}
+                  onChange={(e) => setGeminiModel(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                >
+                  {GEMINI_MODELS.map((model) => (
+                    <option key={model.value} value={model.value}>
+                      {model.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Gemini 3 Pro provides the best transcription accuracy
                 </p>
               </div>
 

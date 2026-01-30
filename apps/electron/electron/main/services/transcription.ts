@@ -380,7 +380,7 @@ Respond in JSON format:
     speakers: undefined,
     word_count: wordCount,
     transcription_provider: 'gemini',
-    transcription_model: 'gemini-2.0-flash-exp',
+    transcription_model: config.transcription.geminiModel,
     title_suggestion: analysis.title_suggestion,
     question_suggestions: analysis.question_suggestions ? JSON.stringify(analysis.question_suggestions) : undefined
   }

@@ -1,4 +1,4 @@
-import { ERROR_MESSAGES, HIDOCK_COMMANDS, HIDOCK_DEVICE_CONFIG, HIDOCK_PRODUCT_IDS } from '@/constants';
+import { ERROR_MESSAGES, HIDOCK_COMMANDS, HIDOCK_DEVICE_CONFIG, HIDOCK_PRODUCT_IDS, ALL_HIDOCK_PRODUCT_IDS, HIDOCK_VENDOR_IDS } from '@/constants';
 import type { AudioRecording, HiDockDevice, StorageInfo, DeviceSettings, MeetingInfo, RecordingInfo, RecordingStatus } from '@/types';
 
 // Device service specific interfaces
@@ -213,20 +213,19 @@ class DeviceService {
             });
 
             // Request device access with all known HiDock vendor/product ID combinations
-            const device = await navigator.usb.requestDevice({
-                filters: [
-                    // Actions Semiconductor vendor ID (0x10D6)
-                    { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.H1 },
-                    { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.H1E },
-                    { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.P1 },
-                    { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.DEFAULT },
-                    // Alternative vendor ID (0x1a86) - commonly used for CH340/CH341 USB chips
-                    { vendorId: 0x1a86, productId: HIDOCK_PRODUCT_IDS.H1 },
-                    { vendorId: 0x1a86, productId: HIDOCK_PRODUCT_IDS.H1E },
-                    { vendorId: 0x1a86, productId: HIDOCK_PRODUCT_IDS.P1 },
-                    { vendorId: 0x1a86, productId: HIDOCK_PRODUCT_IDS.DEFAULT },
-                ]
-            });
+            // Build filters for all vendor IDs × all product IDs
+            const filters: USBDeviceFilter[] = [];
+            for (const vendorId of HIDOCK_VENDOR_IDS) {
+                for (const productId of ALL_HIDOCK_PRODUCT_IDS) {
+                    filters.push({ vendorId, productId });
+                }
+            }
+            // Also include CH340/CH341 USB chips (0x1a86) for compatibility
+            for (const productId of ALL_HIDOCK_PRODUCT_IDS) {
+                filters.push({ vendorId: 0x1a86, productId });
+            }
+
+            const device = await navigator.usb.requestDevice({ filters });
 
             this.updateProgress('device_request', {
                 operation: 'Device selected',

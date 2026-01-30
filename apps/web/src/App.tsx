@@ -7,7 +7,6 @@ import { Transcription } from '@/pages/Transcription';
 import { Settings } from '@/pages/Settings';
 import { useAppStore } from '@/store/useAppStore';
 import { geminiService } from '@/services/geminiService';
-import { VibeKanbanWebCompanion } from 'vibe-kanban-web-companion';
 
 function App() {
   const { settings, setError } = useAppStore();
@@ -26,17 +25,14 @@ function App() {
   }, [settings.geminiApiKey, setError]);
 
   return (
-    <>
-      <VibeKanbanWebCompanion />
-      <Layout>
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/recordings" element={<Recordings />} />
-          <Route path="/transcription" element={<Transcription />} />
-          <Route path="/settings" element={<Settings />} />
-        </Routes>
-      </Layout>
-    </>
+    <Layout>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/recordings" element={<Recordings />} />
+        <Route path="/transcription" element={<Transcription />} />
+        <Route path="/settings" element={<Settings />} />
+      </Routes>
+    </Layout>
   );
 }
 

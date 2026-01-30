@@ -53,7 +53,16 @@ export const CMD = {
 } as const
 
 // USB Constants
-export const USB_VENDOR_ID = 0x10d6 // Actions Semiconductor
+// Source: Official HiDock HiNotes jensen.js (December 2025)
+export const USB_VENDOR_ID = 0x10d6 // Actions Semiconductor (default)
+export const USB_ALTERNATE_VENDOR_ID = 0x3887 // HiDock (newer P1 Mini devices)
+
+// All known HiDock Vendor IDs - use this for device filtering
+export const USB_VENDOR_IDS = [
+  0x10d6, // Actions Semiconductor (older devices)
+  0x3887  // HiDock (newer P1 Mini devices)
+] as const
+
 export const USB_PRODUCT_IDS = {
   // Original product IDs (hex)
   H1: 0xaf0c,       // 45068 decimal
@@ -377,8 +386,8 @@ export class JensenDevice {
     // Create handler that triggers tryConnect on USB plug-in
     this.usbConnectHandler = (event: USBConnectionEvent) => {
       const device = event.device
-      // Only react to HiDock devices
-      if (device.vendorId === USB_VENDOR_ID && device.productName?.includes('HiDock')) {
+      // Only react to HiDock devices (check all known vendor IDs)
+      if (USB_VENDOR_IDS.includes(device.vendorId) && device.productName?.includes('HiDock')) {
         console.log('[Jensen] USB device connected event detected, triggering tryConnect')
         this.tryConnect()
       }
@@ -451,8 +460,7 @@ export class JensenDevice {
       return false
     }
 
-    // CRITICAL: Always disconnect first to clean up any stale connections
-    // This matches official jensen.js behavior and fixes "device in use" errors
+    // Disconnect first to clean up any stale connections (matches official jensen.js)
     await this.disconnect()
 
     try {
@@ -463,14 +471,14 @@ export class JensenDevice {
       if (DEBUG_PROTOCOL) console.log('connect: Found', devices.length, 'authorized devices')
 
       let device = devices.find(
-        (d) => d.vendorId === USB_VENDOR_ID && d.productName?.includes('HiDock')
+        (d) => USB_VENDOR_IDS.includes(d.vendorId) && d.productName?.includes('HiDock')
       )
 
       if (!device) {
         if (DEBUG_PROTOCOL) console.log('connect: No authorized HiDock found, showing device picker')
-        // Request a new device
+        // Request a new device - include filters for all known vendor IDs
         device = await navigator.usb.requestDevice({
-          filters: [{ vendorId: USB_VENDOR_ID }]
+          filters: USB_VENDOR_IDS.map((vendorId) => ({ vendorId }))
         })
       } else {
         if (DEBUG_PROTOCOL) console.log('connect: Found authorized HiDock:', device.productName)
@@ -482,11 +490,43 @@ export class JensenDevice {
       }
 
       if (DEBUG_PROTOCOL) console.log('connect: Opening device...')
+
+      // Check if device is already open (stale state from previous session)
+      if (device.opened) {
+        console.log('connect: Device already open, closing first...')
+        try {
+          await device.close()
+        } catch (e) {
+          console.warn('connect: Error closing already-open device:', e)
+        }
+      }
+
       await device.open()
       if (DEBUG_PROTOCOL) console.log('connect: Device opened, selecting configuration...')
+
+      // Log device state for debugging
+      console.log('connect: Device state after open:', {
+        opened: device.opened,
+        configuration: device.configuration?.configurationValue,
+        configurations: device.configurations?.length
+      })
+
       await device.selectConfiguration(1)
       if (DEBUG_PROTOCOL) console.log('connect: Claiming interface...')
+
+      // Log interface info before claiming
+      if (device.configuration) {
+        const iface = device.configuration.interfaces[0]
+        console.log('connect: Interface 0 info:', {
+          interfaceNumber: iface?.interfaceNumber,
+          claimed: iface?.claimed,
+          alternates: iface?.alternates?.length
+        })
+      }
+
       await device.claimInterface(0)
+      if (DEBUG_PROTOCOL) console.log('connect: Selecting alternate interface...')
+      await device.selectAlternateInterface(0, 0)
       if (DEBUG_PROTOCOL) console.log('connect: Interface claimed successfully')
 
       this.device = device
@@ -590,7 +630,7 @@ export class JensenDevice {
     try {
       const devices = await navigator.usb.getDevices()
       const device = devices.find(
-        (d) => d.vendorId === USB_VENDOR_ID && d.productName?.includes('HiDock')
+        (d) => USB_VENDOR_IDS.includes(d.vendorId) && d.productName?.includes('HiDock')
       )
 
       if (!device) return false
@@ -598,6 +638,7 @@ export class JensenDevice {
       await device.open()
       await device.selectConfiguration(1)
       await device.claimInterface(0)
+      await device.selectAlternateInterface(0, 0)
 
       this.device = device
 
@@ -653,46 +694,22 @@ export class JensenDevice {
     // Remove USB disconnect listener first
     this.removeUsbDisconnectListener()
 
-    // CRITICAL: Set abort flag BEFORE waiting for lock
-    // This allows download loops to break out immediately instead of continuing
-    // to read from a disconnected device
-    this.abortOperations = true
-
-    // Wait for any pending USB operations to complete before disconnecting
-    // This prevents USB errors from calling releaseInterface while transferIn is active
-    // Operations should now exit quickly because abortOperations is set
-    if (this.lockHolder) {
-      console.log(`[Jensen] Aborting ${this.lockHolder}, waiting for cleanup...`)
-      await this.operationLock
-    }
-
+    // Simple disconnect matching official jensen.js - just close the device
     if (this.device) {
       try {
-        // Release interface before closing (critical for proper USB cleanup)
-        if (this.device.opened) {
-          try {
-            await this.device.releaseInterface(0)
-          } catch (e) {
-            console.warn('[Jensen] Error releasing interface:', e)
-          }
-        }
         await this.device.close()
       } catch (e) {
         console.warn('[Jensen] Error closing device:', e)
       }
       this.device = null
-      // Reset protocol state
-      this.sequenceId = 0
-      this.receiveBuffer = new Uint8Array(0)
-      // Reset the operation lock to prevent stale locks from blocking future operations
-      this.operationLock = Promise.resolve()
-      this.lockHolder = null
       this.ondisconnect?.()
     }
 
-    // ALWAYS reset abort flag after disconnect cleanup, even if device was null
-    // This fixes bug where tryConnect() calls disconnect() on first connection
-    // and abortOperations stays true because device was null
+    // Reset protocol state
+    this.sequenceId = 0
+    this.receiveBuffer = new Uint8Array(0)
+    this.operationLock = Promise.resolve()
+    this.lockHolder = null
     this.abortOperations = false
   }
 
@@ -718,16 +735,15 @@ export class JensenDevice {
           console.log('[Jensen] Device reset successful')
         } catch (e) {
           console.warn('[Jensen] Device reset failed, trying close/reopen:', e)
-          // Fall back to close and reopen
-          try {
-            await this.device.releaseInterface(0)
-          } catch { /* ignore */ }
+          // Fall back to close and reopen (no releaseInterface - just close)
           await this.device.close()
           await this.device.open()
           await this.device.selectConfiguration(1)
           await this.device.claimInterface(0)
+          await this.device.selectAlternateInterface(0, 0)
         }
       }
+
       return true
     } catch (error) {
       console.error('[Jensen] Reset failed:', error)
@@ -1259,83 +1275,68 @@ export class JensenDevice {
     })
   }
 
-  // List files - streams data from device
-  // expectedFileCount is optional - if not provided, progress will show 0 as expected
-  async listFiles(onProgress?: (bytesReceived: number, expectedFiles: number) => void, expectedFileCount?: number): Promise<FileInfo[]> {
-    console.log(`[Jensen] >>> listFiles ENTRY, expectedFileCount=${expectedFileCount}`)
+  // List files - streams data from device with incremental updates
+  // onProgress: called with (filesFound, expectedFiles) for progress tracking
+  // onNewFiles: called with batches of newly parsed files for streaming display (like web app)
+  // expectedFileCount: optional hint for expected total files
+  async listFiles(
+    onProgress?: (filesFound: number, expectedFiles: number) => void,
+    expectedFileCount?: number,
+    onNewFiles?: (files: FileInfo[]) => void
+  ): Promise<FileInfo[]> {
     return this.withLock('listFiles', async () => {
-      console.log(`[Jensen] >>> listFiles GOT LOCK`)
-      if (DEBUG_PROTOCOL) console.log('[Jensen] listFiles called, expectedFileCount:', expectedFileCount)
       if (!this.device) {
-        console.error('[Jensen] listFiles: Device not connected')
         throw new Error('Device not connected')
       }
 
       if (!this.device.opened) {
-        console.error('[Jensen] listFiles: Device not opened')
         throw new Error('Device not opened')
       }
 
-      // CRITICAL: Clear receive buffer before file list operation
-      // This prevents leftover data from previous commands being misinterpreted
-      // as file list responses (which could cause immediate return with 0 files)
+      // Clear receive buffer before file list operation
       this.receiveBuffer = new Uint8Array(0)
 
-      // Use provided count or 0 (progress will still work, just won't show expected total)
       let expectedFiles = expectedFileCount || 0
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] Fetching file list, expected files: ${expectedFiles}`)
       onProgress?.(0, expectedFiles)
 
       // Send GET_FILE_LIST command
       const seqId = this.sequenceId++
       const msg = new JensenMessage(CMD.GET_FILE_LIST)
       msg.sequence(seqId)
-      console.log(`[Jensen] >>> Sending GET_FILE_LIST command, seq=${seqId}`)
+      if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Sending command, seq=${seqId}, expected=${expectedFiles}`)
       await this.device.transferOut(1, msg.make() as unknown as BufferSource)
-      console.log(`[Jensen] >>> GET_FILE_LIST command sent, waiting for data...`)
 
       // Incremental parsing state
       const allFiles: FileInfo[] = []
       let partialBuffer: Uint8Array = new Uint8Array(0)
       let totalFilesFromHeader = 0
-      let totalBytesReceived = 0
       let packetsReceived = 0
       const startTime = Date.now()
-      // Timeout strategy:
-      // - 120 second overall timeout (large file lists can take a while)
-      // - Stop when we get all expected files OR receive empty terminator
-      // - 5 second idle timeout (no new data)
-      const overallTimeout = 120000 // 2 minutes max for large lists
+      const overallTimeout = 120000 // 2 minutes max
       let lastDataTime = startTime
+      const BATCH_SIZE = 20 // Emit files in batches of 20 for streaming display
 
-      console.log(`[Jensen] >>> listFiles: ENTERING LOOP, abortOperations=${this.abortOperations}, startTime=${startTime}`)
       while (Date.now() - startTime < overallTimeout && !this.abortOperations) {
-        console.log(`[Jensen] >>> listFiles: LOOP ITERATION, elapsed=${Date.now() - startTime}ms`)
-        // Check for abort request (disconnect called)
         if (this.abortOperations) {
-          console.log(`[Jensen] listFiles: Aborted by disconnect request`)
-          return allFiles // Return what we have
+          console.log(`[Jensen] listFiles: Aborted`)
+          return allFiles
         }
 
         try {
-          // Read data directly from USB
-          // Note: WebUSB transferIn has implicit short timeout behavior
           const readSize = 4096 * 16 // 64KB buffer
-          console.log(`[Jensen] >>> listFiles: CALLING transferIn...`)
           const result = await this.device.transferIn(2, readSize)
-          console.log(`[Jensen] >>> listFiles: transferIn returned, status=${result.status}, dataLen=${result.data?.byteLength ?? 0}`)
 
           if (result.status === 'ok' && result.data && result.data.byteLength > 0) {
-            lastDataTime = Date.now() // Update last data time
+            lastDataTime = Date.now()
 
-            // Append to receive buffer with proper slice handling
+            // Append to receive buffer
             const newData = new Uint8Array(result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength))
             const combined = new Uint8Array(this.receiveBuffer.length + newData.length)
             combined.set(this.receiveBuffer)
             combined.set(newData, this.receiveBuffer.length)
             this.receiveBuffer = combined
 
-            // Try to extract file list messages from buffer
+            // Parse all available packets
             let packetParsed = true
             while (packetParsed) {
               const parsedMsg = this.tryParseMessage()
@@ -1346,26 +1347,18 @@ export class JensenDevice {
 
               // Accept packets that match our command OR sequence
               if (parsedMsg.id === CMD.GET_FILE_LIST || parsedMsg.sequence === seqId) {
-                // Log what we received for debugging
-                console.log(`[Jensen] listFiles: Received packet cmd=${parsedMsg.id}, seq=${parsedMsg.sequence}, bodyLen=${parsedMsg.body.length}, allFiles=${allFiles.length}, packetsReceived=${packetsReceived}`)
-
                 if (parsedMsg.body.length === 0) {
-                  // Empty body signals end of transmission
-                  // BUT: Only treat as terminator if we've received actual data
-                  // Some devices send an empty ACK packet before the actual file list
+                  // Empty body = end of transmission (if we have data)
                   if (allFiles.length > 0 || packetsReceived > 0) {
-                    console.log(`[Jensen] listFiles: Empty body terminator (have data), returning ${allFiles.length} files`)
+                    if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Complete, ${allFiles.length} files`)
                     return allFiles
                   }
-                  // First packet with empty body - might be ACK, continue waiting for data
-                  console.log(`[Jensen] listFiles: Empty body on first packet (possible ACK), waiting for actual data...`)
-                  continue
+                  continue // First empty packet might be ACK
                 }
 
                 packetsReceived++
-                totalBytesReceived += parsedMsg.body.length
 
-                // Combine with partial buffer from previous packet
+                // Combine with partial buffer
                 const currentData = new Uint8Array(partialBuffer.length + parsedMsg.body.length)
                 currentData.set(partialBuffer)
                 currentData.set(parsedMsg.body, partialBuffer.length)
@@ -1373,7 +1366,6 @@ export class JensenDevice {
                 // Parse files incrementally
                 const { parsedFiles, remainingBuffer, headerTotal } = this.parsePartialFileList(currentData, totalFilesFromHeader)
 
-                // Update total from header if found
                 if (headerTotal > 0 && totalFilesFromHeader === 0) {
                   totalFilesFromHeader = headerTotal
                   expectedFiles = headerTotal
@@ -1383,27 +1375,34 @@ export class JensenDevice {
                 allFiles.push(...parsedFiles)
                 partialBuffer = remainingBuffer
 
-                // Report progress with actual file count (verbose logging only)
-                if (parsedFiles.length > 0 && DEBUG_USB) {
-                  console.log(`[Jensen] listFiles: Packet ${packetsReceived}: +${parsedFiles.length} files (total: ${allFiles.length}/${expectedFiles || '?'})`)
+                // Emit new files in batches for streaming display (like web app)
+                if (onNewFiles && parsedFiles.length > 0) {
+                  for (let i = 0; i < parsedFiles.length; i += BATCH_SIZE) {
+                    const batch = parsedFiles.slice(i, i + BATCH_SIZE)
+                    onNewFiles(batch)
+                    // Small delay between batches to make streaming visible
+                    if (i + BATCH_SIZE < parsedFiles.length) {
+                      await this.delay(50)
+                    }
+                  }
                 }
+
+                // Report progress
                 onProgress?.(allFiles.length, expectedFiles)
 
-                // Yield to event loop to allow UI updates (every packet)
+                // Yield to event loop for UI updates
                 await new Promise(resolve => setTimeout(resolve, 0))
               }
             }
 
-            // STOP CONDITIONS:
-            // 1. If we have ALL expected files (from param or header), stop immediately
+            // Stop if we have all expected files
             const effectiveExpected = expectedFiles > 0 ? expectedFiles : totalFilesFromHeader
             if (effectiveExpected > 0 && allFiles.length >= effectiveExpected) {
-              if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Got all ${allFiles.length}/${effectiveExpected} files, stopping`)
+              if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Got all ${allFiles.length}/${effectiveExpected} files`)
               break
             }
           }
         } catch (error) {
-          // Handle DOMException errors
           if (error instanceof DOMException) {
             if (error.name === 'NetworkError') {
               // USB timeout - check if we should stop (5 second idle timeout)
@@ -1422,7 +1421,7 @@ export class JensenDevice {
         }
       }
 
-      console.log(`[Jensen] listFiles: Loop exited - ${allFiles.length} files from ${packetsReceived} packets, ${totalBytesReceived} bytes, elapsed: ${Date.now() - startTime}ms`)
+      if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Complete - ${allFiles.length} files from ${packetsReceived} packets, elapsed: ${Date.now() - startTime}ms`)
       return allFiles
     })
   }

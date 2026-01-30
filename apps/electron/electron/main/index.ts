@@ -3,8 +3,20 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
 // HiDock USB Vendor/Product IDs
-const USB_VENDOR_ID = 0x10d6 // Actions Semiconductor
-const USB_PRODUCT_IDS = [0xaf0c, 0xaf0d, 0xb00d, 0xaf0e, 0xb00e]
+// Source: Official HiDock HiNotes jensen.js (December 2025)
+const USB_VENDOR_IDS = [
+  0x10d6, // Actions Semiconductor (older H1, H1E, P1 devices)
+  0x3887  // HiDock (newer P1 Mini devices)
+]
+const USB_PRODUCT_IDS = [
+  0xaf0c,  // H1
+  0xaf0d,  // H1E
+  0xb00d,  // H1E (alternate)
+  0xaf0e,  // P1
+  0xb00e,  // P1 (alternate)
+  0xaf0f,  // P1 Mini
+  0x2041   // P1 Mini (alternate)
+]
 import { initializeDatabase, closeDatabase } from './services/database'
 import { initializeConfig } from './services/config'
 import { initializeFileStorage } from './services/file-storage'
@@ -154,6 +166,11 @@ async function initializeServices(): Promise<void> {
   updateSplashStatus('Starting application...', 100)
 }
 
+// Disable WebUSB blocklist to allow HiDock device access
+// Required since Electron 37+ which introduced Chromium's WebUSB blocklist
+// Without this, devices on the blocklist get "Access denied" errors
+app.commandLine.appendSwitch('disable-usb-blocklist')
+
 // Conditionally enable remote debugging (dev mode or explicit opt-in)
 const enableRemoteDebugging = is.dev || process.env.ENABLE_REMOTE_DEBUGGING === 'true'
 if (enableRemoteDebugging) {
@@ -184,7 +201,7 @@ app.whenReady().then(async () => {
 
     const hidockDevice = details.deviceList.find(
       (device) =>
-        device.vendorId === USB_VENDOR_ID &&
+        USB_VENDOR_IDS.includes(device.vendorId) &&
         (USB_PRODUCT_IDS.includes(device.productId) ||
           device.productName?.toLowerCase().includes('hidock'))
     )
@@ -193,7 +210,7 @@ app.whenReady().then(async () => {
       console.log('Auto-selecting HiDock device:', hidockDevice.productName)
       callback(hidockDevice.deviceId)
     } else if (details.deviceList.length > 0) {
-      const vendorDevice = details.deviceList.find(d => d.vendorId === USB_VENDOR_ID)
+      const vendorDevice = details.deviceList.find(d => USB_VENDOR_IDS.includes(d.vendorId))
       if (vendorDevice) {
         console.log('Auto-selecting vendor device:', vendorDevice.productName)
         callback(vendorDevice.deviceId)
@@ -216,6 +233,16 @@ app.whenReady().then(async () => {
       return true
     }
     return false
+  })
+
+  // Allow all USB protected classes - required for some USB devices that use
+  // protected USB classes (like audio, HID, mass storage, etc.)
+  // This fixes "Unable to claim interface" errors on Windows
+  session.defaultSession.setUSBProtectedClassesHandler((details) => {
+    // Return empty array to protect nothing (allow all classes)
+    // This is necessary for HiDock devices which may use protected USB classes
+    console.log('[USB] Protected classes request for:', details.origin)
+    return []
   })
 
   // Initialize all services before creating window (shows progress in splash)

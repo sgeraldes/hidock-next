@@ -346,6 +346,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
 
   const [deviceConnected, setDeviceConnected] = useState(false)
   const loadingRef = useRef(false) // Prevent concurrent loads
+  const deviceReadyRefreshDoneRef = useRef(false) // Track if we've done a device-ready refresh
 
   const deviceService = getHiDockDeviceService()
 
@@ -476,13 +477,32 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     setDeviceConnected(deviceService.isConnected())
 
     // Subscribe to device connection changes
-    const unsubscribe = deviceService.onConnectionChange((connected) => {
+    const unsubConnection = deviceService.onConnectionChange((connected) => {
       setDeviceConnected(connected)
+      // Reset the device-ready refresh flag when disconnecting
+      if (!connected) {
+        deviceReadyRefreshDoneRef.current = false
+      }
       // Reload when connection status changes (device data may have changed)
       loadRecordings()
     })
 
-    return unsubscribe
+    // Subscribe to connection STATUS changes (important: 'ready' means device is fully initialized)
+    // This fixes the issue where connection change fires before device is ready,
+    // causing isConnected() to return false and skipping device data fetch
+    const unsubStatus = deviceService.onStatusChange((status) => {
+      if (status.step === 'ready' && !deviceReadyRefreshDoneRef.current) {
+        console.log('[useUnifiedRecordings] Device ready - forcing refresh to get device files')
+        deviceReadyRefreshDoneRef.current = true
+        // Force refresh when device becomes ready to ensure we get fresh device data
+        loadRecordings(true)
+      }
+    })
+
+    return () => {
+      unsubConnection()
+      unsubStatus()
+    }
   }, [loaded, loadRecordings, deviceService])
 
   // Subscribe to recording watcher events for auto-refresh

@@ -1,19 +1,58 @@
 // HiDock Device Constants (matching jensen.js protocol)
+// Source: Official HiDock HiNotes jensen.js (December 2025)
 export const HIDOCK_DEVICE_CONFIG = {
-  VENDOR_ID: 0x10D6, // Actions Semiconductor
+  VENDOR_ID: 0x10D6, // Actions Semiconductor (default)
+  ALTERNATE_VENDOR_ID: 0x3887, // HiDock (newer P1 Mini devices)
   PRODUCT_ID: 0xB00D, // HiDock H1E default
   INTERFACE_NUMBER: 0,
   ENDPOINT_IN: 2,     // Endpoint 2 for IN direction (from jensen.js)
   ENDPOINT_OUT: 1,    // Endpoint 1 for OUT direction (from jensen.js)
 } as const;
 
+// All known HiDock Vendor IDs
+export const HIDOCK_VENDOR_IDS = [
+  0x10D6,  // Actions Semiconductor (older devices)
+  0x3887,  // HiDock (newer P1 Mini devices)
+] as const;
+
 // Additional HiDock Product IDs
+// Source: Official HiDock HiNotes jensen.js (December 2025)
 export const HIDOCK_PRODUCT_IDS = {
-  H1: 0xAF0C,
-  H1E: 0xAF0D,
-  P1: 0xAF0E,
+  // H1 devices
+  H1: 0xAF0C,           // 45068 decimal
+  H1_ALT_1: 0x0100,     // 256 decimal (alt)
+  H1_ALT_2: 0x0102,     // 258 decimal (alt)
+  // H1E devices
+  H1E: 0xAF0D,          // 45069 decimal (older PID)
+  H1E_NEW: 0xB00D,      // newer PID
+  H1E_ALT_1: 0x0101,    // 257 decimal (alt)
+  H1E_ALT_2: 0x0103,    // 259 decimal (alt)
+  // P1 devices
+  P1: 0xAF0E,           // 45070 decimal (older PID)
+  P1_NEW: 0xB00E,       // newer PID - IMPORTANT: Many P1 devices use this
+  P1_ALT: 0x2040,       // 8256 decimal (alt)
+  // P1 Mini devices
+  P1_MINI: 0xAF0F,      // 45071 decimal
+  P1_MINI_ALT: 0x2041,  // 8257 decimal (alt)
+  // Default
   DEFAULT: 0xB00D,
 } as const;
+
+// All Product IDs as an array for device filtering
+export const ALL_HIDOCK_PRODUCT_IDS = [
+  HIDOCK_PRODUCT_IDS.H1,
+  HIDOCK_PRODUCT_IDS.H1_ALT_1,
+  HIDOCK_PRODUCT_IDS.H1_ALT_2,
+  HIDOCK_PRODUCT_IDS.H1E,
+  HIDOCK_PRODUCT_IDS.H1E_NEW,
+  HIDOCK_PRODUCT_IDS.H1E_ALT_1,
+  HIDOCK_PRODUCT_IDS.H1E_ALT_2,
+  HIDOCK_PRODUCT_IDS.P1,
+  HIDOCK_PRODUCT_IDS.P1_NEW,
+  HIDOCK_PRODUCT_IDS.P1_ALT,
+  HIDOCK_PRODUCT_IDS.P1_MINI,
+  HIDOCK_PRODUCT_IDS.P1_MINI_ALT,
+] as const;
 
 // HiDock Protocol Commands (complete jensen.js protocol)
 export const HIDOCK_COMMANDS = {

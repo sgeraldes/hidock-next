@@ -2758,6 +2758,23 @@ class HiDockToolGUI(
         self.transcription_section.pack(fill="both", expand=True, padx=5, pady=5)
         self.insights_section.pack(fill="both", expand=True, padx=5, pady=5)
 
+    def _set_long_operation_active_state(self, active: bool, label: str = ""):
+        """Set the long operation state to control UI behavior during lengthy operations.
+
+        Args:
+            active: True to start a long operation, False to end it
+            label: Name of the operation (e.g., "Transcription", "Formatting Storage")
+        """
+        self.is_long_operation_active = active
+        self.active_operation_name = label if active else None
+        # Update UI state based on operation status
+        self._update_all_button_states()
+        logger.debug(
+            "GUI",
+            "_set_long_operation_active_state",
+            f"Long operation {'started' if active else 'ended'}: {label}",
+        )
+
     def _cancel_transcription(self):
         """Cancel the current transcription process."""
         self.transcription_cancelled = True

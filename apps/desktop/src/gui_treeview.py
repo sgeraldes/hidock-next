@@ -134,7 +134,16 @@ class TreeViewMixin:
                 )
 
             # Configure loading tag with distinctive styling
-            self.file_tree.tag_configure("loading", foreground="blue", font=("Arial", 10, "italic"))
+            # Use the same font family/size as the main treeview, just with italic style
+            try:
+                default_ctk_font = ctk.CTkFont()
+                font_family = default_ctk_font.cget("family")
+                base_size = default_ctk_font.cget("size")
+                loading_font_size = max(10, base_size - 1)  # Match treeview font size
+                loading_font = (font_family, loading_font_size, "italic")
+            except Exception:
+                loading_font = ("Arial", 12, "italic")  # Fallback with reasonable size
+            self.file_tree.tag_configure("loading", foreground="blue", font=loading_font)
         else:
             # Files are already displayed - just update status bar, don't clear tree
             pass

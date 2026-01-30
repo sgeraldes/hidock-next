@@ -60,7 +60,7 @@ const DEFAULT_CONFIG: AppConfig = {
   transcription: {
     provider: 'gemini',
     geminiApiKey: '',
-    geminiModel: 'gemini-2.0-flash',
+    geminiModel: 'gemini-3-pro-preview', // Best model for audio transcription
     autoTranscribe: true,
     language: 'es'
   },
