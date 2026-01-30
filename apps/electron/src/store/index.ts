@@ -57,8 +57,8 @@ export type { FilterStore, DateRange, RecordingStatusFilter } from '@/types/stor
 export { useLayoutStore, useIsModalActive, useModalProps } from './ui/useLayoutStore'
 export type { LayoutStore, Theme, ModalType } from './ui/useLayoutStore'
 
-export { useLibraryUIStore, useHasActiveFilters, useSelectedCount, useIsSelected, useSelectedIds } from './ui/useLibraryUIStore'
-export type { LibraryUIStore, LibrarySource, LibraryViewMode, LibrarySortBy, LibrarySortOrder, LibraryDateRange } from './ui/useLibraryUIStore'
+// NOTE: useLibraryUIStore was removed (dead code) - use useLibraryStore instead
+// See: .claude/specs/spec-007-store-consolidation.md
 
 export { useCalendarUIStore, useViewDateRange, useIsDateInView, useIsMeetingSelected, getViewStartDate, getViewEndDate } from './ui/useCalendarUIStore'
 export type { CalendarUIStore, CalendarViewMode } from './ui/useCalendarUIStore'
@@ -77,7 +77,7 @@ export type { UIStore, SidebarContent, PlaybackState, SentimentSegment } from '@
  * - Config → Domain stores + Feature stores
  * - Calendar → useMeetingsStore + useCalendarStore + useCalendarUIStore
  * - Recordings → useKnowledgeStore + useTranscriptionStore
- * - UI State → useLayoutStore, useLibraryUIStore, useCalendarUIStore, useUIStore
+ * - UI State → useLayoutStore, useLibraryStore, useCalendarUIStore, useUIStore
  * - Device Sync → useDeviceSyncStore + useDownloadQueueStore
  */
 export { useAppStore } from './useAppStore'
