@@ -1,4 +1,27 @@
-// Database types matching SQLite schema
+/**
+ * Database types matching SQLite schema
+ *
+ * ## Null vs Undefined Convention
+ *
+ * This codebase follows a consistent pattern for nullable types:
+ *
+ * **Rule 1: Database Types - Use `field: T | null`**
+ * - Fields from database tables use explicit `| null`
+ * - SQLite returns `null` for missing column values
+ * - Example: `location: string | null`
+ *
+ * **Rule 2: UI Component Props - Use `field?: T`**
+ * - Optional component props use TypeScript optional syntax
+ * - Never add `| null` to optional props
+ * - Example: `onSubmit?: () => void`
+ *
+ * **Rule 3: Derived Types - Match the Source**
+ * - If deriving from database, use `| null`
+ * - If deriving from UI props, use `?:`
+ *
+ * This convention reduces ambiguity between "missing" (undefined) and
+ * "explicitly empty" (null) values, improving type safety.
+ */
 
 // =============================================================================
 // Re-export store types

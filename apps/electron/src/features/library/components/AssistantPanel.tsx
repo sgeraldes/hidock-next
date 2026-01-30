@@ -20,7 +20,7 @@ import { Sparkles, FileText, Lightbulb, AlertCircle } from 'lucide-react'
 
 interface AssistantPanelProps {
   recording: UnifiedRecording | null
-  transcript?: { question_suggestions?: string | null } | null
+  transcript?: { question_suggestions: string | null } | null
   onAskAssistant?: (recording: UnifiedRecording) => void
   onGenerateOutput?: (recording: UnifiedRecording) => void
 }

@@ -46,8 +46,8 @@ export interface DeviceSyncStore {
   // Actions
   setConnectionStatus: (
     status: DeviceConnectionStatus,
-    model?: string | null,
-    serial?: string | null
+    model: string | null,
+    serial: string | null
   ) => void
   setConnectionError: (error: string | null) => void
   setFiles: (files: DeviceFile[]) => void
