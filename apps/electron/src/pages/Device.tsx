@@ -6,12 +6,13 @@ import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import {
   getHiDockDeviceService,
-  HiDockRecording,
   BatteryStatus
 } from '@/services/hidock-device'
 import { Progress } from '@/components/ui/progress'
 import { toast } from '@/components/ui/toaster'
 import { useAppStore } from '@/store/useAppStore'
+import { hasDeviceFile } from '@/types/unified-recording'
+import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 
 const CONNECTION_TIMEOUT_MS = 15000 // 15 second timeout
 const DEBUG_DEVICE_UI = false // Enable verbose UI logging
@@ -42,8 +43,8 @@ export function Device() {
 
   // Initialize service
   const deviceService = getHiDockDeviceService()
+  const { recordings, loading: loadingRecordings, refresh: refreshUnifiedRecordings } = useUnifiedRecordings()
   const [connecting, setConnecting] = useState(false)
-  const [recordings, setRecordings] = useState<HiDockRecording[]>([])
   const [error, setError] = useState<string | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [_downloadProgress, setDownloadProgress] = useState<any>(null)
@@ -65,9 +66,7 @@ export function Device() {
   const [batteryStatus, setBatteryStatus] = useState<BatteryStatus | null>(null)
   const [bluetoothScanning, setBluetoothScanning] = useState(false)
 
-  // File list loading state
-  const [loadingRecordings, setLoadingRecordings] = useState(false)
-  const [loadingProgress, setLoadingProgress] = useState<{ filesLoaded: number; expectedFiles: number } | null>(null)
+  // File list loading state is now managed by useUnifiedRecordings hook
 
   // Synced files tracking
   const [syncedFilenames, setSyncedFilenames] = useState<Set<string>>(new Set())
@@ -206,24 +205,15 @@ export function Device() {
       }
     })
 
-    // Load additional data if already connected
+    // Load additional data if already connected (recordings are loaded by useUnifiedRecordings hook)
     const loadInitialData = async () => {
       if (DEBUG_DEVICE_UI) console.log('[Device.tsx] loadInitialData called, isConnected:', deviceService.isConnected())
       if (deviceService.isConnected()) {
-        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device already connected, loading recordings...')
         try {
-          const recs = await deviceService.listRecordings()
-          if (mounted) {
-            if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] loadInitialData got ${recs.length} recordings`)
-            setRecordings(recs)
-            // Auto-sync is handled by the dedicated useEffect that watches recordings state
-          }
-          if (mounted && deviceService.isP1Device()) {
+          if (deviceService.isP1Device()) {
             if (DEBUG_DEVICE_UI) console.log('[Device.tsx] P1 device detected, loading battery status...')
             const status = await deviceService.getBatteryStatus()
-            if (mounted) {
-              setBatteryStatus(status)
-            }
+            if (mounted) setBatteryStatus(status)
           }
         } catch (e) {
           console.error('[Device.tsx] Failed to load initial data:', e)
@@ -234,36 +224,15 @@ export function Device() {
     }
     loadInitialData()
 
-    // Subscribe to connection changes
+    // Subscribe to connection changes (recordings are managed by useUnifiedRecordings hook)
     const unsubscribe = deviceService.onConnectionChange(async (connected) => {
       if (!mounted) return
       if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Connection change:', connected)
       setConnecting(false)
       clearConnectionTimers() // Clear timers on connection change
       if (connected) {
-        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device connected, loading recordings...')
+        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device connected')
         setError(null) // Clear any previous errors
-
-        // Load recordings - auto-sync is handled by the dedicated useEffect that watches recordings state
-        setLoadingRecordings(true)
-        setLoadingProgress(null)
-        try {
-          const recs = await deviceService.listRecordings((filesLoaded, expectedFiles) => {
-            setLoadingProgress({ filesLoaded, expectedFiles })
-          })
-          if (mounted) {
-            if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Received ${recs.length} recordings`)
-            setRecordings(recs)
-            // Auto-sync is handled by the dedicated useEffect
-          }
-        } catch (e) {
-          console.error('[Device.tsx] Failed to load recordings:', e)
-        } finally {
-          if (mounted) {
-            setLoadingRecordings(false)
-            setLoadingProgress(null)
-          }
-        }
 
         // Load P1-specific data
         if (deviceService.isP1Device()) {
@@ -272,7 +241,6 @@ export function Device() {
         }
       } else {
         if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device disconnected, clearing state...')
-        setRecordings([])
         setBatteryStatus(null)
         // Reset auto-sync flag so it triggers on reconnect
         autoSyncTriggeredRef.current = false
@@ -341,12 +309,13 @@ export function Device() {
     }
   }, [activityLog.length])
 
-  // Refresh synced filenames when recordings list changes (catches new syncs)
+  // Refresh synced filenames when device-accessible recordings change (catches new syncs)
+  const deviceRecordingsCount = recordings.filter(rec => hasDeviceFile(rec)).length
   useEffect(() => {
-    if (deviceState.connected && recordings.length > 0) {
+    if (deviceState.connected && deviceRecordingsCount > 0) {
       refreshSyncedFilenames()
     }
-  }, [recordings.length, deviceState.connected, refreshSyncedFilenames])
+  }, [deviceRecordingsCount, deviceState.connected, refreshSyncedFilenames])
 
   const handleConnect = async () => {
     setConnecting(true)
@@ -418,12 +387,15 @@ export function Device() {
     setError(null)
 
     try {
+      // Filter to device-accessible recordings only
+      const deviceRecordings = recordings.filter(rec => hasDeviceFile(rec))
       // Use download service to determine which files need syncing (handles all reconciliation)
-      const filesToCheck = recordings.map(rec => ({
+      // Note: dateCreated maps from UnifiedRecording.dateRecorded (same underlying device timestamp)
+      const filesToCheck = deviceRecordings.map(rec => ({
         filename: rec.filename,
         size: rec.size,
         duration: rec.duration,
-        dateCreated: rec.dateCreated
+        dateCreated: rec.dateRecorded
       }))
 
       const filesWithStatus = await window.electronAPI.downloadService.getFilesToSync(filesToCheck)
@@ -486,44 +458,6 @@ export function Device() {
       setSyncing(false)
     }
   }
-
-  // Effect to trigger auto-sync when recordings are actually loaded (handles race condition)
-  /* 
-  // DISABLED: Auto-sync logic moved to background service (or disabled per user request to stop page-load triggers)
-  useEffect(() => {
-    // Only trigger if:
-    // 1. Device is connected
-    // 2. Recordings have been loaded (not empty)
-    // 3. Auto-sync hasn't been triggered yet this session
-    // 4. We're not currently syncing
-    if (deviceState.connected && recordings.length > 0 && !autoSyncTriggeredRef.current && !syncing && !storeSyncing) {
-      const checkAndTriggerAutoSync = async () => {
-        try {
-          const config = await window.electronAPI.config.get()
-          const shouldAutoDownload = config?.device?.autoDownload ?? true
-          if (shouldAutoDownload) {
-            deviceService.log('info', 'Auto-sync check (recordings loaded)', `${recordings.length} recordings available`)
-            const syncedFiles = await window.electronAPI.syncedFiles.getFilenames()
-            const syncedSet = new Set(syncedFiles)
-            const toSync = recordings.filter((rec) => !syncedSet.has(rec.filename))
-            if (toSync.length > 0) {
-              setSyncedFilenames(syncedSet)
-              _triggerAutoSync(recordings, syncedSet)
-            } else {
-              deviceService.log('success', 'All files synced', 'No new recordings to download')
-              autoSyncTriggeredRef.current = true // Mark as handled
-            }
-          }
-        } catch (e) {
-          console.error('[Device.tsx] Auto-sync check error:', e)
-        }
-      }
-      // Small delay to let other state settle
-      const timer = setTimeout(checkAndTriggerAutoSync, 100)
-      return () => clearTimeout(timer)
-    }
-  }, [deviceState.connected, recordings, syncing, (storeSyncing as any), deviceService, _triggerAutoSync])
-  */
 
   const handleAutoRecordToggle = async (enabled: boolean) => {
     try {
@@ -953,44 +887,20 @@ export function Device() {
 
                   {/* Sync button */}
                   {(() => {
-                    // Calculate unsynced count - use loaded recordings if available, otherwise estimate from device count
-                    const unsyncedCount = recordings.length > 0
-                      ? recordings.filter((r) => !syncedFilenames.has(r.filename)).length
+                    // Calculate unsynced count from device-accessible recordings
+                    const deviceAccessibleRecordings = recordings.filter(rec => hasDeviceFile(rec))
+                    const unsyncedCount = deviceAccessibleRecordings.length > 0
+                      ? deviceAccessibleRecordings.filter(r => r.syncStatus === 'not-synced').length
                       : Math.max(0, deviceState.recordingCount - syncedFilenames.size)
-                    const allSynced = unsyncedCount === 0 && (recordings.length > 0 || deviceState.recordingCount > 0)
-                    const isLoadingList = loadingRecordings && recordings.length === 0
+                    const allSynced = unsyncedCount === 0 && (deviceAccessibleRecordings.length > 0 || deviceState.recordingCount > 0)
+                    const isLoadingList = loadingRecordings && deviceAccessibleRecordings.length === 0
 
                     return (
                       <>
-                        {/* Show loading progress when fetching file list */}
-                        {loadingRecordings && loadingProgress && (
-                          <div className="mb-3 p-3 bg-muted/50 rounded-lg">
-                            <div className="flex items-center justify-between mb-2">
-                              <span className="text-sm text-muted-foreground">
-                                {loadingProgress.expectedFiles > 0
-                                  ? 'Loading file list...'
-                                  : 'Scanning device for recordings...'}
-                              </span>
-                              <span className="text-sm font-medium">
-                                {loadingProgress.expectedFiles > 0
-                                  ? `${loadingProgress.filesLoaded} / ${loadingProgress.expectedFiles}`
-                                  : loadingProgress.filesLoaded > 0
-                                    ? `${loadingProgress.filesLoaded} files found`
-                                    : 'Please wait...'}
-                              </span>
-                            </div>
-                            <Progress
-                              value={loadingProgress.expectedFiles > 0
-                                ? (loadingProgress.filesLoaded / loadingProgress.expectedFiles) * 100
-                                : undefined}
-                              className="h-2"
-                            />
-                          </div>
-                        )}
                         <Button
                           className="w-full"
                           onClick={storeSyncing ? cancelDeviceSync : handleSyncAll}
-                          disabled={(!storeSyncing && (syncing || (recordings.length === 0 && !isLoadingList && deviceState.recordingCount === 0) || allSynced || isLoadingList))}
+                          disabled={(!storeSyncing && (syncing || (deviceAccessibleRecordings.length === 0 && !isLoadingList && deviceState.recordingCount === 0) || allSynced || isLoadingList))}
                           variant={storeSyncing ? 'destructive' : (allSynced ? 'secondary' : 'default')}
                         >
                           {storeSyncing ? (
