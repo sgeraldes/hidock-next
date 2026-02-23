@@ -1187,12 +1187,12 @@ class HiDockDeviceService {
     this.state.firmwareVersion = null
     this.state.storage = null
     this.state.settings = null
-    // NOTE: Do NOT clear recordingCount or recordings cache on disconnect!
-    // Both survive disconnect/reconnect - will be used if file count matches on reconnect.
-    // recordingCount and cache are only invalidated when:
-    // 1. File count changes (detected on reconnect)
-    // 2. User clicks "Refresh" button (forceRefresh=true)
-    // 3. App restarts (acceptable)
+    // Invalidate cache count to force fresh fetch on reconnect
+    // (cachedRecordings preserved for instant UI display via getCachedRecordings())
+    this.cachedRecordingCount = -1
+    // NOTE: Do NOT clear cachedRecordings on disconnect!
+    // The recordings array survives disconnect for instant Phase 1 display.
+    // Cache count is reset to -1 so reconnect always fetches fresh data.
     this.notifyStateChange()
     this.logActivity('info', 'USB device disconnected', 'Recording count and cache preserved for quick reconnect')
     this.updateStatus('idle', 'Device disconnected')
