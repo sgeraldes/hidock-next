@@ -3,6 +3,8 @@
  * TypeScript port of the Jensen protocol for USB communication
  */
 
+import { GrowableBuffer } from './growable-buffer'
+
 // Command IDs from the Jensen protocol
 // Source: Official HiDock HiNotes jensen.js (December 2025)
 export const CMD = {
@@ -285,7 +287,7 @@ const DEBUG_PROTOCOL = true // Enable protocol-level logging
 export class JensenDevice {
   private device: USBDevice | null = null
   private sequenceId = 0
-  private receiveBuffer: Uint8Array = new Uint8Array(0)
+  private receiveBuffer = new GrowableBuffer()
 
   // USB operation mutex - prevents concurrent USB operations that cause InvalidStateError
   private operationLock: Promise<void> = Promise.resolve()
@@ -320,7 +322,7 @@ export class JensenDevice {
     // Clean up state
     this.device = null
     this.sequenceId = 0
-    this.receiveBuffer = new Uint8Array(0)
+    this.receiveBuffer = new GrowableBuffer() // Release memory on disconnect
     this.operationLock = Promise.resolve()
     this.lockHolder = null
 
@@ -545,7 +547,7 @@ export class JensenDevice {
       // Reset ALL protocol state on new connection (matches official jensen.js setup function)
       // This is critical for proper sequencing and prevents stale data issues
       this.sequenceId = 0
-      this.receiveBuffer = new Uint8Array(0)
+      this.receiveBuffer.clear()
       this.versionCode = null
       this.versionNumber = null
       this.serialNumber = null
@@ -630,7 +632,7 @@ export class JensenDevice {
       // Reset ALL protocol state on new connection (matches official jensen.js setup function)
       // This is critical for proper sequencing and prevents stale data issues
       this.sequenceId = 0
-      this.receiveBuffer = new Uint8Array(0)
+      this.receiveBuffer.clear()
       this.versionCode = null
       this.versionNumber = null
       this.serialNumber = null
@@ -683,7 +685,7 @@ export class JensenDevice {
       this.device = null
       // Reset protocol state
       this.sequenceId = 0
-      this.receiveBuffer = new Uint8Array(0)
+      this.receiveBuffer = new GrowableBuffer() // Release memory on disconnect
       // Reset the operation lock to prevent stale locks from blocking future operations
       this.operationLock = Promise.resolve()
       this.lockHolder = null
@@ -707,7 +709,7 @@ export class JensenDevice {
     try {
       // Clear internal state first
       this.sequenceId = 0
-      this.receiveBuffer = new Uint8Array(0)
+      this.receiveBuffer.clear()
       this.operationLock = Promise.resolve()
       this.lockHolder = null
 
@@ -758,10 +760,7 @@ export class JensenDevice {
         // Append to receive buffer
         // Important: Use slice() to create a copy, as the underlying buffer may be reused
         const newData = new Uint8Array(result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength))
-        const combined = new Uint8Array(this.receiveBuffer.length + newData.length)
-        combined.set(this.receiveBuffer)
-        combined.set(newData, this.receiveBuffer.length)
-        this.receiveBuffer = combined
+        this.receiveBuffer.append(newData)
         if (DEBUG_USB) console.log(`[Jensen] Read ${newData.length} bytes, buffer now ${this.receiveBuffer.length} bytes`)
         return true
       }
@@ -790,7 +789,7 @@ export class JensenDevice {
     // Find sync marker
     let syncPos = -1
     for (let i = 0; i <= this.receiveBuffer.length - 2; i++) {
-      if (this.receiveBuffer[i] === 0x12 && this.receiveBuffer[i + 1] === 0x34) {
+      if (this.receiveBuffer.byteAt(i) === 0x12 && this.receiveBuffer.byteAt(i + 1) === 0x34) {
         syncPos = i
         break
       }
@@ -798,31 +797,31 @@ export class JensenDevice {
 
     if (syncPos === -1) {
       // No sync marker found, clear buffer
-      this.receiveBuffer = new Uint8Array(0)
+      this.receiveBuffer.clear()
       return null
     }
 
     // Discard any data before sync marker
     if (syncPos > 0) {
       if (DEBUG_USB) console.warn(`[Jensen] Discarding ${syncPos} bytes before sync marker`)
-      this.receiveBuffer = this.receiveBuffer.slice(syncPos)
+      this.receiveBuffer.consume(syncPos)
     }
 
     if (this.receiveBuffer.length < 12) return null
 
     // Parse header
-    const cmdId = (this.receiveBuffer[2] << 8) | this.receiveBuffer[3]
+    const cmdId = (this.receiveBuffer.byteAt(2) << 8) | this.receiveBuffer.byteAt(3)
     const seqId =
-      (this.receiveBuffer[4] << 24) |
-      (this.receiveBuffer[5] << 16) |
-      (this.receiveBuffer[6] << 8) |
-      this.receiveBuffer[7]
+      (this.receiveBuffer.byteAt(4) << 24) |
+      (this.receiveBuffer.byteAt(5) << 16) |
+      (this.receiveBuffer.byteAt(6) << 8) |
+      this.receiveBuffer.byteAt(7)
 
     const bodyLenRaw =
-      (this.receiveBuffer[8] << 24) |
-      (this.receiveBuffer[9] << 16) |
-      (this.receiveBuffer[10] << 8) |
-      this.receiveBuffer[11]
+      (this.receiveBuffer.byteAt(8) << 24) |
+      (this.receiveBuffer.byteAt(9) << 16) |
+      (this.receiveBuffer.byteAt(10) << 8) |
+      this.receiveBuffer.byteAt(11)
 
     const padding = (bodyLenRaw >> 24) & 0xff
     const bodyLen = bodyLenRaw & 0xffffff
@@ -833,9 +832,8 @@ export class JensenDevice {
       return null
     }
 
-    // Extract body and consume from buffer
-    const body = this.receiveBuffer.slice(12, 12 + bodyLen)
-    this.receiveBuffer = this.receiveBuffer.slice(totalLen)
+    // Extract body and advance buffer atomically using compound method
+    const body = this.receiveBuffer.extractAndConsume(12, 12 + bodyLen, totalLen)
 
     return { id: cmdId, sequence: seqId, body }
   }
@@ -862,10 +860,7 @@ export class JensenDevice {
           // Append to receive buffer
           // Important: Use slice() to create a copy, as the underlying buffer may be reused
           const newData = new Uint8Array(result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength))
-          const combined = new Uint8Array(this.receiveBuffer.length + newData.length)
-          combined.set(this.receiveBuffer)
-          combined.set(newData, this.receiveBuffer.length)
-          this.receiveBuffer = combined
+          this.receiveBuffer.append(newData)
           if (DEBUG_USB) console.log(`[Jensen] Read ${newData.length} bytes, buffer now ${this.receiveBuffer.length} bytes`)
 
           // Try to parse all complete packets in buffer
@@ -1279,7 +1274,7 @@ export class JensenDevice {
       // CRITICAL: Clear receive buffer before file list operation
       // This prevents leftover data from previous commands being misinterpreted
       // as file list responses (which could cause immediate return with 0 files)
-      this.receiveBuffer = new Uint8Array(0)
+      this.receiveBuffer.clear()
 
       // Use provided count or 0 (progress will still work, just won't show expected total)
       let expectedFiles = expectedFileCount || 0
@@ -1330,10 +1325,7 @@ export class JensenDevice {
 
             // Append to receive buffer with proper slice handling
             const newData = new Uint8Array(result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength))
-            const combined = new Uint8Array(this.receiveBuffer.length + newData.length)
-            combined.set(this.receiveBuffer)
-            combined.set(newData, this.receiveBuffer.length)
-            this.receiveBuffer = combined
+            this.receiveBuffer.append(newData)
 
             // Try to extract file list messages from buffer
             let packetParsed = true
@@ -1477,11 +1469,8 @@ export class JensenDevice {
           pos = startPos
           break
         }
-        let filename = ''
-        for (let i = 0; i < nameLen; i++) {
-          const char = buffer[pos + i]
-          if (char > 0) filename += String.fromCharCode(char)
-        }
+        const filenameBytes = buffer.subarray(pos, pos + nameLen)
+        const filename = new TextDecoder().decode(filenameBytes).replace(/\0/g, '')
         pos += nameLen
 
         // File length (4 bytes, big-endian)
@@ -1508,10 +1497,8 @@ export class JensenDevice {
           pos = startPos
           break
         }
-        let signature = ''
-        for (let i = 0; i < 16; i++) {
-          signature += buffer[pos + i].toString(16).padStart(2, '0')
-        }
+        const sigBytes = buffer.subarray(pos, pos + 16)
+        const signature = Array.from(sigBytes, b => b.toString(16).padStart(2, '0')).join('')
         pos += 16
 
         // Parse filename for date/time
@@ -1598,7 +1585,7 @@ export class JensenDevice {
       if (!this.device || !this.device.opened) return false
 
       // Clear receive buffer before download to prevent stale data issues
-      this.receiveBuffer = new Uint8Array(0)
+      this.receiveBuffer.clear()
 
       if (DEBUG_PROTOCOL) console.log(`[Jensen] downloadFile: Starting download of ${filename}, size=${fileSize}`)
 

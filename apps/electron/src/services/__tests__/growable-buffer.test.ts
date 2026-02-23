@@ -458,7 +458,6 @@ describe('GrowableBuffer', () => {
   describe('stress test', () => {
     it('handles many MB of data with message parsing', () => {
       const buf = new GrowableBuffer()
-      const HEADER = new Uint8Array([0x12, 0x34])
       let totalAppended = 0
       let messagesExtracted = 0
 
