@@ -814,23 +814,27 @@ class HiDockDeviceService {
         return []
       }
 
+      let timeoutId: ReturnType<typeof setTimeout>
       try {
-        // Wait max 2 minutes for existing request (matching overall timeout)
         const result = await Promise.race([
           waitForPromise(),
-          new Promise<HiDockRecording[]>((_, reject) =>
-            setTimeout(() => reject(new Error('Timed out waiting for existing request')), 120000)
-          )
+          new Promise<HiDockRecording[]>((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error('Timed out waiting for existing request')), 120000)
+          })
         ])
-        // Report final progress
+        clearTimeout(timeoutId!)
         onProgress?.(result.length, expectedFileCount)
         return result
       } catch (error) {
-        // If timed out, clear the hung promise and let a new request start
-        console.warn('[HiDockDevice] listRecordings: Existing request timed out, clearing and retrying')
-        this.listRecordingsPromise = null
-        this.listRecordingsLock = false
-        // Fall through to start a new request
+        clearTimeout(timeoutId!)
+        // Do NOT clear listRecordingsPromise or listRecordingsLock here.
+        // The promise owner (the IIFE at line 849) clears these in its finally block.
+        // Clearing them from a waiter would:
+        //   1. Break other concurrent waiters (their waitForPromise() loop sees null and returns [])
+        //   2. Start a second concurrent USB operation (Jensen withLock would block it anyway)
+        //   3. Create race conditions with the F01 lock-type-aware guard
+        console.warn('[HiDockDevice] listRecordings: Timed out waiting for existing request, returning cached data')
+        return this.cachedRecordings ?? []
       }
     }
 
@@ -899,12 +903,16 @@ class HiDockDeviceService {
 
         return recordings
       } catch (error) {
-        // Ensure animation is stopped on error
         animationCancelled = true
         clearInterval(animationInterval)
         console.error('[HiDockDevice] listRecordings error:', error)
-        this.logActivity('error', 'Failed to list files', error instanceof Error ? error.message : 'Unknown error')
-        return []
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+        const cachedCount = this.cachedRecordings?.length ?? 0
+        this.logActivity('error', 'Failed to list files', `${errorMsg} (returned ${cachedCount} cached files)`)
+        // Return cached data as fallback instead of empty array
+        // This prevents waiters from receiving empty results on transient USB errors
+        // Note: cached data may be stale if files changed between connects (acceptable tradeoff)
+        return this.cachedRecordings ?? []
       } finally {
         // Clear the lock and promise when done (success or error)
         this.listRecordingsLock = false
