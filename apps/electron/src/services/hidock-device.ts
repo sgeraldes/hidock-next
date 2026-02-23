@@ -716,17 +716,42 @@ class HiDockDeviceService {
       return []
     }
 
-    // CRITICAL: If a download is in progress, return cached data to prevent USB interference
-    // This fixes the issue where navigating to Recordings page stops ongoing downloads
-    if (this.jensen.isOperationInProgress()) {
-      console.log('[HiDockDevice] >>> listRecordings: OPERATION IN PROGRESS, returning cached')
-      if (this.cachedRecordings !== null) {
-        onProgress?.(this.cachedRecordings.length, this.cachedRecordings.length)
-        return this.cachedRecordings
+    // Lock-type-aware guard: examine which Jensen lock is held and respond appropriately
+    // instead of blanket-rejecting all operations
+    const lockHolder = this.jensen.getLockHolder()
+    if (lockHolder) {
+      // Case 1: File listing already in progress - wait for in-flight promise
+      if (lockHolder === 'listFiles' && this.listRecordingsPromise) {
+        console.log('[HiDockDevice] >>> listRecordings: listFiles lock held, waiting for in-flight promise')
+        try {
+          const result = await this.listRecordingsPromise
+          onProgress?.(result.length, this.state.recordingCount || result.length)
+          return result
+        } catch {
+          return this.cachedRecordings ?? []
+        }
       }
-      // No cache available, return empty array rather than interrupt download
-      this.logActivity('info', 'Skipped file list', 'Download in progress')
-      return []
+      // Case 2: Download in progress - protect by returning cached data
+      if (lockHolder.startsWith('downloadFile:')) {
+        console.log('[HiDockDevice] >>> listRecordings: download in progress, returning cached')
+        if (this.cachedRecordings !== null) {
+          onProgress?.(this.cachedRecordings.length, this.cachedRecordings.length)
+          return this.cachedRecordings
+        }
+        this.logActivity('info', 'Skipped file list', 'Download in progress')
+        return []
+      }
+      // Case 3: Delete in progress - protect it
+      if (lockHolder.startsWith('deleteFile:')) {
+        console.log('[HiDockDevice] >>> listRecordings: delete in progress, returning cached')
+        if (this.cachedRecordings !== null) {
+          onProgress?.(this.cachedRecordings.length, this.cachedRecordings.length)
+          return this.cachedRecordings
+        }
+        return []
+      }
+      // Case 4: Init commands (short-lived) - fall through to init-wait guard
+      console.log(`[HiDockDevice] >>> listRecordings: init lock '${lockHolder}' held, falling through to init wait`)
     }
 
     // Wait for initialization to complete before listing files

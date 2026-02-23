@@ -608,6 +608,11 @@ export class JensenDevice {
     return this.lockHolder !== null
   }
 
+  // Get the name of the current lock holder (for lock-type-aware decisions)
+  getLockHolder(): string | null {
+    return this.lockHolder
+  }
+
   // Try to auto-connect to previously authorized device
   // Follows official jensen.js pattern: disconnect first, then connect
   async tryConnect(): Promise<boolean> {
