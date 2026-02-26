@@ -318,6 +318,8 @@ interface UseUnifiedRecordingsResult {
     both: number
     synced: number
     unsynced: number
+    onSource: number
+    locallyAvailable: number
   }
 }
 
@@ -354,6 +356,12 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     console.log('[useUnifiedRecordings] loadRecordings called, forceRefresh:', forceRefresh, 'loadingRef:', loadingRef.current)
 
     // Prevent concurrent loads
+    // TODO (FL-03): This ref-based locking has an async race window. Between the
+    // check (loadingRef.current === false) and the set (loadingRef.current = true),
+    // another caller on the same microtask could pass the guard. This is a known
+    // limitation of ref-based locks in async React code. A proper fix would use a
+    // promise-based queue or AbortController to cancel the previous load. In practice,
+    // the race is narrow and the worst case is a redundant fetch, not data corruption.
     if (loadingRef.current) {
       console.log('[useUnifiedRecordings] Skipping - already loading')
       return
@@ -420,13 +428,21 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       }
 
       setRecordings(initialRecordings)
-      setLoading(false) // Mark as loaded after showing cached data
       markLoaded() // Mark as loaded in store
 
       // PHASE 2: Fetch device recordings (slow) - this updates the view when complete
       // Only needed if we don't have memory cache or forceRefresh is true
+      const needsDeviceFetch = isConnected && (memoryCachedDeviceRecs.length === 0 || forceRefresh)
+
+      // Only clear loading if no device fetch is needed.
+      // If Phase 2 will run, keep loading=true so the UI shows a loading indicator
+      // and the sync button stays disabled until device recordings are available.
+      if (!needsDeviceFetch) {
+        setLoading(false)
+      }
+
       let deviceRecs: HiDockRecording[] = memoryCachedDeviceRecs
-      if (isConnected && (memoryCachedDeviceRecs.length === 0 || forceRefresh)) {
+      if (needsDeviceFetch) {
         try {
           deviceRecs = await deviceService.listRecordings(undefined, forceRefresh)
         } catch (deviceError) {
@@ -456,6 +472,8 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       const finalRecordings = buildRecordingMap(deviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, isConnected, knowledgeCaptures)
       console.log('[useUnifiedRecordings] Final recordings count:', finalRecordings.length)
       setRecordings(finalRecordings)
+      // Clear loading after final update (covers both Phase 1-only and Phase 2 paths)
+      setLoading(false)
     } catch (e) {
       console.error('[useUnifiedRecordings] Error loading recordings:', e)
       setError(e instanceof Error ? e.message : 'Failed to load recordings')
@@ -465,6 +483,12 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       console.log('[useUnifiedRecordings] loadRecordings completed')
     }
   }, [deviceService, setRecordings, setLoading, setError, markLoaded])
+
+  // TODO: FL-05: Multiple page instances each create independent subscriptions below.
+  // A singleton subscription manager would prevent duplicate refreshes when multiple
+  // components consume this hook simultaneously.
+  // TODO: FL-10: React StrictMode double-mount is expected in dev mode. Subscriptions
+  // are properly cleaned up on unmount so this does not cause leaks in production.
 
   // Initial load (only if not already loaded) and device connection subscription
   useEffect(() => {
@@ -507,6 +531,8 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
 
   // Subscribe to recording watcher events for auto-refresh
   useEffect(() => {
+    if (!window.electronAPI?.onRecordingAdded) return
+
     const unsubscribe = window.electronAPI.onRecordingAdded((data) => {
       console.log('[useUnifiedRecordings] New recording detected:', data.recording.filename)
 
@@ -532,6 +558,10 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     const checkDeviceChanges = async () => {
       try {
         if (!deviceService.isConnected()) return
+
+        // FL-04: Skip polling when a connection-triggered refresh is already in progress
+        // This prevents the polling effect from racing with connection event handlers
+        if (loadingRef.current) return
 
         // Get current device recordings count
         const deviceRecs = deviceService.getCachedRecordings()

@@ -1,3 +1,4 @@
+// TODO: W1-HS-04: This store is not consumed by any component. Wire it to the Calendar page or remove it.
 /**
  * Meetings Store (Domain)
  *
@@ -7,6 +8,7 @@
  */
 
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 import { subscribeWithSelector } from 'zustand/middleware'
 import type { Meeting } from '@/types'
 
@@ -122,43 +124,43 @@ export const useMeetingById = (id: string | null) => {
  * Get meetings by date (matches start_time date)
  */
 export const useMeetingsByDate = (date: Date) => {
-  return useMeetingsStore((state) => {
+  return useMeetingsStore(useShallow((state) => {
     const targetDate = date.toISOString().split('T')[0] // Get YYYY-MM-DD
     return state.items.filter((meeting) => {
       const meetingDate = new Date(meeting.start_time).toISOString().split('T')[0]
       return meetingDate === targetDate
     })
-  })
+  }))
 }
 
 /**
  * Get meetings within a date range
  */
 export const useMeetingsByDateRange = (startDate: Date, endDate: Date) => {
-  return useMeetingsStore((state) => {
+  return useMeetingsStore(useShallow((state) => {
     const start = startDate.getTime()
     const end = endDate.getTime()
     return state.items.filter((meeting) => {
       const meetingTime = new Date(meeting.start_time).getTime()
       return meetingTime >= start && meetingTime <= end
     })
-  })
+  }))
 }
 
 /**
  * Get recurring meetings
  */
 export const useRecurringMeetings = () => {
-  return useMeetingsStore((state) => state.items.filter((meeting) => meeting.is_recurring === 1))
+  return useMeetingsStore(useShallow((state) => state.items.filter((meeting) => meeting.is_recurring === 1)))
 }
 
 /**
  * Get meetings by organizer email
  */
 export const useMeetingsByOrganizer = (organizerEmail: string | null) => {
-  return useMeetingsStore((state) =>
+  return useMeetingsStore(useShallow((state) =>
     organizerEmail
       ? state.items.filter((meeting) => meeting.organizer_email === organizerEmail)
       : []
-  )
+  ))
 }

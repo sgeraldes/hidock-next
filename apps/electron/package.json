@@ -1,7 +1,7 @@
 {
-  "name": "hidock-meeting-intelligence",
+  "name": "hidock-universal-knowledge-hub",
   "version": "1.0.0",
-  "description": "Calendar-first meeting intelligence app for HiDock",
+  "description": "Universal knowledge hub that transforms ANY information source (recordings, documents, notes, emails, etc.) into actionable insights - integrating device management, transcription, and AI analysis",
   "main": "./out/main/index.js",
   "author": "HiDock",
   "license": "MIT",

@@ -1,3 +1,4 @@
+// TODO: W1-HS-10: This store is not consumed by any component. Wire it to the Calendar page or remove it.
 /**
  * Calendar UI Store (UI)
  *
@@ -7,6 +8,7 @@
  */
 
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 import { persist } from 'zustand/middleware'
 
 export type CalendarViewMode = 'day' | 'week' | 'month'
@@ -130,11 +132,11 @@ export const getViewEndDate = (date: Date, view: CalendarViewMode): Date => {
  * Get the date range for the current view
  */
 export const useViewDateRange = () => {
-  return useCalendarUIStore((state) => {
+  return useCalendarUIStore(useShallow((state) => {
     const start = getViewStartDate(state.selectedDate, state.viewMode)
     const end = getViewEndDate(state.selectedDate, state.viewMode)
     return { start, end }
-  })
+  }))
 }
 
 /**

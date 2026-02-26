@@ -14,16 +14,20 @@ describe('useTransitionFilters', () => {
   beforeEach(() => {
     vi.clearAllMocks()
 
-    // Setup mock filter manager
+    // Setup mock filter manager (dual-mode filter system)
     mockFilterManager = {
-      locationFilter: 'all' as const,
+      filterMode: 'semantic' as const,
+      semanticFilter: 'all' as const,
+      exclusiveFilter: 'all' as const,
       categoryFilter: null,
       qualityFilter: null,
       statusFilter: null,
       searchQuery: '',
       hasActiveFilters: false,
       activeFilterCount: 0,
-      setLocationFilter: vi.fn(),
+      setFilterMode: vi.fn(),
+      setSemanticFilter: vi.fn(),
+      setExclusiveFilter: vi.fn(),
       setCategoryFilter: vi.fn(),
       setQualityFilter: vi.fn(),
       setStatusFilter: vi.fn(),
@@ -39,7 +43,9 @@ describe('useTransitionFilters', () => {
     it('should expose filter state from useLibraryFilterManager', () => {
       const { result } = renderHook(() => useTransitionFilters())
 
-      expect(result.current.locationFilter).toBe('all')
+      expect(result.current.filterMode).toBe('semantic')
+      expect(result.current.semanticFilter).toBe('all')
+      expect(result.current.exclusiveFilter).toBe('all')
       expect(result.current.categoryFilter).toBeNull()
       expect(result.current.qualityFilter).toBeNull()
       expect(result.current.statusFilter).toBeNull()
@@ -59,13 +65,13 @@ describe('useTransitionFilters', () => {
     it('should reflect changes in filter manager state', () => {
       const { result, rerender } = renderHook(() => useTransitionFilters())
 
-      expect(result.current.locationFilter).toBe('all')
+      expect(result.current.semanticFilter).toBe('all')
 
       // Simulate filter manager state change
-      mockFilterManager.locationFilter = 'device'
+      mockFilterManager.semanticFilter = 'on-source'
       rerender()
 
-      expect(result.current.locationFilter).toBe('device')
+      expect(result.current.semanticFilter).toBe('on-source')
     })
   })
 
@@ -82,12 +88,12 @@ describe('useTransitionFilters', () => {
       expect(result.current.isPending).toBe(false)
 
       act(() => {
-        result.current.setLocationFilter('device')
+        result.current.setSemanticFilter('on-source')
       })
 
       // isPending should be true during transition
       await waitFor(() => {
-        expect(mockFilterManager.setLocationFilter).toHaveBeenCalledWith('device')
+        expect(mockFilterManager.setSemanticFilter).toHaveBeenCalledWith('on-source')
       })
 
       // isPending should eventually become false
@@ -98,15 +104,27 @@ describe('useTransitionFilters', () => {
   })
 
   describe('wrapped filter actions', () => {
-    it('should wrap setLocationFilter in transition', async () => {
+    it('should wrap setSemanticFilter in transition', async () => {
       const { result } = renderHook(() => useTransitionFilters())
 
       act(() => {
-        result.current.setLocationFilter('device')
+        result.current.setSemanticFilter('on-source')
       })
 
       await waitFor(() => {
-        expect(mockFilterManager.setLocationFilter).toHaveBeenCalledWith('device')
+        expect(mockFilterManager.setSemanticFilter).toHaveBeenCalledWith('on-source')
+      })
+    })
+
+    it('should wrap setExclusiveFilter in transition', async () => {
+      const { result } = renderHook(() => useTransitionFilters())
+
+      act(() => {
+        result.current.setExclusiveFilter('source-only')
+      })
+
+      await waitFor(() => {
+        expect(mockFilterManager.setExclusiveFilter).toHaveBeenCalledWith('source-only')
       })
     })
 
@@ -175,7 +193,7 @@ describe('useTransitionFilters', () => {
     it('should maintain stable action references', () => {
       const { result, rerender } = renderHook(() => useTransitionFilters())
 
-      const firstSetLocationFilter = result.current.setLocationFilter
+      const firstSetSemanticFilter = result.current.setSemanticFilter
       const firstSetCategoryFilter = result.current.setCategoryFilter
       const firstSetQualityFilter = result.current.setQualityFilter
       const firstSetStatusFilter = result.current.setStatusFilter
@@ -185,7 +203,7 @@ describe('useTransitionFilters', () => {
       // Rerender without changing dependencies
       rerender()
 
-      expect(result.current.setLocationFilter).toBe(firstSetLocationFilter)
+      expect(result.current.setSemanticFilter).toBe(firstSetSemanticFilter)
       expect(result.current.setCategoryFilter).toBe(firstSetCategoryFilter)
       expect(result.current.setQualityFilter).toBe(firstSetQualityFilter)
       expect(result.current.setStatusFilter).toBe(firstSetStatusFilter)
@@ -200,14 +218,14 @@ describe('useTransitionFilters', () => {
 
       // Trigger multiple filter changes in rapid succession
       act(() => {
-        result.current.setLocationFilter('device')
+        result.current.setSemanticFilter('on-source')
         result.current.setCategoryFilter('meeting')
         result.current.setSearchQuery('test')
       })
 
       // All actions should eventually be called
       await waitFor(() => {
-        expect(mockFilterManager.setLocationFilter).toHaveBeenCalledWith('device')
+        expect(mockFilterManager.setSemanticFilter).toHaveBeenCalledWith('on-source')
         expect(mockFilterManager.setCategoryFilter).toHaveBeenCalledWith('meeting')
         expect(mockFilterManager.setSearchQuery).toHaveBeenCalledWith('test')
       })
@@ -218,13 +236,13 @@ describe('useTransitionFilters', () => {
 
       // Simulate a filter update
       act(() => {
-        result.current.setLocationFilter('device')
+        result.current.setSemanticFilter('on-source')
       })
 
       // The action should be queued via startTransition
       // Verify it's eventually called
       await waitFor(() => {
-        expect(mockFilterManager.setLocationFilter).toHaveBeenCalledWith('device')
+        expect(mockFilterManager.setSemanticFilter).toHaveBeenCalledWith('on-source')
       })
     })
   })
@@ -258,18 +276,18 @@ describe('useTransitionFilters', () => {
       })
     })
 
-    it('should handle LocationFilter type values', async () => {
+    it('should handle semantic filter type values', async () => {
       const { result } = renderHook(() => useTransitionFilters())
 
-      const locationValues: Array<'all' | 'device' | 'local' | 'cloud'> = ['all', 'device', 'local', 'cloud']
+      const semanticValues = ['all', 'on-source', 'locally-available', 'synced'] as const
 
-      for (const location of locationValues) {
+      for (const filter of semanticValues) {
         act(() => {
-          result.current.setLocationFilter(location)
+          result.current.setSemanticFilter(filter)
         })
 
         await waitFor(() => {
-          expect(mockFilterManager.setLocationFilter).toHaveBeenCalledWith(location)
+          expect(mockFilterManager.setSemanticFilter).toHaveBeenCalledWith(filter)
         })
 
         vi.clearAllMocks()
@@ -282,14 +300,18 @@ describe('useTransitionFilters', () => {
       const { result } = renderHook(() => useTransitionFilters())
 
       // Verify all properties are accessible
-      expect(result.current).toHaveProperty('locationFilter')
+      expect(result.current).toHaveProperty('filterMode')
+      expect(result.current).toHaveProperty('semanticFilter')
+      expect(result.current).toHaveProperty('exclusiveFilter')
       expect(result.current).toHaveProperty('categoryFilter')
       expect(result.current).toHaveProperty('qualityFilter')
       expect(result.current).toHaveProperty('statusFilter')
       expect(result.current).toHaveProperty('searchQuery')
       expect(result.current).toHaveProperty('hasActiveFilters')
       expect(result.current).toHaveProperty('activeFilterCount')
-      expect(result.current).toHaveProperty('setLocationFilter')
+      expect(result.current).toHaveProperty('setFilterMode')
+      expect(result.current).toHaveProperty('setSemanticFilter')
+      expect(result.current).toHaveProperty('setExclusiveFilter')
       expect(result.current).toHaveProperty('setCategoryFilter')
       expect(result.current).toHaveProperty('setQualityFilter')
       expect(result.current).toHaveProperty('setStatusFilter')

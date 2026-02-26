@@ -162,6 +162,10 @@ export interface GetContactByIdRequest {
 export interface UpdateContactRequest {
   id: string
   notes?: string
+  type?: 'team' | 'candidate' | 'customer' | 'external' | 'unknown'
+  role?: string
+  company?: string
+  tags?: string[]
 }
 
 // =============================================================================
@@ -207,6 +211,7 @@ export interface UpdateProjectRequest {
   id: string
   name?: string
   description?: string
+  status?: 'active' | 'archived'
 }
 
 /**
@@ -244,6 +249,8 @@ export interface GenerateOutputRequest {
   meetingId?: string
   projectId?: string
   contactId?: string
+  knowledgeCaptureId?: string
+  actionableId?: string
 }
 
 /**

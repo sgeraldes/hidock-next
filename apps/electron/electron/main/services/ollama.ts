@@ -178,7 +178,19 @@ let ollamaInstance: OllamaService | null = null
 
 export function getOllamaService(): OllamaService {
   if (!ollamaInstance) {
-    ollamaInstance = new OllamaService()
+    try {
+      // Read config dynamically to avoid circular dependency issues at startup
+      const { getConfig } = require('./config')
+      const config = getConfig()
+      ollamaInstance = new OllamaService(
+        config.embeddings?.ollamaBaseUrl || OLLAMA_BASE_URL,
+        config.embeddings?.ollamaModel || EMBEDDING_MODEL,
+        config.chat?.ollamaModel || CHAT_MODEL
+      )
+    } catch {
+      // Fall back to defaults if config is not available yet
+      ollamaInstance = new OllamaService()
+    }
   }
   return ollamaInstance
 }

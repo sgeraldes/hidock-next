@@ -8,6 +8,7 @@
 
 import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
+import { useShallow } from 'zustand/react/shallow'
 
 export type TranscriptionStatus = 'pending' | 'processing' | 'completed' | 'failed'
 
@@ -39,9 +40,6 @@ export interface TranscriptionQueueStore {
   retry: (id: string) => void
   remove: (id: string) => void
   clear: () => void
-
-  // Async Actions
-  loadQueue: () => Promise<void>
 
   // Queries
   isProcessing: (recordingId: string) => boolean
@@ -135,17 +133,25 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
     },
 
     retry: (id) => {
+      const item = get().queue.get(id)
+      if (!item || item.status !== 'failed') return
+
+      // Update DB first so the transcription processor picks it up
+      window.electronAPI?.recordings?.updateQueueItem?.(id, 'pending').catch((e) => {
+        console.error('Failed to update queue item in DB for retry:', e)
+      })
+
       set((state) => {
-        const item = state.queue.get(id)
-        if (!item || item.status !== 'failed') return state
+        const currentItem = state.queue.get(id)
+        if (!currentItem) return state
 
         const queue = new Map(state.queue)
         queue.set(id, {
-          ...item,
+          ...currentItem,
           status: 'pending',
           progress: 0,
           error: undefined,
-          retryCount: item.retryCount + 1
+          retryCount: currentItem.retryCount + 1
         })
 
         return { queue }
@@ -169,40 +175,6 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
 
     clear: () => {
       set({ queue: new Map(), processing: new Set() })
-    },
-
-    // Async Actions
-    loadQueue: async () => {
-      try {
-        const result = await (window.electronAPI.recordings as any).getQueue()
-        if (result.success) {
-          const queue = new Map<string, TranscriptionItem>()
-          const processing = new Set<string>()
-
-          result.data.forEach((item: any) => {
-            const transcriptionItem: TranscriptionItem = {
-              id: item.id,
-              recordingId: item.recording_id,
-              filename: item.filename || 'Unknown',
-              status: item.status,
-              progress: item.status === 'completed' ? 100 : item.status === 'processing' ? 50 : 0,
-              retryCount: item.attempts || 0,
-              attempts: item.attempts || 0,
-              error: item.error_message
-            }
-
-            queue.set(item.id, transcriptionItem)
-
-            if (item.status === 'processing') {
-              processing.add(item.recording_id)
-            }
-          })
-
-          set({ queue, processing })
-        }
-      } catch (error) {
-        console.error('Failed to load transcription queue:', error)
-      }
     },
 
     // Queries
@@ -232,7 +204,7 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
  * Get all pending transcriptions
  */
 export const usePendingTranscriptions = () => {
-  return useTranscriptionStore((state) => {
+  return useTranscriptionStore(useShallow((state) => {
     const pending: TranscriptionItem[] = []
     state.queue.forEach((item) => {
       if (item.status === 'pending') {
@@ -240,14 +212,14 @@ export const usePendingTranscriptions = () => {
       }
     })
     return pending
-  })
+  }))
 }
 
 /**
  * Get all processing transcriptions
  */
 export const useProcessingTranscriptions = () => {
-  return useTranscriptionStore((state) => {
+  return useTranscriptionStore(useShallow((state) => {
     const processing: TranscriptionItem[] = []
     state.queue.forEach((item) => {
       if (item.status === 'processing') {
@@ -255,14 +227,14 @@ export const useProcessingTranscriptions = () => {
       }
     })
     return processing
-  })
+  }))
 }
 
 /**
  * Get all failed transcriptions
  */
 export const useFailedTranscriptions = () => {
-  return useTranscriptionStore((state) => {
+  return useTranscriptionStore(useShallow((state) => {
     const failed: TranscriptionItem[] = []
     state.queue.forEach((item) => {
       if (item.status === 'failed') {
@@ -270,14 +242,14 @@ export const useFailedTranscriptions = () => {
       }
     })
     return failed
-  })
+  }))
 }
 
 /**
  * Get queue statistics
  */
 export const useTranscriptionStats = () => {
-  return useTranscriptionStore((state) => {
+  return useTranscriptionStore(useShallow((state) => {
     let total = 0
     let completed = 0
     let failed = 0
@@ -303,5 +275,5 @@ export const useTranscriptionStats = () => {
     })
 
     return { total, completed, failed, processing, pending }
-  })
+  }))
 }

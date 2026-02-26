@@ -1,5 +1,4 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
 import {
   Folder,
   Search,
@@ -18,12 +17,15 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
 import type { Project } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
+import { toast } from '@/components/ui/toaster'
 
 export function Projects() {
-  const _navigate = useNavigate()
-  void _navigate // Reserved for project detail navigation
+  // TODO(PJ-08): Migrate to useProjectsStore from @/store instead of local useState.
+  // The store (store/domain/useProjectsStore.ts) already has loadProjects, createProject,
+  // updateProject, deleteProject, and selectProject actions. This page should consume
+  // that store directly. The initial data load below already uses IPC via window.electronAPI.
   const [projects, setProjects] = useState<Project[]>([])
-  const [activeProject, setActiveConversation] = useState<Project | null>(null)
+  const [activeProject, setActiveProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'all'>('active')
@@ -42,13 +44,18 @@ export function Projects() {
       }
     } catch (error) {
       console.error('Failed to load projects:', error)
+      toast.error('Failed to load projects', error instanceof Error ? error.message : 'An unexpected error occurred')
     } finally {
       setLoading(false)
     }
   }
 
+  // PJ-12: Debounce search to avoid firing IPC on every keystroke
   useEffect(() => {
-    loadProjects()
+    const timer = setTimeout(() => {
+      loadProjects()
+    }, 300)
+    return () => clearTimeout(timer)
   }, [searchQuery])
 
   const filteredProjects = useMemo(() => {
@@ -72,10 +79,11 @@ export function Projects() {
           createdAt: p.created_at || p.createdAt || new Date().toISOString()
         }
         setProjects(prev => [mapped, ...prev])
-        setActiveConversation(mapped)
+        setActiveProject(mapped)
       }
     } catch (error) {
       console.error('Failed to create project:', error)
+      toast.error('Failed to create project', error instanceof Error ? error.message : 'An unexpected error occurred')
     }
   }
 
@@ -103,10 +111,11 @@ export function Projects() {
           </div>
 
           <div className="flex gap-1 p-1 bg-muted rounded-lg">
-            {['active', 'archived'].map((s) => (
+            {/* PJ-15: Added "All" filter option */}
+            {(['all', 'active', 'archived'] as const).map((s) => (
               <button
                 key={s}
-                onClick={() => setStatusFilter(s as any)}
+                onClick={() => setStatusFilter(s)}
                 className={cn(
                   "flex-1 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all",
                   statusFilter === s ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
@@ -130,7 +139,7 @@ export function Projects() {
               {filteredProjects.map((project) => (
                 <div
                   key={project.id}
-                  onClick={() => setActiveConversation(project)}
+                  onClick={() => setActiveProject(project)}
                   className={cn(
                     "w-full text-left p-3 rounded-xl transition-all cursor-pointer group",
                     activeProject?.id === project.id 
@@ -184,11 +193,46 @@ export function Projects() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" className="h-9 gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-9 gap-2"
+                  onClick={async () => {
+                    const newStatus: 'active' | 'archived' = activeProject.status === 'active' ? 'archived' : 'active'
+                    try {
+                      const result = await window.electronAPI.projects.update({ id: activeProject.id, status: newStatus })
+                      if (result.success) {
+                        const updated: Project = { ...activeProject, status: newStatus }
+                        setActiveProject(updated)
+                        setProjects(prev => prev.map(p => p.id === activeProject.id ? updated : p))
+                      }
+                    } catch (error) {
+                      console.error('Failed to update project status:', error)
+                      toast.error('Failed to update project', error instanceof Error ? error.message : 'An unexpected error occurred')
+                    }
+                  }}
+                >
                   <Archive className="h-4 w-4" />
                   {activeProject.status === 'active' ? 'Archive' : 'Activate'}
                 </Button>
-                <Button variant="ghost" size="icon" className="h-9 w-9 text-muted-foreground hover:text-destructive">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 text-muted-foreground hover:text-destructive"
+                  onClick={async () => {
+                    if (!confirm(`Delete project "${activeProject.name}"? This cannot be undone.`)) return
+                    try {
+                      const result = await window.electronAPI.projects.delete(activeProject.id)
+                      if (result.success) {
+                        setProjects(prev => prev.filter(p => p.id !== activeProject.id))
+                        setActiveProject(null)
+                      }
+                    } catch (error) {
+                      console.error('Failed to delete project:', error)
+                      toast.error('Failed to delete project', error instanceof Error ? error.message : 'An unexpected error occurred')
+                    }
+                  }}
+                >
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </div>
@@ -205,7 +249,7 @@ export function Projects() {
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Knowledge</p>
                         <FileText className="h-4 w-4 text-primary" />
                       </div>
-                      <p className="text-2xl font-bold mt-2">12 Items</p>
+                      <p className="text-2xl font-bold mt-2">{activeProject.knowledgeIds?.length ?? '\u2014'} {activeProject.knowledgeIds ? 'Items' : ''}</p>
                     </CardContent>
                   </Card>
                   <Card className="bg-muted/5">
@@ -214,7 +258,7 @@ export function Projects() {
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">People</p>
                         <Users className="h-4 w-4 text-primary" />
                       </div>
-                      <p className="text-2xl font-bold mt-2">5 Involved</p>
+                      <p className="text-2xl font-bold mt-2">{activeProject.personIds?.length ?? '\u2014'} {activeProject.personIds ? 'Involved' : ''}</p>
                     </CardContent>
                   </Card>
                   <Card className="bg-muted/5">
@@ -223,7 +267,7 @@ export function Projects() {
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Actions</p>
                         <CheckCircle2 className="h-4 w-4 text-primary" />
                       </div>
-                      <p className="text-2xl font-bold mt-2">8 Pending</p>
+                      <p className="text-2xl font-bold mt-2">{'\u2014'}</p>
                     </CardContent>
                   </Card>
                 </div>
@@ -243,12 +287,30 @@ export function Projects() {
                       <Bot className="h-5 w-5 text-primary" />
                       <h3 className="font-bold text-sm uppercase tracking-wider">AI Project Insight</h3>
                     </div>
-                    <p className="text-sm leading-relaxed">
-                      Based on the 12 knowledge items in this project, the recurring theme is **"Amazon Connect Integration Strategy"**. Dani has been the primary driver of technical decisions.
+                    <p className="text-sm leading-relaxed text-muted-foreground italic">
+                      AI-generated insights for "{activeProject.name}" will appear here once knowledge items are linked to this project.
                     </p>
                     <div className="mt-4 flex gap-2">
-                      <Button size="sm" variant="outline" className="h-8 text-xs bg-background">Generate Status Report</Button>
-                      <Button size="sm" variant="outline" className="h-8 text-xs bg-background">Summarize Decisions</Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 text-xs bg-background"
+                        disabled
+                        title="Coming soon"
+                        onClick={() => toast.info('Coming soon', 'Report generation is not yet available.')}
+                      >
+                        Generate Status Report
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 text-xs bg-background"
+                        disabled
+                        title="Coming soon"
+                        onClick={() => toast.info('Coming soon', 'Decision summarization is not yet available.')}
+                      >
+                        Summarize Decisions
+                      </Button>
                     </div>
                   </CardContent>
                 </Card>

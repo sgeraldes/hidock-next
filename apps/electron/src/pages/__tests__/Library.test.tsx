@@ -59,15 +59,103 @@ vi.mock('@tanstack/react-virtual', () => ({
     })),
     getTotalSize: () => count * 64,
     scrollToIndex: vi.fn(),
-    measureElement: vi.fn()
+    measureElement: vi.fn(),
+    measure: vi.fn()
   })
+}))
+
+vi.mock('@/store/useLibraryStore', () => ({
+  useLibraryStore: vi.fn((selector) => {
+    const state = {
+      viewMode: 'card',
+      sortBy: 'date',
+      sortOrder: 'desc',
+      selectedIds: new Set(),
+      recordingErrors: new Map(),
+      scrollOffset: 0,
+      setViewMode: vi.fn(),
+      toggleViewMode: vi.fn(),
+      setSortBy: vi.fn(),
+      setSortOrder: vi.fn(),
+      toggleSortOrder: vi.fn(),
+      setScrollOffset: vi.fn(),
+      setRecordingError: vi.fn(),
+      clearRecordingError: vi.fn(),
+      toggleSelection: vi.fn(),
+      selectAll: vi.fn(),
+      clearSelection: vi.fn(),
+      panelSizes: [25, 45, 30],
+      setPanelSizes: vi.fn(),
+      selectedSourceId: null,
+      setSelectedSourceId: vi.fn(),
+      expandedRowIds: new Set(),
+      toggleRowExpansion: vi.fn(),
+      expandRow: vi.fn(),
+      collapseRow: vi.fn(),
+      collapseAllRows: vi.fn()
+    }
+    return typeof selector === 'function' ? selector(state) : state
+  }),
+  useLibrarySorting: vi.fn(() => ({ sortBy: 'date', sortOrder: 'desc' }))
+}))
+
+vi.mock('@/hooks/useOperations', () => ({
+  useOperations: vi.fn(() => ({
+    queueTranscription: vi.fn().mockResolvedValue(true),
+    queueBulkTranscriptions: vi.fn().mockResolvedValue(0),
+    queueDownload: vi.fn().mockResolvedValue(true),
+    queueBulkDownloads: vi.fn().mockResolvedValue(0),
+    cancelTranscription: vi.fn(),
+    cancelAllTranscriptions: vi.fn(),
+    cancelAllDownloads: vi.fn()
+  }))
+}))
+
+vi.mock('@/features/library/hooks', () => ({
+  useSourceSelection: vi.fn(() => ({
+    selectedIds: new Set(),
+    selectedCount: 0,
+    toggleSelection: vi.fn(),
+    selectAll: vi.fn(),
+    clearSelection: vi.fn(),
+    isSelected: vi.fn(() => false),
+    handleSelectionClick: vi.fn()
+  })),
+  useKeyboardNavigation: vi.fn(() => ({
+    handleKeyDown: vi.fn()
+  })),
+  useTransitionFilters: vi.fn(() => ({
+    filterMode: 'semantic',
+    semanticFilter: 'all',
+    exclusiveFilter: 'all',
+    categoryFilter: null,
+    qualityFilter: null,
+    statusFilter: null,
+    searchQuery: '',
+    setFilterMode: vi.fn(),
+    setSemanticFilter: vi.fn(),
+    setExclusiveFilter: vi.fn(),
+    setCategoryFilter: vi.fn(),
+    setQualityFilter: vi.fn(),
+    setStatusFilter: vi.fn(),
+    setSearchQuery: vi.fn(),
+    isPending: false
+  }))
 }))
 
 // Mock electronAPI
 global.window.electronAPI = {
   transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}) },
   meetings: { getByIds: vi.fn().mockResolvedValue({}) },
-  storage: { openFolder: vi.fn() }
+  storage: { openFolder: vi.fn() },
+  recordings: {
+    addExternal: vi.fn(),
+    delete: vi.fn(),
+    updateStatus: vi.fn()
+  },
+  downloadService: {
+    queueDownloads: vi.fn()
+  }
 } as any
 
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
@@ -75,18 +163,14 @@ import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 const mockRecording = {
   id: 'test-123',
   filename: 'test.wav',
-  displayTitle: 'Test Recording',
-  quality: 'valuable',
+  quality: 'valuable' as const,
   duration: 120,
+  size: 1024000,
   dateRecorded: new Date(),
-  recordedAt: new Date().toISOString(),
-  location: 'local-only',
+  location: 'local-only' as const,
   localPath: '/path/test.wav',
-  syncStatus: 'synced',
-  transcriptionStatus: 'complete',
-  isProcessed: false,
-  isProcessing: false,
-  hasTranscript: false,
+  syncStatus: 'synced' as const,
+  transcriptionStatus: 'complete' as const,
   title: 'Test Recording'
 }
 
@@ -99,7 +183,7 @@ describe('Library', () => {
       error: null,
       refresh: vi.fn(),
       deviceConnected: false,
-      stats: { total: 0, deviceOnly: 0, localOnly: 0, both: 0, synced: 0, unsynced: 0 }
+      stats: { total: 0, deviceOnly: 0, localOnly: 0, both: 0, synced: 0, unsynced: 0, onSource: 0, locallyAvailable: 0 }
     })
   })
 
@@ -119,7 +203,7 @@ describe('Library', () => {
         error: null,
         refresh: vi.fn(),
         deviceConnected: false,
-        stats: { total: 0, deviceOnly: 0, localOnly: 0, both: 0, synced: 0, unsynced: 0 }
+        stats: { total: 0, deviceOnly: 0, localOnly: 0, both: 0, synced: 0, unsynced: 0, onSource: 0, locallyAvailable: 0 }
       })
 
       renderLibrary()
@@ -136,7 +220,7 @@ describe('Library', () => {
         error: null,
         refresh: vi.fn(),
         deviceConnected: false,
-        stats: { total: 0, deviceOnly: 0, localOnly: 0, both: 0, synced: 0, unsynced: 0 }
+        stats: { total: 0, deviceOnly: 0, localOnly: 0, both: 0, synced: 0, unsynced: 0, onSource: 0, locallyAvailable: 0 }
       })
 
       renderLibrary()
@@ -153,7 +237,7 @@ describe('Library', () => {
         error: null,
         refresh: vi.fn(),
         deviceConnected: false,
-        stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0 }
+        stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0, onSource: 0, locallyAvailable: 1 }
       })
 
       renderLibrary()
@@ -171,7 +255,7 @@ describe('Library', () => {
         error: null,
         refresh: vi.fn(),
         deviceConnected: false,
-        stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0 }
+        stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0, onSource: 0, locallyAvailable: 1 }
       })
 
       renderLibrary()
@@ -191,7 +275,7 @@ describe('Library', () => {
         error: 'Failed to load recordings',
         refresh: vi.fn(),
         deviceConnected: false,
-        stats: { total: 0, deviceOnly: 0, localOnly: 0, both: 0, synced: 0, unsynced: 0 }
+        stats: { total: 0, deviceOnly: 0, localOnly: 0, both: 0, synced: 0, unsynced: 0, onSource: 0, locallyAvailable: 0 }
       })
 
       renderLibrary()
@@ -208,7 +292,7 @@ describe('Library', () => {
         error: null,
         refresh: vi.fn(),
         deviceConnected: false,
-        stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0 }
+        stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0, onSource: 0, locallyAvailable: 1 }
       })
 
       renderLibrary()
@@ -238,7 +322,7 @@ describe('Library', () => {
         error: null,
         refresh: vi.fn(),
         deviceConnected: false,
-        stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0 }
+        stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0, onSource: 0, locallyAvailable: 1 }
       })
 
       renderLibrary()

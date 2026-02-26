@@ -9,7 +9,8 @@ import {
   RefreshCw,
   Trash2,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Wand2
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -39,6 +40,7 @@ interface SourceCardProps {
   onStop: () => void
   onDownload: () => void
   onDelete: () => void
+  onTranscribe?: () => void
   onAskAssistant: () => void
   onGenerateOutput: () => void
   onToggleTranscript: () => void
@@ -62,6 +64,7 @@ export const SourceCard = memo(function SourceCard({
   onStop,
   onDownload,
   onDelete,
+  onTranscribe,
   onAskAssistant,
   onGenerateOutput,
   onToggleTranscript,
@@ -137,6 +140,27 @@ export const SourceCard = memo(function SourceCard({
             <Button variant="ghost" size="icon" onClick={onGenerateOutput} title="Generate artifact from this capture">
               <FileText className="h-4 w-4" />
             </Button>
+
+            {/* Transcribe button - for local recordings without transcript */}
+            {hasLocalPath(recording) && recording.transcriptionStatus !== 'complete' && onTranscribe && (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onTranscribe}
+                disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
+                title={
+                  recording.transcriptionStatus === 'pending' ? 'Transcription queued' :
+                  recording.transcriptionStatus === 'processing' ? 'Transcription in progress' :
+                  'Transcribe this capture'
+                }
+              >
+                {recording.transcriptionStatus === 'processing' ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Wand2 className="h-4 w-4" />
+                )}
+              </Button>
+            )}
 
             {/* Transcription status badge */}
             <TranscriptionStatusBadge status={recording.transcriptionStatus} />

@@ -77,11 +77,9 @@ export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
   const handlePlaybackRateChange = useCallback(
     (value: string) => {
       setPlaybackRate(value)
-      // Note: Actual playback rate control would need to be implemented in OperationController
-      // For now, we just update the UI state
-      console.log('Playback rate changed to:', value)
+      audioControls.setPlaybackRate(parseFloat(value))
     },
-    []
+    [audioControls]
   )
 
   return (

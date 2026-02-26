@@ -66,6 +66,12 @@ export async function decodeAudioData(
   // Use singleton audio context instead of creating new one
   const audioContext = getAudioContext()
 
+  // Ensure AudioContext is active (it may start in 'suspended' state
+  // if created without a user gesture, causing decodeAudioData to hang)
+  if (audioContext.state === 'suspended') {
+    await audioContext.resume()
+  }
+
   // Decode base64 to binary
   const binaryData = atob(base64Data)
   const arrayBuffer = new ArrayBuffer(binaryData.length)
@@ -77,6 +83,31 @@ export async function decodeAudioData(
 
   // Decode audio data
   return await audioContext.decodeAudioData(arrayBuffer)
+}
+
+/**
+ * Get the MIME type for an audio file based on its extension.
+ *
+ * @param filePath - Full file path or just the filename/extension
+ * @returns MIME type string (defaults to 'audio/wav' for unknown extensions)
+ */
+export function getAudioMimeType(filePath: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase()
+  switch (ext) {
+    case 'mp3':
+    case 'hda': // HDA files are MPEG MP3
+      return 'audio/mpeg'
+    case 'm4a':
+      return 'audio/mp4'
+    case 'ogg':
+      return 'audio/ogg'
+    case 'flac':
+      return 'audio/flac'
+    case 'webm':
+      return 'audio/webm'
+    default:
+      return 'audio/wav'
+  }
 }
 
 /**

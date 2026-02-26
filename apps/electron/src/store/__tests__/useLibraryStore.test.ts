@@ -20,7 +20,6 @@ import {
   useLibraryStore,
   useLibraryViewMode,
   useLibrarySelection,
-  useLibrarySorting,
   type SortBy
 } from '@/store/useLibraryStore'
 import type { LibraryError } from '@/features/library/utils/errorHandling'

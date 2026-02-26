@@ -113,9 +113,13 @@ export interface ElectronAPI {
     addExternal: () => Promise<{ success: boolean; recording?: any; error?: string }>
     // Transcription
     transcribe: (recordingId: string) => Promise<void>
-    addToQueue: (recordingId: string) => Promise<boolean>
+    addToQueue: (recordingId: string) => Promise<string | false>
     processQueue: () => Promise<boolean>
     getTranscriptionStatus: () => Promise<{ isProcessing: boolean; pendingCount: number; processingCount: number }>
+    getTranscriptionQueue: () => Promise<any[]>
+    cancelTranscription: (recordingId: string) => Promise<{ success: boolean }>
+    cancelAllTranscriptions: () => Promise<{ success: boolean; count: number }>
+    updateQueueItem: (id: string, status: string, errorMessage?: string) => Promise<boolean>
   }
 
   // Database - Transcripts
@@ -178,7 +182,7 @@ export interface ElectronAPI {
   storage: {
     getInfo: () => Promise<any>
     openFolder: (folder: 'recordings' | 'transcripts' | 'data') => Promise<boolean>
-    readRecording: (filePath: string) => Promise<string | null>
+    readRecording: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>
     deleteRecording: (filePath: string) => Promise<boolean>
     saveRecording: (filename: string, data: number[], recordingDateIso?: string) => Promise<string>
   }
@@ -260,6 +264,11 @@ export interface ElectronAPI {
       timestamp?: string
       embeddingDimensions: number
     }>>
+    globalSearch: (query: string, limit?: number) => Promise<Result<{
+      knowledge: any[]
+      people: any[]
+      projects: any[]
+    }>>
   }
 
   // Download Service - Centralized background download manager
@@ -293,11 +302,12 @@ export interface ElectronAPI {
       failedFiles: number
       status: 'active' | 'completed' | 'cancelled' | 'failed'
     }>
-    processDownload: (filename: string, data: number[]) => Promise<{ success: boolean; filePath?: string; error?: string }>
+    processDownload: (filename: string, data: number[] | Uint8Array) => Promise<{ success: boolean; filePath?: string; error?: string }>
     updateProgress: (filename: string, bytesReceived: number) => Promise<void>
     markFailed: (filename: string, error: string) => Promise<void>
     clearCompleted: () => Promise<void>
     cancelAll: () => Promise<void>
+    retryFailed: () => Promise<number>
     getStats: () => Promise<{ totalSynced: number; pendingInQueue: number; failedInQueue: number }>
     onStateUpdate: (callback: (state: any) => void) => () => void
   }
@@ -390,6 +400,13 @@ export interface ElectronAPI {
   // Recording Watcher Events
   onRecordingAdded: (callback: (data: { recording: any }) => void) => () => void
 
+  // Transcription Events
+  onTranscriptionStarted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => () => void
+  onTranscriptionCompleted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => () => void
+  onTranscriptionFailed: (callback: (data: { queueItemId?: string; recordingId: string; error: string }) => void) => () => void
+  onTranscriptionCancelled: (callback: (data: { recordingId: string }) => void) => () => void
+  onTranscriptionAllCancelled: (callback: (data: { count: number }) => void) => () => void
+
   // Security Warning Events
   onSecurityWarning: (callback: (data: { type: string; message: string }) => void) => () => void
 }
@@ -427,7 +444,7 @@ const electronAPI: ElectronAPI = {
     getById: (id) => callIPC('projects:getById', id),
     create: (request) => callIPC('projects:create', request),
     update: (request) => callIPC('projects:update', request),
-    delete: (id) => callIPC('projects:delete', { id }),
+    delete: (id) => callIPC('projects:delete', id),
     tagMeeting: (request) => callIPC('projects:tagMeeting', request),
     untagMeeting: (request) => callIPC('projects:untagMeeting', request),
     getForMeeting: (meetingId) => callIPC('projects:getForMeeting', meetingId)
@@ -451,7 +468,11 @@ const electronAPI: ElectronAPI = {
     transcribe: (recordingId) => callIPC('recordings:transcribe', recordingId),
     addToQueue: (recordingId) => callIPC('recordings:addToQueue', recordingId),
     processQueue: () => callIPC('recordings:processQueue'),
-    getTranscriptionStatus: () => callIPC('recordings:getTranscriptionStatus')
+    getTranscriptionStatus: () => callIPC('recordings:getTranscriptionStatus'),
+    getTranscriptionQueue: () => callIPC('transcription:getQueue'),
+    cancelTranscription: (recordingId: string) => callIPC('transcription:cancel', recordingId),
+    cancelAllTranscriptions: () => callIPC('transcription:cancelAll'),
+    updateQueueItem: (id: string, status: string, errorMessage?: string) => callIPC('transcription:updateQueueItem', id, status, errorMessage),
   },
 
   transcripts: {
@@ -561,7 +582,8 @@ const electronAPI: ElectronAPI = {
     indexTranscript: (transcript, metadata) =>
       callIPC('rag:index-transcript', { transcript, metadata }),
     search: (query, limit) => callIPC('rag:search', { query, limit }),
-    getChunks: () => callIPC('rag:get-chunks')
+    getChunks: () => callIPC('rag:get-chunks'),
+    globalSearch: (query, limit) => callIPC('rag:globalSearch', { query, limit })
   },
 
   downloadService: {
@@ -575,6 +597,7 @@ const electronAPI: ElectronAPI = {
     markFailed: (filename, error) => callIPC('download-service:mark-failed', filename, error),
     clearCompleted: () => callIPC('download-service:clear-completed'),
     cancelAll: () => callIPC('download-service:cancel-all'),
+    retryFailed: () => callIPC('download-service:retry-failed'),
     getStats: () => callIPC('download-service:get-stats'),
     onStateUpdate: (callback) => {
       const handler = (_event: any, state: any) => callback(state)
@@ -645,6 +668,47 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('recording:new', handler)
     return () => {
       ipcRenderer.removeListener('recording:new', handler)
+    }
+  },
+
+  // Transcription Event Listeners
+  onTranscriptionStarted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => {
+    const handler = (_event: any, data: { queueItemId?: string; recordingId: string }) => callback(data)
+    ipcRenderer.on('transcription:started', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:started', handler)
+    }
+  },
+
+  onTranscriptionCompleted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => {
+    const handler = (_event: any, data: { queueItemId?: string; recordingId: string }) => callback(data)
+    ipcRenderer.on('transcription:completed', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:completed', handler)
+    }
+  },
+
+  onTranscriptionFailed: (callback: (data: { queueItemId?: string; recordingId: string; error: string }) => void) => {
+    const handler = (_event: any, data: { queueItemId?: string; recordingId: string; error: string }) => callback(data)
+    ipcRenderer.on('transcription:failed', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:failed', handler)
+    }
+  },
+
+  onTranscriptionCancelled: (callback: (data: { recordingId: string }) => void) => {
+    const handler = (_event: any, data: { recordingId: string }) => callback(data)
+    ipcRenderer.on('transcription:cancelled', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:cancelled', handler)
+    }
+  },
+
+  onTranscriptionAllCancelled: (callback: (data: { count: number }) => void) => {
+    const handler = (_event: any, data: { count: number }) => callback(data)
+    ipcRenderer.on('transcription:all-cancelled', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:all-cancelled', handler)
     }
   },
 

@@ -1,4 +1,4 @@
-import { useAppStore } from '@/store/useAppStore'
+import { useConfigStore } from '@/store/domain/useConfigStore'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 
 export interface AutoSyncResult {
@@ -14,21 +14,21 @@ export interface AutoSyncResult {
  * 3. Device is connected AND fully initialized (step === 'ready')
  */
 export function checkAutoSyncAllowed(): AutoSyncResult {
-  const store = useAppStore.getState()
+  const configStore = useConfigStore.getState()
   const deviceService = getHiDockDeviceService()
 
   // Guard 1: Config must be loaded
-  if (!store.configReady) {
+  if (!configStore.configReady) {
     return { allowed: false, reason: 'Config not loaded yet' }
   }
 
   // Guard 2: Config must exist
-  if (!store.config) {
+  if (!configStore.config) {
     return { allowed: false, reason: 'Config unavailable' }
   }
 
   // Guard 3: Auto-download must be EXPLICITLY enabled (no defaulting to true)
-  const autoDownloadSetting = store.config.device?.autoDownload
+  const autoDownloadSetting = configStore.config.device?.autoDownload
   if (autoDownloadSetting !== true) {
     return {
       allowed: false,
@@ -65,7 +65,7 @@ export async function waitForConfig(timeoutMs: number = 5000): Promise<boolean> 
   const startTime = Date.now()
 
   while (Date.now() - startTime < timeoutMs) {
-    const { configReady } = useAppStore.getState()
+    const { configReady } = useConfigStore.getState()
     if (configReady) return true
     await new Promise(resolve => setTimeout(resolve, 100))
   }

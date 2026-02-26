@@ -1,3 +1,4 @@
+// TODO: W1-HS-08: This store is not consumed by any component. Wire it to the Library page or remove it.
 /**
  * Quality Store (Feature)
  *
@@ -7,6 +8,7 @@
  */
 
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 import { subscribeWithSelector } from 'zustand/middleware'
 
 export type QualityRating = 'valuable' | 'archived' | 'low-value' | 'garbage' | 'unrated'
@@ -85,23 +87,13 @@ export const useQualityStore = create<QualityStore>()(
     loadAssessments: async () => {
       set({ loading: true })
       try {
-        // Note: This assumes an electronAPI method exists for loading quality assessments
-        // If not implemented yet, this will need to be added to the backend
-        const result = await (window.electronAPI.recordings as any).getQualityAssessments?.()
-        if (result?.success) {
-          const assessments = new Map<string, QualityAssessment>()
-          result.data.forEach((item: any) => {
-            assessments.set(item.recordingId, {
-              recordingId: item.recordingId,
-              rating: item.rating,
-              notes: item.notes,
-              assessedAt: new Date(item.assessedAt)
-            })
-          })
-          set({ assessments, loading: false })
-        } else {
-          set({ loading: false })
-        }
+        // ACTION ITEM: No bulk quality assessment API exists yet.
+        // The quality API (window.electronAPI.quality) only supports per-recording
+        // queries and uses a different rating scale ('high'|'medium'|'low') than
+        // this store's QualityRating ('valuable'|'archived'|'low-value'|'garbage'|'unrated').
+        // Needs: 1) Backend bulk getter endpoint  2) Rating system alignment
+        console.warn('[useQualityStore] loadAssessments: No bulk API available yet')
+        set({ loading: false })
       } catch (error) {
         console.error('Failed to load quality assessments:', error)
         set({ loading: false })
@@ -113,13 +105,13 @@ export const useQualityStore = create<QualityStore>()(
         // Update local state immediately
         get().setQuality(recordingId, rating, notes)
 
-        // Persist to backend
-        // Note: This assumes an electronAPI method exists for saving quality
-        // If not implemented yet, this will need to be added to the backend
-        await (window.electronAPI.recordings as any).setQuality?.(recordingId, rating, notes)
+        // ACTION ITEM: Quality API uses different rating scale ('high'|'medium'|'low')
+        // than this store's QualityRating ('valuable'|'archived'|'low-value'|'garbage'|'unrated').
+        // Persisting to backend requires rating system alignment.
+        // Backend API: window.electronAPI.quality.set(recordingId, quality, reason, assessedBy)
+        console.warn(`[useQualityStore] saveAssessment: Backend persistence skipped (rating mismatch)`)
       } catch (error) {
         console.error(`Failed to save quality assessment for ${recordingId}:`, error)
-        // Optionally rollback on error
       }
     }
   }))
@@ -140,7 +132,7 @@ export const useRecordingQuality = (recordingId: string | null) => {
  * Get all recordings with a specific quality rating
  */
 export const useRecordingsByQuality = (rating: QualityRating) => {
-  return useQualityStore((state) => {
+  return useQualityStore(useShallow((state) => {
     const recordingIds: string[] = []
     state.assessments.forEach((assessment) => {
       if (assessment.rating === rating) {
@@ -148,14 +140,14 @@ export const useRecordingsByQuality = (rating: QualityRating) => {
       }
     })
     return recordingIds
-  })
+  }))
 }
 
 /**
  * Get quality statistics
  */
 export const useQualityStats = () => {
-  return useQualityStore((state) => {
+  return useQualityStore(useShallow((state) => {
     const stats = {
       valuable: 0,
       archived: 0,
@@ -171,7 +163,7 @@ export const useQualityStats = () => {
     })
 
     return stats
-  })
+  }))
 }
 
 /**

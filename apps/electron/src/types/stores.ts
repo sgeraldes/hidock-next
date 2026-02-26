@@ -177,6 +177,10 @@ export interface UIStore {
   setWaveformLoading: (recordingId: string | null) => void
   setWaveformLoadingError: (recordingId: string | null, error: string | null) => void
   setWaveformLoadedFor: (recordingId: string | null) => void
+
+  // QA monitoring toggle
+  qaLogsEnabled: boolean
+  setQaLogsEnabled: (enabled: boolean) => void
 }
 
 // =============================================================================

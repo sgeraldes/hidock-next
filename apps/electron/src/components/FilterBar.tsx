@@ -1,3 +1,4 @@
+// TODO: W1-HS-11: This component is not consumed by any page. Wire it to the Calendar or Library page or remove it.
 /**
  * FilterBar Component
  *

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Usb, Download, RefreshCw, HardDrive, Mic, AlertCircle, Radio, Battery, Bluetooth, Play, Pause, Square, X, Terminal, ChevronDown, ChevronUp, Check, Copy, RotateCcw } from 'lucide-react'
+import { Usb, Download, RefreshCw, HardDrive, Mic, AlertCircle, Radio, Battery, Bluetooth, Play, Pause, Square, X, Terminal, ChevronDown, ChevronUp, Check, Copy, RotateCcw, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
@@ -11,46 +11,36 @@ import {
 import { Progress } from '@/components/ui/progress'
 import { toast } from '@/components/ui/toaster'
 import { useAppStore } from '@/store/useAppStore'
-import { hasDeviceFile } from '@/types/unified-recording'
+import { hasDeviceFile, type DeviceOnlyRecording, type BothLocationsRecording } from '@/types/unified-recording'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
+import { cancelDownloads } from '@/hooks/useDownloadOrchestrator'
+
+import { formatEta } from '@/utils/formatters'
 
 const CONNECTION_TIMEOUT_MS = 15000 // 15 second timeout
 const DEBUG_DEVICE_UI = false // Enable verbose UI logging
 
-// Format ETA in human-readable form
-function formatEta(seconds: number | null): string {
-  if (seconds === null || seconds <= 0) return ''
-  if (seconds < 60) return `${seconds}s remaining`
-  if (seconds < 3600) {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return secs > 0 ? `${mins}m ${secs}s remaining` : `${mins}m remaining`
-  }
-  const hours = Math.floor(seconds / 3600)
-  const mins = Math.floor((seconds % 3600) / 60)
-  return mins > 0 ? `${hours}h ${mins}m remaining` : `${hours}h remaining`
-}
-
 export function Device() {
+  // TODO (DL-05/DV-08): Dual syncing state causes UI flicker. `storeSyncing` (from useAppStore)
+  // tracks the download orchestrator's sync state, while `syncing` (local useState) tracks
+  // the Device page's manual sync button state. Both are used in the UI conditionals (line ~977),
+  // causing the sync button to flicker between states when one updates before the other.
+  // The fix requires unifying these into a single source of truth, but that needs careful
+  // coordination between useDownloadOrchestrator and the Device page's manual sync flow.
   const storeSyncing = useAppStore(state => state.deviceSyncing)
   const deviceState = useAppStore(state => state.deviceState)
   const connectionStatus = useAppStore(state => state.connectionStatus)
   const activityLog = useAppStore(state => state.activityLog)
   const setDeviceSyncState = useAppStore(state => state.setDeviceSyncState)
-  const cancelDeviceSync = useAppStore(state => state.cancelDeviceSync)
   const deviceSyncProgress = useAppStore(state => state.deviceSyncProgress)
   const deviceSyncEta = useAppStore(state => state.deviceSyncEta)
 
   // Initialize service
   const deviceService = getHiDockDeviceService()
-  const { recordings, loading: loadingRecordings, refresh: refreshUnifiedRecordings } = useUnifiedRecordings()
+  const { recordings, loading: loadingRecordings } = useUnifiedRecordings()
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [syncing, setSyncing] = useState(false)
-  const [_downloadProgress, setDownloadProgress] = useState<any>(null)
-  void _downloadProgress // Reserved for future UI display
-  const [_connectionStartTime, setConnectionStartTime] = useState<number | null>(null)
-  void _connectionStartTime // Reserved for future UI display
   const [connectionElapsed, setConnectionElapsed] = useState(0)
   const connectionTimeoutRef = useRef<number | null>(null)
   const connectionTimerRef = useRef<number | null>(null)
@@ -58,13 +48,18 @@ export function Device() {
   // Realtime streaming state
   const [realtimeActive, setRealtimeActive] = useState(false)
   const [realtimePaused, setRealtimePaused] = useState(false)
-  const [realtimeDataOffset, setRealtimeDataOffset] = useState(0)
+  // DV-09: Offset state is kept in sync for potential future UI use; polling reads from ref
+  const [, setRealtimeDataOffset] = useState(0)
   const [realtimeDataReceived, setRealtimeDataReceived] = useState(0)
   const realtimeIntervalRef = useRef<number | null>(null)
+  // DV-09: Ref to track current offset for use in interval callback (avoids stale closure)
+  const realtimeDataOffsetRef = useRef(0)
 
   // P1-specific state
   const [batteryStatus, setBatteryStatus] = useState<BatteryStatus | null>(null)
   const [bluetoothScanning, setBluetoothScanning] = useState(false)
+  // DV-10: Ref to track Bluetooth scan timeout for cleanup on unmount
+  const btScanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // File list loading state is now managed by useUnifiedRecordings hook
 
@@ -88,6 +83,11 @@ export function Device() {
   // Track if auto-sync has been triggered for this connection session (prevents duplicate triggers)
   const autoSyncTriggeredRef = useRef(false)
 
+  // DV-04: Cancel handler that aborts the in-progress USB transfer AND sets store state
+  const cancelDeviceSync = useCallback(() => {
+    cancelDownloads() // Aborts the USB transfer via AbortController + sets store state
+  }, [])
+
   // Helper to clean up connection timers
   const clearConnectionTimers = useCallback(() => {
     if (connectionTimeoutRef.current) {
@@ -98,7 +98,6 @@ export function Device() {
       clearInterval(connectionTimerRef.current)
       connectionTimerRef.current = null
     }
-    setConnectionStartTime(null)
     setConnectionElapsed(0)
   }, [])
 
@@ -256,21 +255,10 @@ export function Device() {
 
     const unsubscribeProgress = deviceService.onDownloadProgress((progress) => {
       if (mounted) {
-        setDownloadProgress(progress)
         // Update global store for sidebar indicator
         setDeviceSyncState({ deviceFileProgress: progress.percent })
       }
     })
-
-    // Update connecting state based on connection status from store
-    const isConnecting = !['idle', 'ready', 'error'].includes(connectionStatus.step)
-    setConnecting(isConnecting)
-
-    // Show errors from connection status
-    if (connectionStatus.step === 'error') {
-      setError(connectionStatus.message)
-      clearConnectionTimers()
-    }
 
     // NOTE: We do NOT start auto-connect here. Auto-connect is managed at the app level.
     // Starting it here would reset user's disconnect decision when navigating pages.
@@ -295,8 +283,28 @@ export function Device() {
       unsubscribeDownloadService()
       // Clean up sync count validation interval
       clearInterval(syncCountInterval)
+      // DV-10: Clean up Bluetooth scan timeout
+      if (btScanTimeoutRef.current) {
+        clearTimeout(btScanTimeoutRef.current)
+        btScanTimeoutRef.current = null
+      }
     }
-  }, [clearConnectionTimers, connectionStatus.step, connectionStatus.message, refreshSyncedFilenames])
+  // DV-03: Removed connectionStatus.step/message from deps — they change ~8x per connect.
+  // Connection status is tracked in a separate effect below.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clearConnectionTimers, refreshSyncedFilenames])
+
+  // DV-03: Separate effect for connection status sync — runs when status changes
+  // but does NOT tear down and re-create all subscriptions
+  useEffect(() => {
+    const isConnecting = !['idle', 'ready', 'error'].includes(connectionStatus.step)
+    setConnecting(isConnecting)
+
+    if (connectionStatus.step === 'error') {
+      setError(connectionStatus.message)
+      clearConnectionTimers()
+    }
+  }, [connectionStatus.step, connectionStatus.message, clearConnectionTimers])
 
   // Separate effect for auto-scrolling activity log - does NOT trigger re-renders
   useEffect(() => {
@@ -323,7 +331,6 @@ export function Device() {
 
     // Start timing
     const startTime = Date.now()
-    setConnectionStartTime(startTime)
     setConnectionElapsed(0)
 
     // Update elapsed time every 100ms
@@ -391,8 +398,11 @@ export function Device() {
       const deviceRecordings = recordings.filter(rec => hasDeviceFile(rec))
       // Use download service to determine which files need syncing (handles all reconciliation)
       // Note: dateCreated maps from UnifiedRecording.dateRecorded (same underlying device timestamp)
+      // DL-08: Use deviceFilename (actual device name) for sync lookups. Currently filename
+      // and deviceFilename are always equal for device recordings, but deviceFilename is
+      // the canonical field for device-accessible recordings.
       const filesToCheck = deviceRecordings.map(rec => ({
-        filename: rec.filename,
+        filename: (rec as DeviceOnlyRecording | BothLocationsRecording).deviceFilename,
         size: rec.size,
         duration: rec.duration,
         dateCreated: rec.dateRecorded
@@ -419,7 +429,7 @@ export function Device() {
         return
       }
 
-      // Queue files to download service - DownloadController will handle actual downloads
+      // Queue files to download service - useDownloadOrchestrator will handle actual downloads
       // IMPORTANT: Pass dateCreated to preserve original recording dates from device
       // Note: dateCreated from getFilesToSync is already serialized to ISO string by IPC
       const queuedIds = await window.electronAPI.downloadService.queueDownloads(
@@ -447,7 +457,7 @@ export function Device() {
         })
         setSyncing(false)
       }
-      // Note: setSyncing(false) is NOT called here for queued files - the DownloadController will manage sync state
+      // Note: setSyncing(false) is NOT called here for queued files - the download orchestrator will manage sync state
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Sync failed')
       toast({
@@ -461,14 +471,30 @@ export function Device() {
 
   const handleAutoRecordToggle = async (enabled: boolean) => {
     try {
-      await deviceService.setAutoRecord(enabled)
+      // DV-06: Check return value — if false, the setting didn't apply on device
+      const success = await deviceService.setAutoRecord(enabled)
+      if (!success) {
+        toast({
+          title: 'Setting not applied',
+          description: 'Failed to update auto-record on device. The switch has been reverted.',
+          variant: 'error'
+        })
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to update setting')
+      toast({
+        title: 'Setting error',
+        description: e instanceof Error ? e.message : 'Failed to update auto-record setting',
+        variant: 'error'
+      })
     }
   }
 
   const handleAutoConnectToggle = (enabled: boolean) => {
-    deviceService.setAutoConnectConfig({ enabled })
+    // DV-11: Sync both enabled and connectOnStartup flags together
+    // When user toggles auto-connect, both flags should update so the
+    // auto-connect behavior is consistent on startup and during runtime
+    deviceService.setAutoConnectConfig({ enabled, connectOnStartup: enabled })
     setAutoConnectConfig(deviceService.getAutoConnectConfig())
     // Setting will take effect on next app startup
   }
@@ -491,9 +517,51 @@ export function Device() {
     }
   }
 
+  // DV-02: Format Storage handler with confirmation
+  const [formatting, setFormatting] = useState(false)
+  const handleFormatStorage = async () => {
+    // Use window.confirm for confirmation since no dialog component exists
+    const confirmed = window.confirm(
+      'WARNING: This will permanently erase ALL recordings on the device.\n\n' +
+      'This action cannot be undone. Are you sure you want to format the device storage?'
+    )
+    if (!confirmed) return
+
+    setFormatting(true)
+    try {
+      const success = await deviceService.formatStorage()
+      if (success) {
+        toast({
+          title: 'Storage formatted',
+          description: 'All recordings have been erased from the device.',
+          variant: 'success'
+        })
+        // Refresh recordings after format
+        const store = useAppStore.getState()
+        if (store.invalidateUnifiedRecordings) {
+          store.invalidateUnifiedRecordings()
+        }
+      } else {
+        toast({
+          title: 'Format failed',
+          description: 'Could not format device storage. Please try again.',
+          variant: 'error'
+        })
+      }
+    } catch (e) {
+      toast({
+        title: 'Format error',
+        description: e instanceof Error ? e.message : 'Unknown error',
+        variant: 'error'
+      })
+    } finally {
+      setFormatting(false)
+    }
+  }
+
   const handleRetryFailed = async () => {
     try {
-      const count = await (window.electronAPI.downloadService as any).retryFailed()
+      const count = await window.electronAPI.downloadService.retryFailed()
       if (count > 0) {
         toast({
           title: 'Retrying downloads',
@@ -525,6 +593,7 @@ export function Device() {
         setRealtimeActive(true)
         setRealtimePaused(false)
         setRealtimeDataOffset(0)
+        realtimeDataOffsetRef.current = 0
         setRealtimeDataReceived(0)
         // Start polling for realtime data
         startRealtimePolling()
@@ -574,6 +643,7 @@ export function Device() {
       setRealtimePaused(false)
       stopRealtimePolling()
       setRealtimeDataOffset(0)
+      realtimeDataOffsetRef.current = 0
       setRealtimeDataReceived(0)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to stop realtime streaming')
@@ -586,10 +656,13 @@ export function Device() {
     }
     realtimeIntervalRef.current = window.setInterval(async () => {
       try {
-        const data = await deviceService.getRealtimeData(realtimeDataOffset)
+        // DV-09: Read offset from ref to get current value, not stale closure
+        const data = await deviceService.getRealtimeData(realtimeDataOffsetRef.current)
         if (data && data.data) {
+          // Update both ref (for next poll) and state (for UI)
+          realtimeDataOffsetRef.current += data.data.length
           setRealtimeDataReceived((prev) => prev + data.data.length)
-          setRealtimeDataOffset((prev) => prev + data.data.length)
+          setRealtimeDataOffset(realtimeDataOffsetRef.current)
           console.log(`Received ${data.data.length} bytes of realtime audio, rest: ${data.rest}`)
         }
       } catch (e) {
@@ -626,9 +699,11 @@ export function Device() {
       if (!success) {
         setError('Failed to start Bluetooth scan')
       }
-      // Scan runs for 30 seconds on device
-      setTimeout(() => {
+      // DV-10: Track timeout via ref so it can be cleaned up on unmount
+      if (btScanTimeoutRef.current) clearTimeout(btScanTimeoutRef.current)
+      btScanTimeoutRef.current = setTimeout(() => {
         setBluetoothScanning(false)
+        btScanTimeoutRef.current = null
       }, 30000)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Bluetooth scan failed')
@@ -839,6 +914,9 @@ export function Device() {
                   </div>
 
                   {/* Settings */}
+                  {/* TODO(DV-07): Additional device settings (LED brightness, notification sounds,
+                      Bluetooth pairing mode) pending Jensen protocol integration. Currently only
+                      auto-record is exposed from the device firmware settings. */}
                   <div className="p-4 border rounded-lg">
                     <p className="font-medium mb-3">Device Settings</p>
                     {deviceState.settings && (
@@ -883,6 +961,23 @@ export function Device() {
                         onCheckedChange={handleAutoTranscribeToggle}
                       />
                     </div>
+
+                    {/* DV-02: Format Storage button */}
+                    <div className="mt-3 pt-3 border-t">
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        className="w-full"
+                        onClick={handleFormatStorage}
+                        disabled={formatting || storeSyncing}
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        {formatting ? 'Formatting...' : 'Format Storage'}
+                      </Button>
+                      <p className="text-[10px] text-muted-foreground mt-1 text-center">
+                        Erases all recordings from device
+                      </p>
+                    </div>
                   </div>
 
                   {/* Sync button */}
@@ -909,7 +1004,7 @@ export function Device() {
                               {deviceSyncProgress ? (
                                 <span className="flex flex-col items-start text-left">
                                   <span>Cancel Sync ({deviceSyncProgress.current}/{deviceSyncProgress.total})</span>
-                                  {deviceSyncEta && <span className="text-xs opacity-80">{formatEta(deviceSyncEta)}</span>}
+                                  {deviceSyncEta && <span className="text-xs opacity-80">{formatEta(deviceSyncEta, true)}</span>}
                                 </span>
                               ) : (
                                 'Cancel Sync'
@@ -999,7 +1094,9 @@ export function Device() {
                       variant="ghost"
                       size="sm"
                       onClick={() => {
+                        // DV-01: Clear both the device service internal log AND the Zustand store
                         deviceService.clearActivityLog()
+                        useAppStore.getState().clearActivityLog()
                       }}
                       disabled={activityLog.length === 0}
                     >

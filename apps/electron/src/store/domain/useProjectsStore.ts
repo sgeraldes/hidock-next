@@ -1,3 +1,4 @@
+// TODO: W1-HS-14: This store is not consumed by any component. Wire it to the corresponding page or remove it.
 /**
  * Projects Store
  *
@@ -25,8 +26,9 @@ export const useProjectsStore = create<ProjectsStore>((set, get) => ({
       const result = await window.electronAPI.projects.getAll({ search })
 
       if (result.success) {
+        // IPC handler maps DB rows to knowledge.ts Project shape (with status, createdAt)
         set({
-          projects: result.data.projects,
+          projects: result.data.projects as unknown as Project[],
           total: result.data.total,
           loading: false
         })
@@ -55,8 +57,9 @@ export const useProjectsStore = create<ProjectsStore>((set, get) => ({
       const result = await window.electronAPI.projects.getById(id)
 
       if (result.success) {
+        // IPC handler maps DB rows to knowledge.ts Project shape (with status, createdAt)
         set({
-          selectedProject: result.data.project,
+          selectedProject: result.data.project as unknown as Project,
           selectedProjectMeetings: result.data.meetings,
           selectedProjectTopics: result.data.topics,
           loading: false
@@ -75,12 +78,14 @@ export const useProjectsStore = create<ProjectsStore>((set, get) => ({
     const result = await window.electronAPI.projects.create({ name, description })
 
     if (result.success) {
+      // IPC handler maps DB rows to knowledge.ts Project shape (with status, createdAt)
+      const project = result.data as unknown as Project
       // Add to local state
       set((state) => ({
-        projects: [result.data, ...state.projects],
+        projects: [project, ...state.projects],
         total: state.total + 1
       }))
-      return result.data
+      return project
     } else {
       throw new Error(result.error.message)
     }
@@ -90,13 +95,15 @@ export const useProjectsStore = create<ProjectsStore>((set, get) => ({
     const result = await window.electronAPI.projects.update({ id, name, description })
 
     if (result.success) {
+      // IPC handler maps DB rows to knowledge.ts Project shape (with status, createdAt)
+      const updated = result.data as unknown as Project
       // Update local state
       set((state) => ({
         projects: state.projects.map((p) =>
-          p.id === id ? result.data : p
+          p.id === id ? updated : p
         ),
         selectedProject: state.selectedProject?.id === id
-          ? result.data
+          ? updated
           : state.selectedProject
       }))
     } else {

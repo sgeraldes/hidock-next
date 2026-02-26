@@ -1,35 +1,26 @@
 import { create } from 'zustand'
-import type { Meeting, Recording, AppConfig, CalendarSyncResult } from '@/types'
+import type { Meeting, CalendarSyncResult } from '@/types'
 import type { HiDockDeviceState, ConnectionStatus, ActivityLogEntry } from '@/services/hidock-device'
+import type { UnifiedRecording } from '@/types/unified-recording'
+// CA-10: CalendarViewType shared between store and calendar-utils
+import type { CalendarViewType } from '@/lib/calendar-utils'
 
 interface AppState {
-  // Config
-  config: AppConfig | null
-  configLoading: boolean
-  configReady: boolean // True ONLY when config has been loaded from main process
-
   // Calendar
   meetings: Meeting[]
   meetingsLoading: boolean
   lastCalendarSync: string | null
   calendarSyncing: boolean
 
-  // Recordings
-  recordings: Recording[]
-  deviceRecordings: Recording[]
-  recordingsLoading: boolean
-
   // Unified recordings (persists across page navigation)
-  unifiedRecordings: any[] // UnifiedRecording[] - using any to avoid circular imports
+  unifiedRecordings: UnifiedRecording[]
   unifiedRecordingsLoaded: boolean
   unifiedRecordingsLoading: boolean
   unifiedRecordingsError: string | null
 
   // UI State
   currentDate: Date
-  calendarView: 'day' | 'workweek' | 'week' | 'month'
-  sidebarOpen: boolean
-  selectedMeetingId: string | null
+  calendarView: CalendarViewType
 
   // Device state (updated by OperationController)
   deviceState: HiDockDeviceState
@@ -51,31 +42,19 @@ interface AppState {
   downloadQueue: Map<string, { filename: string; progress: number; size: number }>
 
   // Actions
-  setConfig: (config: AppConfig) => void
-  loadConfig: () => Promise<void>
-  updateConfig: <K extends keyof AppConfig>(section: K, values: Partial<AppConfig[K]>) => Promise<void>
-
   setMeetings: (meetings: Meeting[]) => void
   loadMeetings: (startDate?: string, endDate?: string) => Promise<void>
   syncCalendar: () => Promise<CalendarSyncResult>
 
-  setRecordings: (recordings: Recording[]) => void
-  setDeviceRecordings: (recordings: Recording[]) => void
-  loadAllRecordings: () => Promise<void> // Load both database and device recordings
-  loadRecordings: () => Promise<void>
-
   // Unified recordings actions (persists across page navigation)
-  setUnifiedRecordings: (recordings: any[]) => void
+  setUnifiedRecordings: (recordings: UnifiedRecording[]) => void
   setUnifiedRecordingsLoading: (loading: boolean) => void
   setUnifiedRecordingsError: (error: string | null) => void
   markUnifiedRecordingsLoaded: () => void
   invalidateUnifiedRecordings: () => void // Force reload on next access
 
   setCurrentDate: (date: Date) => void
-  setCalendarView: (view: 'day' | 'workweek' | 'week' | 'month') => void
-  toggleSidebar: () => void
-  setSelectedMeetingId: (id: string | null) => void
-
+  setCalendarView: (view: CalendarViewType) => void
   navigateWeek: (direction: 'prev' | 'next') => void
   navigateMonth: (direction: 'prev' | 'next') => void
   goToToday: () => void
@@ -110,18 +89,10 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
-  config: null,
-  configLoading: false,
-  configReady: false,
-
   meetings: [],
   meetingsLoading: false,
   lastCalendarSync: null,
   calendarSyncing: false,
-
-  recordings: [],
-  deviceRecordings: [],
-  recordingsLoading: false,
 
   // Unified recordings initial state
   unifiedRecordings: [],
@@ -131,10 +102,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   currentDate: new Date(),
   calendarView: 'week',
-  sidebarOpen: true,
-  selectedMeetingId: null,
-
-  // Device state initial state
+// Device state initial state
   deviceState: {
     connected: false,
     model: 'unknown',
@@ -159,29 +127,6 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Download queue initial state
   downloadQueue: new Map(),
-
-  // Config actions
-  setConfig: (config) => set({ config }),
-
-  loadConfig: async () => {
-    set({ configLoading: true })
-    try {
-      const config = await window.electronAPI.config.get()
-      set({ config, configLoading: false, configReady: true })
-    } catch (error) {
-      console.error('Failed to load config:', error)
-      set({ configLoading: false, configReady: true }) // Ready with null = safe default
-    }
-  },
-
-  updateConfig: async (section, values) => {
-    try {
-      const newConfig = await window.electronAPI.config.updateSection(section, values)
-      set({ config: newConfig })
-    } catch (error) {
-      console.error('Failed to update config:', error)
-    }
-  },
 
   // Meeting actions
   setMeetings: (meetings) => set({ meetings }),
@@ -218,33 +163,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  // Recording actions
-  setRecordings: (recordings) => set({ recordings }),
-  setDeviceRecordings: (recordings) => set({ deviceRecordings: recordings }),
-
-  loadRecordings: async () => {
-    set({ recordingsLoading: true })
-    try {
-      const recordings = await window.electronAPI.recordings.getAll()
-      set({ recordings, recordingsLoading: false })
-    } catch (error) {
-      console.error('Failed to load recordings:', error)
-      set({ recordingsLoading: false })
-    }
-  },
-
-  loadAllRecordings: async () => {
-    set({ recordingsLoading: true })
-    try {
-      // Load all recordings from database (includes device-only, local-only, both)
-      const recordings = await window.electronAPI.recordings.getAll()
-      set({ recordings, recordingsLoading: false })
-    } catch (error) {
-      console.error('Failed to load all recordings:', error)
-      set({ recordingsLoading: false })
-    }
-  },
-
   // Unified recordings actions
   setUnifiedRecordings: (recordings) => set({ unifiedRecordings: recordings }),
   setUnifiedRecordingsLoading: (loading) => set({ unifiedRecordingsLoading: loading }),
@@ -255,8 +173,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   // UI actions
   setCurrentDate: (date) => set({ currentDate: date }),
   setCalendarView: (view) => set({ calendarView: view }),
-  toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
-  setSelectedMeetingId: (id) => set({ selectedMeetingId: id }),
 
   navigateWeek: (direction) => {
     const { currentDate } = get()
@@ -307,7 +223,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     deviceSyncEta: null,
   }),
 
-  // Cancel is signaled via state - DownloadController checks this
+  // Cancel is signaled via state - useDownloadOrchestrator checks this
   cancelDeviceSync: () => set({ deviceSyncing: false }),
 
   // Download queue actions
@@ -331,6 +247,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     return { downloadQueue: newQueue }
   }),
 
+  // TODO (SM-08): isDownloading and getDownloadProgress use get() to read downloadQueue,
+  // which means the caller must subscribe to downloadQueue changes for reactivity.
+  // If a component calls useAppStore((s) => s.isDownloading(id)), it subscribes to the
+  // entire store and re-renders on any state change. Callers should subscribe to
+  // downloadQueue directly (e.g., useAppStore((s) => s.downloadQueue)) and then call
+  // these methods, or use a derived selector pattern instead.
   isDownloading: (id) => get().downloadQueue.has(id),
 
   getDownloadProgress: (id) => {
@@ -340,7 +262,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 }))
 
 // Helper functions
-function getViewStartDate(date: Date, view: 'day' | 'workweek' | 'week' | 'month'): Date {
+function getViewStartDate(date: Date, view: CalendarViewType): Date {
   const start = new Date(date)
   if (view === 'day') {
     // Just the current day
@@ -355,7 +277,7 @@ function getViewStartDate(date: Date, view: 'day' | 'workweek' | 'week' | 'month
   return start
 }
 
-function getViewEndDate(date: Date, view: 'day' | 'workweek' | 'week' | 'month'): Date {
+function getViewEndDate(date: Date, view: CalendarViewType): Date {
   const end = new Date(date)
   if (view === 'day') {
     // Just the current day

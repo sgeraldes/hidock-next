@@ -1,10 +1,13 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
-import { readFileSync, existsSync } from 'fs'
+import { readFile, existsSync } from 'fs'
+import { promisify } from 'util'
 import { extname } from 'path'
+
+const readFileAsync = promisify(readFile)
 import { getConfig } from './config'
 import {
   getRecordingById,
-  updateRecordingStatus,
+  updateRecordingTranscriptionStatus,
   insertTranscript,
   getQueueItems,
   updateQueueItem,
@@ -13,7 +16,10 @@ import {
   addRecordingMeetingCandidate,
   linkRecordingToMeeting,
   updateKnowledgeCaptureTitle,
+  removeFromQueueByRecordingId,
+  cancelPendingTranscriptions,
   run,
+  queryOne,
   type Transcript
 } from './database'
 import { BrowserWindow } from 'electron'
@@ -52,6 +58,24 @@ export function stopTranscriptionProcessor(): void {
   }
 }
 
+let cancelRequested = false
+
+export function cancelTranscription(recordingId: string): void {
+  removeFromQueueByRecordingId(recordingId)
+  updateRecordingTranscriptionStatus(recordingId, 'none')
+  notifyRenderer('transcription:cancelled', { recordingId })
+}
+
+export function cancelAllTranscriptions(): number {
+  cancelRequested = true
+  const count = cancelPendingTranscriptions()
+  notifyRenderer('transcription:all-cancelled', { count })
+  // cancelRequested is reset at the end of processQueue (after the loop breaks)
+  // rather than on a timer, to avoid the race where the flag resets before
+  // processQueue has a chance to observe it.
+  return count
+}
+
 async function processQueue(): Promise<void> {
   if (isProcessing) return
 
@@ -60,12 +84,26 @@ async function processQueue(): Promise<void> {
     return
   }
 
+  // Re-queue failed items that haven't exhausted retries (attempts < 3)
+  const failedItems = getQueueItems('failed')
+  for (const item of failedItems) {
+    if (item.attempts < 3) {
+      updateQueueItem(item.id, 'pending')
+      console.log(`Re-queuing failed item ${item.id} (attempt ${item.attempts}/3)`)
+    }
+  }
+
   const pendingItems = getQueueItems('pending')
   if (pendingItems.length === 0) return
 
   isProcessing = true
 
   for (const item of pendingItems) {
+    if (cancelRequested) {
+      console.log('Transcription cancelled by user')
+      break
+    }
+
     try {
       updateQueueItem(item.id, 'processing')
       notifyRenderer('transcription:started', { queueItemId: item.id, recordingId: item.recording_id })
@@ -79,6 +117,8 @@ async function processQueue(): Promise<void> {
       console.error('Transcription failed:', errorMessage)
 
       updateQueueItem(item.id, 'failed', errorMessage)
+      // AI-13: Use standard enum value 'error' (not 'failed')
+      updateRecordingTranscriptionStatus(item.recording_id, 'error')
       notifyRenderer('transcription:failed', {
         queueItemId: item.id,
         recordingId: item.recording_id,
@@ -93,6 +133,8 @@ async function processQueue(): Promise<void> {
   }
 
   isProcessing = false
+  // AI-11: Reset cancel flag after loop exits, not on a timer
+  cancelRequested = false
 }
 
 interface ActionableDetection {
@@ -197,10 +239,11 @@ async function transcribeRecording(recordingId: string): Promise<void> {
   }
 
   console.log(`Transcribing: ${recording.filename}`)
-  updateRecordingStatus(recordingId, 'transcribing')
+  // AI-13: Use standard enum values matching Recording.transcription_status
+  updateRecordingTranscriptionStatus(recordingId, 'processing')
 
-  // Read the audio file
-  const audioBuffer = readFileSync(recording.file_path)
+  // Read the audio file asynchronously to avoid blocking the main process
+  const audioBuffer = await readFileAsync(recording.file_path)
   const base64Audio = audioBuffer.toString('base64')
 
   // Determine MIME type
@@ -386,7 +429,8 @@ Respond in JSON format:
   }
 
   insertTranscript(transcript)
-  updateRecordingStatus(recordingId, 'transcribed')
+  // AI-13: Use standard enum value 'complete' (not 'transcribed')
+  updateRecordingTranscriptionStatus(recordingId, 'complete')
 
   // Auto-update recording title if we have a title suggestion
   if (analysis.title_suggestion) {
@@ -395,14 +439,28 @@ Respond in JSON format:
 
   // Detect actionables from transcript
   try {
-    const detections = await detectActionables(fullText, recordingId, {
+    // Look up the knowledge_capture for this recording
+    const knowledgeCapture = queryOne<{ id: string }>(
+      'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
+      [recordingId]
+    )
+    const sourceKnowledgeId = knowledgeCapture?.id || recordingId
+
+    const detections = await detectActionables(fullText, sourceKnowledgeId, {
       title: analysis.title_suggestion,
       questions: analysis.question_suggestions
     })
 
     // Create actionable entries with TEXT IDs
+    const VALID_TEMPLATE_IDS = ['meeting_minutes', 'interview_feedback', 'project_status', 'action_items']
+
     for (const detection of detections) {
       const actionableId = `act_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+
+      // Sanitize template ID: fall back to 'meeting_minutes' if AI suggests an invalid one
+      const sanitizedTemplate = detection.suggestedTemplate && VALID_TEMPLATE_IDS.includes(detection.suggestedTemplate)
+        ? detection.suggestedTemplate
+        : 'meeting_minutes'
 
       run(
         `INSERT INTO actionables (
@@ -411,13 +469,13 @@ Respond in JSON format:
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           actionableId,
-          recordingId, // source_knowledge_id references knowledge_captures.id
+          sourceKnowledgeId, // source_knowledge_id references knowledge_captures.id
           detection.type,
           detection.suggestedTitle,
           detection.reason,
           'pending',
           detection.confidence,
-          detection.suggestedTemplate || null,
+          sanitizedTemplate,
           new Date().toISOString()
         ]
       )
@@ -434,7 +492,8 @@ Respond in JSON format:
   // Index transcript into vector store for RAG
   try {
     const vectorStore = getVectorStore()
-    const meetingId = recording.meeting_id
+    // Use the AI-linked meeting ID if available, otherwise fall back to the original
+    const meetingId = analysis.selected_meeting_id || recording.meeting_id
     let meetingSubject: string | undefined
 
     if (meetingId) {

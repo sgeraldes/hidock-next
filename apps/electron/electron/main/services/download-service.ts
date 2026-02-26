@@ -228,6 +228,15 @@ class DownloadService {
 
       this.emitStateUpdate()
 
+      // DL-07: Clean up completed items from queue after emitting final state.
+      // Keep them briefly so the renderer sees the 100% state, then remove.
+      setTimeout(() => {
+        this.state.queue.delete(filename)
+        // Also prune any other stale completed items (max 50 retained)
+        this.pruneCompletedItems(50)
+        this.emitStateUpdate()
+      }, 2000)
+
       console.log(`[DownloadService] Completed: ${filename}`)
       return { success: true, filePath }
 
@@ -253,6 +262,10 @@ class DownloadService {
   updateProgress(filename: string, bytesReceived: number): void {
     const item = this.state.queue.get(filename)
     if (item) {
+      if (item.status === 'pending') {
+        item.status = 'downloading'
+        item.startedAt = new Date()
+      }
       item.progress = Math.round((bytesReceived / item.fileSize) * 100)
       this.emitStateUpdate()
     }
@@ -276,6 +289,49 @@ class DownloadService {
   }
 
   /**
+   * Re-queue all failed downloads as pending so they can be retried
+   */
+  retryFailed(): number {
+    let count = 0
+    for (const item of this.state.queue.values()) {
+      if (item.status === 'failed') {
+        item.status = 'pending'
+        item.progress = 0
+        item.error = undefined
+        item.startedAt = undefined
+        item.completedAt = undefined
+        count++
+      }
+    }
+
+    if (count > 0) {
+      this.state.isPaused = false
+      this.emitStateUpdate()
+    }
+
+    return count
+  }
+
+  /**
+   * DL-07: Prune completed items from queue, keeping at most maxRetained.
+   */
+  private pruneCompletedItems(maxRetained: number): void {
+    const completed: string[] = []
+    for (const [key, item] of this.state.queue) {
+      if (item.status === 'completed') {
+        completed.push(key)
+      }
+    }
+    // Remove oldest first (beyond the retention limit)
+    if (completed.length > maxRetained) {
+      const toRemove = completed.slice(0, completed.length - maxRetained)
+      for (const key of toRemove) {
+        this.state.queue.delete(key)
+      }
+    }
+  }
+
+  /**
    * Remove completed/failed items from queue
    */
   clearCompleted(): void {
@@ -294,7 +350,7 @@ class DownloadService {
     this.state.isPaused = true
 
     for (const item of this.state.queue.values()) {
-      if (item.status === 'pending') {
+      if (item.status === 'pending' || item.status === 'downloading') {
         item.status = 'failed'
         item.error = 'Cancelled'
       }
@@ -353,15 +409,41 @@ class DownloadService {
 
   /**
    * Emit state update to all renderer windows
+   * Throttled to prevent IPC spam (max once every 250ms for progress updates)
+   *
+   * TODO: DL-09: The 250ms throttle can cause visual mismatch between actual progress
+   * and displayed progress. Consider event-based progress updates (emit on meaningful
+   * state changes like status transitions) instead of time-based throttling.
    */
-  private emitStateUpdate(): void {
-    const state = this.getState()
-    const windows = BrowserWindow.getAllWindows()
+  private emitPending = false
+  private emitTimer: ReturnType<typeof setTimeout> | null = null
 
-    for (const win of windows) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('download-service:state-update', state)
+  private emitStateUpdate(immediate: boolean = false): void {
+    if (immediate || !this.emitTimer) {
+      this.emitPending = false
+      if (this.emitTimer) {
+        clearTimeout(this.emitTimer)
       }
+
+      const state = this.getState()
+      const windows = BrowserWindow.getAllWindows()
+
+      for (const win of windows) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('download-service:state-update', state)
+        }
+      }
+
+      // Set a throttle window
+      this.emitTimer = setTimeout(() => {
+        this.emitTimer = null
+        if (this.emitPending) {
+          this.emitStateUpdate(true)
+        }
+      }, 250)
+    } else {
+      // Mark as pending - will be sent when throttle window expires
+      this.emitPending = true
     }
   }
 }
@@ -418,7 +500,7 @@ export function registerDownloadServiceHandlers(): void {
   })
 
   // Process a completed download (data passed from renderer after USB transfer)
-  ipcMain.handle('download-service:process-download', async (_, filename: string, data: number[]) => {
+  ipcMain.handle('download-service:process-download', async (_, filename: string, data: number[] | Uint8Array) => {
     const buffer = Buffer.from(data)
     return service.processDownload(filename, buffer)
   })
@@ -441,6 +523,11 @@ export function registerDownloadServiceHandlers(): void {
   // Cancel all
   ipcMain.handle('download-service:cancel-all', () => {
     service.cancelAll()
+  })
+
+  // Retry failed downloads
+  ipcMain.handle('download-service:retry-failed', () => {
+    return service.retryFailed()
   })
 
   // Get sync stats

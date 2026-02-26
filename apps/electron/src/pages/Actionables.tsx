@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import {
@@ -11,7 +11,6 @@ import {
   ListTodo,
   Users,
   Sparkles,
-  Trash2,
   Bot,
   Loader2,
   AlertCircle,
@@ -29,6 +28,7 @@ import {
 } from '@/components/ui/dialog'
 import { cn, formatDateTime } from '@/lib/utils'
 import type { Actionable, ActionableStatus } from '@/types/knowledge'
+import type { OutputTemplateId } from '@/types'
 
 export function Actionables() {
   const location = useLocation()
@@ -48,6 +48,9 @@ export function Actionables() {
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [showOutputModal, setShowOutputModal] = useState(false)
   const [generationHistory, setGenerationHistory] = useState<number[]>([])
+  // AC-06: Use a ref to hold the latest generationHistory to avoid stale closure in useCallback
+  const generationHistoryRef = useRef(generationHistory)
+  generationHistoryRef.current = generationHistory
 
   const loadActionables = async () => {
     setLoading(true)
@@ -61,10 +64,11 @@ export function Actionables() {
     }
   }
 
+  // AC-06: Use ref to read generationHistory, avoiding stale closure and unstable deps
   const handleAutoGenerate = useCallback(async (sourceId: string) => {
     // Check rate limiting (max 3/minute)
     const now = Date.now()
-    const recentGenerations = generationHistory.filter(t => now - t < 60000)
+    const recentGenerations = generationHistoryRef.current.filter(t => now - t < 60000)
     if (recentGenerations.length >= 3) {
       setGenerationError('Rate limit reached. Please wait a minute before generating again.')
       return
@@ -82,7 +86,6 @@ export function Actionables() {
       if (result.success) {
         setGeneratedOutput({ ...result.data, sourceId })
         setShowOutputModal(true)
-        // Use functional update to avoid stale closure and clean old entries
         setGenerationHistory(prev => [...prev.filter(t => now - t < 60000), now])
       } else {
         setGenerationError(result.error.message || 'Failed to generate output')
@@ -93,7 +96,7 @@ export function Actionables() {
     } finally {
       setGenerating(false)
     }
-  }, [generationHistory])
+  }, [])
 
   const copyToClipboard = async (text?: string) => {
     if (!text) return
@@ -112,6 +115,15 @@ export function Actionables() {
   useEffect(() => {
     loadActionables()
   }, [])
+
+  // AC-07: Auto-dismiss error banner after 5 seconds
+  useEffect(() => {
+    if (!generationError) return
+    const timer = setTimeout(() => {
+      setGenerationError(null)
+    }, 5000)
+    return () => clearTimeout(timer)
+  }, [generationError])
 
   // Handle navigation state from Library
   useEffect(() => {
@@ -147,7 +159,7 @@ export function Actionables() {
 
       // Now trigger actual output generation
       const result = await window.electronAPI.outputs.generate({
-        templateId: actionable.suggestedTemplate || 'meeting_minutes',
+        templateId: (actionable.suggestedTemplate || 'meeting_minutes') as OutputTemplateId,
         knowledgeCaptureId: actionable.sourceKnowledgeId
       })
 
@@ -217,10 +229,10 @@ export function Actionables() {
 
         {/* Filter bar */}
         <div className="flex items-center gap-2 mt-4 overflow-x-auto pb-2">
-          {['all', 'pending', 'generated', 'shared', 'dismissed'].map((s) => (
+          {(['all', 'pending', 'in_progress', 'generated', 'shared', 'dismissed'] as const).map((s) => (
             <button
               key={s}
-              onClick={() => setStatusFilter(s as any)}
+              onClick={() => setStatusFilter(s)}
               className={cn(
                 "px-4 py-1.5 rounded-full text-xs font-semibold border transition-all whitespace-nowrap capitalize",
                 statusFilter === s 
@@ -315,7 +327,12 @@ export function Actionables() {
                           </>
                         )}
                         {actionable.status === 'generated' && (
-                          <Button variant="outline" size="sm" className="flex-1 sm:flex-none gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="flex-1 sm:flex-none gap-2"
+                            onClick={() => handleAutoGenerate(actionable.sourceKnowledgeId)}
+                          >
                             <FileText className="h-4 w-4" />
                             View Output
                           </Button>
@@ -368,7 +385,7 @@ export function Actionables() {
           <div className="text-center space-y-4 bg-card p-8 rounded-lg shadow-lg border">
             <Loader2 className="h-12 w-12 animate-spin mx-auto text-primary" />
             <div>
-              <h3 className="text-lg font-semibold mb-1">Generating Meeting Minutes</h3>
+              <h3 className="text-lg font-semibold mb-1">Generating output...</h3>
               <p className="text-sm text-muted-foreground">This may take a few moments...</p>
             </div>
           </div>

@@ -42,6 +42,9 @@ export interface AppConfig {
     theme: 'light' | 'dark' | 'system'
     defaultView: 'week' | 'month'
     startOfWeek: number
+    calendarView: 'day' | 'workweek' | 'week' | 'month'
+    hideEmptyMeetings: boolean
+    showListView: boolean
   }
 }
 
@@ -84,7 +87,10 @@ const DEFAULT_CONFIG: AppConfig = {
   ui: {
     theme: 'system',
     defaultView: 'week',
-    startOfWeek: 1 // Monday
+    startOfWeek: 1, // Monday
+    calendarView: 'week',
+    hideEmptyMeetings: true,
+    showListView: false
   }
 }
 

@@ -6,7 +6,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 17
+const SCHEMA_VERSION = 18
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -965,6 +965,36 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v17 complete: Confidence column added to actionables')
+  },
+  18: () => {
+    // v18: AI-15 — Add missing columns to chat_messages referenced by assistant mapper
+    console.log('Running migration to schema v18: Adding missing chat_messages columns')
+    const database = getDatabase()
+
+    const tableInfo = database.exec('PRAGMA table_info(chat_messages)')
+    if (tableInfo.length > 0 && tableInfo[0].values) {
+      const columns = tableInfo[0].values.map((row: any) => row[1])
+
+      const columnsToAdd = [
+        { name: 'edited_at', sql: 'ALTER TABLE chat_messages ADD COLUMN edited_at TEXT' },
+        { name: 'original_content', sql: 'ALTER TABLE chat_messages ADD COLUMN original_content TEXT' },
+        { name: 'created_output_id', sql: 'ALTER TABLE chat_messages ADD COLUMN created_output_id TEXT' },
+        { name: 'saved_as_insight_id', sql: 'ALTER TABLE chat_messages ADD COLUMN saved_as_insight_id TEXT' }
+      ]
+
+      for (const col of columnsToAdd) {
+        if (!columns.includes(col.name)) {
+          try {
+            database.run(col.sql)
+            console.log(`[Migration v18] Added ${col.name} column to chat_messages`)
+          } catch (e) {
+            console.warn(`[Migration v18] Failed to add ${col.name}:`, e)
+          }
+        }
+      }
+    }
+
+    console.log('Migration v18 complete: chat_messages columns added')
   }
 
 }
@@ -1056,6 +1086,24 @@ export async function initializeDatabase(): Promise<void> {
       if (!capCols.includes(col.name)) {
         console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`)
         try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch (e) {}
+      }
+    }
+
+    // Repair chat_messages (AI-15: columns referenced by assistant mapper)
+    const chatMsgInfo = database.exec("PRAGMA table_info(chat_messages)")
+    if (chatMsgInfo.length > 0 && chatMsgInfo[0].values) {
+      const chatCols = chatMsgInfo[0].values.map(col => col[1])
+      const chatRepairs = [
+        { name: 'edited_at', def: 'TEXT' },
+        { name: 'original_content', def: 'TEXT' },
+        { name: 'created_output_id', def: 'TEXT' },
+        { name: 'saved_as_insight_id', def: 'TEXT' }
+      ]
+      for (const col of chatRepairs) {
+        if (!chatCols.includes(col.name)) {
+          console.log(`[Database] Repairing chat_messages: adding ${col.name}`)
+          try { database.run(`ALTER TABLE chat_messages ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+        }
       }
     }
 
@@ -1679,6 +1727,10 @@ export function updateRecordingStatus(id: string, status: string): void {
   run('UPDATE recordings SET status = ? WHERE id = ?', [status, id])
 }
 
+export function updateRecordingTranscriptionStatus(id: string, transcriptionStatus: string): void {
+  run('UPDATE recordings SET transcription_status = ? WHERE id = ?', [transcriptionStatus, id])
+}
+
 export function linkRecordingToMeeting(
   recordingId: string,
   meetingId: string,
@@ -1743,7 +1795,7 @@ export function getTranscriptsByRecordingIds(recordingIds: string[]): Map<string
 
 export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): void {
   run(
-    `INSERT INTO transcripts (id, recording_id, full_text, language, summary, action_items,
+    `INSERT OR REPLACE INTO transcripts (id, recording_id, full_text, language, summary, action_items,
       topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model,
       title_suggestion, question_suggestions)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1831,11 +1883,17 @@ export function addToQueue(recordingId: string): string {
   return id
 }
 
-export function getQueueItems(status?: string): QueueItem[] {
+export function getQueueItems(status?: string): (QueueItem & { filename?: string })[] {
+  const sql = `
+    SELECT tq.*, r.filename
+    FROM transcription_queue tq
+    LEFT JOIN recordings r ON tq.recording_id = r.id
+    ${status ? 'WHERE tq.status = ?' : ''}
+    ORDER BY tq.created_at`
   if (status) {
-    return queryAll<QueueItem>('SELECT * FROM transcription_queue WHERE status = ? ORDER BY created_at', [status])
+    return queryAll<QueueItem & { filename?: string }>(sql, [status])
   }
-  return queryAll<QueueItem>('SELECT * FROM transcription_queue ORDER BY created_at')
+  return queryAll<QueueItem & { filename?: string }>(sql)
 }
 
 export function updateQueueItem(id: string, status: string, errorMessage?: string): void {
@@ -1853,6 +1911,28 @@ export function updateQueueItem(id: string, status: string, errorMessage?: strin
   } else {
     run('UPDATE transcription_queue SET status = ? WHERE id = ?', [status, id])
   }
+}
+
+export function removeFromQueue(id: string): void {
+  run('DELETE FROM transcription_queue WHERE id = ?', [id])
+}
+
+export function removeFromQueueByRecordingId(recordingId: string): void {
+  run('DELETE FROM transcription_queue WHERE recording_id = ?', [recordingId])
+}
+
+export function cancelPendingTranscriptions(): number {
+  const pending = getQueueItems('pending')
+  const processing = getQueueItems('processing')
+  run("DELETE FROM transcription_queue WHERE status = 'pending'")
+  run("UPDATE transcription_queue SET status = 'cancelled' WHERE status = 'processing'")
+  for (const item of pending) {
+    updateRecordingTranscriptionStatus(item.recording_id, 'none')
+  }
+  for (const item of processing) {
+    updateRecordingTranscriptionStatus(item.recording_id, 'none')
+  }
+  return pending.length + processing.length
 }
 
 // Chat queries
@@ -2542,10 +2622,13 @@ export function selectMeetingForRecordingByUser(recordingId: string, meetingId: 
 }
 
 export function resetStuckTranscriptions(): { recordingsReset: number; queueItemsReset: number } {
-  getDatabase().run("UPDATE recordings SET status = 'pending' WHERE status = 'transcribing'")
-  getDatabase().run("UPDATE transcription_queue SET status = 'pending' WHERE status = 'processing'")
-  console.log('[Database] Reset stuck transcriptions check complete')
-  return { recordingsReset: 0, queueItemsReset: 0 }
+  const db = getDatabase()
+  db.run("UPDATE recordings SET status = 'pending' WHERE status = 'transcribing'")
+  const recordingsReset = db.getRowsModified()
+  db.run("UPDATE transcription_queue SET status = 'pending' WHERE status = 'processing'")
+  const queueItemsReset = db.getRowsModified()
+  console.log(`[Database] Reset stuck transcriptions: ${recordingsReset} recordings, ${queueItemsReset} queue items`)
+  return { recordingsReset, queueItemsReset }
 }
 
 // =============================================================================

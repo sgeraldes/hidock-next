@@ -172,7 +172,9 @@ export function isBothLocations(rec: UnifiedRecording): rec is BothLocationsReco
 }
 
 export function hasLocalPath(rec: UnifiedRecording): rec is LocalOnlyRecording | BothLocationsRecording {
-  return rec.location === 'local-only' || rec.location === 'both'
+  if (rec.location !== 'local-only' && rec.location !== 'both') return false
+  // Also verify the path is non-empty to prevent IPC validation failures
+  return !!(rec as LocalOnlyRecording | BothLocationsRecording).localPath
 }
 
 export function hasDeviceFile(rec: UnifiedRecording): rec is DeviceOnlyRecording | BothLocationsRecording {

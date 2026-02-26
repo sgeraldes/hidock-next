@@ -1,3 +1,4 @@
+// TODO: W1-HS-06: This store is not consumed by any component. Wire it to the Calendar page or remove it.
 /**
  * Calendar Store
  *

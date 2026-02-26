@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -11,7 +11,9 @@ import {
   Edit,
   RefreshCw,
   ExternalLink,
-  Bot
+  Bot,
+  Check,
+  X
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -23,19 +25,23 @@ export function PersonDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [person, setPerson] = useState<Person | null>(null)
-  const [meetings, _setMeetings] = useState<any[]>([])
-  void _setMeetings // Reserved for future meeting updates
+  const [meetings, setMeetings] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'timeline' | 'knowledge'>('timeline')
+  const [isEditing, setIsEditing] = useState(false)
+  const [editForm, setEditForm] = useState<{ name: string; email: string; role: string; company: string; notes: string }>({
+    name: '', email: '', role: '', company: '', notes: ''
+  })
 
-  const loadDetails = async () => {
+  // PE-12: Wrapped in useCallback to satisfy dependency arrays
+  const loadDetails = useCallback(async () => {
     if (!id) return
     setLoading(true)
     try {
       const result = await window.electronAPI.contacts.getById(id)
       if (result.success && result.data.contact) {
         const c = result.data.contact as any
-        setPerson({
+        const personData: Person = {
           ...c,
           type: c.type || 'unknown',
           tags: c.tags ? (typeof c.tags === 'string' ? JSON.parse(c.tags) : c.tags) : [],
@@ -43,18 +49,58 @@ export function PersonDetail() {
           lastSeenAt: c.last_seen_at || c.lastSeenAt,
           interactionCount: c.meeting_count || c.interactionCount || 0,
           createdAt: c.created_at || c.createdAt || new Date().toISOString()
+        }
+        setPerson(personData)
+        setEditForm({
+          name: personData.name || '',
+          email: personData.email || '',
+          role: personData.role || '',
+          company: personData.company || '',
+          notes: personData.notes || ''
         })
+        if (result.data.meetings) {
+          setMeetings(result.data.meetings)
+        }
       }
     } catch (error) {
       console.error('Failed to load person details:', error)
     } finally {
       setLoading(false)
     }
+  }, [id])
+
+  const handleSaveEdit = async () => {
+    if (!person || !id) return
+    try {
+      await window.electronAPI.contacts.update({
+        id,
+        notes: editForm.notes || undefined,
+        role: editForm.role || undefined,
+        company: editForm.company || undefined
+      })
+      setIsEditing(false)
+      await loadDetails()
+    } catch (error) {
+      console.error('Failed to update person:', error)
+    }
+  }
+
+  const handleCancelEdit = () => {
+    if (person) {
+      setEditForm({
+        name: person.name || '',
+        email: person.email || '',
+        role: person.role || '',
+        company: person.company || '',
+        notes: person.notes || ''
+      })
+    }
+    setIsEditing(false)
   }
 
   useEffect(() => {
     loadDetails()
-  }, [id])
+  }, [loadDetails])
 
   const getTypeColor = (type: PersonType) => {
     switch (type) {
@@ -120,10 +166,23 @@ export function PersonDetail() {
               <RefreshCw className="h-4 w-4 mr-2" />
               Refresh
             </Button>
-            <Button size="sm" variant="default">
-              <Edit className="h-4 w-4 mr-2" />
-              Edit
-            </Button>
+            {isEditing ? (
+              <>
+                <Button size="sm" variant="default" onClick={handleSaveEdit}>
+                  <Check className="h-4 w-4 mr-2" />
+                  Save
+                </Button>
+                <Button size="sm" variant="ghost" onClick={handleCancelEdit}>
+                  <X className="h-4 w-4 mr-2" />
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <Button size="sm" variant="default" onClick={() => setIsEditing(true)}>
+                <Edit className="h-4 w-4 mr-2" />
+                Edit
+              </Button>
+            )}
           </div>
         </div>
       </header>
@@ -148,12 +207,22 @@ export function PersonDetail() {
                       </div>
                     </div>
                   )}
-                  {person.role && (
+                  {(person.role || isEditing) && (
                     <div className="flex items-start gap-3">
                       <Briefcase className="h-4 w-4 text-muted-foreground mt-0.5" />
                       <div className="min-w-0 flex-1">
                         <p className="text-xs text-muted-foreground mb-0.5">Role</p>
-                        <p className="text-sm font-medium truncate">{person.role}</p>
+                        {isEditing ? (
+                          <input
+                            type="text"
+                            value={editForm.role}
+                            onChange={(e) => setEditForm((prev) => ({ ...prev, role: e.target.value }))}
+                            className="text-sm font-medium w-full border rounded px-2 py-1 bg-background"
+                            placeholder="Enter role..."
+                          />
+                        ) : (
+                          <p className="text-sm font-medium truncate">{person.role}</p>
+                        )}
                       </div>
                     </div>
                   )}
@@ -264,13 +333,22 @@ export function PersonDetail() {
                 )}
               </div>
 
-              {person.notes && (
+              {(person.notes || isEditing) && (
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Notes</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p className="text-sm whitespace-pre-wrap leading-relaxed">{person.notes}</p>
+                    {isEditing ? (
+                      <textarea
+                        value={editForm.notes}
+                        onChange={(e) => setEditForm((prev) => ({ ...prev, notes: e.target.value }))}
+                        className="text-sm w-full border rounded px-2 py-1 bg-background min-h-[80px] leading-relaxed"
+                        placeholder="Add notes..."
+                      />
+                    ) : (
+                      <p className="text-sm whitespace-pre-wrap leading-relaxed">{person.notes}</p>
+                    )}
                   </CardContent>
                 </Card>
               )}

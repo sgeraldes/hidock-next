@@ -117,13 +117,25 @@ class RAGService {
       const docs = await vectorStore.searchByMeeting(context.meetingId)
       const queryEmbedding = await ollama.generateEmbedding(message)
       if (queryEmbedding) {
-        // Re-rank by query relevance
-        searchResults = docs.map((doc) => ({
-          document: doc,
-          score: 0.8 // Default score for filtered results
-        }))
+        // Re-rank by actual query relevance using cosine similarity
+        searchResults = docs.map((doc) => {
+          let score = 0.5 // Default if embedding comparison fails
+          if (doc.embedding && doc.embedding.length === queryEmbedding.length) {
+            let dotProduct = 0, normA = 0, normB = 0
+            for (let i = 0; i < queryEmbedding.length; i++) {
+              dotProduct += queryEmbedding[i] * doc.embedding[i]
+              normA += queryEmbedding[i] * queryEmbedding[i]
+              normB += doc.embedding[i] * doc.embedding[i]
+            }
+            const denominator = Math.sqrt(normA) * Math.sqrt(normB)
+            score = denominator === 0 ? 0 : dotProduct / denominator
+          }
+          return { document: doc, score }
+        })
+        // Sort by actual relevance
+        searchResults.sort((a, b) => b.score - a.score)
       } else {
-        searchResults = docs.map((doc) => ({ document: doc, score: 0.8 }))
+        searchResults = docs.map((doc) => ({ document: doc, score: 0.5 }))
       }
       searchResults = searchResults.slice(0, 5)
     } else {
@@ -200,14 +212,14 @@ class RAGService {
 
     const userMessage = `Context:\n${contextText}\n\nQuestion: ${message}`
 
-    // Add to conversation history
-    context.conversationHistory.push({ role: 'user', content: message })
-
-    // Build messages for LLM
+    // Build messages for LLM (use history BEFORE adding current message to avoid duplicates)
     const messages: OllamaChatMessage[] = [
       ...context.conversationHistory.slice(-6), // Keep last 3 exchanges
       { role: 'user', content: userMessage }
     ]
+
+    // Add raw message to conversation history (after building messages to avoid duplicate)
+    context.conversationHistory.push({ role: 'user', content: message })
 
     // Generate response
     const answer = await ollama.chat(messages, {
@@ -342,7 +354,7 @@ ${transcript.substring(0, 8000)}`
         id: v[0],
         title: v[1],
         summary: v[2],
-        capturedAt: v[13]
+        capturedAt: v[15] // captured_at is the 16th column (index 15) in knowledge_captures
       })) : []
 
       // 2. Search people

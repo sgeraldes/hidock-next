@@ -6,6 +6,7 @@
  */
 
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import {
   FilterMode,
@@ -279,7 +280,7 @@ export const useLibraryStore = create<LibraryStore>()(
 export const useLibraryViewMode = () => useLibraryStore((state) => state.viewMode)
 export const useLibrarySelection = () => useLibraryStore((state) => state.selectedIds)
 export const useLibrarySorting = () =>
-  useLibraryStore((state) => ({
+  useLibraryStore(useShallow((state) => ({
     sortBy: state.sortBy,
     sortOrder: state.sortOrder
-  }))
+  })))

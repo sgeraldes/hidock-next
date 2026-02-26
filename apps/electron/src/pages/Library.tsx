@@ -24,15 +24,13 @@ import {
   BulkActionsBar,
   LiveRegion,
   useAnnouncement,
-  BulkProgressModal,
-  BulkResultSummary,
-  SourceDetailDrawer,
   TriPaneLayout,
   SourceReader,
   AssistantPanel
 } from '@/features/library/components'
 import { useSourceSelection, useKeyboardNavigation, useTransitionFilters } from '@/features/library/hooks'
-import { useLibraryStore } from '@/store/useLibraryStore'
+import { useLibraryStore, useLibrarySorting } from '@/store/useLibraryStore'
+import { useOperations } from '@/hooks/useOperations'
 
 export function Library() {
   const navigate = useNavigate()
@@ -43,13 +41,22 @@ export function Library() {
   const selectedSourceId = useLibraryStore((state) => state.selectedSourceId)
   const setSelectedSourceId = useLibraryStore((state) => state.setSelectedSourceId)
 
+  // Centralized operations (downloads + transcriptions)
+  const {
+    queueTranscription,
+    queueBulkTranscriptions,
+    queueDownload,
+    queueBulkDownloads,
+  } = useOperations()
+
   // Centralized audio controls (persists across navigation)
   const audioControls = useAudioControls()
   const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
   const playbackCurrentTime = useUIStore((state) => state.playbackCurrentTime)
 
   // Get download queue from app store to check download status
-  const { downloadQueue, isDownloading } = useAppStore()
+  const downloadQueue = useAppStore((state) => state.downloadQueue)
+  const isDownloading = useAppStore((state) => state.isDownloading)
 
   // UI state
   const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set())
@@ -75,6 +82,11 @@ export function Library() {
   } = useTransitionFilters()
   const deferredSearchQuery = useDeferredValue(searchQuery)
 
+  // Sort state
+  const { sortBy, sortOrder } = useLibrarySorting()
+  const setSortBy = useLibraryStore((state) => state.setSortBy)
+  const setSortOrder = useLibraryStore((state) => state.setSortOrder)
+
   // Row expansion state
   const expandedRowIds = useLibraryStore((state) => state.expandedRowIds)
   const toggleRowExpansion = useLibraryStore((state) => state.toggleRowExpansion)
@@ -89,22 +101,18 @@ export function Library() {
     enrichmentAbortController.current = new AbortController()
   }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
 
-  // View mode persisted in store across navigation
-  const compactView = useUIStore((state) => state.recordingsCompactView)
-  const setCompactView = useUIStore((state) => state.setRecordingsCompactView)
+  // View mode persisted in library store (single source of truth for library view mode)
+  const viewMode = useLibraryStore((state) => state.viewMode)
+  const setViewMode = useLibraryStore((state) => state.setViewMode)
+  const compactView = viewMode === 'compact'
+  const setCompactView = useCallback((compact: boolean) => {
+    setViewMode(compact ? 'compact' : 'card')
+  }, [setViewMode])
 
   // Bulk operations
   const [bulkProcessing, setBulkProcessing] = useState(false)
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 })
-  const [bulkOperationItems] = useState<Array<{ id: string; status: 'pending' | 'processing' | 'success' | 'failed' | 'cancelled' }>>([])
-  const [bulkOperationResult, setBulkOperationResult] = useState<{ succeeded: string[]; failed: Array<{ id: string; error: any }>; cancelled: string[]; wasAborted: boolean } | null>(null)
-  const [showBulkProgressModal, setShowBulkProgressModal] = useState(false)
-  const [showBulkResultModal, setShowBulkResultModal] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
-
-  // Detail drawer state
-  const [selectedSourceForDrawer, setSelectedSourceForDrawer] = useState<UnifiedRecording | null>(null)
-  const [drawerOpen, setDrawerOpen] = useState(false)
 
   // Selection for bulk operations
   const {
@@ -224,7 +232,6 @@ export function Library() {
   const filteredRecordings = useMemo(() => {
     const filtered = recordings.filter((rec) => {
       // Use dual-mode filter matching (semantic or exclusive)
-      const activeFilter = filterMode === 'semantic' ? semanticFilter : exclusiveFilter
       const locationMatches =
         filterMode === 'semantic'
           ? matchesSemanticFilter(rec.location, semanticFilter)
@@ -259,8 +266,32 @@ export function Library() {
       }
     }
 
+    // Apply sorting
+    const sortMultiplier = sortOrder === 'asc' ? 1 : -1
+    filtered.sort((a, b) => {
+      switch (sortBy) {
+        case 'date': {
+          const aTime = a.dateRecorded ? new Date(a.dateRecorded).getTime() : 0
+          const bTime = b.dateRecorded ? new Date(b.dateRecorded).getTime() : 0
+          return (aTime - bTime) * sortMultiplier
+        }
+        case 'duration':
+          return ((a.duration || 0) - (b.duration || 0)) * sortMultiplier
+        case 'name':
+          return a.filename.localeCompare(b.filename) * sortMultiplier
+        case 'quality': {
+          const qualityOrder: Record<string, number> = { high: 3, medium: 2, low: 1 }
+          const aQ = qualityOrder[a.quality || ''] || 0
+          const bQ = qualityOrder[b.quality || ''] || 0
+          return (aQ - bQ) * sortMultiplier
+        }
+        default:
+          return 0
+      }
+    })
+
     return filtered
-  }, [recordings, filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery])
+  }, [recordings, filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, deferredSearchQuery, sortBy, sortOrder])
 
   // Announce filter result changes (after filteredRecordings is declared)
   useEffect(() => {
@@ -315,22 +346,10 @@ export function Library() {
 
   const handleDownload = useCallback(
     async (recording: UnifiedRecording) => {
-      if (!isDeviceOnly(recording)) return
       if (!deviceConnected) return
-
-      try {
-        await window.electronAPI.downloadService.queueDownloads([
-          {
-            filename: recording.deviceFilename,
-            size: recording.size,
-            dateCreated: recording.dateRecorded.toISOString()
-          }
-        ])
-      } catch (e) {
-        console.error('Failed to queue download:', e)
-      }
+      await queueDownload(recording)
     },
-    [deviceConnected]
+    [deviceConnected, queueDownload]
   )
 
   const handleAddRecording = async () => {
@@ -361,21 +380,9 @@ export function Library() {
   )
 
   const handleBulkDownload = async () => {
-    const deviceOnlyRecordings = filteredRecordings.filter((r) => isDeviceOnly(r))
-    if (deviceOnlyRecordings.length === 0) return
     if (!deviceConnected) return
-
-    try {
-      await window.electronAPI.downloadService.queueDownloads(
-        deviceOnlyRecordings.map((r) => ({
-          filename: r.deviceFilename,
-          size: r.size,
-          dateCreated: r.dateRecorded.toISOString()
-        }))
-      )
-    } catch (e) {
-      console.error('Failed to queue bulk downloads:', e)
-    }
+    const deviceOnlyRecordings = filteredRecordings.filter((r) => isDeviceOnly(r))
+    await queueBulkDownloads(deviceOnlyRecordings)
   }
 
   const handleBulkProcess = async () => {
@@ -388,16 +395,7 @@ export function Library() {
     setBulkProgress({ current: 0, total: needsProcessing.length })
 
     try {
-      for (let i = 0; i < needsProcessing.length; i++) {
-        const recording = needsProcessing[i]
-        setBulkProgress({ current: i + 1, total: needsProcessing.length })
-
-        try {
-          await window.electronAPI.recordings.updateStatus(recording.id, 'pending')
-        } catch (e) {
-          console.error('Failed to queue:', recording.filename, e)
-        }
-      }
+      await queueBulkTranscriptions(needsProcessing)
       await refresh(false)
     } finally {
       setBulkProcessing(false)
@@ -407,23 +405,11 @@ export function Library() {
 
   // Selection-based bulk operations
   const handleSelectedDownload = useCallback(async () => {
-    const selectedRecordings = filteredRecordings.filter((r) => selectedIds.has(r.id) && isDeviceOnly(r))
-    if (selectedRecordings.length === 0) return
     if (!deviceConnected) return
-
-    try {
-      await window.electronAPI.downloadService.queueDownloads(
-        selectedRecordings.map((r) => ({
-          filename: 'deviceFilename' in r ? r.deviceFilename : r.filename,
-          size: r.size,
-          dateCreated: r.dateRecorded.toISOString()
-        }))
-      )
-      clearSelection()
-    } catch (e) {
-      console.error('Failed to queue selected downloads:', e)
-    }
-  }, [filteredRecordings, selectedIds, deviceConnected, clearSelection])
+    const selectedRecordings = filteredRecordings.filter((r) => selectedIds.has(r.id) && isDeviceOnly(r))
+    const queued = await queueBulkDownloads(selectedRecordings)
+    if (queued > 0) clearSelection()
+  }, [filteredRecordings, selectedIds, deviceConnected, clearSelection, queueBulkDownloads])
 
   const handleSelectedProcess = useCallback(async () => {
     const selectedRecordings = filteredRecordings.filter(
@@ -435,23 +421,14 @@ export function Library() {
     setBulkProgress({ current: 0, total: selectedRecordings.length })
 
     try {
-      for (let i = 0; i < selectedRecordings.length; i++) {
-        const recording = selectedRecordings[i]
-        setBulkProgress({ current: i + 1, total: selectedRecordings.length })
-
-        try {
-          await window.electronAPI.recordings.updateStatus(recording.id, 'pending')
-        } catch (e) {
-          console.error('Failed to queue:', recording.filename, e)
-        }
-      }
+      const queued = await queueBulkTranscriptions(selectedRecordings)
       await refresh(false)
-      clearSelection()
+      if (queued > 0) clearSelection()
     } finally {
       setBulkProcessing(false)
       setBulkProgress({ current: 0, total: 0 })
     }
-  }, [filteredRecordings, selectedIds, refresh, clearSelection])
+  }, [filteredRecordings, selectedIds, refresh, clearSelection, queueBulkTranscriptions])
 
   // PESSIMISTIC UPDATE: Server-first bulk delete with transaction boundary
   const handleSelectedDelete = useCallback(async () => {
@@ -636,7 +613,8 @@ export function Library() {
 
   // Handle row click for tri-pane layout
   const handleRowClick = useCallback((recording: UnifiedRecording) => {
-    // Stop any currently playing audio before switching to new recording
+    // TODO: Consider allowing background audio playback while browsing rows.
+    // Currently stops any playing audio aggressively on every row click.
     audioControls.stop()
     setSelectedSourceId(recording.id)
 
@@ -651,22 +629,16 @@ export function Library() {
   const selectedRecording = selectedSourceId ? recordings.find((r) => r.id === selectedSourceId) : null
   const selectedTranscript = selectedRecording ? transcripts.get(selectedRecording.id) : undefined
 
-  const handleCloseDrawer = useCallback(() => {
-    setDrawerOpen(false)
-    // Clear selection after animation completes
-    setTimeout(() => setSelectedSourceForDrawer(null), 300)
-  }, [])
-
   // Virtualization setup
   const parentRef = useRef<HTMLDivElement>(null)
 
   const estimateSize = useCallback(
     (index: number) => {
       const recording = filteredRecordings[index]
-      if (!recording) return compactView ? 52 : 200
+      if (!recording) return compactView ? 48 : 200
 
       // Base height
-      let height = compactView ? 52 : 120
+      let height = compactView ? 48 : 120
 
       // Card view specific additions
       if (!compactView) {
@@ -682,7 +654,7 @@ export function Library() {
 
       // Add expanded content height for compact view
       if (compactView && expandedRowIds.has(recording.id)) {
-        height += 280 // Base expanded content height
+        height += 200 // Base expanded content height (no action buttons)
         if (transcripts.get(recording.id)?.summary) height += 120 // Transcript summary
         if (recording.meetingId && meetings.get(recording.meetingId)) height += 60 // Meeting card
       }
@@ -762,6 +734,8 @@ export function Library() {
             qualityFilter={qualityFilter ?? 'all'}
             statusFilter={statusFilter ?? 'all'}
             searchQuery={searchQuery}
+            sortBy={sortBy}
+            sortOrder={sortOrder}
             onFilterModeChange={setFilterMode}
             onSemanticFilterChange={setSemanticFilter}
             onExclusiveFilterChange={setExclusiveFilter}
@@ -769,6 +743,8 @@ export function Library() {
             onQualityFilterChange={(filter) => setQualityFilter(filter === 'all' ? null : filter)}
             onStatusFilterChange={(filter) => setStatusFilter(filter === 'all' ? null : filter)}
             onSearchQueryChange={setSearchQuery}
+            onSortByChange={setSortBy}
+            onSortOrderChange={setSortOrder}
           />
         </div>
         {isFilterPending && (
@@ -858,7 +834,7 @@ export function Library() {
                         <SourceRow
                           recording={recording}
                           meeting={meeting}
-                          transcript={expandedRowIds.has(recording.id) ? transcripts.get(recording.id) : undefined}
+                          transcript={transcripts.get(recording.id)}
                           isPlaying={currentlyPlayingId === recording.id}
                           isDownloading={isDeviceOnly(recording) && isDownloading(recording.deviceFilename)}
                           downloadProgress={
@@ -868,6 +844,7 @@ export function Library() {
                           deviceConnected={deviceConnected}
                           isSelected={isSelected(recording.id)}
                           isExpanded={expandedRowIds.has(recording.id)}
+                          isActiveSource={selectedSourceId === recording.id}
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
@@ -875,18 +852,14 @@ export function Library() {
                           onToggleExpand={() => toggleRowExpansion(recording.id)}
                           onPlay={() => {
                             if (hasLocalPath(recording)) {
-                              handleRowClick(recording)  // Select the recording first
+                              setSelectedSourceId(recording.id)
                               handlePlayCallback(recording.id, recording.localPath)
                             }
                           }}
                           onStop={handleStopCallback}
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
-                          onTranscribe={() => {
-                            window.electronAPI.recordings.updateStatus(recording.id, 'pending').catch((e) => {
-                              console.error('Failed to queue transcription:', e)
-                            })
-                          }}
+                          onTranscribe={() => queueTranscription(recording)}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
                           onGenerateOutput={() => handleGenerateOutputCallback(recording)}
                           onNavigateToMeeting={handleNavigateToMeeting}
@@ -936,13 +909,14 @@ export function Library() {
                           onClick={() => handleRowClick(recording)}
                           onPlay={() => {
                             if (hasLocalPath(recording)) {
-                              handleRowClick(recording)  // Select the recording first
+                              setSelectedSourceId(recording.id)
                               handlePlayCallback(recording.id, recording.localPath)
                             }
                           }}
                           onStop={handleStopCallback}
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
+                          onTranscribe={() => queueTranscription(recording)}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
                           onGenerateOutput={() => handleGenerateOutputCallback(recording)}
                           onToggleTranscript={() => handleToggleTranscriptCallback(recording.id)}
@@ -981,10 +955,7 @@ export function Library() {
                 if (selectedRecording) handleDownloadCallback(selectedRecording)
               }}
               onTranscribe={() => {
-                if (selectedRecording) {
-                  window.electronAPI.recordings.updateStatus(selectedRecording.id, 'pending')
-                    .catch(e => console.error('Failed to queue transcription:', e))
-                }
+                if (selectedRecording) queueTranscription(selectedRecording)
               }}
               onDelete={() => {
                 if (selectedRecording) handleDeleteCallback(selectedRecording)
@@ -1012,85 +983,6 @@ export function Library() {
         />
       </div>
 
-      {/* Bulk Progress Modal - shows during bulk operations */}
-      <BulkProgressModal
-        isOpen={showBulkProgressModal}
-        onClose={() => setShowBulkProgressModal(false)}
-        operation="download" // TODO: Make this dynamic based on operation type
-        items={bulkOperationItems.map((item) => ({
-          id: item.id,
-          status: item.status,
-          data: filteredRecordings.find((r) => r.id === item.id)
-        }))}
-        progress={bulkProgress}
-        onCancel={() => {
-          setBulkProcessing(false)
-          setShowBulkProgressModal(false)
-        }}
-      />
-
-      {/* Bulk Result Summary - shows after operations complete */}
-      {bulkOperationResult && (
-        <BulkResultSummary
-          isOpen={showBulkResultModal}
-          onClose={() => {
-            setShowBulkResultModal(false)
-            setBulkOperationResult(null)
-          }}
-          operation="Download" // TODO: Make this dynamic
-          result={bulkOperationResult}
-          onRetryFailed={(ids) => {
-            // TODO: Implement retry logic
-            console.log('Retry failed items:', ids)
-          }}
-        />
-      )}
-
-      {/* Source Detail Drawer */}
-      <SourceDetailDrawer
-        source={selectedSourceForDrawer}
-        transcript={selectedSourceForDrawer ? transcripts.get(selectedSourceForDrawer.id) : undefined}
-        meeting={
-          selectedSourceForDrawer && selectedSourceForDrawer.meetingId
-            ? meetings.get(selectedSourceForDrawer.meetingId)
-            : undefined
-        }
-        isOpen={drawerOpen}
-        isPlaying={selectedSourceForDrawer ? currentlyPlayingId === selectedSourceForDrawer.id : false}
-        onClose={handleCloseDrawer}
-        onPlay={() => {
-          if (selectedSourceForDrawer && hasLocalPath(selectedSourceForDrawer)) {
-            handlePlayCallback(selectedSourceForDrawer.id, selectedSourceForDrawer.localPath)
-          }
-        }}
-        onStop={handleStopCallback}
-        onTranscribe={() => {
-          if (selectedSourceForDrawer) {
-            // Queue for transcription
-            window.electronAPI.recordings.updateStatus(selectedSourceForDrawer.id, 'pending').catch((e) => {
-              console.error('Failed to queue transcription:', e)
-            })
-          }
-        }}
-        onDownload={() => {
-          if (selectedSourceForDrawer) {
-            handleDownloadCallback(selectedSourceForDrawer)
-          }
-        }}
-        onDelete={() => {
-          if (selectedSourceForDrawer) {
-            handleDeleteCallback(selectedSourceForDrawer)
-            handleCloseDrawer()
-          }
-        }}
-        onNavigateToMeeting={handleNavigateToMeeting}
-        onAskAssistant={() => {
-          if (selectedSourceForDrawer) {
-            handleAskAssistantCallback(selectedSourceForDrawer)
-          }
-        }}
-        deviceConnected={deviceConnected}
-      />
     </div>
   )
 }

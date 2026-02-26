@@ -1,10 +1,11 @@
-import { Filter, Cloud, HardDrive, Check, Search } from 'lucide-react'
+import { Filter, Cloud, HardDrive, Check, Search, ArrowUpDown } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import {
   FilterMode,
   SemanticLocationFilter,
   ExclusiveLocationFilter
 } from '@/types/unified-recording'
+import type { SortBy, SortOrder } from '@/store/useLibraryStore'
 
 interface LibraryFiltersProps {
   stats: {
@@ -22,6 +23,8 @@ interface LibraryFiltersProps {
   qualityFilter: string
   statusFilter: string
   searchQuery: string
+  sortBy?: SortBy
+  sortOrder?: SortOrder
   onFilterModeChange: (mode: FilterMode) => void
   onSemanticFilterChange: (filter: SemanticLocationFilter) => void
   onExclusiveFilterChange: (filter: ExclusiveLocationFilter) => void
@@ -29,6 +32,8 @@ interface LibraryFiltersProps {
   onQualityFilterChange: (filter: string) => void
   onStatusFilterChange: (filter: string) => void
   onSearchQueryChange: (query: string) => void
+  onSortByChange?: (sortBy: SortBy) => void
+  onSortOrderChange?: (order: SortOrder) => void
 }
 
 const CATEGORIES = ['all', 'meeting', 'interview', '1:1', 'brainstorm', 'note'] as const
@@ -42,13 +47,17 @@ export function LibraryFilters({
   qualityFilter,
   statusFilter,
   searchQuery,
+  sortBy,
+  sortOrder,
   onFilterModeChange,
   onSemanticFilterChange,
   onExclusiveFilterChange,
   onCategoryFilterChange,
   onQualityFilterChange,
   onStatusFilterChange,
-  onSearchQueryChange
+  onSearchQueryChange,
+  onSortByChange,
+  onSortOrderChange
 }: LibraryFiltersProps) {
   // Determine active filter value based on mode
   const activeFilter = filterMode === 'semantic' ? semanticFilter : exclusiveFilter
@@ -96,7 +105,7 @@ export function LibraryFilters({
           <Filter className="h-4 w-4 text-muted-foreground" />
           <div className="flex rounded-lg border overflow-hidden" data-testid="location-filter">
             <button
-              onClick={() => handleFilterChange('all' as any)}
+              onClick={() => handleFilterChange('all' as SemanticLocationFilter & ExclusiveLocationFilter)}
               className={`px-3 py-1.5 text-xs font-medium transition-colors ${
                 activeFilter === 'all'
                   ? 'bg-primary text-primary-foreground'
@@ -230,6 +239,33 @@ export function LibraryFilters({
       </div>
 
       <div className="flex flex-wrap items-center gap-4">
+        {/* Sort Controls */}
+        {onSortByChange && onSortOrderChange && (
+          <div className="flex items-center gap-2">
+            <ArrowUpDown className="h-4 w-4 text-muted-foreground" />
+            <span className="text-xs font-medium text-muted-foreground">Sort:</span>
+            <select
+              value={sortBy ?? 'date'}
+              onChange={(e) => onSortByChange(e.target.value as SortBy)}
+              className="h-8 rounded-md border border-input bg-background px-3 py-1 text-xs"
+              aria-label="Sort by"
+            >
+              <option value="date">Date</option>
+              <option value="name">Name</option>
+              <option value="duration">Duration</option>
+              <option value="quality">Quality</option>
+            </select>
+            <button
+              onClick={() => onSortOrderChange(sortOrder === 'asc' ? 'desc' : 'asc')}
+              className="h-8 px-2 rounded-md border border-input bg-background text-xs font-medium hover:bg-muted transition-colors"
+              aria-label={`Sort ${sortOrder === 'asc' ? 'ascending' : 'descending'}`}
+              title={`Currently ${sortOrder === 'asc' ? 'ascending' : 'descending'} - click to toggle`}
+            >
+              {sortOrder === 'asc' ? 'Asc' : 'Desc'}
+            </button>
+          </div>
+        )}
+
         {/* Quality Filter */}
         <div className="flex items-center gap-2">
           <span className="text-xs font-medium text-muted-foreground">Quality:</span>

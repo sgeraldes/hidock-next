@@ -4,12 +4,15 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { useAppStore } from '@/store/useAppStore'
+import { useConfigStore } from '@/store/domain/useConfigStore'
 import { formatBytes } from '@/lib/utils'
 import { HealthCheck } from '@/components/HealthCheck'
 import type { StorageInfo } from '@/types'
 
 export function Settings() {
-  const { config, loadConfig, updateConfig, syncCalendar, calendarSyncing } = useAppStore()
+  const syncCalendar = useAppStore((s) => s.syncCalendar)
+  const calendarSyncing = useAppStore((s) => s.calendarSyncing)
+  const { config, loadConfig, updateConfig } = useConfigStore()
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
   const [saving, setSaving] = useState(false)
 

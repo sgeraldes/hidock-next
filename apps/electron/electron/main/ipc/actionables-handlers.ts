@@ -5,7 +5,8 @@ import type { Actionable } from '@/types/knowledge'
 
 export function registerActionablesHandlers(): void {
   // Get all actionables
-  ipcMain.handle('actionables:getAll', async (_, { status }: { status?: string } = {}) => {
+  ipcMain.handle('actionables:getAll', async (_, options?: { status?: string }) => {
+    const status = options?.status
     try {
       let sql = 'SELECT * FROM actionables'
       const params: any[] = []

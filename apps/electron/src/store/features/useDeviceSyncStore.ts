@@ -1,3 +1,4 @@
+// TODO: W1-HS-07: This store is not consumed by any component. Wire it to the Device page or remove it.
 /**
  * Device Sync Store (Feature)
  *
@@ -57,12 +58,9 @@ export interface DeviceSyncStore {
   setStorageInfo: (used: number, total: number) => void
   markFileSynced: (filename: string) => void
 
-  // Async Actions
-  connect: () => Promise<void>
-  disconnect: () => Promise<void>
-  refreshFileList: () => Promise<void>
-  syncFile: (filename: string) => Promise<void>
-  syncAll: () => Promise<void>
+  // NOTE: Async device actions (connect, disconnect, refreshFileList, syncFile, syncAll)
+  // were removed — they called window.electronAPI.device.* which doesn't exist.
+  // Actual device operations go through hidock-device.ts → jensen.ts (WebUSB).
 }
 
 export const useDeviceSyncStore = create<DeviceSyncStore>()(
@@ -137,128 +135,9 @@ export const useDeviceSyncStore = create<DeviceSyncStore>()(
       }))
     },
 
-    // Async Actions
-    connect: async () => {
-      set({ connectionStatus: 'connecting', connectionError: null })
-      try {
-        const result = await (window.electronAPI as any).device.connect()
-        if (result.success) {
-          set({
-            connectionStatus: 'connected',
-            deviceModel: result.model || null,
-            deviceSerial: result.serial || null
-          })
-          // Load file list after connection
-          await get().refreshFileList()
-        } else {
-          set({
-            connectionStatus: 'error',
-            connectionError: result.error || 'Failed to connect'
-          })
-        }
-      } catch (error) {
-        set({
-          connectionStatus: 'error',
-          connectionError: String(error)
-        })
-      }
-    },
-
-    disconnect: async () => {
-      try {
-        await (window.electronAPI as any).device.disconnect()
-        set({
-          connectionStatus: 'disconnected',
-          deviceModel: null,
-          deviceSerial: null,
-          files: [],
-          storageUsed: 0,
-          storageTotal: 0
-        })
-        get().clearSyncState()
-      } catch (error) {
-        console.error('Failed to disconnect:', error)
-      }
-    },
-
-    refreshFileList: async () => {
-      if (get().connectionStatus !== 'connected') return
-
-      set({ filesLoading: true })
-      try {
-        const result = await (window.electronAPI as any).device.getFileList()
-        if (result.success) {
-          set({
-            files: result.files.map((file: any) => ({
-              filename: file.filename,
-              size: file.size,
-              date: file.date,
-              isSynced: file.isSynced || false
-            })),
-            storageUsed: result.storageUsed || 0,
-            storageTotal: result.storageTotal || 0,
-            filesLoading: false
-          })
-        } else {
-          set({ filesLoading: false })
-        }
-      } catch (error) {
-        console.error('Failed to load file list:', error)
-        set({ filesLoading: false })
-      }
-    },
-
-    syncFile: async (filename) => {
-      get().setSyncState({
-        syncing: true,
-        currentFile: filename,
-        progress: { current: 1, total: 1 },
-        fileProgress: 0
-      })
-
-      try {
-        await (window.electronAPI as any).device.downloadFile(filename, (progress: number) => {
-          get().setSyncState({ fileProgress: progress })
-        })
-
-        get().markFileSynced(filename)
-        get().clearSyncState()
-      } catch (error) {
-        console.error(`Failed to sync file ${filename}:`, error)
-        get().clearSyncState()
-      }
-    },
-
-    syncAll: async () => {
-      const unsyncedFiles = get().files.filter((file) => !file.isSynced)
-      if (unsyncedFiles.length === 0) return
-
-      get().setSyncState({
-        syncing: true,
-        progress: { current: 0, total: unsyncedFiles.length },
-        fileProgress: 0
-      })
-
-      for (let i = 0; i < unsyncedFiles.length; i++) {
-        const file = unsyncedFiles[i]
-
-        get().setSyncState({
-          currentFile: file.filename,
-          progress: { current: i + 1, total: unsyncedFiles.length }
-        })
-
-        try {
-          await (window.electronAPI as any).device.downloadFile(file.filename, (progress: number) => {
-            get().setSyncState({ fileProgress: progress })
-          })
-          get().markFileSynced(file.filename)
-        } catch (error) {
-          console.error(`Failed to sync file ${file.filename}:`, error)
-        }
-      }
-
-      get().clearSyncState()
-    }
+    // NOTE: Dead async actions removed (connect, disconnect, refreshFileList, syncFile, syncAll).
+    // They called window.electronAPI.device.* which doesn't exist in preload.
+    // See FIX-019 in STABILITY_FIXES.md.
   }))
 )
 

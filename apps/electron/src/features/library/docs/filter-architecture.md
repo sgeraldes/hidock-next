@@ -4,6 +4,10 @@
 
 The Library feature uses a layered hook architecture for filter state management, combining Zustand for persistence with React hooks for derived state and performance optimization.
 
+**Context: Universal Knowledge Hub**
+
+This filter architecture is part of the Electron app - the fourth iteration and PRIMARY APPLICATION of HiDock Next. While currently focused on recordings, the Library is designed as a **Universal Knowledge Hub** that will eventually support ANY artifact type (PDFs, DOCX, PPTX, MD, notes, emails, Slack messages, etc.). The filter architecture is built to scale to multi-artifact-type scenarios while maintaining performance and usability.
+
 ## Architecture Layers
 
 ### Layer 1: State Store (`useLibraryStore`)
@@ -380,13 +384,106 @@ const { locationFilter, categoryFilter, searchQuery } = useTransitionFilters()
 
 ## Future Enhancements
 
-Potential improvements to consider:
+### Short-Term (Recording-Focused)
+
+Improvements for the current recording implementation:
 
 1. **Filter Presets:** Save/load named filter combinations
 2. **Filter History:** Undo/redo filter changes
 3. **Advanced Filters:** Date ranges, duration ranges, quality thresholds
 4. **Filter Sharing:** URL-based filter state for sharing
 5. **Filter Analytics:** Track which filters are used most
+
+### Long-Term (Universal Knowledge Hub)
+
+Extensions for multi-artifact-type support:
+
+1. **Artifact Type Filter:** Filter by artifact type (recording, document, note, email, etc.)
+   ```typescript
+   artifactTypeFilter: 'all' | 'recording' | 'document' | 'note' | 'email' | 'slack'
+   ```
+
+2. **Multi-Source Location Filter:** Expand location filter to support different source types
+   ```typescript
+   locationFilter: {
+     recordings: 'device' | 'local' | 'cloud'
+     documents: 'local' | 'cloud' | 'imported'
+     notes: 'local' | 'synced'
+     emails: 'inbox' | 'sent' | 'archived'
+   }
+   ```
+
+3. **Universal Metadata Filters:** Common filters across all artifact types
+   - Date ranges (creation, modification, access)
+   - Size/duration ranges
+   - Tags and categories (unified taxonomy)
+   - People/contacts (across all sources)
+   - Projects and topics
+
+4. **Content-Type Specific Filters:** Specialized filters per artifact type
+   - Recordings: audio quality, speaker count, language
+   - Documents: page count, document type, format
+   - Notes: markdown vs plain text, linked notes
+   - Emails: sender, recipient, has attachments
+   - Slack: channel, thread, reaction count
+
+5. **Cross-Artifact Filters:** Filters that span multiple sources
+   - "Related artifacts" - items linked or mentioned together
+   - "Same event" - artifacts from the same meeting/time period
+   - "Same people" - artifacts involving the same contacts
+   - "Same project" - artifacts tagged with the same project
+
+6. **AI-Powered Filters:** Intelligent filtering based on content
+   - Sentiment (positive, neutral, negative)
+   - Topics and themes (auto-detected)
+   - Action items present (yes/no)
+   - Key insights extracted (yes/no)
+   - Similarity to selected artifact
+
+### Architectural Considerations for Multi-Artifact Support
+
+**Filter State Evolution:**
+```typescript
+// Current (recording-only)
+interface LibraryState {
+  locationFilter: LocationFilter
+  categoryFilter: string | null
+  // ...
+}
+
+// Future (multi-artifact)
+interface LibraryState {
+  artifactTypeFilter: ArtifactTypeFilter
+  perTypeFilters: {
+    recording: RecordingFilters
+    document: DocumentFilters
+    note: NoteFilters
+    // ...
+  }
+  universalFilters: UniversalFilters
+  // ...
+}
+```
+
+**Performance Optimizations:**
+- Lazy loading filters for inactive artifact types
+- Virtual scrolling for large artifact lists
+- Debounced search across multiple sources
+- Incremental filter application (apply cheap filters first)
+- Cached filter results with invalidation
+
+**Persistence Strategy:**
+- Per-artifact-type filter preferences
+- Global filter preferences (apply to all types)
+- Filter preset templates
+- Last-used filters per artifact type
+
+**UI/UX Considerations:**
+- Grouped filter panels by artifact type
+- Quick filter toggles for common combinations
+- Visual indicators for active filters per type
+- Filter suggestions based on current artifact selection
+- Keyboard shortcuts for filter navigation
 
 ## Related Files
 

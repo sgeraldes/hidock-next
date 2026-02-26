@@ -1,31 +1,35 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { 
-  Search, 
-  RefreshCw, 
-  FileText, 
-  Users, 
-  Folder, 
+import {
+  Search,
+  RefreshCw,
+  FileText,
+  Users,
+  Folder,
   ChevronRight,
   TrendingUp,
   Zap,
-  Clock
+  Clock,
+  AlertCircle
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatDateTime, cn } from '@/lib/utils'
+import { toast } from '@/components/ui/toaster'
 
 export function Explore() {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<any>(null)
   const [loading, setLoading] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'all' | 'knowledge' | 'people' | 'projects'>('all')
 
   const handleSearch = async () => {
     if (!query.trim()) return
     setLoading(true)
+    setSearchError(null)
     try {
       const res = await window.electronAPI.rag.search(query, 10)
       // Map legacy array response to categorized object if needed
@@ -36,6 +40,9 @@ export function Explore() {
       }
     } catch (error) {
       console.error('Search failed:', error)
+      const message = error instanceof Error ? error.message : 'An unexpected error occurred'
+      setSearchError(message)
+      toast.error('Search failed', message)
     } finally {
       setLoading(false)
     }
@@ -62,7 +69,7 @@ export function Explore() {
             <p className="text-muted-foreground">Search, discover, and connect your knowledge across all captures, people, and projects.</p>
           </div>
 
-          <form onSubmit={handleSearch} className="relative">
+          <form onSubmit={(e) => { e.preventDefault(); handleSearch(); }} className="relative">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
             <Input
               placeholder="Search anything... (e.g. 'Amazon Connect', 'Mario', 'API decisions')"
@@ -83,7 +90,17 @@ export function Explore() {
       <div className="flex-1 overflow-auto">
         <div className="max-w-5xl mx-auto p-6 space-y-8">
           
-          {!results && !loading && (
+          {searchError && (
+            <div className="flex items-center gap-3 p-4 rounded-xl border border-destructive/50 bg-destructive/5 text-sm">
+              <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
+              <div>
+                <p className="font-semibold text-destructive">Search failed</p>
+                <p className="text-muted-foreground mt-0.5">{searchError}</p>
+              </div>
+            </div>
+          )}
+
+          {!results && !loading && !searchError && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4">
               <Card className="border-primary/20 bg-primary/5 rounded-2xl">
                 <CardHeader>
@@ -110,11 +127,21 @@ export function Explore() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-2">
-                  <Button variant="ghost" size="sm" className="w-full justify-between hover:bg-blue-500/10 h-10 px-3">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full justify-between hover:bg-blue-500/10 h-10 px-3"
+                    onClick={() => { setQuery('summarize recent recordings'); }}
+                  >
                     <span className="text-sm">Summarize recent activity</span>
                     <ChevronRight className="h-4 w-4" />
                   </Button>
-                  <Button variant="ghost" size="sm" className="w-full justify-between hover:bg-blue-500/10 h-10 px-3">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full justify-between hover:bg-blue-500/10 h-10 px-3"
+                    onClick={() => { setQuery('find unresolved tasks and action items'); }}
+                  >
                     <span className="text-sm">Find unresolved tasks</span>
                     <ChevronRight className="h-4 w-4" />
                   </Button>
@@ -130,10 +157,10 @@ export function Explore() {
                   Search Results ({totalResults})
                 </h2>
                 <div className="flex bg-muted p-1 rounded-lg gap-1">
-                  {['all', 'knowledge', 'people', 'projects'].map((t) => (
+                  {(['all', 'knowledge', 'people', 'projects'] as const).map((t) => (
                     <button
                       key={t}
-                      onClick={() => setActiveTab(t as any)}
+                      onClick={() => setActiveTab(t)}
                       className={cn(
                         "px-3 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all",
                         activeTab === t ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
@@ -154,6 +181,9 @@ export function Explore() {
                       <h3 className="text-sm font-bold uppercase tracking-wider">Knowledge ({results.knowledge.length})</h3>
                     </div>
                     <div className="grid grid-cols-1 gap-3">
+                      {/* TODO(EX-07): Knowledge cards navigate to /library without context.
+                          The route should support ID-based navigation (e.g., /library?id=<k.id>)
+                          so the library auto-selects the relevant item. */}
                       {results.knowledge.map(k => (
                         <Card key={k.id} className="group hover:border-primary/30 cursor-pointer transition-all shadow-sm" onClick={() => navigate(`/library`)}>
                           <CardContent className="p-4 flex items-center justify-between gap-4">
@@ -208,6 +238,9 @@ export function Explore() {
                       <h3 className="text-sm font-bold uppercase tracking-wider">Projects ({results.projects.length})</h3>
                     </div>
                     <div className="grid grid-cols-1 gap-3">
+                      {/* TODO(EX-07): Project cards navigate to /projects without context.
+                          The route should support ID-based navigation (e.g., /projects?id=<pr.id>)
+                          so the projects page auto-selects the relevant project. */}
                       {results.projects.map(pr => (
                         <Card key={pr.id} className="group hover:border-emerald-500/30 cursor-pointer transition-all shadow-sm" onClick={() => navigate(`/projects`)}>
                           <CardContent className="p-4 flex items-center justify-between gap-4">

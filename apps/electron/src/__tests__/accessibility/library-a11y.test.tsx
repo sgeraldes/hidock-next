@@ -19,9 +19,11 @@ const mockUseUnifiedRecordings = vi.fn(() => ({
     total: 0,
     deviceOnly: 0,
     localOnly: 0,
+    both: 0,
     synced: 0,
-    transcribed: 0,
-    untranscribed: 0
+    unsynced: 0,
+    onSource: 0,
+    locallyAvailable: 0
   }
 }))
 
@@ -39,6 +41,38 @@ vi.mock('@/components/OperationController', () => ({
   })
 }))
 
+vi.mock('@/features/library/hooks', () => ({
+  useSourceSelection: vi.fn(() => ({
+    selectedIds: new Set(),
+    selectedCount: 0,
+    toggleSelection: vi.fn(),
+    selectAll: vi.fn(),
+    clearSelection: vi.fn(),
+    isSelected: vi.fn(() => false),
+    handleSelectionClick: vi.fn()
+  })),
+  useKeyboardNavigation: vi.fn(() => ({
+    handleKeyDown: vi.fn()
+  })),
+  useTransitionFilters: vi.fn(() => ({
+    filterMode: 'semantic',
+    semanticFilter: 'all',
+    exclusiveFilter: 'all',
+    categoryFilter: null,
+    qualityFilter: null,
+    statusFilter: null,
+    searchQuery: '',
+    setFilterMode: vi.fn(),
+    setSemanticFilter: vi.fn(),
+    setExclusiveFilter: vi.fn(),
+    setCategoryFilter: vi.fn(),
+    setQualityFilter: vi.fn(),
+    setStatusFilter: vi.fn(),
+    setSearchQuery: vi.fn(),
+    isPending: false
+  }))
+}))
+
 vi.mock('@/store/useUIStore', () => ({
   useUIStore: (selector: any) => {
     const state = {
@@ -51,25 +85,36 @@ vi.mock('@/store/useUIStore', () => ({
 }))
 
 vi.mock('@/store/useAppStore', () => ({
-  useAppStore: () => ({
-    downloadQueue: new Map(),
-    isDownloading: vi.fn(() => false)
-  })
+  useAppStore: (selector: any) => {
+    const state = {
+      downloadQueue: new Map(),
+      isDownloading: vi.fn(() => false),
+      isConnected: false,
+      deviceInfo: null
+    }
+    return typeof selector === 'function' ? selector(state) : state
+  }
 }))
 
 vi.mock('@/store/useLibraryStore', () => ({
   useLibraryStore: (selector: any) => {
     const state = {
+      viewMode: 'card',
+      sortBy: 'date',
+      sortOrder: 'desc',
       locationFilter: 'all',
       categoryFilter: null,
       qualityFilter: null,
       statusFilter: null,
       searchQuery: '',
+      setViewMode: vi.fn(),
       setLocationFilter: vi.fn(),
       setCategoryFilter: vi.fn(),
       setQualityFilter: vi.fn(),
       setStatusFilter: vi.fn(),
       setSearchQuery: vi.fn(),
+      setSortBy: vi.fn(),
+      setSortOrder: vi.fn(),
       recordingErrors: new Map(),
       // Selection state
       selectedIds: new Set<string>(),
@@ -91,8 +136,52 @@ vi.mock('@/store/useLibraryStore', () => ({
       collapseAllRows: vi.fn()
     }
     return selector(state)
-  }
+  },
+  useLibrarySorting: vi.fn(() => ({ sortBy: 'date', sortOrder: 'desc' }))
 }))
+
+vi.mock('@/hooks/useOperations', () => ({
+  useOperations: vi.fn(() => ({
+    queueTranscription: vi.fn().mockResolvedValue(true),
+    queueBulkTranscriptions: vi.fn().mockResolvedValue(0),
+    queueDownload: vi.fn().mockResolvedValue(true),
+    queueBulkDownloads: vi.fn().mockResolvedValue(0),
+    cancelTranscription: vi.fn(),
+    cancelAllTranscriptions: vi.fn(),
+    cancelAllDownloads: vi.fn()
+  }))
+}))
+
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({ count }: { count: number }) => ({
+    getVirtualItems: () => Array.from({ length: Math.min(count, 50) }, (_, index) => ({
+      index,
+      size: 200,
+      start: index * 200,
+      key: String(index),
+      measureElement: vi.fn()
+    })),
+    getTotalSize: () => count * 200,
+    scrollToIndex: vi.fn(),
+    measureElement: vi.fn(),
+    measure: vi.fn()
+  })
+}))
+
+// Mock electronAPI
+global.window.electronAPI = {
+  transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}) },
+  meetings: { getByIds: vi.fn().mockResolvedValue({}) },
+  storage: { openFolder: vi.fn() },
+  recordings: {
+    addExternal: vi.fn(),
+    delete: vi.fn(),
+    updateStatus: vi.fn()
+  },
+  downloadService: {
+    queueDownloads: vi.fn()
+  }
+} as any
 
 describe('Library Accessibility', () => {
   beforeEach(() => {
@@ -175,7 +264,7 @@ describe('Library Accessibility', () => {
       }
     ]
 
-    mockUseUnifiedRecordings.mockReturnValueOnce({
+    const mockData = {
       recordings: mockRecordings,
       loading: false,
       error: null,
@@ -185,17 +274,40 @@ describe('Library Accessibility', () => {
         total: 2,
         deviceOnly: 1,
         localOnly: 0,
+        both: 1,
         synced: 1,
-        transcribed: 0,
-        untranscribed: 2
+        unsynced: 1,
+        onSource: 2,
+        locallyAvailable: 1
       }
-    })
+    }
+    // Provide enough values for React StrictMode double-render
+    mockUseUnifiedRecordings.mockReturnValue(mockData)
 
     const { container } = render(
       <MemoryRouter>
         <Library />
       </MemoryRouter>
     )
+
+    // Restore default mock for subsequent tests
+    mockUseUnifiedRecordings.mockImplementation(() => ({
+      recordings: [] as UnifiedRecording[],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
+      deviceConnected: false,
+      stats: {
+        total: 0,
+        deviceOnly: 0,
+        localOnly: 0,
+        both: 0,
+        synced: 0,
+        unsynced: 0,
+        onSource: 0,
+        locallyAvailable: 0
+      }
+    }))
 
     // With recordings, listbox should be rendered with proper ARIA attributes
     const listbox = container.querySelector('[role="listbox"]')

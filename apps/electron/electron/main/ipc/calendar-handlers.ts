@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import { getConfig, updateConfig } from '../services/config'
 import { syncCalendar, getLastSyncTime, CalendarSyncResult } from '../services/calendar-sync'
+import { clearAllMeetings } from '../services/database'
 import {
   SetIcsUrlSchema,
   ToggleAutoSyncSchema,
@@ -22,6 +23,22 @@ export function registerCalendarHandlers(): void {
       }
     }
 
+    return await syncCalendar(config.calendar.icsUrl)
+  })
+
+  // Clear all meetings and perform a fresh sync
+  ipcMain.handle('calendar:clear-and-sync', async (): Promise<CalendarSyncResult> => {
+    const config = getConfig()
+
+    if (!config.calendar.icsUrl) {
+      return {
+        success: false,
+        error: 'No calendar URL configured',
+        meetingsCount: 0
+      }
+    }
+
+    clearAllMeetings()
     return await syncCalendar(config.calendar.icsUrl)
   })
 

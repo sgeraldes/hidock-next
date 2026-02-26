@@ -1,3 +1,4 @@
+// TODO: W1-HS-05: This store is not consumed by any component. Wire it to the Library page or remove it.
 /**
  * Knowledge Store (Domain)
  *
@@ -7,6 +8,7 @@
  */
 
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 import { subscribeWithSelector } from 'zustand/middleware'
 import type { RecordingWithTranscript } from '@/types'
 
@@ -125,16 +127,16 @@ export const useKnowledgeById = (id: string | null) => {
  * Get knowledge items by meeting ID
  */
 export const useKnowledgeByMeeting = (meetingId: string | null) => {
-  return useKnowledgeStore((state) =>
+  return useKnowledgeStore(useShallow((state) =>
     meetingId ? state.items.filter((item) => item.meeting_id === meetingId) : []
-  )
+  ))
 }
 
 /**
  * Get knowledge items by location (proximity match)
  */
 export const useKnowledgeByLocation = (location: string | null) => {
-  return useKnowledgeStore((state) =>
+  return useKnowledgeStore(useShallow((state) =>
     location
       ? state.items.filter((item) => {
           // Simple substring match for now - could be enhanced with fuzzy matching
@@ -142,7 +144,7 @@ export const useKnowledgeByLocation = (location: string | null) => {
           return itemLocation.includes(location.toLowerCase())
         })
       : []
-  )
+  ))
 }
 
 /**
@@ -151,14 +153,14 @@ export const useKnowledgeByLocation = (location: string | null) => {
 export const useKnowledgeByStatus = (
   status: 'pending' | 'transcribing' | 'transcribed' | 'error'
 ) => {
-  return useKnowledgeStore((state) => state.items.filter((item) => item.status === status))
+  return useKnowledgeStore(useShallow((state) => state.items.filter((item) => item.status === status)))
 }
 
 /**
  * Get all transcribed knowledge items
  */
 export const useTranscribedKnowledge = () => {
-  return useKnowledgeStore((state) =>
+  return useKnowledgeStore(useShallow((state) =>
     state.items.filter((item) => item.status === 'transcribed' && item.transcript)
-  )
+  ))
 }

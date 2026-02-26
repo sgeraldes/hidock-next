@@ -20,6 +20,7 @@ import {
   removeSyncedFile,
   getSyncedFilenames,
   updateRecordingStatus,
+  updateRecordingTranscriptionStatus,
   linkRecordingToMeeting
 } from '../services/database'
 
@@ -53,7 +54,13 @@ export function registerDatabaseHandlers(): void {
   })
 
   ipcMain.handle('db:update-recording-status', async (_, id: string, status: string) => {
-    updateRecordingStatus(id, status)
+    // Transcription-related statuses go to transcription_status column
+    const transcriptionStatuses = ['none', 'pending', 'queued', 'transcribing', 'transcribed', 'failed']
+    if (transcriptionStatuses.includes(status)) {
+      updateRecordingTranscriptionStatus(id, status)
+    } else {
+      updateRecordingStatus(id, status)
+    }
     return getRecordingById(id)
   })
 

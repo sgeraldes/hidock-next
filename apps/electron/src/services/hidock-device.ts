@@ -149,12 +149,21 @@ class HiDockDeviceService {
   // (set immediately before async work, checked before promise is set)
   private listRecordingsLock: boolean = false
 
+  // Debounce: timestamp of last successful listRecordings completion
+  private listRecordingsLastCompleted: number = 0
+  private static readonly LIST_RECORDINGS_DEBOUNCE_MS = 2000
+
   // Flag to prevent overlapping auto-connect attempts
   private autoConnectInProgress: boolean = false
 
   // Synchronous flag to prevent duplicate initAutoConnect (set immediately before any async work)
   // This handles React StrictMode double-invoking effects
   private initAutoConnectStarted: boolean = false
+
+  // FL-09: Timestamp of last 'ready' status notification, used to dedup
+  // back-to-back onStatusChange('ready') and onConnectionChange(true) events
+  private lastReadyStatusTimestamp: number = 0
+  private static readonly READY_DEDUP_MS = 500
 
   constructor() {
     this.jensen = getJensenDevice()
@@ -360,6 +369,9 @@ class HiDockDeviceService {
   enableAutoConnect(): void {
     this.autoConnectEnabled = true
     this.userInitiatedDisconnect = false
+    this.autoConnectConfig.enabled = true
+    this.autoConnectConfig.connectOnStartup = true
+    this.saveAutoConnectConfig() // Persist so setting survives app restart
     this.logActivity('info', 'Auto-connect re-enabled')
   }
 
@@ -716,6 +728,31 @@ class HiDockDeviceService {
       return []
     }
 
+    // FL-02: Debounce — if called within 2s of a previous successful completion,
+    // return cached data (prevents triple-fire on device connection/ready/poll)
+    if (!forceRefresh && this.cachedRecordings !== null) {
+      const timeSinceLast = Date.now() - this.listRecordingsLastCompleted
+      if (timeSinceLast < HiDockDeviceService.LIST_RECORDINGS_DEBOUNCE_MS) {
+        console.log(`[HiDockDevice] >>> listRecordings: DEBOUNCED (${timeSinceLast}ms since last), returning cached`)
+        onProgress?.(this.cachedRecordings.length, this.cachedRecordings.length)
+        return this.cachedRecordings
+      }
+    }
+
+    // FL-01/FL-08: forceRefresh must wait for existing operation to complete,
+    // then start a new one — never run concurrently
+    if (forceRefresh && (this.listRecordingsLock || this.listRecordingsPromise)) {
+      console.log('[HiDockDevice] >>> listRecordings: forceRefresh waiting for existing operation to complete')
+      if (this.listRecordingsPromise) {
+        try {
+          await this.listRecordingsPromise
+        } catch {
+          // Ignore error from previous operation — we'll start a fresh one
+        }
+      }
+      // After the existing operation completes, fall through to start a new one
+    }
+
     // Lock-type-aware guard: examine which Jensen lock is held and respond appropriately
     // instead of blanket-rejecting all operations
     const lockHolder = this.jensen.getLockHolder()
@@ -759,15 +796,27 @@ class HiDockDeviceService {
     if (!this.initializationComplete) {
       console.log('[HiDockDevice] >>> listRecordings: WAITING FOR INIT')
       this.logActivity('info', 'Waiting for initialization', 'File list request waiting for device init...')
+      // FL-06: Emit periodic status updates so the UI shows "Initializing device..."
+      // instead of appearing frozen during the wait
+      this.updateStatus('getting-info', 'Initializing device...', 15)
       // Wait up to 60 seconds for initialization (initialization itself can take up to 60s with 4x15s timeouts)
       const maxWait = 60000
       const startWait = Date.now()
+      let lastProgressUpdate = 0
       while (!this.initializationComplete && Date.now() - startWait < maxWait) {
         await new Promise(resolve => setTimeout(resolve, 100))
         // Check if disconnected during wait
         if (!this.isConnected()) {
           this.logActivity('error', 'List files aborted', 'Device disconnected while waiting for init')
           return []
+        }
+        // FL-06: Emit progress update every 5 seconds so UI doesn't appear frozen
+        const elapsed = Date.now() - startWait
+        const secondsElapsed = Math.floor(elapsed / 1000)
+        if (secondsElapsed > lastProgressUpdate && secondsElapsed % 5 === 0) {
+          lastProgressUpdate = secondsElapsed
+          const progress = Math.min(15 + Math.round((elapsed / maxWait) * 50), 65)
+          this.updateStatus('getting-info', `Initializing device... (${secondsElapsed}s)`, progress)
         }
       }
       if (!this.initializationComplete) {
@@ -917,6 +966,8 @@ class HiDockDeviceService {
         // Clear the lock and promise when done (success or error)
         this.listRecordingsLock = false
         this.listRecordingsPromise = null
+        // FL-02: Update debounce timestamp on completion
+        this.listRecordingsLastCompleted = Date.now()
       }
     })()
 
@@ -1222,6 +1273,9 @@ class HiDockDeviceService {
     this.state.settings = null
     // Invalidate cache count to force fresh fetch on reconnect
     // (cachedRecordings preserved for instant UI display via getCachedRecordings())
+    // TODO: FL-07: Setting cachedRecordingCount = -1 forces a full re-fetch on reconnect
+    // even if no recordings changed. Consider comparing counts on reconnect before
+    // triggering a full list refresh to avoid unnecessary data transfers.
     this.cachedRecordingCount = -1
     // NOTE: Do NOT clear cachedRecordings on disconnect!
     // The recordings array survives disconnect for instant Phase 1 display.
@@ -1238,6 +1292,13 @@ class HiDockDeviceService {
   }
 
   private notifyConnectionChange(connected: boolean): void {
+    // FL-09: If a 'ready' status notification just fired (within dedup window),
+    // skip the connection change notification for 'connected=true' to prevent
+    // duplicate refresh triggers in subscribers
+    if (connected && Date.now() - this.lastReadyStatusTimestamp < HiDockDeviceService.READY_DEDUP_MS) {
+      console.log('[HiDockDevice] Skipping notifyConnectionChange(true) - ready status just fired')
+      return
+    }
     for (const listener of this.connectionListeners) {
       try {
         listener(connected)
@@ -1248,6 +1309,10 @@ class HiDockDeviceService {
   }
 
   private notifyStatusChange(status: ConnectionStatus): void {
+    // FL-09: Record timestamp when 'ready' status fires for dedup with connection change
+    if (status.step === 'ready') {
+      this.lastReadyStatusTimestamp = Date.now()
+    }
     for (const listener of this.statusListeners) {
       try {
         listener(status)

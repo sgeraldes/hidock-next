@@ -13,7 +13,7 @@ import { TranscriptViewer } from './TranscriptViewer'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, parseJsonArray } from '@/types'
-import { Calendar, Clock, HardDrive, Tag, ExternalLink, Play, Download, Trash2, Wand2, RefreshCw } from 'lucide-react'
+import { Calendar, Clock, HardDrive, Tag, ExternalLink, Download, Trash2, Wand2, RefreshCw, Play, Square } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { formatDuration } from '@/lib/utils'
 
@@ -123,6 +123,33 @@ export function SourceReader({
 
       {/* Action Buttons Section */}
       <div className="flex flex-wrap gap-2 px-6 py-3 border-b bg-muted/30">
+        {/* Play/Stop Button - only for local recordings */}
+        {canPlay && (
+          isPlaying ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onStop}
+              className="gap-2"
+              title="Stop playback"
+            >
+              <Square className="h-4 w-4" />
+              Stop
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onPlay}
+              className="gap-2"
+              title="Play recording"
+            >
+              <Play className="h-4 w-4" />
+              Play
+            </Button>
+          )
+        )}
+
         {/* Download Button - only for device-only recordings */}
         {isDeviceOnly(recording) && onDownload && (
           <Button
@@ -204,10 +231,9 @@ export function SourceReader({
         )}
       </div>
 
-      {/* Audio Player */}
-      {canPlay && (
+      {/* Audio Player — only shown after playback has been initiated */}
+      {canPlay && isPlaying && (
         <div className="sticky top-0 bg-background z-10 border-b">
-          {/* Always show AudioPlayer when file is selected - key forces remount on file change */}
           <AudioPlayer key={recording.id} filename={recording.filename} onClose={onStop} />
         </div>
       )}

@@ -1,121 +1,12 @@
 /**
- * UI Store
+ * UI Store - Re-export from canonical location
  *
- * Manages UI state including sidebar, selected meeting, and output generation.
+ * The canonical UI store lives at @/store/ui/useUIStore.
+ * This file re-exports to maintain backward compatibility with imports
+ * from @/store/useUIStore.
+ *
+ * WARNING: Do NOT create a separate create() call here.
+ * Both paths MUST resolve to the same Zustand store instance.
  */
 
-import { create } from 'zustand'
-import type { UIStore, SidebarContent } from '@/types/stores'
-
-export const useUIStore = create<UIStore>((set) => ({
-  // State
-  sidebarOpen: true,
-  sidebarContent: 'calendar',
-  selectedMeetingId: null,
-  isGeneratingOutput: false,
-  outputContent: null,
-
-  // Recordings page view preference (persists across navigation)
-  recordingsCompactView: true, // Default to list view (compact)
-
-  // Playback state (managed by OperationController)
-  currentlyPlayingId: null,
-  currentlyPlayingPath: null,
-  playbackCurrentTime: 0,
-  playbackDuration: 0,
-  isPlaying: false,
-  playbackWaveformData: null,
-  playbackSentimentData: null,
-
-  // Waveform loading state
-  waveformLoadingId: null,
-  waveformLoadingError: null,
-  waveformLoadedForId: null,
-
-  // Actions
-  toggleSidebar: () => {
-    set((state) => ({ sidebarOpen: !state.sidebarOpen }))
-  },
-
-  setSidebarOpen: (open: boolean) => {
-    set({ sidebarOpen: open })
-  },
-
-  setSidebarContent: (content: SidebarContent) => {
-    set({ sidebarContent: content, sidebarOpen: true })
-  },
-
-  selectMeeting: (id: string | null) => {
-    set({ selectedMeetingId: id })
-  },
-
-  setGeneratingOutput: (generating: boolean) => {
-    set({ isGeneratingOutput: generating })
-  },
-
-  setOutputContent: (content: string | null) => {
-    set({ outputContent: content })
-  },
-
-  clearOutput: () => {
-    set({ outputContent: null, isGeneratingOutput: false })
-  },
-
-  // Recordings view actions
-  setRecordingsCompactView: (compact: boolean) => {
-    set({ recordingsCompactView: compact })
-  },
-
-  // Playback actions (called by OperationController)
-  setCurrentlyPlaying: (recordingId: string | null, filePath: string | null) => {
-    set({ currentlyPlayingId: recordingId, currentlyPlayingPath: filePath })
-  },
-
-  setPlaybackProgress: (currentTime: number, duration: number) => {
-    set({ playbackCurrentTime: currentTime, playbackDuration: duration })
-  },
-
-  setIsPlaying: (playing: boolean) => {
-    set({ isPlaying: playing })
-  },
-
-  setWaveformData: (waveformData: Float32Array | null) => {
-    set({ playbackWaveformData: waveformData })
-  },
-
-  setSentimentData: (sentimentData) => {
-    set({ playbackSentimentData: sentimentData })
-  },
-
-  // Waveform loading actions
-  setWaveformLoading: (recordingId: string | null) => {
-    set({
-      waveformLoadingId: recordingId,
-      waveformLoadingError: null  // Clear error when starting new load
-    })
-  },
-
-  setWaveformLoadingError: (recordingId: string | null, error: string | null) => {
-    set({
-      waveformLoadingId: null,
-      waveformLoadingError: error
-    })
-  },
-
-  setWaveformLoadedFor: (recordingId: string | null) => {
-    set({
-      waveformLoadingId: null,
-      waveformLoadingError: null,
-      waveformLoadedForId: recordingId
-    })
-  }
-}))
-
-// Note: When selecting multiple values from the store, use individual selectors
-// in your component to avoid infinite re-render issues. For example:
-//   const isGenerating = useUIStore((state) => state.isGeneratingOutput)
-//   const content = useUIStore((state) => state.outputContent)
-//
-// Combining selectors into objects can cause infinite loops because a new object
-// is created on each render. Use `useShallow` from 'zustand/react/shallow' if you
-// need to select multiple values at once.
+export { useUIStore } from './ui/useUIStore'

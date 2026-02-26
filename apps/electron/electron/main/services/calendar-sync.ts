@@ -3,7 +3,7 @@ import { writeFileSync } from 'fs'
 import { join } from 'path'
 import { getCachePath } from './file-storage'
 import { upsertMeetingsBatch, Meeting } from './database'
-import { getConfig } from './config'
+import { getConfig, updateConfig } from './config'
 
 /**
  * Windows timezone names to UTC offset in seconds.
@@ -384,8 +384,9 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
       throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : 'Unknown error'}`)
     }
 
-    // Update last sync time in config
+    // Update last sync time in config and persist it
     const now = new Date().toISOString()
+    await updateConfig('calendar', { lastSyncAt: now })
 
     console.log(`Calendar sync complete: ${meetings.length} meetings`)
 

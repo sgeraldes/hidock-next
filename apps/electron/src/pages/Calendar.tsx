@@ -4,6 +4,8 @@ import { Mic, RefreshCw, Play, X, LayoutGrid, Square, CheckSquare, FileText, Tra
 import { Button } from '@/components/ui/button'
 import { cn, formatTime, isToday, formatDuration } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
+import { useShallow } from 'zustand/react/shallow'
+import { useConfigStore } from '@/store/domain/useConfigStore'
 import type { Meeting, Recording } from '@/types'
 import {
   Tooltip,
@@ -13,11 +15,13 @@ import {
 } from '@/components/ui/tooltip'
 import { RecordingLinkDialog } from '@/components/RecordingLinkDialog'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
-import { UnifiedRecording, DeviceOnlyRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
+import { UnifiedRecording, DeviceOnlyRecording, BothLocationsRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
+import { useOperations } from '@/hooks/useOperations'
+import { toast } from '@/components/ui/toaster'
 
 // Extracted calendar components
 import { CalendarHeader, CalendarStatsBar, StatusIcon, RecordingTooltipContent, MeetingOverlayTooltipContent } from '@/components/calendar'
@@ -52,6 +56,29 @@ function formatShortTime(date: Date): string {
   return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
 
+// CA-05: Current time indicator that updates every 60 seconds
+function CurrentTimeIndicator({ startHour, hourHeight }: { startHour: number; hourHeight: number }) {
+  const [now, setNow] = useState(() => new Date())
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNow(new Date())
+    }, 60000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const top = Math.max(0, (now.getHours() + now.getMinutes() / 60 - startHour) * hourHeight)
+
+  return (
+    <div
+      className="absolute left-0 right-0 border-t-2 border-red-500 z-20 pointer-events-none"
+      style={{ top }}
+    >
+      <div className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-red-500 rounded-full" />
+    </div>
+  )
+}
+
 export function Calendar() {
   const navigate = useNavigate()
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -63,26 +90,46 @@ export function Calendar() {
     navigateMonth,
     goToToday,
     setCurrentDate,
+    calendarView,
     setCalendarView,
     loadMeetings,
     lastCalendarSync: lastSync,
     calendarSyncing,
-    config,
-    loadConfig,
-    updateConfig,
     // Download queue from global store (persists across navigation)
     downloadQueue,
     addToDownloadQueue,
     updateDownloadProgress,
     removeFromDownloadQueue,
     setDeviceSyncState,
-  } = useAppStore()
+  } = useAppStore(useShallow((state) => ({
+    meetings: state.meetings,
+    currentDate: state.currentDate,
+    meetingsLoading: state.meetingsLoading,
+    navigateWeek: state.navigateWeek,
+    navigateMonth: state.navigateMonth,
+    goToToday: state.goToToday,
+    setCurrentDate: state.setCurrentDate,
+    calendarView: state.calendarView,
+    setCalendarView: state.setCalendarView,
+    loadMeetings: state.loadMeetings,
+    lastCalendarSync: state.lastCalendarSync,
+    calendarSyncing: state.calendarSyncing,
+    downloadQueue: state.downloadQueue,
+    addToDownloadQueue: state.addToDownloadQueue,
+    updateDownloadProgress: state.updateDownloadProgress,
+    removeFromDownloadQueue: state.removeFromDownloadQueue,
+    setDeviceSyncState: state.setDeviceSyncState,
+  })))
+  const { config, loadConfig, updateConfig } = useConfigStore()
 
   // Get unified recordings (device + local)
   const { recordings: unifiedRecordings, loading: recordingsLoading, refresh: refreshRecordings, deviceConnected, stats } = useUnifiedRecordings()
 
+  // Centralized operations
+  const { queueTranscription } = useOperations()
+
   // State from config (with defaults)
-  const [calendarView, setCalendarViewLocal] = useState<CalendarViewType>('week')
+  // calendarView now comes from useAppStore (single source of truth — CA-04)
   const [hideEmptyMeetings, setHideEmptyMeetings] = useState(true)
   const [showListView, setShowListView] = useState(false)
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(true)
@@ -117,14 +164,14 @@ export function Calendar() {
   // Sync state with config when it loads
   useEffect(() => {
     if (config?.ui) {
-      setCalendarViewLocal(config.ui.calendarView || 'week')
+      setCalendarView(config.ui.calendarView || 'week')
       setHideEmptyMeetings(config.ui.hideEmptyMeetings ?? true)
       setShowListView(config.ui.showListView ?? false)
     }
     if (config?.calendar) {
       setAutoSyncEnabled(config.calendar.syncEnabled)
     }
-  }, [config])
+  }, [config, setCalendarView])
 
   // Load meetings when date or view changes
   useEffect(() => {
@@ -172,7 +219,7 @@ export function Calendar() {
   }, [showListView])
 
   // Get dates for current view
-  const viewDates = useMemo(() => {
+  const viewDates = useMemo((): Date[] => {
     switch (calendarView) {
       case 'day':
         return getDayDates(currentDate)
@@ -182,6 +229,8 @@ export function Calendar() {
         return getWeekDates(currentDate)
       case 'month':
         return getMonthDates(currentDate)
+      default:
+        return getWeekDates(currentDate)
     }
   }, [currentDate, calendarView])
 
@@ -336,19 +385,31 @@ export function Calendar() {
   }, [lastSync])
 
   // Handle sync button click
+  const setCalendarSyncing = useCallback((syncing: boolean) => {
+    useAppStore.setState({ calendarSyncing: syncing })
+  }, [])
+
   const handleSync = useCallback(async () => {
     console.log('[Calendar] Clearing cache and resyncing...')
+    setCalendarSyncing(true)
     try {
       const result = await window.electronAPI.calendar.clearAndSync()
       console.log('[Calendar] Clear and sync result:', result)
+      if (result && !result.success) {
+        toast.error('Calendar sync failed', result.error || 'Unknown error occurred')
+      }
       // Reload meetings for current view
+      if (!viewDates.length) return
       const endDate = new Date(viewDates[viewDates.length - 1])
       endDate.setHours(23, 59, 59, 999)
       await loadMeetings(viewDates[0].toISOString(), endDate.toISOString())
     } catch (err) {
       console.error('[Calendar] Clear and sync failed:', err)
+      toast.error('Calendar sync failed', err instanceof Error ? err.message : 'An unexpected error occurred')
+    } finally {
+      setCalendarSyncing(false)
     }
-  }, [viewDates, loadMeetings])
+  }, [viewDates, loadMeetings, setCalendarSyncing])
 
   // Handle navigation (memoized)
   const handleNavigatePrev = useCallback(() => {
@@ -377,7 +438,6 @@ export function Calendar() {
 
   // Handle view changes with config persistence (memoized)
   const handleCalendarViewChange = useCallback(async (view: CalendarViewType) => {
-    setCalendarViewLocal(view)
     setCalendarView(view)
     try {
       await updateConfig('ui', { calendarView: view })
@@ -467,7 +527,7 @@ export function Calendar() {
 
     setDeleting(recording.id)
     try {
-      const filename = ('deviceFilename' in (recording as any)) ? (recording as any).deviceFilename : recording.filename
+      const filename = (recording as DeviceOnlyRecording | BothLocationsRecording).deviceFilename || recording.filename
       await deviceService.deleteRecording(filename)
       await refreshRecordings(true)
     } catch (e) {
@@ -497,29 +557,16 @@ export function Calendar() {
 
   // Trigger transcription for a local recording (memoized)
   const handleTranscribe = useCallback(async (recording: UnifiedRecording) => {
-    if (!hasLocalPath(recording)) {
-      alert('Cannot transcribe: file not available locally. Download from device first.')
-      return
-    }
-    if (recording.transcriptionStatus === 'processing' || recording.transcriptionStatus === 'complete') return
-
     setTranscribing(recording.id)
     try {
-      const result: any = await window.electronAPI.recordings.transcribe(recording.id)
-      if (result && result.success === false) {
-        console.error('Transcription failed:', result.error)
-        alert(`Transcription failed: ${result.error}`)
-      } else {
-        // Refresh to see updated status
+      const queued = await queueTranscription(recording)
+      if (queued) {
         await refreshRecordings(false)
       }
-    } catch (e) {
-      console.error('Transcription failed:', e)
-      alert(`Transcription failed: ${e instanceof Error ? e.message : 'Unknown error'}`)
     } finally {
       setTranscribing(null)
     }
-  }, [refreshRecordings])
+  }, [queueTranscription, refreshRecordings])
 
   // Selection handlers (memoized)
   const toggleSelection = useCallback((id: string) => {
@@ -998,6 +1045,11 @@ export function Calendar() {
         </div>
       ) : calendarView === 'month' ? (
         /* Month View */
+        /* TODO (CA-09): Design inconsistency - Month view is meeting-centric (shows meetings with
+           recording indicators), while Week/Day view is recording-centric (shows recordings with
+           meeting overlays). Both views should ideally show BOTH meetings AND recordings to provide
+           a consistent experience. Suggested approach: add recording blocks to month view cells and
+           add meeting blocks as primary items to week/day view alongside recordings. */
         <div className="flex-1 flex flex-col min-h-0">
           {/* Day of Week Headers */}
           <div className="grid grid-cols-7 border-b flex-shrink-0">
@@ -1093,7 +1145,7 @@ export function Calendar() {
           </div>
         </div>
       ) : (
-        /* Day/Workweek/Week View */
+        /* Day/Workweek/Week View — recording-centric (see CA-09 TODO above for inconsistency) */
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           {/* Day Headers - fixed, with scrollbar gutter to match content */}
           <div className="flex border-b flex-shrink-0 overflow-y-scroll" style={{ scrollbarGutter: 'stable' }}>
@@ -1179,16 +1231,9 @@ export function Calendar() {
                       />
                     ))}
 
-                    {/* Current Time Indicator */}
+                    {/* Current Time Indicator (CA-05: updates every 60s) */}
                     {today && (
-                      <div
-                        className="absolute left-0 right-0 border-t-2 border-red-500 z-20 pointer-events-none"
-                        style={{
-                          top: Math.max(0, (new Date().getHours() + new Date().getMinutes() / 60 - START_HOUR) * HOUR_HEIGHT)
-                        }}
-                      >
-                        <div className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-red-500 rounded-full" />
-                      </div>
+                      <CurrentTimeIndicator startHour={START_HOUR} hourHeight={HOUR_HEIGHT} />
                     )}
 
                     {/* ===== MEETING OVERLAYS (DASHED - SECONDARY) ===== */}
@@ -1197,6 +1242,9 @@ export function Calendar() {
                       const { top, height } = getMeetingOverlayStyle(meeting)
 
                       const startHour = meeting.startTime.getHours()
+                      // TODO(CA-06): Recordings/meetings outside the visible hour range (START_HOUR to END_HOUR,
+                      // currently 7AM-9PM) are silently hidden. Consider expanding the range dynamically based on
+                      // data, or adding a scroll-to-time feature so users can see early morning / late night items.
                       if (startHour < START_HOUR || startHour >= END_HOUR) return null
 
                       const canShowTime = height > 35
@@ -1326,6 +1374,7 @@ export function Calendar() {
         onClose={() => setLinkDialogRecording(null)}
         onResolved={() => {
           setLinkDialogRecording(null)
+          if (!viewDates.length) return
           const startDate = viewDates[0].toISOString()
           const endDate = new Date(viewDates[viewDates.length - 1])
           endDate.setHours(23, 59, 59, 999)

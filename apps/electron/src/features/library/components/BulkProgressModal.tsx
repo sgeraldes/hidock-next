@@ -117,8 +117,8 @@ function ErrorDetails({ error }: { error: LibraryError }) {
  * Individual item row component
  */
 function ItemRow({ item }: { item: BulkOperationItem }) {
-  // Extract title from item data (assuming data has a title property)
-  const title = (item.data as any)?.title || (item.data as any)?.name || `Item ${item.id.slice(0, 8)}`
+  const data = item.data as Record<string, unknown> | null
+  const title = (data?.title as string) || (data?.name as string) || `Item ${item.id.slice(0, 8)}`
 
   return (
     <li className="py-2 border-b last:border-b-0" aria-label={`${title}: ${getStatusText(item.status)}`}>

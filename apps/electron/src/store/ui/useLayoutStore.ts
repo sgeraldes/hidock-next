@@ -1,3 +1,4 @@
+// TODO: W1-HS-09: This store is not consumed by any component. Wire it to the Layout component or remove it.
 /**
  * Layout Store (UI)
  *

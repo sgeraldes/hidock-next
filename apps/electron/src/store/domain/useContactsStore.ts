@@ -1,3 +1,4 @@
+// TODO: W1-HS-13: This store is not consumed by any component. Wire it to the corresponding page or remove it.
 /**
  * Contacts Store
  *

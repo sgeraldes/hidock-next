@@ -60,10 +60,10 @@ export const USB_VENDOR_ID = 0x10d6 // Actions Semiconductor (default)
 export const USB_ALTERNATE_VENDOR_ID = 0x3887 // HiDock (newer P1 Mini devices)
 
 // All known HiDock Vendor IDs - use this for device filtering
-export const USB_VENDOR_IDS = [
+export const USB_VENDOR_IDS: number[] = [
   0x10d6, // Actions Semiconductor (older devices)
   0x3887  // HiDock (newer P1 Mini devices)
-] as const
+]
 
 export const USB_PRODUCT_IDS = {
   // Original product IDs (hex)
@@ -389,7 +389,7 @@ export class JensenDevice {
     this.usbConnectHandler = (event: USBConnectionEvent) => {
       const device = event.device
       // Only react to HiDock devices (check all known vendor IDs)
-      if (USB_VENDOR_IDS.includes(device.vendorId) && device.productName?.includes('HiDock')) {
+      if (USB_VENDOR_IDS.includes(device.vendorId) && device.productName?.toLowerCase().includes('hidock')) {
         console.log('[Jensen] USB device connected event detected, triggering tryConnect')
         this.tryConnect()
       }
@@ -473,7 +473,7 @@ export class JensenDevice {
       if (DEBUG_PROTOCOL) console.log('connect: Found', devices.length, 'authorized devices')
 
       let device = devices.find(
-        (d) => USB_VENDOR_IDS.includes(d.vendorId) && d.productName?.includes('HiDock')
+        (d) => USB_VENDOR_IDS.includes(d.vendorId) && d.productName?.toLowerCase().includes('hidock')
       )
 
       if (!device) {
@@ -637,7 +637,7 @@ export class JensenDevice {
     try {
       const devices = await navigator.usb.getDevices()
       const device = devices.find(
-        (d) => USB_VENDOR_IDS.includes(d.vendorId) && d.productName?.includes('HiDock')
+        (d) => USB_VENDOR_IDS.includes(d.vendorId) && d.productName?.toLowerCase().includes('hidock')
       )
 
       if (!device) return false
@@ -1171,24 +1171,27 @@ export class JensenDevice {
     }
   }
 
+  // DV-05: Wrapped with USB lock guard to prevent concurrent USB operations
   async setTime(date: Date, timeout = 5): Promise<{ result: string } | null> {
-    const dateStr = [
-      date.getFullYear(),
-      String(date.getMonth() + 1).padStart(2, '0'),
-      String(date.getDate()).padStart(2, '0'),
-      String(date.getHours()).padStart(2, '0'),
-      String(date.getMinutes()).padStart(2, '0'),
-      String(date.getSeconds()).padStart(2, '0')
-    ].join('')
+    return this.withLock('setTime', async () => {
+      const dateStr = [
+        date.getFullYear(),
+        String(date.getMonth() + 1).padStart(2, '0'),
+        String(date.getDate()).padStart(2, '0'),
+        String(date.getHours()).padStart(2, '0'),
+        String(date.getMinutes()).padStart(2, '0'),
+        String(date.getSeconds()).padStart(2, '0')
+      ].join('')
 
-    try {
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.SET_DEVICE_TIME).body(this.toBcd(dateStr)),
-        timeout
-      )
-    } catch {
-      return null
-    }
+      try {
+        return await this.send<{ result: string }>(
+          new JensenMessage(CMD.SET_DEVICE_TIME).body(this.toBcd(dateStr)),
+          timeout
+        )
+      } catch {
+        return null
+      }
+    })
   }
 
   async getFileCount(timeout = 15): Promise<{ count: number } | null> {
@@ -1201,29 +1204,35 @@ export class JensenDevice {
     })
   }
 
+  // DV-05: Wrapped with USB lock guard to prevent concurrent USB operations
   async getSettings(timeout = 5): Promise<DeviceSettings | null> {
     if (this.versionNumber && this.versionNumber < 327714) {
       return { autoRecord: false, autoPlay: false }
     }
-    try {
-      return await this.send<DeviceSettings>(new JensenMessage(CMD.GET_SETTINGS), timeout)
-    } catch {
-      return null
-    }
+    return this.withLock('getSettings', async () => {
+      try {
+        return await this.send<DeviceSettings>(new JensenMessage(CMD.GET_SETTINGS), timeout)
+      } catch {
+        return null
+      }
+    })
   }
 
+  // DV-05: Wrapped with USB lock guard to prevent concurrent USB operations
   async setAutoRecord(enabled: boolean, timeout = 5): Promise<{ result: string } | null> {
     if (this.versionNumber && this.versionNumber < 327714) {
       return { result: 'unsupported' }
     }
-    try {
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.SET_SETTINGS).body([0, 0, 0, enabled ? 1 : 2]),
-        timeout
-      )
-    } catch {
-      return null
-    }
+    return this.withLock('setAutoRecord', async () => {
+      try {
+        return await this.send<{ result: string }>(
+          new JensenMessage(CMD.SET_SETTINGS).body([0, 0, 0, enabled ? 1 : 2]),
+          timeout
+        )
+      } catch {
+        return null
+      }
+    })
   }
 
   async getCardInfo(timeout = 10): Promise<CardInfo | null> {
@@ -1247,18 +1256,21 @@ export class JensenDevice {
     })
   }
 
+  // DV-05: Wrapped with USB lock guard to prevent concurrent USB operations
   async formatCard(timeout = 30): Promise<{ result: string } | null> {
     if (this.versionNumber && this.versionNumber < 327733) {
       return null
     }
-    try {
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.FORMAT_CARD).body([1, 2, 3, 4]),
-        timeout
-      )
-    } catch {
-      return null
-    }
+    return this.withLock('formatCard', async () => {
+      try {
+        return await this.send<{ result: string }>(
+          new JensenMessage(CMD.FORMAT_CARD).body([1, 2, 3, 4]),
+          timeout
+        )
+      } catch {
+        return null
+      }
+    })
   }
 
   async deleteFile(filename: string, timeout = 10): Promise<{ result: string } | null> {

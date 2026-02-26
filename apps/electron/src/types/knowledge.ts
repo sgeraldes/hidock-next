@@ -181,6 +181,15 @@ export interface Message {
 
 
 
+/**
+ * Person types for UI-level contact representation.
+ *
+ * Note: `Person` (defined below) is the UI-level type with camelCase fields.
+ * `Contact` (in types/index.ts) is the DB-level type with snake_case fields.
+ * Both represent the same entity at different layers. The People page uses Person,
+ * while the ContactsStore operates on Contact. A mapping is done at the IPC boundary
+ * (see People.tsx loadPeople and contacts-handlers.ts).
+ */
 export type PersonType = 'team' | 'candidate' | 'customer' | 'external' | 'unknown'
 
 

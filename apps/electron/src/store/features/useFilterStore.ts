@@ -1,3 +1,4 @@
+// TODO: W1-HS-12: This store is not consumed by any component. Wire it to the corresponding page or remove it.
 /**
  * Filter Store
  *
@@ -6,6 +7,7 @@
  */
 
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 import type { FilterStore, DateRange, RecordingStatusFilter } from '@/types/stores'
 
 export const useFilterStore = create<FilterStore>((set, get) => ({
@@ -73,7 +75,7 @@ export const useFilterStore = create<FilterStore>((set, get) => ({
 
 // Selector hooks for common filter combinations
 export const useActiveFilters = () => {
-  return useFilterStore((state) => ({
+  return useFilterStore(useShallow((state) => ({
     dateRange: state.dateRange,
     contactId: state.contactId,
     projectId: state.projectId,
@@ -86,17 +88,17 @@ export const useActiveFilters = () => {
       state.status ||
       state.searchQuery
     )
-  }))
+  })))
 }
 
 // Convert filter state to API request format
 export const useFilterAsRequest = () => {
-  return useFilterStore((state) => ({
+  return useFilterStore(useShallow((state) => ({
     startDate: state.dateRange?.start.toISOString(),
     endDate: state.dateRange?.end.toISOString(),
     contactId: state.contactId ?? undefined,
     projectId: state.projectId ?? undefined,
     status: state.status === null ? 'all' : state.status,
     search: state.searchQuery || undefined
-  }))
+  })))
 }

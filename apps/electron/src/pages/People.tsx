@@ -1,13 +1,13 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { 
-  Users, 
-  Search, 
-  RefreshCw, 
-  Mail, 
-  Building, 
-  Briefcase, 
-  Clock, 
+import {
+  Users,
+  Search,
+  RefreshCw,
+  Mail,
+  Building,
+  Briefcase,
+  Clock,
   MessageSquare,
   Tag,
   ChevronRight,
@@ -19,20 +19,34 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import type { Person, PersonType } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
+import { toast } from '@/components/ui/toaster'
+
+// TODO(PE-07): Add delete contact capability. Requires a new IPC handler (contacts:delete)
+// in electron/main/ipc/ and a corresponding UI button (e.g., context menu or detail view action).
 
 export function People() {
   const navigate = useNavigate()
+
+  // TODO(PE-04): Migrate to useContactsStore from @/store instead of local useState.
+  // The store (store/domain/useContactsStore.ts) already has loadContacts, selectContact,
+  // updateContact, and setSearchQuery actions. This page duplicates that state locally.
+  // Note: The store operates on Contact (DB type) while this page uses Person (UI type).
+  // A mapping layer will be needed during migration (see PE-06 in types/knowledge.ts).
   const [people, setPeople] = useState<Person[]>([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [typeFilter, setTypeFilter] = useState<PersonType | 'all'>('all')
 
-  const loadPeople = async () => {
+  // PE-12: Wrapped in useCallback to stabilize reference for dependency arrays
+  const loadPeople = useCallback(async () => {
     setLoading(true)
     try {
-      const result = await window.electronAPI.contacts.getAll({ 
+      // TODO(PE-08): Type filter is client-side only and will miss contacts beyond this hardcoded
+      // limit. Consider passing the type filter to the IPC handler for server-side filtering.
+      // TODO(PE-09): Implement pagination or virtual scroll for large contact lists.
+      const result = await window.electronAPI.contacts.getAll({
         search: searchQuery,
-        limit: 100 
+        limit: 100
       })
       if (result.success) {
         const mappedPeople = result.data.contacts.map((c: any) => ({
@@ -45,14 +59,19 @@ export function People() {
       }
     } catch (error) {
       console.error('Failed to load people:', error)
+      toast.error('Failed to load people', error instanceof Error ? error.message : 'An unexpected error occurred')
     } finally {
       setLoading(false)
     }
-  }
-
-  useEffect(() => {
-    loadPeople()
   }, [searchQuery])
+
+  // PE-05: Debounce search to avoid firing IPC on every keystroke
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      loadPeople()
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [loadPeople])
 
   const filteredPeople = useMemo(() => {
     return people.filter(p => {
@@ -85,7 +104,12 @@ export function People() {
               <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
               Refresh
             </Button>
-            <Button size="sm" variant="default" disabled>
+            <Button
+              size="sm"
+              variant="default"
+              title="Coming soon"
+              onClick={() => toast.info('Coming soon', 'Contact creation is not yet available.')}
+            >
               <UserPlus className="h-4 w-4 mr-2" />
               Add Person
             </Button>
@@ -107,10 +131,10 @@ export function People() {
           <div className="flex items-center gap-2 overflow-x-auto pb-2 sm:pb-0 w-full sm:w-auto">
             <Filter className="h-4 w-4 text-muted-foreground flex-shrink-0" />
             <div className="flex gap-1">
-              {['all', 'team', 'candidate', 'customer', 'external'].map((t) => (
+              {(['all', 'team', 'candidate', 'customer', 'external'] as const).map((t) => (
                 <button
                   key={t}
-                  onClick={() => setTypeFilter(t as any)}
+                  onClick={() => setTypeFilter(t)}
                   className={cn(
                     "px-3 py-1 rounded-full text-xs font-medium border transition-all whitespace-nowrap",
                     typeFilter === t 
@@ -139,7 +163,9 @@ export function People() {
                 <Users className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
                 <h3 className="text-lg font-medium mb-2">No People Found</h3>
                 <p className="text-muted-foreground">
-                  Try changing your search or filter settings.
+                  {searchQuery || typeFilter !== 'all'
+                    ? 'Try changing your search or filter settings.'
+                    : 'No contacts yet. Contacts are automatically created when recordings are transcribed.'}
                 </p>
               </CardContent>
             </Card>
@@ -204,16 +230,16 @@ export function People() {
                       </div>
                     </div>
 
-                    {person.tags.length > 0 && (
+                    {(person.tags?.length ?? 0) > 0 && (
                       <div className="flex flex-wrap gap-1.5 pt-1">
-                        {person.tags.slice(0, 3).map(tag => (
+                        {(person.tags ?? []).slice(0, 3).map(tag => (
                           <div key={tag} className="flex items-center gap-1 text-[10px] bg-secondary px-2 py-0.5 rounded-full">
                             <Tag className="h-2.5 w-2.5" />
                             {tag}
                           </div>
                         ))}
-                        {person.tags.length > 3 && (
-                          <span className="text-[10px] text-muted-foreground">+{person.tags.length - 3} more</span>
+                        {(person.tags?.length ?? 0) > 3 && (
+                          <span className="text-[10px] text-muted-foreground">+{(person.tags?.length ?? 0) - 3} more</span>
                         )}
                       </div>
                     )}

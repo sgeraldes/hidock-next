@@ -113,12 +113,16 @@ export function useKeyboardNavigation({
 
         case 'Enter':
           // Ctrl+Enter: Toggle expansion
-          // Enter alone: Open detail (existing behavior)
+          // Enter alone: Open detail if handler exists, otherwise toggle expand
           event.preventDefault()
           if (modKey && currentItemId && onToggleExpand) {
             onToggleExpand(currentItemId)
-          } else if (focusedIndex >= 0 && focusedIndex < items.length && onOpenDetail) {
-            onOpenDetail(items[focusedIndex])
+          } else if (focusedIndex >= 0 && focusedIndex < items.length) {
+            if (onOpenDetail) {
+              onOpenDetail(items[focusedIndex])
+            } else if (onToggleExpand) {
+              onToggleExpand(items[focusedIndex])
+            }
           }
           break
 

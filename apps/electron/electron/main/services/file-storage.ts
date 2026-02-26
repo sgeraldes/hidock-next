@@ -263,7 +263,11 @@ export function deleteRecording(filePath: string): boolean {
     const normalizedTranscripts = normalize(resolve(transcriptsPath))
 
     // Only allow deletion of files within recordings or transcripts directories
-    if (!normalizedPath.startsWith(normalizedRecordings) && !normalizedPath.startsWith(normalizedTranscripts)) {
+    // Use case-insensitive comparison on Windows (paths are case-insensitive)
+    const pathToCompare = process.platform === 'win32' ? normalizedPath.toLowerCase() : normalizedPath
+    const recToCompare = process.platform === 'win32' ? normalizedRecordings.toLowerCase() : normalizedRecordings
+    const transToCompare = process.platform === 'win32' ? normalizedTranscripts.toLowerCase() : normalizedTranscripts
+    if (!pathToCompare.startsWith(recToCompare) && !pathToCompare.startsWith(transToCompare)) {
       console.error('Attempted to delete file outside allowed directories:', filePath)
       return false
     }
@@ -328,7 +332,11 @@ export function readRecordingFile(filePath: string): Buffer | null {
     const normalizedTranscripts = normalize(resolve(transcriptsPath))
 
     // Only allow reading files within recordings or transcripts directories
-    if (!normalizedPath.startsWith(normalizedRecordings) && !normalizedPath.startsWith(normalizedTranscripts)) {
+    // Use case-insensitive comparison on Windows (paths are case-insensitive)
+    const pathToCompare = process.platform === 'win32' ? normalizedPath.toLowerCase() : normalizedPath
+    const recToCompare = process.platform === 'win32' ? normalizedRecordings.toLowerCase() : normalizedRecordings
+    const transToCompare = process.platform === 'win32' ? normalizedTranscripts.toLowerCase() : normalizedTranscripts
+    if (!pathToCompare.startsWith(recToCompare) && !pathToCompare.startsWith(transToCompare)) {
       console.error('Attempted to read file outside allowed directories:', filePath)
       return null
     }

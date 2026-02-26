@@ -223,14 +223,14 @@ export interface MeetingContact {
 }
 
 /**
- * User-created project for organizing meetings
+ * User-created project for organizing meetings.
+ *
+ * Canonical type is defined in knowledge.ts with camelCase fields (createdAt, status).
+ * The legacy DB-level type (with created_at snake_case) is no longer exported here.
+ * All consumers should use the knowledge.ts Project type.
  */
-export interface Project {
-  id: string
-  name: string
-  description: string | null
-  created_at: string
-}
+import type { Project } from './knowledge'
+export type { Project } from './knowledge'
 
 /**
  * Junction table: Meeting-Project relationship

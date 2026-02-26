@@ -4,6 +4,7 @@ import {
   getRecordingById,
   getRecordingsForMeeting,
   updateRecordingStatus,
+  updateRecordingTranscriptionStatus,
   linkRecordingToMeeting,
   getTranscriptByRecordingId,
   getCandidatesForRecordingWithDetails,
@@ -25,8 +26,11 @@ import {
   transcribeManually,
   getTranscriptionStatus,
   startTranscriptionProcessor,
-  stopTranscriptionProcessor
+  stopTranscriptionProcessor,
+  cancelTranscription,
+  cancelAllTranscriptions
 } from '../services/transcription'
+import { getQueueItems, addToQueue, updateQueueItem } from '../services/database'
 import {
   GetRecordingByIdSchema,
   DeleteRecordingSchema,
@@ -235,6 +239,45 @@ export function registerRecordingHandlers(): void {
     stopTranscriptionProcessor()
   })
 
+  ipcMain.handle('transcription:cancel', async (_, recordingId: string): Promise<{ success: boolean }> => {
+    try {
+      cancelTranscription(recordingId)
+      return { success: true }
+    } catch (error) {
+      console.error('transcription:cancel error:', error)
+      return { success: false }
+    }
+  })
+
+  ipcMain.handle('transcription:cancelAll', async (): Promise<{ success: boolean; count: number }> => {
+    try {
+      const count = cancelAllTranscriptions()
+      return { success: true, count }
+    } catch (error) {
+      console.error('transcription:cancelAll error:', error)
+      return { success: false, count: 0 }
+    }
+  })
+
+  ipcMain.handle('transcription:getQueue', async (): Promise<any[]> => {
+    try {
+      return getQueueItems()
+    } catch (error) {
+      console.error('transcription:getQueue error:', error)
+      return []
+    }
+  })
+
+  ipcMain.handle('transcription:updateQueueItem', async (_, id: string, status: string, errorMessage?: string): Promise<boolean> => {
+    try {
+      updateQueueItem(id, status, errorMessage)
+      return true
+    } catch (error) {
+      console.error('transcription:updateQueueItem error:', error)
+      return false
+    }
+  })
+
   // Scan recordings folder
   ipcMain.handle('recordings:scanFolder', async (): Promise<string[]> => {
     return getRecordingFiles()
@@ -350,6 +393,44 @@ export function registerRecordingHandlers(): void {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error occurred'
       }
+    }
+  })
+
+  // Select a meeting for a recording (manual linking from dialog)
+  ipcMain.handle('recordings:selectMeeting', async (_, recordingId: string, meetingId: string | null) => {
+    try {
+      if (meetingId) {
+        linkRecordingToMeeting(recordingId, meetingId, 1.0, 'manual')
+      } else {
+        linkRecordingToMeeting(recordingId, '', 0, '')
+      }
+      return { success: true }
+    } catch (error) {
+      console.error('recordings:selectMeeting error:', error)
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  // Add a recording to the transcription queue
+  ipcMain.handle('recordings:addToQueue', async (_, recordingId: string) => {
+    try {
+      const queueItemId = addToQueue(recordingId)
+      updateRecordingTranscriptionStatus(recordingId, 'queued')
+      return queueItemId
+    } catch (error) {
+      console.error('recordings:addToQueue error:', error)
+      return false
+    }
+  })
+
+  // Start processing the transcription queue
+  ipcMain.handle('recordings:processQueue', async () => {
+    try {
+      startTranscriptionProcessor()
+      return true
+    } catch (error) {
+      console.error('recordings:processQueue error:', error)
+      return false
     }
   })
 

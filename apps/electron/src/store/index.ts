@@ -16,6 +16,8 @@
 // Domain Stores - Core Business Entities
 // =============================================================================
 
+export { useConfigStore } from './domain/useConfigStore'
+
 export { useKnowledgeStore, useKnowledgeById, useKnowledgeByMeeting, useKnowledgeByLocation, useKnowledgeByStatus, useTranscribedKnowledge } from './domain/useKnowledgeStore'
 export type { KnowledgeStore, KnowledgeCapture } from './domain/useKnowledgeStore'
 
@@ -32,8 +34,9 @@ export type { ProjectsStore } from '@/types/stores'
 // Feature Stores - Cross-Cutting Functionality
 // =============================================================================
 
-export { useDownloadQueueStore, useDownloadProgress, useFailedDownloads, useActiveDownloads, usePendingDownloads, useQueueStats } from './features/useDownloadQueueStore'
-export type { DownloadQueueStore, DownloadItem, DownloadStatus } from './features/useDownloadQueueStore'
+// NOTE: useDownloadQueueStore was removed (dead code - imported by zero components).
+// Active download tracking uses useAppStore.downloadQueue instead.
+// See STABILITY_FIXES.md Phase 1.5 for details.
 
 export { useTranscriptionStore, usePendingTranscriptions, useProcessingTranscriptions, useFailedTranscriptions, useTranscriptionStats } from './features/useTranscriptionStore'
 export type { TranscriptionQueueStore, TranscriptionItem, TranscriptionStatus } from './features/useTranscriptionStore'
@@ -78,6 +81,6 @@ export type { UIStore, SidebarContent, PlaybackState, SentimentSegment } from '@
  * - Calendar → useMeetingsStore + useCalendarStore + useCalendarUIStore
  * - Recordings → useKnowledgeStore + useTranscriptionStore
  * - UI State → useLayoutStore, useLibraryStore, useCalendarUIStore, useUIStore
- * - Device Sync → useDeviceSyncStore + useDownloadQueueStore
+ * - Device Sync → useDeviceSyncStore
  */
 export { useAppStore } from './useAppStore'

@@ -16,34 +16,23 @@ import {
   CheckCircle2,
   Loader2,
   XCircle,
-  Download,
-  RefreshCw,
   RotateCcw
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/store/useAppStore'
+import { useConfigStore } from '@/store/domain/useConfigStore'
+import { useShallow } from 'zustand/react/shallow'
 
 type LucideIcon = typeof FileText
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
 import { OperationController } from '@/components/OperationController'
+import { OperationsPanel } from '@/components/layout/OperationsPanel'
+import { useUIStore } from '@/store/ui/useUIStore'
+import { Switch } from '@/components/ui/switch'
 
 interface LayoutProps {
   children: ReactNode
-}
-
-// Format ETA in human-readable form
-function formatEta(seconds: number | null): string {
-  if (seconds === null || seconds <= 0) return ''
-  if (seconds < 60) return `~${seconds}s`
-  if (seconds < 3600) {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return secs > 0 ? `~${mins}m ${secs}s` : `~${mins}m`
-  }
-  const hours = Math.floor(seconds / 3600)
-  const mins = Math.floor((seconds % 3600) / 60)
-  return mins > 0 ? `~${hours}h ${mins}m` : `~${hours}h`
 }
 
 // Navigation structure with sections
@@ -86,23 +75,20 @@ const navigationSections: NavigationSection[] = [
 export function Layout({ children }: LayoutProps) {
   const location = useLocation()
   const [isDevMode, setIsDevMode] = useState(false)
-  const {
-    sidebarOpen,
-    toggleSidebar,
-    loadConfig,
-    loadMeetings,
-    syncCalendar,
-    lastCalendarSync,
-    config,
-    deviceState,
-    connectionStatus,
-    deviceSyncing,
-    deviceSyncProgress,
-    deviceFileDownloading,
-    deviceFileProgress,
-    deviceSyncEta,
-    downloadQueue
-  } = useAppStore()
+  const { loadMeetings, syncCalendar, lastCalendarSync, deviceState, connectionStatus } = useAppStore(
+    useShallow((s) => ({
+      loadMeetings: s.loadMeetings,
+      syncCalendar: s.syncCalendar,
+      lastCalendarSync: s.lastCalendarSync,
+      deviceState: s.deviceState,
+      connectionStatus: s.connectionStatus
+    }))
+  )
+  const { config, loadConfig } = useConfigStore()
+  const sidebarOpen = useUIStore((s) => s.sidebarOpen)
+  const toggleSidebar = useUIStore((s) => s.toggleSidebar)
+  const qaLogsEnabled = useUIStore((s) => s.qaLogsEnabled)
+  const setQaLogsEnabled = useUIStore((s) => s.setQaLogsEnabled)
 
   // Track previous state for toast notifications
   const prevConnectedRef = useRef<boolean | null>(null)
@@ -322,96 +308,12 @@ export function Layout({ children }: LayoutProps) {
           </div>
         </nav>
 
-        {/* Download Queue Indicator */}
-        {downloadQueue.size > 0 && (
-          <div className="px-3 py-2 border-t border-slate-700">
-            <div className="flex items-center gap-2 text-xs text-slate-300">
-              <Download className="h-3 w-3 text-emerald-400 animate-pulse" />
-              {sidebarOpen ? (
-                <span className="flex-1">
-                  Syncing {deviceSyncProgress ? `${deviceSyncProgress.current}/${deviceSyncProgress.total}` : downloadQueue.size} files
-                </span>
-              ) : (
-                <span className="text-[10px] text-emerald-400">{downloadQueue.size}</span>
-              )}
-            </div>
-            {sidebarOpen && (
-              <div className="mt-2 space-y-1.5">
-                {/* Overall sync progress if available */}
-                {deviceSyncProgress && deviceSyncProgress.total > 0 && (
-                  <div className="mb-2">
-                    <div className="flex justify-between text-[10px] text-slate-400 mb-1">
-                      <span>Overall progress</span>
-                      <span>{Math.round((deviceSyncProgress.current / deviceSyncProgress.total) * 100)}%</span>
-                    </div>
-                    <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-emerald-500 transition-all duration-200"
-                        style={{ width: `${(deviceSyncProgress.current / deviceSyncProgress.total) * 100}%` }}
-                      />
-                    </div>
-                    {deviceSyncEta && (
-                      <div className="text-[10px] text-slate-500 mt-1">{formatEta(deviceSyncEta)}</div>
-                    )}
-                  </div>
-                )}
-                {/* Current file progress */}
-                {Array.from(downloadQueue.entries()).slice(0, 2).map(([id, item]) => (
-                  <div key={id} className="space-y-0.5">
-                    <div className="flex justify-between text-[10px]">
-                      <span className="text-slate-400 truncate max-w-[120px]" title={item.filename}>
-                        {item.filename.length > 20 ? `...${item.filename.slice(-17)}` : item.filename}
-                      </span>
-                      <span className="text-slate-500">{item.progress}%</span>
-                    </div>
-                    <div className="h-1 bg-slate-700 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-blue-500 transition-all duration-200"
-                        style={{ width: `${item.progress}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
-                {downloadQueue.size > 2 && (
-                  <div className="text-[10px] text-slate-500 pt-0.5">+{downloadQueue.size - 2} more in queue</div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Sync Status Indicator (shown when no download queue but syncing is active) */}
-        {(deviceSyncing || deviceFileDownloading) && downloadQueue.size === 0 && (
-          <div className="px-3 py-2 border-t border-slate-700">
-            <div className="flex items-center gap-2 text-xs text-slate-300">
-              <RefreshCw className="h-3 w-3 animate-spin text-blue-400" />
-              {sidebarOpen && (
-                <>
-                  {deviceSyncing && deviceSyncProgress ? (
-                    <span>Syncing {deviceSyncProgress.current}/{deviceSyncProgress.total}</span>
-                  ) : deviceFileDownloading ? (
-                    <span className="truncate max-w-[140px]" title={deviceFileDownloading}>{deviceFileDownloading}</span>
-                  ) : (
-                    <span>Syncing...</span>
-                  )}
-                </>
-              )}
-            </div>
-            {sidebarOpen && deviceFileProgress > 0 && (
-              <div className="mt-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-blue-500 transition-all duration-200"
-                  style={{ width: `${deviceFileProgress}%` }}
-                />
-              </div>
-            )}
-          </div>
-        )}
+        {/* Operations Panel - Downloads + Transcriptions */}
+        <OperationsPanel sidebarOpen={sidebarOpen} />
 
         {/* Dev Tools */}
-        <div className="border-t border-slate-700 p-3 space-y-2">
-          {/* Restart button - shown in dev mode or always accessible */}
-          {isDevMode && (
+        {isDevMode && (
+          <div className="border-t border-slate-700 p-3 space-y-2">
             <Button
               variant="ghost"
               size="sm"
@@ -425,8 +327,18 @@ export function Layout({ children }: LayoutProps) {
               <RotateCcw className="h-4 w-4" />
               {sidebarOpen && <span>Restart</span>}
             </Button>
-          )}
-        </div>
+            {sidebarOpen && (
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-slate-400">QA Logs</span>
+                <Switch
+                  checked={qaLogsEnabled}
+                  onCheckedChange={setQaLogsEnabled}
+                  className="scale-75"
+                />
+              </div>
+            )}
+          </div>
+        )}
       </aside>
 
       {/* Main Content */}

@@ -15,9 +15,11 @@ describe('useLibraryFilterManager', () => {
   beforeEach(() => {
     vi.clearAllMocks()
 
-    // Setup mock store state
+    // Setup mock store state (dual-mode filter system)
     storeState = {
-      locationFilter: 'all' as const,
+      filterMode: 'semantic' as const,
+      semanticFilter: 'all' as const,
+      exclusiveFilter: 'all' as const,
       categoryFilter: null,
       qualityFilter: null,
       statusFilter: null,
@@ -26,8 +28,14 @@ describe('useLibraryFilterManager', () => {
 
     // Setup mock store actions
     storeActions = {
-      setLocationFilter: vi.fn((filter) => {
-        storeState.locationFilter = filter
+      setFilterMode: vi.fn((mode) => {
+        storeState.filterMode = mode
+      }),
+      setSemanticFilter: vi.fn((filter) => {
+        storeState.semanticFilter = filter
+      }),
+      setExclusiveFilter: vi.fn((filter) => {
+        storeState.exclusiveFilter = filter
       }),
       setCategoryFilter: vi.fn((filter) => {
         storeState.categoryFilter = filter
@@ -42,7 +50,9 @@ describe('useLibraryFilterManager', () => {
         storeState.searchQuery = query
       }),
       clearFilters: vi.fn(() => {
-        storeState.locationFilter = 'all'
+        storeState.filterMode = 'semantic'
+        storeState.semanticFilter = 'all'
+        storeState.exclusiveFilter = 'all'
         storeState.categoryFilter = null
         storeState.qualityFilter = null
         storeState.statusFilter = null
@@ -62,7 +72,9 @@ describe('useLibraryFilterManager', () => {
     it('should return default filter state', () => {
       const { result } = renderHook(() => useLibraryFilterManager())
 
-      expect(result.current.locationFilter).toBe('all')
+      expect(result.current.filterMode).toBe('semantic')
+      expect(result.current.semanticFilter).toBe('all')
+      expect(result.current.exclusiveFilter).toBe('all')
       expect(result.current.categoryFilter).toBeNull()
       expect(result.current.qualityFilter).toBeNull()
       expect(result.current.statusFilter).toBeNull()
@@ -79,21 +91,31 @@ describe('useLibraryFilterManager', () => {
 
   describe('filter state', () => {
     it('should reflect filter changes from store', () => {
-      storeState.locationFilter = 'device'
+      storeState.semanticFilter = 'on-source'
       storeState.categoryFilter = 'meeting'
       storeState.searchQuery = 'test query'
 
       const { result } = renderHook(() => useLibraryFilterManager())
 
-      expect(result.current.locationFilter).toBe('device')
+      expect(result.current.semanticFilter).toBe('on-source')
       expect(result.current.categoryFilter).toBe('meeting')
       expect(result.current.searchQuery).toBe('test query')
     })
   })
 
   describe('derived state', () => {
-    it('should count location filter as active when not "all"', () => {
-      storeState.locationFilter = 'device'
+    it('should count semantic filter as active when not "all"', () => {
+      storeState.semanticFilter = 'on-source'
+
+      const { result } = renderHook(() => useLibraryFilterManager())
+
+      expect(result.current.hasActiveFilters).toBe(true)
+      expect(result.current.activeFilterCount).toBe(1)
+    })
+
+    it('should count exclusive filter as active when not "all" and mode is exclusive', () => {
+      storeState.filterMode = 'exclusive'
+      storeState.exclusiveFilter = 'source-only'
 
       const { result } = renderHook(() => useLibraryFilterManager())
 
@@ -147,7 +169,7 @@ describe('useLibraryFilterManager', () => {
     })
 
     it('should count multiple active filters correctly', () => {
-      storeState.locationFilter = 'device'
+      storeState.semanticFilter = 'on-source'
       storeState.categoryFilter = 'meeting'
       storeState.qualityFilter = 'valuable'
       storeState.searchQuery = 'test'
@@ -159,7 +181,7 @@ describe('useLibraryFilterManager', () => {
     })
 
     it('should count all filters when all are active', () => {
-      storeState.locationFilter = 'device'
+      storeState.semanticFilter = 'on-source'
       storeState.categoryFilter = 'meeting'
       storeState.qualityFilter = 'valuable'
       storeState.statusFilter = 'ready'
@@ -173,14 +195,24 @@ describe('useLibraryFilterManager', () => {
   })
 
   describe('filter actions', () => {
-    it('should provide setLocationFilter action', () => {
+    it('should provide setSemanticFilter action', () => {
       const { result } = renderHook(() => useLibraryFilterManager())
 
       act(() => {
-        result.current.setLocationFilter('device')
+        result.current.setSemanticFilter('on-source')
       })
 
-      expect(storeActions.setLocationFilter).toHaveBeenCalledWith('device')
+      expect(storeActions.setSemanticFilter).toHaveBeenCalledWith('on-source')
+    })
+
+    it('should provide setExclusiveFilter action', () => {
+      const { result } = renderHook(() => useLibraryFilterManager())
+
+      act(() => {
+        result.current.setExclusiveFilter('source-only')
+      })
+
+      expect(storeActions.setExclusiveFilter).toHaveBeenCalledWith('source-only')
     })
 
     it('should provide setCategoryFilter action', () => {
@@ -254,7 +286,7 @@ describe('useLibraryFilterManager', () => {
       expect(result.current.activeFilterCount).toBe(0)
 
       // Change filter state
-      storeState.locationFilter = 'device'
+      storeState.semanticFilter = 'on-source'
       rerender()
 
       expect(result.current.activeFilterCount).toBe(1)
@@ -285,7 +317,7 @@ describe('useLibraryFilterManager', () => {
     })
 
     it('should handle clearing filters from active state', () => {
-      storeState.locationFilter = 'device'
+      storeState.semanticFilter = 'on-source'
       storeState.categoryFilter = 'meeting'
       storeState.searchQuery = 'test'
 
@@ -294,7 +326,7 @@ describe('useLibraryFilterManager', () => {
       expect(result.current.activeFilterCount).toBe(3)
 
       // Clear filters
-      storeState.locationFilter = 'all'
+      storeState.semanticFilter = 'all'
       storeState.categoryFilter = null
       storeState.searchQuery = ''
       rerender()
