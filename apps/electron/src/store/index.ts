@@ -2,14 +2,27 @@
  * Store Exports
  *
  * Centralized exports for all Zustand stores organized by category:
- * - Domain: Core business entities (Knowledge, Meetings, Contacts, Projects)
- * - Features: Feature-specific functionality (Downloads, Transcription, Device Sync, Quality)
- * - UI: User interface state (Layout, Library UI, Calendar UI, General UI)
+ * - Domain: Core business entities (Config)
+ * - Features: Feature-specific functionality (Transcription)
+ * - UI: User interface state (Library, General UI)
  *
  * Architecture Philosophy:
  * - Domain stores manage CRUD operations on core entities
  * - Feature stores handle cross-cutting concerns and workflows
  * - UI stores manage ephemeral UI state and user preferences
+ *
+ * Dead Code Removal (W1-HS-04 through W1-HS-14):
+ * - REMOVED: useMeetingsStore (never consumed)
+ * - REMOVED: useKnowledgeStore (never consumed)
+ * - REMOVED: useCalendarStore (never consumed)
+ * - REMOVED: useDeviceSyncStore (never consumed)
+ * - REMOVED: useQualityStore (never consumed)
+ * - REMOVED: useLayoutStore (never consumed)
+ * - REMOVED: useCalendarUIStore (never consumed)
+ * - REMOVED: useFilterStore (never consumed)
+ * - REMOVED: useContactsStore (never consumed by People page)
+ * - REMOVED: useProjectsStore (never consumed by Projects page)
+ * - REMOVED: FilterBar.tsx component (never rendered)
  */
 
 // =============================================================================
@@ -17,18 +30,6 @@
 // =============================================================================
 
 export { useConfigStore } from './domain/useConfigStore'
-
-export { useKnowledgeStore, useKnowledgeById, useKnowledgeByMeeting, useKnowledgeByLocation, useKnowledgeByStatus, useTranscribedKnowledge } from './domain/useKnowledgeStore'
-export type { KnowledgeStore, KnowledgeCapture } from './domain/useKnowledgeStore'
-
-export { useMeetingsStore, useMeetingById, useMeetingsByDate, useMeetingsByDateRange, useRecurringMeetings, useMeetingsByOrganizer } from './domain/useMeetingsStore'
-export type { MeetingsStore } from './domain/useMeetingsStore'
-
-export { useContactsStore } from './domain/useContactsStore'
-export type { ContactsStore } from '@/types/stores'
-
-export { useProjectsStore } from './domain/useProjectsStore'
-export type { ProjectsStore } from '@/types/stores'
 
 // =============================================================================
 // Feature Stores - Cross-Cutting Functionality
@@ -41,30 +42,14 @@ export type { ProjectsStore } from '@/types/stores'
 export { useTranscriptionStore, usePendingTranscriptions, useProcessingTranscriptions, useFailedTranscriptions, useTranscriptionStats } from './features/useTranscriptionStore'
 export type { TranscriptionQueueStore, TranscriptionItem, TranscriptionStatus } from './features/useTranscriptionStore'
 
-export { useDeviceSyncStore, useUnsyncedFilesCount, useStoragePercentage, useIsDeviceConnected, useIsSyncing } from './features/useDeviceSyncStore'
-export type { DeviceSyncStore, DeviceFile, DeviceSyncState, DeviceConnectionStatus } from './features/useDeviceSyncStore'
-
-export { useQualityStore, useRecordingQuality, useRecordingsByQuality, useQualityStats, useIsRecordingRated } from './features/useQualityStore'
-export type { QualityStore, QualityAssessment, QualityRating } from './features/useQualityStore'
-
-export { useCalendarStore } from './features/useCalendarStore'
-export type { CalendarStore } from '@/types/stores'
-
-export { useFilterStore, useActiveFilters, useFilterAsRequest } from './features/useFilterStore'
-export type { FilterStore, DateRange, RecordingStatusFilter } from '@/types/stores'
-
 // =============================================================================
 // UI Stores - User Interface State
 // =============================================================================
 
-export { useLayoutStore, useIsModalActive, useModalProps } from './ui/useLayoutStore'
-export type { LayoutStore, Theme, ModalType } from './ui/useLayoutStore'
-
 // NOTE: useLibraryUIStore was removed (dead code) - use useLibraryStore instead
 // See: .claude/specs/spec-007-store-consolidation.md
 
-export { useCalendarUIStore, useViewDateRange, useIsDateInView, useIsMeetingSelected, getViewStartDate, getViewEndDate } from './ui/useCalendarUIStore'
-export type { CalendarUIStore, CalendarViewMode } from './ui/useCalendarUIStore'
+export { useLibraryStore } from './useLibraryStore'
 
 export { useUIStore } from './ui/useUIStore'
 export type { UIStore, SidebarContent, PlaybackState, SentimentSegment } from '@/types/stores'
@@ -77,10 +62,8 @@ export type { UIStore, SidebarContent, PlaybackState, SentimentSegment } from '@
  * @deprecated
  * This monolithic store is being phased out in favor of the granular domain/feature/UI stores.
  * Use specific stores instead:
- * - Config → Domain stores + Feature stores
- * - Calendar → useMeetingsStore + useCalendarStore + useCalendarUIStore
- * - Recordings → useKnowledgeStore + useTranscriptionStore
- * - UI State → useLayoutStore, useLibraryStore, useCalendarUIStore, useUIStore
- * - Device Sync → useDeviceSyncStore
+ * - Config → useConfigStore
+ * - Transcription → useTranscriptionStore
+ * - UI State → useLibraryStore, useUIStore
  */
 export { useAppStore } from './useAppStore'
