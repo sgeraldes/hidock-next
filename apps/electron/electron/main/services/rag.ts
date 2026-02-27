@@ -362,8 +362,8 @@ ${transcript.substring(0, 8000)}`
 
       // 2. Search people
       const peopleRows = db.exec(`
-        SELECT * FROM contacts 
-        WHERE name LIKE ? OR email LIKE ? OR company LIKE ? OR role LIKE ?
+        SELECT * FROM contacts
+        WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\'
         LIMIT ?
       `, [likeQuery, likeQuery, likeQuery, likeQuery, limit])
       
@@ -376,8 +376,8 @@ ${transcript.substring(0, 8000)}`
 
       // 3. Search projects
       const projectRows = db.exec(`
-        SELECT * FROM projects 
-        WHERE name LIKE ? OR description LIKE ?
+        SELECT * FROM projects
+        WHERE name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
         LIMIT ?
       `, [likeQuery, likeQuery, limit])
       

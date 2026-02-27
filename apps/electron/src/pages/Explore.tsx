@@ -55,9 +55,10 @@ export function Explore() {
   }
 
   useEffect(() => {
+    // Debounce search by 300ms
     const timer = setTimeout(() => {
       if (query.trim()) handleSearch()
-    }, 500)
+    }, 300)
     return () => clearTimeout(timer)
   }, [query])
 

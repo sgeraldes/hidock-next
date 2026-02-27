@@ -53,7 +53,7 @@ export function Actionables() {
   const generationHistoryRef = useRef(generationHistory)
   generationHistoryRef.current = generationHistory
 
-  const loadActionables = async () => {
+  const loadActionables = useCallback(async () => {
     setLoading(true)
     try {
       const data = await window.electronAPI.actionables.getAll()
@@ -63,7 +63,7 @@ export function Actionables() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
   // AC-06: Use ref to read generationHistory, avoiding stale closure and unstable deps
   const handleAutoGenerate = useCallback(async (sourceId: string, templateId: string = 'meeting_minutes') => {
@@ -116,7 +116,7 @@ export function Actionables() {
 
   useEffect(() => {
     loadActionables()
-  }, [])
+  }, [loadActionables])
 
   // AC-07: Auto-dismiss error banner after 5 seconds
   useEffect(() => {

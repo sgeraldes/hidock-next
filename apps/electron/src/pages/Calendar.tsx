@@ -23,6 +23,7 @@ import {
 } from '@/components/ui/tooltip'
 import { RecordingLinkDialog } from '@/components/RecordingLinkDialog'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
+import { useToday } from '@/hooks/useToday'
 import { UnifiedRecording, DeviceOnlyRecording, BothLocationsRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { AudioPlayer } from '@/components/AudioPlayer'
@@ -90,6 +91,8 @@ function CurrentTimeIndicator({ startHour, hourHeight }: { startHour: number; ho
 export function Calendar() {
   const navigate = useNavigate()
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  // Use useToday hook to ensure "today" updates at midnight
+  const today = useToday()
   // SM-04 fix: Use granular selectors instead of destructuring 8+ fields
   const meetings = useMeetings()
   const currentDate = useCurrentDate()
@@ -145,9 +148,13 @@ export function Calendar() {
     Pick<Recording, 'id' | 'filename' | 'date_recorded' | 'duration_seconds'> | null
   >(null)
 
-  // Load config on mount
+  // Load config on mount - must complete BEFORE first sync
   useEffect(() => {
-    loadConfig()
+    const initialize = async () => {
+      // Load config FIRST
+      await loadConfig()
+    }
+    initialize()
   }, [loadConfig])
 
   // Sync state with config when it loads

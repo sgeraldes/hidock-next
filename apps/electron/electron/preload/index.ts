@@ -98,6 +98,7 @@ export interface ElectronAPI {
     getAll: (request?: GetContactsRequest) => Promise<Result<GetContactsResponse>>
     getById: (id: string) => Promise<Result<ContactWithMeetings>>
     update: (request: UpdateContactRequest) => Promise<Result<Contact>>
+    delete: (id: string) => Promise<Result<void>>
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
   }
 
@@ -159,6 +160,7 @@ export interface ElectronAPI {
 
   // Actionables
   actionables: {
+    getById: (id: string) => Promise<Actionable | null>
     getAll: (options?: { status?: string }) => Promise<Actionable[]>
     updateStatus: (id: string, status: string) => Promise<{ success: boolean; error?: string }>
     generateOutput: (actionableId: string) => Promise<{ success: boolean; error?: string; data?: any }>
@@ -452,6 +454,7 @@ const electronAPI: ElectronAPI = {
     getAll: (request) => callIPC('contacts:getAll', request),
     getById: (id) => callIPC('contacts:getById', id),
     update: (request) => callIPC('contacts:update', request),
+    delete: (id) => callIPC('contacts:delete', id),
     getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
   },
 
@@ -508,6 +511,7 @@ const electronAPI: ElectronAPI = {
   },
 
   actionables: {
+    getById: (id) => callIPC('actionables:getById', id),
     getAll: (options) => callIPC('actionables:getAll', options),
     updateStatus: (id, status) => callIPC('actionables:updateStatus', id, status),
     generateOutput: (actionableId) => callIPC('actionables:generateOutput', actionableId)
