@@ -31,6 +31,7 @@ import {
   cancelAllTranscriptions
 } from '../services/transcription'
 import { getQueueItems, addToQueue, updateQueueItem } from '../services/database'
+import { getConfig } from '../services/config'
 import {
   GetRecordingByIdSchema,
   DeleteRecordingSchema,
@@ -414,6 +415,15 @@ export function registerRecordingHandlers(): void {
   // Add a recording to the transcription queue
   ipcMain.handle('recordings:addToQueue', async (_, recordingId: string) => {
     try {
+      // Validate API key is configured before queueing
+      const config = getConfig()
+      if (!config.transcription.geminiApiKey) {
+        return {
+          success: false,
+          error: 'Transcription API key not configured. Please add your API key in Settings.'
+        }
+      }
+
       const queueItemId = addToQueue(recordingId)
       updateRecordingTranscriptionStatus(recordingId, 'queued')
       return queueItemId

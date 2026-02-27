@@ -81,6 +81,7 @@ async function processQueue(): Promise<void> {
 
   const config = getConfig()
   if (!config.transcription.geminiApiKey) {
+    console.warn('[Transcription] Cannot process queue: API key not configured. Please add your API key in Settings.')
     return
   }
 
