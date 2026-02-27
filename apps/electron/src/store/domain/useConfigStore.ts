@@ -21,20 +21,32 @@ export const useConfigStore = create<ConfigState>((set) => ({
   loadConfig: async () => {
     set({ configLoading: true })
     try {
-      const config = await window.electronAPI.config.get()
-      set({ config, configLoading: false, configReady: true })
+      const result = await window.electronAPI.config.get()
+      if (result.success) {
+        set({ config: result.data, configLoading: false, configReady: true })
+      } else {
+        const errorMessage = result.error?.message || 'Failed to load configuration'
+        throw new Error(errorMessage)
+      }
     } catch (error) {
       console.error('Failed to load config:', error)
       set({ configLoading: false, configReady: true }) // Ready with null = safe default
+      throw error // Re-throw for UI error handling
     }
   },
 
   updateConfig: async (section, values) => {
     try {
-      const newConfig = await window.electronAPI.config.updateSection(section, values)
-      set({ config: newConfig })
+      const result = await window.electronAPI.config.updateSection(section, values)
+      if (result.success) {
+        set({ config: result.data })
+      } else {
+        const errorMessage = result.error?.message || 'Failed to update configuration'
+        throw new Error(errorMessage)
+      }
     } catch (error) {
       console.error('Failed to update config:', error)
+      throw error // Re-throw for UI error handling
     }
   },
 }))

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Save, FolderOpen, RefreshCw } from 'lucide-react'
+import { useEffect, useState, useCallback } from 'react'
+import { Save, FolderOpen, RefreshCw, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -7,15 +7,17 @@ import { useAppStore, useCalendarSyncing } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 import { formatBytes } from '@/lib/utils'
 import { HealthCheck } from '@/components/HealthCheck'
-import type { StorageInfo } from '@/types'
+import { toast } from '@/components/ui/toaster'
+import type { StorageInfo, AppConfig } from '@/types'
 
 export function Settings() {
   // SM-09 fix: Use granular selectors
   const syncCalendar = useAppStore((s) => s.syncCalendar)
   const calendarSyncing = useCalendarSyncing()
-  const { config, loadConfig, updateConfig } = useConfigStore()
+  const { config, loadConfig, updateConfig, configLoading } = useConfigStore()
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
   const [saving, setSaving] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   // Local form state
   const [icsUrl, setIcsUrl] = useState('')
@@ -48,10 +50,63 @@ export function Settings() {
     { value: 'gemini-2.5-flash-lite-preview-09-2025', label: 'Gemini 2.5 Flash Lite Preview' },
   ]
 
-  useEffect(() => {
-    loadConfig()
-    loadStorageInfo()
+  // Validation function for config values
+  const validateConfig = useCallback((updates: Partial<AppConfig>): string | null => {
+    // Transcription settings validation
+    if (updates.transcription) {
+      if (updates.transcription.geminiApiKey !== undefined) {
+        const apiKey = updates.transcription.geminiApiKey.trim()
+        if (apiKey && apiKey.length < 10) {
+          return 'API key must be at least 10 characters'
+        }
+      }
+    }
+
+    // Calendar settings validation
+    if (updates.calendar) {
+      if (updates.calendar.icsUrl !== undefined) {
+        const url = updates.calendar.icsUrl.trim()
+        if (url && !url.startsWith('http')) {
+          return 'Calendar URL must start with http:// or https://'
+        }
+      }
+      if (updates.calendar.syncIntervalMinutes !== undefined) {
+        const interval = updates.calendar.syncIntervalMinutes
+        if (interval < 5 || interval > 120) {
+          return 'Sync interval must be between 5 and 120 minutes'
+        }
+      }
+    }
+
+    // Embeddings settings validation
+    if (updates.embeddings) {
+      if (updates.embeddings.ollamaBaseUrl !== undefined) {
+        const url = updates.embeddings.ollamaBaseUrl.trim()
+        if (url && !url.startsWith('http')) {
+          return 'Ollama URL must start with http:// or https://'
+        }
+      }
+    }
+
+    return null // Valid
   }, [])
+
+  // Stable loadConfig with useCallback for dependency array
+  const loadConfigStable = useCallback(async () => {
+    try {
+      setLoadError(null)
+      await loadConfig()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load settings'
+      setLoadError(message)
+      toast.error('Failed to Load Settings', message)
+    }
+  }, [loadConfig])
+
+  useEffect(() => {
+    loadConfigStable()
+    loadStorageInfo()
+  }, [loadConfigStable])
 
   useEffect(() => {
     if (config) {
@@ -79,39 +134,132 @@ export function Settings() {
   }
 
   const handleSaveCalendar = async () => {
-    setSaving(true)
-    try {
-      await updateConfig('calendar', {
+    if (saving) {
+      toast.warning('Please wait', 'Previous save in progress')
+      return
+    }
+
+    // Store previous values for rollback
+    const previousIcsUrl = config?.calendar.icsUrl || ''
+    const previousSyncEnabled = config?.calendar.syncEnabled ?? true
+    const previousSyncInterval = config?.calendar.syncIntervalMinutes || 15
+
+    const updates: Partial<AppConfig> = {
+      calendar: {
         icsUrl,
         syncEnabled,
         syncIntervalMinutes: syncInterval
-      })
+      }
+    }
+
+    // Validate before save
+    const validationError = validateConfig(updates)
+    if (validationError) {
+      toast.error('Validation Error', validationError)
+      return
+    }
+
+    setSaving(true)
+    try {
+      await updateConfig('calendar', updates.calendar!)
+
+      toast.success('Settings Saved', 'Calendar settings have been updated')
+    } catch (error) {
+      // Rollback on error
+      setIcsUrl(previousIcsUrl)
+      setSyncEnabled(previousSyncEnabled)
+      setSyncInterval(previousSyncInterval)
+
+      const message = error instanceof Error ? error.message : 'Failed to save calendar settings'
+      toast.error('Save Failed', message)
+      console.error('Failed to save calendar settings:', error)
     } finally {
       setSaving(false)
     }
   }
 
   const handleSaveTranscription = async () => {
-    setSaving(true)
-    try {
-      await updateConfig('transcription', {
+    if (saving) {
+      toast.warning('Please wait', 'Previous save in progress')
+      return
+    }
+
+    // Store previous values for rollback
+    const previousApiKey = config?.transcription.geminiApiKey || ''
+    const previousModel = config?.transcription.geminiModel || 'gemini-3-pro-preview'
+
+    const updates: Partial<AppConfig> = {
+      transcription: {
         geminiApiKey,
         geminiModel
-      })
+      }
+    }
+
+    // Validate before save
+    const validationError = validateConfig(updates)
+    if (validationError) {
+      toast.error('Validation Error', validationError)
+      return
+    }
+
+    setSaving(true)
+    try {
+      await updateConfig('transcription', updates.transcription!)
+
+      toast.success('Settings Saved', `Transcription provider set to ${geminiModel}`)
+    } catch (error) {
+      // Rollback on error
+      setGeminiApiKey(previousApiKey)
+      setGeminiModel(previousModel)
+
+      const message = error instanceof Error ? error.message : 'Failed to save transcription settings'
+      toast.error('Save Failed', message)
+      console.error('Failed to save transcription settings:', error)
     } finally {
       setSaving(false)
     }
   }
 
   const handleSaveChat = async () => {
+    if (saving) {
+      toast.warning('Please wait', 'Previous save in progress')
+      return
+    }
+
+    // Store previous values for rollback
+    const previousChatProvider = config?.chat.provider || 'gemini'
+    const previousOllamaUrl = config?.embeddings.ollamaBaseUrl || 'http://localhost:11434'
+
+    const updates: Partial<AppConfig> = {
+      chat: {
+        provider: chatProvider
+      },
+      embeddings: {
+        ollamaBaseUrl: ollamaUrl
+      }
+    }
+
+    // Validate before save
+    const validationError = validateConfig(updates)
+    if (validationError) {
+      toast.error('Validation Error', validationError)
+      return
+    }
+
     setSaving(true)
     try {
-      await updateConfig('chat', {
-        provider: chatProvider
-      })
-      await updateConfig('embeddings', {
-        ollamaBaseUrl: ollamaUrl
-      })
+      await updateConfig('chat', updates.chat!)
+      await updateConfig('embeddings', updates.embeddings!)
+
+      toast.success('Settings Saved', `Chat provider set to ${chatProvider}`)
+    } catch (error) {
+      // Rollback on error
+      setChatProvider(previousChatProvider)
+      setOllamaUrl(previousOllamaUrl)
+
+      const message = error instanceof Error ? error.message : 'Failed to save chat settings'
+      toast.error('Save Failed', message)
+      console.error('Failed to save chat settings:', error)
     } finally {
       setSaving(false)
     }
@@ -119,6 +267,31 @@ export function Settings() {
 
   const handleOpenFolder = async (folder: 'recordings' | 'transcripts' | 'data') => {
     await window.electronAPI.storage.openFolder(folder)
+  }
+
+  // Loading state
+  if (configLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full">
+        <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground mb-4" />
+        <p className="text-muted-foreground">Loading settings...</p>
+      </div>
+    )
+  }
+
+  // Error state with retry
+  if (loadError) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-6">
+        <AlertCircle className="h-12 w-12 text-destructive mb-4" />
+        <h2 className="text-xl font-semibold mb-2">Failed to Load Settings</h2>
+        <p className="text-muted-foreground mb-4 text-center max-w-md">{loadError}</p>
+        <Button onClick={loadConfigStable}>
+          <RefreshCw className="h-4 w-4 mr-2" />
+          Retry
+        </Button>
+      </div>
+    )
   }
 
   return (
@@ -137,15 +310,20 @@ export function Settings() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <label className="text-sm font-medium">ICS Calendar URL</label>
+                <label htmlFor="icsUrl" className="text-sm font-medium">ICS Calendar URL</label>
                 <Input
+                  id="icsUrl"
                   type="url"
                   placeholder="https://outlook.office365.com/owa/calendar/.../calendar.ics"
                   value={icsUrl}
                   onChange={(e) => setIcsUrl(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSaveCalendar()}
+                  disabled={saving}
+                  aria-label="ICS Calendar URL"
+                  aria-describedby="icsUrl-description"
                   className="mt-1"
                 />
-                <p className="text-xs text-muted-foreground mt-1">
+                <p id="icsUrl-description" className="text-xs text-muted-foreground mt-1">
                   Publish your Outlook calendar and paste the ICS link here
                 </p>
               </div>
@@ -157,6 +335,9 @@ export function Settings() {
                     id="syncEnabled"
                     checked={syncEnabled}
                     onChange={(e) => setSyncEnabled(e.target.checked)}
+                    onKeyDown={(e) => e.key === ' ' && setSyncEnabled(!syncEnabled)}
+                    disabled={saving}
+                    aria-label="Enable auto-sync"
                     className="rounded"
                   />
                   <label htmlFor="syncEnabled" className="text-sm">
@@ -165,13 +346,17 @@ export function Settings() {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <label className="text-sm">Every</label>
+                  <label htmlFor="syncInterval" className="text-sm">Every</label>
                   <Input
+                    id="syncInterval"
                     type="number"
                     min={5}
                     max={120}
                     value={syncInterval}
                     onChange={(e) => setSyncInterval(parseInt(e.target.value) || 15)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSaveCalendar()}
+                    disabled={saving}
+                    aria-label="Sync interval in minutes"
                     className="w-20"
                   />
                   <span className="text-sm">minutes</span>
@@ -179,12 +364,21 @@ export function Settings() {
               </div>
 
               <div className="flex items-center gap-2">
-                <Button onClick={handleSaveCalendar} disabled={saving}>
-                  <Save className="h-4 w-4 mr-2" />
+                <Button
+                  onClick={handleSaveCalendar}
+                  disabled={saving}
+                  aria-label="Save calendar settings"
+                >
+                  <Save className="h-4 w-4 mr-2" aria-hidden="true" />
                   Save
                 </Button>
-                <Button variant="outline" onClick={() => syncCalendar()} disabled={calendarSyncing}>
-                  <RefreshCw className={`h-4 w-4 mr-2 ${calendarSyncing ? 'animate-spin' : ''}`} />
+                <Button
+                  variant="outline"
+                  onClick={() => syncCalendar()}
+                  disabled={calendarSyncing || saving}
+                  aria-label="Sync calendar now"
+                >
+                  <RefreshCw className={`h-4 w-4 mr-2 ${calendarSyncing ? 'animate-spin' : ''}`} aria-hidden="true" />
                   Sync Now
                 </Button>
               </div>
@@ -199,15 +393,20 @@ export function Settings() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <label className="text-sm font-medium">Gemini API Key</label>
+                <label htmlFor="geminiApiKey" className="text-sm font-medium">Gemini API Key</label>
                 <Input
+                  id="geminiApiKey"
                   type="password"
                   placeholder="Enter your Gemini API key"
                   value={geminiApiKey}
                   onChange={(e) => setGeminiApiKey(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                  disabled={saving}
+                  aria-label="Gemini API Key"
+                  aria-describedby="geminiApiKey-description"
                   className="mt-1"
                 />
-                <p className="text-xs text-muted-foreground mt-1">
+                <p id="geminiApiKey-description" className="text-xs text-muted-foreground mt-1">
                   Get your API key from{' '}
                   <a
                     href="https://aistudio.google.com/app/apikey"
@@ -221,10 +420,15 @@ export function Settings() {
               </div>
 
               <div>
-                <label className="text-sm font-medium">Transcription Model</label>
+                <label htmlFor="geminiModel" className="text-sm font-medium">Transcription Model</label>
                 <select
+                  id="geminiModel"
                   value={geminiModel}
                   onChange={(e) => setGeminiModel(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                  disabled={saving}
+                  aria-label="Transcription Model"
+                  aria-describedby="geminiModel-description"
                   className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
                 >
                   {GEMINI_MODELS.map((model) => (
@@ -233,13 +437,17 @@ export function Settings() {
                     </option>
                   ))}
                 </select>
-                <p className="text-xs text-muted-foreground mt-1">
+                <p id="geminiModel-description" className="text-xs text-muted-foreground mt-1">
                   Gemini 3 Pro provides the best transcription accuracy
                 </p>
               </div>
 
-              <Button onClick={handleSaveTranscription} disabled={saving}>
-                <Save className="h-4 w-4 mr-2" />
+              <Button
+                onClick={handleSaveTranscription}
+                disabled={saving}
+                aria-label="Save transcription settings"
+              >
+                <Save className="h-4 w-4 mr-2" aria-hidden="true" />
                 Save
               </Button>
             </CardContent>
@@ -253,17 +461,25 @@ export function Settings() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <label className="text-sm font-medium">Chat Provider</label>
-                <div className="flex gap-2 mt-2">
+                <label id="chatProvider-label" className="text-sm font-medium">Chat Provider</label>
+                <div className="flex gap-2 mt-2" role="group" aria-labelledby="chatProvider-label">
                   <Button
                     variant={chatProvider === 'gemini' ? 'default' : 'outline'}
                     onClick={() => setChatProvider('gemini')}
+                    onKeyDown={(e) => e.key === 'Enter' && setChatProvider('gemini')}
+                    disabled={saving}
+                    aria-label="Use Gemini chat provider"
+                    aria-pressed={chatProvider === 'gemini'}
                   >
                     Gemini
                   </Button>
                   <Button
                     variant={chatProvider === 'ollama' ? 'default' : 'outline'}
                     onClick={() => setChatProvider('ollama')}
+                    onKeyDown={(e) => e.key === 'Enter' && setChatProvider('ollama')}
+                    disabled={saving}
+                    aria-label="Use Ollama local chat provider"
+                    aria-pressed={chatProvider === 'ollama'}
                   >
                     Ollama (Local)
                   </Button>
@@ -272,19 +488,31 @@ export function Settings() {
 
               {chatProvider === 'ollama' && (
                 <div>
-                  <label className="text-sm font-medium">Ollama URL</label>
+                  <label htmlFor="ollamaUrl" className="text-sm font-medium">Ollama URL</label>
                   <Input
+                    id="ollamaUrl"
                     type="url"
                     placeholder="http://localhost:11434"
                     value={ollamaUrl}
                     onChange={(e) => setOllamaUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSaveChat()}
+                    disabled={saving}
+                    aria-label="Ollama base URL"
+                    aria-describedby="ollamaUrl-description"
                     className="mt-1"
                   />
+                  <p id="ollamaUrl-description" className="text-xs text-muted-foreground mt-1">
+                    URL of your local Ollama server
+                  </p>
                 </div>
               )}
 
-              <Button onClick={handleSaveChat} disabled={saving}>
-                <Save className="h-4 w-4 mr-2" />
+              <Button
+                onClick={handleSaveChat}
+                disabled={saving}
+                aria-label="Save chat settings"
+              >
+                <Save className="h-4 w-4 mr-2" aria-hidden="true" />
                 Save
               </Button>
             </CardContent>
