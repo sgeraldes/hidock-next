@@ -6,11 +6,12 @@ SETUP = $(PYTHON) setup.py
 DESKTOP_DIR = apps/desktop
 WEB_DIR = apps/web
 AUDIO_DIR = apps/audio-insights
+RECORDER_DIR = apps/meeting-recorder
 # Default Linux venv path; on Windows or macOS activate the matching tagged venv (.venv.win/.venv.mac/.venv.wsl)
 # This keeps Make targets simple while multi-OS logic lives in setup.py
 VENV = $(DESKTOP_DIR)/.venv.linux
 
-.PHONY: help setup dev-quick migrate-copy migrate-rebuild desktop web audio tests clean env-rebuild
+.PHONY: help setup dev-quick migrate-copy migrate-rebuild desktop web audio recorder tests clean env-rebuild
 
 help:
 	@echo "HiDock Next Make targets:"
@@ -21,6 +22,7 @@ help:
 	@echo "  make desktop        - Run desktop app (after activation)"
 	@echo "  make web            - Run web dev server"
 	@echo "  make audio          - Run audio insights dev server"
+	@echo "  make recorder       - Run meeting recorder dev server"
 	@echo "  make tests          - Run all test suites (python + web + audio)"
 	@echo "  make clean          - Remove Python venv and node_modules"
 	@echo "  make env-rebuild    - Force rebuild Python environment"
@@ -49,6 +51,9 @@ web:
 
 audio:
 	cd $(AUDIO_DIR) && npm run dev
+
+recorder:
+	cd $(RECORDER_DIR) && npm run dev
 
 tests:
 	# Adjust the venv name below if not on native Linux

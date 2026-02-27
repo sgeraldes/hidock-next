@@ -39,6 +39,7 @@ export function Actionables() {
 
   // Generation state
   const [generating, setGenerating] = useState(false)
+  const [currentGeneratingTemplate, setCurrentGeneratingTemplate] = useState<string>('meeting_minutes')
   const [generatedOutput, setGeneratedOutput] = useState<{
     content: string
     templateId: string
@@ -65,7 +66,7 @@ export function Actionables() {
   }
 
   // AC-06: Use ref to read generationHistory, avoiding stale closure and unstable deps
-  const handleAutoGenerate = useCallback(async (sourceId: string) => {
+  const handleAutoGenerate = useCallback(async (sourceId: string, templateId: string = 'meeting_minutes') => {
     // Check rate limiting (max 3/minute)
     const now = Date.now()
     const recentGenerations = generationHistoryRef.current.filter(t => now - t < 60000)
@@ -75,11 +76,12 @@ export function Actionables() {
     }
 
     setGenerating(true)
+    setCurrentGeneratingTemplate(templateId)
     setGenerationError(null)
 
     try {
       const result = await window.electronAPI.outputs.generate({
-        templateId: 'meeting_minutes',
+        templateId: templateId as OutputTemplateId,
         knowledgeCaptureId: sourceId
       })
 
@@ -130,10 +132,11 @@ export function Actionables() {
     const state = location.state as {
       sourceId?: string
       action?: 'generate'
+      templateId?: string
     } | null
 
     if (state?.sourceId && state?.action === 'generate') {
-      handleAutoGenerate(state.sourceId)
+      handleAutoGenerate(state.sourceId, state.templateId)
     }
   }, [location.state, handleAutoGenerate])
 
@@ -146,7 +149,9 @@ export function Actionables() {
 
   const handleApprove = async (actionable: Actionable) => {
     try {
+      const templateId = actionable.suggestedTemplate || 'meeting_minutes'
       setGenerating(true)
+      setCurrentGeneratingTemplate(templateId)
       setGenerationError(null)
 
       // Call generateOutput handler to update status to in_progress
@@ -159,7 +164,7 @@ export function Actionables() {
 
       // Now trigger actual output generation
       const result = await window.electronAPI.outputs.generate({
-        templateId: (actionable.suggestedTemplate || 'meeting_minutes') as OutputTemplateId,
+        templateId: templateId as OutputTemplateId,
         knowledgeCaptureId: actionable.sourceKnowledgeId
       })
 
@@ -227,7 +232,7 @@ export function Actionables() {
           </div>
         </div>
 
-        {/* Filter bar */}
+        {/* Filter bar - AC-03 FIX: Added 'in_progress' to filter options */}
         <div className="flex items-center gap-2 mt-4 overflow-x-auto pb-2">
           {(['all', 'pending', 'in_progress', 'generated', 'shared', 'dismissed'] as const).map((s) => (
             <button
@@ -235,12 +240,12 @@ export function Actionables() {
               onClick={() => setStatusFilter(s)}
               className={cn(
                 "px-4 py-1.5 rounded-full text-xs font-semibold border transition-all whitespace-nowrap capitalize",
-                statusFilter === s 
-                  ? "bg-primary border-primary text-primary-foreground shadow-sm" 
+                statusFilter === s
+                  ? "bg-primary border-primary text-primary-foreground shadow-sm"
                   : "bg-background border-border text-muted-foreground hover:bg-muted"
               )}
             >
-              {s}
+              {s === 'in_progress' ? 'In Progress' : s}
             </button>
           ))}
         </div>
@@ -331,7 +336,31 @@ export function Actionables() {
                             variant="outline"
                             size="sm"
                             className="flex-1 sm:flex-none gap-2"
-                            onClick={() => handleAutoGenerate(actionable.sourceKnowledgeId)}
+                            onClick={async () => {
+                              // AC-02 FIX: Add onClick handler to regenerate and view the output
+                              const templateId = actionable.suggestedTemplate || 'meeting_minutes'
+                              try {
+                                setGenerating(true)
+                                setCurrentGeneratingTemplate(templateId)
+                                setGenerationError(null)
+
+                                const result = await window.electronAPI.outputs.generate({
+                                  templateId: templateId as OutputTemplateId,
+                                  knowledgeCaptureId: actionable.sourceKnowledgeId
+                                })
+
+                                if (result.success) {
+                                  setGeneratedOutput({ ...result.data, sourceId: actionable.sourceKnowledgeId })
+                                  setShowOutputModal(true)
+                                } else {
+                                  setGenerationError(result.error.message || 'Failed to load output')
+                                }
+                              } catch (error: any) {
+                                setGenerationError(error.message || 'Failed to load output')
+                              } finally {
+                                setGenerating(false)
+                              }
+                            }}
                           >
                             <FileText className="h-4 w-4" />
                             View Output
@@ -379,13 +408,21 @@ export function Actionables() {
         </div>
       )}
 
-      {/* Loading Overlay */}
+      {/* Loading Overlay - AC-08 FIX: Dynamic text based on template type */}
       {generating && (
         <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="text-center space-y-4 bg-card p-8 rounded-lg shadow-lg border">
             <Loader2 className="h-12 w-12 animate-spin mx-auto text-primary" />
             <div>
-              <h3 className="text-lg font-semibold mb-1">Generating output...</h3>
+              <h3 className="text-lg font-semibold mb-1">
+                Generating {
+                  currentGeneratingTemplate === 'meeting_minutes' ? 'Meeting Minutes' :
+                  currentGeneratingTemplate === 'interview_feedback' ? 'Interview Feedback' :
+                  currentGeneratingTemplate === 'project_status' ? 'Project Status' :
+                  currentGeneratingTemplate === 'action_items' ? 'Action Items' :
+                  'Output'
+                }...
+              </h3>
               <p className="text-sm text-muted-foreground">This may take a few moments...</p>
             </div>
           </div>

@@ -201,7 +201,11 @@ export interface Contact {
   id: string
   name: string
   email: string | null
+  type: string
+  role: string | null
+  company: string | null
   notes: string | null
+  tags: string | null // JSON string
   first_seen_at: string
   last_seen_at: string
   meeting_count: number

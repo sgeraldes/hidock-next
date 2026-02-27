@@ -13,7 +13,7 @@ import {
 import { Transcript, Meeting } from '@/types'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
-import { useAppStore } from '@/store/useAppStore'
+import { useDownloadQueue } from '@/store/useAppStore'
 import {
   LibraryHeader,
   LibraryFilters,
@@ -54,9 +54,13 @@ export function Library() {
   const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
   const playbackCurrentTime = useUIStore((state) => state.playbackCurrentTime)
 
-  // Get download queue from app store to check download status
-  const downloadQueue = useAppStore((state) => state.downloadQueue)
-  const isDownloading = useAppStore((state) => state.isDownloading)
+  // SM-03 fix: Use granular selector instead of pulling volatile state
+  const downloadQueue = useDownloadQueue()
+
+  // Helper to check if a file is downloading
+  const isDownloading = useCallback((filename: string) => {
+    return downloadQueue.has(filename)
+  }, [downloadQueue])
 
   // UI state
   const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set())
@@ -87,10 +91,7 @@ export function Library() {
   const setSortBy = useLibraryStore((state) => state.setSortBy)
   const setSortOrder = useLibraryStore((state) => state.setSortOrder)
 
-  // Row expansion state
-  const expandedRowIds = useLibraryStore((state) => state.expandedRowIds)
-  const toggleRowExpansion = useLibraryStore((state) => state.toggleRowExpansion)
-  const collapseRow = useLibraryStore((state) => state.collapseRow)
+  // Row expansion removed - details now shown in center panel
 
   // AbortController for cancelling enrichment on filter changes or navigation
   const enrichmentAbortController = useRef(new AbortController())
@@ -303,18 +304,18 @@ export function Library() {
   // Memoize the list of IDs for keyboard navigation
   const itemIds = useMemo(() => filteredRecordings.map((r) => r.id), [filteredRecordings])
 
-  // Keyboard navigation for accessibility
-  const { handleKeyDown } = useKeyboardNavigation({
+  // Keyboard navigation for accessibility - LB-19 fix: Use focusedIndex and containerRef
+  const { handleKeyDown, focusedIndex, containerRef } = useKeyboardNavigation({
     items: itemIds,
     selectedIds,
-    expandedIds: expandedRowIds,
+    expandedIds: new Set<string>(), // No expansion - keep for compatibility
     onToggleSelection: toggleSelection,
     onSelectAll: selectAll,
     onClearSelection: clearSelection,
-    onToggleExpand: toggleRowExpansion,
-    onExpandRow: useLibraryStore((state) => state.expandRow),
-    onCollapseRow: useLibraryStore((state) => state.collapseRow),
-    onCollapseAllRows: useLibraryStore((state) => state.collapseAllRows),
+    onToggleExpand: () => {}, // No-op - expansion removed
+    onExpandRow: () => {}, // No-op - expansion removed
+    onCollapseRow: () => {}, // No-op - expansion removed
+    onCollapseAllRows: () => {}, // No-op - expansion removed
     isEnabled: filteredRecordings.length > 0
   })
 
@@ -498,10 +499,7 @@ export function Library() {
       // Step 1: Delete on server FIRST
       await window.electronAPI.recordings.delete(recording.id)
 
-      // Step 2: Clean up expanded state
-      collapseRow(recording.id)
-
-      // Step 3: Refresh data from server to update UI ONLY on success
+      // Step 2: Refresh data from server to update UI ONLY on success
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete from device:', e)
@@ -510,7 +508,7 @@ export function Library() {
     } finally {
       setDeleting(null)
     }
-  }, [deviceConnected, refresh, collapseRow])
+  }, [deviceConnected, refresh])
 
   // PESSIMISTIC UPDATE: Server-first delete with proper error handling
   const handleDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
@@ -526,10 +524,7 @@ export function Library() {
       // Step 1: Delete on server FIRST
       await window.electronAPI.recordings.delete(recording.id)
 
-      // Step 2: Clean up expanded state
-      collapseRow(recording.id)
-
-      // Step 3: Refresh data from server to update UI ONLY on success
+      // Step 2: Refresh data from server to update UI ONLY on success
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete local file:', e)
@@ -538,7 +533,7 @@ export function Library() {
     } finally {
       setDeleting(null)
     }
-  }, [transcripts, refresh, collapseRow])
+  }, [transcripts, refresh])
 
   const handleDelete = useCallback(
     (recording: UnifiedRecording) => {
@@ -628,6 +623,7 @@ export function Library() {
   // Get selected recording and its data for SourceReader
   const selectedRecording = selectedSourceId ? recordings.find((r) => r.id === selectedSourceId) : null
   const selectedTranscript = selectedRecording ? transcripts.get(selectedRecording.id) : undefined
+  const selectedMeeting = selectedRecording?.meetingId ? meetings.get(selectedRecording.meetingId) : undefined
 
   // Virtualization setup
   const parentRef = useRef<HTMLDivElement>(null)
@@ -652,16 +648,9 @@ export function Library() {
         if (isDeviceOnly(recording)) height += 30
       }
 
-      // Add expanded content height for compact view
-      if (compactView && expandedRowIds.has(recording.id)) {
-        height += 200 // Base expanded content height (no action buttons)
-        if (transcripts.get(recording.id)?.summary) height += 120 // Transcript summary
-        if (recording.meetingId && meetings.get(recording.meetingId)) height += 60 // Meeting card
-      }
-
       return height
     },
-    [compactView, filteredRecordings, currentlyPlayingId, meetings, transcripts, expandedTranscripts, expandedRowIds]
+    [compactView, filteredRecordings, currentlyPlayingId, meetings, transcripts, expandedTranscripts]
   )
 
   const rowVirtualizer = useVirtualizer({
@@ -670,14 +659,6 @@ export function Library() {
     estimateSize,
     overscan: 5
   })
-
-  // Re-measure all rows when expansion state changes
-  useEffect(() => {
-    // Use requestAnimationFrame to ensure DOM has updated before measuring
-    requestAnimationFrame(() => {
-      rowVirtualizer.measure()
-    })
-  }, [expandedRowIds, rowVirtualizer])
 
   // Loading state
   if (loading && recordings.length === 0) {
@@ -723,7 +704,7 @@ export function Library() {
       />
 
       {/* Filters */}
-      <div className="px-6 relative">
+      <div className="px-2 sm:px-4 lg:px-6 relative">
         <div className={isFilterPending ? 'opacity-70 pointer-events-none transition-opacity' : 'transition-opacity'}>
           <LibraryFilters
             stats={stats}
@@ -783,15 +764,20 @@ export function Library() {
       <div className="flex-1 overflow-hidden">
         <TriPaneLayout
           leftPanel={
-            /* Left Panel: Recording List */
+            /* Left Panel: Recording List - LB-19 fix: Add containerRef for keyboard navigation */
             <div
-              ref={parentRef}
-              className="h-full overflow-auto p-6"
+              ref={(el) => {
+                // @ts-expect-error - Ref callback pattern for multiple refs
+                parentRef.current = el
+                // @ts-expect-error - Ref callback pattern for multiple refs
+                containerRef.current = el
+              }}
+              className="h-full overflow-auto p-2 sm:p-4 lg:p-6"
               onKeyDown={handleKeyDown}
               tabIndex={0}
               data-testid="library-list"
             >
-        <div className={`max-w-4xl mx-auto transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
+        <div className={`lg:max-w-4xl lg:mx-auto transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
           {filteredRecordings.length === 0 ? (
             <EmptyState
               hasRecordings={recordings.length > 0}
@@ -810,16 +796,18 @@ export function Library() {
               aria-rowcount={filteredRecordings.length}
             >
               {compactView ? (
-                // Compact List View
+                // Compact List View - LB-19 fix: Add focus indicator support
                 <div key="compact-view" className="border rounded-lg overflow-hidden">
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                     const recording = filteredRecordings[virtualRow.index]
                     const meeting = recording.meetingId ? meetings.get(recording.meetingId) : undefined
+                    const isFocused = focusedIndex === virtualRow.index
 
                     return (
                       <div
                         key={recording.id}
                         data-index={virtualRow.index}
+                        data-focus-index={virtualRow.index}
                         ref={rowVirtualizer.measureElement}
                         style={{
                           position: 'absolute',
@@ -828,7 +816,10 @@ export function Library() {
                           width: '100%',
                           transform: `translateY(${virtualRow.start}px)`
                         }}
-                        className={virtualRow.index > 0 ? 'border-t' : ''}
+                        className={[
+                          virtualRow.index > 0 ? 'border-t' : '',
+                          isFocused ? 'ring-2 ring-primary ring-inset' : ''
+                        ].join(' ')}
                         aria-rowindex={virtualRow.index + 1}
                       >
                         <SourceRow
@@ -836,20 +827,12 @@ export function Library() {
                           meeting={meeting}
                           transcript={transcripts.get(recording.id)}
                           isPlaying={currentlyPlayingId === recording.id}
-                          isDownloading={isDeviceOnly(recording) && isDownloading(recording.deviceFilename)}
-                          downloadProgress={
-                            isDeviceOnly(recording) ? downloadQueue.get(recording.deviceFilename)?.progress : undefined
-                          }
-                          isDeleting={deleting === recording.id}
-                          deviceConnected={deviceConnected}
                           isSelected={isSelected(recording.id)}
-                          isExpanded={expandedRowIds.has(recording.id)}
                           isActiveSource={selectedSourceId === recording.id}
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
                           onClick={() => handleRowClick(recording)}
-                          onToggleExpand={() => toggleRowExpansion(recording.id)}
                           onPlay={() => {
                             if (hasLocalPath(recording)) {
                               setSelectedSourceId(recording.id)
@@ -857,29 +840,25 @@ export function Library() {
                             }
                           }}
                           onStop={handleStopCallback}
-                          onDownload={() => handleDownloadCallback(recording)}
-                          onDelete={() => handleDeleteCallback(recording)}
-                          onTranscribe={() => queueTranscription(recording)}
-                          onAskAssistant={() => handleAskAssistantCallback(recording)}
-                          onGenerateOutput={() => handleGenerateOutputCallback(recording)}
-                          onNavigateToMeeting={handleNavigateToMeeting}
                         />
                       </div>
                     )
                   })}
                 </div>
               ) : (
-                // Card View
+                // Card View - LB-19 fix: Add focus indicator support
                 <div key="card-view" className="space-y-4">
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                     const recording = filteredRecordings[virtualRow.index]
                     const transcript = transcripts.get(recording.id)
                     const meeting = recording.meetingId ? meetings.get(recording.meetingId) : undefined
+                    const isFocused = focusedIndex === virtualRow.index
 
                     return (
                       <div
                         key={recording.id}
                         data-index={virtualRow.index}
+                        data-focus-index={virtualRow.index}
                         ref={rowVirtualizer.measureElement}
                         style={{
                           position: 'absolute',
@@ -888,6 +867,7 @@ export function Library() {
                           width: '100%',
                           transform: `translateY(${virtualRow.start}px)`
                         }}
+                        className={isFocused ? 'ring-2 ring-primary rounded-lg' : ''}
                         aria-rowindex={virtualRow.index + 1}
                       >
                         <SourceCard
@@ -937,6 +917,7 @@ export function Library() {
             <SourceReader
               recording={selectedRecording ?? null}
               transcript={selectedTranscript}
+              meeting={selectedMeeting}
               isPlaying={selectedRecording ? currentlyPlayingId === selectedRecording.id : false}
               currentTimeMs={playbackCurrentTime * 1000}
               onPlay={() => {
@@ -950,7 +931,7 @@ export function Library() {
                   audioControls.seek(startMs / 1000)
                 }
               }}
-              // NEW: Action button callbacks
+              // Action button callbacks
               onDownload={() => {
                 if (selectedRecording) handleDownloadCallback(selectedRecording)
               }}
@@ -960,7 +941,7 @@ export function Library() {
               onDelete={() => {
                 if (selectedRecording) handleDeleteCallback(selectedRecording)
               }}
-              // NEW: State for button disabling
+              // State for button disabling
               deviceConnected={deviceConnected}
               isDownloading={selectedRecording && isDeviceOnly(selectedRecording)
                 ? isDownloading(selectedRecording.deviceFilename)
@@ -969,6 +950,8 @@ export function Library() {
                 ? downloadQueue.get(selectedRecording.deviceFilename)?.progress
                 : undefined}
               isDeleting={selectedRecording ? deleting === selectedRecording.id : false}
+              // Navigation
+              onNavigateToMeeting={handleNavigateToMeeting}
             />
           }
           rightPanel={

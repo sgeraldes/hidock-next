@@ -6,7 +6,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 18
+const SCHEMA_VERSION = 19
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -995,6 +995,27 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v18 complete: chat_messages columns added')
+  },
+  19: () => {
+    // v19: TQ-01 — Add filename column to transcription_queue
+    console.log('Running migration to schema v19: Adding filename to transcription_queue')
+    const database = getDatabase()
+
+    const tableInfo = database.exec('PRAGMA table_info(transcription_queue)')
+    if (tableInfo.length > 0 && tableInfo[0].values) {
+      const columns = tableInfo[0].values.map((row: any) => row[1])
+
+      if (!columns.includes('filename')) {
+        try {
+          database.run('ALTER TABLE transcription_queue ADD COLUMN filename TEXT')
+          console.log('[Migration v19] Added filename column to transcription_queue')
+        } catch (e) {
+          console.warn('[Migration v19] Failed to add filename column:', e)
+        }
+      }
+    }
+
+    console.log('Migration v19 complete: transcription_queue filename column added')
   }
 
 }
@@ -1166,17 +1187,83 @@ export function closeDatabase(): void {
 }
 
 /**
+ * Ensure a knowledge_capture exists for a recording
+ * Creates one if it doesn't exist, returns the knowledge_capture_id
+ *
+ * AC-01 FIX: This ensures actionables always have a valid knowledge_capture_id
+ */
+export function ensureKnowledgeCaptureForRecording(recordingId: string): string | null {
+  try {
+    // First check if recording already has a knowledge_capture linked via migrated_to_capture_id
+    const recording = getRecordingById(recordingId)
+    if (!recording) {
+      console.error(`[ensureKnowledgeCapture] Recording not found: ${recordingId}`)
+      return null
+    }
+
+    // If already linked, return existing capture ID
+    if (recording.migrated_to_capture_id) {
+      return recording.migrated_to_capture_id
+    }
+
+    // Check if a capture exists by source_recording_id
+    const existingCapture = queryOne<{ id: string }>(
+      'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
+      [recordingId]
+    )
+
+    if (existingCapture) {
+      // Link it to the recording for future lookups
+      run('UPDATE recordings SET migrated_to_capture_id = ? WHERE id = ?', [existingCapture.id, recordingId])
+      return existingCapture.id
+    }
+
+    // Create a new knowledge_capture
+    const captureId = `kc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    const now = new Date().toISOString()
+
+    // Get transcript for summary if available
+    const transcript = getTranscriptByRecordingId(recordingId)
+
+    run(
+      `INSERT INTO knowledge_captures (
+        id, title, summary, category, status,
+        captured_at, created_at, updated_at,
+        source_recording_id, source_meeting_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        captureId,
+        recording.filename || 'Untitled Recording',
+        transcript?.summary || null,
+        'meeting', // default category
+        transcript ? 'ready' : 'processing',
+        recording.date_recorded || now,
+        now,
+        now,
+        recordingId,
+        recording.meeting_id || null
+      ]
+    )
+
+    // Link back to recording
+    run('UPDATE recordings SET migrated_to_capture_id = ? WHERE id = ?', [captureId, recordingId])
+
+    console.log(`[ensureKnowledgeCapture] Created knowledge_capture ${captureId} for recording ${recordingId}`)
+    return captureId
+  } catch (error) {
+    console.error('[ensureKnowledgeCapture] Failed:', error)
+    return null
+  }
+}
+
+/**
  * Update knowledge_capture title based on title_suggestion
  * Only updates if the current title matches the filename pattern
  */
 export function updateKnowledgeCaptureTitle(recordingId: string, titleSuggestion: string): void {
   try {
-    // Get the recording to find the knowledge_capture
-    const recording = getRecordingById(recordingId)
-    if (!recording) return
-
-    // Get the knowledge capture via migrated_to_capture_id
-    const captureId = recording.migrated_to_capture_id
+    // Ensure knowledge_capture exists (AC-01 related improvement)
+    const captureId = ensureKnowledgeCaptureForRecording(recordingId)
     if (!captureId) return
 
     // Get the knowledge capture
@@ -1187,7 +1274,7 @@ export function updateKnowledgeCaptureTitle(recordingId: string, titleSuggestion
     if (!capture) return
 
     // Only update if title looks like a filename (contains .hda or similar)
-    if (capture.title.includes('.') || capture.title === 'Untitled') {
+    if (capture.title.includes('.') || capture.title === 'Untitled' || capture.title === 'Untitled Recording') {
       run(
         'UPDATE knowledge_captures SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
         [titleSuggestion, captureId]
@@ -1794,8 +1881,11 @@ export function getTranscriptsByRecordingIds(recordingIds: string[]): Map<string
 }
 
 export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): void {
+  // AI-02 FIX: Delete old transcription first to avoid UNIQUE constraint violation on re-transcription
+  run('DELETE FROM transcripts WHERE recording_id = ?', [transcript.recording_id])
+
   run(
-    `INSERT OR REPLACE INTO transcripts (id, recording_id, full_text, language, summary, action_items,
+    `INSERT INTO transcripts (id, recording_id, full_text, language, summary, action_items,
       topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model,
       title_suggestion, question_suggestions)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1877,9 +1967,9 @@ export interface QueueItem {
   completed_at?: string
 }
 
-export function addToQueue(recordingId: string): string {
+export function addToQueue(recordingId: string, filename?: string): string {
   const id = crypto.randomUUID()
-  run('INSERT INTO transcription_queue (id, recording_id) VALUES (?, ?)', [id, recordingId])
+  run('INSERT INTO transcription_queue (id, recording_id, filename) VALUES (?, ?, ?)', [id, recordingId, filename ?? null])
   return id
 }
 

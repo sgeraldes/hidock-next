@@ -3,9 +3,10 @@
  * Handles embedding generation and LLM inference via local Ollama instance
  */
 
-const OLLAMA_BASE_URL = 'http://localhost:11434'
-const EMBEDDING_MODEL = 'nomic-embed-text'
-const CHAT_MODEL = 'llama3.2'
+// AI-07 FIX: These are now fallback defaults only - actual values come from config
+const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434'
+const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text'
+const DEFAULT_CHAT_MODEL = 'llama3.2'
 
 interface OllamaEmbeddingResponse {
   embedding: number[]
@@ -28,9 +29,9 @@ class OllamaService {
   private chatModel: string
 
   constructor(
-    baseUrl = OLLAMA_BASE_URL,
-    embeddingModel = EMBEDDING_MODEL,
-    chatModel = CHAT_MODEL
+    baseUrl = DEFAULT_OLLAMA_BASE_URL,
+    embeddingModel = DEFAULT_EMBEDDING_MODEL,
+    chatModel = DEFAULT_CHAT_MODEL
   ) {
     this.baseUrl = baseUrl
     this.embeddingModel = embeddingModel
@@ -179,15 +180,20 @@ let ollamaInstance: OllamaService | null = null
 export function getOllamaService(): OllamaService {
   if (!ollamaInstance) {
     try {
-      // Read config dynamically to avoid circular dependency issues at startup
+      // AI-07 FIX: Read config values properly from the config service
       const { getConfig } = require('./config')
       const config = getConfig()
-      ollamaInstance = new OllamaService(
-        config.embeddings?.ollamaBaseUrl || OLLAMA_BASE_URL,
-        config.embeddings?.ollamaModel || EMBEDDING_MODEL,
-        config.chat?.ollamaModel || CHAT_MODEL
-      )
-    } catch {
+
+      // Read from correct config paths (embeddings.ollamaBaseUrl, embeddings.ollamaModel, chat.ollamaModel)
+      const baseUrl = config.embeddings?.ollamaBaseUrl || DEFAULT_OLLAMA_BASE_URL
+      const embeddingModel = config.embeddings?.ollamaModel || DEFAULT_EMBEDDING_MODEL
+      const chatModel = config.chat?.ollamaModel || DEFAULT_CHAT_MODEL
+
+      console.log(`[Ollama] Initializing with config: baseUrl=${baseUrl}, embeddingModel=${embeddingModel}, chatModel=${chatModel}`)
+
+      ollamaInstance = new OllamaService(baseUrl, embeddingModel, chatModel)
+    } catch (error) {
+      console.warn('[Ollama] Failed to read config, using defaults:', error)
       // Fall back to defaults if config is not available yet
       ollamaInstance = new OllamaService()
     }

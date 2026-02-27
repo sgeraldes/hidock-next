@@ -4,12 +4,51 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-HiDock Next is a suite of applications for managing HiDock® devices. It's a monorepo containing:
-- **Desktop App** (`apps/desktop/`) - Python/CustomTkinter GUI for device management
-- **Web App** (`apps/web/`) - React/TypeScript browser interface using WebUSB
-- **Audio Insights** (`apps/audio-insights/`) - AI-powered audio analysis tool
+**HiDock Next** is a **universal knowledge hub** - an integrated suite of applications that extracts insights, manages information, and produces results from ANY knowledge source (recordings, PDFs, PPTX, DOCX, MD, notes, calendar, email, Slack, and more).
 
-The project implements the Jensen protocol for USB communication with HiDock devices (H1, H1E, P1 models).
+### The Suite Evolution
+
+The project evolved through four iterations, each building toward the ultimate vision:
+
+1. **Desktop App** (`apps/desktop/`) - **First iteration: Device management focused**
+   - Python/CustomTkinter GUI for managing HiDock® devices (H1, H1E, P1 models)
+   - USB communication via Jensen protocol (PyUSB)
+   - File sync, device settings, storage management
+   - **Entry point**: Where users typically discover HiDock Next
+   - **Focus**: Hardware management and basic file operations
+
+2. **Web App** (`apps/web/`) - **Second iteration: Transcription focused**
+   - React/TypeScript browser interface using WebUSB
+   - AI transcription with multiple providers (Gemini, OpenAI, etc.)
+   - Web-based device access (no drivers needed)
+   - **Focus**: Making recordings accessible and transcribable anywhere
+
+3. **Audio Insights** (`apps/audio-insights/`) - **Third iteration: Insights prototype**
+   - AI-powered audio analysis tool
+   - Extracting insights from transcriptions
+   - **Focus**: Proving the concept of knowledge extraction from audio
+
+4. **Electron App** (`apps/electron/`) - **Fourth iteration: The integrated hub** ⭐ **CURRENT FOCUS**
+   - **Vision**: Universal knowledge hub integrating all previous capabilities
+   - **Scope**: Not just audio, but ANY artifact as a knowledge source
+   - Knowledge sources: recordings, PDFs, presentations, documents, markdown, notes, calendar events, emails, Slack messages, etc.
+   - **Capabilities**: Extract data, create chunks, generate insights, manage information, produce results
+   - Unified library with advanced search, filtering, and organization
+   - AI-powered analysis across all knowledge sources
+   - **Goal**: The central intelligence system for all your information
+
+### Current Architecture
+
+**Monorepo Structure:**
+- `apps/desktop/` - Device management (Python/CustomTkinter) - Original entry point
+- `apps/web/` - Transcription focus (React/TypeScript/WebUSB)
+- `apps/audio-insights/` - Insights prototype (AI analysis)
+- `apps/electron/` - **Universal knowledge hub** (integration of all capabilities)
+
+**Shared Protocols:**
+- Jensen protocol for USB communication with HiDock devices
+- Common device interface abstraction across desktop/web
+- Shared transcription service architecture
 
 ## Essential Commands
 
@@ -32,16 +71,22 @@ python setup.py --skip-web --skip-audio
 ### Running Applications
 
 ```bash
-# Desktop app
+# Electron app (Universal Knowledge Hub) ⭐ PRIMARY APPLICATION
+cd apps/electron && npm run dev
+
+# Desktop app (Device Management - Original entry point)
 ./run-desktop.sh        # Unix/macOS
 run-desktop.bat         # Windows
 
-# Web app
+# Web app (Transcription Focus)
 ./run-web.sh            # Unix/macOS
 run-web.bat             # Windows
 
 # Or manually:
 cd apps/web && npm run dev
+
+# Audio Insights (Prototype)
+cd apps/audio-insights && npm run dev
 ```
 
 ### Testing
@@ -97,6 +142,84 @@ python scripts/build/build_desktop.py
 ```
 
 ## Architecture
+
+### Electron App (`apps/electron/`) - **Universal Knowledge Hub** ⭐
+
+**Vision:** The central intelligence system that transforms any information source into actionable insights.
+
+**Entry Point:** `apps/electron/electron/main/index.ts` → Electron main process
+
+**What Makes It Different:**
+- **Not just audio**: Handles recordings, PDFs, presentations, documents, markdown, notes, calendar, email, Slack, etc.
+- **Universal extraction**: Extracts data and insights from ANY artifact type
+- **Integrated capabilities**: Combines device management, transcription, and AI analysis from all previous iterations
+- **Knowledge-first**: Organized around insights and information, not just files
+
+**Current Focus (Wave 4 Refactor):**
+We're currently implementing a comprehensive UI/UX redesign and auto-refresh system for the Knowledge Library:
+- **Auto-refresh**: Real-time updates when new recordings/artifacts are detected
+- **Waveform loading**: Immediate audio visualization on selection
+- **Enhanced UI**: Clear labels, location badges, responsive layout
+- **Accessibility**: WCAG 2.1 AA compliance with keyboard navigation and screen reader support
+- **Universal library**: Preparing architecture for multi-artifact-type support
+
+**Technology Stack:**
+- **Frontend**: React 18 + TypeScript + Tailwind CSS
+- **State Management**: Zustand
+- **Backend**: Electron main process (Node.js)
+- **Database**: SQLite (better-sqlite3) for local knowledge storage
+- **AI Integration**: Multiple transcription providers, future multi-modal analysis
+- **Device Communication**: IPC bridge to device services
+
+**Key Services:**
+- **Recording Watcher** (`recording-watcher.ts`) - File system monitoring for auto-refresh
+- **Device Service** - USB device communication (inherited from desktop app architecture)
+- **Transcription Service** - Multi-provider AI transcription
+- **Download Service** - 4-layer reconciliation for accurate sync status
+- **Calendar Service** - Meeting correlation with recordings (future: all artifacts)
+- **Metadata Service** - Unified metadata management across artifact types
+
+**Core Components:**
+- **Knowledge Library** (`pages/Library.tsx`) - Main unified view of all knowledge sources
+  - Currently: Recordings with device/local/synced status
+  - Future: PDFs, documents, presentations, notes, emails, etc.
+- **Device Management** (`pages/Device.tsx`) - HiDock device sync and management
+- **Unified Recordings Hook** (`hooks/useUnifiedRecordings.ts`) - Data aggregation and state management
+- **Operation Controller** (`components/OperationController.tsx`) - Audio playback, waveform generation
+- **Middle Panel** (`components/MiddlePanel.tsx`) - Action buttons and metadata display
+- **Source Rows** (`components/SourceRow.tsx`) - Individual knowledge item display
+
+**Future Architecture (Multi-Artifact Support):**
+```
+Knowledge Library
+├── Recordings (current focus)
+├── Documents (PDF, DOCX, PPTX)
+├── Notes (MD, text)
+├── Communications (Email, Slack)
+├── Calendar Events
+└── Web Artifacts (bookmarks, articles)
+
+Each artifact type:
+- Unified metadata schema
+- AI-powered extraction and chunking
+- Cross-artifact search and linking
+- Insight generation and correlation
+```
+
+**Database Schema:**
+- `recordings` - Audio file metadata
+- `synced_files` - Sync status tracking
+- `transcriptions` - AI-generated transcripts
+- `meetings` - Calendar event correlation
+- Future: `documents`, `notes`, `communications`, `insights`, `chunks`, `embeddings`
+
+**IPC Architecture:**
+- Main process: Device management, file watching, database operations
+- Renderer process: React UI, user interactions
+- IPC channels: `recording:new`, `download:complete`, `device:connected`, etc.
+- Future: Generic artifact channels for all knowledge sources
+
+---
 
 ### Desktop App (`apps/desktop/`)
 
@@ -306,6 +429,61 @@ Or use automated installer: `python setup.py --auto-install-missing`
 - **Logging:** Use `logger` from `config_and_logger.py`, not print statements
 - **Error handling:** Catch specific exceptions, log with context
 
+### QA Logging Rules (Electron App)
+
+**Context:** QA logs are development/debugging logs controlled by the QA Logs toggle in Settings sidebar.
+
+**MUST:**
+- Always respect `qaLogsEnabled` toggle from `useUIStore`
+- Use consistent `[QA-MONITOR]` prefix for all QA logs
+- For services/classes: Use `useUIStore.getState().qaLogsEnabled` check
+- For React components: Use `const qaEnabled = useUIStore((s) => s.qaLogsEnabled)` selector
+- For preload scripts: Read from localStorage bridge (context isolation prevents store access)
+
+**MUST NOT:**
+- Hardcode `DEBUG = true` constants (ties logs to runtime config instead)
+- Use `console.log('[QA-MONITOR]')` directly without toggle check
+- Bypass toggle with `if (true)` or `if (import.meta.env.DEV)` guards alone
+
+**Preload Script Pattern** (context isolation workaround):
+```typescript
+// electron/preload/index.ts
+let qaEnabled = false
+try {
+  const stored = localStorage.getItem('hidock-ui-store')
+  if (stored) {
+    const { state } = JSON.parse(stored)
+    qaEnabled = state?.qaLogsEnabled ?? false
+  }
+} catch { /* fail silently */ }
+
+if (qaEnabled) console.log('[QA-MONITOR] ...')
+```
+
+**Service/Class Pattern:**
+```typescript
+// src/services/*.ts, src/hooks/*.ts
+import { useUIStore } from '@/store'
+
+const qaEnabled = useUIStore.getState().qaLogsEnabled
+if (qaEnabled) console.log('[QA-MONITOR] ...')
+```
+
+**React Component Pattern:**
+```typescript
+const qaEnabled = useUIStore((s) => s.qaLogsEnabled)
+
+useEffect(() => {
+  if (qaEnabled) console.log('[QA-MONITOR] ...')
+}, [qaEnabled])
+```
+
+**Why this matters:** Without toggle checks, QA logs spam console even when user disables them. The QA Logging System Audit (2026-02-27) found 52+ log statements not respecting the toggle. See `apps/electron/QA_LOGGING_AUDIT.md` for full findings.
+
+**Related:**
+- Architecture decision: `LESSON-0014-evolutionary-agent-audit-with-validation.md`
+- Audit report: `apps/electron/QA_LOGGING_AUDIT.md`
+
 ## Testing Philosophy
 
 - Fast feedback loop: default `pytest` runs only fast unit tests
@@ -341,3 +519,82 @@ Application config stored in `hidock_config.json` (auto-created):
    - HTTPS required (or localhost for dev)
 
 See `docs/TROUBLESHOOTING.md` for detailed guide.
+
+---
+
+## Branding & Visual Identity
+
+### App Icon Guidance (Electron App)
+
+**What the Icon Should NOT Represent:**
+- ❌ Audio waveforms or recording metaphors (that's the device's job, not the app)
+- ❌ Microphones or recording hardware (this is not a recording app)
+- ❌ Simple file management or folders (too generic, misses the intelligence aspect)
+- ❌ Device hardware (that's just one entry point, not the vision)
+
+**What the Icon SHOULD Represent:**
+The Electron app icon should communicate that this is a **universal knowledge hub** - a central intelligence system for ALL information sources.
+
+**Core Concepts to Convey:**
+- **Central nexus/hub** - Where ALL information flows and connects
+- **Universal connectivity** - Any source, any format (not just audio)
+- **Intelligence/AI processing** - Extracting meaning from chaos
+- **Knowledge synthesis** - Combining disparate sources into insights
+- **Organized understanding** - Making information actionable
+
+**Recommended Icon Directions:**
+
+1. **The Knowledge Sphere** (Primary recommendation)
+   - Central glowing sphere/orb representing core intelligence
+   - Orbital rings or particles representing different data sources flowing in
+   - Everything flows to the center, gets processed, outputs insights
+   - Colors: Deep blue/purple core → bright cyan/white glow (intelligence/processing)
+   - Feel: Sophisticated, AI-powered, universal, professional
+
+2. **The Knowledge Nexus**
+   - Central node with connections radiating outward
+   - Different connection points for different sources (files, calendar, email, chat, audio)
+   - Neural network hub aesthetic
+   - Suggests: "Everything connects here"
+
+3. **The Universal Dock**
+   - Multiple "slots" or connection points (literal multi-port dock)
+   - Modern, clean, professional
+   - Central platform where everything plugs in
+   - Literal interpretation of "docking" any information source
+
+4. **The Insight Engine**
+   - Geometric shape (hexagon/circle) with processing visual inside
+   - Suggests transformation: raw data → insights
+   - Glowing/gradient to suggest active intelligence
+   - Subtle icons of different data types flowing in
+
+**Design Principles:**
+- **Scalable**: Must work at 16x16, 32x32, 256x256, 512x512 pixels
+- **Strong silhouette**: Recognizable even without color
+- **Avoid fine details**: Won't show at small sizes
+- **Platform guidelines**: macOS rounded square, Windows flexible
+- **Cross-platform**: Works on taskbar/dock
+
+**Color Palette Suggestions:**
+- **Primary**: Deep blue → cyan gradient (tech, intelligence, professional)
+- **Alternative**: Purple → pink gradient (creative, modern, knowledge/insight)
+- **Accent**: Orange/amber for active/processing states
+- **Glow effects**: White/cyan for intelligence indicators
+
+**Comparison to Similar Apps:**
+- **Notion**: Organization + knowledge
+- **Obsidian**: Knowledge graph + connections
+- **Mem.ai**: AI-powered knowledge hub
+- **HiDock Next**: Universal intelligence + multi-source insights
+
+### Per-App Identity
+
+While the Electron app is the unified vision, each app has its subset focus:
+
+- **Desktop App**: Device-first, hardware management icon (USB device, dock connector)
+- **Web App**: Transcription-first, accessibility icon (speech bubbles, text from audio)
+- **Audio Insights**: Analysis-first, insight icon (magnifying glass + waveform)
+- **Electron App**: **Knowledge hub** icon (nexus, sphere, universal connector)
+
+---

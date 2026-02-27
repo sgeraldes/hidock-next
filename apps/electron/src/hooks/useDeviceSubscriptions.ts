@@ -9,9 +9,19 @@
 import { useEffect, useRef } from 'react'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
+import { useUIStore } from '@/store'
 import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
 
-const DEBUG = import.meta.env.DEV
+// QA Logging helper - respects user's QA Logs toggle
+function shouldLogQa(): boolean {
+  const IS_PROD = import.meta.env.PROD
+  if (!IS_PROD) return true // Always log in dev
+  try {
+    return useUIStore.getState().qaLogsEnabled
+  } catch {
+    return false
+  }
+}
 
 export function useDeviceSubscriptions() {
   const deviceService = getHiDockDeviceService()
@@ -29,7 +39,7 @@ export function useDeviceSubscriptions() {
     if (deviceSubscriptionsInitialized.current) return
     deviceSubscriptionsInitialized.current = true
 
-    if (DEBUG) console.log('[useDeviceSubscriptions] Subscribing to device state')
+    if (shouldLogQa()) console.log('[useDeviceSubscriptions] Subscribing to device state')
 
     // Get initial device state and update store
     const initialState = deviceService.getState()
@@ -39,13 +49,13 @@ export function useDeviceSubscriptions() {
 
     // Subscribe to device state changes
     const unsubStateChange = deviceService.onStateChange((state) => {
-      if (DEBUG) console.log('[useDeviceSubscriptions] Device state changed:', state)
+      if (shouldLogQa()) console.log('[useDeviceSubscriptions] Device state changed:', state)
       setDeviceState(state)
     })
 
     // Subscribe to connection status changes
     const unsubStatusChange = deviceService.onStatusChange(async (status) => {
-      if (DEBUG) console.log('[useDeviceSubscriptions] Connection status changed:', status)
+      if (shouldLogQa()) console.log('[useDeviceSubscriptions] Connection status changed:', status)
       setConnectionStatus(status)
 
       // AUTO-SYNC TRIGGER: Only when status becomes 'ready'
@@ -54,25 +64,27 @@ export function useDeviceSubscriptions() {
 
       const { allowed, reason } = checkAutoSyncAllowed()
       if (!allowed) {
-        if (DEBUG) console.log(`[useDeviceSubscriptions] Auto-sync skipped on ready: ${reason}`)
+        if (shouldLogQa()) console.log(`[useDeviceSubscriptions] Auto-sync skipped on ready: ${reason}`)
         return
       }
 
       autoSyncTriggeredRef.current = true
-      if (DEBUG) console.log('[useDeviceSubscriptions] Auto-sync triggered on device ready')
+      if (shouldLogQa()) console.log('[useDeviceSubscriptions] Auto-sync triggered on device ready')
 
       const recordings = deviceService.getCachedRecordings()
       if (recordings.length > 0) {
-        const syncedFilenames = await window.electronAPI.syncedFiles.getFilenames()
-        const syncedSet = new Set(syncedFilenames)
-        // TODO (DL-06): Simple filename matching is insufficient for sync detection.
-        // Device files may be renamed during download (.hda -> .wav), and different
-        // recordings could theoretically share filenames across format/re-record cycles.
-        // Should use file hash or size+date combo for reliable matching. Don't change
-        // the logic yet as it could break sync — needs careful migration plan.
-        const toSync = recordings.filter(rec => !syncedSet.has(rec.filename))
+        // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
+        const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
+          recordings.map(rec => ({
+            filename: rec.filename,
+            size: rec.size,
+            duration: rec.duration,
+            dateCreated: rec.dateCreated
+          }))
+        )
+        const toSync = reconcileResults.filter(result => !result.skipReason)
         if (toSync.length > 0) {
-          if (DEBUG) console.log(`[QA-MONITOR][Operation] Auto-sync on ready: ${toSync.length} files to download`)
+          if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Auto-sync on ready: ${toSync.length} files to download`)
           deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
 
           const filesToQueue = toSync.map(rec => ({
@@ -98,7 +110,7 @@ export function useDeviceSubscriptions() {
     })
 
     return () => {
-      if (DEBUG) console.log('[useDeviceSubscriptions] Unsubscribing from device state')
+      if (shouldLogQa()) console.log('[useDeviceSubscriptions] Unsubscribing from device state')
       unsubStateChange()
       unsubStatusChange()
       unsubActivity()
@@ -116,19 +128,19 @@ export function useDeviceSubscriptions() {
 
       const configLoaded = await waitForConfig(10000)
       if (!configLoaded) {
-        if (DEBUG) console.log('[useDeviceSubscriptions] Config load timeout, skipping auto-sync')
+        if (shouldLogQa()) console.log('[useDeviceSubscriptions] Config load timeout, skipping auto-sync')
         return
       }
 
       const deviceReady = await waitForDeviceReady(60000)
       if (!deviceReady) {
-        if (DEBUG) console.log('[useDeviceSubscriptions] Device not ready, skipping auto-sync')
+        if (shouldLogQa()) console.log('[useDeviceSubscriptions] Device not ready, skipping auto-sync')
         return
       }
 
       const { allowed, reason } = checkAutoSyncAllowed()
       if (!allowed) {
-        if (DEBUG) console.log(`[useDeviceSubscriptions] Auto-sync skipped: ${reason}`)
+        if (shouldLogQa()) console.log(`[useDeviceSubscriptions] Auto-sync skipped: ${reason}`)
         deviceService.log('info', 'Auto-sync skipped', reason)
         return
       }
@@ -136,16 +148,22 @@ export function useDeviceSubscriptions() {
       if (autoSyncTriggeredRef.current) return
 
       autoSyncTriggeredRef.current = true
-      if (DEBUG) console.log('[useDeviceSubscriptions] Initial auto-sync check (device pre-connected)')
+      if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial auto-sync check (device pre-connected)')
 
       const recordings = deviceService.getCachedRecordings()
       if (recordings.length > 0) {
-        const syncedFilenames = await window.electronAPI.syncedFiles.getFilenames()
-        const syncedSet = new Set(syncedFilenames)
-        // TODO (DL-06): Same filename matching limitation as above — see DL-06 comment.
-        const toSync = recordings.filter(rec => !syncedSet.has(rec.filename))
+        // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
+        const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
+          recordings.map(rec => ({
+            filename: rec.filename,
+            size: rec.size,
+            duration: rec.duration,
+            dateCreated: rec.dateCreated
+          }))
+        )
+        const toSync = reconcileResults.filter(result => !result.skipReason)
         if (toSync.length > 0) {
-          if (DEBUG) console.log(`[QA-MONITOR][Operation] Initial auto-sync: ${toSync.length} files to download`)
+          if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Initial auto-sync: ${toSync.length} files to download`)
           deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
 
           const filesToQueue = toSync.map(rec => ({

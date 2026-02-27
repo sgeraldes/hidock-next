@@ -1,6 +1,10 @@
 # gui_main_window.py
 """
-Main GUI Window for the HiDock Explorer Tool.
+Main GUI Window for the HiDock Desktop Application.
+
+HiDock Desktop is the first iteration of the HiDock Next ecosystem, serving as
+the typical entry point for users. This app focuses on direct USB device management
+and local file operations.
 
 This module defines the `HiDockToolGUI` class, which creates and manages
 the main application window using customtkinter. It handles user interactions,
@@ -11,6 +15,8 @@ as well as configuration and logging utilities.
 
 The GUI provides a menubar, toolbar, file list (Treeview), status bar,
 and optional log pane.
+
+Part of the HiDock Next ecosystem - see ../../CLAUDE.md for complete architecture.
 """
 
 import asyncio
@@ -79,7 +85,10 @@ class HiDockToolGUI(
     AudioMetadataMixin,
 ):
     """
-    Main application window for the HiDock Explorer Tool.
+    Main application window for the HiDock Desktop Application.
+
+    This is the primary interface for the device management focused first iteration
+    of HiDock Next - the typical entry point for new users.
 
     This class initializes the main GUI, including widgets for device interaction,
     file management, audio playback, and application settings. It handles
@@ -92,6 +101,8 @@ class HiDockToolGUI(
         icons (dict): Stores CTkImage objects for GUI elements.
         menu_icons (dict): Stores tkinter.PhotoImage objects for the menubar.
         various ctk.Variable instances: For managing GUI state and settings.
+
+    Part of the HiDock Next ecosystem alongside Web, Audio Insights, and Electron apps.
     """
 
     def __init__(self, *args, **kwargs):

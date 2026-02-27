@@ -845,7 +845,9 @@ class HiDockDeviceService {
 
     // Prevent concurrent requests - use synchronous lock to prevent TOCTOU race
     // Check both the lock flag (set synchronously) and promise (set after lock)
-    if ((this.listRecordingsLock || this.listRecordingsPromise) && !forceRefresh) {
+    // FL-01/FL-08 FIX: NEVER allow forceRefresh to bypass concurrency lock
+    // forceRefresh only affects cache validation above, not concurrency control
+    if (this.listRecordingsLock || this.listRecordingsPromise) {
       if (DEBUG_DEVICE) console.log('[HiDockDevice] listRecordings: Request already in progress, waiting...')
       // Don't log - this is just coordination between components
       // Wait for the promise if it exists, or poll for it if lock is set but promise not yet
@@ -1254,8 +1256,10 @@ class HiDockDeviceService {
       this.logActivity('success', 'Device initialization complete')
     }
 
-    // Notify listeners
-    this.notifyConnectionChange(true)
+    // FL-09 FIX: Do NOT call notifyConnectionChange(true) here — it was already called
+    // when the device first connected (in handleConnect). Calling it again causes
+    // duplicate work in subscribers (they receive both 'ready' status AND connection change).
+    // The 'ready' status update above is sufficient to notify listeners that init is complete.
   }
 
   private handleDisconnect(): void {

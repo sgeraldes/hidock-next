@@ -136,8 +136,13 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
       const item = get().queue.get(id)
       if (!item || item.status !== 'failed') return
 
-      // Update DB first so the transcription processor picks it up
-      window.electronAPI?.recordings?.updateQueueItem?.(id, 'pending').catch((e) => {
+      // TQ-04 FIX: Update DB first so the transcription processor picks it up
+      window.electronAPI?.recordings?.updateQueueItem?.(id, 'pending').then(() => {
+        // Ensure transcription processor is running after retry
+        window.electronAPI?.recordings?.processQueue?.().catch((e) => {
+          console.error('Failed to start transcription processor after retry:', e)
+        })
+      }).catch((e) => {
         console.error('Failed to update queue item in DB for retry:', e)
       })
 

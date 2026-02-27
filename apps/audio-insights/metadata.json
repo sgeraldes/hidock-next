@@ -1,6 +1,10 @@
 {
   "name": "Audio Insights Extractor",
-  "description": "An application to upload or record audio, transcribe it, and extract key insights using Gemini API.",
+  "description": "HiDock Next - Third Iteration Prototype: AI-powered audio analysis demonstrating transcription and insights extraction. Capabilities now integrated into the Electron app.",
+  "version": "2.0.0",
+  "status": "prototype",
+  "ecosystem": "HiDock Next",
+  "iteration": 3,
   "requestFramePermissions": [
     "microphone"
   ],

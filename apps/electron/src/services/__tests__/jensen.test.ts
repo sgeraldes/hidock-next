@@ -31,7 +31,6 @@ function createMockUSBDevice(overrides: Partial<USBDevice> = {}): USBDevice {
           interfaceNumber: 0,
           claimed: false,
           alternate: {
-            interfaceNumber: 0,
             alternateSetting: 0,
             interfaceClass: 0xff,
             interfaceSubclass: 0,
@@ -54,7 +53,6 @@ function createMockUSBDevice(overrides: Partial<USBDevice> = {}): USBDevice {
           },
           alternates: [
             {
-              interfaceNumber: 0,
               alternateSetting: 0,
               interfaceClass: 0xff,
               interfaceSubclass: 0,

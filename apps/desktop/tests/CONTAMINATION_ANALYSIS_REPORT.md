@@ -1,5 +1,7 @@
 # Comprehensive Test Data Contamination Analysis & Resolution Report
 
+> **Context:** This report is for the HiDock Desktop application - the device management focused first iteration of HiDock Next. See `../README.md` for application overview.
+
 ## Executive Summary
 
 ✅ **CONTAMINATION RISK: ELIMINATED**

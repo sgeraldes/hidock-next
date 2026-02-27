@@ -1,6 +1,6 @@
 # HiDock Desktop Application 🖥️
 
-**Transform your HiDock recordings with reliable device management and local audio control.**
+**Your entry point to the HiDock Next ecosystem - direct USB device management and audio control.**
 
 ![HiDock Desktop Screenshot](../docs/assets/hidock-desktop-screenshot.png)
 
@@ -10,15 +10,26 @@
 
 ## 🎯 What is HiDock Desktop?
 
-HiDock Desktop is a **free, open-source application** that connects to your **HiDock recording device** via USB, giving you complete control over your audio recordings:
+HiDock Desktop is the **first iteration** of the HiDock Next suite - a **free, open-source application** focused on direct USB device management and local audio control. This is typically where users first discover HiDock Next.
 
-- **📁 Manage recordings** - Download, organize, and play your audio files locally
-- **🎵 Audio Playback** - Basic playback controls with waveform visualization
+**Core Focus:**
+- **📁 Device Management** - Direct USB connection to HiDock® H1, H1E, and P1 devices
+- **🎵 File Operations** - Download, organize, and play audio files locally
 - **🔒 Privacy-first** - Everything stays on your device, no internet required
-- **💾 Your data, your control** - You own the hardware, you own the files
+- **💾 Hardware Control** - You own the hardware, you control the files
 
-**Perfect for:** Conference calls, meetings, interviews, lectures, and any audio recording needs where you want
-complete control and privacy.
+**Perfect for:** Users who need reliable USB device management, local file operations, and basic audio playback without cloud dependencies.
+
+### Part of the HiDock Next Ecosystem
+
+HiDock Desktop is one component in a larger suite of applications:
+
+- **Desktop App** (this app) - Device management focused, first iteration
+- **Web App** - Browser-based interface using WebUSB for device access
+- **Audio Insights** - AI-powered audio analysis and transcription
+- **Electron App** - Integrated knowledge hub combining all functionality
+
+See the [main README](../../README.md) for the complete ecosystem overview and how these apps evolved into a unified knowledge management platform.
 
 ## ✨ Current Features
 
@@ -52,6 +63,8 @@ complete control and privacy.
 - **No Telemetry:** Zero data collection or tracking
 
 ## 🗺️ Roadmap
+
+> **Note:** This roadmap represents the evolution of the standalone Desktop App. Many advanced features (AI transcription, collaborative tools, web dashboard) are being implemented in the integrated **Electron app** as part of the larger HiDock Next ecosystem. See the [main README](../../README.md) for the unified platform vision.
 
 ### 🎯 **Phase 1: Audio Improvements (Next Release)**
 
@@ -273,6 +286,19 @@ This project is licensed under the MIT License - free for personal and commercia
 
 ---
 
-**Ready to transform your HiDock experience?** [⬆️ Follow the Quick Start guide](#-quick-start) to begin!
+**Ready to get started with device management?** [⬆️ Follow the Quick Start guide](#-quick-start) to begin!
 
-*Part of the HiDock Next ecosystem. See [main README](../README.md) for the complete project overview.*
+---
+
+## 🌐 About the HiDock Next Ecosystem
+
+HiDock Desktop is the **first iteration** and typical **entry point** for users discovering HiDock Next. It focuses on reliable USB device management and local file operations.
+
+**Looking for more?**
+- **AI transcription?** Check out the [Audio Insights app](../audio-insights/)
+- **Web-based access?** Try the [Web App](../web/) with WebUSB
+- **Unified platform?** Explore the [Electron app](../electron/) - our integrated knowledge hub
+
+This suite of applications evolved from device management tools into a comprehensive knowledge management platform. Each app serves a specific purpose while contributing to the larger vision of transforming audio recordings into actionable knowledge.
+
+*See [main README](../../README.md) for complete ecosystem documentation.*

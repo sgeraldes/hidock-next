@@ -1,7 +1,8 @@
 {
   "name": "audio-insights-extractor",
+  "description": "HiDock Next - Third Iteration: Insights prototype demonstrating AI-powered audio analysis. Capabilities now integrated into the Electron app.",
   "private": true,
-  "version": "0.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

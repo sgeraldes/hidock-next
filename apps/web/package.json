@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Community-driven web application for HiDock device management and AI-powered audio transcription",
+  "description": "Browser-based transcription app for HiDock devices - second iteration of HiDock Next suite, focused on zero-installation AI transcription access",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

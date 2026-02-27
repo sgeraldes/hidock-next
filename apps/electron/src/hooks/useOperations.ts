@@ -29,6 +29,23 @@ export function useOperations() {
       return false
     }
 
+    // Check if API key is configured before queuing
+    try {
+      const apiKey = await window.electronAPI.config.getValue('transcription.geminiApiKey')
+      if (!apiKey || apiKey.trim() === '') {
+        toast({
+          title: 'API key required',
+          description: 'Please configure your Gemini API key in Settings before transcribing.',
+          variant: 'error'
+        })
+        return false
+      }
+    } catch (e) {
+      console.error('Failed to check API key:', e)
+      toast({ title: 'Configuration error', description: 'Could not verify API key configuration', variant: 'error' })
+      return false
+    }
+
     try {
       await window.electronAPI.recordings.updateStatus(recording.id, 'pending')
       const queueItemId = await window.electronAPI.recordings.addToQueue(recording.id)
@@ -55,6 +72,23 @@ export function useOperations() {
       return 0
     }
 
+    // Check if API key is configured before queuing
+    try {
+      const apiKey = await window.electronAPI.config.getValue('transcription.geminiApiKey')
+      if (!apiKey || apiKey.trim() === '') {
+        toast({
+          title: 'API key required',
+          description: 'Please configure your Gemini API key in Settings before transcribing.',
+          variant: 'error'
+        })
+        return 0
+      }
+    } catch (e) {
+      console.error('Failed to check API key:', e)
+      toast({ title: 'Configuration error', description: 'Could not verify API key configuration', variant: 'error' })
+      return 0
+    }
+
     let queued = 0
     for (const recording of eligible) {
       try {
@@ -76,7 +110,13 @@ export function useOperations() {
   const cancelTranscription = useCallback(async (recordingId: string) => {
     try {
       await window.electronAPI.recordings.cancelTranscription(recordingId)
-      useTranscriptionStore.getState().remove(recordingId)
+      // TQ-03 FIX: Find and remove queue item by recordingId, not by item ID
+      const store = useTranscriptionStore.getState()
+      const items = Array.from(store.queue.values())
+      const item = items.find((i) => i.recordingId === recordingId)
+      if (item) {
+        store.remove(item.id)
+      }
       toast({ title: 'Transcription cancelled' })
     } catch (e) {
       console.error('Failed to cancel transcription:', e)

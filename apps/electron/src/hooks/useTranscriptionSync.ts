@@ -22,13 +22,79 @@ export function useTranscriptionSync() {
           if (item.status === 'pending' || item.status === 'processing') {
             store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
             if (item.status === 'processing') {
-              // TODO: Real progress should come from transcription service events.
-              // Using -1 to signal indeterminate "in progress" state.
-              store.updateProgress(item.id, -1)
+              // TQ-08 FIX: Use 50 as placeholder instead of -1 for indeterminate progress
+              // Real progress should come from transcription service events (TQ-09)
+              store.updateProgress(item.id, 50)
             }
           }
         }
       }).catch(e => console.error('Failed to hydrate transcription queue:', e))
+    }
+
+    // TQ-09 FIX: Subscribe to real-time transcription events instead of just polling
+    const unsubscribers: (() => void)[] = []
+
+    if (isElectron && window.electronAPI) {
+      // Listen for transcription started
+      if (window.electronAPI.onTranscriptionStarted) {
+        unsubscribers.push(
+          window.electronAPI.onTranscriptionStarted((data) => {
+            const store = useTranscriptionStore.getState()
+            if (data.queueItemId) {
+              store.updateProgress(data.queueItemId, 50)
+            }
+          })
+        )
+      }
+
+      // Listen for transcription completed
+      if (window.electronAPI.onTranscriptionCompleted) {
+        unsubscribers.push(
+          window.electronAPI.onTranscriptionCompleted((data) => {
+            const store = useTranscriptionStore.getState()
+            if (data.queueItemId) {
+              store.markCompleted(data.queueItemId, 'gemini')
+            }
+          })
+        )
+      }
+
+      // Listen for transcription failed
+      if (window.electronAPI.onTranscriptionFailed) {
+        unsubscribers.push(
+          window.electronAPI.onTranscriptionFailed((data) => {
+            const store = useTranscriptionStore.getState()
+            if (data.queueItemId) {
+              store.markFailed(data.queueItemId, data.error || 'Unknown error')
+            }
+          })
+        )
+      }
+
+      // Listen for transcription cancelled
+      if (window.electronAPI.onTranscriptionCancelled) {
+        unsubscribers.push(
+          window.electronAPI.onTranscriptionCancelled((data) => {
+            const store = useTranscriptionStore.getState()
+            // Find queue item by recordingId and remove it
+            const items = Array.from(store.queue.values())
+            const item = items.find((i) => i.recordingId === data.recordingId)
+            if (item) {
+              store.remove(item.id)
+            }
+          })
+        )
+      }
+
+      // Listen for all transcriptions cancelled
+      if (window.electronAPI.onTranscriptionAllCancelled) {
+        unsubscribers.push(
+          window.electronAPI.onTranscriptionAllCancelled(() => {
+            const store = useTranscriptionStore.getState()
+            store.clear()
+          })
+        )
+      }
     }
 
     // Poll transcription queue and sync to store (5s interval)
@@ -57,9 +123,9 @@ export function useTranscriptionSync() {
                 if (!store.queue.has(item.id)) {
                   store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
                 }
-                // TODO: Real progress should come from transcription service events.
-                // Using -1 to signal indeterminate "in progress" state.
-                store.updateProgress(item.id, -1)
+                // TQ-08 FIX: Use 50 as placeholder instead of -1 for indeterminate progress
+                // Real progress should come from transcription service events (TQ-09)
+                store.updateProgress(item.id, 50)
               } else if (item.status === 'pending') {
                 if (!store.queue.has(item.id)) {
                   store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
@@ -81,6 +147,8 @@ export function useTranscriptionSync() {
 
     return () => {
       if (transcriptionInterval) clearInterval(transcriptionInterval)
+      // TQ-09 FIX: Cleanup event listeners
+      unsubscribers.forEach((unsub) => unsub())
     }
   }, [])
 }

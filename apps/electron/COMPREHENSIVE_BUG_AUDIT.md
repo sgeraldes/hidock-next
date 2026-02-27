@@ -194,20 +194,22 @@ These were fixed during Phases 1-5 with full test coverage (51 tests, all passin
 | SM-10 | Library.tsx `getState()` in callback — NOT A BUG (correct pattern) | Library.tsx | 598 | NONE |
 | SM-11 | OperationsPanel retry `getState()` in onClick — NOT A BUG | OperationsPanel.tsx | 171 | NONE |
 
-### 4D. File Listing Audit (10 issues)
+### 4D. File Listing Audit (10 issues) — **FIXED: 7 of 10 (2026-02-27)**
 
-| ID | Issue | File | Line(s) | Severity |
-|----|-------|------|---------|----------|
-| FL-01 | `forceRefresh=true` bypasses concurrency guard — duplicate USB operations | hidock-device.ts | 802 | HIGH |
-| FL-02 | Triple-fire on device connection (connection + ready + poll) | useUnifiedRecordings.ts | 499, 510, 577 | HIGH |
-| FL-03 | `loadingRef` guard has async race window between resumptions | useUnifiedRecordings.ts | 355-478 | MEDIUM |
-| FL-04 | Polling effect races with connection events | useUnifiedRecordings.ts | 540-592 | MEDIUM |
-| FL-05 | Multiple page instances each create independent subscriptions | useUnifiedRecordings.ts | 482-592 | LOW |
-| FL-06 | No progress feedback during 60-second init wait | hidock-device.ts | 762-780 | MEDIUM |
-| FL-07 | Cache invalidation on disconnect guarantees unnecessary re-fetch | hidock-device.ts | 1228 | LOW |
-| FL-08 | `forceRefresh` overwrites promise reference — corrupts lock state | hidock-device.ts | 846-926 | HIGH |
-| FL-09 | `onStatusChange('ready')` and `onConnectionChange(true)` fire back-to-back | hidock-device.ts | 1200-1210 | MEDIUM |
-| FL-10 | React StrictMode double-mount creates brief duplicate subscriptions (dev only) | useUnifiedRecordings.ts | 482-592 | LOW |
+| ID | Issue | File | Line(s) | Severity | Status |
+|----|-------|------|---------|----------|--------|
+| FL-01 | `forceRefresh=true` bypasses concurrency guard — duplicate USB operations | hidock-device.ts | 802 | HIGH | ✅ FIXED |
+| FL-02 | Triple-fire on device connection (connection + ready + poll) | useUnifiedRecordings.ts | 499, 510, 577 | HIGH | ✅ FIXED |
+| FL-03 | `loadingRef` guard has async race window between resumptions | useUnifiedRecordings.ts | 355-478 | MEDIUM | ✅ MITIGATED |
+| FL-04 | Polling effect races with connection events | useUnifiedRecordings.ts | 540-592 | MEDIUM | ✅ MITIGATED |
+| FL-05 | Multiple page instances each create independent subscriptions | useUnifiedRecordings.ts | 482-592 | LOW | ACCEPTED |
+| FL-06 | No progress feedback during 60-second init wait | hidock-device.ts | 762-780 | MEDIUM | ✅ ALREADY FIXED |
+| FL-07 | Cache invalidation on disconnect guarantees unnecessary re-fetch | hidock-device.ts | 1228 | LOW | ACCEPTED |
+| FL-08 | `forceRefresh` overwrites promise reference — corrupts lock state | hidock-device.ts | 846-926 | HIGH | ✅ FIXED |
+| FL-09 | `onStatusChange('ready')` and `onConnectionChange(true)` fire back-to-back | hidock-device.ts | 1200-1210 | MEDIUM | ✅ FIXED |
+| FL-10 | React StrictMode double-mount creates brief duplicate subscriptions (dev only) | useUnifiedRecordings.ts | 482-592 | LOW | ACCEPTED |
+
+**Fix Details:** See `FILE_LISTING_BUGS_FIXED.md` for comprehensive fix report.
 
 ### 4E. Actionables Page Audit (8 issues)
 
@@ -354,21 +356,21 @@ These were fixed during Phases 1-5 with full test coverage (51 tests, all passin
 
 ### Total Bug Count by Category
 
-| Category | CRITICAL | HIGH | MEDIUM | LOW | Total |
-|----------|----------|------|--------|-----|-------|
-| Download/Sync | 1 | 2 | 5 | 7 | 15 |
-| Transcription Queue | 2 | 2 | 3 | 2 | 9 |
-| State Management | 0 | 2 | 3 | 6 | 11 |
-| File Listing | 0 | 3 | 4 | 3 | 10 |
-| Actionables | 1 | 1 | 3 | 3 | 8 |
-| Calendar | 1 | 1 | 4 | 4 | 10 |
-| Projects | 3 | 0 | 7 | 5 | 15 |
-| People | 0 | 2 | 3 | 7 | 12 |
-| Explore/Search | 1 | 3 | 2 | 1 | 7 |
-| AI Backend | 1 | 3 | 6 | 5 | 15 |
-| Library | 0 | 3 | 6 | 11 | 20 |
-| Device | 0 | 3 | 5 | 4 | 12 |
-| **TOTAL** | **10** | **25** | **51** | **58** | **144** |
+| Category | CRITICAL | HIGH | MEDIUM | LOW | Total | Fixed |
+|----------|----------|------|--------|-----|-------|-------|
+| Download/Sync | 1 | 2 | 5 | 7 | 15 | 1/15 |
+| Transcription Queue | 2 | 2 | 3 | 2 | 9 | 9/9 ✅ |
+| State Management | 0 | 2 | 3 | 6 | 11 | 7/11 |
+| File Listing | 0 | 3 | 4 | 3 | 10 | **7/10** ✅ |
+| Actionables | 1 | 1 | 3 | 3 | 8 | 4/8 |
+| Calendar | 1 | 1 | 4 | 4 | 10 | 10/10 ✅ |
+| Projects | 3 | 0 | 7 | 5 | 15 | 3/15 |
+| People | 0 | 2 | 3 | 7 | 12 | 3/12 |
+| Explore/Search | 1 | 3 | 2 | 1 | 7 | 4/7 |
+| AI Backend | 1 | 3 | 6 | 5 | 15 | 3/15 |
+| Library | 0 | 3 | 6 | 11 | 20 | 2/20 |
+| Device | 0 | 3 | 5 | 4 | 12 | 1/12 |
+| **TOTAL** | **10** | **25** | **51** | **58** | **144** | **54/144 (38%)** |
 
 ### Previously Fixed (not in the 144 above)
 

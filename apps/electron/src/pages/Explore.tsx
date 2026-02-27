@@ -31,18 +31,24 @@ export function Explore() {
     setLoading(true)
     setSearchError(null)
     try {
-      const res = await window.electronAPI.rag.search(query, 10)
-      // Map legacy array response to categorized object if needed
-      if (Array.isArray(res)) {
-        setResults({ knowledge: res, people: [], projects: [] })
+      const result = await window.electronAPI.rag.globalSearch(query, 10)
+
+      // Unwrap Result<> wrapper
+      if (result.success) {
+        setResults(result.data)
       } else {
-        setResults(res || { knowledge: [], people: [], projects: [] })
+        // Handle error from Result wrapper
+        const errorMsg = result.error.message || 'Search failed'
+        setSearchError(errorMsg)
+        toast.error('Search failed', errorMsg)
+        setResults({ knowledge: [], people: [], projects: [] })
       }
     } catch (error) {
       console.error('Search failed:', error)
       const message = error instanceof Error ? error.message : 'An unexpected error occurred'
       setSearchError(message)
       toast.error('Search failed', message)
+      setResults({ knowledge: [], people: [], projects: [] })
     } finally {
       setLoading(false)
     }

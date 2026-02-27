@@ -1,15 +1,20 @@
 """
-Main entry point for the HiDock Tool application.
+Main entry point for the HiDock Desktop Application.
 
+HiDock Desktop is the first iteration of the HiDock Next ecosystem, focused on
+direct USB device management and local audio control. This is typically the entry
+point where users discover HiDock Next.
 
 This script initializes and runs the main graphical user interface (GUI)
-for the HiDock Tool, built using customtkinter. It sets up initial
+for the HiDock Desktop app, built using customtkinter. It sets up initial
 appearance modes and themes for the GUI.
 
 The script includes a top-level exception handler that logs critical errors
 and attempts to display a user-friendly error message using tkinter
 as a fallback if the main customtkinter application fails to initialize
 or encounters a severe runtime issue.
+
+Part of the HiDock Next ecosystem - see ../../CLAUDE.md for complete architecture.
 """
 
 # main.py

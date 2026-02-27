@@ -3,8 +3,16 @@ import { useNavigate } from 'react-router-dom'
 import { Mic, RefreshCw, Play, X, LayoutGrid, Square, CheckSquare, FileText, Trash2, List, FileAudio, Download } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn, formatTime, isToday, formatDuration } from '@/lib/utils'
-import { useAppStore } from '@/store/useAppStore'
-import { useShallow } from 'zustand/react/shallow'
+import {
+  useAppStore,
+  useMeetings,
+  useMeetingsLoading,
+  useCurrentDate,
+  useCalendarView,
+  useLastCalendarSync,
+  useCalendarSyncing,
+  useDownloadQueue
+} from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 import type { Meeting, Recording } from '@/types'
 import {
@@ -82,44 +90,25 @@ function CurrentTimeIndicator({ startHour, hourHeight }: { startHour: number; ho
 export function Calendar() {
   const navigate = useNavigate()
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const {
-    meetings,
-    currentDate,
-    meetingsLoading,
-    navigateWeek,
-    navigateMonth,
-    goToToday,
-    setCurrentDate,
-    calendarView,
-    setCalendarView,
-    loadMeetings,
-    lastCalendarSync: lastSync,
-    calendarSyncing,
-    // Download queue from global store (persists across navigation)
-    downloadQueue,
-    addToDownloadQueue,
-    updateDownloadProgress,
-    removeFromDownloadQueue,
-    setDeviceSyncState,
-  } = useAppStore(useShallow((state) => ({
-    meetings: state.meetings,
-    currentDate: state.currentDate,
-    meetingsLoading: state.meetingsLoading,
-    navigateWeek: state.navigateWeek,
-    navigateMonth: state.navigateMonth,
-    goToToday: state.goToToday,
-    setCurrentDate: state.setCurrentDate,
-    calendarView: state.calendarView,
-    setCalendarView: state.setCalendarView,
-    loadMeetings: state.loadMeetings,
-    lastCalendarSync: state.lastCalendarSync,
-    calendarSyncing: state.calendarSyncing,
-    downloadQueue: state.downloadQueue,
-    addToDownloadQueue: state.addToDownloadQueue,
-    updateDownloadProgress: state.updateDownloadProgress,
-    removeFromDownloadQueue: state.removeFromDownloadQueue,
-    setDeviceSyncState: state.setDeviceSyncState,
-  })))
+  // SM-04 fix: Use granular selectors instead of destructuring 8+ fields
+  const meetings = useMeetings()
+  const currentDate = useCurrentDate()
+  const meetingsLoading = useMeetingsLoading()
+  const calendarView = useCalendarView()
+  const lastSync = useLastCalendarSync()
+  const calendarSyncing = useCalendarSyncing()
+  const downloadQueue = useDownloadQueue()
+  // Action selectors - still need direct access
+  const navigateWeek = useAppStore((s) => s.navigateWeek)
+  const navigateMonth = useAppStore((s) => s.navigateMonth)
+  const goToToday = useAppStore((s) => s.goToToday)
+  const setCurrentDate = useAppStore((s) => s.setCurrentDate)
+  const setCalendarView = useAppStore((s) => s.setCalendarView)
+  const loadMeetings = useAppStore((s) => s.loadMeetings)
+  const addToDownloadQueue = useAppStore((s) => s.addToDownloadQueue)
+  const updateDownloadProgress = useAppStore((s) => s.updateDownloadProgress)
+  const removeFromDownloadQueue = useAppStore((s) => s.removeFromDownloadQueue)
+  const setDeviceSyncState = useAppStore((s) => s.setDeviceSyncState)
   const { config, loadConfig, updateConfig } = useConfigStore()
 
   // Get unified recordings (device + local)
@@ -170,6 +159,10 @@ export function Calendar() {
     }
     if (config?.calendar) {
       setAutoSyncEnabled(config.calendar.syncEnabled)
+      // CA-03 FIX: Load lastSyncAt from config on mount
+      if (config.calendar.lastSyncAt) {
+        useAppStore.setState({ lastCalendarSync: config.calendar.lastSyncAt })
+      }
     }
   }, [config, setCalendarView])
 
@@ -397,14 +390,25 @@ export function Calendar() {
       console.log('[Calendar] Clear and sync result:', result)
       if (result && !result.success) {
         toast.error('Calendar sync failed', result.error || 'Unknown error occurred')
+      } else if (result && result.success) {
+        // CA-03 FIX: Update lastSync state after successful sync
+        if (result.lastSync) {
+          useAppStore.setState({ lastCalendarSync: result.lastSync })
+        }
+        toast.success(`Calendar synced successfully: ${result.meetingsCount || 0} meetings`)
       }
       // Reload meetings for current view
-      if (!viewDates.length) return
+      // CA-08 FIX: Guard against empty viewDates array
+      if (!viewDates || viewDates.length === 0) {
+        console.warn('[Calendar] No view dates available, skipping meeting reload')
+        return
+      }
       const endDate = new Date(viewDates[viewDates.length - 1])
       endDate.setHours(23, 59, 59, 999)
       await loadMeetings(viewDates[0].toISOString(), endDate.toISOString())
     } catch (err) {
       console.error('[Calendar] Clear and sync failed:', err)
+      // CA-07 FIX: Already showing error to user via toast
       toast.error('Calendar sync failed', err instanceof Error ? err.message : 'An unexpected error occurred')
     } finally {
       setCalendarSyncing(false)

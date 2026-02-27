@@ -58,8 +58,9 @@ export interface CalendarMeeting extends Meeting {
 
 // Calendar constants
 export const HOUR_HEIGHT = 60 // pixels per hour
-export const START_HOUR = 7 // 7 AM
-export const END_HOUR = 21 // 9 PM
+// CA-06 FIX: Expanded hour range from 7AM-9PM to 6AM-11PM to show early morning and late evening recordings
+export const START_HOUR = 6 // 6 AM
+export const END_HOUR = 23 // 11 PM
 export const HOURS = Array.from({ length: END_HOUR - START_HOUR }, (_, i) => START_HOUR + i)
 
 /**

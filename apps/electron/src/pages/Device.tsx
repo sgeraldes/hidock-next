@@ -289,8 +289,9 @@ export function Device() {
         btScanTimeoutRef.current = null
       }
     }
-  // DV-03: Removed connectionStatus.step/message from deps — they change ~8x per connect.
-  // Connection status is tracked in a separate effect below.
+  // DL-11: Only include stable singleton refs in deps, never state changes that
+  // would cause re-subscription. clearConnectionTimers and refreshSyncedFilenames
+  // are stable refs.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearConnectionTimers, refreshSyncedFilenames])
 

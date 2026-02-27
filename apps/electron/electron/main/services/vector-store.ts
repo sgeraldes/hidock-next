@@ -262,6 +262,42 @@ class VectorStore {
     return deleted
   }
 
+  /**
+   * AI-06 FIX: Update meeting_id for all chunks belonging to a recording
+   * Called when AI links a recording to a meeting after transcription
+   */
+  async updateMeetingIdForRecording(recordingId: string, meetingId: string, meetingSubject?: string): Promise<number> {
+    let updated = 0
+    const db = getDatabase()
+
+    // Update in-memory documents
+    for (const doc of this.documents.values()) {
+      if (doc.metadata.recordingId === recordingId) {
+        doc.metadata.meetingId = meetingId
+        if (meetingSubject) {
+          doc.metadata.subject = meetingSubject
+        }
+        updated++
+      }
+    }
+
+    // Update in database
+    if (meetingSubject) {
+      db.run(
+        'UPDATE vector_embeddings SET meeting_id = ?, subject = ? WHERE recording_id = ?',
+        [meetingId, meetingSubject, recordingId]
+      )
+    } else {
+      db.run(
+        'UPDATE vector_embeddings SET meeting_id = ? WHERE recording_id = ?',
+        [meetingId, recordingId]
+      )
+    }
+
+    console.log(`Updated meeting_id for ${updated} vector chunks (recording ${recordingId} -> meeting ${meetingId})`)
+    return updated
+  }
+
   getDocumentCount(): number {
     return this.documents.size
   }

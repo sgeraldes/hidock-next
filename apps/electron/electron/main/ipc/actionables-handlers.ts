@@ -6,18 +6,19 @@ import type { Actionable } from '@/types/knowledge'
 export function registerActionablesHandlers(): void {
   // Get all actionables
   ipcMain.handle('actionables:getAll', async (_, options?: { status?: string }) => {
-    const status = options?.status
+    // AC-05 FIX: Add null/undefined guard before destructuring
+    const status = options?.status ?? undefined
     try {
       let sql = 'SELECT * FROM actionables'
       const params: any[] = []
-      
+
       if (status) {
         sql += ' WHERE status = ?'
         params.push(status)
       }
-      
+
       sql += ' ORDER BY created_at DESC'
-      
+
       const rows = queryAll<any>(sql, params)
       return rows.map(mapToActionable)
     } catch (error) {

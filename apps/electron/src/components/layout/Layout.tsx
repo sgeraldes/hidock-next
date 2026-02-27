@@ -19,9 +19,13 @@ import {
   RotateCcw
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useAppStore } from '@/store/useAppStore'
+import {
+  useAppStore,
+  useLastCalendarSync,
+  useDeviceState,
+  useConnectionStatus
+} from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
-import { useShallow } from 'zustand/react/shallow'
 
 type LucideIcon = typeof FileText
 import { Button } from '@/components/ui/button'
@@ -75,15 +79,12 @@ const navigationSections: NavigationSection[] = [
 export function Layout({ children }: LayoutProps) {
   const location = useLocation()
   const [isDevMode, setIsDevMode] = useState(false)
-  const { loadMeetings, syncCalendar, lastCalendarSync, deviceState, connectionStatus } = useAppStore(
-    useShallow((s) => ({
-      loadMeetings: s.loadMeetings,
-      syncCalendar: s.syncCalendar,
-      lastCalendarSync: s.lastCalendarSync,
-      deviceState: s.deviceState,
-      connectionStatus: s.connectionStatus
-    }))
-  )
+  // SM-02 fix: Use granular selectors instead of destructuring entire store
+  const loadMeetings = useAppStore((s) => s.loadMeetings)
+  const syncCalendar = useAppStore((s) => s.syncCalendar)
+  const lastCalendarSync = useLastCalendarSync()
+  const deviceState = useDeviceState()
+  const connectionStatus = useConnectionStatus()
   const { config, loadConfig } = useConfigStore()
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)

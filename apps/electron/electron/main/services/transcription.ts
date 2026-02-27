@@ -16,6 +16,7 @@ import {
   addRecordingMeetingCandidate,
   linkRecordingToMeeting,
   updateKnowledgeCaptureTitle,
+  ensureKnowledgeCaptureForRecording,
   removeFromQueueByRecordingId,
   cancelPendingTranscriptions,
   run,
@@ -33,6 +34,50 @@ export function setMainWindowForTranscription(win: BrowserWindow): void {
   mainWindow = win
 }
 
+/**
+ * Clean up recordings that have 'pending' or 'processing' status but no queue item.
+ * This can happen if queue items are deleted/cancelled but recording status wasn't updated.
+ */
+function cleanupStaleTranscriptionStatuses(): void {
+  try {
+    // Find all recordings with pending/processing status
+    const staleRecordings = queryOne<{ id: string; status: string }[]>(
+      `SELECT id, status FROM recordings WHERE status IN ('pending', 'processing')`,
+      []
+    )
+
+    if (!staleRecordings || staleRecordings.length === 0) {
+      console.log('[Transcription Cleanup] No stale statuses found')
+      return
+    }
+
+    console.log(`[Transcription Cleanup] Found ${staleRecordings.length} recordings with pending/processing status`)
+
+    let cleaned = 0
+    for (const recording of staleRecordings) {
+      // Check if there's a queue item for this recording
+      const queueItem = queryOne<{ id: string }>(
+        `SELECT id FROM transcription_queue WHERE recording_id = ? AND status != 'completed'`,
+        [recording.id]
+      )
+
+      if (!queueItem) {
+        // No active queue item - reset status to 'none'
+        updateRecordingTranscriptionStatus(recording.id, 'none')
+        cleaned++
+        console.log(`[Transcription Cleanup] Reset status for ${recording.id} (was ${recording.status}, no queue item)`)
+      }
+    }
+
+    if (cleaned > 0) {
+      console.log(`[Transcription Cleanup] Cleaned up ${cleaned} stale transcription statuses`)
+      notifyRenderer('transcription:cleanup-complete', { count: cleaned })
+    }
+  } catch (error) {
+    console.error('[Transcription Cleanup] Failed:', error)
+  }
+}
+
 export function startTranscriptionProcessor(): void {
   if (processingInterval) {
     console.log('Transcription processor already running')
@@ -40,6 +85,9 @@ export function startTranscriptionProcessor(): void {
   }
 
   console.log('Starting transcription processor')
+
+  // Clean up stale transcription statuses on startup
+  cleanupStaleTranscriptionStatuses()
 
   // Process queue every 10 seconds
   processingInterval = setInterval(() => {
@@ -81,16 +129,39 @@ async function processQueue(): Promise<void> {
 
   const config = getConfig()
   if (!config.transcription.geminiApiKey) {
-    console.warn('[Transcription] Cannot process queue: API key not configured. Please add your API key in Settings.')
+    console.error('[Transcription] Cannot process queue: Gemini API key not configured')
+
+    // Mark all pending items as failed with clear error message
+    const pendingItems = getQueueItems('pending')
+    const processingItems = getQueueItems('processing')
+
+    const allStuckItems = [...pendingItems, ...processingItems]
+    if (allStuckItems.length > 0) {
+      console.log(`[Transcription] Marking ${allStuckItems.length} stuck items as failed (no API key)`)
+
+      for (const item of allStuckItems) {
+        updateQueueItem(item.id, 'failed', 'Gemini API key not configured. Please add your API key in Settings.')
+        updateRecordingTranscriptionStatus(item.recording_id, 'error')
+        notifyRenderer('transcription:failed', {
+          queueItemId: item.id,
+          recordingId: item.recording_id,
+          error: 'Gemini API key not configured. Please add your API key in Settings.'
+        })
+      }
+    }
+
     return
   }
 
-  // Re-queue failed items that haven't exhausted retries (attempts < 3)
+  // AI-03 FIX: Actually retry failed items (this code was dead because retries never happened)
   const failedItems = getQueueItems('failed')
   for (const item of failedItems) {
     if (item.attempts < 3) {
+      // Reset to pending so it gets picked up in the processing loop
       updateQueueItem(item.id, 'pending')
-      console.log(`Re-queuing failed item ${item.id} (attempt ${item.attempts}/3)`)
+      // Also reset recording status so UI shows it's retrying
+      updateRecordingTranscriptionStatus(item.recording_id, 'pending')
+      console.log(`Re-queuing failed item ${item.id} (attempt ${item.attempts + 1}/3)`)
     }
   }
 
@@ -403,6 +474,14 @@ Respond in JSON format:
           'ai_transcript_match'
         )
         console.log(`AI matched recording to meeting: "${selectedMeeting.subject}" (confidence: ${analysis.meeting_confidence})`)
+
+        // AI-06 FIX: Update vector store meeting_id after AI linking
+        try {
+          const vectorStore = getVectorStore()
+          await vectorStore.updateMeetingIdForRecording(recordingId, selectedMeeting.id, selectedMeeting.subject)
+        } catch (e) {
+          console.warn('Failed to update vector store meeting_id after AI linking:', e)
+        }
       }
     }
   }
@@ -440,12 +519,14 @@ Respond in JSON format:
 
   // Detect actionables from transcript
   try {
-    // Look up the knowledge_capture for this recording
-    const knowledgeCapture = queryOne<{ id: string }>(
-      'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
-      [recordingId]
-    )
-    const sourceKnowledgeId = knowledgeCapture?.id || recordingId
+    // AC-01 FIX: Ensure a knowledge_capture exists before creating actionables
+    // This fixes the critical bug where actionables stored recording_id instead of knowledge_capture_id
+    const sourceKnowledgeId = ensureKnowledgeCaptureForRecording(recordingId)
+
+    if (!sourceKnowledgeId) {
+      console.error('[Actionable Detection] Failed to get/create knowledge_capture for recording:', recordingId)
+      throw new Error('Could not create knowledge capture for recording')
+    }
 
     const detections = await detectActionables(fullText, sourceKnowledgeId, {
       title: analysis.title_suggestion,

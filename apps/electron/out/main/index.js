@@ -1,15 +1,108 @@
 "use strict";
 const electron = require("electron");
 const path = require("path");
-const utils = require("@electron-toolkit/utils");
 const initSqlJs = require("sql.js");
 const fs = require("fs");
 const ICAL = require("ical.js");
 const zod = require("zod");
 const crypto$1 = require("crypto");
 const generativeAi = require("@google/generative-ai");
+const util = require("util");
 const uuid = require("uuid");
 const events = require("events");
+const is = {
+  dev: !electron.app.isPackaged
+};
+const platform = {
+  isWindows: process.platform === "win32",
+  isMacOS: process.platform === "darwin",
+  isLinux: process.platform === "linux"
+};
+const electronApp = {
+  setAppUserModelId(id) {
+    if (platform.isWindows)
+      electron.app.setAppUserModelId(is.dev ? process.execPath : id);
+  },
+  setAutoLaunch(auto) {
+    if (platform.isLinux)
+      return false;
+    const isOpenAtLogin = () => {
+      return electron.app.getLoginItemSettings().openAtLogin;
+    };
+    if (isOpenAtLogin() !== auto) {
+      electron.app.setLoginItemSettings({ openAtLogin: auto });
+      return isOpenAtLogin() === auto;
+    } else {
+      return true;
+    }
+  },
+  skipProxy() {
+    return electron.session.defaultSession.setProxy({ mode: "direct" });
+  }
+};
+const optimizer = {
+  watchWindowShortcuts(window, shortcutOptions) {
+    if (!window)
+      return;
+    const { webContents } = window;
+    const { escToCloseWindow = false, zoom = false } = shortcutOptions || {};
+    webContents.on("before-input-event", (event, input) => {
+      if (input.type === "keyDown") {
+        if (!is.dev) {
+          if (input.code === "KeyR" && (input.control || input.meta))
+            event.preventDefault();
+          if (input.code === "KeyI" && (input.alt && input.meta || input.control && input.shift)) {
+            event.preventDefault();
+          }
+        } else {
+          if (input.code === "F12") {
+            if (webContents.isDevToolsOpened()) {
+              webContents.closeDevTools();
+            } else {
+              webContents.openDevTools({ mode: "undocked" });
+              console.log("Open dev tool...");
+            }
+          }
+        }
+        if (escToCloseWindow) {
+          if (input.code === "Escape" && input.key !== "Process") {
+            window.close();
+            event.preventDefault();
+          }
+        }
+        if (!zoom) {
+          if (input.code === "Minus" && (input.control || input.meta))
+            event.preventDefault();
+          if (input.code === "Equal" && input.shift && (input.control || input.meta))
+            event.preventDefault();
+        }
+      }
+    });
+  },
+  registerFramelessWindowIpc() {
+    electron.ipcMain.on("win:invoke", (event, action) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      if (win) {
+        if (action === "show") {
+          win.show();
+        } else if (action === "showInactive") {
+          win.showInactive();
+        } else if (action === "min") {
+          win.minimize();
+        } else if (action === "max") {
+          const isMaximized = win.isMaximized();
+          if (isMaximized) {
+            win.unmaximize();
+          } else {
+            win.maximize();
+          }
+        } else if (action === "close") {
+          win.close();
+        }
+      }
+    });
+  }
+};
 const DEFAULT_CONFIG = {
   version: "1.0.0",
   storage: {
@@ -25,7 +118,8 @@ const DEFAULT_CONFIG = {
   transcription: {
     provider: "gemini",
     geminiApiKey: "",
-    geminiModel: "gemini-2.0-flash",
+    geminiModel: "gemini-3-pro-preview",
+    // Best model for audio transcription
     autoTranscribe: true,
     language: "es"
   },
@@ -49,8 +143,11 @@ const DEFAULT_CONFIG = {
   ui: {
     theme: "system",
     defaultView: "week",
-    startOfWeek: 1
+    startOfWeek: 1,
     // Monday
+    calendarView: "week",
+    hideEmptyMeetings: true,
+    showListView: false
   }
 };
 let config = { ...DEFAULT_CONFIG };
@@ -246,7 +343,10 @@ function deleteRecording(filePath) {
     const normalizedPath = path.normalize(path.resolve(filePath));
     const normalizedRecordings = path.normalize(path.resolve(recordingsPath));
     const normalizedTranscripts = path.normalize(path.resolve(transcriptsPath));
-    if (!normalizedPath.startsWith(normalizedRecordings) && !normalizedPath.startsWith(normalizedTranscripts)) {
+    const pathToCompare = process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath;
+    const recToCompare = process.platform === "win32" ? normalizedRecordings.toLowerCase() : normalizedRecordings;
+    const transToCompare = process.platform === "win32" ? normalizedTranscripts.toLowerCase() : normalizedTranscripts;
+    if (!pathToCompare.startsWith(recToCompare) && !pathToCompare.startsWith(transToCompare)) {
       console.error("Attempted to delete file outside allowed directories:", filePath);
       return false;
     }
@@ -293,7 +393,10 @@ function readRecordingFile(filePath) {
     const normalizedPath = path.normalize(path.resolve(filePath));
     const normalizedRecordings = path.normalize(path.resolve(recordingsPath));
     const normalizedTranscripts = path.normalize(path.resolve(transcriptsPath));
-    if (!normalizedPath.startsWith(normalizedRecordings) && !normalizedPath.startsWith(normalizedTranscripts)) {
+    const pathToCompare = process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath;
+    const recToCompare = process.platform === "win32" ? normalizedRecordings.toLowerCase() : normalizedRecordings;
+    const transToCompare = process.platform === "win32" ? normalizedTranscripts.toLowerCase() : normalizedTranscripts;
+    if (!pathToCompare.startsWith(recToCompare) && !pathToCompare.startsWith(transToCompare)) {
       console.error("Attempted to read file outside allowed directories:", filePath);
       return null;
     }
@@ -309,7 +412,7 @@ function readRecordingFile(filePath) {
 }
 let db = null;
 let dbPath = "";
-const SCHEMA_VERSION = 17;
+const SCHEMA_VERSION = 19;
 const SCHEMA = `
 -- Calendar events from ICS
 CREATE TABLE IF NOT EXISTS meetings (
@@ -1174,6 +1277,48 @@ const MIGRATIONS = {
       }
     }
     console.log("Migration v17 complete: Confidence column added to actionables");
+  },
+  18: () => {
+    console.log("Running migration to schema v18: Adding missing chat_messages columns");
+    const database2 = getDatabase();
+    const tableInfo = database2.exec("PRAGMA table_info(chat_messages)");
+    if (tableInfo.length > 0 && tableInfo[0].values) {
+      const columns = tableInfo[0].values.map((row) => row[1]);
+      const columnsToAdd = [
+        { name: "edited_at", sql: "ALTER TABLE chat_messages ADD COLUMN edited_at TEXT" },
+        { name: "original_content", sql: "ALTER TABLE chat_messages ADD COLUMN original_content TEXT" },
+        { name: "created_output_id", sql: "ALTER TABLE chat_messages ADD COLUMN created_output_id TEXT" },
+        { name: "saved_as_insight_id", sql: "ALTER TABLE chat_messages ADD COLUMN saved_as_insight_id TEXT" }
+      ];
+      for (const col of columnsToAdd) {
+        if (!columns.includes(col.name)) {
+          try {
+            database2.run(col.sql);
+            console.log(`[Migration v18] Added ${col.name} column to chat_messages`);
+          } catch (e) {
+            console.warn(`[Migration v18] Failed to add ${col.name}:`, e);
+          }
+        }
+      }
+    }
+    console.log("Migration v18 complete: chat_messages columns added");
+  },
+  19: () => {
+    console.log("Running migration to schema v19: Adding filename to transcription_queue");
+    const database2 = getDatabase();
+    const tableInfo = database2.exec("PRAGMA table_info(transcription_queue)");
+    if (tableInfo.length > 0 && tableInfo[0].values) {
+      const columns = tableInfo[0].values.map((row) => row[1]);
+      if (!columns.includes("filename")) {
+        try {
+          database2.run("ALTER TABLE transcription_queue ADD COLUMN filename TEXT");
+          console.log("[Migration v19] Added filename column to transcription_queue");
+        } catch (e) {
+          console.warn("[Migration v19] Failed to add filename column:", e);
+        }
+      }
+    }
+    console.log("Migration v19 complete: transcription_queue filename column added");
   }
 };
 function runMigrations(currentVersion) {
@@ -1250,6 +1395,25 @@ async function initializeDatabase() {
         }
       }
     }
+    const chatMsgInfo = database2.exec("PRAGMA table_info(chat_messages)");
+    if (chatMsgInfo.length > 0 && chatMsgInfo[0].values) {
+      const chatCols = chatMsgInfo[0].values.map((col) => col[1]);
+      const chatRepairs = [
+        { name: "edited_at", def: "TEXT" },
+        { name: "original_content", def: "TEXT" },
+        { name: "created_output_id", def: "TEXT" },
+        { name: "saved_as_insight_id", def: "TEXT" }
+      ];
+      for (const col of chatRepairs) {
+        if (!chatCols.includes(col.name)) {
+          console.log(`[Database] Repairing chat_messages: adding ${col.name}`);
+          try {
+            database2.run(`ALTER TABLE chat_messages ADD COLUMN ${col.name} ${col.def}`);
+          } catch (e) {
+          }
+        }
+      }
+    }
     const versionResult = database2.exec("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
     const currentVersion = versionResult.length > 0 && versionResult[0].values.length > 0 ? versionResult[0].values[0][0] : 0;
     if (currentVersion < SCHEMA_VERSION) {
@@ -1296,18 +1460,65 @@ function closeDatabase() {
     db = null;
   }
 }
-function updateKnowledgeCaptureTitle(recordingId, titleSuggestion) {
+function ensureKnowledgeCaptureForRecording(recordingId) {
   try {
     const recording = getRecordingById(recordingId);
-    if (!recording) return;
-    const captureId = recording.migrated_to_capture_id;
+    if (!recording) {
+      console.error(`[ensureKnowledgeCapture] Recording not found: ${recordingId}`);
+      return null;
+    }
+    if (recording.migrated_to_capture_id) {
+      return recording.migrated_to_capture_id;
+    }
+    const existingCapture = queryOne(
+      "SELECT id FROM knowledge_captures WHERE source_recording_id = ?",
+      [recordingId]
+    );
+    if (existingCapture) {
+      run("UPDATE recordings SET migrated_to_capture_id = ? WHERE id = ?", [existingCapture.id, recordingId]);
+      return existingCapture.id;
+    }
+    const captureId = `kc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const transcript = getTranscriptByRecordingId(recordingId);
+    run(
+      `INSERT INTO knowledge_captures (
+        id, title, summary, category, status,
+        captured_at, created_at, updated_at,
+        source_recording_id, source_meeting_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        captureId,
+        recording.filename || "Untitled Recording",
+        transcript?.summary || null,
+        "meeting",
+        // default category
+        transcript ? "ready" : "processing",
+        recording.date_recorded || now,
+        now,
+        now,
+        recordingId,
+        recording.meeting_id || null
+      ]
+    );
+    run("UPDATE recordings SET migrated_to_capture_id = ? WHERE id = ?", [captureId, recordingId]);
+    console.log(`[ensureKnowledgeCapture] Created knowledge_capture ${captureId} for recording ${recordingId}`);
+    return captureId;
+  } catch (error2) {
+    console.error("[ensureKnowledgeCapture] Failed:", error2);
+    return null;
+  }
+}
+function updateKnowledgeCaptureTitle(recordingId, titleSuggestion) {
+  try {
+    const captureId = ensureKnowledgeCaptureForRecording(recordingId);
     if (!captureId) return;
     const capture = queryOne(
       "SELECT id, title FROM knowledge_captures WHERE id = ?",
       [captureId]
     );
     if (!capture) return;
-    if (capture.title.includes(".") || capture.title === "Untitled") {
+    if (capture.title.includes(".") || capture.title === "Untitled" || capture.title === "Untitled Recording") {
       run(
         "UPDATE knowledge_captures SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         [titleSuggestion, captureId]
@@ -1606,6 +1817,9 @@ function insertRecording(recording) {
 function updateRecordingStatus(id, status) {
   run("UPDATE recordings SET status = ? WHERE id = ?", [status, id]);
 }
+function updateRecordingTranscriptionStatus(id, transcriptionStatus) {
+  run("UPDATE recordings SET transcription_status = ? WHERE id = ?", [transcriptionStatus, id]);
+}
 function linkRecordingToMeeting(recordingId, meetingId, confidence, method) {
   run(
     `UPDATE recordings SET meeting_id = ?, correlation_confidence = ?, correlation_method = ? WHERE id = ?`,
@@ -1633,6 +1847,7 @@ function getTranscriptsByRecordingIds(recordingIds) {
   return results;
 }
 function insertTranscript(transcript) {
+  run("DELETE FROM transcripts WHERE recording_id = ?", [transcript.recording_id]);
   run(
     `INSERT INTO transcripts (id, recording_id, full_text, language, summary, action_items,
       topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model,
@@ -1667,16 +1882,22 @@ function searchTranscripts(query) {
     [`%${escaped}%`, `%${escaped}%`, `%${escaped}%`]
   );
 }
-function addToQueue(recordingId) {
+function addToQueue(recordingId, filename) {
   const id = crypto.randomUUID();
-  run("INSERT INTO transcription_queue (id, recording_id) VALUES (?, ?)", [id, recordingId]);
+  run("INSERT INTO transcription_queue (id, recording_id, filename) VALUES (?, ?, ?)", [id, recordingId, filename ?? null]);
   return id;
 }
 function getQueueItems(status) {
+  const sql = `
+    SELECT tq.*, r.filename
+    FROM transcription_queue tq
+    LEFT JOIN recordings r ON tq.recording_id = r.id
+    ${status ? "WHERE tq.status = ?" : ""}
+    ORDER BY tq.created_at`;
   if (status) {
-    return queryAll("SELECT * FROM transcription_queue WHERE status = ? ORDER BY created_at", [status]);
+    return queryAll(sql, [status]);
   }
-  return queryAll("SELECT * FROM transcription_queue ORDER BY created_at");
+  return queryAll(sql);
 }
 function updateQueueItem(id, status, errorMessage) {
   if (status === "processing") {
@@ -1693,6 +1914,22 @@ function updateQueueItem(id, status, errorMessage) {
   } else {
     run("UPDATE transcription_queue SET status = ? WHERE id = ?", [status, id]);
   }
+}
+function removeFromQueueByRecordingId(recordingId) {
+  run("DELETE FROM transcription_queue WHERE recording_id = ?", [recordingId]);
+}
+function cancelPendingTranscriptions() {
+  const pending = getQueueItems("pending");
+  const processing = getQueueItems("processing");
+  run("DELETE FROM transcription_queue WHERE status = 'pending'");
+  run("UPDATE transcription_queue SET status = 'cancelled' WHERE status = 'processing'");
+  for (const item of pending) {
+    updateRecordingTranscriptionStatus(item.recording_id, "none");
+  }
+  for (const item of processing) {
+    updateRecordingTranscriptionStatus(item.recording_id, "none");
+  }
+  return pending.length + processing.length;
 }
 function getChatHistory(limit = 50) {
   return queryAll("SELECT * FROM chat_messages ORDER BY created_at DESC LIMIT ?", [limit]).reverse();
@@ -1737,6 +1974,15 @@ function clearAllSyncedFiles() {
 function getSyncedFilenames() {
   const files = queryAll("SELECT original_filename FROM synced_files");
   return new Set(files.map((f) => f.original_filename));
+}
+function clearAllMeetings() {
+  runInTransaction(() => {
+    runNoSave("DELETE FROM meeting_contacts");
+    runNoSave("DELETE FROM recording_meeting_candidates");
+    runNoSave("UPDATE recordings SET meeting_id = NULL, correlation_confidence = NULL, correlation_method = NULL WHERE meeting_id IS NOT NULL");
+    runNoSave("DELETE FROM meetings");
+  });
+  console.log("[Database] Cleared all meetings and associated links");
 }
 function getContacts(search, limit = 100, offset = 0) {
   let countSql = "SELECT COUNT(*) as count FROM contacts";
@@ -2073,12 +2319,15 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   addRecordingMeetingCandidate,
   addSyncedFile,
   addToQueue,
+  cancelPendingTranscriptions,
+  clearAllMeetings,
   clearAllSyncedFiles,
   clearChatHistory,
   closeDatabase,
   createProject,
   deleteProject,
   deleteRecordingLocal,
+  ensureKnowledgeCaptureForRecording,
   findCandidateMeetingsForRecording,
   getAllSyncedFiles,
   getCandidatesForRecordingWithDetails,
@@ -2121,6 +2370,7 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   markRecordingDownloaded,
   queryAll,
   queryOne,
+  removeFromQueueByRecordingId,
   removeSyncedFile,
   run,
   runInTransaction,
@@ -2136,6 +2386,7 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   updateRecordingStatus,
   updateRecordingStorageTier,
   updateRecordingStorageTierAsync,
+  updateRecordingTranscriptionStatus,
   upsertMeetingsBatch,
   upsertQualityAssessment,
   upsertQualityAssessmentAsync
@@ -2181,7 +2432,12 @@ function registerDatabaseHandlers() {
     return getRecordingsForMeeting(meetingId);
   });
   electron.ipcMain.handle("db:update-recording-status", async (_, id, status) => {
-    updateRecordingStatus(id, status);
+    const transcriptionStatuses = ["none", "pending", "queued", "transcribing", "transcribed", "failed"];
+    if (transcriptionStatuses.includes(status)) {
+      updateRecordingTranscriptionStatus(id, status);
+    } else {
+      updateRecordingStatus(id, status);
+    }
     return getRecordingById(id);
   });
   electron.ipcMain.handle(
@@ -2527,6 +2783,7 @@ async function syncCalendar(icsUrl) {
       throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : "Unknown error"}`);
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
+    await updateConfig("calendar", { lastSyncAt: now });
     console.log(`Calendar sync complete: ${meetings.length} meetings`);
     return {
       success: true,
@@ -2781,6 +3038,18 @@ function registerCalendarHandlers() {
         meetingsCount: 0
       };
     }
+    return await syncCalendar(config22.calendar.icsUrl);
+  });
+  electron.ipcMain.handle("calendar:clear-and-sync", async () => {
+    const config22 = getConfig();
+    if (!config22.calendar.icsUrl) {
+      return {
+        success: false,
+        error: "No calendar URL configured",
+        meetingsCount: 0
+      };
+    }
+    clearAllMeetings();
     return await syncCalendar(config22.calendar.icsUrl);
   });
   electron.ipcMain.handle("calendar:get-last-sync", async () => {
@@ -3265,14 +3534,14 @@ function getWatcherStatus() {
     path: getRecordingsPath()
   };
 }
-const OLLAMA_BASE_URL = "http://localhost:11434";
-const EMBEDDING_MODEL = "nomic-embed-text";
-const CHAT_MODEL = "llama3.2";
+const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
+const DEFAULT_EMBEDDING_MODEL = "nomic-embed-text";
+const DEFAULT_CHAT_MODEL = "llama3.2";
 class OllamaService {
   baseUrl;
   embeddingModel;
   chatModel;
-  constructor(baseUrl = OLLAMA_BASE_URL, embeddingModel = EMBEDDING_MODEL, chatModel = CHAT_MODEL) {
+  constructor(baseUrl = DEFAULT_OLLAMA_BASE_URL, embeddingModel = DEFAULT_EMBEDDING_MODEL, chatModel = DEFAULT_CHAT_MODEL) {
     this.baseUrl = baseUrl;
     this.embeddingModel = embeddingModel;
     this.chatModel = chatModel;
@@ -3391,7 +3660,18 @@ class OllamaService {
 let ollamaInstance = null;
 function getOllamaService() {
   if (!ollamaInstance) {
-    ollamaInstance = new OllamaService();
+    try {
+      const { getConfig: getConfig2 } = require("./config");
+      const config2 = getConfig2();
+      const baseUrl = config2.embeddings?.ollamaBaseUrl || DEFAULT_OLLAMA_BASE_URL;
+      const embeddingModel = config2.embeddings?.ollamaModel || DEFAULT_EMBEDDING_MODEL;
+      const chatModel = config2.chat?.ollamaModel || DEFAULT_CHAT_MODEL;
+      console.log(`[Ollama] Initializing with config: baseUrl=${baseUrl}, embeddingModel=${embeddingModel}, chatModel=${chatModel}`);
+      ollamaInstance = new OllamaService(baseUrl, embeddingModel, chatModel);
+    } catch (error2) {
+      console.warn("[Ollama] Failed to read config, using defaults:", error2);
+      ollamaInstance = new OllamaService();
+    }
   }
   return ollamaInstance;
 }
@@ -3564,6 +3844,36 @@ class VectorStore {
     db2.run("DELETE FROM vector_embeddings WHERE recording_id = ?", [recordingId]);
     return deleted;
   }
+  /**
+   * AI-06 FIX: Update meeting_id for all chunks belonging to a recording
+   * Called when AI links a recording to a meeting after transcription
+   */
+  async updateMeetingIdForRecording(recordingId, meetingId, meetingSubject) {
+    let updated = 0;
+    const db2 = getDatabase();
+    for (const doc of this.documents.values()) {
+      if (doc.metadata.recordingId === recordingId) {
+        doc.metadata.meetingId = meetingId;
+        if (meetingSubject) {
+          doc.metadata.subject = meetingSubject;
+        }
+        updated++;
+      }
+    }
+    if (meetingSubject) {
+      db2.run(
+        "UPDATE vector_embeddings SET meeting_id = ?, subject = ? WHERE recording_id = ?",
+        [meetingId, meetingSubject, recordingId]
+      );
+    } else {
+      db2.run(
+        "UPDATE vector_embeddings SET meeting_id = ? WHERE recording_id = ?",
+        [meetingId, recordingId]
+      );
+    }
+    console.log(`Updated meeting_id for ${updated} vector chunks (recording ${recordingId} -> meeting ${meetingId})`);
+    return updated;
+  }
   getDocumentCount() {
     return this.documents.size;
   }
@@ -3587,11 +3897,43 @@ function getVectorStore() {
   }
   return vectorStoreInstance;
 }
+const readFileAsync = util.promisify(fs.readFile);
 let mainWindow$1 = null;
 let isProcessing = false;
 let processingInterval = null;
 function setMainWindowForTranscription(win) {
   mainWindow$1 = win;
+}
+function cleanupStaleTranscriptionStatuses() {
+  try {
+    const staleRecordings = queryOne(
+      `SELECT id, status FROM recordings WHERE status IN ('pending', 'processing')`,
+      []
+    );
+    if (!staleRecordings || staleRecordings.length === 0) {
+      console.log("[Transcription Cleanup] No stale statuses found");
+      return;
+    }
+    console.log(`[Transcription Cleanup] Found ${staleRecordings.length} recordings with pending/processing status`);
+    let cleaned = 0;
+    for (const recording of staleRecordings) {
+      const queueItem = queryOne(
+        `SELECT id FROM transcription_queue WHERE recording_id = ? AND status != 'completed'`,
+        [recording.id]
+      );
+      if (!queueItem) {
+        updateRecordingTranscriptionStatus(recording.id, "none");
+        cleaned++;
+        console.log(`[Transcription Cleanup] Reset status for ${recording.id} (was ${recording.status}, no queue item)`);
+      }
+    }
+    if (cleaned > 0) {
+      console.log(`[Transcription Cleanup] Cleaned up ${cleaned} stale transcription statuses`);
+      notifyRenderer("transcription:cleanup-complete", { count: cleaned });
+    }
+  } catch (error2) {
+    console.error("[Transcription Cleanup] Failed:", error2);
+  }
 }
 function startTranscriptionProcessor() {
   if (processingInterval) {
@@ -3599,6 +3941,7 @@ function startTranscriptionProcessor() {
     return;
   }
   console.log("Starting transcription processor");
+  cleanupStaleTranscriptionStatuses();
   processingInterval = setInterval(() => {
     processQueue();
   }, 1e4);
@@ -3611,16 +3954,56 @@ function stopTranscriptionProcessor() {
     console.log("Transcription processor stopped");
   }
 }
+let cancelRequested = false;
+function cancelTranscription(recordingId) {
+  removeFromQueueByRecordingId(recordingId);
+  updateRecordingTranscriptionStatus(recordingId, "none");
+  notifyRenderer("transcription:cancelled", { recordingId });
+}
+function cancelAllTranscriptions() {
+  cancelRequested = true;
+  const count = cancelPendingTranscriptions();
+  notifyRenderer("transcription:all-cancelled", { count });
+  return count;
+}
 async function processQueue() {
   if (isProcessing) return;
   const config2 = getConfig();
   if (!config2.transcription.geminiApiKey) {
+    console.error("[Transcription] Cannot process queue: Gemini API key not configured");
+    const pendingItems2 = getQueueItems("pending");
+    const processingItems = getQueueItems("processing");
+    const allStuckItems = [...pendingItems2, ...processingItems];
+    if (allStuckItems.length > 0) {
+      console.log(`[Transcription] Marking ${allStuckItems.length} stuck items as failed (no API key)`);
+      for (const item of allStuckItems) {
+        updateQueueItem(item.id, "failed", "Gemini API key not configured. Please add your API key in Settings.");
+        updateRecordingTranscriptionStatus(item.recording_id, "error");
+        notifyRenderer("transcription:failed", {
+          queueItemId: item.id,
+          recordingId: item.recording_id,
+          error: "Gemini API key not configured. Please add your API key in Settings."
+        });
+      }
+    }
     return;
+  }
+  const failedItems = getQueueItems("failed");
+  for (const item of failedItems) {
+    if (item.attempts < 3) {
+      updateQueueItem(item.id, "pending");
+      updateRecordingTranscriptionStatus(item.recording_id, "pending");
+      console.log(`Re-queuing failed item ${item.id} (attempt ${item.attempts + 1}/3)`);
+    }
   }
   const pendingItems = getQueueItems("pending");
   if (pendingItems.length === 0) return;
   isProcessing = true;
   for (const item of pendingItems) {
+    if (cancelRequested) {
+      console.log("Transcription cancelled by user");
+      break;
+    }
     try {
       updateQueueItem(item.id, "processing");
       notifyRenderer("transcription:started", { queueItemId: item.id, recordingId: item.recording_id });
@@ -3631,6 +4014,7 @@ async function processQueue() {
       const errorMessage = error2 instanceof Error ? error2.message : "Unknown error";
       console.error("Transcription failed:", errorMessage);
       updateQueueItem(item.id, "failed", errorMessage);
+      updateRecordingTranscriptionStatus(item.recording_id, "error");
       notifyRenderer("transcription:failed", {
         queueItemId: item.id,
         recordingId: item.recording_id,
@@ -3642,6 +4026,7 @@ async function processQueue() {
     }
   }
   isProcessing = false;
+  cancelRequested = false;
 }
 async function detectActionables(transcriptText, knowledgeCaptureId, metadata) {
   const config2 = getConfig();
@@ -3714,8 +4099,8 @@ async function transcribeRecording(recordingId) {
     throw new Error("Gemini API key not configured");
   }
   console.log(`Transcribing: ${recording.filename}`);
-  updateRecordingStatus(recordingId, "transcribing");
-  const audioBuffer = fs.readFileSync(recording.file_path);
+  updateRecordingTranscriptionStatus(recordingId, "processing");
+  const audioBuffer = await readFileAsync(recording.file_path);
   const base64Audio = audioBuffer.toString("base64");
   const ext = path.extname(recording.file_path).toLowerCase();
   const mimeTypes = {
@@ -3839,6 +4224,12 @@ Respond in JSON format:
           "ai_transcript_match"
         );
         console.log(`AI matched recording to meeting: "${selectedMeeting.subject}" (confidence: ${analysis.meeting_confidence})`);
+        try {
+          const vectorStore = getVectorStore();
+          await vectorStore.updateMeetingIdForRecording(recordingId, selectedMeeting.id, selectedMeeting.subject);
+        } catch (e) {
+          console.warn("Failed to update vector store meeting_id after AI linking:", e);
+        }
       }
     }
   }
@@ -3854,22 +4245,29 @@ Respond in JSON format:
     key_points: analysis.key_points ? JSON.stringify(analysis.key_points) : void 0,
     word_count: wordCount,
     transcription_provider: "gemini",
-    transcription_model: "gemini-2.0-flash-exp",
+    transcription_model: config2.transcription.geminiModel,
     title_suggestion: analysis.title_suggestion,
     question_suggestions: analysis.question_suggestions ? JSON.stringify(analysis.question_suggestions) : void 0
   };
   insertTranscript(transcript);
-  updateRecordingStatus(recordingId, "transcribed");
+  updateRecordingTranscriptionStatus(recordingId, "complete");
   if (analysis.title_suggestion) {
     updateKnowledgeCaptureTitle(recordingId, analysis.title_suggestion);
   }
   try {
-    const detections = await detectActionables(fullText, recordingId, {
+    const sourceKnowledgeId = ensureKnowledgeCaptureForRecording(recordingId);
+    if (!sourceKnowledgeId) {
+      console.error("[Actionable Detection] Failed to get/create knowledge_capture for recording:", recordingId);
+      throw new Error("Could not create knowledge capture for recording");
+    }
+    const detections = await detectActionables(fullText, sourceKnowledgeId, {
       title: analysis.title_suggestion,
       questions: analysis.question_suggestions
     });
+    const VALID_TEMPLATE_IDS = ["meeting_minutes", "interview_feedback", "project_status", "action_items"];
     for (const detection of detections) {
       const actionableId = `act_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const sanitizedTemplate = detection.suggestedTemplate && VALID_TEMPLATE_IDS.includes(detection.suggestedTemplate) ? detection.suggestedTemplate : "meeting_minutes";
       run(
         `INSERT INTO actionables (
           id, source_knowledge_id, type, title, description, status,
@@ -3877,14 +4275,14 @@ Respond in JSON format:
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           actionableId,
-          recordingId,
+          sourceKnowledgeId,
           // source_knowledge_id references knowledge_captures.id
           detection.type,
           detection.suggestedTitle,
           detection.reason,
           "pending",
           detection.confidence,
-          detection.suggestedTemplate || null,
+          sanitizedTemplate,
           (/* @__PURE__ */ new Date()).toISOString()
         ]
       );
@@ -3897,7 +4295,7 @@ Respond in JSON format:
   }
   try {
     const vectorStore = getVectorStore();
-    const meetingId = recording.meeting_id;
+    const meetingId = analysis.selected_meeting_id || recording.meeting_id;
     let meetingSubject;
     if (meetingId) {
       const meeting = getMeetingById(meetingId);
@@ -4097,6 +4495,41 @@ function registerRecordingHandlers() {
   electron.ipcMain.handle("recordings:stopTranscriptionProcessor", async () => {
     stopTranscriptionProcessor();
   });
+  electron.ipcMain.handle("transcription:cancel", async (_, recordingId) => {
+    try {
+      cancelTranscription(recordingId);
+      return { success: true };
+    } catch (error2) {
+      console.error("transcription:cancel error:", error2);
+      return { success: false };
+    }
+  });
+  electron.ipcMain.handle("transcription:cancelAll", async () => {
+    try {
+      const count = cancelAllTranscriptions();
+      return { success: true, count };
+    } catch (error2) {
+      console.error("transcription:cancelAll error:", error2);
+      return { success: false, count: 0 };
+    }
+  });
+  electron.ipcMain.handle("transcription:getQueue", async () => {
+    try {
+      return getQueueItems();
+    } catch (error2) {
+      console.error("transcription:getQueue error:", error2);
+      return [];
+    }
+  });
+  electron.ipcMain.handle("transcription:updateQueueItem", async (_, id, status, errorMessage) => {
+    try {
+      updateQueueItem(id, status, errorMessage);
+      return true;
+    } catch (error2) {
+      console.error("transcription:updateQueueItem error:", error2);
+      return false;
+    }
+  });
   electron.ipcMain.handle("recordings:scanFolder", async () => {
     return getRecordingFiles();
   });
@@ -4186,6 +4619,47 @@ function registerRecordingHandlers() {
       };
     }
   });
+  electron.ipcMain.handle("recordings:selectMeeting", async (_, recordingId, meetingId) => {
+    try {
+      if (meetingId) {
+        linkRecordingToMeeting(recordingId, meetingId, 1, "manual");
+      } else {
+        linkRecordingToMeeting(recordingId, "", 0, "");
+      }
+      return { success: true };
+    } catch (error2) {
+      console.error("recordings:selectMeeting error:", error2);
+      return { success: false, error: error2.message };
+    }
+  });
+  electron.ipcMain.handle("recordings:addToQueue", async (_, recordingId) => {
+    try {
+      const config2 = getConfig();
+      if (!config2.transcription.geminiApiKey) {
+        return {
+          success: false,
+          error: "Transcription API key not configured. Please add your API key in Settings."
+        };
+      }
+      const recording = getRecordingById(recordingId);
+      const filename = recording?.filename ?? void 0;
+      const queueItemId = addToQueue(recordingId, filename);
+      updateRecordingTranscriptionStatus(recordingId, "queued");
+      return queueItemId;
+    } catch (error2) {
+      console.error("recordings:addToQueue error:", error2);
+      return false;
+    }
+  });
+  electron.ipcMain.handle("recordings:processQueue", async () => {
+    try {
+      startTranscriptionProcessor();
+      return true;
+    } catch (error2) {
+      console.error("recordings:processQueue error:", error2);
+      return false;
+    }
+  });
   console.log("Recording IPC handlers registered");
 }
 function success(data) {
@@ -4261,13 +4735,23 @@ class RAGService {
       const docs = await vectorStore.searchByMeeting(context.meetingId);
       const queryEmbedding = await ollama.generateEmbedding(message);
       if (queryEmbedding) {
-        searchResults = docs.map((doc) => ({
-          document: doc,
-          score: 0.8
-          // Default score for filtered results
-        }));
+        searchResults = docs.map((doc) => {
+          let score = 0;
+          if (doc.embedding && doc.embedding.length === queryEmbedding.length) {
+            let dotProduct = 0, normA = 0, normB = 0;
+            for (let i = 0; i < queryEmbedding.length; i++) {
+              dotProduct += queryEmbedding[i] * doc.embedding[i];
+              normA += queryEmbedding[i] * queryEmbedding[i];
+              normB += doc.embedding[i] * doc.embedding[i];
+            }
+            const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+            score = denominator === 0 ? 0 : dotProduct / denominator;
+          }
+          return { document: doc, score };
+        });
+        searchResults.sort((a, b) => b.score - a.score);
       } else {
-        searchResults = docs.map((doc) => ({ document: doc, score: 0.8 }));
+        searchResults = docs.map((doc) => ({ document: doc, score: 0.5 }));
       }
       searchResults = searchResults.slice(0, 5);
     } else {
@@ -4323,12 +4807,13 @@ ${allContextParts.join("\n\n---\n\n")}` : "No relevant meeting transcripts found
 ${contextText}
 
 Question: ${message}`;
-    context.conversationHistory.push({ role: "user", content: message });
     const messages = [
       ...context.conversationHistory.slice(-6),
-      // Keep last 3 exchanges
+      // Keep last 3 exchanges (raw messages only)
       { role: "user", content: userMessage }
+      // Send enhanced message with context to LLM
     ];
+    context.conversationHistory.push({ role: "user", content: message });
     const answer = await ollama.chat(messages, {
       systemPrompt: SYSTEM_PROMPT,
       temperature: 0.7,
@@ -4424,7 +4909,8 @@ ${transcript.substring(0, 8e3)}`;
         id: v[0],
         title: v[1],
         summary: v[2],
-        capturedAt: v[13]
+        capturedAt: v[15]
+        // captured_at is the 16th column (index 15) in knowledge_captures
       })) : [];
       const peopleRows = db2.exec(`
         SELECT * FROM contacts 
@@ -4682,7 +5168,7 @@ function registerRAGHandlers() {
 }
 function registerAppHandlers() {
   electron.ipcMain.handle("app:restart", async () => {
-    if (utils.is.dev) {
+    if (is.dev) {
       const windows = electron.BrowserWindow.getAllWindows();
       if (windows.length > 0) {
         windows[0].webContents.reload();
@@ -7063,6 +7549,11 @@ class DownloadService {
         this.state.currentSession.completedFiles++;
       }
       this.emitStateUpdate();
+      setTimeout(() => {
+        this.state.queue.delete(filename);
+        this.pruneCompletedItems(50);
+        this.emitStateUpdate();
+      }, 2e3);
       console.log(`[DownloadService] Completed: ${filename}`);
       return { success: true, filePath };
     } catch (error2) {
@@ -7083,6 +7574,10 @@ class DownloadService {
   updateProgress(filename, bytesReceived) {
     const item = this.state.queue.get(filename);
     if (item) {
+      if (item.status === "pending") {
+        item.status = "downloading";
+        item.startedAt = /* @__PURE__ */ new Date();
+      }
       item.progress = Math.round(bytesReceived / item.fileSize * 100);
       this.emitStateUpdate();
     }
@@ -7102,6 +7597,44 @@ class DownloadService {
     }
   }
   /**
+   * Re-queue all failed downloads as pending so they can be retried
+   */
+  retryFailed() {
+    let count = 0;
+    for (const item of this.state.queue.values()) {
+      if (item.status === "failed") {
+        item.status = "pending";
+        item.progress = 0;
+        item.error = void 0;
+        item.startedAt = void 0;
+        item.completedAt = void 0;
+        count++;
+      }
+    }
+    if (count > 0) {
+      this.state.isPaused = false;
+      this.emitStateUpdate();
+    }
+    return count;
+  }
+  /**
+   * DL-07: Prune completed items from queue, keeping at most maxRetained.
+   */
+  pruneCompletedItems(maxRetained) {
+    const completed = [];
+    for (const [key, item] of this.state.queue) {
+      if (item.status === "completed") {
+        completed.push(key);
+      }
+    }
+    if (completed.length > maxRetained) {
+      const toRemove = completed.slice(0, completed.length - maxRetained);
+      for (const key of toRemove) {
+        this.state.queue.delete(key);
+      }
+    }
+  }
+  /**
    * Remove completed/failed items from queue
    */
   clearCompleted() {
@@ -7118,7 +7651,7 @@ class DownloadService {
   cancelAll() {
     this.state.isPaused = true;
     for (const item of this.state.queue.values()) {
-      if (item.status === "pending") {
+      if (item.status === "pending" || item.status === "downloading") {
         item.status = "failed";
         item.error = "Cancelled";
       }
@@ -7161,14 +7694,35 @@ class DownloadService {
   }
   /**
    * Emit state update to all renderer windows
+   * Throttled to prevent IPC spam (max once every 250ms for progress updates)
+   *
+   * TODO: DL-09: The 250ms throttle can cause visual mismatch between actual progress
+   * and displayed progress. Consider event-based progress updates (emit on meaningful
+   * state changes like status transitions) instead of time-based throttling.
    */
-  emitStateUpdate() {
-    const state = this.getState();
-    const windows = electron.BrowserWindow.getAllWindows();
-    for (const win of windows) {
-      if (!win.isDestroyed()) {
-        win.webContents.send("download-service:state-update", state);
+  emitPending = false;
+  emitTimer = null;
+  emitStateUpdate(immediate = false) {
+    if (immediate || !this.emitTimer) {
+      this.emitPending = false;
+      if (this.emitTimer) {
+        clearTimeout(this.emitTimer);
       }
+      const state = this.getState();
+      const windows = electron.BrowserWindow.getAllWindows();
+      for (const win of windows) {
+        if (!win.isDestroyed()) {
+          win.webContents.send("download-service:state-update", state);
+        }
+      }
+      this.emitTimer = setTimeout(() => {
+        this.emitTimer = null;
+        if (this.emitPending) {
+          this.emitStateUpdate(true);
+        }
+      }, 250);
+    } else {
+      this.emitPending = true;
     }
   }
 }
@@ -7219,6 +7773,9 @@ function registerDownloadServiceHandlers() {
   });
   electron.ipcMain.handle("download-service:cancel-all", () => {
     service.cancelAll();
+  });
+  electron.ipcMain.handle("download-service:retry-failed", () => {
+    return service.retryFailed();
   });
   electron.ipcMain.handle("download-service:get-stats", () => {
     return service.getSyncStats();
@@ -8384,7 +8941,8 @@ function mapToMessage(row) {
   };
 }
 function registerActionablesHandlers() {
-  electron.ipcMain.handle("actionables:getAll", async (_, { status } = {}) => {
+  electron.ipcMain.handle("actionables:getAll", async (_, options) => {
+    const status = options?.status ?? void 0;
     try {
       let sql = "SELECT * FROM actionables";
       const params = [];
@@ -8507,8 +9065,28 @@ function registerIpcHandlers() {
   registerActionablesHandlers();
   console.log("All IPC handlers registered");
 }
-const USB_VENDOR_ID = 4310;
-const USB_PRODUCT_IDS = [44812, 44813, 45069, 44814, 45070];
+const USB_VENDOR_IDS = [
+  4310,
+  // Actions Semiconductor (older H1, H1E, P1 devices)
+  14471
+  // HiDock (newer P1 Mini devices)
+];
+const USB_PRODUCT_IDS = [
+  44812,
+  // H1
+  44813,
+  // H1E
+  45069,
+  // H1E (alternate)
+  44814,
+  // P1
+  45070,
+  // P1 (alternate)
+  44815,
+  // P1 Mini
+  8257
+  // P1 Mini (alternate)
+];
 let mainWindow = null;
 let splashWindow = null;
 const SPLASH_HTML = `<!DOCTYPE html>
@@ -8603,7 +9181,7 @@ function createWindow() {
     electron.shell.openExternal(details.url);
     return { action: "deny" };
   });
-  if (utils.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
+  if (is.dev && process.env["ELECTRON_RENDERER_URL"]) {
     mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
   } else {
     mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
@@ -8641,13 +9219,17 @@ async function initializeServices() {
   console.log("IPC handlers registered");
   updateSplashStatus("Starting application...", 100);
 }
-electron.app.commandLine.appendSwitch("remote-debugging-port", "9222");
-electron.app.whenReady().then(async () => {
-  utils.electronApp.setAppUserModelId("com.hidock.meeting-intelligence");
+electron.app.commandLine.appendSwitch("disable-usb-blocklist");
+const enableRemoteDebugging = is.dev || process.env.ENABLE_REMOTE_DEBUGGING === "true";
+if (enableRemoteDebugging) {
   electron.app.commandLine.appendSwitch("remote-debugging-port", "9222");
+  console.warn("[SECURITY] Remote debugging enabled on port 9222");
+}
+electron.app.whenReady().then(async () => {
+  electronApp.setAppUserModelId("com.hidock.meeting-intelligence");
   splashWindow = createSplashWindow();
   electron.app.on("browser-window-created", (_, window) => {
-    utils.optimizer.watchWindowShortcuts(window);
+    optimizer.watchWindowShortcuts(window);
   });
   electron.session.defaultSession.on("select-usb-device", (_event, details, callback) => {
     console.log("=== USB DEVICE SELECTION ===");
@@ -8657,13 +9239,13 @@ electron.app.whenReady().then(async () => {
       productName: d.productName
     })));
     const hidockDevice = details.deviceList.find(
-      (device) => device.vendorId === USB_VENDOR_ID && (USB_PRODUCT_IDS.includes(device.productId) || device.productName?.toLowerCase().includes("hidock"))
+      (device) => USB_VENDOR_IDS.includes(device.vendorId) && (USB_PRODUCT_IDS.includes(device.productId) || device.productName?.toLowerCase().includes("hidock"))
     );
     if (hidockDevice) {
       console.log("Auto-selecting HiDock device:", hidockDevice.productName);
       callback(hidockDevice.deviceId);
     } else if (details.deviceList.length > 0) {
-      const vendorDevice = details.deviceList.find((d) => d.vendorId === USB_VENDOR_ID);
+      const vendorDevice = details.deviceList.find((d) => USB_VENDOR_IDS.includes(d.vendorId));
       if (vendorDevice) {
         console.log("Auto-selecting vendor device:", vendorDevice.productName);
         callback(vendorDevice.deviceId);
@@ -8685,6 +9267,10 @@ electron.app.whenReady().then(async () => {
     }
     return false;
   });
+  electron.session.defaultSession.setUSBProtectedClassesHandler(() => {
+    console.log("[USB] Protected classes request received");
+    return [];
+  });
   await initializeServices();
   createWindow();
   if (mainWindow) {
@@ -8696,6 +9282,14 @@ electron.app.whenReady().then(async () => {
   startRecordingWatcher();
   startTranscriptionProcessor();
   console.log("Background services started");
+  if (!is.dev && process.env.ENABLE_REMOTE_DEBUGGING === "true" && mainWindow) {
+    mainWindow.webContents.on("did-finish-load", () => {
+      mainWindow?.webContents.send("security-warning", {
+        type: "remote-debugging-enabled",
+        message: "Remote debugging is enabled. This should only be used for troubleshooting."
+      });
+    });
+  }
   electron.app.on("activate", function() {
     if (electron.BrowserWindow.getAllWindows().length === 0) createWindow();
   });

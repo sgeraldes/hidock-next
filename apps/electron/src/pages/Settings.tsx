@@ -3,15 +3,16 @@ import { Save, FolderOpen, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
-import { useAppStore } from '@/store/useAppStore'
+import { useAppStore, useCalendarSyncing } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 import { formatBytes } from '@/lib/utils'
 import { HealthCheck } from '@/components/HealthCheck'
 import type { StorageInfo } from '@/types'
 
 export function Settings() {
+  // SM-09 fix: Use granular selectors
   const syncCalendar = useAppStore((s) => s.syncCalendar)
-  const calendarSyncing = useAppStore((s) => s.calendarSyncing)
+  const calendarSyncing = useCalendarSyncing()
   const { config, loadConfig, updateConfig } = useConfigStore()
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
   const [saving, setSaving] = useState(false)

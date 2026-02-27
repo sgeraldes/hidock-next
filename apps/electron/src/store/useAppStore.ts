@@ -296,3 +296,38 @@ function getViewEndDate(date: Date, view: CalendarViewType): Date {
   end.setHours(23, 59, 59, 999)
   return end
 }
+
+// ========================================
+// Granular Selectors (SM-02 fix)
+// ========================================
+// Export individual selectors to prevent over-subscription and unnecessary re-renders.
+// Components should use these instead of destructuring the entire store.
+
+// Calendar selectors
+export const useMeetings = () => useAppStore((s) => s.meetings)
+export const useMeetingsLoading = () => useAppStore((s) => s.meetingsLoading)
+export const useLastCalendarSync = () => useAppStore((s) => s.lastCalendarSync)
+export const useCalendarSyncing = () => useAppStore((s) => s.calendarSyncing)
+export const useCalendarView = () => useAppStore((s) => s.calendarView)
+export const useCurrentDate = () => useAppStore((s) => s.currentDate)
+
+// Device state selectors
+export const useDeviceState = () => useAppStore((s) => s.deviceState)
+export const useConnectionStatus = () => useAppStore((s) => s.connectionStatus)
+export const useDeviceConnected = () => useAppStore((s) => s.deviceState.connected)
+export const useActivityLog = () => useAppStore((s) => s.activityLog)
+
+// Device sync selectors
+export const useDeviceSyncing = () => useAppStore((s) => s.deviceSyncing)
+export const useDeviceSyncProgress = () => useAppStore((s) => s.deviceSyncProgress)
+export const useDeviceSyncEta = () => useAppStore((s) => s.deviceSyncEta)
+
+// Download queue selectors
+export const useDownloadQueue = () => useAppStore((s) => s.downloadQueue)
+export const useIsDownloading = (id: string) => useAppStore((s) => s.downloadQueue.has(id))
+export const useDownloadProgress = (id: string) => useAppStore((s) => s.downloadQueue.get(id)?.progress ?? null)
+
+// Unified recordings selectors
+export const useUnifiedRecordings = () => useAppStore((s) => s.unifiedRecordings)
+export const useUnifiedRecordingsLoading = () => useAppStore((s) => s.unifiedRecordingsLoading)
+export const useUnifiedRecordingsError = () => useAppStore((s) => s.unifiedRecordingsError)

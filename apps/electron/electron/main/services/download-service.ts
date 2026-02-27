@@ -500,7 +500,8 @@ export function registerDownloadServiceHandlers(): void {
   })
 
   // Process a completed download (data passed from renderer after USB transfer)
-  ipcMain.handle('download-service:process-download', async (_, filename: string, data: number[] | Uint8Array) => {
+  // DL-01: Accept Buffer to prevent memory amplification. Buffer is more efficiently transferred over IPC.
+  ipcMain.handle('download-service:process-download', async (_, filename: string, data: Buffer | number[] | Uint8Array) => {
     const buffer = Buffer.from(data)
     return service.processDownload(filename, buffer)
   })

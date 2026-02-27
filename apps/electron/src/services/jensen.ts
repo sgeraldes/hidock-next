@@ -290,7 +290,7 @@ interface ResponseMessage {
 
 // Logging configuration - set to true for debugging download issues
 const DEBUG_USB = false // Enable detailed USB transfer logging
-const DEBUG_PROTOCOL = true // Enable protocol-level logging
+const DEBUG_PROTOCOL = false // Enable protocol-level logging
 
 // Main Jensen device class
 export class JensenDevice {

@@ -67,6 +67,51 @@ vi.mock('crypto', async () => {
   }
 })
 
+// Mock validation schemas
+vi.mock('../validation', () => ({
+  GetRecordingByIdSchema: {
+    safeParse: vi.fn((data) => ({ success: true, data }))
+  },
+  DeleteRecordingSchema: {
+    safeParse: vi.fn((data) => ({ success: true, data }))
+  },
+  LinkRecordingToMeetingSchema: {
+    safeParse: vi.fn((data) => ({ success: true, data }))
+  },
+  UnlinkRecordingFromMeetingSchema: {
+    safeParse: vi.fn((data) => ({ success: true, data }))
+  },
+  TranscribeRecordingSchema: {
+    safeParse: vi.fn((data) => ({ success: true, data }))
+  }
+}))
+
+// Mock recording-watcher service
+vi.mock('../../services/recording-watcher', () => ({
+  startRecordingWatcher: vi.fn(),
+  stopRecordingWatcher: vi.fn(),
+  getWatcherStatus: vi.fn(() => ({ isWatching: false, path: '/mock/recordings' }))
+}))
+
+// Mock transcription service
+vi.mock('../../services/transcription', () => ({
+  transcribeManually: vi.fn(),
+  getTranscriptionStatus: vi.fn(() => ({ isProcessing: false, pendingCount: 0, processingCount: 0 })),
+  startTranscriptionProcessor: vi.fn(),
+  stopTranscriptionProcessor: vi.fn(),
+  cancelTranscription: vi.fn(),
+  cancelAllTranscriptions: vi.fn(() => 0)
+}))
+
+// Mock config service
+vi.mock('../../services/config', () => ({
+  getConfig: vi.fn(() => ({
+    transcription: {
+      geminiApiKey: 'mock-api-key'
+    }
+  }))
+}))
+
 // Mock recording-watcher
 vi.mock('../../services/recording-watcher', () => ({
   startRecordingWatcher: vi.fn(),

@@ -1,18 +1,33 @@
 # Audio Insights Extractor (Prototype)
 
-A standalone React application for extracting meaningful insights from audio files using AI-powered transcription and analysis.
+**Third Iteration of HiDock Next** - A proof-of-concept React application demonstrating AI-powered insights extraction from audio files.
 
 ## Overview
 
-The Audio Insights Extractor is a lightweight, browser-based tool that allows users to:
+The Audio Insights Extractor is the **insights prototype** in the HiDock Next ecosystem - the third iteration that proved the concept of extracting meaningful knowledge from audio recordings. This smaller prototype demonstrated capabilities that are now integrated into the [unified Electron app](../electron/) as part of the larger vision for a universal knowledge hub.
 
-- Upload audio files in various formats (WAV, MP3, M4A, FLAC)
-- Transcribe audio to text using Google Gemini AI
-- Extract key insights, summaries, and action items
-- Analyze sentiment and identify topics
-- Export results in multiple formats
+### What This Prototype Demonstrates
 
-This tool is part of the HiDock Next ecosystem but can operate independently for general audio analysis tasks.
+- **AI-Powered Audio Analysis**: Upload audio files and extract insights using Google Gemini AI
+- **Knowledge Extraction**: Transcribe, summarize, identify key points and action items
+- **Sentiment Analysis**: Determine emotional tone and topic categorization
+- **Browser-Based Processing**: Lightweight, client-side audio processing
+- **Export Capabilities**: Download results in multiple formats (JSON, TXT, CSV)
+
+### Supported Audio Formats
+
+- WAV, MP3, M4A, FLAC, OGG
+
+### HiDock Next Ecosystem
+
+This is the **third of four applications** in the HiDock Next suite:
+
+1. **Desktop App** (`apps/desktop/`) - Python/CustomTkinter GUI for HiDock device management
+2. **Web App** (`apps/web/`) - React/TypeScript browser interface using WebUSB
+3. **Audio Insights** (`apps/audio-insights/`) - **This prototype** - AI-powered audio analysis
+4. **Electron App** (`apps/electron/`) - Universal knowledge hub integrating all capabilities
+
+The insights capabilities proven in this prototype are now part of the Electron app, which serves as the comprehensive solution combining device management, audio analysis, and knowledge extraction in a unified desktop application.
 
 ## Features
 
@@ -52,11 +67,13 @@ This tool is part of the HiDock Next ecosystem but can operate independently for
 ```bash
 # Clone the repository (if not already done)
 git clone https://github.com/sgeraldes/hidock-next.git
-cd hidock-next/audio-insights-extractor
+cd hidock-next/apps/audio-insights
 
 # Install dependencies
 npm install
 ```
+
+**Note:** For the full-featured audio insights experience with device integration and advanced capabilities, see the [Electron app](../electron/).
 
 ### Configuration
 
@@ -382,23 +399,38 @@ export interface CustomAnalysis {
 }
 ```
 
-## Roadmap
+## Project Status & Evolution
 
-### Planned Features
+### Current Status
 
-- **Multi-language Support**: Support for 50+ languages
-- **Speaker Diarization**: Advanced speaker identification
-- **Real-time Processing**: Live audio stream analysis
-- **Collaboration**: Share and collaborate on transcriptions
-- **Advanced Export**: Word, PDF, and presentation formats
-- **API Integration**: RESTful API for programmatic access
+This is a **proof-of-concept prototype** that successfully demonstrated AI-powered insights extraction from audio files. Its core capabilities have been integrated into the [Electron app](../electron/), which represents the full vision of HiDock Next as a universal knowledge hub.
 
-### Version History
+### What Was Proven
 
-- **v1.0.0**: Initial release with basic transcription
-- **v1.1.0**: Added insights and analysis features
-- **v1.2.0**: Improved UI/UX and error handling
-- **v2.0.0**: React 19 upgrade and performance improvements
+- **AI Integration**: Successfully validated Google Gemini for audio transcription and analysis
+- **Browser-Based Processing**: Demonstrated client-side audio handling without server dependencies
+- **Insights Extraction**: Proved the value of automated summarization, key point extraction, and action item identification
+- **User Experience**: Established UX patterns for audio analysis workflows
+
+### Evolution Path
+
+1. **Initial Concept** (v1.0.0): Basic transcription prototype
+2. **Insights Addition** (v1.1.0): Added AI-powered analysis features
+3. **UX Refinement** (v1.2.0): Improved interface and error handling
+4. **React 19 Upgrade** (v2.0.0): Modernized tech stack
+5. **Integration** (Current): Capabilities merged into Electron app
+
+### Future Development
+
+Active development has moved to the [Electron app](../electron/), which includes:
+- All audio insights capabilities from this prototype
+- HiDock device management integration
+- Universal knowledge hub features
+- Cross-platform desktop application benefits
+- Enhanced audio player with waveform visualization
+- Multi-provider AI transcription (11+ services)
+
+This prototype remains available as a standalone browser-based tool for lightweight audio analysis tasks.
 
 ## Support
 

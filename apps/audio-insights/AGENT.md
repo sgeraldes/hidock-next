@@ -1,5 +1,14 @@
 # AI Assistant Operational Rules: Audio Insights Extractor
 
+**Context:** This is the **third iteration prototype** of HiDock Next - a proof-of-concept demonstrating AI-powered insights extraction from audio files. This prototype successfully validated concepts that are now integrated into the [Electron app](../electron/), which represents the full vision of a universal knowledge hub.
+
+## Project Status
+
+- **Role**: Insights prototype proving AI-powered audio analysis concepts
+- **Current State**: Stable proof-of-concept, capabilities integrated into Electron app
+- **Maintenance Mode**: Active development has moved to the Electron app
+- **Use Case**: Standalone browser-based tool for lightweight audio analysis
+
 This document contains the mandatory, non-negotiable rules and procedures for all React TypeScript development on the Audio Insights Extractor. As an AI assistant, you must adhere to these rules without exception. All project configurations are defined in `package.json`, `tsconfig.json`, and `vite.config.ts`.
 
 ---
@@ -12,9 +21,9 @@ This document contains the mandatory, non-negotiable rules and procedures for al
 
 - **Vite Development Only:** Never use Create React App or other build tools. All development must use Vite with the official React plugin.
 
-- **Google Gemini AI Only:** This application uses Google Gemini as the exclusive AI provider. Never implement other AI services without explicit requirements.
+- **Google Gemini AI Only:** This prototype application uses Google Gemini as the exclusive AI provider for validation purposes. The [Electron app](../electron/) supports 11+ AI providers including OpenAI, Anthropic, and others.
 
-- **Browser-Only Audio Processing:** Use Web Audio API and File API exclusively. Never attempt server-side audio processing.
+- **Browser-Only Audio Processing:** Use Web Audio API and File API exclusively. Never attempt server-side audio processing in this prototype.
 
 ## 2. Technology Stack Requirements
 
@@ -372,32 +381,29 @@ npm run dev
 All code must follow this exact structure:
 
 ```text
-audio-insights-extractor/
-├── src/
-│   ├── main.tsx             # React 19 app entry point
-│   ├── App.tsx              # Main application component
-│   ├── components/
-│   │   ├── FileUpload.tsx   # File upload component
-│   │   ├── AudioProcessor.tsx # Audio processing logic
-│   │   ├── TranscriptionView.tsx # Display results
-│   │   └── ErrorBoundary.tsx # Error handling
-│   ├── services/
-│   │   ├── gemini.ts        # Gemini AI service
-│   │   └── audio.ts         # Audio processing utilities
-│   ├── types/
-│   │   └── index.ts         # Type definitions
-│   ├── hooks/
-│   │   ├── useAudioProcessor.ts # Audio processing hook
-│   │   └── useGeminiAI.ts   # AI integration hook
-│   └── styles/
-│       └── global.css       # Global styles
-├── public/
-│   └── index.html           # Main HTML template
-├── package.json             # Dependencies and scripts
-├── vite.config.ts           # Vite configuration
-├── tsconfig.json            # TypeScript configuration
-└── vitest.config.ts         # Testing configuration
+apps/audio-insights/          # Third iteration - insights prototype
+├── App.tsx                   # Main application component (React 19)
+├── index.tsx                 # App entry point
+├── components/
+│   ├── AudioInput.tsx        # File upload component
+│   ├── TranscriptionDisplay.tsx # Text display and editing
+│   ├── InsightsDisplay.tsx   # AI analysis results
+│   ├── LoadingSpinner.tsx    # Progress indicators
+│   ├── ErrorMessage.tsx      # Error handling
+│   └── IconComponents.tsx    # UI icons and graphics
+├── services/
+│   └── geminiService.ts      # Gemini AI service integration
+├── types.ts                  # TypeScript type definitions
+├── constants.ts              # Configuration constants
+├── index.html                # Main HTML template
+├── package.json              # Dependencies and scripts
+├── vite.config.ts            # Vite configuration
+├── tsconfig.json             # TypeScript configuration
+├── README.md                 # Project documentation
+└── AGENT.md                  # This file - AI assistant rules
 ```
+
+**Note:** This prototype structure differs from the [Electron app](../electron/) which has a more comprehensive architecture including device integration and multi-provider AI support.
 
 ## 9. Error Handling Requirements
 

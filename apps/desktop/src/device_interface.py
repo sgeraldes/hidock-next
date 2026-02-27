@@ -1,9 +1,17 @@
 """
-Unified Device Interface Abstraction for HiDock Community Platform.
+Unified Device Interface Abstraction for HiDock Next Ecosystem.
 
-This module provides a common interface for device operations across both
-desktop and web applications, enabling consistent device management,
-model detection, capability reporting, storage monitoring, and health diagnostics.
+This module provides a common interface for device operations across the
+HiDock Next suite (Desktop, Web, Audio Insights, and Electron apps),
+enabling consistent device management, model detection, capability reporting,
+storage monitoring, and health diagnostics.
+
+The Desktop app (apps/desktop) implements this interface for direct USB
+communication with HiDock® devices. Other apps in the ecosystem may implement
+different transport layers (WebUSB, remote access, etc.) while maintaining
+the same interface contract.
+
+Part of the HiDock Next ecosystem - see ../../CLAUDE.md for complete architecture.
 """
 
 import threading

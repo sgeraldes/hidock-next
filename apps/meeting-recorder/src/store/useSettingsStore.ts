@@ -1,0 +1,151 @@
+import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
+
+export type SettingsField =
+  | "provider"
+  | "model"
+  | "apiKey"
+  | "ollamaBaseUrl"
+  | "bedrockRegion"
+  | "bedrockAccessKeyId"
+  | "bedrockSecretAccessKey"
+  | "bedrockSessionToken"
+  | "autoRecord"
+  | "pollInterval"
+  | "gracePeriod"
+  | "chunkInterval"
+  | "transcriptionLanguage"
+  | "translationLanguage"
+  | "theme"
+  | "startMinimized"
+  | "closeToTray";
+
+export interface SettingsState {
+  provider: string;
+  model: string;
+  apiKey: string;
+  ollamaBaseUrl: string;
+  bedrockRegion: string;
+  bedrockAccessKeyId: string;
+  bedrockSecretAccessKey: string;
+  bedrockSessionToken: string;
+
+  autoRecord: boolean;
+  pollInterval: number;
+  gracePeriod: number;
+  chunkInterval: number;
+
+  transcriptionLanguage: string;
+  translationLanguage: string;
+  theme: "light" | "dark" | "system";
+  startMinimized: boolean;
+  closeToTray: boolean;
+
+  loaded: boolean;
+
+  setField: (key: SettingsField, value: string | number | boolean) => void;
+  loadFromIPC: () => Promise<void>;
+  saveToIPC: (key: string, value: string) => Promise<void>;
+}
+
+export const useSettingsStore = create<SettingsState>()(
+  persist(
+    (set) => ({
+      provider: "google",
+      model: "gemini-2.0-flash",
+      apiKey: "",
+      ollamaBaseUrl: "http://localhost:11434/api",
+      bedrockRegion: "us-east-1",
+      bedrockAccessKeyId: "",
+      bedrockSecretAccessKey: "",
+      bedrockSessionToken: "",
+
+      autoRecord: true,
+      pollInterval: 3,
+      gracePeriod: 15,
+      chunkInterval: 15,
+
+      transcriptionLanguage: "en",
+      translationLanguage: "es",
+      theme: "system",
+      startMinimized: false,
+      closeToTray: true,
+
+      loaded: false,
+
+      setField: (key, value) => {
+        set({ [key]: value });
+      },
+
+      loadFromIPC: async () => {
+        try {
+          const all = await window.electronAPI.settings.getAll();
+          const updates: Partial<SettingsState> = { loaded: true };
+
+          if (all["ai.provider"]) updates.provider = all["ai.provider"];
+          if (all["ai.model"]) updates.model = all["ai.model"];
+          if (all["ai.apiKey"]) updates.apiKey = all["ai.apiKey"];
+          if (all["ai.ollamaBaseUrl"])
+            updates.ollamaBaseUrl = all["ai.ollamaBaseUrl"];
+          if (all["ai.bedrockRegion"])
+            updates.bedrockRegion = all["ai.bedrockRegion"];
+          if (all["ai.bedrockAccessKeyId"])
+            updates.bedrockAccessKeyId = all["ai.bedrockAccessKeyId"];
+          if (all["ai.bedrockSecretAccessKey"])
+            updates.bedrockSecretAccessKey = all["ai.bedrockSecretAccessKey"];
+          if (all["ai.bedrockSessionToken"])
+            updates.bedrockSessionToken = all["ai.bedrockSessionToken"];
+
+          if (all["recording.autoRecord"])
+            updates.autoRecord = all["recording.autoRecord"] === "true";
+          if (all["recording.pollInterval"]) {
+            const pi = parseInt(all["recording.pollInterval"], 10);
+            if (!isNaN(pi) && pi > 0) updates.pollInterval = pi;
+          }
+          if (all["recording.gracePeriod"]) {
+            const gp = parseInt(all["recording.gracePeriod"], 10);
+            if (!isNaN(gp) && gp > 0) updates.gracePeriod = gp;
+          }
+          if (all["recording.chunkInterval"]) {
+            const ci = parseInt(all["recording.chunkInterval"], 10);
+            if (!isNaN(ci) && ci > 0) updates.chunkInterval = ci;
+          }
+
+          if (all["general.transcriptionLanguage"])
+            updates.transcriptionLanguage =
+              all["general.transcriptionLanguage"];
+          if (all["general.translationLanguage"])
+            updates.translationLanguage = all["general.translationLanguage"];
+          if (all["general.theme"])
+            updates.theme = all["general.theme"] as "light" | "dark" | "system";
+          if (all["general.startMinimized"])
+            updates.startMinimized = all["general.startMinimized"] === "true";
+          if (all["general.closeToTray"])
+            updates.closeToTray = all["general.closeToTray"] === "true";
+
+          set(updates);
+        } catch (err) {
+          console.warn("[SettingsStore] Failed to load settings:", err);
+          set({ loaded: true });
+        }
+      },
+
+      saveToIPC: async (key, value) => {
+        try {
+          await window.electronAPI.settings.set(key, value);
+        } catch (err) {
+          console.warn("[SettingsStore] Failed to save setting:", key, err);
+        }
+      },
+    }),
+    {
+      name: "meeting-recorder-settings",
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state) => ({
+        provider: state.provider,
+        model: state.model,
+        theme: state.theme,
+      }),
+    },
+  ),
+);

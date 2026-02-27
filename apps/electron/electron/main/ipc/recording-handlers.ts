@@ -424,7 +424,11 @@ export function registerRecordingHandlers(): void {
         }
       }
 
-      const queueItemId = addToQueue(recordingId)
+      // TQ-01 FIX: Get recording filename to persist in queue
+      const recording = getRecordingById(recordingId)
+      const filename = recording?.filename ?? undefined
+
+      const queueItemId = addToQueue(recordingId, filename)
       updateRecordingTranscriptionStatus(recordingId, 'queued')
       return queueItemId
     } catch (error) {

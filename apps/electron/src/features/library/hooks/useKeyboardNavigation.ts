@@ -53,6 +53,21 @@ export function useKeyboardNavigation({
     }
   }, [items.length, focusedIndex])
 
+  // LB-19 fix: Scroll focused item into view when focus changes
+  useEffect(() => {
+    if (focusedIndex < 0 || !containerRef.current) return
+
+    const container = containerRef.current
+    const focusedElement = container.querySelector(`[data-focus-index="${focusedIndex}"]`)
+
+    if (focusedElement) {
+      focusedElement.scrollIntoView({
+        block: 'nearest',
+        behavior: 'smooth'
+      })
+    }
+  }, [focusedIndex])
+
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
       if (!isEnabled || items.length === 0) return

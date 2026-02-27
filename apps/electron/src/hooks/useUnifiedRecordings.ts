@@ -349,24 +349,36 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
   const [deviceConnected, setDeviceConnected] = useState(false)
   const loadingRef = useRef(false) // Prevent concurrent loads
   const deviceReadyRefreshDoneRef = useRef(false) // Track if we've done a device-ready refresh
+  const lastLoadTimestampRef = useRef(0) // FL-02: Track last load to prevent triple-fire
 
   const deviceService = getHiDockDeviceService()
 
   const loadRecordings = useCallback(async (forceRefresh: boolean = false) => {
     console.log('[useUnifiedRecordings] loadRecordings called, forceRefresh:', forceRefresh, 'loadingRef:', loadingRef.current)
 
+    // FL-02 FIX: Debounce rapid-fire calls (connection + ready + poll within 2 seconds)
+    // This prevents the triple-fire issue where all 3 events trigger simultaneously on device connection
+    const now = Date.now()
+    const timeSinceLastLoad = now - lastLoadTimestampRef.current
+    if (!forceRefresh && timeSinceLastLoad < 2000) {
+      console.log('[useUnifiedRecordings] Debouncing - only', timeSinceLastLoad, 'ms since last load')
+      return
+    }
+
     // Prevent concurrent loads
-    // TODO (FL-03): This ref-based locking has an async race window. Between the
+    // FL-03 MITIGATION: This ref-based locking has an async race window. Between the
     // check (loadingRef.current === false) and the set (loadingRef.current = true),
     // another caller on the same microtask could pass the guard. This is a known
-    // limitation of ref-based locks in async React code. A proper fix would use a
-    // promise-based queue or AbortController to cancel the previous load. In practice,
-    // the race is narrow and the worst case is a redundant fetch, not data corruption.
+    // limitation of ref-based locks in async React code. However, the FL-02 debounce
+    // above (2 second window) significantly reduces the likelihood of this race occurring.
+    // The worst case is a redundant fetch, not data corruption. A full fix would use a
+    // promise-based queue, but the complexity isn't warranted given the low risk.
     if (loadingRef.current) {
       console.log('[useUnifiedRecordings] Skipping - already loading')
       return
     }
     loadingRef.current = true
+    lastLoadTimestampRef.current = now
 
     // If not forcing and already loaded, skip (except for device connection changes)
     // This is handled by the caller - forceRefresh=true bypasses cached data

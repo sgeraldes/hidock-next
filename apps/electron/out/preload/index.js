@@ -1,17 +1,28 @@
 "use strict";
 const electron = require("electron");
+function isQaLoggingEnabled() {
+  try {
+    const stored = localStorage.getItem("hidock-ui-store");
+    if (!stored) return false;
+    const { state } = JSON.parse(stored);
+    return state?.qaLogsEnabled ?? false;
+  } catch {
+    return false;
+  }
+}
 const callIPC = async (channel, ...args) => {
   const isPolling = ["recordings:getTranscriptionStatus", "db:get-recordings", "knowledge:getAll"].includes(channel);
+  const qaEnabled = isQaLoggingEnabled();
   try {
     const start = performance.now();
     const result = await electron.ipcRenderer.invoke(channel, ...args);
     const duration = (performance.now() - start).toFixed(1);
-    if (!isPolling) {
+    if (!isPolling && qaEnabled) {
       console.log(`[QA-MONITOR][IPC] ${channel} (${duration}ms)`);
     }
     return result;
   } catch (error) {
-    if (!isPolling) {
+    if (!isPolling && qaEnabled) {
       console.error(`[QA-MONITOR][IPC-ERR] ${channel}:`, error);
     }
     throw error;
@@ -45,7 +56,7 @@ const electronAPI = {
     getById: (id) => callIPC("projects:getById", id),
     create: (request) => callIPC("projects:create", request),
     update: (request) => callIPC("projects:update", request),
-    delete: (id) => callIPC("projects:delete", { id }),
+    delete: (id) => callIPC("projects:delete", id),
     tagMeeting: (request) => callIPC("projects:tagMeeting", request),
     untagMeeting: (request) => callIPC("projects:untagMeeting", request),
     getForMeeting: (meetingId) => callIPC("projects:getForMeeting", meetingId)
@@ -67,7 +78,11 @@ const electronAPI = {
     transcribe: (recordingId) => callIPC("recordings:transcribe", recordingId),
     addToQueue: (recordingId) => callIPC("recordings:addToQueue", recordingId),
     processQueue: () => callIPC("recordings:processQueue"),
-    getTranscriptionStatus: () => callIPC("recordings:getTranscriptionStatus")
+    getTranscriptionStatus: () => callIPC("recordings:getTranscriptionStatus"),
+    getTranscriptionQueue: () => callIPC("transcription:getQueue"),
+    cancelTranscription: (recordingId) => callIPC("transcription:cancel", recordingId),
+    cancelAllTranscriptions: () => callIPC("transcription:cancelAll"),
+    updateQueueItem: (id, status, errorMessage) => callIPC("transcription:updateQueueItem", id, status, errorMessage)
   },
   transcripts: {
     getByRecordingId: (recordingId) => callIPC("db:get-transcript", recordingId),
@@ -161,7 +176,8 @@ const electronAPI = {
     stats: () => callIPC("rag:stats"),
     indexTranscript: (transcript, metadata) => callIPC("rag:index-transcript", { transcript, metadata }),
     search: (query, limit) => callIPC("rag:search", { query, limit }),
-    getChunks: () => callIPC("rag:get-chunks")
+    getChunks: () => callIPC("rag:get-chunks"),
+    globalSearch: (query, limit) => callIPC("rag:globalSearch", { query, limit })
   },
   downloadService: {
     getState: () => callIPC("download-service:get-state"),
@@ -174,6 +190,7 @@ const electronAPI = {
     markFailed: (filename, error) => callIPC("download-service:mark-failed", filename, error),
     clearCompleted: () => callIPC("download-service:clear-completed"),
     cancelAll: () => callIPC("download-service:cancel-all"),
+    retryFailed: () => callIPC("download-service:retry-failed"),
     getStats: () => callIPC("download-service:get-stats"),
     onStateUpdate: (callback) => {
       const handler = (_event, state) => callback(state);
@@ -233,6 +250,50 @@ const electronAPI = {
     electron.ipcRenderer.on("recording:new", handler);
     return () => {
       electron.ipcRenderer.removeListener("recording:new", handler);
+    };
+  },
+  // Transcription Event Listeners
+  onTranscriptionStarted: (callback) => {
+    const handler = (_event, data) => callback(data);
+    electron.ipcRenderer.on("transcription:started", handler);
+    return () => {
+      electron.ipcRenderer.removeListener("transcription:started", handler);
+    };
+  },
+  onTranscriptionCompleted: (callback) => {
+    const handler = (_event, data) => callback(data);
+    electron.ipcRenderer.on("transcription:completed", handler);
+    return () => {
+      electron.ipcRenderer.removeListener("transcription:completed", handler);
+    };
+  },
+  onTranscriptionFailed: (callback) => {
+    const handler = (_event, data) => callback(data);
+    electron.ipcRenderer.on("transcription:failed", handler);
+    return () => {
+      electron.ipcRenderer.removeListener("transcription:failed", handler);
+    };
+  },
+  onTranscriptionCancelled: (callback) => {
+    const handler = (_event, data) => callback(data);
+    electron.ipcRenderer.on("transcription:cancelled", handler);
+    return () => {
+      electron.ipcRenderer.removeListener("transcription:cancelled", handler);
+    };
+  },
+  onTranscriptionAllCancelled: (callback) => {
+    const handler = (_event, data) => callback(data);
+    electron.ipcRenderer.on("transcription:all-cancelled", handler);
+    return () => {
+      electron.ipcRenderer.removeListener("transcription:all-cancelled", handler);
+    };
+  },
+  // Security Warning Listener
+  onSecurityWarning: (callback) => {
+    const handler = (_event, data) => callback(data);
+    electron.ipcRenderer.on("security-warning", handler);
+    return () => {
+      electron.ipcRenderer.removeListener("security-warning", handler);
     };
   }
 };

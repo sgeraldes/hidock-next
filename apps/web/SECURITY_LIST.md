@@ -1,6 +1,18 @@
-# Security Analysis Findings for hidock-web-app
+# Security Analysis Findings for HiDock Web Application
 
-This document outlines the security findings from a review of the `hidock-web-app` codebase.
+This document outlines the security findings from a review of the HiDock Web Application codebase.
+
+## Project Context
+
+The HiDock Web Application is the **transcription-focused** browser app (second iteration of HiDock Next). Security considerations specific to this app:
+
+1. **Browser Environment**: Unlike the Desktop App (native USB) or Electron App (local filesystem access), this app runs entirely in the browser with WebUSB.
+
+2. **API Key Management**: Users bring their own AI provider keys (OpenAI, Gemini, etc.) which must be stored securely in browser storage.
+
+3. **Zero Installation**: The zero-installation advantage means we can't rely on OS-level security features - everything must be browser-based.
+
+4. **WebUSB Access**: Direct hardware access through WebUSB requires careful permission handling and validation.
 
 ## Findings
 

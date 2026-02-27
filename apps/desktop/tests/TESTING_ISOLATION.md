@@ -1,5 +1,7 @@
 # Test Data Isolation System
 
+> **Context:** This document is for the HiDock Desktop application - the device management focused first iteration of HiDock Next. See `../README.md` for application overview.
+
 This document explains the comprehensive test data isolation system implemented to prevent tests from contaminating production data.
 
 ## Overview

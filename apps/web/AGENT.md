@@ -2,6 +2,28 @@
 
 This document contains the mandatory, non-negotiable rules and procedures for all React TypeScript development on the HiDock Web Application. As an AI assistant, you must adhere to these rules without exception. All project configurations are defined in `package.json`, `tsconfig.json`, and `vite.config.ts`.
 
+## Project Context: The Transcription-Focused Web App
+
+**Critical Understanding**: This is the **second iteration** of HiDock Next, specifically focused on **browser-based transcription access**. You must understand:
+
+1. **Role in Ecosystem**: This app evolved from the Desktop App to solve one problem: make recordings accessible and transcribable in a browser without installation.
+
+2. **Not the Full Vision**: The Electron App is the universal knowledge hub. This app focuses on:
+   - WebUSB browser access to HiDock devices
+   - AI transcription with multiple providers
+   - Zero installation (just open a URL)
+   - Team sharing and accessibility
+
+3. **Scope Limitations**: This app is intentionally limited to recordings and transcription. It does NOT handle:
+   - PDFs, documents, presentations (that's the Electron App)
+   - Calendar or email integration (that's the Electron App)
+   - Advanced knowledge management (that's the Electron App)
+
+4. **When to Reference Other Apps**:
+   - Mention Desktop App for: USB drivers, offline operation, first-time setup
+   - Mention Electron App for: integrated knowledge hub, multi-source analysis
+   - Keep this app focused on its transcription mission
+
 ---
 
 ## 1. Core Directives
@@ -185,6 +207,8 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
 ```
 
 ## 4. Multi-Provider AI Integration
+
+**Context**: Multi-provider AI support is a core differentiator for this app. Unlike Desktop App (limited providers) and unlike requiring the Electron App's full setup, this web app provides immediate access to transcription through any major AI provider.
 
 ### Required AI Provider Support
 

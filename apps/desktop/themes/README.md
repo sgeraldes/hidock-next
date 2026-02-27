@@ -1,5 +1,7 @@
 # Azure theme for ttk
 
+> **Note:** This theme is used in the HiDock Desktop application (part of the HiDock Next ecosystem). See `../README.md` for application documentation.
+
 ![Screenshot of the Azure theme](screenshot.png)
 
 ## How to use?

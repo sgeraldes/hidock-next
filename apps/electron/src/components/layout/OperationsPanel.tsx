@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { X, Download, Sparkles, RefreshCw, AlertCircle, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { useAppStore } from '@/store/useAppStore'
+import { useDownloadQueue, useDeviceSyncProgress, useDeviceSyncEta } from '@/store/useAppStore'
 import { useTranscriptionStore, useTranscriptionStats } from '@/store/features/useTranscriptionStore'
 import { useOperations } from '@/hooks/useOperations'
 import { toast } from '@/components/ui/toaster'
@@ -13,14 +13,15 @@ interface OperationsPanelProps {
 }
 
 export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
-  // TODO (SM-06): downloadQueue and transcriptionQueue are Map references. Zustand's default
-  // Object.is equality check always sees a new Map as different, causing re-renders on every
-  // store update even if the map contents haven't changed. Maps can't be shallow-compared by
-  // useShallow either. A custom equality function or normalized state shape would be needed
-  // to optimize this, but the panel is small enough that frequent re-renders are acceptable.
-  const downloadQueue = useAppStore((s) => s.downloadQueue)
-  const deviceSyncProgress = useAppStore((s) => s.deviceSyncProgress)
-  const deviceSyncEta = useAppStore((s) => s.deviceSyncEta)
+  // SM-06 fix: Use granular selector exports
+  // Note: downloadQueue is a Map reference. Zustand's default Object.is equality check
+  // always sees a new Map as different, causing re-renders on every store update even if
+  // the map contents haven't changed. A custom equality function or normalized state shape
+  // would be needed to optimize this, but the panel is small enough that frequent re-renders
+  // are acceptable.
+  const downloadQueue = useDownloadQueue()
+  const deviceSyncProgress = useDeviceSyncProgress()
+  const deviceSyncEta = useDeviceSyncEta()
   const transcriptionStats = useTranscriptionStats()
   const transcriptionQueue = useTranscriptionStore((s) => s.queue)
   const { cancelAllDownloads, cancelAllTranscriptions, cancelTranscription } = useOperations()

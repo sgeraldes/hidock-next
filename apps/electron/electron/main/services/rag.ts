@@ -113,13 +113,13 @@ class RAGService {
     // Search for relevant context
     let searchResults: SearchResult[]
     if (context.meetingId) {
-      // Search within specific meeting
+      // AI-08 FIX: Search within specific meeting and compute actual relevance scores
       const docs = await vectorStore.searchByMeeting(context.meetingId)
       const queryEmbedding = await ollama.generateEmbedding(message)
       if (queryEmbedding) {
-        // Re-rank by actual query relevance using cosine similarity
+        // Compute actual cosine similarity for each chunk
         searchResults = docs.map((doc) => {
-          let score = 0.5 // Default if embedding comparison fails
+          let score = 0.0 // Start with zero, not hardcoded 0.8
           if (doc.embedding && doc.embedding.length === queryEmbedding.length) {
             let dotProduct = 0, normA = 0, normB = 0
             for (let i = 0; i < queryEmbedding.length; i++) {
@@ -132,14 +132,16 @@ class RAGService {
           }
           return { document: doc, score }
         })
-        // Sort by actual relevance
+        // Sort by actual relevance (best matches first)
         searchResults.sort((a, b) => b.score - a.score)
       } else {
+        // Fallback: no embedding, use all docs with neutral score
         searchResults = docs.map((doc) => ({ document: doc, score: 0.5 }))
       }
+      // Take top 5 most relevant chunks
       searchResults = searchResults.slice(0, 5)
     } else {
-      // Global search
+      // Global search across all meetings
       searchResults = await vectorStore.search(message, 5)
     }
 
@@ -212,13 +214,14 @@ class RAGService {
 
     const userMessage = `Context:\n${contextText}\n\nQuestion: ${message}`
 
-    // Build messages for LLM (use history BEFORE adding current message to avoid duplicates)
+    // AI-05 FIX: Build messages for LLM using history WITHOUT duplicating current message
+    // The userMessage includes context, so we send that to LLM but only store raw message in history
     const messages: OllamaChatMessage[] = [
-      ...context.conversationHistory.slice(-6), // Keep last 3 exchanges
-      { role: 'user', content: userMessage }
+      ...context.conversationHistory.slice(-6), // Keep last 3 exchanges (raw messages only)
+      { role: 'user', content: userMessage } // Send enhanced message with context to LLM
     ]
 
-    // Add raw message to conversation history (after building messages to avoid duplicate)
+    // Store only the raw user message in history (not the context-enhanced version)
     context.conversationHistory.push({ role: 'user', content: message })
 
     // Generate response

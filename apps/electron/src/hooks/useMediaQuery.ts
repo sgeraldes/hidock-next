@@ -37,13 +37,16 @@ export function useMediaQuery(query: string): boolean {
 
 /**
  * Predefined breakpoint hooks for common use cases
+ * Mobile: ≤479px (phones in portrait)
+ * Tablet: 480px - 1023px (phones in landscape + tablets)
+ * Desktop: ≥1024px (full resizable layout)
  */
 export function useIsMobile(): boolean {
-  return useMediaQuery('(max-width: 767px)');
+  return useMediaQuery('(max-width: 479px)');
 }
 
 export function useIsTablet(): boolean {
-  return useMediaQuery('(min-width: 768px) and (max-width: 1023px)');
+  return useMediaQuery('(min-width: 480px) and (max-width: 1023px)');
 }
 
 export function useIsDesktop(): boolean {

@@ -1,8 +1,19 @@
 # HiDock Web Application 🌐
 
-**Modern Browser-Based HiDock Management with AI Transcription**
+**Browser-Based Transcription Access - The Second Iteration of HiDock Next**
 
-The HiDock Web Application is a cutting-edge React TypeScript web app that provides browser-based control over HiDock recording devices using the WebUSB API. Built with modern web technologies, it offers real-time device management and AI-powered audio transcription capabilities directly in your browser.
+The HiDock Web Application is a **transcription-focused** React TypeScript web app that makes your HiDock recordings accessible and transcribable anywhere through your browser. Part of the HiDock Next suite, this app evolved from the Desktop App to solve a specific need: **making recordings accessible via browser with AI transcription**, no installation required.
+
+## Part of the HiDock Next Ecosystem
+
+This is the **second iteration** in the evolution toward a universal knowledge hub:
+
+1. **Desktop App** - Device management focused (USB, file sync, settings)
+2. **Web App** (this app) - **Transcription focused** (browser access, AI transcription)
+3. **Audio Insights** - Insights prototype (AI-powered analysis)
+4. **Electron App** - Universal knowledge hub (integrates all capabilities, processes ANY knowledge source)
+
+For the fully integrated experience with recordings, PDFs, documents, calendar, email, and more, see the [Electron app](../electron/).
 
 [![React 18](https://img.shields.io/badge/React-18.2.0-blue.svg)](https://reactjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.2+-blue.svg)](https://www.typescriptlang.org/)
@@ -11,16 +22,27 @@ The HiDock Web Application is a cutting-edge React TypeScript web app that provi
 
 ## 🌟 Key Features
 
+### 🎯 **Why This App Exists**
+
+This app solves a specific problem: **access your HiDock recordings and transcribe them anywhere, without installing software**. While the Desktop App requires Python installation and the Electron App is the full knowledge hub, this web app lets you:
+
+- Open any browser and access your device
+- Transcribe recordings immediately with AI
+- Share a URL with team members (no setup required)
+- Use on any computer without installation
+
 ### 🌐 Browser-Native Device Communication
 
 - **WebUSB API**: Direct HiDock device communication in supported browsers
 - **Real-time Connection**: Live device detection and status monitoring
 - **HTTPS Required**: Secure connection required for WebUSB functionality
 - **Cross-Platform**: Works on Windows, macOS, and Linux in supported browsers
+- **No Drivers**: Unlike Desktop App, no USB drivers or Python setup needed
 
-### 🤖 AI-Powered Transcription
+### 🤖 AI-Powered Transcription (Primary Focus)
 
 - **Google Gemini Integration**: Advanced AI transcription and analysis
+- **Multi-Provider Support**: OpenAI, Anthropic, and other providers
 - **BYOK Model**: Bring Your Own Key for cost control and privacy
 - **Real-time Processing**: Live transcription with progress tracking
 - **Audio Insights**: Automatic summary, action items, and sentiment analysis
@@ -280,9 +302,25 @@ The app automatically detects HiDock devices. If you have connection issues:
 
 MIT License - see [LICENSE](../LICENSE) file for details.
 
+## Relationship to Other Apps
+
+### How This Fits in the Ecosystem
+
+- **Desktop App** → **Web App** → **Audio Insights** → **Electron App**
+- Each iteration built on the previous, solving more problems
+- This app (Web) focuses specifically on browser-based transcription access
+- The Electron App represents the full vision: a universal knowledge hub
+
+### When to Use Each App
+
+- **Desktop App**: First-time device setup, advanced USB management, offline operation
+- **Web App (this)**: Quick transcription access, no installation, sharing with team
+- **Audio Insights**: Prototype for testing advanced insights features
+- **Electron App**: Full integrated experience with all knowledge sources (recordings, PDFs, documents, calendar, email, etc.)
+
 ## Acknowledgments
 
-- Original HiDock Next Python application
+- Original HiDock Next Python Desktop application
 - Google Gemini AI for transcription services
 - WebUSB specification contributors
 - Open source community
@@ -290,6 +328,10 @@ MIT License - see [LICENSE](../LICENSE) file for details.
 ---
 
 **Note**: This is a community-driven project and is not officially affiliated with HiDock or its parent company.
+
+## Evolution Context
+
+This web app emerged from the Desktop App as a way to make recordings accessible anywhere without Python setup. It proved the value of browser-based access and AI transcription, which informed the design of the Electron App as the ultimate universal knowledge hub. This app remains valuable for its simplicity and zero-installation approach to transcription.
 
 ## 🎯 **Production Ready - Complete Implementation**
 

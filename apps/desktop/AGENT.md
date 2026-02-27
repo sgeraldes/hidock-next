@@ -4,6 +4,29 @@ This document contains the mandatory, non-negotiable rules and procedures for al
 
 ---
 
+## 0. Application Context
+
+### About This Application
+
+HiDock Desktop is the **first iteration** of the HiDock Next ecosystem - a device management focused application that serves as the typical **entry point** for users discovering HiDock Next.
+
+**Primary Focus:**
+- Direct USB communication with HiDock® devices (H1, H1E, P1 models)
+- File management operations (download, delete, organize)
+- Basic audio playback and visualization
+- Local-first, privacy-focused device control
+
+**Part of Larger Ecosystem:**
+This is NOT the complete vision - it's a foundational component. The broader HiDock Next suite includes:
+- **Desktop App** (this app) - USB device management entry point
+- **Web App** - Browser-based WebUSB interface
+- **Audio Insights** - AI-powered transcription and analysis
+- **Electron App** - Integrated universal knowledge hub
+
+When implementing features, consider whether they belong in this focused device management app or in the integrated Electron platform. See `../../CLAUDE.md` for ecosystem architecture.
+
+---
+
 ## 1. Core Directives
 
 - **Python Rules Apply:** You must follow all rules in `.amazonq/rules/PYTHON.md` including TDD, validation suite, and quality gates.

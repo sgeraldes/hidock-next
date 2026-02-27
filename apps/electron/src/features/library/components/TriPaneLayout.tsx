@@ -3,8 +3,8 @@
  *
  * Responsive three-column layout for the Library page:
  * - Desktop (≥1024px): Three-column resizable layout
- * - Tablet (<1024px): Two-column layout with toggleable third panel
- * - Mobile (<768px): Single-column with tab navigation
+ * - Tablet (480px-1023px): Two-column resizable layout + toggleable third panel
+ * - Mobile (<480px): Single-column with tab navigation
  *
  * Panels:
  * - Left Panel: Recording list with filters
@@ -28,6 +28,36 @@ interface TriPaneLayoutProps {
 export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLayoutProps) {
   const panelSizes = useLibraryStore((state) => state.panelSizes)
   const setPanelSizes = useLibraryStore((state) => state.setPanelSizes)
+
+  // Normalize panel sizes to ensure they total 100% and respect constraints
+  const normalizeDesktopPanelSizes = (sizes: number[]): [number, number, number] => {
+    const [left = 25, center = 45, right = 30] = sizes
+    const total = left + center + right
+
+    if (Math.abs(total - 100) < 0.1) {
+      // Already normalized
+      return [left, center, right]
+    }
+
+    // Normalize to 100% while respecting min/max constraints
+    const scale = 100 / total
+    const normalized = [
+      Math.max(20, Math.min(35, left * scale)),   // left: min 20, max 35
+      Math.max(30, center * scale),                // center: min 30, no max
+      Math.max(20, Math.min(40, right * scale))    // right: min 20, max 40
+    ]
+
+    // Ensure final total is exactly 100
+    const normalizedTotal = normalized[0] + normalized[1] + normalized[2]
+    if (Math.abs(normalizedTotal - 100) > 0.1) {
+      // Adjust center panel to make up the difference
+      normalized[1] = 100 - normalized[0] - normalized[2]
+    }
+
+    return normalized as [number, number, number]
+  }
+
+  const desktopPanelSizes = normalizeDesktopPanelSizes(panelSizes)
 
   // Responsive breakpoint detection
   const isMobile = useIsMobile()
@@ -132,34 +162,59 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
     )
   }
 
-  // Tablet Layout: Two panes with toggleable third pane
+  // Tablet Layout: Two-pane resizable layout with toggleable third pane
   if (isTablet) {
     return (
       <div className="flex h-full relative">
-        {/* Left Panel: Recording List - Fixed width */}
-        <div
-          role="region"
-          aria-label="Recording list"
-          className="w-64 border-r border-gray-200 overflow-y-auto flex-shrink-0"
+        {/* Resizable two-pane layout */}
+        <ResizablePanelGroup
+          direction="horizontal"
+          onLayout={(sizes) => {
+            // Only persist left and center sizes for tablet mode
+            setPanelSizes([sizes[0] ?? 30, sizes[1] ?? 70, panelSizes[2] ?? 30])
+          }}
+          className="flex-1"
         >
-          {leftPanel}
-        </div>
+          {/* Left Panel: Recording List */}
+          <ResizablePanel
+            defaultSize={panelSizes[0] ?? 30}
+            minSize={25}
+            maxSize={45}
+            id="left-panel-tablet"
+          >
+            <div
+              role="region"
+              aria-label="Recording list"
+              className="h-full overflow-auto"
+            >
+              {leftPanel}
+            </div>
+          </ResizablePanel>
 
-        {/* Center Panel: Source Reader - Flexible */}
-        <div
-          role="region"
-          aria-label="Recording content viewer"
-          className="flex-1 overflow-hidden"
-        >
-          {centerPanel}
-        </div>
+          <ResizableHandle withHandle />
+
+          {/* Center Panel: Source Reader */}
+          <ResizablePanel
+            defaultSize={panelSizes[1] ?? 70}
+            minSize={40}
+            id="center-panel-tablet"
+          >
+            <div
+              role="region"
+              aria-label="Recording content viewer"
+              className="h-full overflow-hidden"
+            >
+              {centerPanel}
+            </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
 
         {/* Right Panel: AI Assistant - Toggleable overlay */}
         {showRightPanelTablet && (
           <div
             role="region"
             aria-label="AI Assistant"
-            className="w-80 border-l border-gray-200 overflow-y-auto shadow-lg bg-white flex-shrink-0"
+            className="w-80 border-l border-gray-200 overflow-y-auto shadow-lg bg-white flex-shrink-0 z-10"
           >
             <div className="flex justify-between items-center p-3 border-b border-gray-200 bg-gray-50">
               <h3 className="font-semibold text-gray-900">AI Assistant</h3>
@@ -191,7 +246,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
         {!showRightPanelTablet && (
           <button
             onClick={() => setShowRightPanelTablet(true)}
-            className="fixed bottom-6 right-6 bg-blue-500 text-white px-4 py-3 rounded-full shadow-lg hover:bg-blue-600 transition-colors flex items-center gap-2"
+            className="fixed bottom-6 right-6 bg-blue-500 text-white px-4 py-3 rounded-full shadow-lg hover:bg-blue-600 transition-colors flex items-center gap-2 z-10"
             aria-label="Open AI assistant panel"
           >
             <svg
@@ -223,7 +278,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
     >
       {/* Left Panel: Recording List */}
       <ResizablePanel
-        defaultSize={panelSizes[0] ?? 25}
+        defaultSize={desktopPanelSizes[0]}
         minSize={20}
         maxSize={35}
         id="left-panel"
@@ -241,7 +296,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
 
       {/* Center Panel: Source Reader */}
       <ResizablePanel
-        defaultSize={panelSizes[1] ?? 45}
+        defaultSize={desktopPanelSizes[1]}
         minSize={30}
         id="center-panel"
       >
@@ -258,7 +313,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
 
       {/* Right Panel: AI Assistant */}
       <ResizablePanel
-        defaultSize={panelSizes[2] ?? 30}
+        defaultSize={desktopPanelSizes[2]}
         minSize={20}
         maxSize={40}
         id="right-panel"

@@ -2,6 +2,29 @@
 
 This document lists requested features and enhancements for the HiDock Web Application. It serves as a roadmap for future development and helps prioritize new functionality based on user needs and technical feasibility.
 
+## App Scope and Boundaries
+
+**Important Context**: This is the **transcription-focused** web app, the second iteration of HiDock Next. When planning features:
+
+1. **In Scope**: Features related to:
+   - WebUSB device access and basic file operations
+   - Audio transcription with multiple AI providers
+   - Recording playback and preview
+   - Browser-based accessibility (zero installation)
+
+2. **Out of Scope**: Features better suited for other apps:
+   - Advanced device management → Desktop App
+   - PDF/document processing → Electron App
+   - Calendar/email integration → Electron App
+   - Universal knowledge hub features → Electron App
+
+3. **Migration Path**: If users need advanced features beyond transcription, guide them to the Electron App (the universal knowledge hub).
+
+4. **Feature Evaluation**: Before adding a feature, ask:
+   - Does this serve the transcription mission?
+   - Would this be better in the Electron App?
+   - Does this maintain our zero-installation advantage?
+
 ## How to Use This Document
 
 **Documenting a New Feature Request:**
@@ -72,11 +95,11 @@ This document lists requested features and enhancements for the HiDock Web Appli
 - **Title:** Audio Playback System
 - **Status:** REQUESTED
 - **Description:** Implement audio playback functionality for recordings stored on the device, including streaming playback and basic controls.
-- **User Story:** As a user, I want to preview my recordings directly in the web app before downloading them, so I can identify the content I need.
-- **Justification:** Audio preview is essential for file management and matches desktop app functionality. Improves user experience by allowing content verification.
+- **User Story:** As a user, I want to preview my recordings directly in the web app before downloading them, so I can identify the content I need before transcribing.
+- **Justification:** Audio preview is essential for transcription workflow. Users need to verify content before committing to transcription (which may incur API costs). Aligns with this app's transcription focus.
 - **Files to Modify:** `src/components/AudioPlayer/index.tsx`, `src/pages/Recordings.tsx`, `src/services/audioProcessingService.ts`, `src/utils/audioUtils.ts`
-- **Implementation Notes:** Need to stream audio data from device through WebUSB, convert HDA format to playable web audio, and integrate with existing AudioPlayer component. May require buffering for smooth playback.
-- **Acceptance Criteria:** Users can play recordings directly from device, control playback (play/pause/seek), see playback progress, and experience smooth audio streaming.
+- **Implementation Notes:** Need to stream audio data from device through WebUSB, convert HDA format to playable web audio, and integrate with existing AudioPlayer component. May require buffering for smooth playback. Keep UI simple and transcription-focused.
+- **Acceptance Criteria:** Users can play recordings directly from device, control playback (play/pause/seek), see playback progress, experience smooth audio streaming, and easily proceed to transcription after preview.
 
 ### Low-Priority
 

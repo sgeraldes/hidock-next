@@ -148,6 +148,49 @@ export const useUIStore = create<UIStore>()(
   )
 )
 
+// ---- Granular Selector Exports (Performance Optimized) ----
+// Following spec-002 and architecture review requirements
+
+import { useShallow } from 'zustand/react/shallow'
+
+// ✅ Scalar selectors - no wrapper needed (Object.is works)
+export const useCurrentlyPlayingId = () => useUIStore((s) => s.currentlyPlayingId)
+export const usePlaybackCurrentTime = () => useUIStore((s) => s.playbackCurrentTime)
+export const usePlaybackDuration = () => useUIStore((s) => s.playbackDuration)
+export const useIsPlaying = () => useUIStore((s) => s.isPlaying)
+export const useWaveformLoadingId = () => useUIStore((s) => s.waveformLoadingId)
+export const useWaveformLoadedForId = () => useUIStore((s) => s.waveformLoadedForId)
+export const useQaLogsEnabled = () => useUIStore((s) => s.qaLogsEnabled)
+
+// ✅ Single reference selectors - no wrapper needed
+export const usePlaybackWaveformData = () => useUIStore((s) => s.playbackWaveformData)
+export const usePlaybackSentimentData = () => useUIStore((s) => s.playbackSentimentData)
+
+// ✅ Derived object selectors - MUST use useShallow to prevent infinite re-renders
+export const usePlaybackActions = () =>
+  useUIStore(useShallow((s) => ({
+    setCurrentlyPlaying: s.setCurrentlyPlaying,
+    setPlaybackProgress: s.setPlaybackProgress,
+    setIsPlaying: s.setIsPlaying,
+  })))
+
+export const useWaveformActions = () =>
+  useUIStore(useShallow((s) => ({
+    setWaveformData: s.setWaveformData,
+    setWaveformLoading: s.setWaveformLoading,
+    setWaveformLoadingError: s.setWaveformLoadingError,
+    setWaveformLoadedFor: s.setWaveformLoadedFor,
+  })))
+
+export const usePlaybackState = () =>
+  useUIStore(useShallow((s) => ({
+    currentlyPlayingId: s.currentlyPlayingId,
+    currentlyPlayingPath: s.currentlyPlayingPath,
+    currentTime: s.playbackCurrentTime,
+    duration: s.playbackDuration,
+    isPlaying: s.isPlaying,
+  })))
+
 // Note: When selecting multiple values from the store, use individual selectors
 // in your component to avoid infinite re-render issues. For example:
 //   const isGenerating = useUIStore((state) => state.isGeneratingOutput)

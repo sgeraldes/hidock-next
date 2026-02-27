@@ -12,33 +12,37 @@
 import { TranscriptViewer } from './TranscriptViewer'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
-import { Transcript, parseJsonArray } from '@/types'
-import { Calendar, Clock, HardDrive, Tag, ExternalLink, Download, Trash2, Wand2, RefreshCw, Play, Square } from 'lucide-react'
+import { Transcript, Meeting, parseJsonArray } from '@/types'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { formatDuration } from '@/lib/utils'
+import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
 
 interface SourceReaderProps {
   recording: UnifiedRecording | null
   transcript?: Transcript
+  meeting?: Meeting
   isPlaying?: boolean
   currentTimeMs?: number
   onPlay?: () => void
   onStop?: () => void
   onSeek?: (startMs: number, endMs?: number) => void
-  // New: Action button callbacks
+  // Action button callbacks
   onDownload?: () => void
   onTranscribe?: () => void
   onDelete?: () => void
-  // New: State for button enabling/disabling
+  // State for button enabling/disabling
   deviceConnected?: boolean
   isDownloading?: boolean
   downloadProgress?: number
   isDeleting?: boolean
+  // Navigation
+  onNavigateToMeeting?: (meetingId: string) => void
 }
 
 export function SourceReader({
   recording,
   transcript,
+  meeting,
   isPlaying = false,
   currentTimeMs = 0,
   onPlay,
@@ -50,7 +54,8 @@ export function SourceReader({
   deviceConnected = false,
   isDownloading = false,
   downloadProgress,
-  isDeleting = false
+  isDeleting = false,
+  onNavigateToMeeting
 }: SourceReaderProps) {
 
   if (!recording) {
@@ -66,65 +71,93 @@ export function SourceReader({
 
   const canPlay = hasLocalPath(recording)
 
-  const fileSize = recording.size > 0 ? `${(recording.size / 1024 / 1024).toFixed(1)} MB` : null
-
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Header with recording metadata */}
+      {/* Header with comprehensive metadata */}
       <div className="p-6 border-b space-y-4">
         <div>
-          <h2 className="text-xl font-semibold mb-2" title={recording.filename}>
+          <h2 className="text-xl font-semibold mb-4" title={recording.filename}>
             {recording.title || recording.filename}
           </h2>
 
-          {/* Tags/Category */}
-          {recording.category && (
-            <div className="flex items-center gap-2 mb-3">
-              <Tag className="h-4 w-4 text-muted-foreground" />
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-primary/10 text-primary">
-                {recording.category}
-              </span>
+          {/* Comprehensive Metadata Grid - same as SourceRowExpanded */}
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 text-sm">
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-1">Date Recorded</p>
+              <p>{(() => {
+                const date = new Date(recording.dateRecorded)
+                return !isNaN(date.getTime()) ? formatDateTime(date.toISOString()) : 'Unknown'
+              })()}</p>
             </div>
-          )}
-
-          {/* Metadata Grid */}
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            {/* Duration */}
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Clock className="h-4 w-4" />
-              <span>{formatDuration(recording.duration)}</span>
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-1">Duration</p>
+              <p>{recording.duration ? formatDuration(recording.duration) : 'Unknown'}</p>
             </div>
-
-            {/* Date */}
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Calendar className="h-4 w-4" />
-              <span>{new Date(recording.dateRecorded).toLocaleDateString()}</span>
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-1">Size</p>
+              <p>{recording.size ? formatBytes(recording.size) : 'Unknown'}</p>
             </div>
-
-            {/* File Size */}
-            {fileSize && (
-              <div className="flex items-center gap-2 text-muted-foreground">
-                <HardDrive className="h-4 w-4" />
-                <span>{fileSize}</span>
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-1">Quality</p>
+              <p className="capitalize">{recording.quality || 'Standard'}</p>
+            </div>
+            {recording.category && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground mb-1">Category</p>
+                <p className="capitalize">{recording.category}</p>
+              </div>
+            )}
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-1">Location</p>
+              <p className="capitalize">{recording.location.replace('-', ' ')}</p>
+            </div>
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-1">Transcription</p>
+              <p className="capitalize">{recording.transcriptionStatus}</p>
+            </div>
+            {recording.title && recording.filename !== recording.title && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground mb-1">Filename</p>
+                <p className="truncate" title={recording.filename}>{recording.filename}</p>
               </div>
             )}
           </div>
 
           {/* Linked Meeting */}
-          {recording.meetingSubject && (
-            <div className="mt-3 flex items-center gap-2 text-sm">
-              <ExternalLink className="h-4 w-4 text-muted-foreground" />
-              <span className="text-muted-foreground">Meeting:</span>
-              <span className="font-medium truncate">{recording.meetingSubject}</span>
+          {meeting && (
+            <div
+              className="mt-4 flex items-center gap-2 p-3 bg-muted/30 border rounded-lg cursor-pointer hover:bg-muted/50 transition-colors"
+              onClick={() => onNavigateToMeeting?.(meeting.id)}
+            >
+              <Calendar className="h-4 w-4 text-primary shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium truncate">{meeting.subject}</p>
+                <p className="text-xs text-muted-foreground">{formatDateTime(meeting.start_time)}</p>
+              </div>
             </div>
+          )}
+
+          {/* Transcript Summary */}
+          {transcript?.summary && (
+            <div className="mt-4 p-3 bg-muted/30 border rounded-lg">
+              <p className="text-xs font-medium text-muted-foreground mb-2">Summary</p>
+              <p className="text-sm leading-relaxed">{transcript.summary}</p>
+            </div>
+          )}
+
+          {/* Device-only notice */}
+          {isDeviceOnly(recording) && (
+            <p className="mt-3 text-xs text-muted-foreground italic">
+              Download this capture to play it and generate a transcript.
+            </p>
           )}
         </div>
       </div>
 
       {/* Action Buttons Section */}
       <div className="flex flex-wrap gap-2 px-6 py-3 border-b bg-muted/30">
-        {/* Play/Stop Button - only for local recordings */}
-        {canPlay && (
+        {/* Play/Stop Button - only for local recordings - LB-03 fix: Wire up onPlay callback */}
+        {canPlay && onPlay && (
           isPlaying ? (
             <Button
               variant="outline"

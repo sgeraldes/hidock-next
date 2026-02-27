@@ -1,20 +1,36 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+// --- QA Logging Helper (localStorage bridge for context isolation) ---
+// NOTE: Cannot check qaLogsEnabled directly due to context isolation.
+// Preload script cannot access renderer's Zustand store, so we read from
+// localStorage where useUIStore persists state via Zustand persist middleware.
+function isQaLoggingEnabled(): boolean {
+  try {
+    const stored = localStorage.getItem('hidock-ui-store')
+    if (!stored) return false
+    const { state } = JSON.parse(stored)
+    return state?.qaLogsEnabled ?? false
+  } catch {
+    return false // Fail silently if localStorage unavailable or malformed
+  }
+}
+
 // --- IPC Logging Wrapper ---
 const callIPC = async (channel: string, ...args: any[]) => {
   const isPolling = ['recordings:getTranscriptionStatus', 'db:get-recordings', 'knowledge:getAll'].includes(channel);
-  
+  const qaEnabled = isQaLoggingEnabled();
+
   try {
     const start = performance.now();
     const result = await ipcRenderer.invoke(channel, ...args);
     const duration = (performance.now() - start).toFixed(1);
-    
-    if (!isPolling) {
+
+    if (!isPolling && qaEnabled) {
         console.log(`[QA-MONITOR][IPC] ${channel} (${duration}ms)`);
     }
     return result;
   } catch (error) {
-    if (!isPolling) {
+    if (!isPolling && qaEnabled) {
         console.error(`[QA-MONITOR][IPC-ERR] ${channel}:`, error);
     }
     throw error;
