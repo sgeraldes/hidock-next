@@ -12,7 +12,8 @@ import {
   Tag,
   ChevronRight,
   Filter,
-  UserPlus
+  UserPlus,
+  Trash2
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -41,11 +42,10 @@ export function People() {
   const loadPeople = useCallback(async () => {
     setLoading(true)
     try {
-      // TODO(PE-08): Type filter is client-side only and will miss contacts beyond this hardcoded
-      // limit. Consider passing the type filter to the IPC handler for server-side filtering.
-      // TODO(PE-09): Implement pagination or virtual scroll for large contact lists.
+      // Server-side type filter (spec-013)
       const result = await window.electronAPI.contacts.getAll({
         search: searchQuery,
+        type: typeFilter,
         limit: 100
       })
       if (result.success) {
@@ -63,7 +63,7 @@ export function People() {
     } finally {
       setLoading(false)
     }
-  }, [searchQuery])
+  }, [searchQuery, typeFilter])
 
   // PE-05: Debounce search to avoid firing IPC on every keystroke
   useEffect(() => {
@@ -73,12 +73,29 @@ export function People() {
     return () => clearTimeout(timer)
   }, [loadPeople])
 
-  const filteredPeople = useMemo(() => {
-    return people.filter(p => {
-      if (typeFilter !== 'all' && p.type !== typeFilter) return false
-      return true
-    })
-  }, [people, typeFilter])
+  const handleDelete = useCallback(async (personId: string, personName: string, event: React.MouseEvent) => {
+    event.stopPropagation() // Prevent card click navigation
+
+    if (!confirm(`Delete ${personName}? This will permanently remove this contact and all their meeting associations.`)) {
+      return
+    }
+
+    try {
+      const result = await window.electronAPI.contacts.delete(personId)
+      if (result.success) {
+        toast.success('Contact deleted', `${personName} has been removed`)
+        await loadPeople() // Refresh list
+      } else {
+        toast.error('Failed to delete contact', result.error || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to delete contact:', error)
+      toast.error('Failed to delete contact', error instanceof Error ? error.message : 'An unexpected error occurred')
+    }
+  }, [loadPeople])
+
+  // Server-side filtering now, so no need for client-side filter
+  const filteredPeople = people
 
   const getTypeColor = (type: PersonType) => {
     switch (type) {
@@ -196,7 +213,18 @@ export function People() {
                           </span>
                         </div>
                       </div>
-                      <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 w-7 p-0 hover:bg-destructive/10 hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                          onClick={(e) => handleDelete(person.id, person.name, e)}
+                          title="Delete contact"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                        <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
+                      </div>
                     </div>
                   </CardHeader>
                   <CardContent className="pt-4 space-y-3">

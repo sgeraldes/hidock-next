@@ -12,9 +12,11 @@ import { UUIDSchema, OptionalStringSchema, SearchPaginationSchema } from './comm
 // =============================================================================
 
 /**
- * Get contacts request with optional search and pagination
+ * Get contacts request with optional search, type filter, and pagination
  */
-export const GetContactsRequestSchema = SearchPaginationSchema
+export const GetContactsRequestSchema = SearchPaginationSchema.extend({
+  type: z.enum(['team', 'candidate', 'customer', 'external', 'unknown', 'all']).optional()
+})
 
 /**
  * Get contact by ID request

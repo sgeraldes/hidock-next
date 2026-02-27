@@ -6,7 +6,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 19
+const SCHEMA_VERSION = 20
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -336,7 +336,7 @@ CREATE TABLE IF NOT EXISTS synced_files (
 CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    email TEXT UNIQUE,
+    email TEXT,
     type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown',
     role TEXT,
     company TEXT,
@@ -1016,6 +1016,76 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v19 complete: transcription_queue filename column added')
+  },
+  20: () => {
+    // v20: Phase A consolidated fixes (spec-013, spec-010, spec-014)
+    console.log('Running migration to schema v20: Phase A consolidated fixes')
+    const database = getDatabase()
+
+    // 1. spec-013: Remove UNIQUE constraint on contacts.email (allows multiple NULL)
+    console.log('[Migration v20] Removing UNIQUE constraint on contacts.email')
+    try {
+      // SQLite requires table recreation to remove constraints
+      database.run(`
+        CREATE TABLE contacts_new (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          email TEXT,
+          type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown',
+          role TEXT,
+          company TEXT,
+          notes TEXT,
+          tags TEXT,
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          meeting_count INTEGER DEFAULT 0,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+      database.run('INSERT INTO contacts_new SELECT * FROM contacts')
+      database.run('DROP TABLE contacts')
+      database.run('ALTER TABLE contacts_new RENAME TO contacts')
+      console.log('[Migration v20] contacts.email UNIQUE constraint removed')
+    } catch (e) {
+      console.warn('[Migration v20] Contacts email constraint fix failed:', e)
+    }
+
+    // 2. spec-010: Add search indexes for knowledge table
+    console.log('[Migration v20] Adding search indexes')
+    try {
+      database.run('CREATE INDEX IF NOT EXISTS idx_knowledge_title ON knowledge_captures(title)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_knowledge_summary ON knowledge_captures(summary)')
+      console.log('[Migration v20] Search indexes created')
+    } catch (e) {
+      console.warn('[Migration v20] Search index creation failed:', e)
+    }
+
+    // 3. spec-014: Add transcription queue progress columns
+    console.log('[Migration v20] Adding transcription queue columns')
+    const tqTableInfo = database.exec('PRAGMA table_info(transcription_queue)')
+    if (tqTableInfo.length > 0 && tqTableInfo[0].values) {
+      const tqColumns = tqTableInfo[0].values.map((row: any) => row[1])
+
+      if (!tqColumns.includes('retry_count')) {
+        try {
+          database.run('ALTER TABLE transcription_queue ADD COLUMN retry_count INTEGER DEFAULT 0')
+          console.log('[Migration v20] Added retry_count column')
+        } catch (e) {
+          console.warn('[Migration v20] Failed to add retry_count:', e)
+        }
+      }
+
+      if (!tqColumns.includes('progress')) {
+        try {
+          database.run('ALTER TABLE transcription_queue ADD COLUMN progress INTEGER DEFAULT 0')
+          console.log('[Migration v20] Added progress column')
+        } catch (e) {
+          console.warn('[Migration v20] Failed to add progress:', e)
+        }
+      }
+    }
+
+    console.log('Migration v20 complete: Phase A consolidated fixes applied')
   }
 
 }
@@ -2209,17 +2279,27 @@ export interface MeetingContact {
   role: ContactRole
 }
 
-export function getContacts(search?: string, limit = 100, offset = 0): { contacts: Contact[]; total: number } {
+export function getContacts(search?: string, type?: string, limit = 100, offset = 0): { contacts: Contact[]; total: number } {
   let countSql = 'SELECT COUNT(*) as count FROM contacts'
   let sql = 'SELECT * FROM contacts'
   const params: unknown[] = []
+  const whereClauses: string[] = []
 
   if (search) {
     const escaped = escapeLikePattern(search)
-    const searchClause = " WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\'"
-    countSql += searchClause
-    sql += searchClause
+    whereClauses.push("(name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\')")
     params.push(`%${escaped}%`, `%${escaped}%`, `%${escaped}%`, `%${escaped}%`)
+  }
+
+  if (type && type !== 'all') {
+    whereClauses.push('type = ?')
+    params.push(type)
+  }
+
+  if (whereClauses.length > 0) {
+    const whereClause = ' WHERE ' + whereClauses.join(' AND ')
+    countSql += whereClause
+    sql += whereClause
   }
 
   sql += ' ORDER BY meeting_count DESC, last_seen_at DESC LIMIT ? OFFSET ?'
@@ -2327,6 +2407,14 @@ export function updateContact(id: string, updates: Partial<Contact>): void {
 
 export function updateContactNotes(id: string, notes: string | null): void {
   run('UPDATE contacts SET notes = ? WHERE id = ?', [notes, id])
+}
+
+/**
+ * Delete a contact by ID.
+ * Cascade deletion of meeting_contacts is handled by FK constraint.
+ */
+export function deleteContact(id: string): void {
+  run('DELETE FROM contacts WHERE id = ?', [id])
 }
 
 export function getMeetingsForContact(contactId: string): Meeting[] {

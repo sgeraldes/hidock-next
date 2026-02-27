@@ -9,6 +9,7 @@ import {
   getContacts,
   getContactById,
   updateContact,
+  deleteContact,
   getMeetingsForContact,
   getContactsForMeeting,
   Contact
@@ -34,8 +35,8 @@ export function registerContactsHandlers(): void {
           return error('VALIDATION_ERROR', 'Invalid request parameters', parsed.error.format())
         }
 
-        const { search, limit, offset } = parsed.data
-        const result = getContacts(search, limit, offset)
+        const { search, type, limit, offset } = parsed.data
+        const result = getContacts(search, type, limit, offset)
 
         return success({
           contacts: result.contacts.map(mapToPerson),
@@ -117,6 +118,31 @@ export function registerContactsHandlers(): void {
       } catch (err) {
         console.error('contacts:update error:', err)
         return error('DATABASE_ERROR', 'Failed to update contact', err)
+      }
+    }
+  )
+
+  /**
+   * Delete contact by ID
+   */
+  ipcMain.handle(
+    'contacts:delete',
+    async (_, id: unknown): Promise<Result<void>> => {
+      try {
+        if (typeof id !== 'string') {
+          return error('VALIDATION_ERROR', 'Contact ID must be a string')
+        }
+
+        const contact = getContactById(id)
+        if (!contact) {
+          return error('NOT_FOUND', `Contact with ID ${id} not found`)
+        }
+
+        deleteContact(id)
+        return success(undefined)
+      } catch (err) {
+        console.error('contacts:delete error:', err)
+        return error('DATABASE_ERROR', 'Failed to delete contact', err)
       }
     }
   )
