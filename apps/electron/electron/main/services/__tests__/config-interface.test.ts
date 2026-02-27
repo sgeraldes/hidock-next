@@ -9,7 +9,7 @@
  * Fix: Add the missing fields to AppConfig.ui interface and default config.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 
 // We'll test by importing the config module and checking the default config has the fields
 describe('FIX-014: Config interface completeness', () => {

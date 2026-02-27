@@ -18,8 +18,6 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 
 describe('FIX-013: Path case sensitivity', () => {
-  const isWindows = process.platform === 'win32'
-
   it('demonstrates that startsWith is case-sensitive', () => {
     const upper = 'C:\\Users\\Sebastian\\HiDock\\recordings'
     const lower = 'C:\\users\\sebastian\\hidock\\recordings'

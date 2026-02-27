@@ -6,7 +6,7 @@
  * transcript insertion, status transitions, and schema migrations.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // ---------------------------------------------------------------------------
 // Mock helpers: sql.js Database object
@@ -120,7 +120,7 @@ const FULL_COLUMNS_PRAGMA = [{ values: [
 
 /** Standard exec mock: all columns present, at schema version 18. */
 function setupStandardExecMock(schemaVersion = 18) {
-  mockDatabase.exec.mockImplementation((sql: string) => {
+  ;(mockDatabase.exec as any).mockImplementation((sql: string) => {
     if (sql.includes('PRAGMA table_info')) {
       return FULL_COLUMNS_PRAGMA
     }
@@ -174,7 +174,7 @@ describe('Database Service', () => {
   // =========================================================================
   describe('initializeDatabase()', () => {
     it('should create a new database when no file exists on disk', async () => {
-      const dbModule = await initTestDatabase()
+      await initTestDatabase()
 
       // Should call new Database() (fresh db, no buffer arg)
       expect(MockSQLDatabase).toHaveBeenCalled()
@@ -383,8 +383,8 @@ describe('Database Service', () => {
       expect(result[1].status).toBe('processing')
 
       // SQL should contain the LEFT JOIN but no WHERE clause
-      const prepareCalls = mockDatabase.prepare.mock.calls
-      const lastPrepareSQL = prepareCalls[prepareCalls.length - 1][0] as string
+      const prepareCalls = mockDatabase.prepare.mock.calls as any[]
+      const lastPrepareSQL = (prepareCalls[prepareCalls.length - 1]?.[0] || '') as string
       expect(lastPrepareSQL).toContain('LEFT JOIN recordings')
       expect(lastPrepareSQL).not.toContain('WHERE tq.status')
     })
@@ -401,8 +401,8 @@ describe('Database Service', () => {
       expect(result).toHaveLength(1)
 
       // SQL should include WHERE clause with status filter
-      const prepareCalls = mockDatabase.prepare.mock.calls
-      const lastPrepareSQL = prepareCalls[prepareCalls.length - 1][0] as string
+      const prepareCalls = mockDatabase.prepare.mock.calls as any[]
+      const lastPrepareSQL = (prepareCalls[prepareCalls.length - 1]?.[0] || '') as string
       expect(lastPrepareSQL).toContain('WHERE tq.status')
 
       // Should bind with the status parameter
@@ -655,7 +655,7 @@ describe('Database Service', () => {
       const fs = await import('fs')
       ;(fs.existsSync as any).mockReturnValue(false)
 
-      mockDatabase.exec.mockImplementation((sql: string) => {
+      ;(mockDatabase.exec as any).mockImplementation((sql: string) => {
         if (sql.includes('PRAGMA table_info(actionables)')) {
           // actionables WITHOUT confidence column
           return [{ values: [
@@ -699,7 +699,7 @@ describe('Database Service', () => {
       const fs = await import('fs')
       ;(fs.existsSync as any).mockReturnValue(false)
 
-      mockDatabase.exec.mockImplementation((sql: string) => {
+      ;(mockDatabase.exec as any).mockImplementation((sql: string) => {
         if (sql.includes('PRAGMA table_info(actionables)')) {
           // actionables WITH confidence column already present
           return [{ values: [
@@ -744,7 +744,7 @@ describe('Database Service', () => {
       const fs = await import('fs')
       ;(fs.existsSync as any).mockReturnValue(false)
 
-      mockDatabase.exec.mockImplementation((sql: string) => {
+      ;(mockDatabase.exec as any).mockImplementation((sql: string) => {
         if (sql.includes('PRAGMA table_info(actionables)')) {
           return [{ values: [
             [0, 'id', 'TEXT', 0, null, 1],
