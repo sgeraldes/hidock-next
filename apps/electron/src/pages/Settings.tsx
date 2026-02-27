@@ -144,16 +144,14 @@ export function Settings() {
     const previousSyncEnabled = config?.calendar.syncEnabled ?? true
     const previousSyncInterval = config?.calendar.syncIntervalMinutes || 15
 
-    const updates: Partial<AppConfig> = {
-      calendar: {
-        icsUrl,
-        syncEnabled,
-        syncIntervalMinutes: syncInterval
-      }
+    const updates = {
+      icsUrl,
+      syncEnabled,
+      syncIntervalMinutes: syncInterval
     }
 
-    // Validate before save
-    const validationError = validateConfig(updates)
+    // Validate before save - validateConfig accepts any shape
+    const validationError = validateConfig({ calendar: updates } as Partial<AppConfig>)
     if (validationError) {
       toast.error('Validation Error', validationError)
       return
@@ -161,7 +159,8 @@ export function Settings() {
 
     setSaving(true)
     try {
-      await updateConfig('calendar', updates.calendar!)
+      // TypeScript doesn't infer Partial correctly, use type assertion
+      await updateConfig('calendar', updates as any)
 
       toast.success('Settings Saved', 'Calendar settings have been updated')
     } catch (error) {
@@ -188,15 +187,13 @@ export function Settings() {
     const previousApiKey = config?.transcription.geminiApiKey || ''
     const previousModel = config?.transcription.geminiModel || 'gemini-3-pro-preview'
 
-    const updates: Partial<AppConfig> = {
-      transcription: {
-        geminiApiKey,
-        geminiModel
-      }
+    const updates = {
+      geminiApiKey,
+      geminiModel
     }
 
     // Validate before save
-    const validationError = validateConfig(updates)
+    const validationError = validateConfig({ transcription: updates } as Partial<AppConfig>)
     if (validationError) {
       toast.error('Validation Error', validationError)
       return
@@ -204,7 +201,7 @@ export function Settings() {
 
     setSaving(true)
     try {
-      await updateConfig('transcription', updates.transcription!)
+      await updateConfig('transcription', updates as any)
 
       toast.success('Settings Saved', `Transcription provider set to ${geminiModel}`)
     } catch (error) {
@@ -230,17 +227,19 @@ export function Settings() {
     const previousChatProvider = config?.chat.provider || 'gemini'
     const previousOllamaUrl = config?.embeddings.ollamaBaseUrl || 'http://localhost:11434'
 
-    const updates: Partial<AppConfig> = {
-      chat: {
-        provider: chatProvider
-      },
-      embeddings: {
-        ollamaBaseUrl: ollamaUrl
-      }
+    const chatUpdates = {
+      provider: chatProvider
+    }
+
+    const embeddingsUpdates = {
+      ollamaBaseUrl: ollamaUrl
     }
 
     // Validate before save
-    const validationError = validateConfig(updates)
+    const validationError = validateConfig({
+      chat: chatUpdates,
+      embeddings: embeddingsUpdates
+    } as Partial<AppConfig>)
     if (validationError) {
       toast.error('Validation Error', validationError)
       return
@@ -248,8 +247,8 @@ export function Settings() {
 
     setSaving(true)
     try {
-      await updateConfig('chat', updates.chat!)
-      await updateConfig('embeddings', updates.embeddings!)
+      await updateConfig('chat', chatUpdates as any)
+      await updateConfig('embeddings', embeddingsUpdates as any)
 
       toast.success('Settings Saved', `Chat provider set to ${chatProvider}`)
     } catch (error) {
