@@ -238,10 +238,10 @@ app.whenReady().then(async () => {
   // Allow all USB protected classes - required for some USB devices that use
   // protected USB classes (like audio, HID, mass storage, etc.)
   // This fixes "Unable to claim interface" errors on Windows
-  session.defaultSession.setUSBProtectedClassesHandler((details) => {
+  session.defaultSession.setUSBProtectedClassesHandler(() => {
     // Return empty array to protect nothing (allow all classes)
     // This is necessary for HiDock devices which may use protected USB classes
-    console.log('[USB] Protected classes request for:', details.origin)
+    console.log('[USB] Protected classes request received')
     return []
   })
 
