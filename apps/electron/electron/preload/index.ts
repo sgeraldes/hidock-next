@@ -1,36 +1,20 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-// --- QA Logging Helper (localStorage bridge for context isolation) ---
-// NOTE: Cannot check qaLogsEnabled directly due to context isolation.
-// Preload script cannot access renderer's Zustand store, so we read from
-// localStorage where useUIStore persists state via Zustand persist middleware.
-function isQaLoggingEnabled(): boolean {
-  try {
-    const stored = localStorage.getItem('hidock-ui-store')
-    if (!stored) return false
-    const { state } = JSON.parse(stored)
-    return state?.qaLogsEnabled ?? false
-  } catch {
-    return false // Fail silently if localStorage unavailable or malformed
-  }
-}
-
 // --- IPC Logging Wrapper ---
 const callIPC = async (channel: string, ...args: any[]) => {
   const isPolling = ['recordings:getTranscriptionStatus', 'db:get-recordings', 'knowledge:getAll'].includes(channel);
-  const qaEnabled = isQaLoggingEnabled();
 
   try {
     const start = performance.now();
     const result = await ipcRenderer.invoke(channel, ...args);
     const duration = (performance.now() - start).toFixed(1);
 
-    if (!isPolling && qaEnabled) {
+    if (!isPolling) {
         console.log(`[QA-MONITOR][IPC] ${channel} (${duration}ms)`);
     }
     return result;
   } catch (error) {
-    if (!isPolling && qaEnabled) {
+    if (!isPolling) {
         console.error(`[QA-MONITOR][IPC-ERR] ${channel}:`, error);
     }
     throw error;
@@ -98,7 +82,6 @@ export interface ElectronAPI {
     getAll: (request?: GetContactsRequest) => Promise<Result<GetContactsResponse>>
     getById: (id: string) => Promise<Result<ContactWithMeetings>>
     update: (request: UpdateContactRequest) => Promise<Result<Contact>>
-    delete: (id: string) => Promise<Result<void>>
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
   }
 
@@ -120,6 +103,8 @@ export interface ElectronAPI {
     getById: (id: string) => Promise<any>
     getForMeeting: (meetingId: string) => Promise<any[]>
     updateStatus: (id: string, status: string) => Promise<any>
+    updateRecordingStatus: (id: string, status: string) => Promise<{ success: boolean; data?: any; error?: string }>
+    updateTranscriptionStatus: (id: string, status: string) => Promise<{ success: boolean; data?: any; error?: string }>
     linkToMeeting: (recordingId: string, meetingId: string, confidence: number, method: string) => Promise<any>
     delete: (id: string) => Promise<boolean>
     // Recording-Meeting linking dialog methods
@@ -160,8 +145,8 @@ export interface ElectronAPI {
 
   // Actionables
   actionables: {
-    getById: (id: string) => Promise<Actionable | null>
     getAll: (options?: { status?: string }) => Promise<Actionable[]>
+    getByMeeting: (meetingId: string) => Promise<Actionable[]>
     updateStatus: (id: string, status: string) => Promise<{ success: boolean; error?: string }>
     generateOutput: (actionableId: string) => Promise<{ success: boolean; error?: string; data?: any }>
   }
@@ -324,9 +309,12 @@ export interface ElectronAPI {
     updateProgress: (filename: string, bytesReceived: number) => Promise<void>
     markFailed: (filename: string, error: string) => Promise<void>
     clearCompleted: () => Promise<void>
+    cancel: (filename: string) => Promise<{ success: boolean; error?: string }>
     cancelAll: () => Promise<void>
     retryFailed: () => Promise<number>
     getStats: () => Promise<{ totalSynced: number; pendingInQueue: number; failedInQueue: number }>
+    checkStalled: () => Promise<number>
+    cancelActive: (reason?: string) => Promise<number>
     onStateUpdate: (callback: (state: any) => void) => () => void
   }
 
@@ -420,6 +408,7 @@ export interface ElectronAPI {
 
   // Transcription Events
   onTranscriptionStarted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => () => void
+  onTranscriptionProgress: (callback: (data: { queueItemId: string; progress: number; stage: string }) => void) => () => void
   onTranscriptionCompleted: (callback: (data: { queueItemId?: string; recordingId: string }) => void) => () => void
   onTranscriptionFailed: (callback: (data: { queueItemId?: string; recordingId: string; error: string }) => void) => () => void
   onTranscriptionCancelled: (callback: (data: { recordingId: string }) => void) => () => void
@@ -454,7 +443,6 @@ const electronAPI: ElectronAPI = {
     getAll: (request) => callIPC('contacts:getAll', request),
     getById: (id) => callIPC('contacts:getById', id),
     update: (request) => callIPC('contacts:update', request),
-    delete: (id) => callIPC('contacts:delete', id),
     getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
   },
 
@@ -474,6 +462,8 @@ const electronAPI: ElectronAPI = {
     getById: (id) => callIPC('db:get-recording', id),
     getForMeeting: (meetingId) => callIPC('db:get-recordings-for-meeting', meetingId),
     updateStatus: (id, status) => callIPC('db:update-recording-status', id, status),
+    updateRecordingStatus: (id, status) => callIPC('recordings:updateStatus', id, status),
+    updateTranscriptionStatus: (id, status) => callIPC('recordings:updateTranscriptionStatus', id, status),
     linkToMeeting: (recordingId, meetingId, confidence, method) =>
       callIPC('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
     delete: (id) => callIPC('recordings:delete', id),
@@ -511,8 +501,8 @@ const electronAPI: ElectronAPI = {
   },
 
   actionables: {
-    getById: (id) => callIPC('actionables:getById', id),
     getAll: (options) => callIPC('actionables:getAll', options),
+    getByMeeting: (meetingId) => callIPC('actionables:getByMeeting', meetingId),
     updateStatus: (id, status) => callIPC('actionables:updateStatus', id, status),
     generateOutput: (actionableId) => callIPC('actionables:generateOutput', actionableId)
   },
@@ -616,9 +606,12 @@ const electronAPI: ElectronAPI = {
     updateProgress: (filename, bytesReceived) => callIPC('download-service:update-progress', filename, bytesReceived),
     markFailed: (filename, error) => callIPC('download-service:mark-failed', filename, error),
     clearCompleted: () => callIPC('download-service:clear-completed'),
+    cancel: (filename) => callIPC('download-service:cancel', filename),
     cancelAll: () => callIPC('download-service:cancel-all'),
     retryFailed: () => callIPC('download-service:retry-failed'),
     getStats: () => callIPC('download-service:get-stats'),
+    checkStalled: () => callIPC('download-service:check-stalled'),
+    cancelActive: (reason?: string) => callIPC('download-service:cancel-active', reason),
     onStateUpdate: (callback) => {
       const handler = (_event: any, state: any) => callback(state)
       ipcRenderer.on('download-service:state-update', handler)
@@ -697,6 +690,14 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('transcription:started', handler)
     return () => {
       ipcRenderer.removeListener('transcription:started', handler)
+    }
+  },
+
+  onTranscriptionProgress: (callback: (data: { queueItemId: string; progress: number; stage: string }) => void) => {
+    const handler = (_event: any, data: { queueItemId: string; progress: number; stage: string }) => callback(data)
+    ipcRenderer.on('transcription:progress', handler)
+    return () => {
+      ipcRenderer.removeListener('transcription:progress', handler)
     }
   },
 

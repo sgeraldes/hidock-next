@@ -27,6 +27,9 @@ export function NavigationLogger() {
   return null
 }
 
+// Store cleanup functions for all QA monitor listeners
+let cleanupFunctions: (() => void)[] = []
+
 export function initInteractionLogger() {
   if (IS_PROD) return
   if (window.hasInitializedInteractionLogger) return
@@ -40,24 +43,56 @@ export function initInteractionLogger() {
     return `${el.tagName.toLowerCase()}${id}${role}${ariaLabel}${text}`
   }
 
-  window.addEventListener('click', (event) => {
+  const clickHandler = (event: MouseEvent) => {
     if (!isQaEnabled()) return
     const target = event.target as HTMLElement
     const interactive = target.closest('button, a, input, select, [role="button"]') || target
     console.log(`[QA-MONITOR] Interaction: Clicked ${getElementLabel(interactive as HTMLElement)}`)
-  }, true)
+  }
+
+  window.addEventListener('click', clickHandler, true)
+
+  // Store cleanup function
+  cleanupFunctions.push(() => {
+    window.removeEventListener('click', clickHandler, true)
+  })
 }
 
 export function initErrorLogger() {
   if (IS_PROD) return
-  window.addEventListener('error', (event) => {
+
+  const errorHandler = (event: ErrorEvent) => {
     if (!isQaEnabled()) return
     console.error(`[QA-MONITOR] Uncaught Error: ${event.message}`, event.error)
-  })
-  window.addEventListener('unhandledrejection', (event) => {
+  }
+
+  const rejectionHandler = (event: PromiseRejectionEvent) => {
     if (!isQaEnabled()) return
     console.error(`[QA-MONITOR] Unhandled Promise Rejection:`, event.reason)
-  })
+  }
+
+  window.addEventListener('error', errorHandler)
+  window.addEventListener('unhandledrejection', rejectionHandler)
+
+  // Store cleanup functions
+  cleanupFunctions.push(
+    () => window.removeEventListener('error', errorHandler),
+    () => window.removeEventListener('unhandledrejection', rejectionHandler)
+  )
+}
+
+/**
+ * Clean up all QA monitor event listeners.
+ * Call this when unmounting the app or disabling QA monitoring.
+ */
+export function cleanupQAMonitor() {
+  if (IS_PROD) return
+
+  cleanupFunctions.forEach(cleanup => cleanup())
+  cleanupFunctions = []
+  window.hasInitializedInteractionLogger = false
+
+  console.log('[QA-MONITOR] All event listeners cleaned up')
 }
 
 export function logStateChange(storeName: string, partialState: any) {

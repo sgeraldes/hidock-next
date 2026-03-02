@@ -28,7 +28,8 @@ import {
   startTranscriptionProcessor,
   stopTranscriptionProcessor,
   cancelTranscription,
-  cancelAllTranscriptions
+  cancelAllTranscriptions,
+  processQueueManually
 } from '../services/transcription'
 import { getQueueItems, addToQueue, updateQueueItem } from '../services/database'
 import { getConfig } from '../services/config'
@@ -37,7 +38,9 @@ import {
   DeleteRecordingSchema,
   LinkRecordingToMeetingSchema,
   UnlinkRecordingFromMeetingSchema,
-  TranscribeRecordingSchema
+  TranscribeRecordingSchema,
+  UpdateRecordingStatusSchema,
+  UpdateTranscriptionStatusSchema
 } from './validation'
 
 export interface RecordingWithTranscript extends Recording {
@@ -424,12 +427,10 @@ export function registerRecordingHandlers(): void {
         }
       }
 
-      // TQ-01 FIX: Get recording filename to persist in queue
-      const recording = getRecordingById(recordingId)
-      const filename = recording?.filename ?? undefined
-
-      const queueItemId = addToQueue(recordingId, filename)
+      const queueItemId = addToQueue(recordingId)
       updateRecordingTranscriptionStatus(recordingId, 'queued')
+      // spec-005: Trigger immediate queue processing after adding
+      processQueueManually()
       return queueItemId
     } catch (error) {
       console.error('recordings:addToQueue error:', error)
@@ -445,6 +446,65 @@ export function registerRecordingHandlers(): void {
     } catch (error) {
       console.error('recordings:processQueue error:', error)
       return false
+    }
+  })
+
+  // spec-005: Retry a failed transcription
+  ipcMain.handle('transcription:retry', async (_, recordingId: string) => {
+    try {
+      const result = TranscribeRecordingSchema.safeParse({ recordingId })
+      if (!result.success) {
+        console.error('transcription:retry validation error:', result.error)
+        return { success: false, error: result.error.issues[0]?.message || 'Invalid request' }
+      }
+
+      const queueItemId = addToQueue(result.data.recordingId)
+      updateRecordingTranscriptionStatus(result.data.recordingId, 'pending')
+      processQueueManually()
+      return { success: true, queueItemId }
+    } catch (error) {
+      console.error('transcription:retry error:', error)
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
+  // Update recording status
+  ipcMain.handle('recordings:updateStatus', async (_, id: unknown, status: unknown): Promise<{ success: boolean; data?: Recording; error?: string }> => {
+    try {
+      const result = UpdateRecordingStatusSchema.safeParse({ id, status })
+      if (!result.success) {
+        console.error('recordings:updateStatus validation error:', result.error)
+        return { success: false, error: result.error.issues[0]?.message || 'Invalid request parameters' }
+      }
+      updateRecordingStatus(result.data.id, result.data.status)
+      const recording = getRecordingById(result.data.id)
+      if (!recording) {
+        return { success: false, error: 'Recording not found after status update' }
+      }
+      return { success: true, data: recording }
+    } catch (error) {
+      console.error('recordings:updateStatus error:', error)
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' }
+    }
+  })
+
+  // Update transcription status
+  ipcMain.handle('recordings:updateTranscriptionStatus', async (_, id: unknown, status: unknown): Promise<{ success: boolean; data?: Recording; error?: string }> => {
+    try {
+      const result = UpdateTranscriptionStatusSchema.safeParse({ id, status })
+      if (!result.success) {
+        console.error('recordings:updateTranscriptionStatus validation error:', result.error)
+        return { success: false, error: result.error.issues[0]?.message || 'Invalid request parameters' }
+      }
+      updateRecordingTranscriptionStatus(result.data.id, result.data.status)
+      const recording = getRecordingById(result.data.id)
+      if (!recording) {
+        return { success: false, error: 'Recording not found after transcription status update' }
+      }
+      return { success: true, data: recording }
+    } catch (error) {
+      console.error('recordings:updateTranscriptionStatus error:', error)
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' }
     }
   })
 

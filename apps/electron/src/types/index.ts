@@ -28,6 +28,7 @@
 // =============================================================================
 
 export * from './stores'
+export type { Actionable } from './knowledge'
 
 // =============================================================================
 // Existing Types
@@ -101,6 +102,7 @@ export interface RecordingWithTranscript extends Recording {
 export interface MeetingDetails {
   meeting: Meeting
   recordings: RecordingWithTranscript[]
+  actionables?: Actionable[]
 }
 
 export interface ChatMessage {
@@ -201,11 +203,7 @@ export interface Contact {
   id: string
   name: string
   email: string | null
-  type: string
-  role: string | null
-  company: string | null
   notes: string | null
-  tags: string | null // JSON string
   first_seen_at: string
   last_seen_at: string
   meeting_count: number

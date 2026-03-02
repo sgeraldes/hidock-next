@@ -147,6 +147,32 @@ export const TranscribeRecordingSchema = z.object({
   recordingId: RecordingIdSchema
 })
 
+/**
+ * Recording status enum
+ */
+export const RecordingStatusSchema = z.enum(['ready', 'processing', 'deleted', 'error'])
+
+/**
+ * Transcription status enum
+ */
+export const TranscriptionStatusSchema = z.enum(['none', 'pending', 'queued', 'transcribing', 'transcribed', 'failed', 'complete', 'processing'])
+
+/**
+ * Update recording status request
+ */
+export const UpdateRecordingStatusSchema = z.object({
+  id: RecordingIdSchema,
+  status: RecordingStatusSchema
+})
+
+/**
+ * Update transcription status request
+ */
+export const UpdateTranscriptionStatusSchema = z.object({
+  id: RecordingIdSchema,
+  status: TranscriptionStatusSchema
+})
+
 // =============================================================================
 // Storage Handlers Schemas
 // =============================================================================
@@ -227,6 +253,10 @@ export type DeleteRecording = z.infer<typeof DeleteRecordingSchema>
 export type LinkRecordingToMeeting = z.infer<typeof LinkRecordingToMeetingSchema>
 export type UnlinkRecordingFromMeeting = z.infer<typeof UnlinkRecordingFromMeetingSchema>
 export type TranscribeRecording = z.infer<typeof TranscribeRecordingSchema>
+export type RecordingStatus = z.infer<typeof RecordingStatusSchema>
+export type TranscriptionStatus = z.infer<typeof TranscriptionStatusSchema>
+export type UpdateRecordingStatus = z.infer<typeof UpdateRecordingStatusSchema>
+export type UpdateTranscriptionStatus = z.infer<typeof UpdateTranscriptionStatusSchema>
 export type OpenFolder = z.infer<typeof OpenFolderSchema>
 export type ReadRecordingFile = z.infer<typeof ReadRecordingFileSchema>
 export type DeleteRecordingFile = z.infer<typeof DeleteRecordingFileSchema>

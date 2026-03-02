@@ -24,6 +24,7 @@ vi.mock('../database', () => ({
   insertTranscript: vi.fn(),
   getQueueItems: (...args: any[]) => mockGetQueueItems(...args),
   updateQueueItem: (...args: any[]) => mockUpdateQueueItem(...args),
+  updateQueueProgress: vi.fn(),
   getMeetingById: vi.fn(),
   findCandidateMeetingsForRecording: vi.fn(() => []),
   addRecordingMeetingCandidate: vi.fn(),
@@ -31,6 +32,8 @@ vi.mock('../database', () => ({
   updateKnowledgeCaptureTitle: vi.fn(),
   removeFromQueueByRecordingId: vi.fn(),
   cancelPendingTranscriptions: vi.fn(() => 0),
+  acquireTranscriptionLock: vi.fn().mockReturnValue(true),
+  releaseTranscriptionLock: vi.fn().mockReturnValue(true),
   run: vi.fn(),
   queryOne: vi.fn()
 }))

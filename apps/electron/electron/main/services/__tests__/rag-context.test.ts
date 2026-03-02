@@ -27,7 +27,18 @@ vi.mock('../vector-store', () => ({
 
 let dbInstance: any = null
 vi.mock('../database', () => ({
-  getDatabase: () => dbInstance
+  getDatabase: () => dbInstance,
+  queryOne: vi.fn((sql: string, params: any[]) => {
+    if (!dbInstance) return undefined
+    const result = dbInstance.exec(sql, params)
+    if (result.length === 0 || result[0].values.length === 0) return undefined
+    const columns = result[0].columns
+    const values = result[0].values[0]
+    const row: any = {}
+    columns.forEach((col: string, i: number) => { row[col] = values[i] })
+    return row
+  }),
+  escapeLikePattern: vi.fn((pattern: string) => pattern.replace(/[%_\\]/g, '\\$&'))
 }))
 
 describe('RAGService Context Injection', () => {
@@ -41,10 +52,12 @@ describe('RAGService Context Injection', () => {
     
     // Setup tables
     dbInstance.run(`
+      CREATE TABLE conversations (id TEXT PRIMARY KEY);
       CREATE TABLE conversation_context (id TEXT, conversation_id TEXT, knowledge_capture_id TEXT);
       CREATE TABLE knowledge_captures (id TEXT, title TEXT, source_recording_id TEXT);
       CREATE TABLE transcripts (recording_id TEXT, full_text TEXT);
-      
+
+      INSERT INTO conversations (id) VALUES ('session-1');
       INSERT INTO knowledge_captures (id, title, source_recording_id) VALUES ('kc-1', 'Test Title', 'rec-1');
       INSERT INTO transcripts (recording_id, full_text) VALUES ('rec-1', 'Full transcript text from knowledge capture');
       INSERT INTO conversation_context (id, conversation_id, knowledge_capture_id) VALUES ('ctx-1', 'session-1', 'kc-1');

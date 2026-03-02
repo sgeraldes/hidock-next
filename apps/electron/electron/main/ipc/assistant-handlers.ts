@@ -46,6 +46,13 @@ export function registerAssistantHandlers(): void {
   // Get messages for a conversation
   ipcMain.handle('assistant:getMessages', async (_, conversationId: string) => {
     try {
+      // Validate conversation exists
+      const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
+      if (!conv) {
+        console.error(`getMessages: Conversation ${conversationId} not found`)
+        return []
+      }
+
       const rows = queryAll<any>('SELECT * FROM chat_messages WHERE conversation_id = ? ORDER BY created_at ASC', [conversationId])
       return rows.map(mapToMessage)
     } catch (error) {
@@ -57,13 +64,21 @@ export function registerAssistantHandlers(): void {
   // Add a message to a conversation
   ipcMain.handle('assistant:addMessage', async (_, conversationId: string, role: 'user' | 'assistant', content: string, sources?: string) => {
     try {
+      // Validate conversation exists before adding message
+      const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
+      if (!conv) {
+        const error = new Error(`Cannot add message: Conversation ${conversationId} not found`)
+        console.error(error.message)
+        throw error
+      }
+
       const id = randomUUID()
       const now = new Date().toISOString()
-      
+
       runInTransaction(() => {
         run('INSERT INTO chat_messages (id, conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?, ?)',
           [id, conversationId, role, content, sources || null, now])
-        
+
         // Update conversation's updated_at timestamp
         run('UPDATE conversations SET updated_at = ? WHERE id = ?', [now, conversationId])
       })
@@ -79,6 +94,19 @@ export function registerAssistantHandlers(): void {
   // Add context to conversation
   ipcMain.handle('assistant:addContext', async (_, conversationId: string, knowledgeCaptureId: string) => {
     try {
+      // Validate both conversation and knowledge capture exist
+      const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
+      if (!conv) {
+        console.error(`addContext: Conversation ${conversationId} not found`)
+        return { success: false, error: 'Conversation not found' }
+      }
+
+      const kc = queryOne<any>('SELECT id FROM knowledge_captures WHERE id = ?', [knowledgeCaptureId])
+      if (!kc) {
+        console.error(`addContext: Knowledge capture ${knowledgeCaptureId} not found`)
+        return { success: false, error: 'Knowledge capture not found' }
+      }
+
       const id = randomUUID()
       run('INSERT OR IGNORE INTO conversation_context (id, conversation_id, knowledge_capture_id) VALUES (?, ?, ?)',
         [id, conversationId, knowledgeCaptureId])
@@ -92,6 +120,13 @@ export function registerAssistantHandlers(): void {
   // Remove context from conversation
   ipcMain.handle('assistant:removeContext', async (_, conversationId: string, knowledgeCaptureId: string) => {
     try {
+      // Validate conversation exists before removing context
+      const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
+      if (!conv) {
+        console.error(`removeContext: Conversation ${conversationId} not found`)
+        return { success: false, error: 'Conversation not found' }
+      }
+
       run('DELETE FROM conversation_context WHERE conversation_id = ? AND knowledge_capture_id = ?',
         [conversationId, knowledgeCaptureId])
       return { success: true }

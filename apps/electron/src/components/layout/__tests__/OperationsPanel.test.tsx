@@ -3,11 +3,14 @@ import { render, screen } from '@testing-library/react'
 import { OperationsPanel } from '../OperationsPanel'
 
 // Mock stores
-import { useAppStore } from '@/store/useAppStore'
+import { useAppStore, useDownloadQueue, useDeviceSyncProgress, useDeviceSyncEta } from '@/store/useAppStore'
 import { useTranscriptionStore, useTranscriptionStats } from '@/store/features/useTranscriptionStore'
 
 vi.mock('@/store/useAppStore', () => ({
-  useAppStore: vi.fn()
+  useAppStore: vi.fn(),
+  useDownloadQueue: vi.fn().mockReturnValue(new Map()),
+  useDeviceSyncProgress: vi.fn().mockReturnValue(null),
+  useDeviceSyncEta: vi.fn().mockReturnValue(null)
 }))
 
 vi.mock('@/store/features/useTranscriptionStore', () => ({
@@ -62,6 +65,7 @@ describe('OperationsPanel', () => {
     const downloadQueue = new Map([
       ['dl-1', { filename: 'REC0001.WAV', progress: 50 }]
     ])
+    vi.mocked(useDownloadQueue).mockReturnValue(downloadQueue as any)
     vi.mocked(useAppStore).mockImplementation((selector: any) => {
       const state = {
         downloadQueue,
@@ -94,6 +98,7 @@ describe('OperationsPanel', () => {
     const downloadQueue = new Map([
       ['dl-1', { filename: 'REC0001.WAV', progress: 50 }]
     ])
+    vi.mocked(useDownloadQueue).mockReturnValue(downloadQueue as any)
     vi.mocked(useAppStore).mockImplementation((selector: any) => {
       const state = {
         downloadQueue,

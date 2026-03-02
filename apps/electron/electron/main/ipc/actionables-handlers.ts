@@ -4,39 +4,19 @@ import { queryAll, run } from '../services/database'
 import type { Actionable } from '@/types/knowledge'
 
 export function registerActionablesHandlers(): void {
-  // Get actionable by ID
-  ipcMain.handle('actionables:getById', async (_, id: string) => {
-    try {
-      const sql = 'SELECT * FROM actionables WHERE id = ?'
-      const row = queryAll<any>(sql, [id])[0]
-      return row ? mapToActionable(row) : null
-    } catch (error) {
-      console.error('actionables:getById error:', error)
-      return null
-    }
-  })
-
   // Get all actionables
   ipcMain.handle('actionables:getAll', async (_, options?: { status?: string }) => {
-    // AC-05 FIX: Add null/undefined guard before destructuring
-    const status = options?.status ?? undefined
+    const status = options?.status
     try {
-      // Fix SQL join to get meeting_id from knowledge_captures
-      let sql = `
-        SELECT
-          a.*,
-          kc.meeting_id
-        FROM actionables a
-        LEFT JOIN knowledge_captures kc ON a.source_knowledge_id = kc.id
-      `
+      let sql = 'SELECT * FROM actionables'
       const params: any[] = []
 
       if (status) {
-        sql += ' WHERE a.status = ?'
+        sql += ' WHERE status = ?'
         params.push(status)
       }
 
-      sql += ' ORDER BY a.created_at DESC'
+      sql += ' ORDER BY created_at DESC'
 
       const rows = queryAll<any>(sql, params)
       return rows.map(mapToActionable)
@@ -77,6 +57,24 @@ export function registerActionablesHandlers(): void {
     } catch (error) {
       console.error('Failed to update actionable status:', error)
       return { success: false, error: (error as Error).message }
+    }
+  })
+
+  // Get actionables by meeting ID
+  ipcMain.handle('actionables:getByMeeting', async (_, meetingId: string) => {
+    try {
+      const sql = `
+        SELECT a.*
+        FROM actionables a
+        INNER JOIN knowledge_captures kc ON a.source_knowledge_id = kc.id
+        WHERE kc.meeting_id = ?
+        ORDER BY a.created_at DESC
+      `
+      const rows = queryAll<any>(sql, [meetingId])
+      return rows.map(mapToActionable)
+    } catch (error) {
+      console.error('Failed to get actionables for meeting:', error)
+      return []
     }
   })
 
@@ -148,7 +146,6 @@ function mapToActionable(row: any): Actionable {
     generatedAt: row.generated_at,
     sharedAt: row.shared_at,
     createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    meetingId: row.meeting_id // Include meeting_id from join
+    updatedAt: row.updated_at
   }
 }

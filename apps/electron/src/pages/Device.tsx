@@ -16,6 +16,7 @@ import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import { cancelDownloads } from '@/hooks/useDownloadOrchestrator'
 
 import { formatEta } from '@/utils/formatters'
+import { DeviceFileList } from '@/components/DeviceFileList'
 
 const CONNECTION_TIMEOUT_MS = 15000 // 15 second timeout
 const DEBUG_DEVICE_UI = false // Enable verbose UI logging
@@ -289,9 +290,8 @@ export function Device() {
         btScanTimeoutRef.current = null
       }
     }
-  // DL-11: Only include stable singleton refs in deps, never state changes that
-  // would cause re-subscription. clearConnectionTimers and refreshSyncedFilenames
-  // are stable refs.
+  // DV-03: Removed connectionStatus.step/message from deps — they change ~8x per connect.
+  // Connection status is tracked in a separate effect below.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearConnectionTimers, refreshSyncedFilenames])
 
@@ -1052,6 +1052,15 @@ export function Device() {
               )}
             </CardContent>
           </Card>
+
+          {/* Device File List - Individual file operations */}
+          {deviceState.connected && (
+            <DeviceFileList
+              recordings={recordings.filter(rec => hasDeviceFile(rec)) as Array<DeviceOnlyRecording | BothLocationsRecording>}
+              syncedFilenames={syncedFilenames}
+              onRefresh={refreshSyncedFilenames}
+            />
+          )}
 
           {/* Activity Log - Always visible, logs work offline too */}
           <Card>

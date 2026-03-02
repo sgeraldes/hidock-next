@@ -15,6 +15,7 @@ export function MeetingDetail() {
   const navigate = useNavigate()
   const [details, setDetails] = useState<MeetingDetails | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   // Global playback state
   const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
@@ -28,11 +29,27 @@ export function MeetingDetail() {
 
   const loadMeetingDetails = async (meetingId: string) => {
     setLoading(true)
+    setError(null)
     try {
       const data = await window.electronAPI.meetings.getDetails(meetingId)
+      if (!data) {
+        throw new Error('Meeting not found')
+      }
+
+      // Load actionables separately with error handling
+      try {
+        const actionables = await window.electronAPI.actionables.getByMeeting(meetingId)
+        data.actionables = actionables
+      } catch (actionablesError) {
+        console.error('Failed to load actionables:', actionablesError)
+        // Continue without actionables rather than fail entirely
+        data.actionables = []
+      }
+
       setDetails(data)
     } catch (error) {
       console.error('Failed to load meeting details:', error)
+      setError((error as Error).message || 'Failed to load meeting')
     } finally {
       setLoading(false)
     }
@@ -42,6 +59,23 @@ export function MeetingDetail() {
     return (
       <div className="flex items-center justify-center h-full">
         <p className="text-muted-foreground">Loading meeting details...</p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-4">
+        <p className="text-destructive">{error}</p>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => id && loadMeetingDetails(id)}>
+            Retry
+          </Button>
+          <Button variant="outline" onClick={() => navigate('/calendar')}>
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Back to Calendar
+          </Button>
+        </div>
       </div>
     )
   }

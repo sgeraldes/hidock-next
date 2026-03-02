@@ -5,7 +5,7 @@
 
 import { getVectorStore, SearchResult } from './vector-store'
 import { getOllamaService, OllamaChatMessage } from './ollama'
-import { getDatabase } from './database'
+import { getDatabase, queryOne, escapeLikePattern } from './database'
 import { Result, success, error } from '../types/api'
 
 interface ChatContext {
@@ -98,6 +98,26 @@ class RAGService {
     const ollama = getOllamaService()
     const vectorStore = getVectorStore()
 
+    // Validate that sessionId corresponds to a valid conversation
+    try {
+      const conversation = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [sessionId])
+      if (!conversation) {
+        console.error(`RAG chat: Invalid conversation ID ${sessionId}`)
+        return {
+          answer: '',
+          sources: [],
+          error: 'Invalid conversation ID. Please create a new conversation.'
+        }
+      }
+    } catch (error) {
+      console.error('RAG chat: Failed to validate conversation:', error)
+      return {
+        answer: '',
+        sources: [],
+        error: 'Failed to validate conversation. Please try again.'
+      }
+    }
+
     // Get or create session context
     let context = this.contexts.get(sessionId)
     if (!context) {
@@ -113,13 +133,13 @@ class RAGService {
     // Search for relevant context
     let searchResults: SearchResult[]
     if (context.meetingId) {
-      // AI-08 FIX: Search within specific meeting and compute actual relevance scores
+      // Search within specific meeting
       const docs = await vectorStore.searchByMeeting(context.meetingId)
       const queryEmbedding = await ollama.generateEmbedding(message)
       if (queryEmbedding) {
-        // Compute actual cosine similarity for each chunk
+        // Re-rank by actual query relevance using cosine similarity
         searchResults = docs.map((doc) => {
-          let score = 0.0 // Start with zero, not hardcoded 0.8
+          let score = 0.5 // Default if embedding comparison fails
           if (doc.embedding && doc.embedding.length === queryEmbedding.length) {
             let dotProduct = 0, normA = 0, normB = 0
             for (let i = 0; i < queryEmbedding.length; i++) {
@@ -132,16 +152,14 @@ class RAGService {
           }
           return { document: doc, score }
         })
-        // Sort by actual relevance (best matches first)
+        // Sort by actual relevance
         searchResults.sort((a, b) => b.score - a.score)
       } else {
-        // Fallback: no embedding, use all docs with neutral score
         searchResults = docs.map((doc) => ({ document: doc, score: 0.5 }))
       }
-      // Take top 5 most relevant chunks
       searchResults = searchResults.slice(0, 5)
     } else {
-      // Global search across all meetings
+      // Global search
       searchResults = await vectorStore.search(message, 5)
     }
 
@@ -214,14 +232,13 @@ class RAGService {
 
     const userMessage = `Context:\n${contextText}\n\nQuestion: ${message}`
 
-    // AI-05 FIX: Build messages for LLM using history WITHOUT duplicating current message
-    // The userMessage includes context, so we send that to LLM but only store raw message in history
+    // Build messages for LLM (use history BEFORE adding current message to avoid duplicates)
     const messages: OllamaChatMessage[] = [
-      ...context.conversationHistory.slice(-6), // Keep last 3 exchanges (raw messages only)
-      { role: 'user', content: userMessage } // Send enhanced message with context to LLM
+      ...context.conversationHistory.slice(-6), // Keep last 3 exchanges
+      { role: 'user', content: userMessage }
     ]
 
-    // Store only the raw user message in history (not the context-enhanced version)
+    // Add raw message to conversation history (after building messages to avoid duplicate)
     context.conversationHistory.push({ role: 'user', content: message })
 
     // Generate response
@@ -343,13 +360,13 @@ ${transcript.substring(0, 8000)}`
     try {
       const db = getDatabase()
       
-      const escaped = query.replace(/'/g, "''")
+      const escaped = escapeLikePattern(query)
       const likeQuery = `%${escaped}%`
 
       // 1. Search knowledge captures (SQL search + Vector search)
       const knowledgeRows = db.exec(`
-        SELECT * FROM knowledge_captures 
-        WHERE title LIKE ? OR summary LIKE ?
+        SELECT * FROM knowledge_captures
+        WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'
         LIMIT ?
       `, [likeQuery, likeQuery, limit])
       

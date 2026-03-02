@@ -11,16 +11,18 @@ import {
   insertTranscript,
   getQueueItems,
   updateQueueItem,
+  updateQueueProgress,
   getMeetingById,
   findCandidateMeetingsForRecording,
   addRecordingMeetingCandidate,
   linkRecordingToMeeting,
   updateKnowledgeCaptureTitle,
-  ensureKnowledgeCaptureForRecording,
   removeFromQueueByRecordingId,
   cancelPendingTranscriptions,
   run,
   queryOne,
+  acquireTranscriptionLock,
+  releaseTranscriptionLock,
   type Transcript
 } from './database'
 import { BrowserWindow } from 'electron'
@@ -34,50 +36,6 @@ export function setMainWindowForTranscription(win: BrowserWindow): void {
   mainWindow = win
 }
 
-/**
- * Clean up recordings that have 'pending' or 'processing' status but no queue item.
- * This can happen if queue items are deleted/cancelled but recording status wasn't updated.
- */
-function cleanupStaleTranscriptionStatuses(): void {
-  try {
-    // Find all recordings with pending/processing status
-    const staleRecordings = queryOne<{ id: string; status: string }[]>(
-      `SELECT id, status FROM recordings WHERE status IN ('pending', 'processing')`,
-      []
-    )
-
-    if (!staleRecordings || staleRecordings.length === 0) {
-      console.log('[Transcription Cleanup] No stale statuses found')
-      return
-    }
-
-    console.log(`[Transcription Cleanup] Found ${staleRecordings.length} recordings with pending/processing status`)
-
-    let cleaned = 0
-    for (const recording of staleRecordings) {
-      // Check if there's a queue item for this recording
-      const queueItem = queryOne<{ id: string }>(
-        `SELECT id FROM transcription_queue WHERE recording_id = ? AND status != 'completed'`,
-        [recording.id]
-      )
-
-      if (!queueItem) {
-        // No active queue item - reset status to 'none'
-        updateRecordingTranscriptionStatus(recording.id, 'none')
-        cleaned++
-        console.log(`[Transcription Cleanup] Reset status for ${recording.id} (was ${recording.status}, no queue item)`)
-      }
-    }
-
-    if (cleaned > 0) {
-      console.log(`[Transcription Cleanup] Cleaned up ${cleaned} stale transcription statuses`)
-      notifyRenderer('transcription:cleanup-complete', { count: cleaned })
-    }
-  } catch (error) {
-    console.error('[Transcription Cleanup] Failed:', error)
-  }
-}
-
 export function startTranscriptionProcessor(): void {
   if (processingInterval) {
     console.log('Transcription processor already running')
@@ -85,9 +43,6 @@ export function startTranscriptionProcessor(): void {
   }
 
   console.log('Starting transcription processor')
-
-  // Clean up stale transcription statuses on startup
-  cleanupStaleTranscriptionStatuses()
 
   // Process queue every 10 seconds
   processingInterval = setInterval(() => {
@@ -124,8 +79,18 @@ export function cancelAllTranscriptions(): number {
   return count
 }
 
+const MAX_RETRY_ATTEMPTS = 3 // spec-014: configurable max retry attempts
+
 async function processQueue(): Promise<void> {
   if (isProcessing) return
+
+  // spec-005: Acquire mutex lock to prevent concurrent processing
+  const processId = `proc_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`
+  const lockAcquired = acquireTranscriptionLock(processId)
+  if (!lockAcquired) {
+    console.log('[Transcription] Another process is already processing the queue, skipping')
+    return
+  }
 
   const config = getConfig()
   if (!config.transcription.geminiApiKey) {
@@ -150,63 +115,94 @@ async function processQueue(): Promise<void> {
       }
     }
 
+    releaseTranscriptionLock(processId)
     return
   }
 
-  // AI-03 FIX: Actually retry failed items (this code was dead because retries never happened)
-  const failedItems = getQueueItems('failed')
-  for (const item of failedItems) {
-    if (item.attempts < 3) {
-      // Reset to pending so it gets picked up in the processing loop
-      updateQueueItem(item.id, 'pending')
-      // Also reset recording status so UI shows it's retrying
-      updateRecordingTranscriptionStatus(item.recording_id, 'pending')
-      console.log(`Re-queuing failed item ${item.id} (attempt ${item.attempts + 1}/3)`)
-    }
-  }
-
-  const pendingItems = getQueueItems('pending')
-  if (pendingItems.length === 0) return
-
-  isProcessing = true
-
-  for (const item of pendingItems) {
-    if (cancelRequested) {
-      console.log('Transcription cancelled by user')
-      break
-    }
-
-    try {
-      updateQueueItem(item.id, 'processing')
-      notifyRenderer('transcription:started', { queueItemId: item.id, recordingId: item.recording_id })
-
-      await transcribeRecording(item.recording_id)
-
-      updateQueueItem(item.id, 'completed')
-      notifyRenderer('transcription:completed', { queueItemId: item.id, recordingId: item.recording_id })
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      console.error('Transcription failed:', errorMessage)
-
-      updateQueueItem(item.id, 'failed', errorMessage)
-      // AI-13: Use standard enum value 'error' (not 'failed')
-      updateRecordingTranscriptionStatus(item.recording_id, 'error')
-      notifyRenderer('transcription:failed', {
-        queueItemId: item.id,
-        recordingId: item.recording_id,
-        error: errorMessage
-      })
-
-      // If too many attempts, don't retry
-      if (item.attempts >= 3) {
-        console.log(`Recording ${item.recording_id} failed after ${item.attempts} attempts`)
+  try {
+    // spec-014: Retry failed items with max attempts
+    const failedItems = getQueueItems('failed')
+    for (const item of failedItems) {
+      const retryCount = (item as any).retry_count ?? 0
+      if (retryCount < MAX_RETRY_ATTEMPTS) {
+        // Reset to pending so it gets picked up in the processing loop
+        updateQueueItem(item.id, 'pending')
+        // Also reset recording status so UI shows it's retrying
+        updateRecordingTranscriptionStatus(item.recording_id, 'pending')
+        console.log(`Re-queuing failed item ${item.id} (retry ${retryCount + 1}/${MAX_RETRY_ATTEMPTS})`)
       }
     }
-  }
 
-  isProcessing = false
-  // AI-11: Reset cancel flag after loop exits, not on a timer
-  cancelRequested = false
+    const pendingItems = getQueueItems('pending')
+    if (pendingItems.length === 0) {
+      return
+    }
+
+    isProcessing = true
+
+    for (const item of pendingItems) {
+      if (cancelRequested) {
+        console.log('Transcription cancelled by user')
+        break
+      }
+
+      try {
+        updateQueueItem(item.id, 'processing')
+        updateQueueProgress(item.id, 0) // spec-014: reset progress
+        notifyRenderer('transcription:started', { queueItemId: item.id, recordingId: item.recording_id })
+
+        // spec-014: Progress callback for transcription stages
+        const progressCallback = (stage: string, progress: number) => {
+          updateQueueProgress(item.id, progress)
+          notifyRenderer('transcription:progress', {
+            queueItemId: item.id,
+            recordingId: item.recording_id,
+            stage,
+            progress
+          })
+        }
+
+        await transcribeRecording(item.recording_id, progressCallback)
+
+        updateQueueProgress(item.id, 100) // spec-014: mark complete
+        updateQueueItem(item.id, 'completed')
+        notifyRenderer('transcription:completed', { queueItemId: item.id, recordingId: item.recording_id })
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+        console.error('Transcription failed:', errorMessage)
+
+        updateQueueItem(item.id, 'failed', errorMessage)
+        // AI-13: Use standard enum value 'error' (not 'failed')
+        updateRecordingTranscriptionStatus(item.recording_id, 'error')
+        notifyRenderer('transcription:failed', {
+          queueItemId: item.id,
+          recordingId: item.recording_id,
+          error: errorMessage
+        })
+
+        // spec-014: Check retry count
+        const retryCount = (item as any).retry_count ?? 0
+        if (retryCount >= MAX_RETRY_ATTEMPTS) {
+          console.log(`Recording ${item.recording_id} failed after ${retryCount} retries (max: ${MAX_RETRY_ATTEMPTS})`)
+        }
+      }
+    }
+
+    isProcessing = false
+    // AI-11: Reset cancel flag after loop exits, not on a timer
+    cancelRequested = false
+  } finally {
+    // spec-005: Always release mutex lock, even if an error occurred
+    releaseTranscriptionLock(processId)
+  }
+}
+
+/**
+ * spec-005: Manually trigger queue processing (exported for IPC handlers).
+ * Call after adding items to the queue for immediate processing.
+ */
+export async function processQueueManually(): Promise<void> {
+  return processQueue()
 }
 
 interface ActionableDetection {
@@ -295,7 +291,10 @@ Only include detections with confidence >= 0.6.`
   }
 }
 
-async function transcribeRecording(recordingId: string): Promise<void> {
+async function transcribeRecording(
+  recordingId: string,
+  progressCallback?: (stage: string, progress: number) => void
+): Promise<void> {
   const recording = getRecordingById(recordingId)
   if (!recording || !recording.file_path) {
     throw new Error(`Recording not found or no local file: ${recordingId}`)
@@ -313,6 +312,8 @@ async function transcribeRecording(recordingId: string): Promise<void> {
   console.log(`Transcribing: ${recording.filename}`)
   // AI-13: Use standard enum values matching Recording.transcription_status
   updateRecordingTranscriptionStatus(recordingId, 'processing')
+
+  progressCallback?.('reading_file', 5) // spec-014: progress reporting
 
   // Read the audio file asynchronously to avoid blocking the main process
   const audioBuffer = await readFileAsync(recording.file_path)
@@ -351,6 +352,8 @@ Meeting ${i + 1}: "${m.subject}"
 `).join('\n')}`
   }
 
+  progressCallback?.('transcribing', 20) // spec-014: progress reporting
+
   // First, transcribe the audio with meeting context
   const transcriptionPrompt = `Transcribe this audio recording.
 The audio may be in Spanish or English - transcribe in the original language.
@@ -370,6 +373,8 @@ Return ONLY the transcription, no additional commentary.`
   ])
 
   const fullText = transcriptionResult.response.text()
+
+  progressCallback?.('analyzing', 50) // spec-014: progress reporting
 
   // Build meeting selection prompt if there are multiple candidates
   let meetingSelectionSection = ''
@@ -474,14 +479,6 @@ Respond in JSON format:
           'ai_transcript_match'
         )
         console.log(`AI matched recording to meeting: "${selectedMeeting.subject}" (confidence: ${analysis.meeting_confidence})`)
-
-        // AI-06 FIX: Update vector store meeting_id after AI linking
-        try {
-          const vectorStore = getVectorStore()
-          await vectorStore.updateMeetingIdForRecording(recordingId, selectedMeeting.id, selectedMeeting.subject)
-        } catch (e) {
-          console.warn('Failed to update vector store meeting_id after AI linking:', e)
-        }
       }
     }
   }
@@ -517,16 +514,15 @@ Respond in JSON format:
     updateKnowledgeCaptureTitle(recordingId, analysis.title_suggestion)
   }
 
+  progressCallback?.('detecting_actionables', 75) // spec-014: progress reporting
+
   // Detect actionables from transcript
   try {
-    // AC-01 FIX: Ensure a knowledge_capture exists before creating actionables
-    // This fixes the critical bug where actionables stored recording_id instead of knowledge_capture_id
-    const sourceKnowledgeId = ensureKnowledgeCaptureForRecording(recordingId)
-
-    if (!sourceKnowledgeId) {
-      console.error('[Actionable Detection] Failed to get/create knowledge_capture for recording:', recordingId)
-      throw new Error('Could not create knowledge capture for recording')
-    }
+    const knowledgeCapture = queryOne<{ id: string }>(
+      'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
+      [recordingId]
+    )
+    const sourceKnowledgeId = knowledgeCapture?.id || recordingId
 
     const detections = await detectActionables(fullText, sourceKnowledgeId, {
       title: analysis.title_suggestion,
@@ -571,6 +567,8 @@ Respond in JSON format:
     // Don't fail the transcription if actionable detection fails
   }
 
+  progressCallback?.('indexing', 85) // spec-014: progress reporting
+
   // Index transcript into vector store for RAG
   try {
     const vectorStore = getVectorStore()
@@ -595,6 +593,7 @@ Respond in JSON format:
     console.warn('Failed to index transcript into vector store:', e)
   }
 
+  progressCallback?.('complete', 100) // spec-014: progress reporting
   console.log(`Transcription complete: ${recording.filename} (${wordCount} words)`)
 }
 

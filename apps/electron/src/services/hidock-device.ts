@@ -16,16 +16,8 @@ import {
   BatteryStatus,
   BluetoothStatus
 } from './jensen'
-
-// Helper to wrap promises with timeout
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`${operation} timed out after ${timeoutMs}ms`)), timeoutMs)
-    )
-  ])
-}
+import { validateDevicePath } from '../utils/path-validation'
+import { withTimeout, isAbortError } from '../utils/timeout'
 
 export interface HiDockRecording {
   id: string
@@ -148,6 +140,9 @@ class HiDockDeviceService {
   // Synchronous flag to prevent TOCTOU race in listRecordings
   // (set immediately before async work, checked before promise is set)
   private listRecordingsLock: boolean = false
+
+  // AbortController tracking for downloads
+  private abortControllers: Map<string, AbortController> = new Map()
 
   // Debounce: timestamp of last successful listRecordings completion
   private listRecordingsLastCompleted: number = 0
@@ -351,6 +346,9 @@ class HiDockDeviceService {
       this.autoConnectInterval = null
     }
     this.autoConnectEnabled = false
+
+    // Clean up USB connect listener to prevent memory leaks
+    this.jensen.removeUsbConnectListener()
   }
 
   // Disable auto-connect (e.g., when user explicitly disconnects)
@@ -433,14 +431,39 @@ class HiDockDeviceService {
 
     this.logActivity('info', 'User initiated connection')
     this.updateStatus('requesting', 'Requesting device access...', 5)
-    const success = await this.jensen.connect()
-    // Note: handleConnect() is called via the onconnect callback in jensen.ts
-    // We should NOT call it here to avoid duplicate initialization
-    if (!success) {
-      this.updateStatus('idle', 'Connection cancelled or failed')
-      this.logActivity('info', 'Connection cancelled or no device selected')
+
+    // Create AbortController for connection timeout
+    const controller = new AbortController()
+
+    try {
+      // Connect with 5-second timeout for USB operations
+      const CONNECTION_TIMEOUT = 5000 // 5 seconds
+      const success = await withTimeout(
+        this.jensen.connect(controller.signal),
+        CONNECTION_TIMEOUT,
+        controller
+      )
+
+      // Note: handleConnect() is called via the onconnect callback in jensen.ts
+      // We should NOT call it here to avoid duplicate initialization
+      if (!success) {
+        this.updateStatus('idle', 'Connection cancelled or failed')
+        this.logActivity('info', 'Connection cancelled or no device selected')
+      }
+      return success
+    } catch (error) {
+      // Handle timeout/abort
+      if (isAbortError(error)) {
+        this.updateStatus('error', 'Connection timeout - device not responding', 0)
+        this.logActivity('error', 'Connection timeout', 'Device did not respond within 5 seconds')
+        console.error('[HiDockDevice] Connection timeout:', error)
+      } else {
+        this.updateStatus('idle', 'Connection failed')
+        this.logActivity('error', 'Connection failed', error instanceof Error ? error.message : 'Unknown error')
+        console.error('[HiDockDevice] Connection error:', error)
+      }
+      return false
     }
-    return success
   }
 
   // Disconnect from device - this disables auto-connect until user clicks connect again
@@ -845,9 +868,7 @@ class HiDockDeviceService {
 
     // Prevent concurrent requests - use synchronous lock to prevent TOCTOU race
     // Check both the lock flag (set synchronously) and promise (set after lock)
-    // FL-01/FL-08 FIX: NEVER allow forceRefresh to bypass concurrency lock
-    // forceRefresh only affects cache validation above, not concurrency control
-    if (this.listRecordingsLock || this.listRecordingsPromise) {
+    if ((this.listRecordingsLock || this.listRecordingsPromise) && !forceRefresh) {
       if (DEBUG_DEVICE) console.log('[HiDockDevice] listRecordings: Request already in progress, waiting...')
       // Don't log - this is just coordination between components
       // Wait for the promise if it exists, or poll for it if lock is set but promise not yet
@@ -979,6 +1000,12 @@ class HiDockDeviceService {
   async deleteRecording(filename: string): Promise<boolean> {
     if (!this.isConnected()) return false
 
+    // SECURITY: Validate path to prevent directory traversal attacks
+    if (!validateDevicePath(filename)) {
+      this.logActivity('error', 'Delete rejected', `Invalid filename: ${filename}`)
+      throw new Error(`Invalid filename: ${filename}`)
+    }
+
     this.logActivity('usb-out', 'CMD: Delete File', `Deleting ${filename}`)
     const result = await this.jensen.deleteFile(filename)
     if (result?.result === 'success') {
@@ -1026,11 +1053,18 @@ class HiDockDeviceService {
   async downloadRecording(
     filename: string,
     fileSize: number,
-    onData: (chunk: Uint8Array) => void
+    onData: (chunk: Uint8Array) => void,
+    signal?: AbortSignal
   ): Promise<boolean> {
     if (!this.isConnected()) {
       this.logActivity('error', 'Download failed', 'Device not connected')
       return false
+    }
+
+    // SECURITY: Validate path to prevent directory traversal attacks
+    if (!validateDevicePath(filename)) {
+      this.logActivity('error', 'Download rejected', `Invalid filename: ${filename}`)
+      throw new Error(`Invalid filename: ${filename}`)
     }
 
     const fileSizeStr = fileSize < 1024 * 1024
@@ -1059,7 +1093,8 @@ class HiDockDeviceService {
         progress.bytesReceived = received
         progress.percent = (received / fileSize) * 100
         this.notifyProgress(progress)
-      }
+      },
+      signal
     )
 
     if (success) {
@@ -1079,59 +1114,109 @@ class HiDockDeviceService {
     onProgress?: (bytesReceived: number) => void,
     recordingDate?: Date // Original recording date from device
   ): Promise<boolean> {
-    const chunks: Uint8Array[] = []
-    let totalReceived = 0
-
-    this.logActivity('info', 'Starting file download', `${filename} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`)
-
-    const success = await this.downloadRecording(filename, fileSize, (chunk) => {
-      chunks.push(chunk)
-      totalReceived += chunk.length
-      onProgress?.(totalReceived)
-    })
-
-    if (!success) {
-      // Log detailed failure info
-      const receivedMB = (totalReceived / 1024 / 1024).toFixed(2)
-      const expectedMB = (fileSize / 1024 / 1024).toFixed(2)
-      const errorMsg = `Download incomplete: received ${receivedMB}MB of ${expectedMB}MB`
-      console.error(`[HiDockDevice] downloadRecordingToFile FAILED: ${filename} - ${errorMsg}`)
-      this.logActivity('error', 'Download failed', `${filename}: ${errorMsg}`)
-      return false
+    // SECURITY: Validate path to prevent directory traversal attacks
+    if (!validateDevicePath(filename)) {
+      this.logActivity('error', 'Download rejected', `Invalid filename: ${filename}`)
+      throw new Error(`Invalid filename: ${filename}`)
     }
 
-    // Concatenate all chunks
-    const totalLength = chunks.reduce((sum, c) => sum + c.length, 0)
-    const combined = new Uint8Array(totalLength)
-    let offset = 0
-    for (const chunk of chunks) {
-      combined.set(chunk, offset)
-      offset += chunk.length
-    }
+    // Create AbortController for this download
+    const controller = new AbortController()
+    this.abortControllers.set(filename, controller)
 
-    // Verify we got all the data
-    if (totalLength !== fileSize) {
-      const errorMsg = `Data mismatch: got ${totalLength} bytes, expected ${fileSize}`
-      console.error(`[HiDockDevice] downloadRecordingToFile FAILED: ${filename} - ${errorMsg}`)
-      this.logActivity('error', 'Download failed', `${filename}: ${errorMsg}`)
-      return false
-    }
-
-    // Save via IPC
     try {
-      await window.electronAPI.storage.saveRecording(
-        filename,
-        Array.from(combined), // Convert to array for IPC
-        recordingDate?.toISOString() // Pass original recording date to preserve it
-      )
-      this.logActivity('success', 'File saved', filename)
-      return true
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error'
-      console.error(`[HiDockDevice] downloadRecordingToFile FAILED to save: ${filename} -`, error)
-      this.logActivity('error', 'Failed to save file', `${filename}: ${errorMsg}`)
-      return false
+      const chunks: Uint8Array[] = []
+      let totalReceived = 0
+
+      this.logActivity('info', 'Starting file download', `${filename} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`)
+
+      const success = await this.downloadRecording(filename, fileSize, (chunk) => {
+        chunks.push(chunk)
+        totalReceived += chunk.length
+        onProgress?.(totalReceived)
+      }, controller.signal)
+
+      if (!success) {
+        // Log detailed failure info
+        const receivedMB = (totalReceived / 1024 / 1024).toFixed(2)
+        const expectedMB = (fileSize / 1024 / 1024).toFixed(2)
+        const errorMsg = `Download incomplete: received ${receivedMB}MB of ${expectedMB}MB`
+        console.error(`[HiDockDevice] downloadRecordingToFile FAILED: ${filename} - ${errorMsg}`)
+        this.logActivity('error', 'Download failed', `${filename}: ${errorMsg}`)
+        return false
+      }
+
+      // Concatenate all chunks
+      const totalLength = chunks.reduce((sum, c) => sum + c.length, 0)
+      const combined = new Uint8Array(totalLength)
+      let offset = 0
+      for (const chunk of chunks) {
+        combined.set(chunk, offset)
+        offset += chunk.length
+      }
+
+      // Verify we got all the data
+      if (totalLength !== fileSize) {
+        const errorMsg = `Data mismatch: got ${totalLength} bytes, expected ${fileSize}`
+        console.error(`[HiDockDevice] downloadRecordingToFile FAILED: ${filename} - ${errorMsg}`)
+        this.logActivity('error', 'Download failed', `${filename}: ${errorMsg}`)
+        return false
+      }
+
+      // Save via IPC
+      try {
+        await window.electronAPI.storage.saveRecording(
+          filename,
+          Array.from(combined), // Convert to array for IPC
+          recordingDate?.toISOString() // Pass original recording date to preserve it
+        )
+        this.logActivity('success', 'File saved', filename)
+        return true
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error'
+        console.error(`[HiDockDevice] downloadRecordingToFile FAILED to save: ${filename} -`, error)
+        this.logActivity('error', 'Failed to save file', `${filename}: ${errorMsg}`)
+        return false
+      }
+    } finally {
+      // Always cleanup the AbortController
+      this.abortControllers.delete(filename)
     }
+  }
+
+  /**
+   * Cancel an in-progress download
+   * @param filename - The filename of the download to cancel
+   * @returns true if a download was cancelled, false if no download was in progress
+   */
+  cancelDownload(filename: string): boolean {
+    const controller = this.abortControllers.get(filename)
+    if (controller) {
+      console.log(`[HiDockDevice] Cancelling download: ${filename}`)
+      controller.abort()
+      this.abortControllers.delete(filename)
+      this.logActivity('warning', 'Download cancelled', filename)
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Cancel all in-progress downloads
+   * @returns number of downloads cancelled
+   */
+  cancelAllDownloads(): number {
+    let count = 0
+    for (const [filename, controller] of this.abortControllers.entries()) {
+      console.log(`[HiDockDevice] Cancelling download: ${filename}`)
+      controller.abort()
+      count++
+    }
+    this.abortControllers.clear()
+    if (count > 0) {
+      this.logActivity('warning', 'All downloads cancelled', `${count} download(s)`)
+    }
+    return count
   }
 
   // Private methods
@@ -1152,14 +1237,17 @@ class HiDockDeviceService {
     let successCount = 0
     const MAX_TIMEOUTS_BEFORE_FAIL = 2 // Fail initialization if 2+ steps timeout
 
+    // Create AbortController for timeout management
+    const controller = new AbortController()
+
     // Step 1: Get device info (critical - if this times out, device is likely unresponsive)
     if (this.initAborted) return
     this.updateStatus('getting-info', 'Reading device information...', 20)
     try {
-      await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, 'Get device info')
+      await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, controller)
       successCount++
     } catch (error) {
-      const isTimeout = error instanceof Error && error.message.includes('timed out')
+      const isTimeout = isAbortError(error)
       if (isTimeout) timeoutCount++
       console.warn('[HiDockDevice] Failed to get device info:', error)
       this.logActivity('error', 'Failed to get device info', error instanceof Error ? error.message : 'Unknown error')
@@ -1182,10 +1270,10 @@ class HiDockDeviceService {
     if (this.initAborted) return
     this.updateStatus('getting-storage', 'Reading storage information...', 40)
     try {
-      await withTimeout(this.refreshStorageInfo(), INIT_STEP_TIMEOUT, 'Get storage info')
+      await withTimeout(this.refreshStorageInfo(), INIT_STEP_TIMEOUT, controller)
       successCount++
     } catch (error) {
-      const isTimeout = error instanceof Error && error.message.includes('timed out')
+      const isTimeout = isAbortError(error)
       if (isTimeout) timeoutCount++
       console.warn('[HiDockDevice] Failed to get storage info:', error)
       this.logActivity('error', 'Failed to get storage info', error instanceof Error ? error.message : 'Unknown error')
@@ -1203,10 +1291,10 @@ class HiDockDeviceService {
     if (this.initAborted) return
     this.updateStatus('getting-settings', 'Loading device settings...', 70)
     try {
-      await withTimeout(this.refreshSettings(), INIT_STEP_TIMEOUT, 'Get settings')
+      await withTimeout(this.refreshSettings(), INIT_STEP_TIMEOUT, controller)
       successCount++
     } catch (error) {
-      const isTimeout = error instanceof Error && error.message.includes('timed out')
+      const isTimeout = isAbortError(error)
       if (isTimeout) timeoutCount++
       console.warn('[HiDockDevice] Failed to get settings:', error)
       this.logActivity('error', 'Failed to get settings', error instanceof Error ? error.message : 'Unknown error')
@@ -1227,10 +1315,10 @@ class HiDockDeviceService {
     if (this.initAborted) return
     this.updateStatus('syncing-time', 'Syncing device time...', 90)
     try {
-      await withTimeout(this.syncTime(), INIT_STEP_TIMEOUT, 'Sync time')
+      await withTimeout(this.syncTime(), INIT_STEP_TIMEOUT, controller)
       successCount++
     } catch (error) {
-      const isTimeout = error instanceof Error && error.message.includes('timed out')
+      const isTimeout = isAbortError(error)
       if (isTimeout) timeoutCount++
       console.warn('[HiDockDevice] Failed to sync time:', error)
       this.logActivity('error', 'Failed to sync time', error instanceof Error ? error.message : 'Unknown error')
@@ -1256,10 +1344,8 @@ class HiDockDeviceService {
       this.logActivity('success', 'Device initialization complete')
     }
 
-    // FL-09 FIX: Do NOT call notifyConnectionChange(true) here — it was already called
-    // when the device first connected (in handleConnect). Calling it again causes
-    // duplicate work in subscribers (they receive both 'ready' status AND connection change).
-    // The 'ready' status update above is sufficient to notify listeners that init is complete.
+    // Notify listeners
+    this.notifyConnectionChange(true)
   }
 
   private handleDisconnect(): void {

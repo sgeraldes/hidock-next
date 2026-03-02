@@ -6,7 +6,7 @@ import { SecurityWarningBanner } from '@/components/SecurityWarningBanner'
 import { LoadingSpinner } from '@/components/LoadingSpinner'
 import { ToastProvider } from '@/components/ui/toaster'
 import { getHiDockDeviceService } from '@/services/hidock-device'
-import { NavigationLogger, initInteractionLogger, initErrorLogger } from '@/services/qa-monitor'
+import { NavigationLogger, initInteractionLogger, initErrorLogger, cleanupQAMonitor } from '@/services/qa-monitor'
 import { lazyWithRetry } from '@/lib/lazyWithRetry'
 
 // Lazy load all page components for code splitting
@@ -46,6 +46,9 @@ function App(): React.ReactElement {
 
     // Cleanup on unmount (shouldn't happen for App, but good practice)
     return () => {
+      // Clean up QA monitor event listeners
+      cleanupQAMonitor()
+      // Stop device auto-connect and disconnect
       deviceService.stopAutoConnect()
       window.removeEventListener('beforeunload', handleBeforeUnload)
       // Also disconnect on unmount

@@ -26,13 +26,21 @@ vi.mock('electron', () => ({
   }
 }))
 
-// Mock database functions
+// Mock database functions (spec-007: added queryOne, queryAll, run, getDatabase)
 vi.mock('../database', () => ({
   markRecordingDownloaded: vi.fn(),
   addSyncedFile: vi.fn(),
   isFileSynced: vi.fn(() => false),
   getRecordingByFilename: vi.fn(() => null),
-  getSyncedFilenames: vi.fn(() => new Set())
+  getSyncedFilenames: vi.fn(() => new Set()),
+  // spec-007: Mock new database functions
+  queryOne: vi.fn(() => null), // No existing entries by default
+  queryAll: vi.fn(() => []),   // Empty queue by default
+  run: vi.fn(),                // No-op by default
+  getDatabase: vi.fn(() => ({  // Mock database instance
+    exec: vi.fn(() => []),
+    run: vi.fn()
+  }))
 }))
 
 // Mock file-storage

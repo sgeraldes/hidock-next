@@ -9,20 +9,10 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
-import { useUIStore } from '@/store'
 import { toast } from '@/components/ui/toaster'
 import { parseError, getErrorMessage } from '@/features/library/utils/errorHandling'
 
-// QA Logging helper - respects user's QA Logs toggle
-function shouldLogQa(): boolean {
-  const IS_PROD = import.meta.env.PROD
-  if (!IS_PROD) return true // Always log in dev
-  try {
-    return useUIStore.getState().qaLogsEnabled
-  } catch {
-    return false
-  }
-}
+const DEBUG = import.meta.env.DEV
 
 interface DownloadQueueItem {
   id: string
@@ -45,6 +35,9 @@ export function cancelDownloads(): void {
     _downloadAbortControllerRef.abort()
     _downloadAbortControllerRef = null
   }
+  // Cancel all downloads at device service level (aborts USB transfers)
+  const deviceService = getHiDockDeviceService()
+  deviceService.cancelAllDownloads()
   // Also set store state so the queue loop breaks
   useAppStore.getState().cancelDeviceSync()
 }
@@ -63,7 +56,7 @@ export function useDownloadOrchestrator() {
   // ---- Single file download ----
 
   const processDownload = useCallback(async (item: { filename: string; fileSize: number }, signal: AbortSignal) => {
-    if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Processing download: ${item.filename}`)
+    if (DEBUG) console.log(`[QA-MONITOR][Operation] Processing download: ${item.filename}`)
 
     if (!deviceService.isConnected()) {
       console.error('[useDownloadOrchestrator] Device not connected')
@@ -88,7 +81,8 @@ export function useDownloadOrchestrator() {
           totalReceived += chunk.length
           window.electronAPI.downloadService.updateProgress(item.filename, totalReceived)
           updateDownloadProgress(item.filename, Math.round((totalReceived / item.fileSize) * 100))
-        }
+        },
+        signal
       )
 
       if (!success) {
@@ -112,20 +106,15 @@ export function useDownloadOrchestrator() {
         offset += chunk.length
       }
 
-      // DL-01: Convert Uint8Array to Buffer before IPC to prevent 16x memory amplification.
-      // Electron's IPC serializes Uint8Array as an array of numbers (JSON format), which
-      // creates massive memory overhead. Buffer is more efficiently transferred.
-      const buffer = Buffer.from(combined.buffer, combined.byteOffset, combined.byteLength)
-
       const result = await window.electronAPI.downloadService.processDownload(
         item.filename,
-        buffer
+        combined
       )
 
       removeFromDownloadQueue(item.filename)
 
       if (result.success) {
-        if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Download completed: ${item.filename}`)
+        if (DEBUG) console.log(`[QA-MONITOR][Operation] Download completed: ${item.filename}`)
         return true
       } else {
         toast({
@@ -165,7 +154,7 @@ export function useDownloadOrchestrator() {
     _downloadAbortControllerRef = downloadAbortControllerRef.current
     const signal = downloadAbortControllerRef.current.signal
 
-    if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Processing ${pendingItems.length} downloads`)
+    if (DEBUG) console.log(`[QA-MONITOR][Operation] Processing ${pendingItems.length} downloads`)
 
     // DL-02: Emit initial progress event immediately after queue creation
     // so the sidebar shows 0/total before the first file starts downloading
@@ -183,20 +172,20 @@ export function useDownloadOrchestrator() {
     // TODO: DL-10: Consider pipelining: start reading next file while writing current file to disk.
     for (const item of pendingItems) {
       if (signal.aborted) {
-        if (shouldLogQa()) console.log('[useDownloadOrchestrator] Download aborted by user')
+        if (DEBUG) console.log('[useDownloadOrchestrator] Download aborted by user')
         aborted = true
         break
       }
 
       if (!deviceService.isConnected()) {
-        if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device disconnected, stopping downloads')
+        if (DEBUG) console.log('[useDownloadOrchestrator] Device disconnected, stopping downloads')
         aborted = true
         break
       }
 
       const storeState = useAppStore.getState()
       if (!storeState.deviceSyncing) {
-        if (shouldLogQa()) console.log('[useDownloadOrchestrator] Sync cancelled by user')
+        if (DEBUG) console.log('[useDownloadOrchestrator] Sync cancelled by user')
         aborted = true
         break
       }
@@ -275,13 +264,13 @@ export function useDownloadOrchestrator() {
         window.electronAPI.downloadService.getState().then((state) => {
           const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
           if (hasPending) {
-            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device connected, resuming downloads')
+            if (DEBUG) console.log('[useDownloadOrchestrator] Device connected, resuming downloads')
             processDownloadQueueRef.current()
           }
         })
       } else if (!deviceState.connected) {
         if (isProcessingDownloads.current) {
-          if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device disconnected, aborting downloads')
+          if (DEBUG) console.log('[useDownloadOrchestrator] Device disconnected, aborting downloads')
           downloadAbortControllerRef.current?.abort()
         }
       }
@@ -312,12 +301,8 @@ export function useDownloadOrchestrator() {
             variant: 'error'
           })
           // DL-12: Abort the actual USB transfer, not just mark as failed
-          // Use both refs to ensure abort happens even if called from outside the hook
           if (downloadAbortControllerRef.current) {
             downloadAbortControllerRef.current.abort()
-          }
-          if (_downloadAbortControllerRef) {
-            _downloadAbortControllerRef.abort()
           }
           if (window.electronAPI?.downloadService?.markFailed) {
             window.electronAPI.downloadService.markFailed(item.filename, `Download stalled at ${item.progress}% (no progress for ${DOWNLOAD_STALL_TIMEOUT / 1000}s)`)

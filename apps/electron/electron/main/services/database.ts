@@ -279,11 +279,35 @@ CREATE TABLE IF NOT EXISTS transcription_queue (
     recording_id TEXT NOT NULL,
     status TEXT DEFAULT 'pending',
     attempts INTEGER DEFAULT 0,
+    retry_count INTEGER DEFAULT 0,
+    progress INTEGER DEFAULT 0,
     error_message TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     started_at TEXT,
     completed_at TEXT,
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
+);
+
+-- Transcription service mutex lock (v19)
+CREATE TABLE IF NOT EXISTS transcription_service_lock (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    process_id TEXT,
+    acquired_at TEXT,
+    updated_at TEXT
+);
+
+-- Download queue (v20) - spec-007
+CREATE TABLE IF NOT EXISTS download_queue (
+    id TEXT PRIMARY KEY,
+    filename TEXT NOT NULL UNIQUE,
+    file_size INTEGER NOT NULL,
+    progress INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'downloading', 'completed', 'failed')),
+    error TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    recording_date TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Conversations (v12)
@@ -333,6 +357,7 @@ CREATE TABLE IF NOT EXISTS synced_files (
 );
 
 -- Contacts extracted from meeting attendees (renamed to People in UI)
+-- Note: email is NOT UNIQUE - multiple contacts can share an email (spec-013)
 CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -441,6 +466,8 @@ CREATE INDEX IF NOT EXISTS idx_recording_candidates_selected ON recording_meetin
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_quality ON knowledge_captures(quality_rating);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_status ON knowledge_captures(status);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_category ON knowledge_captures(category);
+CREATE INDEX IF NOT EXISTS idx_knowledge_title ON knowledge_captures(title);
+CREATE INDEX IF NOT EXISTS idx_knowledge_summary ON knowledge_captures(summary);
 CREATE INDEX IF NOT EXISTS idx_quality_recording ON quality_assessments(recording_id);
 CREATE INDEX IF NOT EXISTS idx_quality_level ON quality_assessments(quality);
 
@@ -997,55 +1024,73 @@ const MIGRATIONS: Record<number, () => void> = {
     console.log('Migration v18 complete: chat_messages columns added')
   },
   19: () => {
-    // v19: TQ-01 — Add filename column to transcription_queue
-    console.log('Running migration to schema v19: Adding filename to transcription_queue')
+    // v19: spec-005 — Add transcription service mutex lock table for atomic process ID tracking
+    console.log('Running migration to schema v19: Adding transcription_service_lock table')
     const database = getDatabase()
 
-    const tableInfo = database.exec('PRAGMA table_info(transcription_queue)')
-    if (tableInfo.length > 0 && tableInfo[0].values) {
-      const columns = tableInfo[0].values.map((row: any) => row[1])
+    try {
+      // Create the lock table
+      database.run(`
+        CREATE TABLE IF NOT EXISTS transcription_service_lock (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          process_id TEXT,
+          acquired_at TEXT,
+          updated_at TEXT
+        )
+      `)
 
-      if (!columns.includes('filename')) {
-        try {
-          database.run('ALTER TABLE transcription_queue ADD COLUMN filename TEXT')
-          console.log('[Migration v19] Added filename column to transcription_queue')
-        } catch (e) {
-          console.warn('[Migration v19] Failed to add filename column:', e)
-        }
-      }
+      // Initialize with a single row (process_id = NULL means unlocked)
+      database.run(`
+        INSERT OR IGNORE INTO transcription_service_lock (id, process_id, acquired_at, updated_at)
+        VALUES (1, NULL, NULL, NULL)
+      `)
+
+      console.log('[Migration v19] transcription_service_lock table created')
+    } catch (e) {
+      console.warn('[Migration v19] Failed to create transcription_service_lock table:', e)
     }
 
-    console.log('Migration v19 complete: transcription_queue filename column added')
+    console.log('Migration v19 complete: Transcription service mutex lock added')
   },
   20: () => {
-    // v20: Phase A consolidated fixes (spec-013, spec-010, spec-014)
+    // v20: Phase A consolidated fixes (spec-013, spec-010, spec-014, spec-007)
     console.log('Running migration to schema v20: Phase A consolidated fixes')
     const database = getDatabase()
 
     // 1. spec-013: Remove UNIQUE constraint on contacts.email (allows multiple NULL)
     console.log('[Migration v20] Removing UNIQUE constraint on contacts.email')
     try {
-      // SQLite requires table recreation to remove constraints
-      database.run(`
-        CREATE TABLE contacts_new (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          email TEXT,
-          type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown',
-          role TEXT,
-          company TEXT,
-          notes TEXT,
-          tags TEXT,
-          first_seen_at TEXT NOT NULL,
-          last_seen_at TEXT NOT NULL,
-          meeting_count INTEGER DEFAULT 0,
-          created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-      `)
-      database.run('INSERT INTO contacts_new SELECT * FROM contacts')
-      database.run('DROP TABLE contacts')
-      database.run('ALTER TABLE contacts_new RENAME TO contacts')
-      console.log('[Migration v20] contacts.email UNIQUE constraint removed')
+      // Check if the UNIQUE constraint exists by checking the CREATE TABLE sql
+      const tableInfo = database.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='contacts'")
+      const createSql = tableInfo.length > 0 && tableInfo[0].values.length > 0
+        ? (tableInfo[0].values[0][0] as string)
+        : ''
+
+      if (createSql.includes('UNIQUE')) {
+        // SQLite requires table recreation to remove constraints
+        database.run(`
+          CREATE TABLE contacts_new (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT,
+            type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown',
+            role TEXT,
+            company TEXT,
+            notes TEXT,
+            tags TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            meeting_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+          )
+        `)
+        database.run('INSERT INTO contacts_new SELECT * FROM contacts')
+        database.run('DROP TABLE contacts')
+        database.run('ALTER TABLE contacts_new RENAME TO contacts')
+        console.log('[Migration v20] contacts.email UNIQUE constraint removed')
+      } else {
+        console.log('[Migration v20] contacts.email UNIQUE constraint already absent')
+      }
     } catch (e) {
       console.warn('[Migration v20] Contacts email constraint fix failed:', e)
     }
@@ -1083,6 +1128,28 @@ const MIGRATIONS: Record<number, () => void> = {
           console.warn('[Migration v20] Failed to add progress:', e)
         }
       }
+    }
+
+    // 4. spec-007: Add download_queue table
+    console.log('[Migration v20] Creating download_queue table')
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS download_queue (
+          id TEXT PRIMARY KEY,
+          filename TEXT NOT NULL UNIQUE,
+          file_size INTEGER NOT NULL,
+          progress INTEGER DEFAULT 0,
+          status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'downloading', 'completed', 'failed')),
+          error TEXT,
+          started_at TEXT,
+          completed_at TEXT,
+          recording_date TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+      console.log('[Migration v20] download_queue table created')
+    } catch (e) {
+      console.warn('[Migration v20] download_queue table creation failed:', e)
     }
 
     console.log('Migration v20 complete: Phase A consolidated fixes applied')
@@ -1180,6 +1247,22 @@ export async function initializeDatabase(): Promise<void> {
       }
     }
 
+    // Repair transcription_queue (spec-014: retry persistence and real-time progress)
+    const queueInfo = database.exec("PRAGMA table_info(transcription_queue)")
+    if (queueInfo.length > 0 && queueInfo[0].values) {
+      const queueCols = queueInfo[0].values.map(col => col[1])
+      const queueRepairs = [
+        { name: 'retry_count', def: 'INTEGER DEFAULT 0' },
+        { name: 'progress', def: 'INTEGER DEFAULT 0' }
+      ]
+      for (const col of queueRepairs) {
+        if (!queueCols.includes(col.name)) {
+          console.log(`[Database] Repairing transcription_queue: adding ${col.name}`)
+          try { database.run(`ALTER TABLE transcription_queue ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+        }
+      }
+    }
+
     // Repair chat_messages (AI-15: columns referenced by assistant mapper)
     const chatMsgInfo = database.exec("PRAGMA table_info(chat_messages)")
     if (chatMsgInfo.length > 0 && chatMsgInfo[0].values) {
@@ -1257,83 +1340,17 @@ export function closeDatabase(): void {
 }
 
 /**
- * Ensure a knowledge_capture exists for a recording
- * Creates one if it doesn't exist, returns the knowledge_capture_id
- *
- * AC-01 FIX: This ensures actionables always have a valid knowledge_capture_id
- */
-export function ensureKnowledgeCaptureForRecording(recordingId: string): string | null {
-  try {
-    // First check if recording already has a knowledge_capture linked via migrated_to_capture_id
-    const recording = getRecordingById(recordingId)
-    if (!recording) {
-      console.error(`[ensureKnowledgeCapture] Recording not found: ${recordingId}`)
-      return null
-    }
-
-    // If already linked, return existing capture ID
-    if (recording.migrated_to_capture_id) {
-      return recording.migrated_to_capture_id
-    }
-
-    // Check if a capture exists by source_recording_id
-    const existingCapture = queryOne<{ id: string }>(
-      'SELECT id FROM knowledge_captures WHERE source_recording_id = ?',
-      [recordingId]
-    )
-
-    if (existingCapture) {
-      // Link it to the recording for future lookups
-      run('UPDATE recordings SET migrated_to_capture_id = ? WHERE id = ?', [existingCapture.id, recordingId])
-      return existingCapture.id
-    }
-
-    // Create a new knowledge_capture
-    const captureId = `kc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-    const now = new Date().toISOString()
-
-    // Get transcript for summary if available
-    const transcript = getTranscriptByRecordingId(recordingId)
-
-    run(
-      `INSERT INTO knowledge_captures (
-        id, title, summary, category, status,
-        captured_at, created_at, updated_at,
-        source_recording_id, source_meeting_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        captureId,
-        recording.filename || 'Untitled Recording',
-        transcript?.summary || null,
-        'meeting', // default category
-        transcript ? 'ready' : 'processing',
-        recording.date_recorded || now,
-        now,
-        now,
-        recordingId,
-        recording.meeting_id || null
-      ]
-    )
-
-    // Link back to recording
-    run('UPDATE recordings SET migrated_to_capture_id = ? WHERE id = ?', [captureId, recordingId])
-
-    console.log(`[ensureKnowledgeCapture] Created knowledge_capture ${captureId} for recording ${recordingId}`)
-    return captureId
-  } catch (error) {
-    console.error('[ensureKnowledgeCapture] Failed:', error)
-    return null
-  }
-}
-
-/**
  * Update knowledge_capture title based on title_suggestion
  * Only updates if the current title matches the filename pattern
  */
 export function updateKnowledgeCaptureTitle(recordingId: string, titleSuggestion: string): void {
   try {
-    // Ensure knowledge_capture exists (AC-01 related improvement)
-    const captureId = ensureKnowledgeCaptureForRecording(recordingId)
+    // Get the recording to find the knowledge_capture
+    const recording = getRecordingById(recordingId)
+    if (!recording) return
+
+    // Get the knowledge capture via migrated_to_capture_id
+    const captureId = recording.migrated_to_capture_id
     if (!captureId) return
 
     // Get the knowledge capture
@@ -1344,7 +1361,7 @@ export function updateKnowledgeCaptureTitle(recordingId: string, titleSuggestion
     if (!capture) return
 
     // Only update if title looks like a filename (contains .hda or similar)
-    if (capture.title.includes('.') || capture.title === 'Untitled' || capture.title === 'Untitled Recording') {
+    if (capture.title.includes('.') || capture.title === 'Untitled') {
       run(
         'UPDATE knowledge_captures SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
         [titleSuggestion, captureId]
@@ -1951,11 +1968,8 @@ export function getTranscriptsByRecordingIds(recordingIds: string[]): Map<string
 }
 
 export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): void {
-  // AI-02 FIX: Delete old transcription first to avoid UNIQUE constraint violation on re-transcription
-  run('DELETE FROM transcripts WHERE recording_id = ?', [transcript.recording_id])
-
   run(
-    `INSERT INTO transcripts (id, recording_id, full_text, language, summary, action_items,
+    `INSERT OR REPLACE INTO transcripts (id, recording_id, full_text, language, summary, action_items,
       topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model,
       title_suggestion, question_suggestions)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1984,7 +1998,7 @@ export function insertTranscript(transcript: Omit<Transcript, 'created_at'>): vo
  * In SQLite LIKE, % matches any sequence and _ matches any single character.
  * We escape them with \ and specify ESCAPE '\' in the query.
  */
-function escapeLikePattern(pattern: string): string {
+export function escapeLikePattern(pattern: string): string {
   return pattern
     .replace(/\\/g, '\\\\')  // Escape backslash first
     .replace(/%/g, '\\%')     // Escape percent
@@ -2031,15 +2045,17 @@ export interface QueueItem {
   recording_id: string
   status: string
   attempts: number
+  retry_count: number
+  progress: number
   error_message?: string
   created_at: string
   started_at?: string
   completed_at?: string
 }
 
-export function addToQueue(recordingId: string, filename?: string): string {
+export function addToQueue(recordingId: string): string {
   const id = crypto.randomUUID()
-  run('INSERT INTO transcription_queue (id, recording_id, filename) VALUES (?, ?, ?)', [id, recordingId, filename ?? null])
+  run('INSERT INTO transcription_queue (id, recording_id) VALUES (?, ?)', [id, recordingId])
   return id
 }
 
@@ -2049,7 +2065,7 @@ export function getQueueItems(status?: string): (QueueItem & { filename?: string
     FROM transcription_queue tq
     LEFT JOIN recordings r ON tq.recording_id = r.id
     ${status ? 'WHERE tq.status = ?' : ''}
-    ORDER BY tq.created_at`
+    ORDER BY tq.created_at ASC`
   if (status) {
     return queryAll<QueueItem & { filename?: string }>(sql, [status])
   }
@@ -2068,9 +2084,18 @@ export function updateQueueItem(id: string, status: string, errorMessage?: strin
       errorMessage ?? null,
       id
     ])
+  } else if (status === 'pending') {
+    // When retrying, increment retry_count and reset progress
+    run('UPDATE transcription_queue SET status = ?, retry_count = retry_count + 1, progress = 0 WHERE id = ?', [status, id])
   } else {
     run('UPDATE transcription_queue SET status = ? WHERE id = ?', [status, id])
   }
+}
+
+export function updateQueueProgress(id: string, progress: number): void {
+  // Clamp progress between 0 and 100
+  const clampedProgress = Math.max(0, Math.min(100, Math.round(progress)))
+  run('UPDATE transcription_queue SET progress = ? WHERE id = ?', [clampedProgress, id])
 }
 
 export function removeFromQueue(id: string): void {
@@ -2407,14 +2432,6 @@ export function updateContact(id: string, updates: Partial<Contact>): void {
 
 export function updateContactNotes(id: string, notes: string | null): void {
   run('UPDATE contacts SET notes = ? WHERE id = ?', [notes, id])
-}
-
-/**
- * Delete a contact by ID.
- * Cascade deletion of meeting_contacts is handled by FK constraint.
- */
-export function deleteContact(id: string): void {
-  run('DELETE FROM contacts WHERE id = ?', [id])
 }
 
 export function getMeetingsForContact(contactId: string): Meeting[] {
@@ -2952,4 +2969,102 @@ export async function updateRecordingStorageTierAsync(
       resolve()
     })
   })
+}
+
+// =============================================================================
+// Transcription Service Mutex Lock (spec-005)
+// =============================================================================
+
+/**
+ * Atomically acquire the transcription service lock.
+ * Uses a database transaction to ensure only one process can acquire the lock.
+ * @param processId Unique process identifier
+ * @returns true if lock acquired, false if already locked
+ */
+export function acquireTranscriptionLock(processId: string): boolean {
+  const database = getDatabase()
+  const now = new Date().toISOString()
+
+  // Check current lock status before attempting to acquire
+  const currentStatus = database.exec('SELECT process_id FROM transcription_service_lock WHERE id = 1')
+  const currentProcessId = currentStatus.length > 0 && currentStatus[0].values.length > 0
+    ? currentStatus[0].values[0][0]
+    : null
+
+  // If already locked by another process, return false
+  if (currentProcessId !== null) {
+    return false
+  }
+
+  // Atomic check-and-set using UPDATE with WHERE clause
+  // If process_id is NULL, set it to our processId
+  database.run(
+    `UPDATE transcription_service_lock
+     SET process_id = ?, acquired_at = ?, updated_at = ?
+     WHERE id = 1 AND process_id IS NULL`,
+    [processId, now, now]
+  )
+
+  // Verify we acquired the lock by checking again
+  const verifyStatus = database.exec('SELECT process_id FROM transcription_service_lock WHERE id = 1')
+  const newProcessId = verifyStatus.length > 0 && verifyStatus[0].values.length > 0
+    ? verifyStatus[0].values[0][0]
+    : null
+
+  return newProcessId === processId
+}
+
+/**
+ * Release the transcription service lock.
+ * @param processId The process ID that currently holds the lock
+ * @returns true if lock released, false if not held by this process
+ */
+export function releaseTranscriptionLock(processId: string): boolean {
+  const database = getDatabase()
+
+  // Check if we currently hold the lock
+  const currentStatus = database.exec('SELECT process_id FROM transcription_service_lock WHERE id = 1')
+  const currentProcessId = currentStatus.length > 0 && currentStatus[0].values.length > 0
+    ? currentStatus[0].values[0][0]
+    : null
+
+  if (currentProcessId !== processId) {
+    return false // Not our lock to release
+  }
+
+  // Release the lock
+  database.run(
+    `UPDATE transcription_service_lock
+     SET process_id = NULL, acquired_at = NULL, updated_at = ?
+     WHERE id = 1 AND process_id = ?`,
+    [new Date().toISOString(), processId]
+  )
+
+  // Verify lock was released
+  const verifyStatus = database.exec('SELECT process_id FROM transcription_service_lock WHERE id = 1')
+  const newProcessId = verifyStatus.length > 0 && verifyStatus[0].values.length > 0
+    ? verifyStatus[0].values[0][0]
+    : null
+
+  return newProcessId === null
+}
+
+/**
+ * Get the current transcription lock status.
+ * @returns Lock status with process_id and timestamps
+ */
+export function getTranscriptionLockStatus(): {
+  processId: string | null
+  acquiredAt: string | null
+  updatedAt: string | null
+} {
+  const database = getDatabase()
+  const row = database.exec('SELECT process_id, acquired_at, updated_at FROM transcription_service_lock WHERE id = 1')
+
+  if (row.length > 0 && row[0].values.length > 0) {
+    const [processId, acquiredAt, updatedAt] = row[0].values[0] as [string | null, string | null, string | null]
+    return { processId, acquiredAt, updatedAt }
+  }
+
+  return { processId: null, acquiredAt: null, updatedAt: null }
 }

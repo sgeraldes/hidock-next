@@ -27,6 +27,7 @@ export function useDeviceSubscriptions() {
   const deviceService = getHiDockDeviceService()
   const deviceSubscriptionsInitialized = useRef(false)
   const autoSyncTriggeredRef = useRef(false)
+  const syncDebounceTimerRef = useRef<NodeJS.Timeout | null>(null) // spec-007: debounce timer
 
   const setDeviceState = useAppStore((s) => s.setDeviceState)
   const setConnectionStatus = useAppStore((s) => s.setConnectionStatus)
@@ -58,6 +59,15 @@ export function useDeviceSubscriptions() {
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Connection status changed:', status)
       setConnectionStatus(status)
 
+      // spec-007: Cancel downloads on disconnect
+      if (status.step === 'disconnected' && window.electronAPI?.downloadService) {
+        const cancelled = await window.electronAPI.downloadService.cancelActive('Device disconnected')
+        if (cancelled > 0) {
+          if (shouldLogQa()) console.log(`[useDeviceSubscriptions] Cancelled ${cancelled} downloads due to disconnect`)
+          deviceService.log('info', 'Downloads cancelled', `${cancelled} active downloads cancelled due to disconnect`)
+        }
+      }
+
       // AUTO-SYNC TRIGGER: Only when status becomes 'ready'
       if (status.step !== 'ready') return
       if (autoSyncTriggeredRef.current) return
@@ -68,40 +78,55 @@ export function useDeviceSubscriptions() {
         return
       }
 
-      autoSyncTriggeredRef.current = true
-      if (shouldLogQa()) console.log('[useDeviceSubscriptions] Auto-sync triggered on device ready')
-
-      const recordings = deviceService.getCachedRecordings()
-      if (recordings.length > 0) {
-        // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
-        const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
-          recordings.map(rec => ({
-            filename: rec.filename,
-            size: rec.size,
-            duration: rec.duration,
-            dateCreated: rec.dateCreated
-          }))
-        )
-        const toSync = reconcileResults.filter(result => !result.skipReason)
-        if (toSync.length > 0) {
-          if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Auto-sync on ready: ${toSync.length} files to download`)
-          deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
-
-          const filesToQueue = toSync.map(rec => ({
-            filename: rec.filename,
-            size: rec.size,
-            dateCreated: rec.dateCreated?.toISOString()
-          }))
-          await window.electronAPI.downloadService.startSession(filesToQueue)
-          setDeviceSyncState({
-            deviceSyncing: true,
-            deviceSyncProgress: { total: toSync.length, current: 0 },
-            deviceFileDownloading: toSync[0]?.filename ?? null
-          })
-        } else {
-          deviceService.log('success', 'All files synced', 'No new recordings to download')
-        }
+      // spec-007: Clear existing debounce timer
+      if (syncDebounceTimerRef.current) {
+        clearTimeout(syncDebounceTimerRef.current)
+        if (shouldLogQa()) console.log('[useDeviceSubscriptions] Cleared previous sync debounce timer')
       }
+
+      // spec-007: Debounce sync by 2 seconds
+      syncDebounceTimerRef.current = setTimeout(async () => {
+        try {
+          autoSyncTriggeredRef.current = true
+          if (shouldLogQa()) console.log('[useDeviceSubscriptions] Auto-sync triggered after 2s debounce')
+
+          const recordings = deviceService.getCachedRecordings()
+          if (recordings.length > 0) {
+            // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
+            const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
+              recordings.map(rec => ({
+                filename: rec.filename,
+                size: rec.size,
+                duration: rec.duration,
+                dateCreated: rec.dateCreated
+              }))
+            )
+            const toSync = reconcileResults.filter(result => !result.skipReason)
+            if (toSync.length > 0) {
+              if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Auto-sync on ready: ${toSync.length} files to download`)
+              deviceService.log('info', 'Auto-sync triggered', `${toSync.length} new recordings to download`)
+
+              const filesToQueue = toSync.map(rec => ({
+                filename: rec.filename,
+                size: rec.size,
+                dateCreated: rec.dateCreated?.toISOString()
+              }))
+              await window.electronAPI.downloadService.startSession(filesToQueue)
+              setDeviceSyncState({
+                deviceSyncing: true,
+                deviceSyncProgress: { total: toSync.length, current: 0 },
+                deviceFileDownloading: toSync[0]?.filename ?? null
+              })
+            } else {
+              deviceService.log('success', 'All files synced', 'No new recordings to download')
+            }
+          }
+        } catch (error) {
+          console.error('[useDeviceSubscriptions] Auto-sync failed:', error)
+        } finally {
+          syncDebounceTimerRef.current = null
+        }
+      }, 2000) // spec-007: 2 second debounce
     })
 
     // Subscribe to activity log
@@ -111,6 +136,11 @@ export function useDeviceSubscriptions() {
 
     return () => {
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Unsubscribing from device state')
+      // spec-007: Clear debounce timer on cleanup
+      if (syncDebounceTimerRef.current) {
+        clearTimeout(syncDebounceTimerRef.current)
+        syncDebounceTimerRef.current = null
+      }
       unsubStateChange()
       unsubStatusChange()
       unsubActivity()

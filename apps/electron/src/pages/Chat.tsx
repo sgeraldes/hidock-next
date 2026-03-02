@@ -77,6 +77,7 @@ export function Chat() {
   // UI state
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
   const [initialLoading, setInitialLoading] = useState(true)
   const [initError, setInitError] = useState<string | null>(null)
   const [status, setStatus] = useState<RAGStatus | null>(null)
@@ -345,26 +346,34 @@ export function Chat() {
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!input.trim() || loading) return
 
-    // Ensure we have a conversation
-    let currentConv = activeConversation
-    if (!currentConv) {
-      try {
-        currentConv = await window.electronAPI.assistant.createConversation(input.trim().slice(0, 30) + '...')
-        setConversations(prev => [currentConv!, ...prev])
-        setActiveConversation(currentConv)
-      } catch (err) {
-        console.error('Failed to create conversation for message:', err)
-        return
-      }
-    }
+    // Race condition protection: prevent concurrent submissions
+    if (isProcessing) return
 
-    const userMessageContent = input.trim()
-    setInput('')
+    // Empty message validation
+    if (!input.trim()) return
+
+    setIsProcessing(true)
     setLoading(true)
 
     try {
+      // Ensure we have a conversation
+      let currentConv = activeConversation
+      if (!currentConv) {
+        try {
+          currentConv = await window.electronAPI.assistant.createConversation(input.trim().slice(0, 30) + '...')
+          setConversations(prev => [currentConv!, ...prev])
+          setActiveConversation(currentConv)
+        } catch (err) {
+          console.error('Failed to create conversation for message:', err)
+          return
+        }
+      }
+
+      const userMessageContent = input.trim()
+      setInput('')
+
+      // Start processing message
       // Add user message
       const userMsg = await window.electronAPI.assistant.addMessage(currentConv!.id, 'user', userMessageContent)
       setMessages((prev) => [...prev, userMsg])
@@ -377,11 +386,6 @@ export function Chat() {
         const errorMsg = await window.electronAPI.assistant.addMessage(currentConv!.id, 'assistant', response.error)
         setMessages((prev) => [...prev, errorMsg])
       } else {
-        // Store sources for this message
-        if (response.sources && response.sources.length > 0) {
-          setSources((prev) => new Map(prev).set(userMsg.id, response.sources))
-        }
-
         // Add assistant response
         const assistantMsg = await window.electronAPI.assistant.addMessage(
           currentConv!.id,
@@ -391,29 +395,33 @@ export function Chat() {
         )
         setMessages((prev) => [...prev, assistantMsg])
 
-        // Store sources
+        // Store sources for assistant message only
         if (response.sources && response.sources.length > 0) {
           setSources((prev) => new Map(prev).set(assistantMsg.id, response.sources))
         }
       }
-      
+
       // Update updated_at in UI
-      setConversations(prev => prev.map(c => 
+      setConversations(prev => prev.map(c =>
         c.id === currentConv!.id ? { ...c, updatedAt: new Date().toISOString() } : c
       ).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()))
 
     } catch (error) {
       console.error('Chat error:', error)
-      const errorMsg = await window.electronAPI.assistant.addMessage(
-        currentConv!.id,
-        'assistant',
-        'Sorry, I encountered an error processing your request. Please make sure Ollama is running and try again.'
-      )
-      setMessages((prev) => [...prev, errorMsg])
+      // Use activeConversation since currentConv may be out of scope
+      if (activeConversation) {
+        const errorMsg = await window.electronAPI.assistant.addMessage(
+          activeConversation.id,
+          'assistant',
+          'Sorry, I encountered an error processing your request. Please make sure Ollama is running and try again.'
+        )
+        setMessages((prev) => [...prev, errorMsg])
+      }
     } finally {
       setLoading(false)
+      setIsProcessing(false)
     }
-  }, [input, loading, activeConversation])
+  }, [input, isProcessing, activeConversation])
 
   const getMessageSources = (message: Message): Source[] => {
     if (sources.has(message.id)) return sources.get(message.id)!
@@ -830,12 +838,12 @@ export function Chat() {
                 }
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                disabled={loading}
+                disabled={isProcessing}
                 className="pr-12 py-6 rounded-2xl shadow-sm border-border bg-background focus-visible:ring-primary/20"
               />
-              <Button 
-                type="submit" 
-                disabled={loading || !input.trim()}
+              <Button
+                type="submit"
+                disabled={isProcessing || !input.trim()}
                 size="icon"
                 className="absolute right-2 h-10 w-10 rounded-xl"
               >

@@ -290,7 +290,7 @@ interface ResponseMessage {
 
 // Logging configuration - set to true for debugging download issues
 const DEBUG_USB = false // Enable detailed USB transfer logging
-const DEBUG_PROTOCOL = false // Enable protocol-level logging
+const DEBUG_PROTOCOL = true // Enable protocol-level logging
 
 // Main Jensen device class
 export class JensenDevice {
@@ -456,14 +456,22 @@ export class JensenDevice {
 
   // Request and connect to a HiDock device
   // Follows official jensen.js pattern: disconnect first, then connect
-  async connect(): Promise<boolean> {
+  async connect(signal?: AbortSignal): Promise<boolean> {
     if (!JensenDevice.isSupported()) {
       console.error('WebUSB not supported')
       return false
     }
 
+    // Check if aborted before starting
+    if (signal?.aborted) {
+      throw new DOMException('Connection aborted', 'AbortError')
+    }
+
     // Disconnect first to clean up any stale connections (matches official jensen.js)
     await this.disconnect()
+
+    // Track device for cleanup on abort
+    let device: USBDevice | null = null
 
     try {
       if (DEBUG_PROTOCOL) console.log('connect: Starting connection process')
@@ -472,7 +480,12 @@ export class JensenDevice {
       const devices = await navigator.usb.getDevices()
       if (DEBUG_PROTOCOL) console.log('connect: Found', devices.length, 'authorized devices')
 
-      let device = devices.find(
+      // Check abort after async operation
+      if (signal?.aborted) {
+        throw new DOMException('Connection aborted', 'AbortError')
+      }
+
+      device = devices.find(
         (d) => USB_VENDOR_IDS.includes(d.vendorId) && d.productName?.toLowerCase().includes('hidock')
       )
 
@@ -491,6 +504,11 @@ export class JensenDevice {
         return false
       }
 
+      // Check abort after device selection
+      if (signal?.aborted) {
+        throw new DOMException('Connection aborted', 'AbortError')
+      }
+
       if (DEBUG_PROTOCOL) console.log('connect: Opening device...')
 
       // Check if device is already open (stale state from previous session)
@@ -506,6 +524,12 @@ export class JensenDevice {
       await device.open()
       if (DEBUG_PROTOCOL) console.log('connect: Device opened, selecting configuration...')
 
+      // Check abort after device open
+      if (signal?.aborted) {
+        await device.close()
+        throw new DOMException('Connection aborted', 'AbortError')
+      }
+
       // Log device state for debugging
       console.log('connect: Device state after open:', {
         opened: device.opened,
@@ -515,6 +539,12 @@ export class JensenDevice {
 
       await device.selectConfiguration(1)
       if (DEBUG_PROTOCOL) console.log('connect: Claiming interface...')
+
+      // Check abort after configuration
+      if (signal?.aborted) {
+        await device.close()
+        throw new DOMException('Connection aborted', 'AbortError')
+      }
 
       // Log interface info before claiming
       if (device.configuration) {
@@ -530,6 +560,12 @@ export class JensenDevice {
       if (DEBUG_PROTOCOL) console.log('connect: Selecting alternate interface...')
       await device.selectAlternateInterface(0, 0)
       if (DEBUG_PROTOCOL) console.log('connect: Interface claimed successfully')
+
+      // Check abort after interface claim
+      if (signal?.aborted) {
+        await device.close()
+        throw new DOMException('Connection aborted', 'AbortError')
+      }
 
       this.device = device
 
@@ -598,6 +634,21 @@ export class JensenDevice {
       this.onconnect?.()
       return true
     } catch (error) {
+      // Ensure device is closed on abort or error
+      if (device) {
+        try {
+          await device.close()
+        } catch (closeError) {
+          console.warn('[Jensen] Failed to close device after error:', closeError)
+        }
+      }
+
+      // Re-throw abort errors
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        console.log('[Jensen] Connection aborted')
+        throw error
+      }
+
       console.error('[Jensen] Connection failed:', error)
       return false
     }
@@ -1597,15 +1648,29 @@ export class JensenDevice {
     filename: string,
     fileSize: number,
     onChunk: (data: Uint8Array) => void,
-    onProgress?: (received: number) => void
+    onProgress?: (received: number) => void,
+    signal?: AbortSignal
   ): Promise<boolean> {
     return this.withLock(`downloadFile:${filename}`, async () => {
       if (!this.device || !this.device.opened) return false
+
+      // Check if already aborted before starting
+      if (signal?.aborted) {
+        console.log(`[Jensen] downloadFile: Already aborted before start`)
+        return false
+      }
 
       // Clear receive buffer before download to prevent stale data issues
       this.receiveBuffer.clear()
 
       if (DEBUG_PROTOCOL) console.log(`[Jensen] downloadFile: Starting download of ${filename}, size=${fileSize}`)
+
+      // Set up abort listener to set the abort flag
+      const abortHandler = () => {
+        console.log(`[Jensen] downloadFile: Abort signal received for ${filename}`)
+        this.abortOperations = true
+      }
+      signal?.addEventListener('abort', abortHandler)
 
       const body: number[] = []
       for (let i = 0; i < filename.length; i++) {
@@ -1628,9 +1693,10 @@ export class JensenDevice {
 
       let lastProgressLog = 0
       while (received < fileSize && consecutiveTimeouts < maxTimeouts && Date.now() - startTime < overallTimeout && !this.abortOperations) {
-        // Check for abort request (disconnect called)
-        if (this.abortOperations) {
-          console.log(`[Jensen] downloadFile: Aborted by disconnect request`)
+        // Check for abort request (from disconnect or AbortSignal)
+        if (this.abortOperations || signal?.aborted) {
+          signal?.removeEventListener('abort', abortHandler)
+          console.log(`[Jensen] downloadFile: Aborted (flag=${this.abortOperations}, signal=${signal?.aborted})`)
           return false
         }
 
@@ -1665,9 +1731,16 @@ export class JensenDevice {
         }
       }
 
+      // Cleanup abort listener
+      signal?.removeEventListener('abort', abortHandler)
+
       const success = received >= fileSize
       if (!success) {
-        console.error(`[Jensen] downloadFile FAILED: received=${received}/${fileSize}, consecutiveTimeouts=${consecutiveTimeouts}, elapsed=${Date.now() - startTime}ms`)
+        if (this.abortOperations || signal?.aborted) {
+          console.log(`[Jensen] downloadFile: Cancelled after receiving ${received}/${fileSize} bytes`)
+        } else {
+          console.error(`[Jensen] downloadFile FAILED: received=${received}/${fileSize}, consecutiveTimeouts=${consecutiveTimeouts}, elapsed=${Date.now() - startTime}ms`)
+        }
       } else if (DEBUG_PROTOCOL) {
         console.log(`[Jensen] downloadFile: Complete, received=${received}/${fileSize} in ${Date.now() - startTime}ms`)
       }

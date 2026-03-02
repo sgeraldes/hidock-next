@@ -67,23 +67,36 @@ vi.mock('crypto', async () => {
   }
 })
 
+// UUID regex for validation
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// Helper to create a schema mock that validates UUIDs in the expected field
+function createSchemaMock(idField: string | string[]) {
+  const fields = Array.isArray(idField) ? idField : [idField]
+  return {
+    safeParse: vi.fn((data: any) => {
+      for (const field of fields) {
+        if (data[field] !== undefined && !UUID_RE.test(data[field])) {
+          return {
+            success: false,
+            error: { issues: [{ message: `${field} must be a valid UUID` }] }
+          }
+        }
+      }
+      return { success: true, data }
+    })
+  }
+}
+
 // Mock validation schemas
 vi.mock('../validation', () => ({
-  GetRecordingByIdSchema: {
-    safeParse: vi.fn((data) => ({ success: true, data }))
-  },
-  DeleteRecordingSchema: {
-    safeParse: vi.fn((data) => ({ success: true, data }))
-  },
-  LinkRecordingToMeetingSchema: {
-    safeParse: vi.fn((data) => ({ success: true, data }))
-  },
-  UnlinkRecordingFromMeetingSchema: {
-    safeParse: vi.fn((data) => ({ success: true, data }))
-  },
-  TranscribeRecordingSchema: {
-    safeParse: vi.fn((data) => ({ success: true, data }))
-  }
+  GetRecordingByIdSchema: createSchemaMock('id'),
+  DeleteRecordingSchema: createSchemaMock('id'),
+  LinkRecordingToMeetingSchema: createSchemaMock(['recordingId', 'meetingId']),
+  UnlinkRecordingFromMeetingSchema: createSchemaMock('recordingId'),
+  TranscribeRecordingSchema: createSchemaMock('recordingId'),
+  UpdateRecordingStatusSchema: createSchemaMock('id'),
+  UpdateTranscriptionStatusSchema: createSchemaMock('id')
 }))
 
 // Mock recording-watcher service
@@ -96,37 +109,12 @@ vi.mock('../../services/recording-watcher', () => ({
 // Mock transcription service
 vi.mock('../../services/transcription', () => ({
   transcribeManually: vi.fn(),
-  getTranscriptionStatus: vi.fn(() => ({ isProcessing: false, pendingCount: 0, processingCount: 0 })),
-  startTranscriptionProcessor: vi.fn(),
-  stopTranscriptionProcessor: vi.fn(),
-  cancelTranscription: vi.fn(),
-  cancelAllTranscriptions: vi.fn(() => 0)
-}))
-
-// Mock config service
-vi.mock('../../services/config', () => ({
-  getConfig: vi.fn(() => ({
-    transcription: {
-      geminiApiKey: 'mock-api-key'
-    }
-  }))
-}))
-
-// Mock recording-watcher
-vi.mock('../../services/recording-watcher', () => ({
-  startRecordingWatcher: vi.fn(),
-  stopRecordingWatcher: vi.fn(),
-  getWatcherStatus: vi.fn()
-}))
-
-// Mock transcription service
-vi.mock('../../services/transcription', () => ({
-  transcribeManually: vi.fn(),
   getTranscriptionStatus: vi.fn(),
   startTranscriptionProcessor: vi.fn(),
   stopTranscriptionProcessor: vi.fn(),
   cancelTranscription: vi.fn(),
-  cancelAllTranscriptions: vi.fn()
+  cancelAllTranscriptions: vi.fn(),
+  processQueueManually: vi.fn().mockResolvedValue(undefined)
 }))
 
 // Mock config service
@@ -183,7 +171,10 @@ describe('Recording IPC Handlers', () => {
       'recordings:addExternal',
       'recordings:selectMeeting',
       'recordings:addToQueue',
-      'recordings:processQueue'
+      'recordings:processQueue',
+      'transcription:retry',
+      'recordings:updateStatus',
+      'recordings:updateTranscriptionStatus'
     ]
 
     for (const channel of expectedChannels) {

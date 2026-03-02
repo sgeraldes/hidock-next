@@ -52,7 +52,9 @@ vi.mock('@/features/library/hooks', () => ({
     handleSelectionClick: vi.fn()
   })),
   useKeyboardNavigation: vi.fn(() => ({
-    handleKeyDown: vi.fn()
+    handleKeyDown: vi.fn(),
+    focusedIndex: -1,
+    containerRef: { current: null }
   })),
   useTransitionFilters: vi.fn(() => ({
     filterMode: 'semantic',
@@ -93,7 +95,16 @@ vi.mock('@/store/useAppStore', () => ({
       deviceInfo: null
     }
     return typeof selector === 'function' ? selector(state) : state
-  }
+  },
+  useDownloadQueue: vi.fn().mockReturnValue(new Map()),
+  useDeviceSyncProgress: vi.fn().mockReturnValue(null),
+  useDeviceSyncEta: vi.fn().mockReturnValue(null),
+  useDeviceConnected: vi.fn().mockReturnValue(false),
+  useDeviceSyncing: vi.fn().mockReturnValue(false),
+  useConnectionStatus: vi.fn().mockReturnValue({ step: 'idle', message: 'Not connected' }),
+  useDeviceState: vi.fn().mockReturnValue({ connected: false }),
+  useIsDownloading: vi.fn().mockReturnValue(false),
+  useDownloadProgress: vi.fn().mockReturnValue(null)
 }))
 
 vi.mock('@/store/useLibraryStore', () => ({

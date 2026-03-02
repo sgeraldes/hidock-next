@@ -211,7 +211,13 @@ async function processNewRecording(filePath: string): Promise<void> {
     const config = getConfig()
     if (config.transcription.autoTranscribe) {
       addToQueue(recordingId)
-      // Individual recording logs disabled for performance
+      // spec-005: Start processor after adding to queue
+      // Use dynamic import to avoid circular dependency
+      import('./transcription').then(({ processQueueManually }) => {
+        processQueueManually()
+      }).catch(err => {
+        console.error('[RecordingWatcher] Failed to import transcription service:', err)
+      })
     } else {
       // Individual recording logs disabled for performance
     }

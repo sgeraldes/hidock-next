@@ -7,10 +7,13 @@ import { MemoryRouter } from 'react-router-dom'
 // Mock Electron API
 global.window.electronAPI = {
       rag: {
-      search: vi.fn().mockResolvedValue({
-        knowledge: [{ id: 'k1', title: 'Knowledge 1', summary: 'Summary 1', capturedAt: new Date().toISOString() }],
-        people: [{ id: 'p1', name: 'Person 1', type: 'team' }],
-        projects: [{ id: 'pr1', name: 'Project 1', status: 'active' }]
+      globalSearch: vi.fn().mockResolvedValue({
+        success: true,
+        data: {
+          knowledge: [{ id: 'k1', title: 'Knowledge 1', summary: 'Summary 1', capturedAt: new Date().toISOString() }],
+          people: [{ id: 'p1', name: 'Person 1', type: 'team' }],
+          projects: [{ id: 'pr1', name: 'Project 1', status: 'active' }]
+        }
       })
     }} as any
 
