@@ -12,6 +12,7 @@ vi.mock('electron', () => ({
 // Mock database
 vi.mock('../../services/database', () => ({
   queryAll: vi.fn(),
+  queryOne: vi.fn(),
   run: vi.fn()
 }))
 
@@ -241,11 +242,33 @@ describe('Actionables IPC Handlers', () => {
       expect(result).toEqual({ success: true })
     })
 
-    it('should reject invalid status transition (shared -> pending)', async () => {
+    // C-ACT-001: shared -> pending is now allowed for re-processing
+    it('should allow transition shared -> pending', async () => {
       const { queryAll, run } = await import('../../services/database')
       vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'shared' }])
 
       const result = await handlers['actionables:updateStatus'](null, 'a-1', 'pending')
+
+      expect(run).toHaveBeenCalled()
+      expect(result).toEqual({ success: true })
+    })
+
+    // C-ACT-001: pending -> generated is now allowed for direct completion
+    it('should allow transition pending -> generated', async () => {
+      const { queryAll, run } = await import('../../services/database')
+      vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'pending' }])
+
+      const result = await handlers['actionables:updateStatus'](null, 'a-1', 'generated')
+
+      expect(run).toHaveBeenCalled()
+      expect(result).toEqual({ success: true })
+    })
+
+    it('should reject truly invalid status transition (shared -> in_progress)', async () => {
+      const { queryAll, run } = await import('../../services/database')
+      vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'shared' }])
+
+      const result = await handlers['actionables:updateStatus'](null, 'a-1', 'in_progress')
 
       expect(run).not.toHaveBeenCalled()
       expect(result).toEqual({
@@ -254,17 +277,47 @@ describe('Actionables IPC Handlers', () => {
       })
     })
 
-    it('should reject invalid status transition (pending -> generated)', async () => {
+    // C-ACT-002: Cleanup generated outputs on dismiss
+    it('should clean up output artifact when dismissing a generated actionable', async () => {
       const { queryAll, run } = await import('../../services/database')
-      vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'pending' }])
+      vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'generated', artifact_id: 'out-1' }])
 
-      const result = await handlers['actionables:updateStatus'](null, 'a-1', 'generated')
+      const result = await handlers['actionables:updateStatus'](null, 'a-1', 'dismissed')
 
-      expect(run).not.toHaveBeenCalled()
-      expect(result).toEqual({
-        success: false,
-        error: expect.stringContaining('Invalid status transition')
-      })
+      // Should delete the output and clear artifact reference
+      expect(run).toHaveBeenCalledWith('DELETE FROM outputs WHERE id = ?', ['out-1'])
+      expect(run).toHaveBeenCalledWith('UPDATE actionables SET artifact_id = NULL, generated_at = NULL WHERE id = ?', ['a-1'])
+      // Should also update the status
+      expect(run).toHaveBeenCalledWith(
+        'UPDATE actionables SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        ['dismissed', 'a-1']
+      )
+      expect(result).toEqual({ success: true })
+    })
+
+    // C-ACT-002: Cleanup generated outputs when reverting to pending
+    it('should clean up output artifact when reverting generated to pending', async () => {
+      const { queryAll, run } = await import('../../services/database')
+      vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'generated', artifact_id: 'out-2' }])
+
+      const result = await handlers['actionables:updateStatus'](null, 'a-1', 'pending')
+
+      expect(run).toHaveBeenCalledWith('DELETE FROM outputs WHERE id = ?', ['out-2'])
+      expect(result).toEqual({ success: true })
+    })
+
+    it('should not attempt cleanup when no artifact_id exists', async () => {
+      const { queryAll, run } = await import('../../services/database')
+      vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'pending', artifact_id: null }])
+
+      const result = await handlers['actionables:updateStatus'](null, 'a-1', 'dismissed')
+
+      // Should NOT call delete on outputs
+      const deleteCalls = vi.mocked(run).mock.calls.filter(
+        ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM outputs')
+      )
+      expect(deleteCalls).toHaveLength(0)
+      expect(result).toEqual({ success: true })
     })
 
     it('should return error if actionable not found', async () => {
@@ -332,7 +385,8 @@ describe('Actionables IPC Handlers', () => {
       })
     })
 
-    it('should return error if actionable is not in pending status', async () => {
+    // C-ACT-001: Now allows both 'pending' and 'generated' status
+    it('should return error if actionable is in in_progress status', async () => {
       const { queryAll } = await import('../../services/database')
       vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'in_progress' }])
 
@@ -340,7 +394,44 @@ describe('Actionables IPC Handlers', () => {
 
       expect(result).toEqual({
         success: false,
-        error: 'Only pending actionables can be generated'
+        error: expect.stringContaining("Cannot generate from 'in_progress' status")
+      })
+    })
+
+    it('should allow regeneration from generated status', async () => {
+      const { queryAll, run } = await import('../../services/database')
+      vi.mocked(queryAll).mockReturnValue([{
+        id: 'a-1',
+        status: 'generated',
+        source_knowledge_id: 'k-1',
+        suggested_template: 'meeting_notes'
+      }])
+
+      const result = await handlers['actionables:generateOutput'](null, 'a-1')
+
+      expect(run).toHaveBeenCalledWith(
+        'UPDATE actionables SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        ['in_progress', 'a-1']
+      )
+      expect(result).toEqual({
+        success: true,
+        data: {
+          actionableId: 'a-1',
+          sourceKnowledgeId: 'k-1',
+          suggestedTemplate: 'meeting_notes'
+        }
+      })
+    })
+
+    it('should reject generation from dismissed status', async () => {
+      const { queryAll } = await import('../../services/database')
+      vi.mocked(queryAll).mockReturnValue([{ id: 'a-1', status: 'dismissed' }])
+
+      const result = await handlers['actionables:generateOutput'](null, 'a-1')
+
+      expect(result).toEqual({
+        success: false,
+        error: expect.stringContaining("Cannot generate from 'dismissed' status")
       })
     })
 

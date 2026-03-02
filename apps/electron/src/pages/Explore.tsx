@@ -10,7 +10,8 @@ import {
   TrendingUp,
   Zap,
   Clock,
-  AlertCircle
+  AlertCircle,
+  ChevronLeft
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -19,6 +20,43 @@ import { formatDateTime, cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 import { highlightMatch } from '@/utils/highlight'
 
+// C-EXP-005: Loading skeleton for search results
+function SearchResultSkeleton() {
+  return (
+    <div className="space-y-6 animate-pulse">
+      <div className="flex items-center justify-between border-b pb-4">
+        <div className="h-4 w-40 bg-muted rounded" />
+        <div className="flex gap-1">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="h-7 w-16 bg-muted rounded-md" />
+          ))}
+        </div>
+      </div>
+      <div className="space-y-4">
+        <div className="flex items-center gap-2">
+          <div className="h-4 w-4 bg-muted rounded" />
+          <div className="h-4 w-24 bg-muted rounded" />
+        </div>
+        {[1, 2, 3].map((i) => (
+          <Card key={i} className="overflow-hidden">
+            <CardContent className="p-4 flex items-center justify-between gap-4">
+              <div className="flex-1 space-y-2">
+                <div className="h-4 w-3/4 bg-muted rounded" />
+                <div className="h-3 w-1/2 bg-muted rounded" />
+                <div className="h-3 w-28 bg-muted rounded" />
+              </div>
+              <div className="h-8 w-8 bg-muted rounded-full" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// C-EXP-003: Pagination constants
+const SEARCH_PAGE_SIZE = 20
+
 export function Explore() {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
@@ -26,6 +64,15 @@ export function Explore() {
   const [loading, setLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'all' | 'knowledge' | 'people' | 'projects'>('all')
+
+  // C-EXP-004: Ref for autofocus on the search input
+  const searchInputRef = useRef<HTMLInputElement>(null)
+
+  // C-EXP-002: Search performance timing
+  const [searchDurationMs, setSearchDurationMs] = useState<number | null>(null)
+
+  // C-EXP-003: Pagination state
+  const [resultPage, setResultPage] = useState(1)
 
   // B-EXP-005: AbortController ref for cancelling pending requests on unmount
   const abortControllerRef = useRef<AbortController | null>(null)
@@ -45,11 +92,20 @@ export function Explore() {
 
     setLoading(true)
     setSearchError(null)
+    setSearchDurationMs(null)
+    // C-EXP-003: Reset pagination on new search
+    setResultPage(1)
+    // C-EXP-002: Start timing
+    const searchStart = performance.now()
     try {
       const result = await window.electronAPI.rag.globalSearch(query, 10)
 
       // B-EXP-005: Check if component unmounted or request was superseded
       if (controller.signal.aborted || cancelledRef.current) return
+
+      // C-EXP-002: Record search duration
+      const elapsed = Math.round(performance.now() - searchStart)
+      setSearchDurationMs(elapsed)
 
       // Unwrap Result<> wrapper
       if (result.success) {
@@ -78,6 +134,11 @@ export function Explore() {
   }, [query])
 
   useEffect(() => {
+    // C-EXP-M04: Clear stale results when query is empty
+    if (!query.trim()) {
+      setResults(null)
+      setSearchDurationMs(null)
+    }
     // Debounce search by 300ms
     const timer = setTimeout(() => {
       if (query.trim()) handleSearch()
@@ -96,8 +157,30 @@ export function Explore() {
     }
   }, [])
 
-  const totalResults = results 
-    ? results.knowledge.length + results.people.length + results.projects.length 
+  // C-EXP-004: Focus search input on mount
+  useEffect(() => {
+    // Small delay to ensure DOM is ready after route transition
+    const timer = setTimeout(() => {
+      searchInputRef.current?.focus()
+    }, 100)
+    return () => clearTimeout(timer)
+  }, [])
+
+  // C-EXP-M03: Reset pagination when active tab changes
+  useEffect(() => {
+    setResultPage(1)
+  }, [activeTab])
+
+  // C-EXP-M01: Clear search error when query changes so stale errors don't persist
+  useEffect(() => {
+    if (searchError) {
+      setSearchError(null)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query])
+
+  const totalResults = results
+    ? results.knowledge.length + results.people.length + results.projects.length
     : 0
 
   return (
@@ -112,7 +195,9 @@ export function Explore() {
 
           <form onSubmit={(e) => { e.preventDefault(); handleSearch(); }} className="relative">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
+            {/* C-EXP-004: Search input with ref for autofocus */}
             <Input
+              ref={searchInputRef}
               placeholder="Search anything... (e.g. 'Amazon Connect', 'Mario', 'API decisions')"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -191,12 +276,25 @@ export function Explore() {
             </div>
           )}
 
+          {/* C-EXP-005: Loading skeleton during search */}
+          {loading && !results && (
+            <SearchResultSkeleton />
+          )}
+
           {results && (
             <div className="space-y-6">
               <div className="flex items-center justify-between border-b pb-4">
-                <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">
-                  Search Results ({totalResults})
-                </h2>
+                <div className="flex items-center gap-3">
+                  <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">
+                    Search Results ({totalResults})
+                  </h2>
+                  {/* C-EXP-002: Search performance metrics */}
+                  {searchDurationMs !== null && (
+                    <span className="text-[10px] text-muted-foreground font-mono bg-muted/50 px-2 py-0.5 rounded-full">
+                      {searchDurationMs}ms
+                    </span>
+                  )}
+                </div>
                 <div className="flex bg-muted p-1 rounded-lg gap-1">
                   {(['all', 'knowledge', 'people', 'projects'] as const).map((t) => (
                     <button
@@ -215,7 +313,12 @@ export function Explore() {
 
               <div className="space-y-8">
                 {/* Knowledge Section */}
-                {(activeTab === 'all' || activeTab === 'knowledge') && results.knowledge.length > 0 && (
+                {(activeTab === 'all' || activeTab === 'knowledge') && results.knowledge.length > 0 && (() => {
+                  // C-EXP-003: Paginate knowledge results
+                  const knowledgeStart = (resultPage - 1) * SEARCH_PAGE_SIZE
+                  const paginatedKnowledge = results.knowledge.slice(knowledgeStart, knowledgeStart + SEARCH_PAGE_SIZE)
+                  const knowledgeTotalPages = Math.ceil(results.knowledge.length / SEARCH_PAGE_SIZE)
+                  return (
                   <div className="space-y-4">
                     <div className="flex items-center gap-2 text-muted-foreground">
                       <FileText className="h-4 w-4" />
@@ -223,7 +326,7 @@ export function Explore() {
                     </div>
                     <div className="grid grid-cols-1 gap-3">
                       {/* B-EXP-002: Navigate to /library with selectedId in navigation state */}
-                      {results.knowledge.map(k => (
+                      {paginatedKnowledge.map(k => (
                         <Card key={k.id} className="group hover:border-primary/30 cursor-pointer transition-all shadow-sm" onClick={() => navigate('/library', { state: { selectedId: k.id } })}>
                           <CardContent className="p-4 flex items-center justify-between gap-4">
                             <div className="min-w-0 flex-1">
@@ -248,8 +351,21 @@ export function Explore() {
                         </Card>
                       ))}
                     </div>
+                    {/* C-EXP-003: Knowledge pagination controls */}
+                    {knowledgeTotalPages > 1 && (
+                      <div className="flex items-center justify-end gap-1 pt-1">
+                        <Button variant="outline" size="sm" disabled={resultPage <= 1} onClick={() => setResultPage(p => Math.max(1, p - 1))}>
+                          <ChevronLeft className="h-4 w-4" />
+                        </Button>
+                        <span className="text-xs px-2">Page {resultPage} of {knowledgeTotalPages}</span>
+                        <Button variant="outline" size="sm" disabled={resultPage >= knowledgeTotalPages} onClick={() => setResultPage(p => Math.min(knowledgeTotalPages, p + 1))}>
+                          <ChevronRight className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    )}
                   </div>
-                )}
+                  )
+                })()}
 
                 {/* People Section */}
                 {(activeTab === 'all' || activeTab === 'people') && results.people.length > 0 && (
@@ -315,12 +431,29 @@ export function Explore() {
                   </div>
                 )}
 
+                {/* C-EXP-M05: Show empty state per-tab when the active tab has no results */}
                 {totalResults === 0 && !loading && (
                   <div className="text-center py-20 border-2 border-dashed rounded-3xl opacity-30">
                     <Search className="h-12 w-12 mx-auto mb-4" />
                     <p className="text-sm">No results found for "{query}"</p>
                   </div>
                 )}
+                {totalResults > 0 && !loading && activeTab !== 'all' && (() => {
+                  const tabHasResults =
+                    (activeTab === 'knowledge' && results.knowledge.length > 0) ||
+                    (activeTab === 'people' && results.people.length > 0) ||
+                    (activeTab === 'projects' && results.projects.length > 0)
+                  if (!tabHasResults) {
+                    return (
+                      <div className="text-center py-12 border-2 border-dashed rounded-3xl opacity-30">
+                        <Search className="h-10 w-10 mx-auto mb-3" />
+                        <p className="text-sm">No {activeTab} results for "{query}"</p>
+                        <p className="text-xs text-muted-foreground mt-1">Try the "all" tab to see results in other categories.</p>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
               </div>
             </div>
           )}

@@ -19,7 +19,7 @@
  * are not tested here. They would require mocking the full electronAPI.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useAppStore } from '@/store/useAppStore'
 import type { HiDockDeviceState, ConnectionStatus, ActivityLogEntry } from '@/services/hidock-device'
 
@@ -474,45 +474,81 @@ describe('useAppStore', () => {
 
   describe('Download Queries', () => {
     it('isDownloading returns true for queued item', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const { addToDownloadQueue } = useAppStore.getState()
 
       addToDownloadQueue('dl-1', 'file.wav', 500000)
 
       expect(useAppStore.getState().isDownloading('dl-1')).toBe(true)
+      warnSpy.mockRestore()
     })
 
     it('isDownloading returns false for non-queued item', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       expect(useAppStore.getState().isDownloading('non-existent')).toBe(false)
+      warnSpy.mockRestore()
     })
 
     it('isDownloading returns false after removal', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const { addToDownloadQueue, removeFromDownloadQueue } = useAppStore.getState()
 
       addToDownloadQueue('dl-1', 'file.wav', 500000)
       removeFromDownloadQueue('dl-1')
 
       expect(useAppStore.getState().isDownloading('dl-1')).toBe(false)
+      warnSpy.mockRestore()
+    })
+
+    // SM-M01: isDownloading emits deprecation warning in dev mode
+    it('isDownloading emits deprecation warning in dev mode', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      useAppStore.getState().isDownloading('test-id')
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('isDownloading() is deprecated')
+      )
+      warnSpy.mockRestore()
     })
 
     it('getDownloadProgress returns progress for queued item', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const { addToDownloadQueue, updateDownloadProgress } = useAppStore.getState()
 
       addToDownloadQueue('dl-1', 'file.wav', 500000)
       updateDownloadProgress('dl-1', 65)
 
       expect(useAppStore.getState().getDownloadProgress('dl-1')).toBe(65)
+      warnSpy.mockRestore()
     })
 
     it('getDownloadProgress returns 0 for newly queued item', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const { addToDownloadQueue } = useAppStore.getState()
 
       addToDownloadQueue('dl-1', 'file.wav', 500000)
 
       expect(useAppStore.getState().getDownloadProgress('dl-1')).toBe(0)
+      warnSpy.mockRestore()
     })
 
     it('getDownloadProgress returns null for non-queued item', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       expect(useAppStore.getState().getDownloadProgress('non-existent')).toBeNull()
+      warnSpy.mockRestore()
+    })
+
+    // SM-M01: getDownloadProgress emits deprecation warning in dev mode
+    it('getDownloadProgress emits deprecation warning in dev mode', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      useAppStore.getState().getDownloadProgress('test-id')
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('getDownloadProgress() is deprecated')
+      )
+      warnSpy.mockRestore()
     })
   })
 
@@ -919,6 +955,37 @@ describe('useAppStore', () => {
       expect(finalState.downloadQueue.get('dl-1')!.progress).toBe(50)
       expect(finalState.calendarView).toBe('month')
       expect(finalState.unifiedRecordingsLoading).toBe(true)
+    })
+  })
+
+  // SM-M01: Granular selector hooks tests
+  describe('Granular Selector Hooks', () => {
+    it('useIsDownloading returns correct boolean for specific id', () => {
+      const { addToDownloadQueue } = useAppStore.getState()
+
+      // Before adding
+      const beforeResult = useAppStore.getState().downloadQueue.has('dl-selector-1')
+      expect(beforeResult).toBe(false)
+
+      addToDownloadQueue('dl-selector-1', 'test.wav', 1000)
+
+      const afterResult = useAppStore.getState().downloadQueue.has('dl-selector-1')
+      expect(afterResult).toBe(true)
+    })
+
+    it('useDownloadProgress returns correct progress for specific id', () => {
+      const { addToDownloadQueue, updateDownloadProgress } = useAppStore.getState()
+
+      addToDownloadQueue('dl-selector-2', 'test.wav', 1000)
+      updateDownloadProgress('dl-selector-2', 42)
+
+      const progress = useAppStore.getState().downloadQueue.get('dl-selector-2')?.progress ?? null
+      expect(progress).toBe(42)
+    })
+
+    it('useDownloadProgress returns null for missing id', () => {
+      const progress = useAppStore.getState().downloadQueue.get('missing-id')?.progress ?? null
+      expect(progress).toBeNull()
     })
   })
 })
