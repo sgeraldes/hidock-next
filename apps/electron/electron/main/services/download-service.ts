@@ -68,10 +68,29 @@ class DownloadService {
   }
   private stalledCheckInterval: NodeJS.Timeout | null = null // spec-007: periodic stalled check
 
+  // B-DWN-009: Dirty-flag caching for getState() to avoid creating new arrays on every call
+  private dirty = true
+  private cachedQueueArray: DownloadQueueItem[] = []
+
   constructor() {
     console.log('[DownloadService] Initialized')
     this.loadQueueFromDatabase()
     this.startStalledCheckInterval() // spec-007: start periodic timeout detection
+  }
+
+  /**
+   * B-DWN-009: Mark the cached queue array as dirty so getState() rebuilds it
+   */
+  private markDirty(): void {
+    this.dirty = true
+  }
+
+  /**
+   * B-DWN-003: Normalize .hda filenames to .mp3 extension
+   * HiDock devices output .hda files which are actually MP3 format
+   */
+  static normalizeFilename(filename: string): string {
+    return filename.replace(/\.hda$/i, '.mp3')
   }
 
   /**
@@ -132,6 +151,7 @@ class DownloadService {
         this.state.queue.set(item.filename, queueItem)
       }
 
+      this.markDirty()
       console.log(`[DownloadService] Loaded ${items.length} items from database`)
     } catch (e) {
       console.error('[DownloadService] Failed to load queue from database:', e)
@@ -237,10 +257,13 @@ class DownloadService {
     const queuedIds: string[] = []
 
     for (const file of files) {
-      // spec-007: Check database for existing queue entry
+      // B-DWN-003: Normalize .hda filenames to .mp3
+      const normalizedFilename = DownloadService.normalizeFilename(file.filename)
+
+      // spec-007: Check database for existing queue entry (check both original and normalized)
       const existingInDb = queryOne<{ id: string; status: string }>(
-        'SELECT id, status FROM download_queue WHERE filename = ? AND status IN (?, ?)',
-        [file.filename, 'pending', 'downloading']
+        'SELECT id, status FROM download_queue WHERE (filename = ? OR filename = ?) AND status IN (?, ?)',
+        [file.filename, normalizedFilename, 'pending', 'downloading']
       )
 
       if (existingInDb) {
@@ -248,21 +271,28 @@ class DownloadService {
         continue
       }
 
-      // Skip if already in memory queue
-      if (this.state.queue.has(file.filename)) {
+      // Skip if already in memory queue (check both original and normalized)
+      if (this.state.queue.has(file.filename) || this.state.queue.has(normalizedFilename)) {
         console.log(`[DownloadService] ${file.filename} already in memory queue, skipping`)
         continue
       }
 
-      // Skip if already synced
+      // Skip if already synced (check both original and normalized)
       const { synced } = this.isFileAlreadySynced(file.filename)
       if (synced) {
         console.log(`[DownloadService] ${file.filename} already synced, skipping`)
         continue
       }
+      if (normalizedFilename !== file.filename) {
+        const { synced: normalizedSynced } = this.isFileAlreadySynced(normalizedFilename)
+        if (normalizedSynced) {
+          console.log(`[DownloadService] ${normalizedFilename} (normalized) already synced, skipping`)
+          continue
+        }
+      }
 
       const item: DownloadQueueItem = {
-        id: file.filename, // Use filename as ID for simplicity
+        id: file.filename, // Use original filename as ID for simplicity
         filename: file.filename,
         fileSize: file.size,
         progress: 0,
@@ -276,6 +306,7 @@ class DownloadService {
       console.log(`[DownloadService] Queued: ${file.filename} (${(file.size / 1024 / 1024).toFixed(1)} MB)`)
     }
 
+    this.markDirty()
     this.emitStateUpdate()
     return queuedIds
   }
@@ -321,6 +352,7 @@ class DownloadService {
       item.status = 'downloading'
       item.startedAt = new Date()
       this.persistQueueItem(item) // spec-007: persist status change
+      this.markDirty()
       this.emitStateUpdate()
 
       // Save the file with the original recording date if available
@@ -347,6 +379,7 @@ class DownloadService {
         this.state.currentSession.completedFiles++
       }
 
+      this.markDirty()
       this.emitStateUpdate()
 
       // DL-07: Clean up completed items from queue after emitting final state.
@@ -354,8 +387,9 @@ class DownloadService {
       setTimeout(() => {
         this.state.queue.delete(filename)
         this.removeFromDatabase(filename) // spec-007: remove from database
-        // Also prune any other stale completed items (max 50 retained)
-        this.pruneCompletedItems(50)
+        // B-DWN-002: Reduced prune threshold from 50 to 10 to prevent memory leaks
+        this.pruneCompletedItems(10)
+        this.markDirty()
         this.emitStateUpdate()
       }, 2000)
 
@@ -374,6 +408,7 @@ class DownloadService {
         this.state.currentSession.failedFiles++
       }
 
+      this.markDirty()
       this.emitStateUpdate()
       return { success: false, error: errorMsg }
     }
@@ -398,7 +433,17 @@ class DownloadService {
     item.error = 'Cancelled by user'
     this.persistQueueItem(item) // spec-007: persist cancellation
     console.log(`[DownloadService] Cancelled download: ${filename}`)
+    this.markDirty()
     this.emitStateUpdate()
+
+    // B-DWN-006: Delayed cleanup for cancelled items (5s)
+    setTimeout(() => {
+      this.state.queue.delete(filename)
+      this.removeFromDatabase(filename)
+      this.markDirty()
+      this.emitStateUpdate()
+    }, 5000)
+
     return { success: true }
   }
 
@@ -420,6 +465,7 @@ class DownloadService {
         this.persistQueueItem(item)
       }
 
+      this.markDirty()
       this.emitStateUpdate()
     }
   }
@@ -438,6 +484,7 @@ class DownloadService {
         this.state.currentSession.failedFiles++
       }
 
+      this.markDirty()
       this.emitStateUpdate()
     }
   }
@@ -450,6 +497,7 @@ class DownloadService {
     const TIMEOUT_MS = 30000 // 30 seconds
     const now = Date.now()
     let stalledCount = 0
+    const stalledFilenames: string[] = []
 
     for (const item of this.state.queue.values()) {
       if (item.status === 'downloading' && item.startedAt) {
@@ -464,13 +512,26 @@ class DownloadService {
             this.state.currentSession.failedFiles++
           }
 
+          stalledFilenames.push(item.filename)
           stalledCount++
         }
       }
     }
 
+    // B-DWN-001: Clean up stalled items from the queue after marking failed
     if (stalledCount > 0) {
+      this.markDirty()
       this.emitStateUpdate()
+
+      // Delayed cleanup: remove stalled items from queue after renderer sees the failed state
+      setTimeout(() => {
+        for (const filename of stalledFilenames) {
+          this.state.queue.delete(filename)
+          this.removeFromDatabase(filename)
+        }
+        this.markDirty()
+        this.emitStateUpdate()
+      }, 5000)
     }
 
     return stalledCount
@@ -498,6 +559,7 @@ class DownloadService {
     }
 
     if (cancelledCount > 0) {
+      this.markDirty()
       this.emitStateUpdate()
     }
 
@@ -507,10 +569,24 @@ class DownloadService {
   /**
    * Re-queue all failed downloads as pending so they can be retried
    */
+  /**
+   * Re-queue all failed downloads as pending so they can be retried.
+   * B-DWN-007: Checks if file is already synced before retrying.
+   */
   retryFailed(): number {
     let count = 0
-    for (const item of this.state.queue.values()) {
+    const alreadySynced: string[] = []
+
+    for (const [key, item] of this.state.queue) {
       if (item.status === 'failed') {
+        // B-DWN-007: Check if file was synced in the meantime
+        const { synced, reason } = this.isFileAlreadySynced(item.filename)
+        if (synced) {
+          console.log(`[DownloadService] Skipping retry for ${item.filename}: ${reason}`)
+          alreadySynced.push(key)
+          continue
+        }
+
         item.status = 'pending'
         item.progress = 0
         item.error = undefined
@@ -521,8 +597,15 @@ class DownloadService {
       }
     }
 
-    if (count > 0) {
+    // Remove already-synced items from queue
+    for (const key of alreadySynced) {
+      this.state.queue.delete(key)
+      this.removeFromDatabase(key)
+    }
+
+    if (count > 0 || alreadySynced.length > 0) {
       this.state.isPaused = false
+      this.markDirty()
       this.emitStateUpdate()
     }
 
@@ -531,14 +614,28 @@ class DownloadService {
 
   /**
    * DL-07: Prune completed items from queue, keeping at most maxRetained.
+   * B-DWN-002: Reduced threshold to 10, also auto-prunes failed items older than 24h.
    */
   private pruneCompletedItems(maxRetained: number): void {
     const completed: string[] = []
+    const now = Date.now()
+    const FAILED_MAX_AGE_MS = 24 * 60 * 60 * 1000 // 24 hours
+
     for (const [key, item] of this.state.queue) {
       if (item.status === 'completed') {
         completed.push(key)
       }
+
+      // B-DWN-002: Auto-prune failed items older than 24h to prevent memory leaks
+      if (item.status === 'failed' && item.startedAt) {
+        const age = now - item.startedAt.getTime()
+        if (age > FAILED_MAX_AGE_MS) {
+          this.state.queue.delete(key)
+          this.removeFromDatabase(key)
+        }
+      }
     }
+
     // Remove oldest first (beyond the retention limit)
     if (completed.length > maxRetained) {
       const toRemove = completed.slice(0, completed.length - maxRetained)
@@ -546,22 +643,28 @@ class DownloadService {
         this.state.queue.delete(key)
       }
     }
+
+    this.markDirty()
   }
 
   /**
    * Remove completed/failed items from queue
+   * B-DWN-004: Also removes from database for persistence consistency
    */
   clearCompleted(): void {
     for (const [key, item] of this.state.queue) {
       if (item.status === 'completed' || item.status === 'failed') {
+        this.removeFromDatabase(key) // B-DWN-004: remove from database too
         this.state.queue.delete(key)
       }
     }
+    this.markDirty()
     this.emitStateUpdate()
   }
 
   /**
    * Cancel all pending downloads
+   * B-DWN-005: Persist cancelled state for each item
    */
   cancelAll(): void {
     this.state.isPaused = true
@@ -570,6 +673,7 @@ class DownloadService {
       if (item.status === 'pending' || item.status === 'downloading') {
         item.status = 'failed'
         item.error = 'Cancelled'
+        this.persistQueueItem(item) // B-DWN-005: persist cancelled state
       }
     }
 
@@ -577,11 +681,13 @@ class DownloadService {
       this.state.currentSession.status = 'cancelled'
     }
 
+    this.markDirty()
     this.emitStateUpdate()
   }
 
   /**
    * Get current state
+   * B-DWN-009: Uses dirty-flag caching to avoid creating new array on every call
    */
   getState(): {
     queue: DownloadQueueItem[]
@@ -589,8 +695,12 @@ class DownloadService {
     isProcessing: boolean
     isPaused: boolean
   } {
+    if (this.dirty) {
+      this.cachedQueueArray = Array.from(this.state.queue.values())
+      this.dirty = false
+    }
     return {
-      queue: Array.from(this.state.queue.values()),
+      queue: this.cachedQueueArray,
       session: this.state.currentSession,
       isProcessing: this.state.isProcessing,
       isPaused: this.state.isPaused
@@ -664,6 +774,11 @@ class DownloadService {
     }
   }
 }
+
+/**
+ * B-DWN-003: Normalize .hda filenames to .mp3 extension (exported for testing)
+ */
+export const normalizeHdaFilename = DownloadService.normalizeFilename
 
 // Singleton instance
 let downloadServiceInstance: DownloadService | null = null

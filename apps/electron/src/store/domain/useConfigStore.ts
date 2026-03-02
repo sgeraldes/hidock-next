@@ -13,7 +13,7 @@ interface ConfigState {
 
 export const useConfigStore = create<ConfigState>((set) => ({
   config: null,
-  configLoading: false,
+  configLoading: true, // B-SET-001: Start as true so UI shows loading state until config is fetched
   configReady: false,
 
   setConfig: (config) => set({ config }),
@@ -36,6 +36,8 @@ export const useConfigStore = create<ConfigState>((set) => ({
   },
 
   updateConfig: async (section, values) => {
+    // B-SET-003: Save previous config so we can restore on failure
+    const previousConfig = useConfigStore.getState().config
     try {
       const result = await window.electronAPI.config.updateSection(section, values)
       if (result.success) {
@@ -46,6 +48,10 @@ export const useConfigStore = create<ConfigState>((set) => ({
       }
     } catch (error) {
       console.error('Failed to update config:', error)
+      // B-SET-003: Restore previous config on failure
+      if (previousConfig) {
+        set({ config: previousConfig })
+      }
       throw error // Re-throw for UI error handling
     }
   },
