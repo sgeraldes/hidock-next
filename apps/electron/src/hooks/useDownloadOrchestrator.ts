@@ -207,12 +207,11 @@ export function useDownloadOrchestrator() {
     _downloadAbortControllerRef = null
     clearDeviceSyncState()
 
-    // Refresh data after sync
+    // B-DEV-007: Force refresh recordings after download completes
+    // Emit a custom event so useUnifiedRecordings can do a forced refresh (with device data)
+    // instead of just invalidating (which only refreshes cached data)
     if (completed > 0) {
-      const store = useAppStore.getState()
-      if (store.invalidateUnifiedRecordings) {
-        store.invalidateUnifiedRecordings()
-      }
+      window.dispatchEvent(new CustomEvent('hidock:downloads-completed'))
     }
 
     if (completed > 0 || failed > 0 || aborted) {
@@ -284,6 +283,8 @@ export function useDownloadOrchestrator() {
       const { downloadQueue } = useAppStore.getState()
       const now = Date.now()
 
+      // B-DEV-008: Per-file stall detection - only fail the individual stalled file,
+      // not abort the entire queue via AbortController
       downloadQueue.forEach((item, id) => {
         const prev = downloadProgressTimestamps.get(id)
         if (!prev) {
@@ -297,24 +298,28 @@ export function useDownloadOrchestrator() {
           console.warn(`[useDownloadOrchestrator] Download stalled: ${item.filename} at ${item.progress}%`)
           toast({
             title: 'Download stalled',
-            description: `${item.filename} stopped at ${item.progress}%. Aborting and marking as failed.`,
+            description: `${item.filename} stopped at ${item.progress}%. Marking as failed.`,
             variant: 'error'
           })
-          // DL-12: Abort the actual USB transfer, not just mark as failed
-          if (downloadAbortControllerRef.current) {
-            downloadAbortControllerRef.current.abort()
-          }
+          // B-DEV-008: Only mark the individual file as failed, don't abort the entire controller
           if (window.electronAPI?.downloadService?.markFailed) {
             window.electronAPI.downloadService.markFailed(item.filename, `Download stalled at ${item.progress}% (no progress for ${DOWNLOAD_STALL_TIMEOUT / 1000}s)`)
           }
+          // Remove from the store queue so it doesn't block the UI
+          useAppStore.getState().removeFromDownloadQueue(id)
           downloadProgressTimestamps.delete(id)
         }
       })
 
-      // Clean up tracking for completed downloads
-      for (const [id] of downloadProgressTimestamps) {
-        if (!downloadQueue.has(id)) {
-          downloadProgressTimestamps.delete(id)
+      // B-DEV-009: Clear downloadProgressTimestamps when no downloads are active to prevent memory leaks
+      if (downloadQueue.size === 0) {
+        downloadProgressTimestamps.clear()
+      } else {
+        // Clean up tracking for completed downloads
+        for (const [id] of downloadProgressTimestamps) {
+          if (!downloadQueue.has(id)) {
+            downloadProgressTimestamps.delete(id)
+          }
         }
       }
     }, 15_000)

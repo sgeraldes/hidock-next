@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Usb, Download, RefreshCw, HardDrive, Mic, AlertCircle, Radio, Battery, Bluetooth, Play, Pause, Square, X, Terminal, ChevronDown, ChevronUp, Check, Copy, RotateCcw, Trash2 } from 'lucide-react'
+import { Usb, Download, RefreshCw, HardDrive, Mic, AlertCircle, Radio, Battery, Bluetooth, Play, Pause, Square, X, Terminal, ChevronDown, ChevronUp, Check, Copy, RotateCcw, Trash2, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
@@ -22,12 +22,7 @@ const CONNECTION_TIMEOUT_MS = 15000 // 15 second timeout
 const DEBUG_DEVICE_UI = false // Enable verbose UI logging
 
 export function Device() {
-  // TODO (DL-05/DV-08): Dual syncing state causes UI flicker. `storeSyncing` (from useAppStore)
-  // tracks the download orchestrator's sync state, while `syncing` (local useState) tracks
-  // the Device page's manual sync button state. Both are used in the UI conditionals (line ~977),
-  // causing the sync button to flicker between states when one updates before the other.
-  // The fix requires unifying these into a single source of truth, but that needs careful
-  // coordination between useDownloadOrchestrator and the Device page's manual sync flow.
+  // B-DEV-001: Unified syncing state - use only store as single source of truth
   const storeSyncing = useAppStore(state => state.deviceSyncing)
   const deviceState = useAppStore(state => state.deviceState)
   const connectionStatus = useAppStore(state => state.connectionStatus)
@@ -38,10 +33,9 @@ export function Device() {
 
   // Initialize service
   const deviceService = getHiDockDeviceService()
-  const { recordings, loading: loadingRecordings } = useUnifiedRecordings()
+  const { recordings, loading: loadingRecordings, refresh: refreshRecordings } = useUnifiedRecordings()
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [syncing, setSyncing] = useState(false)
   const [connectionElapsed, setConnectionElapsed] = useState(0)
   const connectionTimeoutRef = useRef<number | null>(null)
   const connectionTimerRef = useRef<number | null>(null)
@@ -77,6 +71,12 @@ export function Device() {
   const [autoDownload, setAutoDownload] = useState<boolean | null>(null)
   const [autoTranscribe, setAutoTranscribe] = useState<boolean | null>(null)
 
+  // B-DEV-005: Loading state for device config switches
+  const [configLoading, setConfigLoading] = useState<Record<string, boolean>>({})
+
+  // B-DEV-010: Debounce ref for refreshSyncedFilenames (500ms window)
+  const lastSyncedRefreshRef = useRef<number>(0)
+
   // Activity log UI state
   const [logExpanded, setLogExpanded] = useState(true)
   const logContainerRef = useRef<HTMLDivElement>(null)
@@ -103,15 +103,25 @@ export function Device() {
   }, [])
 
   // Cancel connection attempt
+  // B-DEV-003: Also disconnect USB on cancel to properly tear down the connection
   const handleCancelConnection = useCallback(() => {
     clearConnectionTimers()
     setConnecting(false)
     setError('Connection cancelled')
     deviceService.stopAutoConnect()
+    deviceService.disconnect()
   }, [clearConnectionTimers, deviceService])
 
   // Helper to refresh synced filenames (used after syncs complete)
+  // B-DEV-010: Debounced with 500ms window to prevent excessive calls
   const refreshSyncedFilenames = useCallback(async () => {
+    const now = Date.now()
+    if (now - lastSyncedRefreshRef.current < 500) {
+      if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Debounced refreshSyncedFilenames call')
+      return
+    }
+    lastSyncedRefreshRef.current = now
+
     try {
       const filenames = await window.electronAPI.syncedFiles.getFilenames()
       setSyncedFilenames(new Set(filenames))
@@ -193,11 +203,9 @@ export function Device() {
       // Track completed downloads to refresh sync count
       const completedCount = state.queue.filter((item) => item.status === 'completed').length
 
-      // Also update syncing state when queue is empty or all complete
+      // B-DEV-001: Use store syncing state instead of local useState
       const pendingOrDownloading = state.queue.filter((item) => item.status === 'pending' || item.status === 'downloading').length
       if (pendingOrDownloading === 0) {
-        setSyncing(false)
-
         // Refresh synced filenames after downloads complete (sync count fix)
         if (completedCount > 0) {
           refreshSyncedFilenames()
@@ -251,6 +259,12 @@ export function Device() {
         }
         setRealtimeActive(false)
         setRealtimePaused(false)
+        // B-DEV-012: Reset BT scan state on disconnect
+        setBluetoothScanning(false)
+        if (btScanTimeoutRef.current) {
+          clearTimeout(btScanTimeoutRef.current)
+          btScanTimeoutRef.current = null
+        }
       }
     })
 
@@ -264,9 +278,9 @@ export function Device() {
     // NOTE: We do NOT start auto-connect here. Auto-connect is managed at the app level.
     // Starting it here would reset user's disconnect decision when navigating pages.
 
-    // Periodic sync count validation (refresh every 60 seconds to catch external changes)
+    // B-DEV-006: Check isConnected() before polling to avoid unnecessary work when disconnected
     const syncCountInterval = setInterval(() => {
-      if (mounted) {
+      if (mounted && deviceService.isConnected()) {
         refreshSyncedFilenames()
       }
     }, 60000)
@@ -307,6 +321,21 @@ export function Device() {
     }
   }, [connectionStatus.step, connectionStatus.message, clearConnectionTimers])
 
+  // B-DEV-011: Battery polling for P1 devices at 60-second interval
+  useEffect(() => {
+    if (!deviceState.connected || !deviceService.isP1Device()) return
+
+    const batteryPollInterval = setInterval(() => {
+      // B-DEV-006: Check isConnected() before polling
+      if (deviceService.isConnected()) {
+        loadBatteryStatus()
+      }
+    }, 60_000) // 60 seconds, not 5
+
+    return () => clearInterval(batteryPollInterval)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceState.connected])
+
   // Separate effect for auto-scrolling activity log - does NOT trigger re-renders
   useEffect(() => {
     if (activityLog.length > 0 && logContainerRef.current) {
@@ -340,11 +369,13 @@ export function Device() {
     }, 100)
 
     // Set up timeout
+    // B-DEV-003: Cancel USB connection on timeout to properly tear down
     connectionTimeoutRef.current = window.setTimeout(() => {
       if (!deviceService.isConnected()) {
         clearConnectionTimers()
         setConnecting(false)
         setError('Connection timed out. Make sure your HiDock is connected via USB and not in use by another application.')
+        deviceService.disconnect()
       }
     }, CONNECTION_TIMEOUT_MS)
 
@@ -391,7 +422,8 @@ export function Device() {
       return
     }
 
-    setSyncing(true)
+    // B-DEV-001: Use store syncing state as single source of truth
+    setDeviceSyncState({ deviceSyncing: true })
     setError(null)
 
     try {
@@ -426,7 +458,7 @@ export function Device() {
           description: 'All recordings are already downloaded',
           variant: 'success'
         })
-        setSyncing(false)
+        setDeviceSyncState({ deviceSyncing: false })
         return
       }
 
@@ -456,9 +488,9 @@ export function Device() {
           description: 'All files are already queued or downloaded',
           variant: 'default'
         })
-        setSyncing(false)
+        setDeviceSyncState({ deviceSyncing: false })
       }
-      // Note: setSyncing(false) is NOT called here for queued files - the download orchestrator will manage sync state
+      // Note: deviceSyncing is not cleared here for queued files - the download orchestrator will manage sync state
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Sync failed')
       toast({
@@ -466,11 +498,13 @@ export function Device() {
         description: e instanceof Error ? e.message : 'Unknown error',
         variant: 'error'
       })
-      setSyncing(false)
+      setDeviceSyncState({ deviceSyncing: false })
     }
   }
 
+  // B-DEV-005: Config toggle handlers with loading state
   const handleAutoRecordToggle = async (enabled: boolean) => {
+    setConfigLoading(prev => ({ ...prev, autoRecord: true }))
     try {
       // DV-06: Check return value — if false, the setting didn't apply on device
       const success = await deviceService.setAutoRecord(enabled)
@@ -488,6 +522,8 @@ export function Device() {
         description: e instanceof Error ? e.message : 'Failed to update auto-record setting',
         variant: 'error'
       })
+    } finally {
+      setConfigLoading(prev => ({ ...prev, autoRecord: false }))
     }
   }
 
@@ -501,20 +537,26 @@ export function Device() {
   }
 
   const handleAutoDownloadToggle = async (enabled: boolean) => {
+    setConfigLoading(prev => ({ ...prev, autoDownload: true }))
     try {
       await window.electronAPI.config.updateSection('device', { autoDownload: enabled })
       setAutoDownload(enabled)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to update auto-download setting')
+    } finally {
+      setConfigLoading(prev => ({ ...prev, autoDownload: false }))
     }
   }
 
   const handleAutoTranscribeToggle = async (enabled: boolean) => {
+    setConfigLoading(prev => ({ ...prev, autoTranscribe: true }))
     try {
       await window.electronAPI.config.updateSection('transcription', { autoTranscribe: enabled })
       setAutoTranscribe(enabled)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to update auto-transcribe setting')
+    } finally {
+      setConfigLoading(prev => ({ ...prev, autoTranscribe: false }))
     }
   }
 
@@ -569,7 +611,7 @@ export function Device() {
           description: `Re-queued ${count} failed download${count !== 1 ? 's' : ''}`,
           variant: 'default'
         })
-        setSyncing(true)
+        setDeviceSyncState({ deviceSyncing: true })
       } else {
         toast({
           title: 'No failed downloads',
@@ -693,6 +735,11 @@ export function Device() {
   }
 
   const handleBluetoothScan = async () => {
+    // B-DEV-012: Check connection before starting scan
+    if (!deviceService.isConnected()) {
+      setError('Device not connected. Cannot start Bluetooth scan.')
+      return
+    }
     setError(null)
     setBluetoothScanning(true)
     try {
@@ -922,11 +969,15 @@ export function Device() {
                     <p className="font-medium mb-3">Device Settings</p>
                     {deviceState.settings && (
                       <div className="flex items-center justify-between mb-3">
-                        <Label htmlFor="auto-record">Auto-record meetings</Label>
+                        <Label htmlFor="auto-record" className="flex items-center gap-2">
+                          Auto-record meetings
+                          {configLoading.autoRecord && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+                        </Label>
                         <Switch
                           id="auto-record"
                           checked={deviceState.settings.autoRecord}
                           onCheckedChange={handleAutoRecordToggle}
+                          disabled={configLoading.autoRecord}
                         />
                       </div>
                     )}
@@ -941,24 +992,26 @@ export function Device() {
                       />
                     </div>
                     <div className="flex items-center justify-between mb-3">
-                      <Label htmlFor="auto-download" className="text-sm">
+                      <Label htmlFor="auto-download" className="text-sm flex items-center gap-2">
                         Auto-download recordings
+                        {configLoading.autoDownload && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
                       </Label>
                       <Switch
                         id="auto-download"
                         checked={autoDownload === true}
-                        disabled={autoDownload === null}
+                        disabled={autoDownload === null || configLoading.autoDownload}
                         onCheckedChange={handleAutoDownloadToggle}
                       />
                     </div>
                     <div className="flex items-center justify-between">
-                      <Label htmlFor="auto-transcribe" className="text-sm">
+                      <Label htmlFor="auto-transcribe" className="text-sm flex items-center gap-2">
                         Auto-transcribe recordings
+                        {configLoading.autoTranscribe && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
                       </Label>
                       <Switch
                         id="auto-transcribe"
                         checked={autoTranscribe === true}
-                        disabled={autoTranscribe === null}
+                        disabled={autoTranscribe === null || configLoading.autoTranscribe}
                         onCheckedChange={handleAutoTranscribeToggle}
                       />
                     </div>
@@ -996,7 +1049,7 @@ export function Device() {
                         <Button
                           className="w-full"
                           onClick={storeSyncing ? cancelDeviceSync : handleSyncAll}
-                          disabled={(!storeSyncing && (syncing || (deviceAccessibleRecordings.length === 0 && !isLoadingList && deviceState.recordingCount === 0) || allSynced || isLoadingList))}
+                          disabled={(!storeSyncing && ((deviceAccessibleRecordings.length === 0 && !isLoadingList && deviceState.recordingCount === 0) || allSynced || isLoadingList))}
                           variant={storeSyncing ? 'destructive' : (allSynced ? 'secondary' : 'default')}
                         >
                           {storeSyncing ? (
@@ -1010,11 +1063,6 @@ export function Device() {
                               ) : (
                                 'Cancel Sync'
                               )}
-                            </>
-                          ) : syncing ? (
-                            <>
-                              <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                              Starting sync...
                             </>
                           ) : isLoadingList ? (
                             <>
@@ -1039,7 +1087,7 @@ export function Device() {
                             className="w-full mt-2"
                             onClick={handleRetryFailed}
                             variant="outline"
-                            disabled={syncing}
+                            disabled={storeSyncing}
                           >
                             <RotateCcw className="h-4 w-4 mr-2" />
                             Retry {failedDownloadCount} Failed Download{failedDownloadCount !== 1 ? 's' : ''}
@@ -1054,11 +1102,13 @@ export function Device() {
           </Card>
 
           {/* Device File List - Individual file operations */}
+          {/* B-DEV-002: Pass onRecordingsRefresh to refresh file list after delete/download */}
           {deviceState.connected && (
             <DeviceFileList
               recordings={recordings.filter(rec => hasDeviceFile(rec)) as Array<DeviceOnlyRecording | BothLocationsRecording>}
               syncedFilenames={syncedFilenames}
               onRefresh={refreshSyncedFilenames}
+              onRecordingsRefresh={() => refreshRecordings(true)}
             />
           )}
 
