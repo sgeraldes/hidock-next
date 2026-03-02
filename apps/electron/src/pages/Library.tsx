@@ -987,6 +987,16 @@ export function Library() {
                             }
                           }}
                           onStop={handleStopCallback}
+                          onDownload={() => handleDownloadCallback(recording)}
+                          onDelete={() => handleDeleteCallback(recording)}
+                          onTranscribe={() => queueTranscription(recording)}
+                          onAskAssistant={() => handleAskAssistantCallback(recording)}
+                          onGenerateOutput={() => handleGenerateOutputCallback(recording)}
+                          isDownloading={isDeviceOnly(recording) && isDownloading(recording.deviceFilename)}
+                          downloadProgress={
+                            isDeviceOnly(recording) ? downloadQueue.get(recording.deviceFilename)?.progress : undefined
+                          }
+                          deviceConnected={deviceConnected}
                         />
                       </div>
                     )

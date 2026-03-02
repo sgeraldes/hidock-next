@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Play, X, AlertCircle } from 'lucide-react'
+import { Play, X, AlertCircle, Download, Trash2, Wand2, Mic, FileText, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -24,6 +24,16 @@ interface SourceRowProps {
   onClick?: () => void
   onPlay: () => void
   onStop: () => void
+  // Action handlers
+  onDownload?: () => void
+  onDelete?: () => void
+  onTranscribe?: () => void
+  onAskAssistant?: () => void
+  onGenerateOutput?: () => void
+  // Download state for device-only recordings
+  isDownloading?: boolean
+  downloadProgress?: number
+  deviceConnected?: boolean
 }
 
 export const SourceRow = memo(function SourceRow({
@@ -37,7 +47,15 @@ export const SourceRow = memo(function SourceRow({
   onSelectionChange,
   onClick,
   onPlay,
-  onStop
+  onStop,
+  onDownload,
+  onDelete,
+  onTranscribe,
+  onAskAssistant,
+  onGenerateOutput,
+  isDownloading = false,
+  downloadProgress,
+  deviceConnected = false
 }: SourceRowProps) {
   const canPlay = hasLocalPath(recording)
   const error = useLibraryStore((state) => state.recordingErrors.get(recording.id))
@@ -106,7 +124,7 @@ export const SourceRow = memo(function SourceRow({
         </div>
       </div>
 
-      {/* Action area — only play button and error indicator */}
+      {/* Action area — action buttons, play button, and error indicator */}
       <div className="flex items-center gap-1 shrink-0 ml-2">
         {/* Error indicator */}
         {error && (
@@ -123,17 +141,123 @@ export const SourceRow = memo(function SourceRow({
           </TooltipProvider>
         )}
 
+        {/* Ask Assistant button */}
+        {onAskAssistant && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={(e) => { e.stopPropagation(); onAskAssistant(); }}
+            title="Ask Assistant about this capture"
+          >
+            <Mic className="h-3.5 w-3.5" />
+          </Button>
+        )}
+
+        {/* Generate Output button */}
+        {onGenerateOutput && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={(e) => { e.stopPropagation(); onGenerateOutput(); }}
+            title="Generate artifact from this capture"
+          >
+            <FileText className="h-3.5 w-3.5" />
+          </Button>
+        )}
+
+        {/* Transcribe button - only for local recordings without complete transcript */}
+        {hasLocalPath(recording) && recording.transcriptionStatus !== 'complete' && onTranscribe && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={(e) => { e.stopPropagation(); onTranscribe(); }}
+            disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
+            title={
+              recording.transcriptionStatus === 'pending' ? 'Transcription queued' :
+              recording.transcriptionStatus === 'processing' ? 'Transcription in progress' :
+              'Transcribe this capture'
+            }
+          >
+            {recording.transcriptionStatus === 'processing' ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Wand2 className="h-3.5 w-3.5" />
+            )}
+          </Button>
+        )}
+
+        {/* Download button - only for device-only recordings */}
+        {recording.location === 'device-only' && onDownload && (
+          isDownloading ? (
+            <div className="flex items-center gap-1 text-xs text-muted-foreground px-2">
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+              <span>{downloadProgress ?? 0}%</span>
+            </div>
+          ) : (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={(e) => { e.stopPropagation(); onDownload(); }}
+              disabled={!deviceConnected}
+              title={deviceConnected ? 'Download to computer' : 'Device not connected'}
+            >
+              <Download className="h-3.5 w-3.5" />
+            </Button>
+          )
+        )}
+
         {/* Play/Stop button */}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 shrink-0"
-          onClick={isPlaying ? onStop : onPlay}
-          disabled={!canPlay}
-          title={isPlaying ? 'Stop playback' : 'Play recording'}
-        >
-          {isPlaying ? <X className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-        </Button>
+        {isPlaying ? (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={(e) => { e.stopPropagation(); onStop(); }}
+            title="Stop playback"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        ) : (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={(e) => { e.stopPropagation(); onPlay(); }}
+            disabled={!canPlay || error?.type === 'audio_not_found'}
+            title={
+              error?.type === 'audio_not_found'
+                ? 'File missing'
+                : canPlay
+                  ? 'Play capture'
+                  : 'Download to play'
+            }
+          >
+            <Play className="h-3.5 w-3.5" />
+          </Button>
+        )}
+
+        {/* Delete button */}
+        {onDelete && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className={
+              recording.location === 'device-only'
+                ? 'text-destructive hover:text-destructive'
+                : recording.location === 'local-only'
+                  ? 'text-orange-500 hover:text-orange-600'
+                  : 'text-muted-foreground hover:text-orange-500'
+            }
+            title={
+              recording.location === 'device-only'
+                ? 'Delete from device (permanent)'
+                : recording.location === 'local-only'
+                  ? 'Delete from computer (permanent)'
+                  : 'Delete from device and computer'
+            }
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        )}
       </div>
     </div>
   )
