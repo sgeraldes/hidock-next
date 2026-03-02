@@ -80,6 +80,11 @@ export class AIProviderService {
       });
       return object;
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.isAuthError(message)) {
+        console.error("[AIProvider] Auth error during transcription:", message);
+        throw new Error(`API key error: ${message}`);
+      }
       console.warn("[AIProvider] generateObject failed, using fallback:", err);
       return this.fallbackTranscription(text);
     }
@@ -108,6 +113,10 @@ export class AIProviderService {
       options?.attendees,
     );
 
+    // Normalize mimeType: strip codec params (e.g. "audio/ogg;codecs=opus" -> "audio/ogg")
+    // AI models typically only need the base media type
+    const baseMimeType = mimeType.split(";")[0].trim();
+
     try {
       const { object } = await generateObject({
         model: effectiveModel,
@@ -120,11 +129,11 @@ export class AIProviderService {
               {
                 type: "file",
                 data: audioData,
-                mediaType: mimeType,
+                mediaType: baseMimeType,
               },
               {
                 type: "text",
-                text: "Transcribe and analyze this audio.",
+                text: "Transcribe the speech in this audio clip.",
               },
             ],
           },
@@ -132,6 +141,12 @@ export class AIProviderService {
       });
       return object;
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Detect auth/config errors - these should NOT be silently swallowed
+      if (this.isAuthError(message)) {
+        console.error("[AIProvider] Auth error during audio transcription:", message);
+        throw new Error(`API key error: ${message}`);
+      }
       console.warn(
         "[AIProvider] Audio transcription failed, using fallback:",
         err,
@@ -230,6 +245,20 @@ export class AIProviderService {
       default:
         throw new Error(`Unknown provider: ${config.provider}`);
     }
+  }
+
+  private isAuthError(message: string): boolean {
+    const lower = message.toLowerCase();
+    return (
+      lower.includes("api key not valid") ||
+      lower.includes("invalid api key") ||
+      lower.includes("permission_denied") ||
+      lower.includes("unauthenticated") ||
+      lower.includes("unauthorized") ||
+      lower.includes("401") ||
+      lower.includes("403") ||
+      lower.includes("api_key_invalid")
+    );
   }
 
   private fallbackTranscription(text: string): TranscriptionResult {

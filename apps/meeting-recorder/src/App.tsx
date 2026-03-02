@@ -9,6 +9,10 @@ import { useSettingsStore } from "./store/useSettingsStore";
 import { useSessionStore } from "./store/useSessionStore";
 import { useElapsedTime } from "./hooks/useElapsedTime";
 import { RecordingProvider } from "./contexts/RecordingContext";
+import {
+  NotificationContainer,
+  showNotification,
+} from "./components/NotificationToast";
 
 function ThemeProvider() {
   const theme = useSettingsStore((s) => s.theme);
@@ -64,29 +68,66 @@ function ShellLayout() {
     micActive,
     autoRecord,
     onStartRecording: async () => {
-      if (isProviderConfigured) {
-        try {
-          const session = (await window.electronAPI.session.create()) as {
-            id: string;
-            status: string;
-            started_at: string;
-          };
-          addSession(session);
-          setActiveSession(session.id);
-          switchView(session.id);
-        } catch (error) {
-          console.error("[App] Failed to create session:", error);
-          // TODO: Show user-facing error notification
-          alert(
-            `Failed to start recording: ${error instanceof Error ? error.message : "Unknown error"}`,
-          );
-        }
+      console.log('[App] onStartRecording called');
+      console.log('[App] isProviderConfigured:', isProviderConfigured);
+
+      // CRITICAL FIX: Allow recording even without AI provider configured
+      // Transcription will be disabled but audio can still be captured
+      if (!isProviderConfigured) {
+        console.log('[App] No AI provider - showing warning');
+        showNotification(
+          "warning",
+          "AI provider not configured. Recording will work but transcription will be disabled.",
+          5000,
+        );
+      }
+
+      try {
+        console.log('[App] Creating session via IPC...');
+        const session = (await window.electronAPI.session.create()) as {
+          id: string;
+          status: string;
+          started_at: string;
+        };
+        console.log('[App] Session created:', session);
+        addSession(session);
+        console.log('[App] Setting active session:', session.id);
+        setActiveSession(session.id);
+        console.log('[App] Switching view to:', session.id);
+        switchView(session.id);
+        console.log('[App] Recording setup complete');
+      } catch (error) {
+        console.error('[App] Failed to create session:', error);
+        console.error("[App] Failed to create session:", error);
+        showNotification(
+          "error",
+          `Failed to start recording: ${error instanceof Error ? error.message : "Unknown error"}`,
+        );
       }
     },
-    onStopRecording: () => {
+    onStopRecording: async () => {
       if (activeSessionId) {
-        window.electronAPI.session.end(activeSessionId);
+        console.log('[App] onStopRecording called for session:', activeSessionId);
+        const sessionToEnd = activeSessionId;
+
+        // Step 1: Stop the recorder and wait for all chunks to be ACK'd by main process
+        const flushFn = useSessionStore.getState().stopAndFlushRef;
+        if (flushFn) {
+          console.log('[App] Step 1: Calling stopAndFlush (ACK-based)...');
+          await flushFn();
+          console.log('[App] Step 1 complete: All chunks ACK\'d');
+        } else {
+          console.warn('[App] No stopAndFlushRef available, falling back to timeout');
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+
+        // Step 2: Clear the active session (unmounts ActiveSessionRecorder)
+        console.log('[App] Step 2: Clearing active session');
         setActiveSession(null);
+
+        // Step 3: End session (triggers concatenation in main process)
+        console.log('[App] Step 3: Ending session via IPC:', sessionToEnd);
+        window.electronAPI.session.end(sessionToEnd);
       }
     },
     onToggleAutoRecord: () => {
@@ -115,6 +156,7 @@ export default function App() {
   return (
     <>
       <ThemeProvider />
+      <NotificationContainer />
       <Routes>
         <Route element={<ShellLayout />}>
           <Route path="/" element={<Dashboard />} />

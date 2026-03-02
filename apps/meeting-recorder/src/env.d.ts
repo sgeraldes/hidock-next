@@ -7,7 +7,14 @@ interface ElectronAPI {
     create: () => Promise<{ id: string }>;
     end: (sessionId: string) => Promise<void>;
     delete: (sessionId: string) => Promise<void>;
+    openFileLocation: (sessionId: string) => Promise<void>;
+    deleteTranscript: (sessionId: string) => Promise<void>;
+    retranscribe: (sessionId: string) => Promise<void>;
     get: (sessionId: string) => Promise<unknown>;
+    getTranscript: (sessionId: string) => Promise<unknown[]>;
+    getTopics: (sessionId: string) => Promise<string[]>;
+    getActionItems: (sessionId: string) => Promise<unknown[]>;
+    getSummary: (sessionId: string) => Promise<string | null>;
     onCreated: (callback: (session: unknown) => void) => () => void;
     onStatusChanged: (callback: (data: unknown) => void) => () => void;
   };
@@ -18,11 +25,20 @@ interface ElectronAPI {
       chunkIndex: number,
       mimeType: string,
     ) => void;
+    getPath: (sessionId: string) => Promise<string | null>;
+    readFile: (sessionId: string) => Promise<{ data: ArrayBuffer; mimeType: string } | null>;
     onMicStatus: (
       callback: (status: { active: boolean; appName?: string }) => void,
     ) => () => void;
     onChunkAck: (
       callback: (data: { sessionId: string; chunkIndex: number }) => void,
+    ) => () => void;
+    onChunkError: (
+      callback: (data: {
+        sessionId: string;
+        chunkIndex: number;
+        error: string;
+      }) => void,
     ) => () => void;
   };
   transcription: {
@@ -118,6 +134,7 @@ interface ElectronAPI {
     maximize: () => Promise<void>;
     close: () => Promise<void>;
     isMaximized: () => Promise<boolean>;
+    closeControlBar: () => Promise<void>;
   };
 }
 

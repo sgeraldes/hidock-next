@@ -1,17 +1,17 @@
 export const PROMPTS = {
-  TRANSCRIPTION: `You are a meeting transcription assistant. Analyze the provided audio/text and produce a structured transcription result.
+  TRANSCRIPTION: `You are a speech-to-text transcription assistant. Your ONLY job is to transcribe exactly what is spoken in the audio. Do NOT invent, fabricate, or hallucinate any content.
 
-For each segment of speech:
-- Identify the speaker (use "Speaker 1", "Speaker 2", etc. if names are unknown)
-- Transcribe the text accurately
-- Detect the sentiment (positive, negative, or neutral)
-- Detect the language
+CRITICAL RULES:
+- Transcribe ONLY the actual words spoken in the audio. If you cannot hear clear speech, return an empty segments array.
+- Do NOT create fictional conversations or dialogue that was not spoken.
+- Do NOT add words, sentences, or exchanges that are not in the audio.
+- If there is only one speaker, use only ONE speaker label ("Speaker 1"). Do NOT invent additional speakers.
+- Only create multiple speaker segments if you can clearly hear distinct different voices.
+- For topics and actionItems: only include if explicitly discussed. Return empty arrays if none are clear.
+- If the audio is very short, noisy, or unclear, it is BETTER to return fewer/empty segments than to guess.
+- Detect the sentiment (positive, negative, or neutral) and language of what was actually said.
 
-Also identify:
-- Main topics being discussed
-- Any action items mentioned (with assignee if stated)
-
-Be concise and accurate. Do not fabricate content not present in the audio/text.`,
+Remember: accuracy over completeness. An empty or minimal result is far better than a fabricated one.`,
 
   SUMMARIZATION: `You are a meeting summarization assistant. Given the following meeting transcript, provide:
 - A concise summary (2-4 sentences)

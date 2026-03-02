@@ -91,7 +91,12 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", async () => {
+  // End any active sessions and finalize audio
+  const { getSessionManager } = await import("./ipc/session-handlers");
+  const sessionManager = getSessionManager();
+  await sessionManager.dispose();
+
   markCleanShutdown(); // Mark clean shutdown before saving
   saveDatabase();
   closeDatabase();

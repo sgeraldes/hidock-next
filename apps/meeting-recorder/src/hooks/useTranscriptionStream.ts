@@ -60,18 +60,22 @@ export function useTranscriptionStream(sessionId: string | null) {
 
     loadHistoricalData();
 
-    const handleSegments = (segments: unknown[]) => {
-      const mapped = (
-        segments as Array<{
+    const handleSegments = (data: unknown) => {
+      // Backend sends { chunkIndex, segments } for timestamp calculation
+      const payload = data as {
+        chunkIndex: number;
+        segments: Array<{
           speaker: string;
           text: string;
           sentiment?: string;
-        }>
-      ).map((s) => ({
+        }>;
+      };
+      const TIMESLICE_MS = 3000;
+      const mapped = payload.segments.map((s) => ({
         id: `seg-${nextSegmentId++}`,
         speaker: s.speaker,
         text: s.text,
-        timestamp: "0:00",
+        timestamp: formatTimestamp(payload.chunkIndex * TIMESLICE_MS),
         sentiment: (s.sentiment ?? "neutral") as
           | "positive"
           | "negative"

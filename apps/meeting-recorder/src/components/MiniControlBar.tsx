@@ -6,11 +6,16 @@ interface SessionInfo {
 
 interface MiniControlBarProps {
   isRecording: boolean;
+  isPaused?: boolean;
+  isMuted?: boolean;
   elapsedTime: number;
   sessionTitle: string | null;
   sessions: SessionInfo[];
   activeSessionId: string | null;
   onEndRecording: () => void;
+  onPauseRecording?: () => void;
+  onResumeRecording?: () => void;
+  onMuteToggle?: () => void;
   onSwitchSession: (sessionId: string) => void;
   onOpenMainWindow: () => void;
   onCloseWindow: () => void;
@@ -24,11 +29,16 @@ function formatTime(seconds: number): string {
 
 export function MiniControlBar({
   isRecording,
+  isPaused = false,
+  isMuted = false,
   elapsedTime,
   sessionTitle,
   sessions,
   activeSessionId,
   onEndRecording,
+  onPauseRecording,
+  onResumeRecording,
+  onMuteToggle,
   onSwitchSession,
   onOpenMainWindow,
   onCloseWindow,
@@ -76,16 +86,65 @@ export function MiniControlBar({
         style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
       >
         {isRecording && (
-          <button
-            data-testid="stop-recording-btn"
-            onClick={onEndRecording}
-            className="p-1.5 rounded hover:bg-muted text-destructive"
-            title="Stop Recording"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-              <rect x="3" y="3" width="10" height="10" rx="1" />
-            </svg>
-          </button>
+          <>
+            {/* Pause/Resume button */}
+            {isPaused ? (
+              <button
+                data-testid="resume-recording-btn"
+                onClick={onResumeRecording}
+                className="p-1.5 rounded hover:bg-muted text-primary"
+                title="Resume Recording"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M5 3l8 5-8 5z" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                data-testid="pause-recording-btn"
+                onClick={onPauseRecording}
+                className="p-1.5 rounded hover:bg-muted text-primary"
+                title="Pause Recording"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                  <rect x="4" y="3" width="3" height="10" />
+                  <rect x="9" y="3" width="3" height="10" />
+                </svg>
+              </button>
+            )}
+
+            {/* Mute button */}
+            <button
+              data-testid="mute-toggle-btn"
+              onClick={onMuteToggle}
+              className={`p-1.5 rounded hover:bg-muted ${isMuted ? "text-destructive" : "text-muted-foreground"}`}
+              title={isMuted ? "Unmute" : "Mute"}
+            >
+              {isMuted ? (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M8 3v10M4 6v4h2l4 4V2L6 6H4z" />
+                  <line x1="11" y1="6" x2="14" y2="9" stroke="currentColor" strokeWidth="2" />
+                  <line x1="14" y1="6" x2="11" y2="9" stroke="currentColor" strokeWidth="2" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M4 6v4h2l4 4V2L6 6H4zM12 5v6" />
+                </svg>
+              )}
+            </button>
+
+            {/* Stop button */}
+            <button
+              data-testid="stop-recording-btn"
+              onClick={onEndRecording}
+              className="p-1.5 rounded hover:bg-muted text-destructive"
+              title="Stop Recording"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                <rect x="3" y="3" width="10" height="10" rx="1" />
+              </svg>
+            </button>
+          </>
         )}
 
         <button

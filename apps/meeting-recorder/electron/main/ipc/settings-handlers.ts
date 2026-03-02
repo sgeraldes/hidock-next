@@ -68,6 +68,11 @@ function reconfigureAIIfNeeded(changedKey: string): void {
   }
 }
 
+/** Configure AI service from database on startup (avoids masked key bug). */
+export function initializeAIFromSettings(): void {
+  reconfigureAIIfNeeded("ai.provider");
+}
+
 export function registerSettingsHandlers(): void {
   ipcMain.handle("settings:get", (_, key: string) => {
     const value = getSetting(key);

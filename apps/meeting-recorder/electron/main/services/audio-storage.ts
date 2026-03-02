@@ -60,6 +60,9 @@ export class AudioStorage {
     const dir = this.getSessionDir(sessionId);
     const toRemove = chunks.slice(0, chunks.length - MAX_CHUNK_FILES);
     for (const filename of toRemove) {
+      // NEVER prune chunk-000 — it contains the WebM EBML header + Segment + Tracks.
+      // Without it, binary concatenation produces an invalid file that can't be parsed.
+      if (filename === "chunk-000.ogg") continue;
       try {
         unlinkSync(join(dir, filename));
       } catch {}

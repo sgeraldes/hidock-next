@@ -15,14 +15,14 @@ import { registerAttachmentHandlers } from "./attachment-handlers";
 import { registerMeetingTypeHandlers } from "./meeting-type-handlers";
 import { registerTranslationSummarizationHandlers } from "./translation-handlers";
 import { registerHistoryHandlers } from "./history-handlers";
-import { registerSettingsHandlers } from "./settings-handlers";
+import { registerSettingsHandlers, initializeAIFromSettings } from "./settings-handlers";
 import { registerWindowHandlers } from "./window-handlers";
 
 export function registerIpcHandlers(): void {
   registerAppHandlers();
+  registerSessionHandlers();  // MUST be before audio handlers - audio needs session manager
   registerAudioHandlers();
   registerAIHandlers();
-  registerSessionHandlers();
   registerSessionDataHandlers();
   registerTranscriptionHandlers();
   registerSpeakerHandlers();
@@ -32,5 +32,7 @@ export function registerIpcHandlers(): void {
   registerHistoryHandlers();
   registerSettingsHandlers();
   registerWindowHandlers();
+  // Configure AI service from database settings (uses real keys, not masked)
+  initializeAIFromSettings();
   console.log("[IPC] Handlers registered");
 }

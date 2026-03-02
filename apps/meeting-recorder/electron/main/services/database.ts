@@ -301,6 +301,7 @@ export {
   updateSession,
   getAllSessions,
   deleteSession,
+  deleteSessionTranscript,
   createRecording,
   getRecordingsBySession,
   updateRecording,

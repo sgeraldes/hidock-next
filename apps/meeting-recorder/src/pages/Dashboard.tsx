@@ -13,14 +13,18 @@ import { useSettingsStore } from "../store/useSettingsStore";
 import { useAudioCapture } from "../hooks/useAudioCapture";
 
 function ActiveSessionRecorder({ sessionId }: { sessionId: string }) {
-  const { start, stop } = useAudioCapture(sessionId);
+  const { start, stop, stopAndFlush } = useAudioCapture(sessionId);
+  const setStopAndFlushRef = useSessionStore((s) => s.setStopAndFlushRef);
 
   useEffect(() => {
+    // Register the flush function so App.tsx stop flow can call it
+    setStopAndFlushRef(stopAndFlush);
     start();
     return () => {
+      setStopAndFlushRef(null);
       stop();
     };
-  }, [start, stop]);
+  }, [start, stop, stopAndFlush, setStopAndFlushRef]);
 
   return null;
 }
@@ -68,7 +72,7 @@ export default function Dashboard() {
   const settingsLoaded = useSettingsStore((s) => s.loaded);
   const isProviderConfigured = provider === "ollama" || Boolean(apiKey);
 
-  useTranscriptionStream(activeSessionId);
+  useTranscriptionStream(viewingSessionId);
 
   useEffect(() => {
     const cleanupMicStatus = window.electronAPI.audio.onMicStatus(
@@ -134,9 +138,10 @@ export default function Dashboard() {
         ended_at?: string | null;
         title?: string | null;
       };
+      // Only register the session data. App.tsx's onStartRecording already calls
+      // setActiveSession and switchView, so doing it here would cause a second
+      // mount of ActiveSessionRecorder and a duplicate MediaRecorder instance.
       addSession(s);
-      setActiveSession(s.id);
-      switchView(s.id);
     });
 
     const cleanupStatus = window.electronAPI.session.onStatusChanged((data) => {

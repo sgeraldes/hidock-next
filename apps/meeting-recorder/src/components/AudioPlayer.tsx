@@ -22,10 +22,47 @@ export function AudioPlayer({ sessionId }: AudioPlayerProps) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // TODO: Add API method to get audio file path
-    // For now, show placeholder
-    setLoading(false);
-    setError("Audio playback not yet implemented");
+    let mounted = true;
+    let blobUrl: string | null = null;
+
+    const loadAudio = async () => {
+      setLoading(true);
+      setError(null);
+
+      try {
+        // PLY-002: Read audio file via IPC as buffer (file:// URLs are blocked by Electron)
+        const result = await window.electronAPI.audio.readFile(sessionId);
+
+        if (!mounted) return;
+
+        if (!result) {
+          setError("No audio recording available for this session");
+          setLoading(false);
+          return;
+        }
+
+        // Create a blob URL from the buffer data
+        const blob = new Blob([result.data], { type: result.mimeType });
+        blobUrl = URL.createObjectURL(blob);
+        setAudioSrc(blobUrl);
+        setLoading(false);
+      } catch (err) {
+        if (!mounted) return;
+        console.error('[AudioPlayer] Failed to load audio:', err);
+        setError(err instanceof Error ? err.message : 'Failed to load audio');
+        setLoading(false);
+      }
+    };
+
+    loadAudio();
+
+    return () => {
+      mounted = false;
+      // Revoke blob URL to free memory
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+      }
+    };
   }, [sessionId]);
 
   useEffect(() => {

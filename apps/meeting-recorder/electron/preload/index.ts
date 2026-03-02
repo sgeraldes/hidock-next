@@ -12,6 +12,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
     get: (sessionId: string) => ipcRenderer.invoke("session:get", sessionId),
     delete: (sessionId: string) =>
       ipcRenderer.invoke("session:delete", sessionId),
+    openFileLocation: (sessionId: string) =>
+      ipcRenderer.invoke("session:openFileLocation", sessionId),
+    deleteTranscript: (sessionId: string) =>
+      ipcRenderer.invoke("session:deleteTranscript", sessionId),
+    retranscribe: (sessionId: string) =>
+      ipcRenderer.invoke("session:retranscribe", sessionId),
     getTranscript: (sessionId: string) =>
       ipcRenderer.invoke("session:getTranscript", sessionId),
     getTopics: (sessionId: string) =>
@@ -43,6 +49,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
     getPath: (sessionId: string) =>
       ipcRenderer.invoke("audio:getPath", sessionId),
+    readFile: (sessionId: string) =>
+      ipcRenderer.invoke("audio:readFile", sessionId),
     onMicStatus: (
       callback: (status: { active: boolean; appName?: string }) => void,
     ) => {
@@ -62,6 +70,20 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ) => callback(data);
       ipcRenderer.on("audio:chunkAck", handler);
       return () => ipcRenderer.removeListener("audio:chunkAck", handler);
+    },
+    onChunkError: (
+      callback: (data: {
+        sessionId: string;
+        chunkIndex: number;
+        error: string;
+      }) => void,
+    ) => {
+      const handler = (
+        _: unknown,
+        data: { sessionId: string; chunkIndex: number; error: string },
+      ) => callback(data);
+      ipcRenderer.on("audio:chunkError", handler);
+      return () => ipcRenderer.removeListener("audio:chunkError", handler);
     },
   },
 

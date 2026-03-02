@@ -30,6 +30,8 @@ export function Settings() {
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434')
   const [showApiKey, setShowApiKey] = useState(false)
   const [storageLoading, setStorageLoading] = useState(false)
+  // C-CHAT: RAG context window
+  const [ragContextSize, setRagContextSize] = useState(5)
 
   // Available Gemini models for transcription (audio-capable)
   // From: https://ai.google.dev/gemini-api/docs/models
@@ -119,9 +121,10 @@ export function Settings() {
     if (!config) return false
     return (
       chatProvider !== config.chat.provider ||
-      ollamaUrl !== config.embeddings.ollamaBaseUrl
+      ollamaUrl !== config.embeddings.ollamaBaseUrl ||
+      ragContextSize !== ((config.chat as any).maxContextChunks || 5)
     )
-  }, [config, chatProvider, ollamaUrl])
+  }, [config, chatProvider, ollamaUrl, ragContextSize])
 
   // Stable loadConfig with useCallback for dependency array
   const loadConfigStable = useCallback(async () => {
@@ -149,6 +152,10 @@ export function Settings() {
       setGeminiModel(config.transcription.geminiModel || 'gemini-3-pro-preview')
       setChatProvider(config.chat.provider)
       setOllamaUrl(config.embeddings.ollamaBaseUrl)
+      // C-CHAT: Load RAG context window size
+      if (config.chat && 'maxContextChunks' in config.chat) {
+        setRagContextSize((config.chat as any).maxContextChunks || 5)
+      }
     }
   }, [config])
 
@@ -268,9 +275,11 @@ export function Settings() {
     // Store previous values for rollback
     const previousChatProvider = config?.chat.provider || 'gemini'
     const previousOllamaUrl = config?.embeddings.ollamaBaseUrl || 'http://localhost:11434'
+    const previousContextSize = (config?.chat as any)?.maxContextChunks || 5
 
     const chatUpdates = {
-      provider: chatProvider
+      provider: chatProvider,
+      maxContextChunks: ragContextSize
     }
 
     const embeddingsUpdates = {
@@ -300,6 +309,7 @@ export function Settings() {
       // Rollback on error - both sections revert
       setChatProvider(previousChatProvider)
       setOllamaUrl(previousOllamaUrl)
+      setRagContextSize(previousContextSize)
       // Reload config from backend to ensure consistency after partial failure
       try { await loadConfig() } catch { /* best effort reload */ }
 
@@ -574,6 +584,34 @@ export function Settings() {
                   </p>
                 </div>
               )}
+
+              {/* C-CHAT: RAG Context Window Size */}
+              <div>
+                <label htmlFor="ragContextSize" className="text-sm font-medium">
+                  RAG Context Window
+                </label>
+                <Input
+                  id="ragContextSize"
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={ragContextSize}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10)
+                    if (!isNaN(val)) {
+                      setRagContextSize(Math.min(20, Math.max(1, val)))
+                    }
+                  }}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSaveChat()}
+                  disabled={saving}
+                  aria-label="RAG context window size"
+                  aria-describedby="ragContextSize-description"
+                  className="mt-1"
+                />
+                <p id="ragContextSize-description" className="text-xs text-muted-foreground mt-1">
+                  Number of knowledge chunks to retrieve for context (1-20). Default: 5
+                </p>
+              </div>
 
               <Button
                 onClick={handleSaveChat}

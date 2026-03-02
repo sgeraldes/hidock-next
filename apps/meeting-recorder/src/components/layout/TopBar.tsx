@@ -71,7 +71,11 @@ export default function TopBar({ onToggleSidebar }: TopBarProps) {
             </button>
           ) : (
             <button
-              onClick={recordingContext.onStartRecording}
+              onClick={() => {
+                console.log('[TopBar] Record button clicked!');
+                console.log('[TopBar] recordingContext:', recordingContext);
+                recordingContext.onStartRecording();
+              }}
               className="flex items-center gap-1.5 px-2 py-1 rounded bg-red-600 hover:bg-red-700 text-white text-xs font-medium"
             >
               <Mic className="w-3 h-3" />
@@ -139,3 +143,4 @@ export default function TopBar({ onToggleSidebar }: TopBarProps) {
     </div>
   );
 }
+// HMR trigger

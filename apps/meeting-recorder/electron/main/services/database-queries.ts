@@ -306,6 +306,13 @@ export function deleteSession(sessionId: string): void {
   database.run("DELETE FROM sessions WHERE id = ?", [sessionId]);
 }
 
+export function deleteSessionTranscript(sessionId: string): void {
+  const database = getDatabase();
+  database.run("DELETE FROM transcript_segments WHERE session_id = ?", [sessionId]);
+  database.run("DELETE FROM action_items WHERE session_id = ?", [sessionId]);
+  database.run("DELETE FROM talking_points WHERE session_id = ?", [sessionId]);
+}
+
 export function getSessionSpeakers(sessionId: string): Speaker[] {
   const database = getDatabase();
   const result = database.exec(

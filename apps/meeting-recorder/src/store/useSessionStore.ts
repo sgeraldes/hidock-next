@@ -16,6 +16,8 @@ interface SessionState {
   micActive: boolean;
   loading: boolean;
   error: string | null;
+  /** Transient ref: stop recorder and wait for all chunks to be ACK'd */
+  stopAndFlushRef: (() => Promise<void>) | null;
 
   setActiveSession: (id: string | null) => void;
   switchView: (sessionId: string) => void;
@@ -25,6 +27,7 @@ interface SessionState {
   setMicActive: (active: boolean) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
+  setStopAndFlushRef: (ref: (() => Promise<void>) | null) => void;
 }
 
 export const useSessionStore = create<SessionState>()(
@@ -36,6 +39,7 @@ export const useSessionStore = create<SessionState>()(
       micActive: false,
       loading: false,
       error: null,
+      stopAndFlushRef: null,
 
       setActiveSession: (id) => set({ activeSessionId: id }),
 
@@ -69,6 +73,7 @@ export const useSessionStore = create<SessionState>()(
       setMicActive: (active) => set({ micActive: active }),
       setLoading: (loading) => set({ loading }),
       setError: (error) => set({ error }),
+      setStopAndFlushRef: (ref) => set({ stopAndFlushRef: ref }),
     }),
     {
       name: "session-store",

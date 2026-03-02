@@ -19,7 +19,11 @@ import {
   User,
   FileAudio,
   Square,
-  RotateCcw
+  RotateCcw,
+  Search,
+  Download,
+  GripVertical,
+  Loader2
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -98,6 +102,13 @@ export function Chat() {
   const [initialLoading, setInitialLoading] = useState(true)
   const [initError, setInitError] = useState<string | null>(null)
   const [status, setStatus] = useState<RAGStatus | null>(null)
+
+  // C-CHAT: Search within conversation
+  const [searchQuery, setSearchQuery] = useState('')
+
+  // C-CHAT: Resizable sidebar
+  const [sidebarWidth, setSidebarWidth] = useState(256) // 16rem = 256px
+  const [isResizing, setIsResizing] = useState(false)
   const [sources, setSources] = useState<Map<string, Source[]>>(new Map())
   const [chunks, setChunks] = useState<VectorChunk[]>([])
   const [showChunks, setShowChunks] = useState(false)
@@ -409,6 +420,72 @@ export function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
+  // C-CHAT: Filter messages by search query
+  const filteredMessages = searchQuery.trim()
+    ? messages.filter(msg =>
+        msg.content.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : messages
+
+  // C-CHAT: Export conversation to markdown
+  const handleExportConversation = useCallback(() => {
+    if (!activeConversation || messages.length === 0) {
+      toast.error('No conversation to export')
+      return
+    }
+
+    const markdown = [
+      `# ${activeConversation.title || 'Untitled Conversation'}`,
+      ``,
+      `**Date:** ${new Date(activeConversation.createdAt).toLocaleDateString()}`,
+      `**Messages:** ${messages.length}`,
+      ``,
+      `---`,
+      ``,
+      ...messages.map(msg => {
+        const role = msg.role === 'user' ? '**You:**' : '**Assistant:**'
+        const timestamp = new Date(msg.createdAt).toLocaleString()
+        return `### ${role} _(${timestamp})_\n\n${msg.content}\n`
+      })
+    ].join('\n')
+
+    const blob = new Blob([markdown], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${activeConversation.title || 'conversation'}.md`
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.success('Conversation exported')
+  }, [activeConversation, messages])
+
+  // C-CHAT: Sidebar resize handlers
+  const handleMouseDown = useCallback(() => {
+    setIsResizing(true)
+  }, [])
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return
+      const newWidth = Math.max(200, Math.min(500, e.clientX))
+      setSidebarWidth(newWidth)
+    }
+
+    const handleMouseUp = () => {
+      setIsResizing(false)
+    }
+
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove)
+      document.addEventListener('mouseup', handleMouseUp)
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isResizing])
+
   // B-CHAT-005: Cancel in-flight RAG request
   const handleCancelRequest = useCallback(async () => {
     if (!activeConversation) return
@@ -636,8 +713,11 @@ export function Chat() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Sidebar - Conversations History */}
-      <aside className="w-64 border-r flex flex-col bg-muted/10">
+      {/* Sidebar - Conversations History (C-CHAT: Resizable) */}
+      <aside
+        className="border-r flex flex-col bg-muted/10 relative"
+        style={{ width: `${sidebarWidth}px` }}
+      >
         <div className="p-4 border-b">
           <Button onClick={handleNewChat} className="w-full gap-2" variant="default">
             <Plus className="h-4 w-4" />
@@ -692,6 +772,16 @@ export function Chat() {
             )}
           </div>
         </div>
+
+        {/* C-CHAT: Resize handle */}
+        <div
+          className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-primary/50 active:bg-primary"
+          onMouseDown={handleMouseDown}
+        >
+          <div className="absolute right-0 top-1/2 -translate-y-1/2 -translate-x-1/2">
+            <GripVertical className="h-4 w-4 text-muted-foreground" />
+          </div>
+        </div>
       </aside>
 
       {/* Main Chat Area */}
@@ -703,6 +793,33 @@ export function Chat() {
             <p className="text-sm text-muted-foreground truncate">
               {activeConversation ? activeConversation.title : 'Knowledge-powered AI conversations'}
             </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {/* C-CHAT: Search within conversation */}
+            {activeConversation && messages.length > 0 && (
+              <div className="relative">
+                <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  type="text"
+                  placeholder="Search messages..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-8 w-48"
+                />
+              </div>
+            )}
+
+            {/* C-CHAT: Export conversation */}
+            {activeConversation && messages.length > 0 && (
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={handleExportConversation}
+                title="Export conversation"
+              >
+                <Download className="h-4 w-4" />
+              </Button>
+            )}
           </div>
           <div className="flex items-center gap-4">
             {status && (
@@ -925,7 +1042,7 @@ export function Chat() {
                 </div>
               </div>
             ) : (
-              messages.map((message) => {
+              filteredMessages.map((message) => {
                 const msgSources = getMessageSources(message)
                 return (
                   <div

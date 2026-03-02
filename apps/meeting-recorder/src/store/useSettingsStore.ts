@@ -124,6 +124,11 @@ export const useSettingsStore = create<SettingsState>()(
             updates.closeToTray = all["general.closeToTray"] === "true";
 
           set(updates);
+
+          // NOTE: AI service is auto-configured in the main process at startup
+          // using real (unmasked) keys from the database. Do NOT call ai.configure
+          // from the renderer here because settings:getAll returns masked API keys
+          // (e.g. "****xxxx") which would overwrite the valid configuration.
         } catch (err) {
           console.warn("[SettingsStore] Failed to load settings:", err);
           set({ loaded: true });
@@ -133,6 +138,9 @@ export const useSettingsStore = create<SettingsState>()(
       saveToIPC: async (key, value) => {
         try {
           await window.electronAPI.settings.set(key, value);
+          // NOTE: settings:set handler in main process auto-reconfigures
+          // the AI service when any ai.* key changes, using real (unmasked)
+          // values from the database. No need to call ai.configure from here.
         } catch (err) {
           console.warn("[SettingsStore] Failed to save setting:", key, err);
         }

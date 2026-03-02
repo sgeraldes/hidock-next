@@ -1,5 +1,11 @@
 #!/bin/bash
-# HiDock Meeting Recorder - Development Run Script
+# HiDock Meeting Recorder - Launch Script (skips if already running)
+
+# Check if electron process for meeting-recorder is already running
+if pgrep -f "electron.*meeting-recorder" &>/dev/null; then
+    echo "Meeting Recorder is already running."
+    exit 0
+fi
 
 echo "Starting HiDock Meeting Recorder..."
 echo

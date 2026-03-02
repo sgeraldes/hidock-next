@@ -1,4 +1,26 @@
 "use strict";
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 const electron = require("electron");
 const path = require("path");
 const initSqlJs = require("sql.js");
@@ -412,7 +434,7 @@ function readRecordingFile(filePath) {
 }
 let db = null;
 let dbPath = "";
-const SCHEMA_VERSION = 19;
+const SCHEMA_VERSION = 20;
 const SCHEMA = `
 -- Calendar events from ICS
 CREATE TABLE IF NOT EXISTS meetings (
@@ -684,11 +706,35 @@ CREATE TABLE IF NOT EXISTS transcription_queue (
     recording_id TEXT NOT NULL,
     status TEXT DEFAULT 'pending',
     attempts INTEGER DEFAULT 0,
+    retry_count INTEGER DEFAULT 0,
+    progress INTEGER DEFAULT 0,
     error_message TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     started_at TEXT,
     completed_at TEXT,
     FOREIGN KEY (recording_id) REFERENCES recordings(id)
+);
+
+-- Transcription service mutex lock (v19)
+CREATE TABLE IF NOT EXISTS transcription_service_lock (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    process_id TEXT,
+    acquired_at TEXT,
+    updated_at TEXT
+);
+
+-- Download queue (v20) - spec-007
+CREATE TABLE IF NOT EXISTS download_queue (
+    id TEXT PRIMARY KEY,
+    filename TEXT NOT NULL UNIQUE,
+    file_size INTEGER NOT NULL,
+    progress INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'downloading', 'completed', 'failed')),
+    error TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    recording_date TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Conversations (v12)
@@ -738,10 +784,11 @@ CREATE TABLE IF NOT EXISTS synced_files (
 );
 
 -- Contacts extracted from meeting attendees (renamed to People in UI)
+-- Note: email is NOT UNIQUE - multiple contacts can share an email (spec-013)
 CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    email TEXT UNIQUE,
+    email TEXT,
     type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown',
     role TEXT,
     company TEXT,
@@ -846,6 +893,8 @@ CREATE INDEX IF NOT EXISTS idx_recording_candidates_selected ON recording_meetin
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_quality ON knowledge_captures(quality_rating);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_status ON knowledge_captures(status);
 CREATE INDEX IF NOT EXISTS idx_knowledge_captures_category ON knowledge_captures(category);
+CREATE INDEX IF NOT EXISTS idx_knowledge_title ON knowledge_captures(title);
+CREATE INDEX IF NOT EXISTS idx_knowledge_summary ON knowledge_captures(summary);
 CREATE INDEX IF NOT EXISTS idx_quality_recording ON quality_assessments(recording_id);
 CREATE INDEX IF NOT EXISTS idx_quality_level ON quality_assessments(quality);
 
@@ -1304,21 +1353,111 @@ const MIGRATIONS = {
     console.log("Migration v18 complete: chat_messages columns added");
   },
   19: () => {
-    console.log("Running migration to schema v19: Adding filename to transcription_queue");
+    console.log("Running migration to schema v19: Adding transcription_service_lock table");
     const database2 = getDatabase();
-    const tableInfo = database2.exec("PRAGMA table_info(transcription_queue)");
-    if (tableInfo.length > 0 && tableInfo[0].values) {
-      const columns = tableInfo[0].values.map((row) => row[1]);
-      if (!columns.includes("filename")) {
+    try {
+      database2.run(`
+        CREATE TABLE IF NOT EXISTS transcription_service_lock (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          process_id TEXT,
+          acquired_at TEXT,
+          updated_at TEXT
+        )
+      `);
+      database2.run(`
+        INSERT OR IGNORE INTO transcription_service_lock (id, process_id, acquired_at, updated_at)
+        VALUES (1, NULL, NULL, NULL)
+      `);
+      console.log("[Migration v19] transcription_service_lock table created");
+    } catch (e) {
+      console.warn("[Migration v19] Failed to create transcription_service_lock table:", e);
+    }
+    console.log("Migration v19 complete: Transcription service mutex lock added");
+  },
+  20: () => {
+    console.log("Running migration to schema v20: Phase A consolidated fixes");
+    const database2 = getDatabase();
+    console.log("[Migration v20] Removing UNIQUE constraint on contacts.email");
+    try {
+      const tableInfo = database2.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='contacts'");
+      const createSql = tableInfo.length > 0 && tableInfo[0].values.length > 0 ? tableInfo[0].values[0][0] : "";
+      if (createSql.includes("UNIQUE")) {
+        database2.run(`
+          CREATE TABLE contacts_new (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT,
+            type TEXT CHECK(type IN ('team', 'candidate', 'customer', 'external', 'unknown')) DEFAULT 'unknown',
+            role TEXT,
+            company TEXT,
+            notes TEXT,
+            tags TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            meeting_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+          )
+        `);
+        database2.run("INSERT INTO contacts_new SELECT * FROM contacts");
+        database2.run("DROP TABLE contacts");
+        database2.run("ALTER TABLE contacts_new RENAME TO contacts");
+        console.log("[Migration v20] contacts.email UNIQUE constraint removed");
+      } else {
+        console.log("[Migration v20] contacts.email UNIQUE constraint already absent");
+      }
+    } catch (e) {
+      console.warn("[Migration v20] Contacts email constraint fix failed:", e);
+    }
+    console.log("[Migration v20] Adding search indexes");
+    try {
+      database2.run("CREATE INDEX IF NOT EXISTS idx_knowledge_title ON knowledge_captures(title)");
+      database2.run("CREATE INDEX IF NOT EXISTS idx_knowledge_summary ON knowledge_captures(summary)");
+      console.log("[Migration v20] Search indexes created");
+    } catch (e) {
+      console.warn("[Migration v20] Search index creation failed:", e);
+    }
+    console.log("[Migration v20] Adding transcription queue columns");
+    const tqTableInfo = database2.exec("PRAGMA table_info(transcription_queue)");
+    if (tqTableInfo.length > 0 && tqTableInfo[0].values) {
+      const tqColumns = tqTableInfo[0].values.map((row) => row[1]);
+      if (!tqColumns.includes("retry_count")) {
         try {
-          database2.run("ALTER TABLE transcription_queue ADD COLUMN filename TEXT");
-          console.log("[Migration v19] Added filename column to transcription_queue");
+          database2.run("ALTER TABLE transcription_queue ADD COLUMN retry_count INTEGER DEFAULT 0");
+          console.log("[Migration v20] Added retry_count column");
         } catch (e) {
-          console.warn("[Migration v19] Failed to add filename column:", e);
+          console.warn("[Migration v20] Failed to add retry_count:", e);
+        }
+      }
+      if (!tqColumns.includes("progress")) {
+        try {
+          database2.run("ALTER TABLE transcription_queue ADD COLUMN progress INTEGER DEFAULT 0");
+          console.log("[Migration v20] Added progress column");
+        } catch (e) {
+          console.warn("[Migration v20] Failed to add progress:", e);
         }
       }
     }
-    console.log("Migration v19 complete: transcription_queue filename column added");
+    console.log("[Migration v20] Creating download_queue table");
+    try {
+      database2.run(`
+        CREATE TABLE IF NOT EXISTS download_queue (
+          id TEXT PRIMARY KEY,
+          filename TEXT NOT NULL UNIQUE,
+          file_size INTEGER NOT NULL,
+          progress INTEGER DEFAULT 0,
+          status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'downloading', 'completed', 'failed')),
+          error TEXT,
+          started_at TEXT,
+          completed_at TEXT,
+          recording_date TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      console.log("[Migration v20] download_queue table created");
+    } catch (e) {
+      console.warn("[Migration v20] download_queue table creation failed:", e);
+    }
+    console.log("Migration v20 complete: Phase A consolidated fixes applied");
   }
 };
 function runMigrations(currentVersion) {
@@ -1395,6 +1534,23 @@ async function initializeDatabase() {
         }
       }
     }
+    const queueInfo = database2.exec("PRAGMA table_info(transcription_queue)");
+    if (queueInfo.length > 0 && queueInfo[0].values) {
+      const queueCols = queueInfo[0].values.map((col) => col[1]);
+      const queueRepairs = [
+        { name: "retry_count", def: "INTEGER DEFAULT 0" },
+        { name: "progress", def: "INTEGER DEFAULT 0" }
+      ];
+      for (const col of queueRepairs) {
+        if (!queueCols.includes(col.name)) {
+          console.log(`[Database] Repairing transcription_queue: adding ${col.name}`);
+          try {
+            database2.run(`ALTER TABLE transcription_queue ADD COLUMN ${col.name} ${col.def}`);
+          } catch (e) {
+          }
+        }
+      }
+    }
     const chatMsgInfo = database2.exec("PRAGMA table_info(chat_messages)");
     if (chatMsgInfo.length > 0 && chatMsgInfo[0].values) {
       const chatCols = chatMsgInfo[0].values.map((col) => col[1]);
@@ -1460,65 +1616,18 @@ function closeDatabase() {
     db = null;
   }
 }
-function ensureKnowledgeCaptureForRecording(recordingId) {
-  try {
-    const recording = getRecordingById(recordingId);
-    if (!recording) {
-      console.error(`[ensureKnowledgeCapture] Recording not found: ${recordingId}`);
-      return null;
-    }
-    if (recording.migrated_to_capture_id) {
-      return recording.migrated_to_capture_id;
-    }
-    const existingCapture = queryOne(
-      "SELECT id FROM knowledge_captures WHERE source_recording_id = ?",
-      [recordingId]
-    );
-    if (existingCapture) {
-      run("UPDATE recordings SET migrated_to_capture_id = ? WHERE id = ?", [existingCapture.id, recordingId]);
-      return existingCapture.id;
-    }
-    const captureId = `kc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const transcript = getTranscriptByRecordingId(recordingId);
-    run(
-      `INSERT INTO knowledge_captures (
-        id, title, summary, category, status,
-        captured_at, created_at, updated_at,
-        source_recording_id, source_meeting_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        captureId,
-        recording.filename || "Untitled Recording",
-        transcript?.summary || null,
-        "meeting",
-        // default category
-        transcript ? "ready" : "processing",
-        recording.date_recorded || now,
-        now,
-        now,
-        recordingId,
-        recording.meeting_id || null
-      ]
-    );
-    run("UPDATE recordings SET migrated_to_capture_id = ? WHERE id = ?", [captureId, recordingId]);
-    console.log(`[ensureKnowledgeCapture] Created knowledge_capture ${captureId} for recording ${recordingId}`);
-    return captureId;
-  } catch (error2) {
-    console.error("[ensureKnowledgeCapture] Failed:", error2);
-    return null;
-  }
-}
 function updateKnowledgeCaptureTitle(recordingId, titleSuggestion) {
   try {
-    const captureId = ensureKnowledgeCaptureForRecording(recordingId);
+    const recording = getRecordingById(recordingId);
+    if (!recording) return;
+    const captureId = recording.migrated_to_capture_id;
     if (!captureId) return;
     const capture = queryOne(
       "SELECT id, title FROM knowledge_captures WHERE id = ?",
       [captureId]
     );
     if (!capture) return;
-    if (capture.title.includes(".") || capture.title === "Untitled" || capture.title === "Untitled Recording") {
+    if (capture.title.includes(".") || capture.title === "Untitled") {
       run(
         "UPDATE knowledge_captures SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         [titleSuggestion, captureId]
@@ -1635,6 +1744,35 @@ function getMeetings(startDate, endDate) {
 }
 function getMeetingById(id) {
   return queryOne("SELECT * FROM meetings WHERE id = ?", [id]);
+}
+function updateMeeting(id, updates) {
+  const fields = [];
+  const params = [];
+  if (updates.subject !== void 0) {
+    fields.push("subject = ?");
+    params.push(updates.subject);
+  }
+  if (updates.start_time !== void 0) {
+    fields.push("start_time = ?");
+    params.push(updates.start_time);
+  }
+  if (updates.end_time !== void 0) {
+    fields.push("end_time = ?");
+    params.push(updates.end_time);
+  }
+  if (updates.location !== void 0) {
+    fields.push("location = ?");
+    params.push(updates.location);
+  }
+  if (updates.description !== void 0) {
+    fields.push("description = ?");
+    params.push(updates.description);
+  }
+  if (fields.length === 0) return;
+  fields.push("updated_at = ?");
+  params.push((/* @__PURE__ */ new Date()).toISOString());
+  params.push(id);
+  run(`UPDATE meetings SET ${fields.join(", ")} WHERE id = ?`, params);
 }
 function getMeetingsByIds(meetingIds) {
   if (meetingIds.length === 0) return /* @__PURE__ */ new Map();
@@ -1847,9 +1985,8 @@ function getTranscriptsByRecordingIds(recordingIds) {
   return results;
 }
 function insertTranscript(transcript) {
-  run("DELETE FROM transcripts WHERE recording_id = ?", [transcript.recording_id]);
   run(
-    `INSERT INTO transcripts (id, recording_id, full_text, language, summary, action_items,
+    `INSERT OR REPLACE INTO transcripts (id, recording_id, full_text, language, summary, action_items,
       topics, key_points, sentiment, speakers, word_count, transcription_provider, transcription_model,
       title_suggestion, question_suggestions)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1882,9 +2019,9 @@ function searchTranscripts(query) {
     [`%${escaped}%`, `%${escaped}%`, `%${escaped}%`]
   );
 }
-function addToQueue(recordingId, filename) {
+function addToQueue(recordingId) {
   const id = crypto.randomUUID();
-  run("INSERT INTO transcription_queue (id, recording_id, filename) VALUES (?, ?, ?)", [id, recordingId, filename ?? null]);
+  run("INSERT INTO transcription_queue (id, recording_id) VALUES (?, ?)", [id, recordingId]);
   return id;
 }
 function getQueueItems(status) {
@@ -1893,7 +2030,7 @@ function getQueueItems(status) {
     FROM transcription_queue tq
     LEFT JOIN recordings r ON tq.recording_id = r.id
     ${status ? "WHERE tq.status = ?" : ""}
-    ORDER BY tq.created_at`;
+    ORDER BY tq.retry_count ASC, tq.created_at ASC`;
   if (status) {
     return queryAll(sql, [status]);
   }
@@ -1911,9 +2048,15 @@ function updateQueueItem(id, status, errorMessage) {
       errorMessage ?? null,
       id
     ]);
+  } else if (status === "pending") {
+    run("UPDATE transcription_queue SET status = ?, retry_count = retry_count + 1, progress = 0 WHERE id = ?", [status, id]);
   } else {
     run("UPDATE transcription_queue SET status = ? WHERE id = ?", [status, id]);
   }
+}
+function updateQueueProgress(id, progress) {
+  const clampedProgress = Math.max(0, Math.min(100, Math.round(progress)));
+  run("UPDATE transcription_queue SET progress = ? WHERE id = ?", [clampedProgress, id]);
 }
 function removeFromQueueByRecordingId(recordingId) {
   run("DELETE FROM transcription_queue WHERE recording_id = ?", [recordingId]);
@@ -1984,16 +2127,24 @@ function clearAllMeetings() {
   });
   console.log("[Database] Cleared all meetings and associated links");
 }
-function getContacts(search, limit = 100, offset = 0) {
+function getContacts(search, type, limit = 100, offset = 0) {
   let countSql = "SELECT COUNT(*) as count FROM contacts";
   let sql = "SELECT * FROM contacts";
   const params = [];
+  const whereClauses = [];
   if (search) {
     const escaped = escapeLikePattern(search);
-    const searchClause = " WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\'";
-    countSql += searchClause;
-    sql += searchClause;
+    whereClauses.push("(name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\')");
     params.push(`%${escaped}%`, `%${escaped}%`, `%${escaped}%`, `%${escaped}%`);
+  }
+  if (type && type !== "all") {
+    whereClauses.push("type = ?");
+    params.push(type);
+  }
+  if (whereClauses.length > 0) {
+    const whereClause = " WHERE " + whereClauses.join(" AND ");
+    countSql += whereClause;
+    sql += whereClause;
   }
   sql += " ORDER BY meeting_count DESC, last_seen_at DESC LIMIT ? OFFSET ?";
   const countResult = queryOne(countSql, params);
@@ -2076,16 +2227,28 @@ function getContactsForMeeting(meetingId) {
     [meetingId]
   );
 }
-function getProjects(search, limit = 100, offset = 0) {
+function deleteContact(id) {
+  run("DELETE FROM meeting_contacts WHERE contact_id = ?", [id]);
+  run("DELETE FROM contacts WHERE id = ?", [id]);
+}
+function getProjects(search, limit = 100, offset = 0, status) {
   let countSql = "SELECT COUNT(*) as count FROM projects";
   let sql = "SELECT * FROM projects";
   const params = [];
+  const whereClauses = [];
   if (search) {
     const escaped = escapeLikePattern(search);
-    const searchClause = " WHERE name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'";
-    countSql += searchClause;
-    sql += searchClause;
+    whereClauses.push("(name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')");
     params.push(`%${escaped}%`, `%${escaped}%`);
+  }
+  if (status && status !== "all") {
+    whereClauses.push("status = ?");
+    params.push(status);
+  }
+  if (whereClauses.length > 0) {
+    const whereClause = " WHERE " + whereClauses.join(" AND ");
+    countSql += whereClause;
+    sql += whereClause;
   }
   sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
   const countResult = queryOne(countSql, params);
@@ -2097,8 +2260,8 @@ function getProjectById(id) {
 }
 function createProject(project) {
   run(
-    "INSERT INTO projects (id, name, description) VALUES (?, ?, ?)",
-    [project.id, project.name, project.description]
+    "INSERT INTO projects (id, name, description, status) VALUES (?, ?, ?, ?)",
+    [project.id, project.name, project.description, project.status || "active"]
   );
   return { ...project, created_at: (/* @__PURE__ */ new Date()).toISOString() };
 }
@@ -2150,6 +2313,25 @@ function tagMeetingToProject(meetingId, projectId) {
 }
 function untagMeetingFromProject(meetingId, projectId) {
   run("DELETE FROM meeting_projects WHERE meeting_id = ? AND project_id = ?", [meetingId, projectId]);
+}
+function getKnowledgeIdsForProject(projectId) {
+  const rows = queryAll(
+    `SELECT DISTINCT kc.id FROM knowledge_captures kc
+     JOIN recordings r ON kc.source_recording_id = r.id
+     JOIN meeting_projects mp ON r.meeting_id = mp.meeting_id
+     WHERE mp.project_id = ?`,
+    [projectId]
+  );
+  return rows.map((r) => r.id);
+}
+function getPersonIdsForProject(projectId) {
+  const rows = queryAll(
+    `SELECT DISTINCT mc.contact_id FROM meeting_contacts mc
+     JOIN meeting_projects mp ON mc.meeting_id = mp.meeting_id
+     WHERE mp.project_id = ?`,
+    [projectId]
+  );
+  return rows.map((r) => r.contact_id);
 }
 function findCandidateMeetingsForRecording(recordingId) {
   const recording = getRecordingById(recordingId);
@@ -2313,8 +2495,44 @@ async function updateRecordingStorageTierAsync(recordingId, tier) {
     });
   });
 }
+function acquireTranscriptionLock(processId) {
+  const database2 = getDatabase();
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const currentStatus = database2.exec("SELECT process_id FROM transcription_service_lock WHERE id = 1");
+  const currentProcessId = currentStatus.length > 0 && currentStatus[0].values.length > 0 ? currentStatus[0].values[0][0] : null;
+  if (currentProcessId !== null) {
+    return false;
+  }
+  database2.run(
+    `UPDATE transcription_service_lock
+     SET process_id = ?, acquired_at = ?, updated_at = ?
+     WHERE id = 1 AND process_id IS NULL`,
+    [processId, now, now]
+  );
+  const verifyStatus = database2.exec("SELECT process_id FROM transcription_service_lock WHERE id = 1");
+  const newProcessId = verifyStatus.length > 0 && verifyStatus[0].values.length > 0 ? verifyStatus[0].values[0][0] : null;
+  return newProcessId === processId;
+}
+function releaseTranscriptionLock(processId) {
+  const database2 = getDatabase();
+  const currentStatus = database2.exec("SELECT process_id FROM transcription_service_lock WHERE id = 1");
+  const currentProcessId = currentStatus.length > 0 && currentStatus[0].values.length > 0 ? currentStatus[0].values[0][0] : null;
+  if (currentProcessId !== processId) {
+    return false;
+  }
+  database2.run(
+    `UPDATE transcription_service_lock
+     SET process_id = NULL, acquired_at = NULL, updated_at = ?
+     WHERE id = 1 AND process_id = ?`,
+    [(/* @__PURE__ */ new Date()).toISOString(), processId]
+  );
+  const verifyStatus = database2.exec("SELECT process_id FROM transcription_service_lock WHERE id = 1");
+  const newProcessId = verifyStatus.length > 0 && verifyStatus[0].values.length > 0 ? verifyStatus[0].values[0][0] : null;
+  return newProcessId === null;
+}
 const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
+  acquireTranscriptionLock,
   addChatMessage,
   addRecordingMeetingCandidate,
   addSyncedFile,
@@ -2325,9 +2543,10 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   clearChatHistory,
   closeDatabase,
   createProject,
+  deleteContact,
   deleteProject,
   deleteRecordingLocal,
-  ensureKnowledgeCaptureForRecording,
+  escapeLikePattern,
   findCandidateMeetingsForRecording,
   getAllSyncedFiles,
   getCandidatesForRecordingWithDetails,
@@ -2337,12 +2556,14 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   getContactsByEmails,
   getContactsForMeeting,
   getDatabase,
+  getKnowledgeIdsForProject,
   getMeetingById,
   getMeetings,
   getMeetingsByIds,
   getMeetingsForContact,
   getMeetingsForProject,
   getMeetingsNearDate,
+  getPersonIdsForProject,
   getProjectById,
   getProjects,
   getProjectsForMeeting,
@@ -2370,6 +2591,7 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   markRecordingDownloaded,
   queryAll,
   queryOne,
+  releaseTranscriptionLock,
   removeFromQueueByRecordingId,
   removeSyncedFile,
   run,
@@ -2380,8 +2602,10 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   untagMeetingFromProject,
   updateContact,
   updateKnowledgeCaptureTitle,
+  updateMeeting,
   updateProject,
   updateQueueItem,
+  updateQueueProgress,
   updateRecordingLifecycle,
   updateRecordingStatus,
   updateRecordingStorageTier,
@@ -2391,24 +2615,66 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   upsertQualityAssessment,
   upsertQualityAssessmentAsync
 }, Symbol.toStringTag, { value: "Module" }));
+function success(data) {
+  return { success: true, data };
+}
+function error(code, message, details) {
+  return { success: false, error: { code, message, details } };
+}
 function registerConfigHandlers() {
   electron.ipcMain.handle("config:get", async () => {
-    return getConfig();
+    try {
+      return success(getConfig());
+    } catch (err) {
+      console.error("[config:get] Error:", err);
+      return error(
+        "SERVICE_UNAVAILABLE",
+        err instanceof Error ? err.message : "Failed to load configuration",
+        err
+      );
+    }
   });
   electron.ipcMain.handle("config:set", async (_, newConfig) => {
-    await saveConfig(newConfig);
-    return getConfig();
+    try {
+      await saveConfig(newConfig);
+      return success(getConfig());
+    } catch (err) {
+      console.error("[config:set] Error:", err);
+      return error(
+        "VALIDATION_ERROR",
+        err instanceof Error ? err.message : "Failed to save configuration",
+        err
+      );
+    }
   });
   electron.ipcMain.handle(
     "config:update-section",
     async (_, section, values) => {
-      await updateConfig(section, values);
-      return getConfig();
+      try {
+        await updateConfig(section, values);
+        return success(getConfig());
+      } catch (err) {
+        console.error(`[config:update-section] Error updating ${String(section)}:`, err);
+        return error(
+          "VALIDATION_ERROR",
+          err instanceof Error ? err.message : `Failed to update ${String(section)} settings`,
+          err
+        );
+      }
     }
   );
   electron.ipcMain.handle("config:get-value", async (_, key) => {
-    const config2 = getConfig();
-    return config2[key];
+    try {
+      const config2 = getConfig();
+      return success(config2[key]);
+    } catch (err) {
+      console.error(`[config:get-value] Error getting ${String(key)}:`, err);
+      return error(
+        "SERVICE_UNAVAILABLE",
+        err instanceof Error ? err.message : `Failed to get ${String(key)} value`,
+        err
+      );
+    }
   });
 }
 function registerDatabaseHandlers() {
@@ -2432,7 +2698,7 @@ function registerDatabaseHandlers() {
     return getRecordingsForMeeting(meetingId);
   });
   electron.ipcMain.handle("db:update-recording-status", async (_, id, status) => {
-    const transcriptionStatuses = ["none", "pending", "queued", "transcribing", "transcribed", "failed"];
+    const transcriptionStatuses = ["none", "pending", "processing", "complete", "error", "queued", "transcribing", "transcribed", "failed"];
     if (transcriptionStatuses.includes(status)) {
       updateRecordingTranscriptionStatus(id, status);
     } else {
@@ -2597,6 +2863,25 @@ const WINDOWS_TIMEZONE_OFFSETS = {
   "Customized Time Zone": -5 * 3600
   // Default to something reasonable
 };
+function categorizeCalendarError(error2) {
+  if (error2 instanceof TypeError && error2.message.includes("fetch")) {
+    return { message: error2.message, category: "network" };
+  }
+  const message = error2 instanceof Error ? error2.message : String(error2);
+  if (message.includes("fetch") || message.includes("ECONNREFUSED") || message.includes("ENOTFOUND") || message.includes("ETIMEDOUT") || message.includes("network") || message.includes("Failed to fetch") || message.includes("ERR_NETWORK") || /^Failed to fetch calendar: \d+/.test(message)) {
+    return { message, category: "network" };
+  }
+  if (message.includes("parse") || message.includes("ICAL") || message.includes("invalid ical") || message.includes("Unexpected") || message.includes("SyntaxError")) {
+    return { message, category: "parse" };
+  }
+  if (message.includes("database") || message.includes("Database") || message.includes("SQLITE") || message.includes("sqlite") || message.includes("constraint")) {
+    return { message, category: "database" };
+  }
+  if (message.includes("URL") || message.includes("url") || message.includes("allowed") || message.includes("HTTPS") || message.includes("blocked") || message.includes("Private IP")) {
+    return { message, category: "validation" };
+  }
+  return { message, category: "unknown" };
+}
 function validateCalendarUrl(url) {
   try {
     const parsed = new URL(url);
@@ -2763,7 +3048,8 @@ async function syncCalendar(icsUrl) {
       return {
         success: false,
         meetingsCount: 0,
-        error: validation.error
+        error: validation.error,
+        errorCategory: "validation"
       };
     }
     const response = await fetch(icsUrl);
@@ -2780,7 +3066,7 @@ async function syncCalendar(icsUrl) {
       upsertMeetingsBatch(meetings);
     } catch (dbError) {
       console.error("Failed to save meetings to database:", dbError);
-      throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : "Unknown error"}`);
+      throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : "Unknown database error"}`);
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     await updateConfig("calendar", { lastSyncAt: now });
@@ -2792,10 +3078,12 @@ async function syncCalendar(icsUrl) {
     };
   } catch (error2) {
     console.error("Calendar sync failed:", error2);
+    const categorized = categorizeCalendarError(error2);
     return {
       success: false,
       meetingsCount: 0,
-      error: error2 instanceof Error ? error2.message : "Unknown error"
+      error: categorized.message,
+      errorCategory: categorized.category
     };
   }
 }
@@ -2936,6 +3224,9 @@ const GetRecordingByIdSchema = zod.z.object({
 const DeleteRecordingSchema = zod.z.object({
   id: RecordingIdSchema
 });
+const DeleteBatchRecordingsSchema = zod.z.object({
+  ids: zod.z.array(zod.z.string().uuid("Each ID must be a valid UUID")).min(1).max(1e3)
+});
 const LinkRecordingToMeetingSchema = zod.z.object({
   recordingId: RecordingIdSchema,
   meetingId: zod.z.string().uuid("Meeting ID must be a valid UUID")
@@ -2945,6 +3236,16 @@ const UnlinkRecordingFromMeetingSchema = zod.z.object({
 });
 const TranscribeRecordingSchema = zod.z.object({
   recordingId: RecordingIdSchema
+});
+const RecordingStatusSchema = zod.z.enum(["ready", "processing", "deleted", "error"]);
+const TranscriptionStatusSchema = zod.z.enum(["none", "pending", "queued", "transcribing", "transcribed", "failed", "complete", "processing"]);
+const UpdateRecordingStatusSchema = zod.z.object({
+  id: RecordingIdSchema,
+  status: RecordingStatusSchema
+});
+const UpdateTranscriptionStatusSchema = zod.z.object({
+  id: RecordingIdSchema,
+  status: TranscriptionStatusSchema
 });
 const OpenFolderSchema = zod.z.object({
   folder: zod.z.enum(["recordings", "transcripts", "data"])
@@ -3462,6 +3763,11 @@ async function processNewRecording(filePath) {
     const config2 = getConfig();
     if (config2.transcription.autoTranscribe) {
       addToQueue(recordingId);
+      Promise.resolve().then(() => transcription).then(({ processQueueManually: processQueueManually2 }) => {
+        processQueueManually2();
+      }).catch((err) => {
+        console.error("[RecordingWatcher] Failed to import transcription service:", err);
+      });
     } else {
     }
     notifyRenderer$1("recording:new", { recording });
@@ -3629,7 +3935,7 @@ class OllamaService {
       if (options.systemPrompt) {
         fullMessages.unshift({ role: "system", content: options.systemPrompt });
       }
-      const response = await fetch(`${this.baseUrl}/api/chat`, {
+      const fetchOptions = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3641,7 +3947,11 @@ class OllamaService {
             num_predict: options.maxTokens ?? 1024
           }
         })
-      });
+      };
+      if (options.signal) {
+        fetchOptions.signal = options.signal;
+      }
+      const response = await fetch(`${this.baseUrl}/api/chat`, fetchOptions);
       if (!response.ok) {
         console.error("Ollama chat error:", response.statusText);
         return null;
@@ -3649,6 +3959,10 @@ class OllamaService {
       const data = await response.json();
       return data.message.content;
     } catch (error2) {
+      if (error2 instanceof DOMException && error2.name === "AbortError") {
+        console.log("[Ollama] Chat request was cancelled");
+        return null;
+      }
       console.error("Failed to chat with Ollama:", error2);
       return null;
     }
@@ -3904,44 +4218,12 @@ let processingInterval = null;
 function setMainWindowForTranscription(win) {
   mainWindow$1 = win;
 }
-function cleanupStaleTranscriptionStatuses() {
-  try {
-    const staleRecordings = queryOne(
-      `SELECT id, status FROM recordings WHERE status IN ('pending', 'processing')`,
-      []
-    );
-    if (!staleRecordings || staleRecordings.length === 0) {
-      console.log("[Transcription Cleanup] No stale statuses found");
-      return;
-    }
-    console.log(`[Transcription Cleanup] Found ${staleRecordings.length} recordings with pending/processing status`);
-    let cleaned = 0;
-    for (const recording of staleRecordings) {
-      const queueItem = queryOne(
-        `SELECT id FROM transcription_queue WHERE recording_id = ? AND status != 'completed'`,
-        [recording.id]
-      );
-      if (!queueItem) {
-        updateRecordingTranscriptionStatus(recording.id, "none");
-        cleaned++;
-        console.log(`[Transcription Cleanup] Reset status for ${recording.id} (was ${recording.status}, no queue item)`);
-      }
-    }
-    if (cleaned > 0) {
-      console.log(`[Transcription Cleanup] Cleaned up ${cleaned} stale transcription statuses`);
-      notifyRenderer("transcription:cleanup-complete", { count: cleaned });
-    }
-  } catch (error2) {
-    console.error("[Transcription Cleanup] Failed:", error2);
-  }
-}
 function startTranscriptionProcessor() {
   if (processingInterval) {
     console.log("Transcription processor already running");
     return;
   }
   console.log("Starting transcription processor");
-  cleanupStaleTranscriptionStatuses();
   processingInterval = setInterval(() => {
     processQueue();
   }, 1e4);
@@ -3966,14 +4248,21 @@ function cancelAllTranscriptions() {
   notifyRenderer("transcription:all-cancelled", { count });
   return count;
 }
+const MAX_RETRY_ATTEMPTS = 3;
 async function processQueue() {
   if (isProcessing) return;
+  const processId = `proc_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+  const lockAcquired = acquireTranscriptionLock(processId);
+  if (!lockAcquired) {
+    console.log("[Transcription] Another process is already processing the queue, skipping");
+    return;
+  }
   const config2 = getConfig();
   if (!config2.transcription.geminiApiKey) {
     console.error("[Transcription] Cannot process queue: Gemini API key not configured");
-    const pendingItems2 = getQueueItems("pending");
+    const pendingItems = getQueueItems("pending");
     const processingItems = getQueueItems("processing");
-    const allStuckItems = [...pendingItems2, ...processingItems];
+    const allStuckItems = [...pendingItems, ...processingItems];
     if (allStuckItems.length > 0) {
       console.log(`[Transcription] Marking ${allStuckItems.length} stuck items as failed (no API key)`);
       for (const item of allStuckItems) {
@@ -3986,47 +4275,107 @@ async function processQueue() {
         });
       }
     }
+    releaseTranscriptionLock(processId);
     return;
   }
-  const failedItems = getQueueItems("failed");
-  for (const item of failedItems) {
-    if (item.attempts < 3) {
-      updateQueueItem(item.id, "pending");
-      updateRecordingTranscriptionStatus(item.recording_id, "pending");
-      console.log(`Re-queuing failed item ${item.id} (attempt ${item.attempts + 1}/3)`);
-    }
-  }
-  const pendingItems = getQueueItems("pending");
-  if (pendingItems.length === 0) return;
-  isProcessing = true;
-  for (const item of pendingItems) {
-    if (cancelRequested) {
-      console.log("Transcription cancelled by user");
-      break;
-    }
-    try {
-      updateQueueItem(item.id, "processing");
-      notifyRenderer("transcription:started", { queueItemId: item.id, recordingId: item.recording_id });
-      await transcribeRecording(item.recording_id);
-      updateQueueItem(item.id, "completed");
-      notifyRenderer("transcription:completed", { queueItemId: item.id, recordingId: item.recording_id });
-    } catch (error2) {
-      const errorMessage = error2 instanceof Error ? error2.message : "Unknown error";
-      console.error("Transcription failed:", errorMessage);
-      updateQueueItem(item.id, "failed", errorMessage);
-      updateRecordingTranscriptionStatus(item.recording_id, "error");
-      notifyRenderer("transcription:failed", {
-        queueItemId: item.id,
-        recordingId: item.recording_id,
-        error: errorMessage
-      });
-      if (item.attempts >= 3) {
-        console.log(`Recording ${item.recording_id} failed after ${item.attempts} attempts`);
+  try {
+    const NON_RETRYABLE_ERRORS = [
+      "Recording not found",
+      "Recording file not found",
+      "Gemini API key not configured",
+      "no local file"
+    ];
+    const failedItems = getQueueItems("failed");
+    const now = Date.now();
+    for (const item of failedItems) {
+      const retryCount = item.retry_count ?? 0;
+      const errorMsg = item.error_message || "";
+      const isNonRetryable = NON_RETRYABLE_ERRORS.some((pattern) => errorMsg.includes(pattern));
+      if (isNonRetryable) {
+        continue;
+      }
+      if (retryCount < MAX_RETRY_ATTEMPTS) {
+        const backoffMs = Math.min(3e4 * Math.pow(2, retryCount), 12e4);
+        const completedAt = item.completed_at ? new Date(item.completed_at).getTime() : 0;
+        const timeSinceFailure = now - completedAt;
+        if (timeSinceFailure < backoffMs) {
+          console.log(`[Transcription] Backoff for ${item.id}: waiting ${Math.round((backoffMs - timeSinceFailure) / 1e3)}s more (retry ${retryCount + 1}/${MAX_RETRY_ATTEMPTS})`);
+          continue;
+        }
+        updateQueueItem(item.id, "pending");
+        updateRecordingTranscriptionStatus(item.recording_id, "pending");
+        console.log(`Re-queuing failed item ${item.id} (retry ${retryCount + 1}/${MAX_RETRY_ATTEMPTS}, backoff ${backoffMs / 1e3}s)`);
       }
     }
+    const pendingItems = getQueueItems("pending");
+    if (pendingItems.length === 0) {
+      return;
+    }
+    isProcessing = true;
+    for (const item of pendingItems) {
+      if (cancelRequested) {
+        console.log("Transcription cancelled by user");
+        break;
+      }
+      try {
+        updateQueueItem(item.id, "processing");
+        updateQueueProgress(item.id, 0);
+        notifyRenderer("transcription:started", { queueItemId: item.id, recordingId: item.recording_id });
+        let tickerProgress = 0;
+        const progressTicker = setInterval(() => {
+          if (tickerProgress < 90) {
+            tickerProgress += 2;
+            updateQueueProgress(item.id, tickerProgress);
+            notifyRenderer("transcription:progress", {
+              queueItemId: item.id,
+              recordingId: item.recording_id,
+              stage: "transcribing",
+              progress: tickerProgress
+            });
+          }
+        }, 3e3);
+        const progressCallback = (stage, progress) => {
+          tickerProgress = progress;
+          updateQueueProgress(item.id, progress);
+          notifyRenderer("transcription:progress", {
+            queueItemId: item.id,
+            recordingId: item.recording_id,
+            stage,
+            progress
+          });
+        };
+        try {
+          await transcribeRecording(item.recording_id, progressCallback);
+        } finally {
+          clearInterval(progressTicker);
+        }
+        updateQueueProgress(item.id, 100);
+        updateQueueItem(item.id, "completed");
+        notifyRenderer("transcription:completed", { queueItemId: item.id, recordingId: item.recording_id });
+      } catch (error2) {
+        const errorMessage = error2 instanceof Error ? error2.message : "Unknown error";
+        console.error("Transcription failed:", errorMessage);
+        updateQueueItem(item.id, "failed", errorMessage);
+        updateRecordingTranscriptionStatus(item.recording_id, "error");
+        notifyRenderer("transcription:failed", {
+          queueItemId: item.id,
+          recordingId: item.recording_id,
+          error: errorMessage
+        });
+        const retryCount = item.retry_count ?? 0;
+        if (retryCount >= MAX_RETRY_ATTEMPTS) {
+          console.log(`Recording ${item.recording_id} failed after ${retryCount} retries (max: ${MAX_RETRY_ATTEMPTS})`);
+        }
+      }
+    }
+    isProcessing = false;
+    cancelRequested = false;
+  } finally {
+    releaseTranscriptionLock(processId);
   }
-  isProcessing = false;
-  cancelRequested = false;
+}
+async function processQueueManually() {
+  return processQueue();
 }
 async function detectActionables(transcriptText, knowledgeCaptureId, metadata) {
   const config2 = getConfig();
@@ -4086,7 +4435,7 @@ Only include detections with confidence >= 0.6.`;
     return [];
   }
 }
-async function transcribeRecording(recordingId) {
+async function transcribeRecording(recordingId, progressCallback) {
   const recording = getRecordingById(recordingId);
   if (!recording || !recording.file_path) {
     throw new Error(`Recording not found or no local file: ${recordingId}`);
@@ -4100,6 +4449,7 @@ async function transcribeRecording(recordingId) {
   }
   console.log(`Transcribing: ${recording.filename}`);
   updateRecordingTranscriptionStatus(recordingId, "processing");
+  progressCallback?.("reading_file", 5);
   const audioBuffer = await readFileAsync(recording.file_path);
   const base64Audio = audioBuffer.toString("base64");
   const ext = path.extname(recording.file_path).toLowerCase();
@@ -4130,6 +4480,7 @@ Meeting ${i + 1}: "${m.subject}"
   ${m.description ? `Description: ${m.description.slice(0, 200)}...` : ""}
 `).join("\n")}`;
   }
+  progressCallback?.("transcribing", 20);
   const transcriptionPrompt = `Transcribe this audio recording.
 The audio may be in Spanish or English - transcribe in the original language.
 Provide a clean, accurate transcription of all speech.
@@ -4146,6 +4497,7 @@ Return ONLY the transcription, no additional commentary.`;
     { text: transcriptionPrompt }
   ]);
   const fullText = transcriptionResult.response.text();
+  progressCallback?.("analyzing", 50);
   let meetingSelectionSection = "";
   if (candidateMeetings.length > 1) {
     meetingSelectionSection = `
@@ -4224,12 +4576,6 @@ Respond in JSON format:
           "ai_transcript_match"
         );
         console.log(`AI matched recording to meeting: "${selectedMeeting.subject}" (confidence: ${analysis.meeting_confidence})`);
-        try {
-          const vectorStore = getVectorStore();
-          await vectorStore.updateMeetingIdForRecording(recordingId, selectedMeeting.id, selectedMeeting.subject);
-        } catch (e) {
-          console.warn("Failed to update vector store meeting_id after AI linking:", e);
-        }
       }
     }
   }
@@ -4254,12 +4600,13 @@ Respond in JSON format:
   if (analysis.title_suggestion) {
     updateKnowledgeCaptureTitle(recordingId, analysis.title_suggestion);
   }
+  progressCallback?.("detecting_actionables", 75);
   try {
-    const sourceKnowledgeId = ensureKnowledgeCaptureForRecording(recordingId);
-    if (!sourceKnowledgeId) {
-      console.error("[Actionable Detection] Failed to get/create knowledge_capture for recording:", recordingId);
-      throw new Error("Could not create knowledge capture for recording");
-    }
+    const knowledgeCapture = queryOne(
+      "SELECT id FROM knowledge_captures WHERE source_recording_id = ?",
+      [recordingId]
+    );
+    const sourceKnowledgeId = knowledgeCapture?.id || recordingId;
     const detections = await detectActionables(fullText, sourceKnowledgeId, {
       title: analysis.title_suggestion,
       questions: analysis.question_suggestions
@@ -4293,6 +4640,7 @@ Respond in JSON format:
   } catch (error2) {
     console.error("[Actionable Detection] Failed to create actionables:", error2);
   }
+  progressCallback?.("indexing", 85);
   try {
     const vectorStore = getVectorStore();
     const meetingId = analysis.selected_meeting_id || recording.meeting_id;
@@ -4311,6 +4659,7 @@ Respond in JSON format:
   } catch (e) {
     console.warn("Failed to index transcript into vector store:", e);
   }
+  progressCallback?.("complete", 100);
   console.log(`Transcription complete: ${recording.filename} (${wordCount} words)`);
 }
 async function transcribeManually(recordingId) {
@@ -4338,6 +4687,17 @@ function notifyRenderer(channel, data) {
     mainWindow$1.webContents.send(channel, data);
   }
 }
+const transcription = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
+  __proto__: null,
+  cancelAllTranscriptions,
+  cancelTranscription,
+  getTranscriptionStatus,
+  processQueueManually,
+  setMainWindowForTranscription,
+  startTranscriptionProcessor,
+  stopTranscriptionProcessor,
+  transcribeManually
+}, Symbol.toStringTag, { value: "Module" }));
 function registerRecordingHandlers() {
   electron.ipcMain.handle("recordings:getAll", async () => {
     try {
@@ -4411,6 +4771,43 @@ function registerRecordingHandlers() {
     } catch (error2) {
       console.error("recordings:delete error:", error2);
       return false;
+    }
+  });
+  electron.ipcMain.handle("recordings:deleteBatch", async (_, ids) => {
+    try {
+      const result = DeleteBatchRecordingsSchema.safeParse({ ids });
+      if (!result.success) {
+        console.error("recordings:deleteBatch validation error:", result.error);
+        return { success: false, deleted: 0, failed: 0, errors: [{ id: "", error: result.error.issues[0]?.message || "Invalid request" }] };
+      }
+      let deleted = 0;
+      let failed = 0;
+      const errors = [];
+      for (const id of result.data.ids) {
+        try {
+          const recording = getRecordingById(id);
+          if (recording && recording.file_path) {
+            const wasDeleted = deleteRecording(recording.file_path);
+            if (wasDeleted) {
+              updateRecordingStatus(id, "deleted");
+              deleted++;
+            } else {
+              failed++;
+              errors.push({ id, error: "File deletion failed" });
+            }
+          } else {
+            failed++;
+            errors.push({ id, error: "Recording not found or no file path" });
+          }
+        } catch (e) {
+          failed++;
+          errors.push({ id, error: e instanceof Error ? e.message : "Unknown error" });
+        }
+      }
+      return { success: failed === 0, deleted, failed, errors };
+    } catch (error2) {
+      console.error("recordings:deleteBatch error:", error2);
+      return { success: false, deleted: 0, failed: 0, errors: [{ id: "", error: error2 instanceof Error ? error2.message : "Unknown error" }] };
     }
   });
   electron.ipcMain.handle(
@@ -4619,6 +5016,58 @@ function registerRecordingHandlers() {
       };
     }
   });
+  electron.ipcMain.handle("recordings:addExternalByPath", async (_, filePath) => {
+    try {
+      const allowedExtensions = [".mp3", ".m4a", ".wav", ".ogg", ".flac", ".webm", ".hda"];
+      const fileExtension = path.extname(filePath).toLowerCase();
+      if (!allowedExtensions.includes(fileExtension)) {
+        return { success: false, error: `Unsupported file type: ${fileExtension}. Supported: ${allowedExtensions.join(", ")}` };
+      }
+      if (!fs.existsSync(filePath)) {
+        return { success: false, error: "File does not exist" };
+      }
+      const stats = fs.statSync(filePath);
+      const originalFilename = path.basename(filePath);
+      const recordingsPath = getRecordingsPath();
+      const timestamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").split("T");
+      const newFilename = `external-${timestamp[0]}-${timestamp[1].substring(0, 8)}${fileExtension}`;
+      const destinationPath = path.join(recordingsPath, newFilename);
+      fs.copyFileSync(filePath, destinationPath);
+      const recordingId = crypto$1.randomUUID();
+      const recording = {
+        id: recordingId,
+        filename: newFilename,
+        original_filename: originalFilename,
+        file_path: destinationPath,
+        file_size: stats.size,
+        duration_seconds: void 0,
+        date_recorded: stats.mtime.toISOString(),
+        meeting_id: void 0,
+        correlation_confidence: void 0,
+        correlation_method: void 0,
+        status: "ready",
+        location: "local-only",
+        transcription_status: "none",
+        on_device: 0,
+        device_last_seen: void 0,
+        on_local: 1,
+        source: "external",
+        is_imported: 1
+      };
+      insertRecording(recording);
+      const insertedRecording = getRecordingById(recordingId);
+      if (!insertedRecording) {
+        return { success: false, error: "Failed to retrieve recording after insert" };
+      }
+      return { success: true, recording: insertedRecording };
+    } catch (error2) {
+      console.error("recordings:addExternalByPath error:", error2);
+      return {
+        success: false,
+        error: error2 instanceof Error ? error2.message : "Unknown error occurred"
+      };
+    }
+  });
   electron.ipcMain.handle("recordings:selectMeeting", async (_, recordingId, meetingId) => {
     try {
       if (meetingId) {
@@ -4641,10 +5090,9 @@ function registerRecordingHandlers() {
           error: "Transcription API key not configured. Please add your API key in Settings."
         };
       }
-      const recording = getRecordingById(recordingId);
-      const filename = recording?.filename ?? void 0;
-      const queueItemId = addToQueue(recordingId, filename);
+      const queueItemId = addToQueue(recordingId);
       updateRecordingTranscriptionStatus(recordingId, "queued");
+      processQueueManually();
       return queueItemId;
     } catch (error2) {
       console.error("recordings:addToQueue error:", error2);
@@ -4660,13 +5108,59 @@ function registerRecordingHandlers() {
       return false;
     }
   });
+  electron.ipcMain.handle("transcription:retry", async (_, recordingId) => {
+    try {
+      const result = TranscribeRecordingSchema.safeParse({ recordingId });
+      if (!result.success) {
+        console.error("transcription:retry validation error:", result.error);
+        return { success: false, error: result.error.issues[0]?.message || "Invalid request" };
+      }
+      const queueItemId = addToQueue(result.data.recordingId);
+      updateRecordingTranscriptionStatus(result.data.recordingId, "pending");
+      processQueueManually();
+      return { success: true, queueItemId };
+    } catch (error2) {
+      console.error("transcription:retry error:", error2);
+      return { success: false, error: error2.message };
+    }
+  });
+  electron.ipcMain.handle("recordings:updateStatus", async (_, id, status) => {
+    try {
+      const result = UpdateRecordingStatusSchema.safeParse({ id, status });
+      if (!result.success) {
+        console.error("recordings:updateStatus validation error:", result.error);
+        return { success: false, error: result.error.issues[0]?.message || "Invalid request parameters" };
+      }
+      updateRecordingStatus(result.data.id, result.data.status);
+      const recording = getRecordingById(result.data.id);
+      if (!recording) {
+        return { success: false, error: "Recording not found after status update" };
+      }
+      return { success: true, data: recording };
+    } catch (error2) {
+      console.error("recordings:updateStatus error:", error2);
+      return { success: false, error: error2 instanceof Error ? error2.message : "Unknown error occurred" };
+    }
+  });
+  electron.ipcMain.handle("recordings:updateTranscriptionStatus", async (_, id, status) => {
+    try {
+      const result = UpdateTranscriptionStatusSchema.safeParse({ id, status });
+      if (!result.success) {
+        console.error("recordings:updateTranscriptionStatus validation error:", result.error);
+        return { success: false, error: result.error.issues[0]?.message || "Invalid request parameters" };
+      }
+      updateRecordingTranscriptionStatus(result.data.id, result.data.status);
+      const recording = getRecordingById(result.data.id);
+      if (!recording) {
+        return { success: false, error: "Recording not found after transcription status update" };
+      }
+      return { success: true, data: recording };
+    } catch (error2) {
+      console.error("recordings:updateTranscriptionStatus error:", error2);
+      return { success: false, error: error2 instanceof Error ? error2.message : "Unknown error occurred" };
+    }
+  });
   console.log("Recording IPC handlers registered");
-}
-function success(data) {
-  return { success: true, data };
-}
-function error(code, message, details) {
-  return { success: false, error: { code, message, details } };
 }
 const SYSTEM_PROMPT = `You are a helpful meeting assistant that answers questions based on meeting transcripts.
 
@@ -4684,8 +5178,60 @@ Guidelines:
 - If asked about something not in the transcripts, acknowledge the limitation
 
 Context from meeting transcripts will be provided with each question.`;
+function estimateTokens(text) {
+  return Math.ceil(text.length / 4);
+}
+function trimHistoryByTokens(history, maxTokens = 4096) {
+  let totalTokens = 0;
+  const trimmed = [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msgTokens = estimateTokens(history[i].content);
+    if (totalTokens + msgTokens > maxTokens) break;
+    totalTokens += msgTokens;
+    trimmed.unshift(history[i]);
+  }
+  return trimmed;
+}
+const MAX_SESSIONS = 50;
+class LRUSessionCache {
+  cache = /* @__PURE__ */ new Map();
+  accessOrder = [];
+  // Most recently accessed at end
+  get(sessionId) {
+    const context = this.cache.get(sessionId);
+    if (context) {
+      this.accessOrder = this.accessOrder.filter((id) => id !== sessionId);
+      this.accessOrder.push(sessionId);
+    }
+    return context;
+  }
+  set(sessionId, context) {
+    if (this.cache.has(sessionId)) {
+      this.cache.set(sessionId, context);
+      this.accessOrder = this.accessOrder.filter((id) => id !== sessionId);
+      this.accessOrder.push(sessionId);
+      return;
+    }
+    while (this.cache.size >= MAX_SESSIONS && this.accessOrder.length > 0) {
+      const lruKey = this.accessOrder.shift();
+      this.cache.delete(lruKey);
+      console.log(`[RAG] LRU evicted session: ${lruKey}`);
+    }
+    this.cache.set(sessionId, context);
+    this.accessOrder.push(sessionId);
+  }
+  delete(sessionId) {
+    this.accessOrder = this.accessOrder.filter((id) => id !== sessionId);
+    return this.cache.delete(sessionId);
+  }
+  get size() {
+    return this.cache.size;
+  }
+}
 class RAGService {
-  contexts = /* @__PURE__ */ new Map();
+  contexts = new LRUSessionCache();
+  // B-CHAT-005: Active AbortControllers for cancellable requests
+  activeControllers = /* @__PURE__ */ new Map();
   async isReady() {
     const ollama = getOllamaService();
     const vectorStore = getVectorStore();
@@ -4722,6 +5268,30 @@ class RAGService {
   async chat(sessionId, message, meetingFilter) {
     const ollama = getOllamaService();
     const vectorStore = getVectorStore();
+    try {
+      const conversation = queryOne("SELECT id FROM conversations WHERE id = ?", [sessionId]);
+      if (!conversation) {
+        console.error(`RAG chat: Invalid conversation ID ${sessionId}`);
+        return {
+          answer: "",
+          sources: [],
+          error: "Invalid conversation ID. Please create a new conversation."
+        };
+      }
+    } catch (error2) {
+      console.error("RAG chat: Failed to validate conversation:", error2);
+      return {
+        answer: "",
+        sources: [],
+        error: "Failed to validate conversation. Please try again."
+      };
+    }
+    const existingController = this.activeControllers.get(sessionId);
+    if (existingController) {
+      existingController.abort();
+    }
+    const controller = new AbortController();
+    this.activeControllers.set(sessionId, controller);
     let context = this.contexts.get(sessionId);
     if (!context) {
       context = { conversationHistory: [] };
@@ -4736,7 +5306,7 @@ class RAGService {
       const queryEmbedding = await ollama.generateEmbedding(message);
       if (queryEmbedding) {
         searchResults = docs.map((doc) => {
-          let score = 0;
+          let score = 0.5;
           if (doc.embedding && doc.embedding.length === queryEmbedding.length) {
             let dotProduct = 0, normA = 0, normB = 0;
             for (let i = 0; i < queryEmbedding.length; i++) {
@@ -4807,17 +5377,17 @@ ${allContextParts.join("\n\n---\n\n")}` : "No relevant meeting transcripts found
 ${contextText}
 
 Question: ${message}`;
+    const trimmedHistory = trimHistoryByTokens(context.conversationHistory, 4096);
     const messages = [
-      ...context.conversationHistory.slice(-6),
-      // Keep last 3 exchanges (raw messages only)
+      ...trimmedHistory,
       { role: "user", content: userMessage }
-      // Send enhanced message with context to LLM
     ];
     context.conversationHistory.push({ role: "user", content: message });
     const answer = await ollama.chat(messages, {
       systemPrompt: SYSTEM_PROMPT,
       temperature: 0.7,
-      maxTokens: 1024
+      maxTokens: 1024,
+      signal: controller.signal
     });
     if (!answer) {
       return {
@@ -4827,9 +5397,10 @@ Question: ${message}`;
       };
     }
     context.conversationHistory.push({ role: "assistant", content: answer });
-    if (context.conversationHistory.length > 20) {
-      context.conversationHistory = context.conversationHistory.slice(-10);
+    if (context.conversationHistory.length > 40) {
+      context.conversationHistory = context.conversationHistory.slice(-20);
     }
+    this.activeControllers.delete(sessionId);
     return { answer, sources };
   }
   async summarizeMeeting(meetingId) {
@@ -4883,6 +5454,21 @@ ${transcript.substring(0, 8e3)}`;
   }
   clearSession(sessionId) {
     this.contexts.delete(sessionId);
+    const controller = this.activeControllers.get(sessionId);
+    if (controller) {
+      controller.abort();
+      this.activeControllers.delete(sessionId);
+    }
+  }
+  // B-CHAT-005: Cancel in-flight RAG request for a session
+  cancelRequest(sessionId) {
+    const controller = this.activeControllers.get(sessionId);
+    if (controller) {
+      controller.abort();
+      this.activeControllers.delete(sessionId);
+      return true;
+    }
+    return false;
   }
   getStats() {
     const vectorStore = getVectorStore();
@@ -4893,41 +5479,96 @@ ${transcript.substring(0, 8e3)}`;
     };
   }
   /**
-   * Perform a global search across all entities
+   * Perform a global search across all entities.
+   * B-EXP-003: Multi-term LIKE search with ranking by match count
+   * (FTS5 is NOT available in sql.js WASM, so we use improved multi-term LIKE).
    */
   async globalSearch(query, limit = 5) {
     try {
       const db2 = getDatabase();
-      const escaped = query.replace(/'/g, "''");
-      const likeQuery = `%${escaped}%`;
-      const knowledgeRows = db2.exec(`
-        SELECT * FROM knowledge_captures 
-        WHERE title LIKE ? OR summary LIKE ?
-        LIMIT ?
-      `, [likeQuery, likeQuery, limit]);
+      const terms = query.trim().split(/\s+/).filter((t) => t.length > 0);
+      if (terms.length === 0) {
+        return success({ knowledge: [], people: [], projects: [] });
+      }
+      if (terms.length === 1) {
+        const escaped = escapeLikePattern(terms[0]);
+        const likeQuery = `%${escaped}%`;
+        const knowledgeRows2 = db2.exec(`
+          SELECT id, title, summary, captured_at FROM knowledge_captures
+          WHERE title LIKE ? ESCAPE '' OR summary LIKE ? ESCAPE ''
+          LIMIT ?
+        `, [likeQuery, likeQuery, limit]);
+        const knowledge2 = knowledgeRows2.length > 0 ? knowledgeRows2[0].values.map((v) => ({
+          id: v[0],
+          title: v[1],
+          summary: v[2],
+          capturedAt: v[3]
+        })) : [];
+        const peopleRows2 = db2.exec(`
+          SELECT id, name, email, type FROM contacts
+          WHERE name LIKE ? ESCAPE '' OR email LIKE ? ESCAPE '' OR company LIKE ? ESCAPE '' OR role LIKE ? ESCAPE ''
+          LIMIT ?
+        `, [likeQuery, likeQuery, likeQuery, likeQuery, limit]);
+        const people2 = peopleRows2.length > 0 ? peopleRows2[0].values.map((v) => ({
+          id: v[0],
+          name: v[1],
+          email: v[2],
+          type: v[3]
+        })) : [];
+        const projectRows2 = db2.exec(`
+          SELECT id, name, description, status FROM projects
+          WHERE name LIKE ? ESCAPE '' OR description LIKE ? ESCAPE ''
+          LIMIT ?
+        `, [likeQuery, likeQuery, limit]);
+        const projects2 = projectRows2.length > 0 ? projectRows2[0].values.map((v) => ({
+          id: v[0],
+          name: v[1],
+          status: v[3]
+        })) : [];
+        return success({ knowledge: knowledge2, people: people2, projects: projects2 });
+      }
+      const buildMultiTermQuery = (table, columns, selectCols, limitVal) => {
+        const params = [];
+        const termClauses = [];
+        const matchCountParts = [];
+        for (const term of terms) {
+          const escaped = escapeLikePattern(term);
+          const likeVal = `%${escaped}%`;
+          const colClauses = columns.map((col) => {
+            params.push(likeVal);
+            return `${col} LIKE ? ESCAPE ''`;
+          });
+          termClauses.push(`(${colClauses.join(" OR ")})`);
+          const countExpr = columns.map((col) => {
+            params.push(likeVal);
+            return `CASE WHEN ${col} LIKE ? ESCAPE '' THEN 1 ELSE 0 END`;
+          });
+          matchCountParts.push(`MAX(${countExpr.join(", ")})`);
+        }
+        const whereClause = termClauses.join(" OR ");
+        const rankExpr = `(${matchCountParts.join(" + ")})`;
+        const sql = `SELECT ${selectCols}, ${rankExpr} AS match_rank FROM ${table} WHERE ${whereClause} ORDER BY match_rank DESC LIMIT ?`;
+        params.push(limitVal);
+        return { sql, params };
+      };
+      const kq = buildMultiTermQuery("knowledge_captures", ["title", "summary"], "id, title, summary, captured_at", limit);
+      const knowledgeRows = db2.exec(kq.sql, kq.params);
       const knowledge = knowledgeRows.length > 0 ? knowledgeRows[0].values.map((v) => ({
         id: v[0],
         title: v[1],
         summary: v[2],
-        capturedAt: v[15]
-        // captured_at is the 16th column (index 15) in knowledge_captures
+        capturedAt: v[3]
       })) : [];
-      const peopleRows = db2.exec(`
-        SELECT * FROM contacts 
-        WHERE name LIKE ? OR email LIKE ? OR company LIKE ? OR role LIKE ?
-        LIMIT ?
-      `, [likeQuery, likeQuery, likeQuery, likeQuery, limit]);
+      const pq = buildMultiTermQuery("contacts", ["name", "email", "company", "role"], "id, name, email, type", limit);
+      const peopleRows = db2.exec(pq.sql, pq.params);
       const people = peopleRows.length > 0 ? peopleRows[0].values.map((v) => ({
         id: v[0],
         name: v[1],
         email: v[2],
         type: v[3]
       })) : [];
-      const projectRows = db2.exec(`
-        SELECT * FROM projects 
-        WHERE name LIKE ? OR description LIKE ?
-        LIMIT ?
-      `, [likeQuery, likeQuery, limit]);
+      const prq = buildMultiTermQuery("projects", ["name", "description"], "id, name, description, status", limit);
+      const projectRows = db2.exec(prq.sql, prq.params);
       const projects = projectRows.length > 0 ? projectRows[0].values.map((v) => ({
         id: v[0],
         name: v[1],
@@ -5111,6 +5752,18 @@ function registerRAGHandlers() {
       return error("INTERNAL_ERROR", "Failed to find action items", err);
     }
   });
+  electron.ipcMain.handle("rag:cancel", async (_event, sessionId) => {
+    try {
+      if (!sessionId || typeof sessionId !== "string") {
+        return error("VALIDATION_ERROR", "Session ID is required");
+      }
+      const cancelled = rag.cancelRequest(sessionId);
+      return success(cancelled);
+    } catch (err) {
+      console.error("rag:cancel error:", err);
+      return error("INTERNAL_ERROR", "Failed to cancel request", err);
+    }
+  });
   electron.ipcMain.handle("rag:clear-session", async (_event, sessionId) => {
     try {
       if (!sessionId || typeof sessionId !== "string") {
@@ -5188,17 +5841,24 @@ function registerAppHandlers() {
   });
   console.log("App IPC handlers registered");
 }
-const GetContactsRequestSchema = SearchPaginationSchema;
+const GetContactsRequestSchema = SearchPaginationSchema.extend({
+  type: zod.z.enum(["team", "candidate", "customer", "external", "unknown", "all"]).optional()
+});
 const GetContactByIdRequestSchema = zod.z.object({
   id: UUIDSchema
 });
 const UpdateContactRequestSchema = zod.z.object({
   id: UUIDSchema,
+  name: zod.z.string().min(1).max(500).optional(),
+  email: zod.z.string().email().max(500).nullable().optional(),
   notes: OptionalStringSchema,
   type: zod.z.enum(["team", "candidate", "customer", "external", "unknown"]).optional(),
   role: OptionalStringSchema,
   company: OptionalStringSchema,
   tags: zod.z.array(zod.z.string()).optional()
+});
+const DeleteContactRequestSchema = zod.z.object({
+  id: UUIDSchema
 });
 const ContactRoleSchema = zod.z.enum(["organizer", "attendee"]);
 zod.z.object({
@@ -5224,8 +5884,8 @@ function registerContactsHandlers() {
         if (!parsed.success) {
           return error("VALIDATION_ERROR", "Invalid request parameters", parsed.error.format());
         }
-        const { search, limit, offset } = parsed.data;
-        const result = getContacts(search, limit, offset);
+        const { search, type, limit, offset } = parsed.data;
+        const result = getContacts(search, type, limit, offset);
         return success({
           contacts: result.contacts.map(mapToPerson),
           total: result.total
@@ -5274,7 +5934,7 @@ function registerContactsHandlers() {
         if (!parsed.success) {
           return error("VALIDATION_ERROR", "Invalid update request", parsed.error.format());
         }
-        const { id, tags, ...otherUpdates } = parsed.data;
+        const { id, tags, name, email, ...otherUpdates } = parsed.data;
         const contact = getContactById(id);
         if (!contact) {
           return error("NOT_FOUND", `Contact with ID ${id} not found`);
@@ -5283,12 +5943,38 @@ function registerContactsHandlers() {
         if (tags) {
           updates.tags = JSON.stringify(tags);
         }
+        if (name !== void 0) {
+          updates.name = name;
+        }
+        if (email !== void 0) {
+          updates.email = email;
+        }
         updateContact(id, updates);
         const updatedContact = getContactById(id);
         return success(mapToPerson(updatedContact));
       } catch (err) {
         console.error("contacts:update error:", err);
         return error("DATABASE_ERROR", "Failed to update contact", err);
+      }
+    }
+  );
+  electron.ipcMain.handle(
+    "contacts:delete",
+    async (_, id) => {
+      try {
+        const parsed = DeleteContactRequestSchema.safeParse({ id });
+        if (!parsed.success) {
+          return error("VALIDATION_ERROR", "Invalid contact ID", parsed.error.format());
+        }
+        const contact = getContactById(parsed.data.id);
+        if (!contact) {
+          return error("NOT_FOUND", `Contact with ID ${parsed.data.id} not found`);
+        }
+        deleteContact(parsed.data.id);
+        return success(void 0);
+      } catch (err) {
+        console.error("contacts:delete error:", err);
+        return error("DATABASE_ERROR", "Failed to delete contact", err);
       }
     }
   );
@@ -5332,7 +6018,9 @@ function mapToPerson(contact) {
     createdAt: contact.created_at
   };
 }
-const GetProjectsRequestSchema = SearchPaginationSchema;
+const GetProjectsRequestSchema = SearchPaginationSchema.extend({
+  status: zod.z.enum(["active", "archived", "all"]).optional()
+});
 const GetProjectByIdRequestSchema = zod.z.object({
   id: UUIDSchema
 });
@@ -5378,8 +6066,8 @@ function registerProjectsHandlers() {
         if (!parsed.success) {
           return error("VALIDATION_ERROR", "Invalid request parameters", parsed.error.format());
         }
-        const { search, limit, offset } = parsed.data;
-        const result = getProjects(search, limit, offset);
+        const { search, limit, offset, status } = parsed.data;
+        const result = getProjects(search, limit, offset, status);
         return success({
           projects: result.projects.map(mapToProject),
           total: result.total
@@ -5417,8 +6105,13 @@ function registerProjectsHandlers() {
             }
           }
         }
+        const knowledgeIds = getKnowledgeIdsForProject(parsed.data.id);
+        const personIds = getPersonIdsForProject(parsed.data.id);
+        const project = mapToProject(dbProject);
+        project.knowledgeIds = knowledgeIds;
+        project.personIds = personIds;
         return success({
-          project: mapToProject(dbProject),
+          project,
           meetings,
           topics: Array.from(topicsSet)
         });
@@ -5440,7 +6133,8 @@ function registerProjectsHandlers() {
         createProject({
           id,
           name: parsed.data.name,
-          description: parsed.data.description ?? null
+          description: parsed.data.description ?? null,
+          status: "active"
         });
         const newProject = getProjectById(id);
         return success(mapToProject(newProject));
@@ -5555,7 +6249,7 @@ function mapToProject(dbProject) {
     id: dbProject.id,
     name: dbProject.name,
     description: dbProject.description,
-    status: dbProject.status || "active",
+    status: dbProject.status === "archived" ? "archived" : "active",
     createdAt: dbProject.created_at
   };
 }
@@ -5821,6 +6515,21 @@ const GenerateOutputRequestSchema = zod.z.object({
   (data) => data.meetingId || data.projectId || data.contactId || data.knowledgeCaptureId,
   { message: "At least one context (meetingId, projectId, contactId, or knowledgeCaptureId) must be provided" }
 );
+const RATE_LIMIT_WINDOW_MS = 6e4;
+const RATE_LIMIT_MAX_REQUESTS = 5;
+const generationTimestamps = /* @__PURE__ */ new Map();
+function checkRateLimit(key) {
+  const now = Date.now();
+  const timestamps = generationTimestamps.get(key) || [];
+  const recent = timestamps.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+  if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
+    generationTimestamps.set(key, recent);
+    return false;
+  }
+  recent.push(now);
+  generationTimestamps.set(key, recent);
+  return true;
+}
 function registerOutputsHandlers() {
   const generator = getOutputGeneratorService();
   electron.ipcMain.handle(
@@ -5842,6 +6551,13 @@ function registerOutputsHandlers() {
         const parsed = GenerateOutputRequestSchema.safeParse(request);
         if (!parsed.success) {
           return error("VALIDATION_ERROR", "Invalid generate request", parsed.error.format());
+        }
+        const rateLimitKey = parsed.data.actionableId || parsed.data.knowledgeCaptureId || "global";
+        if (!checkRateLimit(rateLimitKey)) {
+          return error(
+            "RATE_LIMITED",
+            "Rate limit exceeded. Maximum 5 generations per minute. Please wait before trying again."
+          );
         }
         const result = await generator.generate(parsed.data);
         if (parsed.data.actionableId) {
@@ -5927,6 +6643,41 @@ function registerOutputsHandlers() {
       } catch (err) {
         console.error("outputs:saveToFile error:", err);
         return error("INTERNAL_ERROR", "Failed to save file", err);
+      }
+    }
+  );
+  electron.ipcMain.handle(
+    "outputs:getByActionableId",
+    async (_, actionableId) => {
+      try {
+        if (typeof actionableId !== "string" || !actionableId) {
+          return error("VALIDATION_ERROR", "actionableId must be a non-empty string");
+        }
+        const actionable = queryOne(
+          "SELECT artifact_id FROM actionables WHERE id = ?",
+          [actionableId]
+        );
+        if (!actionable) {
+          return error("NOT_FOUND", `Actionable ${actionableId} not found`);
+        }
+        if (!actionable.artifact_id) {
+          return success(null);
+        }
+        const output = queryOne(
+          "SELECT content, template_id, generated_at FROM outputs WHERE id = ?",
+          [actionable.artifact_id]
+        );
+        if (!output) {
+          return success(null);
+        }
+        return success({
+          content: output.content,
+          templateId: output.template_id,
+          generatedAt: output.generated_at
+        });
+      } catch (err) {
+        console.error("outputs:getByActionableId error:", err);
+        return error("INTERNAL_ERROR", "Failed to get output for actionable", err);
       }
     }
   );
@@ -7428,12 +8179,132 @@ class DownloadService {
     isProcessing: false,
     isPaused: false
   };
+  stalledCheckInterval = null;
+  // spec-007: periodic stalled check
+  // B-DWN-009: Dirty-flag caching for getState() to avoid creating new arrays on every call
+  dirty = true;
+  cachedQueueArray = [];
   constructor() {
     console.log("[DownloadService] Initialized");
+    this.loadQueueFromDatabase();
+    this.startStalledCheckInterval();
+  }
+  /**
+   * B-DWN-009: Mark the cached queue array as dirty so getState() rebuilds it
+   */
+  markDirty() {
+    this.dirty = true;
+  }
+  /**
+   * B-DWN-003: Normalize .hda filenames to .mp3 extension
+   * HiDock devices output .hda files which are actually MP3 format
+   */
+  static normalizeFilename(filename) {
+    return filename.replace(/\.hda$/i, ".mp3");
+  }
+  /**
+   * spec-007: Start periodic check for stalled downloads (every 10 seconds)
+   */
+  startStalledCheckInterval() {
+    this.stalledCheckInterval = setInterval(() => {
+      this.checkForStalledDownloads();
+    }, 1e4);
+    console.log("[DownloadService] Started periodic stalled download check (10s interval)");
+  }
+  /**
+   * spec-007: Stop periodic stalled check (for cleanup)
+   */
+  stopStalledCheckInterval() {
+    if (this.stalledCheckInterval) {
+      clearInterval(this.stalledCheckInterval);
+      this.stalledCheckInterval = null;
+      console.log("[DownloadService] Stopped periodic stalled download check");
+    }
+  }
+  /**
+   * C-004: Clean up all timers (stalled check + emit throttle) for graceful shutdown.
+   * Should be called before app quit to prevent leaked intervals/timeouts.
+   */
+  destroy() {
+    this.stopStalledCheckInterval();
+    if (this.emitTimer) {
+      clearTimeout(this.emitTimer);
+      this.emitTimer = null;
+    }
+    this.emitPending = false;
+    console.log("[DownloadService] Destroyed (all timers cleaned up)");
+  }
+  /**
+   * Load queue from database on startup (spec-007: persistence)
+   */
+  loadQueueFromDatabase() {
+    try {
+      const items = queryAll(`
+        SELECT id, filename, file_size, progress, status, error, started_at, completed_at, recording_date
+        FROM download_queue
+        WHERE status IN ('pending', 'downloading')
+        ORDER BY created_at ASC
+      `);
+      for (const item of items) {
+        const queueItem = {
+          id: item.id,
+          filename: item.filename,
+          fileSize: item.file_size,
+          progress: item.progress,
+          status: item.status,
+          error: item.error ?? void 0,
+          startedAt: item.started_at ? new Date(item.started_at) : void 0,
+          completedAt: item.completed_at ? new Date(item.completed_at) : void 0,
+          recordingDate: item.recording_date ? new Date(item.recording_date) : void 0
+        };
+        this.state.queue.set(item.filename, queueItem);
+      }
+      this.markDirty();
+      console.log(`[DownloadService] Loaded ${items.length} items from database`);
+    } catch (e) {
+      console.error("[DownloadService] Failed to load queue from database:", e);
+    }
+  }
+  /**
+   * Persist a queue item to database (spec-007: persistence)
+   */
+  persistQueueItem(item) {
+    try {
+      run(`
+        INSERT OR REPLACE INTO download_queue
+        (id, filename, file_size, progress, status, error, started_at, completed_at, recording_date, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM download_queue WHERE id = ?), datetime('now')))
+      `, [
+        item.id,
+        item.filename,
+        item.fileSize,
+        item.progress,
+        item.status,
+        item.error ?? null,
+        item.startedAt?.toISOString() ?? null,
+        item.completedAt?.toISOString() ?? null,
+        item.recordingDate?.toISOString() ?? null,
+        item.id
+        // For COALESCE to preserve created_at
+      ]);
+    } catch (e) {
+      console.error(`[DownloadService] Failed to persist queue item ${item.filename}:`, e);
+    }
+  }
+  /**
+   * Remove item from database (spec-007: persistence)
+   */
+  removeFromDatabase(filename) {
+    try {
+      run("DELETE FROM download_queue WHERE filename = ?", [filename]);
+    } catch (e) {
+      console.error(`[DownloadService] Failed to remove ${filename} from database:`, e);
+    }
   }
   /**
    * Check if a file needs to be downloaded
    * Reconciles database, synced_files table, and actual files on disk
+   * C-004: Also checks .mp3 normalized name (B-DWN-003 normalizes .hda->.mp3)
    */
   isFileAlreadySynced(filename) {
     if (isFileSynced(filename)) {
@@ -7443,12 +8314,24 @@ class DownloadService {
     if (wavFilename !== filename && isFileSynced(wavFilename)) {
       return { synced: true, reason: "WAV version in synced_files" };
     }
+    const mp3Filename = DownloadService.normalizeFilename(filename);
+    if (mp3Filename !== filename && mp3Filename !== wavFilename && isFileSynced(mp3Filename)) {
+      return { synced: true, reason: "MP3 version in synced_files" };
+    }
     const recordingsPath = getRecordingsPath();
     const filePath = path.join(recordingsPath, wavFilename);
     if (fs.existsSync(filePath)) {
       console.log(`[DownloadService] Found orphaned file on disk: ${wavFilename}, adding to synced_files`);
       addSyncedFile(filename, wavFilename, filePath);
       return { synced: true, reason: "File exists on disk (reconciled)" };
+    }
+    if (mp3Filename !== filename && mp3Filename !== wavFilename) {
+      const mp3Path = path.join(recordingsPath, mp3Filename);
+      if (fs.existsSync(mp3Path)) {
+        console.log(`[DownloadService] Found orphaned MP3 file on disk: ${mp3Filename}, adding to synced_files`);
+        addSyncedFile(filename, mp3Filename, mp3Path);
+        return { synced: true, reason: "MP3 file exists on disk (reconciled)" };
+      }
     }
     const recording = getRecordingByFilename(filename) || getRecordingByFilename(wavFilename);
     if (recording && recording.file_path && fs.existsSync(recording.file_path)) {
@@ -7473,13 +8356,22 @@ class DownloadService {
     return results;
   }
   /**
-   * Add files to download queue
+   * Add files to download queue (spec-007: database duplicate check)
    */
   queueDownloads(files) {
     const queuedIds = [];
     for (const file of files) {
-      if (this.state.queue.has(file.filename)) {
-        console.log(`[DownloadService] ${file.filename} already in queue, skipping`);
+      const normalizedFilename = DownloadService.normalizeFilename(file.filename);
+      const existingInDb = queryOne(
+        "SELECT id, status FROM download_queue WHERE (filename = ? OR filename = ?) AND status IN (?, ?)",
+        [file.filename, normalizedFilename, "pending", "downloading"]
+      );
+      if (existingInDb) {
+        console.log(`[DownloadService] ${file.filename} already in database queue (${existingInDb.status}), skipping`);
+        continue;
+      }
+      if (this.state.queue.has(file.filename) || this.state.queue.has(normalizedFilename)) {
+        console.log(`[DownloadService] ${file.filename} already in memory queue, skipping`);
         continue;
       }
       const { synced } = this.isFileAlreadySynced(file.filename);
@@ -7487,9 +8379,16 @@ class DownloadService {
         console.log(`[DownloadService] ${file.filename} already synced, skipping`);
         continue;
       }
+      if (normalizedFilename !== file.filename) {
+        const { synced: normalizedSynced } = this.isFileAlreadySynced(normalizedFilename);
+        if (normalizedSynced) {
+          console.log(`[DownloadService] ${normalizedFilename} (normalized) already synced, skipping`);
+          continue;
+        }
+      }
       const item = {
         id: file.filename,
-        // Use filename as ID for simplicity
+        // Use original filename as ID for simplicity
         filename: file.filename,
         fileSize: file.size,
         progress: 0,
@@ -7498,28 +8397,37 @@ class DownloadService {
         // Store the original recording date
       };
       this.state.queue.set(file.filename, item);
+      this.persistQueueItem(item);
       queuedIds.push(file.filename);
       console.log(`[DownloadService] Queued: ${file.filename} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
     }
-    this.emitStateUpdate();
+    this.markDirty();
+    this.emitStateUpdate(true);
     return queuedIds;
   }
   /**
    * Start a sync session
+   * C-004: Uses queuedIds.length (newly queued) instead of queue.size (includes prior items)
    */
   startSyncSession(files) {
-    this.queueDownloads(files);
+    const queuedIds = this.queueDownloads(files);
+    let pendingCount = 0;
+    for (const item of this.state.queue.values()) {
+      if (item.status === "pending" || item.status === "downloading") {
+        pendingCount++;
+      }
+    }
     const session = {
       id: `sync_${Date.now()}`,
-      totalFiles: this.state.queue.size,
+      totalFiles: pendingCount,
       completedFiles: 0,
       failedFiles: 0,
       startedAt: /* @__PURE__ */ new Date(),
       status: "active"
     };
     this.state.currentSession = session;
-    this.emitStateUpdate();
-    console.log(`[DownloadService] Started sync session ${session.id} with ${session.totalFiles} files`);
+    this.emitStateUpdate(true);
+    console.log(`[DownloadService] Started sync session ${session.id} with ${session.totalFiles} files (${queuedIds.length} newly queued)`);
     return session;
   }
   /**
@@ -7532,9 +8440,28 @@ class DownloadService {
       return { success: false, error: "File not in queue" };
     }
     try {
+      const recordingsPath = getRecordingsPath();
+      if (!fs.existsSync(recordingsPath)) {
+        const { mkdirSync } = await import("fs");
+        try {
+          mkdirSync(recordingsPath, { recursive: true });
+          console.log(`[DownloadService] Created recordings directory: ${recordingsPath}`);
+        } catch (mkdirErr) {
+          const errMsg = `Recordings directory cannot be created: ${recordingsPath}`;
+          console.error(`[DownloadService] ${errMsg}`, mkdirErr);
+          item.status = "failed";
+          item.error = errMsg;
+          this.persistQueueItem(item);
+          this.markDirty();
+          this.emitStateUpdate(true);
+          return { success: false, error: errMsg };
+        }
+      }
       item.status = "downloading";
       item.startedAt = /* @__PURE__ */ new Date();
-      this.emitStateUpdate();
+      this.persistQueueItem(item);
+      this.markDirty();
+      this.emitStateUpdate(true);
       const filePath = await saveRecording(filename, data, void 0, item.recordingDate);
       const wavFilename = filename.replace(/\.hda$/i, ".wav");
       addSyncedFile(filename, path.basename(filePath), filePath, data.length);
@@ -7545,13 +8472,17 @@ class DownloadService {
       item.status = "completed";
       item.progress = 100;
       item.completedAt = /* @__PURE__ */ new Date();
+      this.persistQueueItem(item);
       if (this.state.currentSession) {
         this.state.currentSession.completedFiles++;
       }
-      this.emitStateUpdate();
+      this.markDirty();
+      this.emitStateUpdate(true);
       setTimeout(() => {
         this.state.queue.delete(filename);
-        this.pruneCompletedItems(50);
+        this.removeFromDatabase(filename);
+        this.pruneCompletedItems(10);
+        this.markDirty();
         this.emitStateUpdate();
       }, 2e3);
       console.log(`[DownloadService] Completed: ${filename}`);
@@ -7561,112 +8492,273 @@ class DownloadService {
       console.error(`[DownloadService] Failed: ${filename} - ${errorMsg}`);
       item.status = "failed";
       item.error = errorMsg;
+      this.persistQueueItem(item);
       if (this.state.currentSession) {
         this.state.currentSession.failedFiles++;
       }
-      this.emitStateUpdate();
+      this.markDirty();
+      this.emitStateUpdate(true);
       return { success: false, error: errorMsg };
     }
   }
   /**
-   * Update progress for a download
+   * Cancel a specific download (spec-004)
+   * C-004: Uses 'cancelled' status to distinguish from actual failures
+   * Note: This only updates the state in the main process.
+   * The renderer must call deviceService.cancelDownload() to abort the actual USB transfer.
+   */
+  cancelDownload(filename) {
+    const item = this.state.queue.get(filename);
+    if (!item) {
+      return { success: false, error: "Download not found in queue" };
+    }
+    if (item.status !== "pending" && item.status !== "downloading") {
+      return { success: false, error: `Cannot cancel download with status: ${item.status}` };
+    }
+    item.status = "cancelled";
+    item.error = "Cancelled by user";
+    this.persistQueueItem(item);
+    console.log(`[DownloadService] Cancelled download: ${filename}`);
+    this.markDirty();
+    this.emitStateUpdate(true);
+    setTimeout(() => {
+      this.state.queue.delete(filename);
+      this.removeFromDatabase(filename);
+      this.markDirty();
+      this.emitStateUpdate();
+    }, 5e3);
+    return { success: true };
+  }
+  /**
+   * Update progress for a download (spec-007: persist progress periodically)
+   * C-004: Tracks lastProgressAt for smarter stall detection based on data flow
    */
   updateProgress(filename, bytesReceived) {
     const item = this.state.queue.get(filename);
     if (item) {
-      if (item.status === "pending") {
+      const oldProgress = item.progress;
+      const statusTransition = item.status === "pending";
+      if (statusTransition) {
         item.status = "downloading";
         item.startedAt = /* @__PURE__ */ new Date();
       }
-      item.progress = Math.round(bytesReceived / item.fileSize * 100);
-      this.emitStateUpdate();
+      item.lastProgressAt = /* @__PURE__ */ new Date();
+      const rawProgress = item.fileSize > 0 ? bytesReceived / item.fileSize * 100 : 0;
+      item.progress = Math.round(Number.isFinite(rawProgress) ? rawProgress : 0);
+      if (Math.floor(oldProgress / 10) !== Math.floor(item.progress / 10)) {
+        this.persistQueueItem(item);
+      }
+      this.markDirty();
+      this.emitStateUpdate(statusTransition);
     }
   }
   /**
-   * Mark download as failed
+   * Mark download as failed (spec-007: persist failure)
    */
   markFailed(filename, error2) {
     const item = this.state.queue.get(filename);
     if (item) {
       item.status = "failed";
       item.error = error2;
+      this.persistQueueItem(item);
       if (this.state.currentSession) {
         this.state.currentSession.failedFiles++;
       }
-      this.emitStateUpdate();
+      this.markDirty();
+      this.emitStateUpdate(true);
     }
+  }
+  /**
+   * spec-007: Check for stalled downloads and mark as failed
+   * Called periodically to detect downloads that exceed timeout
+   * C-004: Uses lastProgressAt (not startedAt) for smarter stall detection.
+   * Large files legitimately take a long time; what matters is whether data
+   * is still flowing. Timeout increased to 60s without progress.
+   */
+  checkForStalledDownloads() {
+    const STALL_TIMEOUT_MS = 6e4;
+    const now = Date.now();
+    let stalledCount = 0;
+    const stalledFilenames = [];
+    for (const item of this.state.queue.values()) {
+      if (item.status === "downloading" && item.startedAt) {
+        const lastActivity = item.lastProgressAt ?? item.startedAt;
+        const elapsed = now - lastActivity.getTime();
+        if (elapsed > STALL_TIMEOUT_MS) {
+          console.warn(`[DownloadService] Stall detected for ${item.filename} (${Math.round(elapsed / 1e3)}s without progress)`);
+          item.status = "failed";
+          item.error = `Download stalled (${Math.round(elapsed / 1e3)}s without data)`;
+          this.persistQueueItem(item);
+          if (this.state.currentSession) {
+            this.state.currentSession.failedFiles++;
+          }
+          stalledFilenames.push(item.filename);
+          stalledCount++;
+        }
+      }
+    }
+    if (stalledCount > 0) {
+      this.markDirty();
+      this.emitStateUpdate(true);
+      setTimeout(() => {
+        for (const filename of stalledFilenames) {
+          this.state.queue.delete(filename);
+          this.removeFromDatabase(filename);
+        }
+        this.markDirty();
+        this.emitStateUpdate();
+      }, 5e3);
+    }
+    return stalledCount;
+  }
+  /**
+   * spec-007: Cancel all active downloads (e.g., on device disconnect)
+   */
+  cancelActiveDownloads(reason = "Cancelled") {
+    let cancelledCount = 0;
+    for (const item of this.state.queue.values()) {
+      if (item.status === "downloading" || item.status === "pending") {
+        item.status = "failed";
+        item.error = reason;
+        this.persistQueueItem(item);
+        if (this.state.currentSession) {
+          this.state.currentSession.failedFiles++;
+        }
+        cancelledCount++;
+        console.log(`[DownloadService] Cancelled: ${item.filename} - ${reason}`);
+      }
+    }
+    if (cancelledCount > 0) {
+      this.markDirty();
+      this.emitStateUpdate(true);
+    }
+    return cancelledCount;
   }
   /**
    * Re-queue all failed downloads as pending so they can be retried
    */
+  /**
+   * Re-queue all failed/cancelled downloads as pending so they can be retried.
+   * B-DWN-007: Checks if file is already synced before retrying.
+   * C-004: Also retries cancelled items, not just failed.
+   */
   retryFailed() {
     let count = 0;
-    for (const item of this.state.queue.values()) {
-      if (item.status === "failed") {
+    const alreadySynced = [];
+    for (const [key, item] of this.state.queue) {
+      if (item.status === "failed" || item.status === "cancelled") {
+        const { synced, reason } = this.isFileAlreadySynced(item.filename);
+        if (synced) {
+          console.log(`[DownloadService] Skipping retry for ${item.filename}: ${reason}`);
+          alreadySynced.push(key);
+          continue;
+        }
         item.status = "pending";
         item.progress = 0;
         item.error = void 0;
         item.startedAt = void 0;
         item.completedAt = void 0;
+        item.lastProgressAt = void 0;
+        this.persistQueueItem(item);
         count++;
       }
     }
-    if (count > 0) {
+    for (const key of alreadySynced) {
+      this.state.queue.delete(key);
+      this.removeFromDatabase(key);
+    }
+    if (count > 0 || alreadySynced.length > 0) {
       this.state.isPaused = false;
-      this.emitStateUpdate();
+      this.markDirty();
+      this.emitStateUpdate(true);
     }
     return count;
   }
   /**
    * DL-07: Prune completed items from queue, keeping at most maxRetained.
+   * B-DWN-002: Reduced threshold to 10, also auto-prunes failed/cancelled items older than 24h.
+   * C-004: Fixed Map iteration during modification bug - collect keys first, then delete.
+   * C-004: Also removes pruned items from database for persistence consistency.
    */
   pruneCompletedItems(maxRetained) {
     const completed = [];
+    const toRemoveStale = [];
+    const now = Date.now();
+    const FAILED_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
     for (const [key, item] of this.state.queue) {
       if (item.status === "completed") {
         completed.push(key);
       }
+      if ((item.status === "failed" || item.status === "cancelled") && item.startedAt) {
+        const age = now - item.startedAt.getTime();
+        if (age > FAILED_MAX_AGE_MS) {
+          toRemoveStale.push(key);
+        }
+      }
+    }
+    for (const key of toRemoveStale) {
+      this.state.queue.delete(key);
+      this.removeFromDatabase(key);
     }
     if (completed.length > maxRetained) {
       const toRemove = completed.slice(0, completed.length - maxRetained);
       for (const key of toRemove) {
         this.state.queue.delete(key);
+        this.removeFromDatabase(key);
       }
     }
+    this.markDirty();
   }
   /**
-   * Remove completed/failed items from queue
+   * Remove completed/failed/cancelled items from queue
+   * B-DWN-004: Also removes from database for persistence consistency
+   * C-004: Also clears cancelled items; collects keys before deletion to avoid Map mutation during iteration
    */
   clearCompleted() {
+    const toDelete = [];
     for (const [key, item] of this.state.queue) {
-      if (item.status === "completed" || item.status === "failed") {
-        this.state.queue.delete(key);
+      if (item.status === "completed" || item.status === "failed" || item.status === "cancelled") {
+        toDelete.push(key);
       }
     }
-    this.emitStateUpdate();
+    for (const key of toDelete) {
+      this.removeFromDatabase(key);
+      this.state.queue.delete(key);
+    }
+    this.markDirty();
+    this.emitStateUpdate(true);
   }
   /**
    * Cancel all pending downloads
+   * B-DWN-005: Persist cancelled state for each item
+   * C-004: Uses 'cancelled' status instead of 'failed' for user-initiated cancellation
    */
   cancelAll() {
     this.state.isPaused = true;
     for (const item of this.state.queue.values()) {
       if (item.status === "pending" || item.status === "downloading") {
-        item.status = "failed";
-        item.error = "Cancelled";
+        item.status = "cancelled";
+        item.error = "Cancelled by user";
+        this.persistQueueItem(item);
       }
     }
     if (this.state.currentSession) {
       this.state.currentSession.status = "cancelled";
     }
-    this.emitStateUpdate();
+    this.markDirty();
+    this.emitStateUpdate(true);
   }
   /**
    * Get current state
+   * B-DWN-009: Uses dirty-flag caching to avoid creating new array on every call
    */
   getState() {
+    if (this.dirty) {
+      this.cachedQueueArray = Array.from(this.state.queue.values());
+      this.dirty = false;
+    }
     return {
-      queue: Array.from(this.state.queue.values()),
+      queue: this.cachedQueueArray,
       session: this.state.currentSession,
       isProcessing: this.state.isProcessing,
       isPaused: this.state.isPaused
@@ -7674,22 +8766,27 @@ class DownloadService {
   }
   /**
    * Get sync statistics
+   * C-004: Separates cancelled from failed in counting
    */
   getSyncStats() {
     const syncedFiles = getSyncedFilenames();
     let pending = 0;
     let failed = 0;
+    let cancelled = 0;
     for (const item of this.state.queue.values()) {
       if (item.status === "pending" || item.status === "downloading") {
         pending++;
       } else if (item.status === "failed") {
         failed++;
+      } else if (item.status === "cancelled") {
+        cancelled++;
       }
     }
     return {
       totalSynced: syncedFiles.size,
       pendingInQueue: pending,
-      failedInQueue: failed
+      failedInQueue: failed,
+      cancelledInQueue: cancelled
     };
   }
   /**
@@ -7771,6 +8868,9 @@ function registerDownloadServiceHandlers() {
   electron.ipcMain.handle("download-service:clear-completed", () => {
     service.clearCompleted();
   });
+  electron.ipcMain.handle("download-service:cancel", (_, filename) => {
+    return service.cancelDownload(filename);
+  });
   electron.ipcMain.handle("download-service:cancel-all", () => {
     service.cancelAll();
   });
@@ -7779,6 +8879,24 @@ function registerDownloadServiceHandlers() {
   });
   electron.ipcMain.handle("download-service:get-stats", () => {
     return service.getSyncStats();
+  });
+  electron.ipcMain.handle("download-service:check-stalled", () => {
+    return service.checkForStalledDownloads();
+  });
+  electron.ipcMain.handle("download-service:cancel-active", (_, reason) => {
+    return service.cancelActiveDownloads(reason);
+  });
+  electron.ipcMain.handle("download-service:notify-completion", (_, stats) => {
+    try {
+      if (!electron.Notification.isSupported()) return;
+      if (stats.completed === 0 && stats.failed === 0) return;
+      const title = stats.aborted ? "Sync cancelled" : stats.failed > 0 ? "Sync completed with errors" : "Sync complete";
+      const body = stats.aborted ? `Downloaded ${stats.completed} file${stats.completed !== 1 ? "s" : ""} before cancellation` : stats.failed > 0 ? `Downloaded ${stats.completed}, failed ${stats.failed}` : `Downloaded ${stats.completed} file${stats.completed !== 1 ? "s" : ""}`;
+      const notification = new electron.Notification({ title, body });
+      notification.show();
+    } catch (e) {
+      console.warn("[DownloadService] Failed to show notification:", e);
+    }
   });
   console.log("[DownloadService] IPC handlers registered");
 }
@@ -8714,9 +9832,10 @@ function registerIntegrityHandlers() {
   });
   console.log("[IntegrityHandlers] IPC handlers registered");
 }
+const KNOWLEDGE_CAPTURE_COLUMNS = `id, title, summary, category, status, quality_rating, quality_confidence, quality_assessed_at, storage_tier, retention_days, expires_at, meeting_id, correlation_confidence, correlation_method, source_recording_id, captured_at, created_at, updated_at, deleted_at`;
 function registerKnowledgeHandlers() {
   electron.ipcMain.handle("knowledge:getAll", async (_, { limit = 100, offset = 0, status, quality, category } = {}) => {
-    let sql = `SELECT * FROM knowledge_captures`;
+    let sql = `SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures`;
     const conditions = [];
     const params = [];
     if (status) {
@@ -8744,9 +9863,23 @@ function registerKnowledgeHandlers() {
       return [];
     }
   });
+  electron.ipcMain.handle("knowledge:getByIds", async (_, ids) => {
+    try {
+      if (!Array.isArray(ids) || ids.length === 0) return [];
+      const placeholders = ids.map(() => "?").join(",");
+      const captures = queryAll(
+        `SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures WHERE id IN (${placeholders})`,
+        ids
+      );
+      return captures.map(mapToKnowledgeCapture);
+    } catch (error2) {
+      console.error("Failed to get knowledge captures by IDs:", error2);
+      return [];
+    }
+  });
   electron.ipcMain.handle("knowledge:getById", async (_, id) => {
     try {
-      const capture = queryOne(`SELECT * FROM knowledge_captures WHERE id = ?`, [id]);
+      const capture = queryOne(`SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures WHERE id = ?`, [id]);
       if (!capture) return null;
       return mapToKnowledgeCapture(capture);
     } catch (error2) {
@@ -8817,10 +9950,12 @@ function mapToKnowledgeCapture(row) {
     deletedAt: row.deleted_at
   };
 }
+const CONVERSATION_COLUMNS = "id, title, created_at, updated_at";
+const MESSAGE_COLUMNS = "id, conversation_id, role, content, sources, created_at, edited_at, original_content, created_output_id, saved_as_insight_id";
 function registerAssistantHandlers() {
   electron.ipcMain.handle("assistant:getConversations", async () => {
     try {
-      const rows = queryAll("SELECT * FROM conversations ORDER BY updated_at DESC");
+      const rows = queryAll(`SELECT ${CONVERSATION_COLUMNS} FROM conversations ORDER BY updated_at DESC`);
       return rows.map(mapToConversation);
     } catch (error2) {
       console.error("Failed to get conversations:", error2);
@@ -8835,7 +9970,7 @@ function registerAssistantHandlers() {
         "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
         [id, title || "New Conversation", now, now]
       );
-      const newConv = queryOne("SELECT * FROM conversations WHERE id = ?", [id]);
+      const newConv = queryOne(`SELECT ${CONVERSATION_COLUMNS} FROM conversations WHERE id = ?`, [id]);
       return mapToConversation(newConv);
     } catch (error2) {
       console.error("Failed to create conversation:", error2);
@@ -8845,6 +9980,8 @@ function registerAssistantHandlers() {
   electron.ipcMain.handle("assistant:deleteConversation", async (_, id) => {
     try {
       run("DELETE FROM conversations WHERE id = ?", [id]);
+      const rag = getRAGService();
+      rag.clearSession(id);
       return { success: true };
     } catch (error2) {
       console.error("Failed to delete conversation:", error2);
@@ -8853,7 +9990,12 @@ function registerAssistantHandlers() {
   });
   electron.ipcMain.handle("assistant:getMessages", async (_, conversationId) => {
     try {
-      const rows = queryAll("SELECT * FROM chat_messages WHERE conversation_id = ? ORDER BY created_at ASC", [conversationId]);
+      const conv = queryOne("SELECT id FROM conversations WHERE id = ?", [conversationId]);
+      if (!conv) {
+        console.error(`getMessages: Conversation ${conversationId} not found`);
+        return { error: "Conversation not found", messages: [] };
+      }
+      const rows = queryAll(`SELECT ${MESSAGE_COLUMNS} FROM chat_messages WHERE conversation_id = ? ORDER BY created_at ASC`, [conversationId]);
       return rows.map(mapToMessage);
     } catch (error2) {
       console.error("Failed to get messages:", error2);
@@ -8862,6 +10004,12 @@ function registerAssistantHandlers() {
   });
   electron.ipcMain.handle("assistant:addMessage", async (_, conversationId, role, content, sources) => {
     try {
+      const conv = queryOne("SELECT id FROM conversations WHERE id = ?", [conversationId]);
+      if (!conv) {
+        const error2 = new Error(`Cannot add message: Conversation ${conversationId} not found`);
+        console.error(error2.message);
+        throw error2;
+      }
       const id = crypto$1.randomUUID();
       const now = (/* @__PURE__ */ new Date()).toISOString();
       runInTransaction(() => {
@@ -8871,7 +10019,7 @@ function registerAssistantHandlers() {
         );
         run("UPDATE conversations SET updated_at = ? WHERE id = ?", [now, conversationId]);
       });
-      const newMessage = queryOne("SELECT * FROM chat_messages WHERE id = ?", [id]);
+      const newMessage = queryOne(`SELECT ${MESSAGE_COLUMNS} FROM chat_messages WHERE id = ?`, [id]);
       return mapToMessage(newMessage);
     } catch (error2) {
       console.error("Failed to add message:", error2);
@@ -8880,6 +10028,16 @@ function registerAssistantHandlers() {
   });
   electron.ipcMain.handle("assistant:addContext", async (_, conversationId, knowledgeCaptureId) => {
     try {
+      const conv = queryOne("SELECT id FROM conversations WHERE id = ?", [conversationId]);
+      if (!conv) {
+        console.error(`addContext: Conversation ${conversationId} not found`);
+        return { success: false, error: "Conversation not found" };
+      }
+      const kc = queryOne("SELECT id FROM knowledge_captures WHERE id = ?", [knowledgeCaptureId]);
+      if (!kc) {
+        console.error(`addContext: Knowledge capture ${knowledgeCaptureId} not found`);
+        return { success: false, error: "Knowledge capture not found" };
+      }
       const id = crypto$1.randomUUID();
       run(
         "INSERT OR IGNORE INTO conversation_context (id, conversation_id, knowledge_capture_id) VALUES (?, ?, ?)",
@@ -8893,6 +10051,11 @@ function registerAssistantHandlers() {
   });
   electron.ipcMain.handle("assistant:removeContext", async (_, conversationId, knowledgeCaptureId) => {
     try {
+      const conv = queryOne("SELECT id FROM conversations WHERE id = ?", [conversationId]);
+      if (!conv) {
+        console.error(`removeContext: Conversation ${conversationId} not found`);
+        return { success: false, error: "Conversation not found" };
+      }
       run(
         "DELETE FROM conversation_context WHERE conversation_id = ? AND knowledge_capture_id = ?",
         [conversationId, knowledgeCaptureId]
@@ -8942,7 +10105,7 @@ function mapToMessage(row) {
 }
 function registerActionablesHandlers() {
   electron.ipcMain.handle("actionables:getAll", async (_, options) => {
-    const status = options?.status ?? void 0;
+    const status = options?.status;
     try {
       let sql = "SELECT * FROM actionables";
       const params = [];
@@ -8965,10 +10128,10 @@ function registerActionablesHandlers() {
         return { success: false, error: `Actionable ${id} not found` };
       }
       const validTransitions = {
-        "pending": ["in_progress", "dismissed"],
+        "pending": ["in_progress", "generated", "dismissed"],
         "in_progress": ["generated", "pending"],
-        "generated": ["shared", "pending"],
-        "shared": [],
+        "generated": ["shared", "pending", "dismissed"],
+        "shared": ["pending"],
         "dismissed": ["pending"]
       };
       const allowedTransitions = validTransitions[actionable.status] || [];
@@ -8978,11 +10141,35 @@ function registerActionablesHandlers() {
           error: `Invalid status transition: ${actionable.status} → ${status}`
         };
       }
+      if ((status === "dismissed" || status === "pending") && actionable.artifact_id) {
+        try {
+          run("DELETE FROM outputs WHERE id = ?", [actionable.artifact_id]);
+          run("UPDATE actionables SET artifact_id = NULL, generated_at = NULL WHERE id = ?", [id]);
+        } catch (cleanupError) {
+          console.warn("[actionables:updateStatus] Failed to clean up output:", cleanupError);
+        }
+      }
       run("UPDATE actionables SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [status, id]);
       return { success: true };
     } catch (error2) {
       console.error("Failed to update actionable status:", error2);
       return { success: false, error: error2.message };
+    }
+  });
+  electron.ipcMain.handle("actionables:getByMeeting", async (_, meetingId) => {
+    try {
+      const sql = `
+        SELECT a.*
+        FROM actionables a
+        INNER JOIN knowledge_captures kc ON a.source_knowledge_id = kc.id
+        WHERE kc.meeting_id = ?
+        ORDER BY a.created_at DESC
+      `;
+      const rows = queryAll(sql, [meetingId]);
+      return rows.map(mapToActionable);
+    } catch (error2) {
+      console.error("Failed to get actionables for meeting:", error2);
+      return [];
     }
   });
   electron.ipcMain.handle("actionables:generateOutput", async (_, actionableId) => {
@@ -8991,8 +10178,8 @@ function registerActionablesHandlers() {
       if (!actionable) {
         return { success: false, error: `Actionable ${actionableId} not found` };
       }
-      if (actionable.status !== "pending") {
-        return { success: false, error: "Only pending actionables can be generated" };
+      if (actionable.status !== "pending" && actionable.status !== "generated") {
+        return { success: false, error: `Cannot generate from '${actionable.status}' status. Must be 'pending' or 'generated'.` };
       }
       run(
         "UPDATE actionables SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -9044,6 +10231,41 @@ function mapToActionable(row) {
     updatedAt: row.updated_at
   };
 }
+const UpdateMeetingRequestSchema = zod.z.object({
+  id: UUIDSchema,
+  subject: zod.z.string().min(1).max(1e3).optional(),
+  start_time: zod.z.string().optional(),
+  end_time: zod.z.string().optional(),
+  location: OptionalStringSchema,
+  description: OptionalStringSchema
+}).refine(
+  (data) => data.subject !== void 0 || data.start_time !== void 0 || data.end_time !== void 0 || data.location !== void 0 || data.description !== void 0,
+  { message: "At least one field must be provided" }
+);
+function registerMeetingsHandlers() {
+  electron.ipcMain.handle(
+    "meetings:update",
+    async (_, request) => {
+      try {
+        const parsed = UpdateMeetingRequestSchema.safeParse(request);
+        if (!parsed.success) {
+          return error("VALIDATION_ERROR", "Invalid update request", parsed.error.format());
+        }
+        const { id, ...updates } = parsed.data;
+        const meeting = getMeetingById(id);
+        if (!meeting) {
+          return error("NOT_FOUND", `Meeting with ID ${id} not found`);
+        }
+        updateMeeting(id, updates);
+        const updatedMeeting = getMeetingById(id);
+        return success(updatedMeeting);
+      } catch (err) {
+        console.error("meetings:update error:", err);
+        return error("DATABASE_ERROR", "Failed to update meeting", err);
+      }
+    }
+  );
+}
 function registerIpcHandlers() {
   registerConfigHandlers();
   registerDatabaseHandlers();
@@ -9063,6 +10285,7 @@ function registerIpcHandlers() {
   registerKnowledgeHandlers();
   registerAssistantHandlers();
   registerActionablesHandlers();
+  registerMeetingsHandlers();
   console.log("All IPC handlers registered");
 }
 const USB_VENDOR_IDS = [
@@ -9300,6 +10523,7 @@ electron.app.on("window-all-closed", () => {
   }
 });
 electron.app.on("before-quit", () => {
+  stopAutoSync();
   stopRecordingWatcher();
   stopTranscriptionProcessor();
   closeDatabase();

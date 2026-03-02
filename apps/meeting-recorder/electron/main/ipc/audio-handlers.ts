@@ -1,4 +1,10 @@
 import { BrowserWindow, IpcMainEvent, ipcMain } from "electron";
+import { execFile } from "child_process";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import { join } from "path";
+import { promisify } from "util";
+// @ts-ignore - ffmpeg-static has no types
+import ffmpegPath from "ffmpeg-static";
 import { AudioStorage } from "../services/audio-storage";
 import { AudioConcatenation } from "../services/audio-concatenation";
 import { MicDetector, MicStatus } from "../services/mic-detector";
@@ -6,9 +12,146 @@ import { getSetting, updateSession } from "../services/database";
 import { getPipeline } from "./transcription-handlers";
 import { getSessionManager } from "./session-handlers";
 
+const execFileAsync = promisify(execFile);
+
 const audioStorage = new AudioStorage();
 const audioConcatenation = new AudioConcatenation(audioStorage);
 const micDetector = new MicDetector();
+
+/**
+ * Cumulative audio buffers per session. As chunks arrive, they're appended
+ * to build a valid WebM stream. For transcription of chunk N > 0, we extract
+ * just the last timeslice from the cumulative stream via ffmpeg.
+ *
+ * Why: WebM timeslice chunks are NOT standalone files. Only chunk 0 has the
+ * EBML header + Segment + Tracks. Chunks 1+ are raw byte-stream continuations
+ * that don't even start at element boundaries. Prepending the init segment
+ * does NOT work. The only way to get valid audio for chunk N is to reconstruct
+ * the full stream (chunks 0..N) and extract the tail via ffmpeg.
+ */
+const cumulativeBuffers = new Map<string, Buffer>();
+
+/** Must match AudioRecorder.timesliceMs (default 3000). */
+const TIMESLICE_MS = 3000;
+
+/**
+ * Detect if an audio buffer is silent (below threshold).
+ * Uses ffmpeg's volumedetect filter to analyze peak and mean volume levels.
+ * Returns true if audio is silent (should skip transcription).
+ */
+async function isSilent(
+  audioBuffer: Buffer,
+  sessionDir: string,
+  chunkIndex: number,
+): Promise<boolean> {
+  const tempAnalyze = join(sessionDir, `_silence-${chunkIndex}.webm`);
+
+  try {
+    writeFileSync(tempAnalyze, audioBuffer);
+
+    // Use volumedetect filter to get audio statistics
+    // Output goes to stderr, so we capture it
+    const { stderr } = await execFileAsync(ffmpegPath, [
+      "-i", tempAnalyze,
+      "-af", "volumedetect",
+      "-f", "null",
+      "-",
+    ]);
+
+    // Parse volumedetect output:
+    // [Parsed_volumedetect_0 @ ...] max_volume: -91.0 dB
+    // [Parsed_volumedetect_0 @ ...] mean_volume: -inf dB
+    const maxVolumeMatch = stderr.match(/max_volume:\s*(-?\d+\.?\d*)\s*dB/);
+    const meanVolumeMatch = stderr.match(/mean_volume:\s*(-?\d+\.?\d*|-inf)\s*dB/);
+
+    if (!maxVolumeMatch) {
+      console.warn(`[AudioHandlers] Could not parse max_volume for chunk ${chunkIndex}`);
+      return false; // If we can't determine, send it anyway (fail open)
+    }
+
+    const maxVolume = parseFloat(maxVolumeMatch[1]);
+    const meanVolume = meanVolumeMatch?.[1] === "-inf"
+      ? -Infinity
+      : parseFloat(meanVolumeMatch?.[1] ?? "-Infinity");
+
+    // Threshold: if max volume is below -50dB, consider it silent
+    // -50dB is very quiet (whisper is ~30-40dB, silence is -90dB+)
+    const SILENCE_THRESHOLD_DB = -50;
+
+    const isSilentChunk = maxVolume < SILENCE_THRESHOLD_DB;
+
+    if (isSilentChunk) {
+      console.log(
+        `[AudioHandlers] Chunk ${chunkIndex} is SILENT (max: ${maxVolume.toFixed(1)}dB, ` +
+        `mean: ${meanVolume === -Infinity ? "-inf" : meanVolume.toFixed(1)}dB) — skipping transcription`,
+      );
+    } else {
+      console.log(
+        `[AudioHandlers] Chunk ${chunkIndex} has audio (max: ${maxVolume.toFixed(1)}dB, ` +
+        `mean: ${meanVolume === -Infinity ? "-inf" : meanVolume.toFixed(1)}dB)`,
+      );
+    }
+
+    return isSilentChunk;
+  } catch (err) {
+    console.error(`[AudioHandlers] Failed to analyze silence for chunk ${chunkIndex}:`, err);
+    return false; // If analysis fails, send it anyway (fail open)
+  } finally {
+    try { if (existsSync(tempAnalyze)) unlinkSync(tempAnalyze); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Extract the last timeslice of audio from the cumulative WebM stream.
+ * Writes the cumulative buffer to a temp file, uses ffmpeg to seek to
+ * the chunk's start time and copy packets from there, producing a valid
+ * standalone audio file for the AI to transcribe.
+ */
+async function extractChunkAudio(
+  cumulativeBuffer: Buffer,
+  chunkIndex: number,
+  sessionDir: string,
+): Promise<Buffer | null> {
+  const tempInput = join(sessionDir, `_transc-in-${chunkIndex}.webm`);
+  const tempOutput = join(sessionDir, `_transc-out-${chunkIndex}.webm`);
+
+  try {
+    writeFileSync(tempInput, cumulativeBuffer);
+
+    const startSeconds = (chunkIndex * TIMESLICE_MS) / 1000;
+
+    await execFileAsync(ffmpegPath, [
+      "-i", tempInput,
+      "-ss", String(startSeconds),
+      "-c", "copy",
+      "-y",
+      tempOutput,
+    ]);
+
+    if (!existsSync(tempOutput)) {
+      console.warn(`[AudioHandlers] ffmpeg produced no output for chunk ${chunkIndex}`);
+      return null;
+    }
+
+    const extracted = readFileSync(tempOutput);
+    if (extracted.length === 0) {
+      console.warn(`[AudioHandlers] ffmpeg produced empty output for chunk ${chunkIndex}`);
+      return null;
+    }
+
+    console.log(
+      `[AudioHandlers] Extracted ${extracted.length} bytes for chunk ${chunkIndex} ` +
+      `transcription (from ${startSeconds}s onward)`,
+    );
+    return extracted;
+  } catch (err) {
+    console.error(`[AudioHandlers] Failed to extract chunk ${chunkIndex}:`, err);
+    return null;
+  } finally {
+    try { if (existsSync(tempInput)) unlinkSync(tempInput); } catch { /* ignore */ }
+    try { if (existsSync(tempOutput)) unlinkSync(tempOutput); } catch { /* ignore */ }
+  }
+}
 
 function broadcastToAllWindows(channel: string, data: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -17,6 +160,10 @@ function broadcastToAllWindows(channel: string, data: unknown): void {
 }
 
 export function registerAudioHandlers(): void {
+  // Provide audio concatenation to session manager for automatic finalization
+  const sessionManager = getSessionManager();
+  sessionManager.setAudioConcatenation(audioConcatenation);
+
   ipcMain.on(
     "audio:chunk",
     (
@@ -26,6 +173,7 @@ export function registerAudioHandlers(): void {
       chunkIndex: number,
       mimeType: string,
     ) => {
+      console.log(`[AudioHandlers] Received chunk ${chunkIndex} for session ${sessionId}: ${data?.byteLength ?? 0} bytes, mime=${mimeType}`);
       try {
         const buffer = Buffer.from(data);
         audioStorage.saveChunk(sessionId, chunkIndex, buffer);
@@ -33,9 +181,48 @@ export function registerAudioHandlers(): void {
 
         const pipeline = getPipeline(sessionId);
         if (pipeline) {
-          pipeline
-            .processAudioChunk(buffer, mimeType, chunkIndex)
-            .catch((err: unknown) => {
+          // Transcription: each chunk sent to the AI must be a valid, decodable audio file.
+          // Chunk 0 is a complete WebM (EBML header + Segment + Tracks + Cluster) — send directly.
+          // Chunks 1+ are raw byte-stream continuations with NO headers and NO element boundary
+          // alignment. We cumulative-concat chunks 0..N, then ffmpeg-extract from N*3s onward
+          // to produce a valid standalone audio clip for the AI.
+          (async () => {
+            try {
+              let transcriptionBuffer: Buffer;
+
+              if (chunkIndex === 0) {
+                cumulativeBuffers.set(sessionId, buffer);
+                transcriptionBuffer = buffer;
+                console.log(`[AudioHandlers] Chunk 0: sending ${buffer.length} bytes directly for transcription`);
+              } else {
+                const prev = cumulativeBuffers.get(sessionId);
+                const cumulative = prev
+                  ? Buffer.concat([prev, buffer])
+                  : buffer;
+                cumulativeBuffers.set(sessionId, cumulative);
+
+                const sessionDir = audioStorage.getSessionDir(sessionId);
+                const extracted = await extractChunkAudio(cumulative, chunkIndex, sessionDir);
+
+                if (!extracted) {
+                  console.warn(`[AudioHandlers] Skipping transcription for chunk ${chunkIndex} (extraction failed)`);
+                  return;
+                }
+                transcriptionBuffer = extracted;
+              }
+
+              // Silence detection: skip transcription if audio is silent
+              // This prevents wasting API tokens and avoids AI hallucinations on silent chunks
+              const sessionDir = audioStorage.getSessionDir(sessionId);
+              const silent = await isSilent(transcriptionBuffer, sessionDir, chunkIndex);
+
+              if (silent) {
+                console.log(`[AudioHandlers] Skipping transcription for chunk ${chunkIndex} (silent audio detected)`);
+                return;
+              }
+
+              await pipeline.processAudioChunk(transcriptionBuffer, mimeType, chunkIndex);
+            } catch (err: unknown) {
               console.error("[AudioHandlers] Pipeline error:", err);
               // Propagate pipeline errors to renderer (ERR-003)
               event.sender.send("audio:chunkError", {
@@ -43,7 +230,8 @@ export function registerAudioHandlers(): void {
                 chunkIndex,
                 error: err instanceof Error ? err.message : "Pipeline error",
               });
-            });
+            }
+          })();
         }
       } catch (err) {
         console.error("[AudioHandlers] Failed to save chunk:", err);
@@ -60,6 +248,19 @@ export function registerAudioHandlers(): void {
   // FIX PLY-001: Get audio path for playback
   ipcMain.handle("audio:getPath", async (_, sessionId: string) => {
     try {
+      // First check if session already has audio_path stored
+      const { getSession } = await import("../services/database-queries");
+      const session = getSession(sessionId);
+
+      if (session?.audio_path) {
+        const { existsSync } = await import("fs");
+        // Return existing path if file still exists
+        if (existsSync(session.audio_path)) {
+          return session.audio_path;
+        }
+      }
+
+      // Otherwise, concatenate chunks now
       const audioPath = await audioConcatenation.concatenateSession(sessionId);
       if (audioPath) {
         // Update database with audio path
@@ -72,12 +273,48 @@ export function registerAudioHandlers(): void {
     }
   });
 
-  micDetector.start((status: MicStatus) => {
+  // FIX PLY-002: Read audio file as buffer for renderer playback
+  // Electron blocks file:// URLs in the renderer, so we serve audio data via IPC
+  ipcMain.handle("audio:readFile", async (_, sessionId: string) => {
+    try {
+      const { getSession } = await import("../services/database-queries");
+      const { readFileSync, existsSync } = await import("fs");
+      const session = getSession(sessionId);
+
+      let audioPath = session?.audio_path;
+
+      // If no audio_path or file doesn't exist, try to (re)concatenate
+      if (!audioPath || !existsSync(audioPath)) {
+        audioPath = await audioConcatenation.concatenateSession(sessionId);
+        if (audioPath) {
+          updateSession(sessionId, { audio_path: audioPath });
+        }
+      }
+
+      if (!audioPath || !existsSync(audioPath)) {
+        return null;
+      }
+
+      const buffer = readFileSync(audioPath);
+      // Determine mime type from extension
+      const ext = audioPath.split('.').pop()?.toLowerCase();
+      const mimeType = ext === 'ogg' ? 'audio/ogg'
+        : ext === 'webm' ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
+
+      return { data: buffer.buffer, mimeType };
+    } catch (err) {
+      console.error("[AudioHandlers] Failed to read audio file:", err);
+      return null;
+    }
+  });
+
+  micDetector.start(async (status: MicStatus) => {
     broadcastToAllWindows("audio:micStatus", status);
     const autoRecordSetting = getSetting("recording.autoRecord");
     const autoRecordEnabled = autoRecordSetting !== "false";
     if (autoRecordEnabled) {
-      getSessionManager().onMicStatusChange(status);
+      await getSessionManager().onMicStatusChange(status);
     }
   });
 }
@@ -88,4 +325,9 @@ export function stopMicDetector(): void {
 
 export function getAudioStorage(): AudioStorage {
   return audioStorage;
+}
+
+/** Clean up audio caches when a session ends. */
+export function clearSessionInitSegment(sessionId: string): void {
+  cumulativeBuffers.delete(sessionId);
 }

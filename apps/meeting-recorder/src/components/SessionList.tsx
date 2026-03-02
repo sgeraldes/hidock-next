@@ -21,7 +21,7 @@ export function SessionList() {
   });
 
   return (
-    <div className="w-64 flex flex-col h-full bg-card border-r border-border shrink-0">
+    <div className="flex flex-col h-full w-full bg-card border-r border-border">
       <div className="px-4 py-4 border-b border-border">
         <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
           Recent Sessions

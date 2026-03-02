@@ -46,9 +46,14 @@ function MiniControlBarApp() {
       sessionTitle={sessionTitle}
       sessions={[]}
       activeSessionId={activeSessionId}
-      onEndRecording={() => {
+      onEndRecording={async () => {
         if (activeSessionId) {
-          window.electronAPI.session.end(activeSessionId);
+          console.log('[MiniControlBar] Stopping recording for session:', activeSessionId);
+          const sessionToEnd = activeSessionId;
+          // MiniControlBar doesn't own the recorder - give main window time to flush
+          // The main window's ActiveSessionRecorder handles the actual stop+flush
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          window.electronAPI.session.end(sessionToEnd);
         }
       }}
       onSwitchSession={() => {}}
