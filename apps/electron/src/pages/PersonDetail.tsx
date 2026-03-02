@@ -30,6 +30,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { formatDateTime } from '@/lib/utils'
 import type { Person, PersonType } from '@/types/knowledge'
+import type { Meeting } from '@/types'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 
@@ -37,7 +38,7 @@ export function PersonDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [person, setPerson] = useState<Person | null>(null)
-  const [meetings, setMeetings] = useState<any[]>([])
+  const [meetings, setMeetings] = useState<Meeting[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'timeline' | 'knowledge'>('timeline')
   const [isEditing, setIsEditing] = useState(false)
@@ -86,8 +87,28 @@ export function PersonDetail() {
   }, [id])
 
   // B-PPL-003: Save including name and email fields
+  // C-PPL: Added form validation
   const handleSaveEdit = async () => {
     if (!person || !id) return
+
+    // Validate name (required, non-empty)
+    const trimmedName = editForm.name.trim()
+    if (!trimmedName) {
+      toast.error('Validation Error', 'Name is required and cannot be empty.')
+      return
+    }
+    if (trimmedName.length < 2) {
+      toast.error('Validation Error', 'Name must be at least 2 characters.')
+      return
+    }
+
+    // Validate email format if provided
+    const trimmedEmail = editForm.email.trim()
+    if (trimmedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      toast.error('Validation Error', 'Please enter a valid email address.')
+      return
+    }
+
     try {
       const updatePayload: Record<string, string | undefined> = {
         id,
@@ -97,11 +118,11 @@ export function PersonDetail() {
       }
 
       // B-PPL-003: Include name and email in updates
-      if (editForm.name && editForm.name !== person.name) {
-        updatePayload.name = editForm.name
+      if (trimmedName !== person.name) {
+        updatePayload.name = trimmedName
       }
-      if (editForm.email !== (person.email || '')) {
-        updatePayload.email = editForm.email || undefined
+      if (trimmedEmail !== (person.email || '')) {
+        updatePayload.email = trimmedEmail || undefined
       }
 
       await window.electronAPI.contacts.update(updatePayload as any)

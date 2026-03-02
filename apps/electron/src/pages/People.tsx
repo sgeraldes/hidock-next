@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Users,
@@ -39,27 +39,34 @@ export function People() {
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [typeFilter, setTypeFilter] = useState<PersonType | 'all'>('all')
+  const [totalCount, setTotalCount] = useState(0)
+
+  // Pagination state
+  const PAGE_SIZE = 30
+  const [currentPage, setCurrentPage] = useState(0)
 
   // Delete confirmation state (replaces confirm())
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null)
+  const [sortBy, setSortBy] = useState<'name' | 'lastSeen' | 'interactions'>('name')
 
-  const loadPeople = useCallback(async () => {
+  // Debounce: skip firing on initial mount
+  const isFirstMount = useRef(true)
+
+  const loadPeople = useCallback(async (page = 0) => {
     setLoading(true)
     try {
       const result = await window.electronAPI.contacts.getAll({
         search: searchQuery,
         type: typeFilter,
-        limit: 100
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE
       })
       if (result.success) {
-        const mappedPeople = result.data.contacts.map((c: any) => ({
-          ...c,
-          firstSeenAt: c.first_seen_at || c.firstSeenAt,
-          lastSeenAt: c.last_seen_at || c.lastSeenAt,
-          interactionCount: c.meeting_count || c.interactionCount || 0
-        }))
-        setPeople(mappedPeople)
+        // Server returns already-mapped Person objects from contacts-handlers.ts
+        const contacts: Person[] = result.data.contacts
+        setPeople(contacts)
+        setTotalCount(result.data.total)
       }
     } catch (error) {
       console.error('Failed to load people:', error)
@@ -69,11 +76,30 @@ export function People() {
     }
   }, [searchQuery, typeFilter])
 
+  // Initial load: fire immediately
   useEffect(() => {
+    loadPeople(0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Subsequent changes: debounce search/filter and reset to first page
+  useEffect(() => {
+    if (isFirstMount.current) {
+      isFirstMount.current = false
+      return
+    }
+    setCurrentPage(0)
     const timer = setTimeout(() => {
-      loadPeople()
+      loadPeople(0)
     }, 300)
     return () => clearTimeout(timer)
+  }, [loadPeople])
+
+  // Pagination helpers
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE))
+  const handlePageChange = useCallback((page: number) => {
+    setCurrentPage(page)
+    loadPeople(page)
   }, [loadPeople])
 
   const handleDeleteClick = useCallback((personId: string, personName: string, event: React.MouseEvent) => {
@@ -89,7 +115,7 @@ export function People() {
       const result = await window.electronAPI.contacts.delete(deleteTarget.id)
       if (result.success) {
         toast.success('Contact deleted', `${deleteTarget.name} has been removed`)
-        await loadPeople()
+        await loadPeople(currentPage)
       } else {
         toast.error('Failed to delete contact', (result as any).error?.message || 'Unknown error')
       }
@@ -99,9 +125,36 @@ export function People() {
     }
     setDeleteDialogOpen(false)
     setDeleteTarget(null)
-  }, [deleteTarget, loadPeople])
+  }, [deleteTarget, loadPeople, currentPage])
 
-  const filteredPeople = people
+  const sortedPeople = useMemo(() => {
+    const sorted = [...people]
+    switch (sortBy) {
+      case 'name':
+        sorted.sort((a, b) => a.name.localeCompare(b.name))
+        break
+      case 'lastSeen':
+        sorted.sort((a, b) => new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime())
+        break
+      case 'interactions':
+        sorted.sort((a, b) => b.interactionCount - a.interactionCount)
+        break
+    }
+    return sorted
+  }, [people, sortBy])
+
+  /** Safely format a date string, returning fallback for invalid dates */
+  const formatDate = (dateStr: string | null | undefined): string => {
+    if (!dateStr) return 'Unknown'
+    const date = new Date(dateStr)
+    if (isNaN(date.getTime())) return 'Unknown'
+    return date.toLocaleDateString()
+  }
+
+  /** Return "interaction" (singular) or "interactions" (plural) */
+  const interactionLabel = (count: number): string => {
+    return count === 1 ? '1 interaction' : `${count} interactions`
+  }
 
   const getTypeColor = (type: PersonType) => {
     switch (type) {
@@ -123,7 +176,7 @@ export function People() {
             <p className="text-sm text-muted-foreground">Everyone mentioned in your knowledge base</p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => loadPeople()}>
+            <Button variant="outline" size="sm" onClick={() => loadPeople(currentPage)}>
               <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
               Refresh
             </Button>
@@ -151,23 +204,39 @@ export function People() {
             />
           </div>
 
-          <div className="flex items-center gap-2 overflow-x-auto pb-2 sm:pb-0 w-full sm:w-auto">
-            <Filter className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            <div className="flex gap-1">
-              {(['all', 'team', 'candidate', 'customer', 'external'] as const).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setTypeFilter(t)}
-                  className={cn(
-                    "px-3 py-1 rounded-full text-xs font-medium border transition-all whitespace-nowrap",
-                    typeFilter === t
-                      ? "bg-primary border-primary text-primary-foreground"
-                      : "bg-background border-border text-muted-foreground hover:bg-muted"
-                  )}
-                >
-                  {t.charAt(0).toUpperCase() + t.slice(1)}
-                </button>
-              ))}
+          <div className="flex items-center gap-4 overflow-x-auto pb-2 sm:pb-0 w-full sm:w-auto">
+            <div className="flex items-center gap-2">
+              <Filter className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+              <div className="flex gap-1">
+                {(['all', 'team', 'candidate', 'customer', 'external'] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setTypeFilter(t)}
+                    className={cn(
+                      "px-3 py-1 rounded-full text-xs font-medium border transition-all whitespace-nowrap",
+                      typeFilter === t
+                        ? "bg-primary border-primary text-primary-foreground"
+                        : "bg-background border-border text-muted-foreground hover:bg-muted"
+                    )}
+                  >
+                    {t.charAt(0).toUpperCase() + t.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 border-l pl-4">
+              <span className="text-xs text-muted-foreground whitespace-nowrap">Sort by</span>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as 'name' | 'lastSeen' | 'interactions')}
+                className="text-xs rounded-md border border-input bg-background px-2 py-1 ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                aria-label="Sort contacts"
+              >
+                <option value="name">Name</option>
+                <option value="lastSeen">Last Seen</option>
+                <option value="interactions">Interactions</option>
+              </select>
             </div>
           </div>
         </div>
@@ -176,11 +245,17 @@ export function People() {
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
         <div className="max-w-5xl mx-auto">
+          {/* Result count indicator */}
+          {!loading && totalCount > 0 && (
+            <p className="text-xs text-muted-foreground mb-4">
+              Showing {Math.min(currentPage * PAGE_SIZE + 1, totalCount)}–{Math.min((currentPage + 1) * PAGE_SIZE, totalCount)} of {totalCount} {totalCount === 1 ? 'person' : 'people'}
+            </p>
+          )}
           {loading && people.length === 0 ? (
             <div className="flex items-center justify-center py-20">
               <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
             </div>
-          ) : filteredPeople.length === 0 ? (
+          ) : sortedPeople.length === 0 ? (
             <Card>
               <CardContent className="py-16 text-center">
                 <Users className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
@@ -193,8 +268,9 @@ export function People() {
               </CardContent>
             </Card>
           ) : (
+            <div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {filteredPeople.map((person) => (
+              {sortedPeople.map((person) => (
                 <Card
                   key={person.id}
                   className="group hover:border-primary/50 transition-all cursor-pointer overflow-hidden shadow-sm hover:shadow-md"
@@ -256,11 +332,11 @@ export function People() {
                     <div className="pt-2 flex items-center justify-between border-t border-border/50">
                       <div className="flex items-center gap-1.5 text-xs font-medium">
                         <MessageSquare className="h-3.5 w-3.5 text-primary" />
-                        <span>{person.interactionCount} interactions</span>
+                        <span>{interactionLabel(person.interactionCount)}</span>
                       </div>
                       <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
                         <Clock className="h-3 w-3" />
-                        <span>{new Date(person.lastSeenAt).toLocaleDateString()}</span>
+                        <span>{formatDate(person.lastSeenAt)}</span>
                       </div>
                     </div>
 
@@ -280,6 +356,34 @@ export function People() {
                   </CardContent>
                 </Card>
               ))}
+            </div>
+
+            {/* Pagination controls */}
+            {totalPages > 1 && (
+              <div className="flex items-center justify-center gap-2 mt-6">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={currentPage === 0 || loading}
+                  onClick={() => handlePageChange(currentPage - 1)}
+                  aria-label="Previous page"
+                >
+                  Previous
+                </Button>
+                <span className="text-sm text-muted-foreground px-2">
+                  Page {currentPage + 1} of {totalPages}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={currentPage >= totalPages - 1 || loading}
+                  onClick={() => handlePageChange(currentPage + 1)}
+                  aria-label="Next page"
+                >
+                  Next
+                </Button>
+              </div>
+            )}
             </div>
           )}
         </div>

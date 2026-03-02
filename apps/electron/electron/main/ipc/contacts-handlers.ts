@@ -22,6 +22,7 @@ import {
   DeleteContactRequestSchema
 } from '../validation/contacts'
 import type { Person } from '@/types/knowledge'
+import type { Meeting } from '@/types'
 
 export function registerContactsHandlers(): void {
   /**
@@ -55,7 +56,7 @@ export function registerContactsHandlers(): void {
    */
   ipcMain.handle(
     'contacts:getById',
-    async (_, id: unknown): Promise<Result<{ contact: Person; meetings: any[]; totalMeetingTimeMinutes: number }>> => {
+    async (_, id: unknown): Promise<Result<{ contact: Person; meetings: Meeting[]; totalMeetingTimeMinutes: number }>> => {
       try {
         const parsed = GetContactByIdRequestSchema.safeParse({ id })
         if (!parsed.success) {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Folder,
   Search,
@@ -10,7 +10,10 @@ import {
   CheckCircle2,
   FileText,
   Bot,
-  Users
+  Users,
+  Edit,
+  Check,
+  X
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -35,6 +38,13 @@ import {
   AlertDialogTitle
 } from '@/components/ui/alert-dialog'
 import type { Project } from '@/types/knowledge'
+
+/** Resolved member info for display in the project detail */
+interface ProjectMember {
+  id: string
+  name: string
+  type: string
+}
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 
@@ -42,6 +52,7 @@ export function Projects() {
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProject, setActiveProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'all'>('active')
 
@@ -52,6 +63,14 @@ export function Projects() {
 
   // B-PRJ-007: Delete project dialog state (replaces confirm())
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+  const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([])
+
+  // Inline description editing state
+  const [isEditingDescription, setIsEditingDescription] = useState(false)
+  const [editDescription, setEditDescription] = useState('')
+
+  // Debounce: skip firing on initial mount
+  const isFirstMount = useRef(true)
 
   // B-PRJ-005: Memoized loadProjects with useCallback
   const loadProjects = useCallback(async () => {
@@ -77,13 +96,25 @@ export function Projects() {
     }
   }, [searchQuery, statusFilter])
 
+  // Initial load: fire immediately
   useEffect(() => {
+    loadProjects()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Subsequent changes: debounce search/filter
+  useEffect(() => {
+    if (isFirstMount.current) {
+      isFirstMount.current = false
+      return
+    }
     const timer = setTimeout(() => {
       loadProjects()
     }, 300)
     return () => clearTimeout(timer)
   }, [loadProjects])
 
+  // Projects are already filtered server-side by searchQuery and statusFilter
   const filteredProjects = projects
 
   // B-PRJ-006: Create project via Dialog instead of prompt()
@@ -142,6 +173,9 @@ export function Projects() {
   // Load project details with knowledgeIds/personIds when selected
   const handleSelectProject = async (project: Project) => {
     setActiveProject(project)
+    setProjectMembers([])
+    setDetailLoading(true)
+    setIsEditingDescription(false)
     try {
       const result = await window.electronAPI.projects.getById(project.id)
       if (result.success && result.data.project) {
@@ -156,10 +190,52 @@ export function Projects() {
           personIds: p.personIds
         }
         setActiveProject(detailed)
+
+        // Resolve person names from IDs in parallel (fixes N+1 query)
+        if (detailed.personIds && detailed.personIds.length > 0) {
+          const memberPromises = detailed.personIds.map(async (personId): Promise<ProjectMember> => {
+            try {
+              const contactResult = await window.electronAPI.contacts.getById(personId)
+              if (contactResult.success && contactResult.data.contact) {
+                const c = contactResult.data.contact as any
+                return { id: c.id, name: c.name, type: c.type || 'unknown' }
+              }
+            } catch {
+              // Skip unresolvable contacts
+            }
+            return { id: personId, name: personId.substring(0, 8) + '...', type: 'unknown' }
+          })
+          const members = await Promise.all(memberPromises)
+          setProjectMembers(members)
+        }
       }
-    } catch (error) {
-      console.error('Failed to load project details:', error)
+    } catch (err) {
+      console.error('Failed to load project details:', err)
+      toast.error('Failed to load project details', err instanceof Error ? err.message : 'An unexpected error occurred')
+    } finally {
+      setDetailLoading(false)
     }
+  }
+
+  // Save description inline
+  const handleSaveDescription = async () => {
+    if (!activeProject) return
+    try {
+      const result = await window.electronAPI.projects.update({
+        id: activeProject.id,
+        description: editDescription.trim() || null
+      })
+      if (result.success) {
+        const updated: Project = { ...activeProject, description: editDescription.trim() || null }
+        setActiveProject(updated)
+        setProjects(prev => prev.map(p => p.id === activeProject.id ? updated : p))
+        toast.success('Description updated', 'Project description has been saved.')
+      }
+    } catch (err) {
+      console.error('Failed to update description:', err)
+      toast.error('Failed to update description', err instanceof Error ? err.message : 'An unexpected error occurred')
+    }
+    setIsEditingDescription(false)
   }
 
   return (
@@ -207,7 +283,22 @@ export function Projects() {
               <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : filteredProjects.length === 0 ? (
-            <p className="text-center text-xs text-muted-foreground py-12">No {statusFilter === 'all' ? '' : statusFilter} projects</p>
+            <div className="text-center py-12 px-4">
+              <Folder className="h-8 w-8 mx-auto text-muted-foreground opacity-20 mb-3" />
+              <p className="text-xs text-muted-foreground mb-3">
+                {searchQuery
+                  ? `No projects matching "${searchQuery}"`
+                  : statusFilter === 'all'
+                    ? 'No projects yet'
+                    : `No ${statusFilter} projects`}
+              </p>
+              {!searchQuery && (
+                <Button onClick={openCreateDialog} size="sm" variant="outline" className="h-7 text-xs gap-1">
+                  <Plus className="h-3 w-3" />
+                  Create Project
+                </Button>
+              )}
+            </div>
           ) : (
             <div className="space-y-1">
               {filteredProjects.map((project) => (
@@ -245,7 +336,12 @@ export function Projects() {
 
       {/* Main Detail Area */}
       <main className="flex-1 flex flex-col min-w-0">
-        {activeProject ? (
+        {activeProject && detailLoading ? (
+          <div className="flex-1 flex flex-col items-center justify-center">
+            <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground mb-4" />
+            <p className="text-sm text-muted-foreground">Loading project details...</p>
+          </div>
+        ) : activeProject ? (
           <div className="flex flex-col h-full overflow-hidden animate-in fade-in slide-in-from-right-2 duration-300">
             {/* Header */}
             <header className="border-b px-8 py-6 h-[120px] flex items-center justify-between">
@@ -321,6 +417,21 @@ export function Projects() {
                         <Users className="h-4 w-4 text-primary" />
                       </div>
                       <p className="text-2xl font-bold mt-2">{activeProject.personIds?.length ?? '\u2014'} {activeProject.personIds ? 'Involved' : ''}</p>
+                      {projectMembers.length > 0 && (
+                        <div className="mt-3 space-y-1.5">
+                          {projectMembers.slice(0, 5).map((member) => (
+                            <div key={member.id} className="flex items-center gap-2 text-xs">
+                              <div className="w-5 h-5 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold">
+                                {member.name.charAt(0).toUpperCase()}
+                              </div>
+                              <span className="truncate">{member.name}</span>
+                            </div>
+                          ))}
+                          {projectMembers.length > 5 && (
+                            <p className="text-[10px] text-muted-foreground pl-7">+{projectMembers.length - 5} more</p>
+                          )}
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
                   <Card className="bg-muted/5">
@@ -334,12 +445,50 @@ export function Projects() {
                   </Card>
                 </div>
 
-                {/* Description */}
+                {/* Description (inline editable) */}
                 <div className="space-y-3">
-                  <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Description</h3>
-                  <p className="text-sm leading-relaxed text-muted-foreground bg-muted/20 p-4 rounded-xl border italic">
-                    {activeProject.description || "No description provided for this project."}
-                  </p>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Description</h3>
+                    {!isEditingDescription && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs gap-1"
+                        onClick={() => {
+                          setEditDescription(activeProject.description || '')
+                          setIsEditingDescription(true)
+                        }}
+                      >
+                        <Edit className="h-3 w-3" />
+                        Edit
+                      </Button>
+                    )}
+                  </div>
+                  {isEditingDescription ? (
+                    <div className="space-y-2">
+                      <textarea
+                        value={editDescription}
+                        onChange={(e) => setEditDescription(e.target.value)}
+                        className="w-full text-sm border rounded-xl px-4 py-3 bg-background min-h-[80px] leading-relaxed focus:outline-none focus:ring-2 focus:ring-ring"
+                        placeholder="Add a project description..."
+                        autoFocus
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button size="sm" className="h-7 text-xs gap-1" onClick={handleSaveDescription}>
+                          <Check className="h-3 w-3" />
+                          Save
+                        </Button>
+                        <Button size="sm" variant="ghost" className="h-7 text-xs gap-1" onClick={() => setIsEditingDescription(false)}>
+                          <X className="h-3 w-3" />
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-sm leading-relaxed text-muted-foreground bg-muted/20 p-4 rounded-xl border italic">
+                      {activeProject.description || "No description provided for this project."}
+                    </p>
+                  )}
                 </div>
 
                 {/* AI Suggestions */}
