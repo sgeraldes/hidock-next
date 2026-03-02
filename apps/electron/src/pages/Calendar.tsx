@@ -11,7 +11,9 @@ import {
   useCalendarView,
   useLastCalendarSync,
   useCalendarSyncing,
-  useDownloadQueue
+  useDownloadQueue,
+  useSetLastCalendarSync,
+  useSetCalendarSyncing,
 } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 import type { Meeting, Recording } from '@/types'
@@ -42,9 +44,8 @@ import {
   type CalendarRecording,
   type CalendarMeetingOverlay,
   HOUR_HEIGHT,
-  START_HOUR,
-  END_HOUR,
-  HOURS,
+  DEFAULT_START_HOUR,
+  DEFAULT_END_HOUR,
   getWeekDates,
   getWorkweekDates,
   getDayDates,
@@ -54,6 +55,7 @@ import {
   buildCalendarRecordings,
   formatDurationStr,
   groupByDay,
+  computeVisibleHourRange,
 } from '@/lib/calendar-utils'
 
 // Helper functions for date/time formatting in list views
@@ -112,7 +114,14 @@ export function Calendar() {
   const updateDownloadProgress = useAppStore((s) => s.updateDownloadProgress)
   const removeFromDownloadQueue = useAppStore((s) => s.removeFromDownloadQueue)
   const setDeviceSyncState = useAppStore((s) => s.setDeviceSyncState)
-  const { config, loadConfig, updateConfig } = useConfigStore()
+  // B-CAL-005: Granular config selectors to prevent excess re-renders
+  const calendarConfig = useConfigStore((s) => s.config?.calendar)
+  const uiConfig = useConfigStore((s) => s.config?.ui)
+  const loadConfig = useConfigStore((s) => s.loadConfig)
+  const updateConfig = useConfigStore((s) => s.updateConfig)
+  // B-CAL-001: Named action selectors replace raw useAppStore.setState()
+  const setLastCalendarSync = useSetLastCalendarSync()
+  const setCalendarSyncing = useSetCalendarSyncing()
 
   // Get unified recordings (device + local)
   const { recordings: unifiedRecordings, loading: recordingsLoading, refresh: refreshRecordings, deviceConnected, stats } = useUnifiedRecordings()
@@ -158,20 +167,22 @@ export function Calendar() {
   }, [loadConfig])
 
   // Sync state with config when it loads
+  // B-CAL-005: Depends on granular uiConfig/calendarConfig instead of whole config object
   useEffect(() => {
-    if (config?.ui) {
-      setCalendarView(config.ui.calendarView || 'week')
-      setHideEmptyMeetings(config.ui.hideEmptyMeetings ?? true)
-      setShowListView(config.ui.showListView ?? false)
+    if (uiConfig) {
+      setCalendarView(uiConfig.calendarView || 'week')
+      setHideEmptyMeetings(uiConfig.hideEmptyMeetings ?? true)
+      setShowListView(uiConfig.showListView ?? false)
     }
-    if (config?.calendar) {
-      setAutoSyncEnabled(config.calendar.syncEnabled)
+    if (calendarConfig) {
+      setAutoSyncEnabled(calendarConfig.syncEnabled)
       // CA-03 FIX: Load lastSyncAt from config on mount
-      if (config.calendar.lastSyncAt) {
-        useAppStore.setState({ lastCalendarSync: config.calendar.lastSyncAt })
+      // B-CAL-001: Use named action instead of raw setState
+      if (calendarConfig.lastSyncAt) {
+        setLastCalendarSync(calendarConfig.lastSyncAt)
       }
     }
-  }, [config, setCalendarView])
+  }, [uiConfig, calendarConfig, setCalendarView, setLastCalendarSync])
 
   // Load meetings when date or view changes
   useEffect(() => {
@@ -213,10 +224,10 @@ export function Calendar() {
     if (scrollContainerRef.current && !showListView) {
       const now = new Date()
       const currentHour = now.getHours()
-      const scrollPosition = Math.max(0, (currentHour - START_HOUR - 1) * HOUR_HEIGHT)
+      const scrollPosition = Math.max(0, (currentHour - visibleStartHour - 1) * HOUR_HEIGHT)
       scrollContainerRef.current.scrollTop = scrollPosition
     }
-  }, [showListView])
+  }, [showListView, visibleStartHour])
 
   // Get dates for current view
   const viewDates = useMemo((): Date[] => {
@@ -236,10 +247,10 @@ export function Calendar() {
 
   const monthDates = useMemo(() => getMonthDates(currentDate), [currentDate])
 
-  // Office hours from config
-  const officeHoursStart = config?.ui?.officeHoursStart ?? 9
-  const officeHoursEnd = config?.ui?.officeHoursEnd ?? 18
-  const workDays = config?.ui?.workDays ?? [1, 2, 3, 4, 5]
+  // Office hours from config (B-CAL-005: uses granular uiConfig)
+  const officeHoursStart = uiConfig?.officeHoursStart ?? 9
+  const officeHoursEnd = uiConfig?.officeHoursEnd ?? 18
+  const workDays = uiConfig?.workDays ?? [1, 2, 3, 4, 5]
 
   // Check if a date is a work day
   const isWorkDay = (date: Date) => workDays.includes(date.getDay())
@@ -302,6 +313,11 @@ export function Calendar() {
     return buildCalendarRecordings(unifiedRecordings, meetings)
   }, [unifiedRecordings, meetings])
 
+  // B-CAL-003: Compute dynamic visible hour range based on actual events
+  const { startHour: visibleStartHour, endHour: visibleEndHour, hours: visibleHours } = useMemo(() => {
+    return computeVisibleHourRange(calendarRecordings, meetingOverlays, DEFAULT_START_HOUR, DEFAULT_END_HOUR)
+  }, [calendarRecordings, meetingOverlays])
+
   // Group recordings by day (for day/workweek/week views)
   const recordingsByDay = useMemo(() => {
     const grouped = groupByDay(
@@ -352,22 +368,24 @@ export function Calendar() {
   }
 
   // Calculate recording position and height (RECORDING-CENTRIC)
+  // B-CAL-003: Uses dynamic visibleStartHour instead of static START_HOUR
   const getRecordingStyle = (recording: CalendarRecording) => {
     const startHour = recording.startTime.getHours() + recording.startTime.getMinutes() / 60
     const endHour = recording.endTime.getHours() + recording.endTime.getMinutes() / 60
 
-    const top = Math.max(0, (startHour - START_HOUR) * HOUR_HEIGHT)
+    const top = Math.max(0, (startHour - visibleStartHour) * HOUR_HEIGHT)
     const height = Math.max(20, (endHour - startHour) * HOUR_HEIGHT - 2)
 
     return { top, height }
   }
 
   // Calculate meeting overlay position (for dashed meeting blocks)
+  // B-CAL-003: Uses dynamic visibleStartHour instead of static START_HOUR
   const getMeetingOverlayStyle = (meeting: CalendarMeetingOverlay) => {
     const startHour = meeting.startTime.getHours() + meeting.startTime.getMinutes() / 60
     const endHour = meeting.endTime.getHours() + meeting.endTime.getMinutes() / 60
 
-    const top = Math.max(0, (startHour - START_HOUR) * HOUR_HEIGHT)
+    const top = Math.max(0, (startHour - visibleStartHour) * HOUR_HEIGHT)
     const height = Math.max(20, (endHour - startHour) * HOUR_HEIGHT - 2)
 
     return { top, height }
@@ -385,9 +403,7 @@ export function Calendar() {
   }, [lastSync])
 
   // Handle sync button click
-  const setCalendarSyncing = useCallback((syncing: boolean) => {
-    useAppStore.setState({ calendarSyncing: syncing })
-  }, [])
+  // B-CAL-001: Uses named store actions instead of raw useAppStore.setState()
 
   const handleSync = useCallback(async () => {
     console.log('[Calendar] Clearing cache and resyncing...')
@@ -399,8 +415,9 @@ export function Calendar() {
         toast.error('Calendar sync failed', result.error || 'Unknown error occurred')
       } else if (result && result.success) {
         // CA-03 FIX: Update lastSync state after successful sync
+        // B-CAL-001: Use named action instead of raw setState
         if (result.lastSync) {
-          useAppStore.setState({ lastCalendarSync: result.lastSync })
+          setLastCalendarSync(result.lastSync)
         }
         toast.success(`Calendar synced successfully: ${result.meetingsCount || 0} meetings`)
       }
@@ -420,7 +437,7 @@ export function Calendar() {
     } finally {
       setCalendarSyncing(false)
     }
-  }, [viewDates, loadMeetings, setCalendarSyncing])
+  }, [viewDates, loadMeetings, setCalendarSyncing, setLastCalendarSync])
 
   // Handle navigation (memoized)
   const handleNavigatePrev = useCallback(() => {
@@ -1197,9 +1214,9 @@ export function Calendar() {
           {/* Time Grid - scrollable, with stable scrollbar gutter */}
           <div ref={scrollContainerRef} className="flex-1 overflow-auto" style={{ scrollbarGutter: 'stable' }}>
             <div className="flex min-h-full">
-              {/* Time Labels */}
+              {/* Time Labels - B-CAL-003: Uses dynamic visibleHours */}
               <div className="w-14 flex-shrink-0 bg-background">
-                {HOURS.map((hour) => (
+                {visibleHours.map((hour) => (
                   <div
                     key={hour}
                     className="relative"
@@ -1230,8 +1247,8 @@ export function Calendar() {
                       today && 'ring-2 ring-inset ring-primary/20'
                     )}
                   >
-                    {/* Hour Lines with office hours shading */}
-                    {HOURS.map((hour) => (
+                    {/* Hour Lines with office hours shading - B-CAL-003: dynamic hours */}
+                    {visibleHours.map((hour) => (
                       <div
                         key={hour}
                         className={cn(
@@ -1244,7 +1261,7 @@ export function Calendar() {
 
                     {/* Current Time Indicator (CA-05: updates every 60s) */}
                     {today && (
-                      <CurrentTimeIndicator startHour={START_HOUR} hourHeight={HOUR_HEIGHT} />
+                      <CurrentTimeIndicator startHour={visibleStartHour} hourHeight={HOUR_HEIGHT} />
                     )}
 
                     {/* ===== MEETING OVERLAYS (DASHED - SECONDARY) ===== */}
@@ -1253,10 +1270,9 @@ export function Calendar() {
                       const { top, height } = getMeetingOverlayStyle(meeting)
 
                       const startHour = meeting.startTime.getHours()
-                      // TODO(CA-06): Recordings/meetings outside the visible hour range (START_HOUR to END_HOUR,
-                      // currently 7AM-9PM) are silently hidden. Consider expanding the range dynamically based on
-                      // data, or adding a scroll-to-time feature so users can see early morning / late night items.
-                      if (startHour < START_HOUR || startHour >= END_HOUR) return null
+                      // B-CAL-003: Dynamic hour range now adjusts to fit events, so this filter
+                      // only hides truly out-of-range items (should be rare with dynamic range)
+                      if (startHour < visibleStartHour || startHour >= visibleEndHour) return null
 
                       const canShowTime = height > 35
 
@@ -1306,7 +1322,7 @@ export function Calendar() {
                       const { top, height } = getRecordingStyle(recording)
 
                       const startHour = recording.startTime.getHours()
-                      if (startHour < START_HOUR || startHour >= END_HOUR) return null
+                      if (startHour < visibleStartHour || startHour >= visibleEndHour) return null
 
                       const canShowTime = height > 35
                       const canShowMultiline = height > 60

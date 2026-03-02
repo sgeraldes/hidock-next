@@ -89,11 +89,77 @@ const WINDOWS_TIMEZONE_OFFSETS: Record<string, number> = {
   'Customized Time Zone': -5 * 3600, // Default to something reasonable
 }
 
+// B-CAL-004: Error category for calendar sync failures
+export type CalendarErrorCategory = 'network' | 'parse' | 'database' | 'validation' | 'unknown'
+
 export interface CalendarSyncResult {
   success: boolean
   meetingsCount: number
   error?: string
+  errorCategory?: CalendarErrorCategory
   lastSync?: string
+}
+
+/**
+ * Categorize a calendar sync error into a user-facing error category.
+ * B-CAL-004: Provides structured error information for better user messaging.
+ */
+export function categorizeCalendarError(error: unknown): { message: string; category: CalendarErrorCategory } {
+  if (error instanceof TypeError && error.message.includes('fetch')) {
+    return { message: error.message, category: 'network' }
+  }
+
+  const message = error instanceof Error ? error.message : String(error)
+
+  // Network errors
+  if (
+    message.includes('fetch') ||
+    message.includes('ECONNREFUSED') ||
+    message.includes('ENOTFOUND') ||
+    message.includes('ETIMEDOUT') ||
+    message.includes('network') ||
+    message.includes('Failed to fetch') ||
+    message.includes('ERR_NETWORK') ||
+    /^Failed to fetch calendar: \d+/.test(message)
+  ) {
+    return { message, category: 'network' }
+  }
+
+  // Parse errors (ICS parsing)
+  if (
+    message.includes('parse') ||
+    message.includes('ICAL') ||
+    message.includes('invalid ical') ||
+    message.includes('Unexpected') ||
+    message.includes('SyntaxError')
+  ) {
+    return { message, category: 'parse' }
+  }
+
+  // Database errors
+  if (
+    message.includes('database') ||
+    message.includes('Database') ||
+    message.includes('SQLITE') ||
+    message.includes('sqlite') ||
+    message.includes('constraint')
+  ) {
+    return { message, category: 'database' }
+  }
+
+  // Validation errors (URL validation, etc.)
+  if (
+    message.includes('URL') ||
+    message.includes('url') ||
+    message.includes('allowed') ||
+    message.includes('HTTPS') ||
+    message.includes('blocked') ||
+    message.includes('Private IP')
+  ) {
+    return { message, category: 'validation' }
+  }
+
+  return { message, category: 'unknown' }
 }
 
 /**
@@ -349,7 +415,8 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
       return {
         success: false,
         meetingsCount: 0,
-        error: validation.error
+        error: validation.error,
+        errorCategory: 'validation'
       }
     }
 
@@ -381,7 +448,7 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
       upsertMeetingsBatch(meetings)
     } catch (dbError) {
       console.error('Failed to save meetings to database:', dbError)
-      throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : 'Unknown error'}`)
+      throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : 'Unknown database error'}`)
     }
 
     // Update last sync time in config and persist it
@@ -397,10 +464,12 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
     }
   } catch (error) {
     console.error('Calendar sync failed:', error)
+    const categorized = categorizeCalendarError(error)
     return {
       success: false,
       meetingsCount: 0,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: categorized.message,
+      errorCategory: categorized.category
     }
   }
 }

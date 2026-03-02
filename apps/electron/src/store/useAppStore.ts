@@ -45,6 +45,8 @@ interface AppState {
   setMeetings: (meetings: Meeting[]) => void
   loadMeetings: (startDate?: string, endDate?: string) => Promise<void>
   syncCalendar: () => Promise<CalendarSyncResult>
+  setLastCalendarSync: (lastSync: string | null) => void
+  setCalendarSyncing: (syncing: boolean) => void
 
   // Unified recordings actions (persists across page navigation)
   setUnifiedRecordings: (recordings: UnifiedRecording[]) => void
@@ -130,6 +132,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Meeting actions
   setMeetings: (meetings) => set({ meetings }),
+  setLastCalendarSync: (lastSync) => set({ lastCalendarSync: lastSync }),
+  setCalendarSyncing: (syncing) => set({ calendarSyncing: syncing }),
 
   loadMeetings: async (startDate, endDate) => {
     set({ meetingsLoading: true })
@@ -310,6 +314,9 @@ export const useLastCalendarSync = () => useAppStore((s) => s.lastCalendarSync)
 export const useCalendarSyncing = () => useAppStore((s) => s.calendarSyncing)
 export const useCalendarView = () => useAppStore((s) => s.calendarView)
 export const useCurrentDate = () => useAppStore((s) => s.currentDate)
+// Calendar action selectors (B-CAL-001: named actions replace raw setState)
+export const useSetLastCalendarSync = () => useAppStore((s) => s.setLastCalendarSync)
+export const useSetCalendarSyncing = () => useAppStore((s) => s.setCalendarSyncing)
 
 // Device state selectors
 export const useDeviceState = () => useAppStore((s) => s.deviceState)

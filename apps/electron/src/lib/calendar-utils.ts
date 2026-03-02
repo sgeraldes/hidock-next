@@ -59,9 +59,78 @@ export interface CalendarMeeting extends Meeting {
 // Calendar constants
 export const HOUR_HEIGHT = 60 // pixels per hour
 // CA-06 FIX: Expanded hour range from 7AM-9PM to 6AM-11PM to show early morning and late evening recordings
-export const START_HOUR = 6 // 6 AM
-export const END_HOUR = 23 // 11 PM
-export const HOURS = Array.from({ length: END_HOUR - START_HOUR }, (_, i) => START_HOUR + i)
+export const DEFAULT_START_HOUR = 6 // 6 AM
+export const DEFAULT_END_HOUR = 23 // 11 PM
+// Legacy aliases for backward compatibility
+export const START_HOUR = DEFAULT_START_HOUR
+export const END_HOUR = DEFAULT_END_HOUR
+export const HOURS = Array.from({ length: DEFAULT_END_HOUR - DEFAULT_START_HOUR }, (_, i) => DEFAULT_START_HOUR + i)
+
+/**
+ * Visible hour range result from computeVisibleHourRange
+ */
+export interface VisibleHourRange {
+  startHour: number
+  endHour: number
+  hours: number[]
+}
+
+/**
+ * Compute the visible hour range for the calendar timeline based on actual event times.
+ * Expands beyond defaultStart/defaultEnd when recordings or meetings fall outside those bounds.
+ * Always includes at least 1 hour of padding around the earliest/latest events.
+ *
+ * B-CAL-003: Dynamic hour range replaces hard-coded 8-18 (or 6-23) range.
+ *
+ * @param recordings - Array of CalendarRecording items displayed in this view
+ * @param meetings - Array of CalendarMeetingOverlay items displayed in this view
+ * @param defaultStart - Default start hour (e.g. 6 for 6 AM)
+ * @param defaultEnd - Default end hour (e.g. 23 for 11 PM)
+ * @returns VisibleHourRange with startHour, endHour, and hours array
+ */
+export function computeVisibleHourRange(
+  recordings: CalendarRecording[],
+  meetings: CalendarMeetingOverlay[],
+  defaultStart: number = DEFAULT_START_HOUR,
+  defaultEnd: number = DEFAULT_END_HOUR
+): VisibleHourRange {
+  let minHour = defaultStart
+  let maxHour = defaultEnd
+
+  // Check recordings for earliest/latest hours
+  for (const rec of recordings) {
+    const startH = rec.startTime.getHours()
+    const endH = rec.endTime.getHours() + (rec.endTime.getMinutes() > 0 ? 1 : 0)
+
+    if (startH < minHour) {
+      minHour = startH
+    }
+    if (endH > maxHour) {
+      maxHour = endH
+    }
+  }
+
+  // Check meetings for earliest/latest hours
+  for (const meeting of meetings) {
+    const startH = meeting.startTime.getHours()
+    const endH = meeting.endTime.getHours() + (meeting.endTime.getMinutes() > 0 ? 1 : 0)
+
+    if (startH < minHour) {
+      minHour = startH
+    }
+    if (endH > maxHour) {
+      maxHour = endH
+    }
+  }
+
+  // Add 1 hour padding (clamped to 0-24)
+  const startHour = Math.max(0, minHour - 1)
+  const endHour = Math.min(24, maxHour + 1)
+
+  const hours = Array.from({ length: endHour - startHour }, (_, i) => startHour + i)
+
+  return { startHour, endHour, hours }
+}
 
 /**
  * Add days to a date in a DST-safe manner
