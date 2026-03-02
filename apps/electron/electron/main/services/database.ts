@@ -2079,12 +2079,13 @@ export function addToQueue(recordingId: string): string {
 }
 
 export function getQueueItems(status?: string): (QueueItem & { filename?: string })[] {
+  // Sort by priority: lower retry_count first (fresh items before retries), then FIFO by created_at
   const sql = `
     SELECT tq.*, r.filename
     FROM transcription_queue tq
     LEFT JOIN recordings r ON tq.recording_id = r.id
     ${status ? 'WHERE tq.status = ?' : ''}
-    ORDER BY tq.created_at ASC`
+    ORDER BY tq.retry_count ASC, tq.created_at ASC`
   if (status) {
     return queryAll<QueueItem & { filename?: string }>(sql, [status])
   }

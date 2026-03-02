@@ -1,4 +1,4 @@
-import { Filter, Cloud, HardDrive, Check, Search, ArrowUpDown } from 'lucide-react'
+import { Filter, Cloud, HardDrive, Check, Search, ArrowUpDown, ChevronUp, ChevronDown } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import {
   FilterMode,
@@ -64,9 +64,27 @@ export function LibraryFilters({
   const handleFilterChange =
     filterMode === 'semantic' ? onSemanticFilterChange : onExclusiveFilterChange
 
+  // Count active filters for the badge
+  const activeFilterCount = [
+    activeFilter !== 'all',
+    categoryFilter !== 'all',
+    qualityFilter !== 'all',
+    statusFilter !== 'all',
+    searchQuery.length > 0
+  ].filter(Boolean).length
+
   return (
     <div className="flex flex-col gap-4 mt-4">
       <div className="flex flex-wrap items-center gap-4">
+        {/* Active filter count badge */}
+        {activeFilterCount > 0 && (
+          <span
+            className="inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full bg-primary text-primary-foreground"
+            aria-label={`${activeFilterCount} filter${activeFilterCount !== 1 ? 's' : ''} active`}
+          >
+            {activeFilterCount} active
+          </span>
+        )}
         {/* Filter mode toggle */}
         <div className="flex items-center gap-2" role="group" aria-label="Filter mode">
           <span className="text-xs font-medium text-muted-foreground">Mode:</span>
@@ -257,11 +275,21 @@ export function LibraryFilters({
             </select>
             <button
               onClick={() => onSortOrderChange(sortOrder === 'asc' ? 'desc' : 'asc')}
-              className="h-8 px-2 rounded-md border border-input bg-background text-xs font-medium hover:bg-muted transition-colors"
+              className="h-8 px-2 rounded-md border border-input bg-background text-xs font-medium hover:bg-muted transition-colors inline-flex items-center gap-1"
               aria-label={`Sort ${sortOrder === 'asc' ? 'ascending' : 'descending'}`}
               title={`Currently ${sortOrder === 'asc' ? 'ascending' : 'descending'} - click to toggle`}
             >
-              {sortOrder === 'asc' ? 'Asc' : 'Desc'}
+              {sortOrder === 'asc' ? (
+                <>
+                  <ChevronUp className="h-3.5 w-3.5" />
+                  Asc
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="h-3.5 w-3.5" />
+                  Desc
+                </>
+              )}
             </button>
           </div>
         )}
