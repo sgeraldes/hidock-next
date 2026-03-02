@@ -16,6 +16,7 @@ import {
 import { formatDateTime, formatDuration } from '@/lib/utils'
 import { parseAttendees, parseJsonArray } from '@/types'
 import { AudioPlayer } from '@/components/AudioPlayer'
+import { MeetingActionables } from '@/components/MeetingActionables'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
 import { toast } from '@/components/ui/toaster'
@@ -621,6 +622,11 @@ export function MeetingDetail() {
               )}
             </CardContent>
           </Card>
+
+          {/* AUD2-002: Actionables Section */}
+          {details.actionables && details.actionables.length > 0 && (
+            <MeetingActionables actionables={details.actionables} />
+          )}
         </div>
       </div>
 
