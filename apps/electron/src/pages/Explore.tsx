@@ -134,6 +134,11 @@ export function Explore() {
   }, [query])
 
   useEffect(() => {
+    // C-EXP-M04: Clear stale results when query is empty
+    if (!query.trim()) {
+      setResults(null)
+      setSearchDurationMs(null)
+    }
     // Debounce search by 300ms
     const timer = setTimeout(() => {
       if (query.trim()) handleSearch()
@@ -161,8 +166,21 @@ export function Explore() {
     return () => clearTimeout(timer)
   }, [])
 
-  const totalResults = results 
-    ? results.knowledge.length + results.people.length + results.projects.length 
+  // C-EXP-M03: Reset pagination when active tab changes
+  useEffect(() => {
+    setResultPage(1)
+  }, [activeTab])
+
+  // C-EXP-M01: Clear search error when query changes so stale errors don't persist
+  useEffect(() => {
+    if (searchError) {
+      setSearchError(null)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query])
+
+  const totalResults = results
+    ? results.knowledge.length + results.people.length + results.projects.length
     : 0
 
   return (
@@ -413,12 +431,29 @@ export function Explore() {
                   </div>
                 )}
 
+                {/* C-EXP-M05: Show empty state per-tab when the active tab has no results */}
                 {totalResults === 0 && !loading && (
                   <div className="text-center py-20 border-2 border-dashed rounded-3xl opacity-30">
                     <Search className="h-12 w-12 mx-auto mb-4" />
                     <p className="text-sm">No results found for "{query}"</p>
                   </div>
                 )}
+                {totalResults > 0 && !loading && activeTab !== 'all' && (() => {
+                  const tabHasResults =
+                    (activeTab === 'knowledge' && results.knowledge.length > 0) ||
+                    (activeTab === 'people' && results.people.length > 0) ||
+                    (activeTab === 'projects' && results.projects.length > 0)
+                  if (!tabHasResults) {
+                    return (
+                      <div className="text-center py-12 border-2 border-dashed rounded-3xl opacity-30">
+                        <Search className="h-10 w-10 mx-auto mb-3" />
+                        <p className="text-sm">No {activeTab} results for "{query}"</p>
+                        <p className="text-xs text-muted-foreground mt-1">Try the "all" tab to see results in other categories.</p>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
               </div>
             </div>
           )}
