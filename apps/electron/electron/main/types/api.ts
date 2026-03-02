@@ -85,6 +85,7 @@ export type ErrorCode =
   | 'TRANSCRIPTION_ERROR'
   | 'INTERNAL_ERROR'
   | 'UNAUTHORIZED'
+  | 'RATE_LIMITED'
 
 // =============================================================================
 // RAG Filter Types

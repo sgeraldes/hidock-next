@@ -27,6 +27,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { cn, formatDateTime } from '@/lib/utils'
+import { toast } from '@/components/ui/toaster'
 import type { Actionable, ActionableStatus } from '@/types/knowledge'
 import type { OutputTemplateId } from '@/types'
 
@@ -49,6 +50,8 @@ export function Actionables() {
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [showOutputModal, setShowOutputModal] = useState(false)
   const [generationHistory, setGenerationHistory] = useState<number[]>([])
+  // B-ACT-002: Per-actionable loading state to prevent double-clicks
+  const [loadingActionableIds, setLoadingActionableIds] = useState<Set<string>>(new Set())
   // AC-06: Use a ref to hold the latest generationHistory to avoid stale closure in useCallback
   const generationHistoryRef = useRef(generationHistory)
   generationHistoryRef.current = generationHistory
@@ -66,12 +69,12 @@ export function Actionables() {
   }, [])
 
   // AC-06: Use ref to read generationHistory, avoiding stale closure and unstable deps
+  // B-ACT-001: Client-side rate limit aligned with server-side (5/minute)
   const handleAutoGenerate = useCallback(async (sourceId: string, templateId: string = 'meeting_minutes') => {
-    // Check rate limiting (max 3/minute)
     const now = Date.now()
     const recentGenerations = generationHistoryRef.current.filter(t => now - t < 60000)
-    if (recentGenerations.length >= 3) {
-      setGenerationError('Rate limit reached. Please wait a minute before generating again.')
+    if (recentGenerations.length >= 5) {
+      toast.warning('Rate limit reached', 'Please wait a minute before generating again.')
       return
     }
 
@@ -147,7 +150,13 @@ export function Actionables() {
     })
   }, [actionables, statusFilter])
 
+  // B-ACT-002: Per-actionable loading state, disable button during operation, server-side revert on failure
   const handleApprove = async (actionable: Actionable) => {
+    // Prevent double-clicks
+    if (loadingActionableIds.has(actionable.id)) return
+
+    setLoadingActionableIds((prev) => new Set(prev).add(actionable.id))
+
     try {
       const templateId = actionable.suggestedTemplate || 'meeting_minutes'
       setGenerating(true)
@@ -158,14 +167,15 @@ export function Actionables() {
       const approvalResult = await window.electronAPI.actionables.generateOutput(actionable.id)
 
       if (!approvalResult.success) {
-        setGenerationError(approvalResult.error || 'Failed to approve actionable')
+        toast.error('Approval failed', approvalResult.error || 'Failed to approve actionable')
         return
       }
 
       // Now trigger actual output generation
       const result = await window.electronAPI.outputs.generate({
         templateId: templateId as OutputTemplateId,
-        knowledgeCaptureId: actionable.sourceKnowledgeId
+        knowledgeCaptureId: actionable.sourceKnowledgeId,
+        actionableId: actionable.id
       })
 
       if (result.success) {
@@ -176,19 +186,30 @@ export function Actionables() {
         await window.electronAPI.actionables.updateStatus(actionable.id, 'generated')
         await loadActionables()
       } else {
-        setGenerationError(result.error.message || 'Failed to generate output')
-        // Status will be reverted to pending by backend
+        const errorMsg = result.error?.message || 'Failed to generate output'
+        toast.error('Generation failed', errorMsg)
+        // Revert status to pending on failure
+        await window.electronAPI.actionables.updateStatus(actionable.id, 'pending').catch(() => {})
         await loadActionables()
       }
     } catch (error: any) {
-      setGenerationError(error.message || 'Failed to generate output')
+      const errorMsg = error?.message || 'Failed to generate output'
+      toast.error('Generation failed', errorMsg)
       console.error('Output generation failed:', error)
+      // Revert status to pending on failure
+      await window.electronAPI.actionables.updateStatus(actionable.id, 'pending').catch(() => {})
       await loadActionables()
     } finally {
       setGenerating(false)
+      setLoadingActionableIds((prev) => {
+        const next = new Set(prev)
+        next.delete(actionable.id)
+        return next
+      })
     }
   }
 
+  // B-ACT-003: Use toast instead of generationError for dismiss failures
   const handleDismiss = async (actionableId: string) => {
     try {
       const result = await window.electronAPI.actionables.updateStatus(actionableId, 'dismissed')
@@ -197,11 +218,11 @@ export function Actionables() {
         await loadActionables()
       } else {
         console.error('Failed to dismiss actionable:', result.error)
-        setGenerationError(result.error || 'Failed to dismiss actionable')
+        toast.error('Dismiss failed', result.error || 'Failed to dismiss actionable')
       }
     } catch (error: any) {
       console.error('Error dismissing actionable:', error)
-      setGenerationError(error.message || 'Failed to dismiss actionable')
+      toast.error('Dismiss failed', error?.message || 'Failed to dismiss actionable')
     }
   }
 
@@ -316,15 +337,26 @@ export function Actionables() {
                       <div className="flex items-center gap-2 flex-shrink-0 w-full sm:w-auto border-t sm:border-0 pt-4 sm:pt-0">
                         {actionable.status === 'pending' && (
                           <>
-                            <Button onClick={() => handleApprove(actionable)} size="sm" className="flex-1 sm:flex-none gap-2 shadow-sm">
-                              <Sparkles className="h-4 w-4" />
-                              Approve & Generate
+                            {/* B-ACT-002: Per-actionable spinner, disabled during operation */}
+                            <Button
+                              onClick={() => handleApprove(actionable)}
+                              size="sm"
+                              className="flex-1 sm:flex-none gap-2 shadow-sm"
+                              disabled={loadingActionableIds.has(actionable.id)}
+                            >
+                              {loadingActionableIds.has(actionable.id) ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Sparkles className="h-4 w-4" />
+                              )}
+                              {loadingActionableIds.has(actionable.id) ? 'Generating...' : 'Approve & Generate'}
                             </Button>
                             <Button
                               onClick={() => handleDismiss(actionable.id)}
                               variant="ghost"
                               size="sm"
                               className="flex-1 sm:flex-none gap-2 text-muted-foreground hover:text-destructive"
+                              disabled={loadingActionableIds.has(actionable.id)}
                             >
                               <X className="h-4 w-4" />
                               Dismiss
@@ -336,33 +368,54 @@ export function Actionables() {
                             variant="outline"
                             size="sm"
                             className="flex-1 sm:flex-none gap-2"
+                            disabled={loadingActionableIds.has(actionable.id)}
                             onClick={async () => {
-                              // AC-02 FIX: Add onClick handler to regenerate and view the output
-                              const templateId = actionable.suggestedTemplate || 'meeting_minutes'
+                              // B-ACT-004: Fetch existing output instead of re-generating
+                              // B-ACT-005: Use toast for View Output errors
+                              if (loadingActionableIds.has(actionable.id)) return
+                              setLoadingActionableIds((prev) => new Set(prev).add(actionable.id))
+
                               try {
-                                setGenerating(true)
-                                setCurrentGeneratingTemplate(templateId)
-                                setGenerationError(null)
+                                const result = await window.electronAPI.outputs.getByActionableId(actionable.id)
 
-                                const result = await window.electronAPI.outputs.generate({
-                                  templateId: templateId as OutputTemplateId,
-                                  knowledgeCaptureId: actionable.sourceKnowledgeId
-                                })
-
-                                if (result.success) {
+                                if (result.success && result.data) {
                                   setGeneratedOutput({ ...result.data, sourceId: actionable.sourceKnowledgeId })
                                   setShowOutputModal(true)
+                                } else if (result.success && !result.data) {
+                                  // No existing output found — fall back to regeneration
+                                  const templateId = actionable.suggestedTemplate || 'meeting_minutes'
+                                  setGenerating(true)
+                                  setCurrentGeneratingTemplate(templateId)
+                                  const genResult = await window.electronAPI.outputs.generate({
+                                    templateId: templateId as OutputTemplateId,
+                                    knowledgeCaptureId: actionable.sourceKnowledgeId
+                                  })
+                                  if (genResult.success) {
+                                    setGeneratedOutput({ ...genResult.data, sourceId: actionable.sourceKnowledgeId })
+                                    setShowOutputModal(true)
+                                  } else {
+                                    toast.error('Failed to load output', genResult.error?.message || 'Unknown error')
+                                  }
+                                  setGenerating(false)
                                 } else {
-                                  setGenerationError(result.error.message || 'Failed to load output')
+                                  toast.error('Failed to load output', result.error?.message || 'Unknown error')
                                 }
                               } catch (error: any) {
-                                setGenerationError(error.message || 'Failed to load output')
+                                toast.error('Failed to load output', error?.message || 'An unexpected error occurred')
                               } finally {
-                                setGenerating(false)
+                                setLoadingActionableIds((prev) => {
+                                  const next = new Set(prev)
+                                  next.delete(actionable.id)
+                                  return next
+                                })
                               }
                             }}
                           >
-                            <FileText className="h-4 w-4" />
+                            {loadingActionableIds.has(actionable.id) ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <FileText className="h-4 w-4" />
+                            )}
                             View Output
                           </Button>
                         )}

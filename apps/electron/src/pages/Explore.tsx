@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Search,
@@ -17,6 +17,7 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { formatDateTime, cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
+import { highlightMatch } from '@/utils/highlight'
 
 export function Explore() {
   const navigate = useNavigate()
@@ -26,12 +27,29 @@ export function Explore() {
   const [searchError, setSearchError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'all' | 'knowledge' | 'people' | 'projects'>('all')
 
-  const handleSearch = async () => {
+  // B-EXP-005: AbortController ref for cancelling pending requests on unmount
+  const abortControllerRef = useRef<AbortController | null>(null)
+  // B-EXP-005: Cancelled ref for unmount detection (AbortController may not be supported by IPC)
+  const cancelledRef = useRef(false)
+
+  // B-EXP-004: Wrap handleSearch in useCallback with proper deps
+  const handleSearch = useCallback(async () => {
     if (!query.trim()) return
+
+    // B-EXP-005: Cancel any pending request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
     setLoading(true)
     setSearchError(null)
     try {
       const result = await window.electronAPI.rag.globalSearch(query, 10)
+
+      // B-EXP-005: Check if component unmounted or request was superseded
+      if (controller.signal.aborted || cancelledRef.current) return
 
       // Unwrap Result<> wrapper
       if (result.success) {
@@ -44,15 +62,20 @@ export function Explore() {
         setResults({ knowledge: [], people: [], projects: [] })
       }
     } catch (error) {
+      // B-EXP-005: Don't update state if cancelled
+      if (controller.signal.aborted || cancelledRef.current) return
+
       console.error('Search failed:', error)
       const message = error instanceof Error ? error.message : 'An unexpected error occurred'
       setSearchError(message)
       toast.error('Search failed', message)
       setResults({ knowledge: [], people: [], projects: [] })
     } finally {
-      setLoading(false)
+      if (!controller.signal.aborted && !cancelledRef.current) {
+        setLoading(false)
+      }
     }
-  }
+  }, [query])
 
   useEffect(() => {
     // Debounce search by 300ms
@@ -60,7 +83,18 @@ export function Explore() {
       if (query.trim()) handleSearch()
     }, 300)
     return () => clearTimeout(timer)
-  }, [query])
+  }, [query, handleSearch])
+
+  // B-EXP-005: Cancel pending requests on unmount
+  useEffect(() => {
+    cancelledRef.current = false
+    return () => {
+      cancelledRef.current = true
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+    }
+  }, [])
 
   const totalResults = results 
     ? results.knowledge.length + results.people.length + results.projects.length 
@@ -188,15 +222,20 @@ export function Explore() {
                       <h3 className="text-sm font-bold uppercase tracking-wider">Knowledge ({results.knowledge.length})</h3>
                     </div>
                     <div className="grid grid-cols-1 gap-3">
-                      {/* TODO(EX-07): Knowledge cards navigate to /library without context.
-                          The route should support ID-based navigation (e.g., /library?id=<k.id>)
-                          so the library auto-selects the relevant item. */}
+                      {/* B-EXP-002: Navigate to /library with selectedId in navigation state */}
                       {results.knowledge.map(k => (
-                        <Card key={k.id} className="group hover:border-primary/30 cursor-pointer transition-all shadow-sm" onClick={() => navigate(`/library`)}>
+                        <Card key={k.id} className="group hover:border-primary/30 cursor-pointer transition-all shadow-sm" onClick={() => navigate('/library', { state: { selectedId: k.id } })}>
                           <CardContent className="p-4 flex items-center justify-between gap-4">
                             <div className="min-w-0 flex-1">
-                              <h4 className="font-semibold text-sm group-hover:text-primary transition-colors truncate">{k.title}</h4>
-                              <p className="text-xs text-muted-foreground line-clamp-1 mt-1">{k.summary || "No summary available"}</p>
+                              {/* B-EXP-001: Highlight matching terms (highlightMatch HTML-escapes input to prevent XSS) */}
+                              <h4
+                                className="font-semibold text-sm group-hover:text-primary transition-colors truncate [&_mark]:bg-yellow-200 dark:[&_mark]:bg-yellow-800 [&_mark]:rounded-sm [&_mark]:px-0.5"
+                                dangerouslySetInnerHTML={{ __html: highlightMatch(k.title || '', query) }}
+                              />
+                              <p
+                                className="text-xs text-muted-foreground line-clamp-1 mt-1 [&_mark]:bg-yellow-200 dark:[&_mark]:bg-yellow-800 [&_mark]:rounded-sm [&_mark]:px-0.5"
+                                dangerouslySetInnerHTML={{ __html: highlightMatch(k.summary || 'No summary available', query) }}
+                              />
                               <div className="flex items-center gap-2 mt-2">
                                 <Clock className="h-3 w-3 text-muted-foreground" />
                                 <span className="text-[10px] text-muted-foreground">{formatDateTime(k.capturedAt)}</span>
@@ -227,7 +266,11 @@ export function Explore() {
                               {p.name.charAt(0)}
                             </div>
                             <div className="min-w-0 flex-1">
-                              <h4 className="font-semibold text-sm group-hover:text-blue-600 transition-colors truncate">{p.name}</h4>
+                              {/* B-EXP-001: Highlight matching terms in people names */}
+                              <h4
+                                className="font-semibold text-sm group-hover:text-blue-600 transition-colors truncate [&_mark]:bg-yellow-200 dark:[&_mark]:bg-yellow-800 [&_mark]:rounded-sm [&_mark]:px-0.5"
+                                dangerouslySetInnerHTML={{ __html: highlightMatch(p.name || '', query) }}
+                              />
                               <p className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">{p.type}</p>
                             </div>
                           </CardContent>
@@ -245,18 +288,20 @@ export function Explore() {
                       <h3 className="text-sm font-bold uppercase tracking-wider">Projects ({results.projects.length})</h3>
                     </div>
                     <div className="grid grid-cols-1 gap-3">
-                      {/* TODO(EX-07): Project cards navigate to /projects without context.
-                          The route should support ID-based navigation (e.g., /projects?id=<pr.id>)
-                          so the projects page auto-selects the relevant project. */}
+                      {/* B-EXP-002: Navigate to /projects with selectedId in navigation state */}
                       {results.projects.map(pr => (
-                        <Card key={pr.id} className="group hover:border-emerald-500/30 cursor-pointer transition-all shadow-sm" onClick={() => navigate(`/projects`)}>
+                        <Card key={pr.id} className="group hover:border-emerald-500/30 cursor-pointer transition-all shadow-sm" onClick={() => navigate('/projects', { state: { selectedId: pr.id } })}>
                           <CardContent className="p-4 flex items-center justify-between gap-4">
                             <div className="flex items-center gap-3 min-w-0 flex-1">
                               <div className="w-9 h-9 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-600 border border-emerald-500/20">
                                 <Folder className="h-5 w-5" />
                               </div>
                               <div className="min-w-0">
-                                <h4 className="font-semibold text-sm group-hover:text-emerald-600 transition-colors truncate">{pr.name}</h4>
+                                {/* B-EXP-001: Highlight matching terms in project names */}
+                                <h4
+                                  className="font-semibold text-sm group-hover:text-emerald-600 transition-colors truncate [&_mark]:bg-yellow-200 dark:[&_mark]:bg-yellow-800 [&_mark]:rounded-sm [&_mark]:px-0.5"
+                                  dangerouslySetInnerHTML={{ __html: highlightMatch(pr.name || '', query) }}
+                                />
                                 <span className="text-[10px] text-muted-foreground uppercase tracking-widest">{pr.status}</span>
                               </div>
                             </div>

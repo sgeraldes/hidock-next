@@ -350,7 +350,9 @@ ${transcript.substring(0, 8000)}`
   }
 
   /**
-   * Perform a global search across all entities
+   * Perform a global search across all entities.
+   * B-EXP-003: Multi-term LIKE search with ranking by match count
+   * (FTS5 is NOT available in sql.js WASM, so we use improved multi-term LIKE).
    */
   async globalSearch(query: string, limit = 5): Promise<Result<{
     knowledge: any[]
@@ -359,31 +361,111 @@ ${transcript.substring(0, 8000)}`
   }>> {
     try {
       const db = getDatabase()
-      
-      const escaped = escapeLikePattern(query)
-      const likeQuery = `%${escaped}%`
 
-      // 1. Search knowledge captures (SQL search + Vector search)
-      const knowledgeRows = db.exec(`
-        SELECT * FROM knowledge_captures
-        WHERE title LIKE ? ESCAPE '\\' OR summary LIKE ? ESCAPE '\\'
-        LIMIT ?
-      `, [likeQuery, likeQuery, limit])
-      
+      // Split query into individual terms for multi-term matching
+      const terms = query.trim().split(/\s+/).filter((t) => t.length > 0)
+
+      if (terms.length === 0) {
+        return success({ knowledge: [], people: [], projects: [] })
+      }
+
+      // For single-term queries, use the simpler original approach for efficiency
+      if (terms.length === 1) {
+        const escaped = escapeLikePattern(terms[0])
+        const likeQuery = `%${escaped}%`
+
+        const knowledgeRows = db.exec(`
+          SELECT * FROM knowledge_captures
+          WHERE title LIKE ? ESCAPE '\' OR summary LIKE ? ESCAPE '\'
+          LIMIT ?
+        `, [likeQuery, likeQuery, limit])
+
+        const knowledge = knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
+          id: v[0],
+          title: v[1],
+          summary: v[2],
+          capturedAt: v[15]
+        })) : []
+
+        const peopleRows = db.exec(`
+          SELECT * FROM contacts
+          WHERE name LIKE ? ESCAPE '\' OR email LIKE ? ESCAPE '\' OR company LIKE ? ESCAPE '\' OR role LIKE ? ESCAPE '\'
+          LIMIT ?
+        `, [likeQuery, likeQuery, likeQuery, likeQuery, limit])
+
+        const people = peopleRows.length > 0 ? peopleRows[0].values.map(v => ({
+          id: v[0],
+          name: v[1],
+          email: v[2],
+          type: v[3]
+        })) : []
+
+        const projectRows = db.exec(`
+          SELECT * FROM projects
+          WHERE name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\'
+          LIMIT ?
+        `, [likeQuery, likeQuery, limit])
+
+        const projects = projectRows.length > 0 ? projectRows[0].values.map(v => ({
+          id: v[0],
+          name: v[1],
+          status: v[3]
+        })) : []
+
+        return success({ knowledge, people, projects })
+      }
+
+      // Multi-term search: match ANY term, rank by how many terms matched
+      const buildMultiTermQuery = (
+        table: string,
+        columns: string[],
+        selectCols: string,
+        limitVal: number
+      ): { sql: string; params: unknown[] } => {
+        const params: unknown[] = []
+        const termClauses: string[] = []
+        const matchCountParts: string[] = []
+
+        for (const term of terms) {
+          const escaped = escapeLikePattern(term)
+          const likeVal = `%${escaped}%`
+
+          // Each term matches if ANY column contains it
+          const colClauses = columns.map((col) => {
+            params.push(likeVal)
+            return `${col} LIKE ? ESCAPE '\'`
+          })
+          termClauses.push(`(${colClauses.join(' OR ')})`)
+
+          // Count: does this term match any column? (0 or 1 per term)
+          const countExpr = columns.map((col) => {
+            params.push(likeVal)
+            return `CASE WHEN ${col} LIKE ? ESCAPE '\' THEN 1 ELSE 0 END`
+          })
+          matchCountParts.push(`MAX(${countExpr.join(', ')})`)
+        }
+
+        const whereClause = termClauses.join(' OR ')
+        const rankExpr = `(${matchCountParts.join(' + ')})`
+
+        const sql = `SELECT ${selectCols}, ${rankExpr} AS match_rank FROM ${table} WHERE ${whereClause} ORDER BY match_rank DESC LIMIT ?`
+        params.push(limitVal)
+        return { sql, params }
+      }
+
+      // 1. Search knowledge captures with multi-term ranking
+      const kq = buildMultiTermQuery('knowledge_captures', ['title', 'summary'], '*', limit)
+      const knowledgeRows = db.exec(kq.sql, kq.params)
       const knowledge = knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
         id: v[0],
         title: v[1],
         summary: v[2],
-        capturedAt: v[15] // captured_at is the 16th column (index 15) in knowledge_captures
+        capturedAt: v[15]
       })) : []
 
-      // 2. Search people
-      const peopleRows = db.exec(`
-        SELECT * FROM contacts
-        WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\'
-        LIMIT ?
-      `, [likeQuery, likeQuery, likeQuery, likeQuery, limit])
-      
+      // 2. Search people with multi-term ranking
+      const pq = buildMultiTermQuery('contacts', ['name', 'email', 'company', 'role'], '*', limit)
+      const peopleRows = db.exec(pq.sql, pq.params)
       const people = peopleRows.length > 0 ? peopleRows[0].values.map(v => ({
         id: v[0],
         name: v[1],
@@ -391,13 +473,9 @@ ${transcript.substring(0, 8000)}`
         type: v[3]
       })) : []
 
-      // 3. Search projects
-      const projectRows = db.exec(`
-        SELECT * FROM projects
-        WHERE name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'
-        LIMIT ?
-      `, [likeQuery, likeQuery, limit])
-      
+      // 3. Search projects with multi-term ranking
+      const prq = buildMultiTermQuery('projects', ['name', 'description'], '*', limit)
+      const projectRows = db.exec(prq.sql, prq.params)
       const projects = projectRows.length > 0 ? projectRows[0].values.map(v => ({
         id: v[0],
         name: v[1],

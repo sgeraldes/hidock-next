@@ -218,6 +218,7 @@ export interface ElectronAPI {
   outputs: {
     getTemplates: () => Promise<Result<OutputTemplate[]>>
     generate: (request: GenerateOutputRequest) => Promise<Result<GenerateOutputResponse>>
+    getByActionableId: (actionableId: string) => Promise<Result<GenerateOutputResponse | null>>
     copyToClipboard: (content: string) => Promise<Result<void>>
     saveToFile: (content: string, suggestedName?: string) => Promise<Result<string>>
   }
@@ -576,6 +577,7 @@ const electronAPI: ElectronAPI = {
   outputs: {
     getTemplates: () => callIPC('outputs:getTemplates'),
     generate: (request) => callIPC('outputs:generate', request),
+    getByActionableId: (actionableId) => callIPC('outputs:getByActionableId', actionableId),
     copyToClipboard: (content) => callIPC('outputs:copyToClipboard', content),
     saveToFile: (content, suggestedName) => callIPC('outputs:saveToFile', content, suggestedName)
   },
