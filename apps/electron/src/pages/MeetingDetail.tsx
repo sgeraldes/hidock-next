@@ -23,6 +23,39 @@ import type { MeetingDetails } from '@/types'
 
 const ATTENDEES_COLLAPSED_LIMIT = 8
 
+/**
+ * C-MTG-005: Safe date formatting that returns a fallback for invalid dates.
+ * Prevents RangeError from Intl.DateTimeFormat when date strings are malformed.
+ */
+function safeFormatTime(date: Date, options: Intl.DateTimeFormatOptions): string {
+  try {
+    if (isNaN(date.getTime())) return '--:--'
+    return date.toLocaleTimeString('en-US', options)
+  } catch {
+    return '--:--'
+  }
+}
+
+function safeFormatDate(date: Date, options: Intl.DateTimeFormatOptions): string {
+  try {
+    if (isNaN(date.getTime())) return 'Unknown date'
+    return date.toLocaleDateString('en-US', options)
+  } catch {
+    return 'Unknown date'
+  }
+}
+
+function safeGetTimezoneName(date: Date): string {
+  try {
+    if (isNaN(date.getTime())) return ''
+    return Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
+      .formatToParts(date)
+      .find(p => p.type === 'timeZoneName')?.value || ''
+  } catch {
+    return ''
+  }
+}
+
 export function MeetingDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -265,6 +298,7 @@ export function MeetingDetail() {
   // C-MTG-005: Guard against invalid dates producing NaN
   const rawDuration = (endDate.getTime() - startDate.getTime()) / 60000
   const durationMins = Number.isFinite(rawDuration) ? Math.round(rawDuration) : 0
+  const isValidDate = !isNaN(startDate.getTime()) && !isNaN(endDate.getTime())
 
   // B-MTG-005: Control visible attendees
   const visibleAttendees = showAllAttendees ? attendees : attendees.slice(0, ATTENDEES_COLLAPSED_LIMIT)
@@ -322,18 +356,24 @@ export function MeetingDetail() {
               <div className="flex items-center gap-3">
                 <Clock className="h-5 w-5 text-muted-foreground" />
                 <div>
-                  {/* C-MTG-003: Timezone-aware time display */}
+                  {/* C-MTG-003: Timezone-aware time display using safe formatters */}
                   <p className="font-medium">
-                    {startDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} -{' '}
-                    {endDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
-                    <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                      {Intl.DateTimeFormat('en-US', { timeZoneName: 'short' }).formatToParts(startDate).find(p => p.type === 'timeZoneName')?.value || ''}
-                    </span>
+                    {safeFormatTime(startDate, { hour: '2-digit', minute: '2-digit' })} -{' '}
+                    {safeFormatTime(endDate, { hour: '2-digit', minute: '2-digit' })}
+                    {isValidDate && (
+                      <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                        {safeGetTimezoneName(startDate)}
+                      </span>
+                    )}
                   </p>
                   <p className="text-sm text-muted-foreground">
                     {durationMins} minutes
-                    {' \u00b7 '}
-                    {startDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                    {isValidDate && (
+                      <>
+                        {' \u00b7 '}
+                        {safeFormatDate(startDate, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                      </>
+                    )}
                   </p>
                 </div>
               </div>
