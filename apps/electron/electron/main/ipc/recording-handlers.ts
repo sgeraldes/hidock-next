@@ -36,6 +36,7 @@ import { getConfig } from '../services/config'
 import {
   GetRecordingByIdSchema,
   DeleteRecordingSchema,
+  DeleteBatchRecordingsSchema,
   LinkRecordingToMeetingSchema,
   UnlinkRecordingFromMeetingSchema,
   TranscribeRecordingSchema,
@@ -132,6 +133,53 @@ export function registerRecordingHandlers(): void {
     } catch (error) {
       console.error('recordings:delete error:', error)
       return false
+    }
+  })
+
+  // Batch delete recordings (B-LIB-007)
+  ipcMain.handle('recordings:deleteBatch', async (_, ids: unknown): Promise<{
+    success: boolean
+    deleted: number
+    failed: number
+    errors: Array<{ id: string; error: string }>
+  }> => {
+    try {
+      const result = DeleteBatchRecordingsSchema.safeParse({ ids })
+      if (!result.success) {
+        console.error('recordings:deleteBatch validation error:', result.error)
+        return { success: false, deleted: 0, failed: 0, errors: [{ id: '', error: result.error.issues[0]?.message || 'Invalid request' }] }
+      }
+
+      let deleted = 0
+      let failed = 0
+      const errors: Array<{ id: string; error: string }> = []
+
+      for (const id of result.data.ids) {
+        try {
+          const recording = getRecordingById(id)
+          if (recording && recording.file_path) {
+            const wasDeleted = deleteRecordingFile(recording.file_path)
+            if (wasDeleted) {
+              updateRecordingStatus(id, 'deleted')
+              deleted++
+            } else {
+              failed++
+              errors.push({ id, error: 'File deletion failed' })
+            }
+          } else {
+            failed++
+            errors.push({ id, error: 'Recording not found or no file path' })
+          }
+        } catch (e) {
+          failed++
+          errors.push({ id, error: e instanceof Error ? e.message : 'Unknown error' })
+        }
+      }
+
+      return { success: failed === 0, deleted, failed, errors }
+    } catch (error) {
+      console.error('recordings:deleteBatch error:', error)
+      return { success: false, deleted: 0, failed: 0, errors: [{ id: '', error: error instanceof Error ? error.message : 'Unknown error' }] }
     }
   })
 

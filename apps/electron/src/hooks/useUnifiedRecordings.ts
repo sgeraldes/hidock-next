@@ -342,7 +342,8 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
   const error = useAppStore((state) => state.unifiedRecordingsError)
   const loaded = useAppStore((state) => state.unifiedRecordingsLoaded)
   const setRecordings = useAppStore((state) => state.setUnifiedRecordings)
-  const setLoading = useAppStore((state) => state.setUnifiedRecordingsLoading)
+  const incrementLoading = useAppStore((state) => state.incrementUnifiedRecordingsLoading)
+  const decrementLoading = useAppStore((state) => state.decrementUnifiedRecordingsLoading)
   const setError = useAppStore((state) => state.setUnifiedRecordingsError)
   const markLoaded = useAppStore((state) => state.markUnifiedRecordingsLoaded)
 
@@ -383,8 +384,10 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     // If not forcing and already loaded, skip (except for device connection changes)
     // This is handled by the caller - forceRefresh=true bypasses cached data
 
-    setLoading(true)
+    incrementLoading()
     setError(null)
+    // B-LIB-001: Track whether we've already decremented to avoid double-decrement on error
+    let decremented = false
 
     try {
       // Guard: Check if running in Electron with full API
@@ -392,7 +395,8 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         console.log('[useUnifiedRecordings] Not in Electron - returning empty data')
         setRecordings([])
         setDeviceConnected(false)
-        setLoading(false)
+        decrementLoading()
+        decremented = true
         loadingRef.current = false
         return
       }
@@ -446,11 +450,12 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       // Only needed if we don't have memory cache or forceRefresh is true
       const needsDeviceFetch = isConnected && (memoryCachedDeviceRecs.length === 0 || forceRefresh)
 
-      // Only clear loading if no device fetch is needed.
-      // If Phase 2 will run, keep loading=true so the UI shows a loading indicator
+      // Only decrement loading if no device fetch is needed.
+      // If Phase 2 will run, keep loading count elevated so the UI shows a loading indicator
       // and the sync button stays disabled until device recordings are available.
       if (!needsDeviceFetch) {
-        setLoading(false)
+        decrementLoading()
+        decremented = true
       }
 
       let deviceRecs: HiDockRecording[] = memoryCachedDeviceRecs
@@ -484,17 +489,22 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       const finalRecordings = buildRecordingMap(deviceRecs, dbRecs, syncedFiles, cachedDeviceFiles, isConnected, knowledgeCaptures)
       console.log('[useUnifiedRecordings] Final recordings count:', finalRecordings.length)
       setRecordings(finalRecordings)
-      // Clear loading after final update (covers both Phase 1-only and Phase 2 paths)
-      setLoading(false)
+      // Decrement loading after final update (covers Phase 2 path only — Phase 1-only already decremented)
+      if (!decremented) {
+        decrementLoading()
+        decremented = true
+      }
     } catch (e) {
       console.error('[useUnifiedRecordings] Error loading recordings:', e)
       setError(e instanceof Error ? e.message : 'Failed to load recordings')
-      setLoading(false)
+      if (!decremented) {
+        decrementLoading()
+      }
     } finally {
       loadingRef.current = false
       console.log('[useUnifiedRecordings] loadRecordings completed')
     }
-  }, [deviceService, setRecordings, setLoading, setError, markLoaded])
+  }, [deviceService, setRecordings, incrementLoading, decrementLoading, setError, markLoaded])
 
   // TODO: FL-05: Multiple page instances each create independent subscriptions below.
   // A singleton subscription manager would prevent duplicate refreshes when multiple

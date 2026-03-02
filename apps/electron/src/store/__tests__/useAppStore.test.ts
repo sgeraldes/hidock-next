@@ -35,6 +35,8 @@ beforeEach(() => {
   store.setUnifiedRecordingsLoading(false)
   store.setUnifiedRecordingsError(null)
   store.invalidateUnifiedRecordings()
+  // Reset counter-based loading (B-LIB-001)
+  useAppStore.setState({ unifiedRecordingsLoadingCount: 0 })
 
   // Reset calendar
   store.setCurrentDate(new Date(2026, 1, 26)) // Fixed date for deterministic tests
@@ -678,6 +680,65 @@ describe('useAppStore', () => {
       markUnifiedRecordingsLoaded()
       invalidateUnifiedRecordings()
       expect(useAppStore.getState().unifiedRecordingsLoaded).toBe(false)
+    })
+
+    // B-LIB-001: Counter-based loading tests
+    it('incrementUnifiedRecordingsLoading increases count and sets loading true', () => {
+      const { incrementUnifiedRecordingsLoading } = useAppStore.getState()
+
+      incrementUnifiedRecordingsLoading()
+      expect(useAppStore.getState().unifiedRecordingsLoadingCount).toBe(1)
+      expect(useAppStore.getState().unifiedRecordingsLoading).toBe(true)
+    })
+
+    it('decrementUnifiedRecordingsLoading decreases count', () => {
+      const { incrementUnifiedRecordingsLoading, decrementUnifiedRecordingsLoading } = useAppStore.getState()
+
+      incrementUnifiedRecordingsLoading()
+      incrementUnifiedRecordingsLoading()
+      decrementUnifiedRecordingsLoading()
+      expect(useAppStore.getState().unifiedRecordingsLoadingCount).toBe(1)
+      expect(useAppStore.getState().unifiedRecordingsLoading).toBe(true)
+    })
+
+    it('decrementUnifiedRecordingsLoading sets loading false when count reaches 0', () => {
+      const { incrementUnifiedRecordingsLoading, decrementUnifiedRecordingsLoading } = useAppStore.getState()
+
+      incrementUnifiedRecordingsLoading()
+      decrementUnifiedRecordingsLoading()
+      expect(useAppStore.getState().unifiedRecordingsLoadingCount).toBe(0)
+      expect(useAppStore.getState().unifiedRecordingsLoading).toBe(false)
+    })
+
+    it('decrementUnifiedRecordingsLoading does not go below 0', () => {
+      const { decrementUnifiedRecordingsLoading } = useAppStore.getState()
+
+      decrementUnifiedRecordingsLoading()
+      decrementUnifiedRecordingsLoading()
+      expect(useAppStore.getState().unifiedRecordingsLoadingCount).toBe(0)
+      expect(useAppStore.getState().unifiedRecordingsLoading).toBe(false)
+    })
+
+    it('multiple concurrent increments track correctly', () => {
+      const { incrementUnifiedRecordingsLoading, decrementUnifiedRecordingsLoading } = useAppStore.getState()
+
+      // Simulate multiple async operations starting
+      incrementUnifiedRecordingsLoading()
+      incrementUnifiedRecordingsLoading()
+      incrementUnifiedRecordingsLoading()
+      expect(useAppStore.getState().unifiedRecordingsLoadingCount).toBe(3)
+      expect(useAppStore.getState().unifiedRecordingsLoading).toBe(true)
+
+      // First two complete
+      decrementUnifiedRecordingsLoading()
+      decrementUnifiedRecordingsLoading()
+      expect(useAppStore.getState().unifiedRecordingsLoadingCount).toBe(1)
+      expect(useAppStore.getState().unifiedRecordingsLoading).toBe(true) // Still loading
+
+      // Last one completes
+      decrementUnifiedRecordingsLoading()
+      expect(useAppStore.getState().unifiedRecordingsLoadingCount).toBe(0)
+      expect(useAppStore.getState().unifiedRecordingsLoading).toBe(false) // Now done
     })
   })
 

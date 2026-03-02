@@ -52,10 +52,13 @@ describe('useUnifiedRecordings', () => {
     storeState = {
       unifiedRecordings: [],
       unifiedRecordingsLoading: false,
+      unifiedRecordingsLoadingCount: 0,
       unifiedRecordingsError: null,
       unifiedRecordingsLoaded: false,
       setUnifiedRecordings: vi.fn(),
       setUnifiedRecordingsLoading: vi.fn(),
+      incrementUnifiedRecordingsLoading: vi.fn(),
+      decrementUnifiedRecordingsLoading: vi.fn(),
       setUnifiedRecordingsError: vi.fn(),
       markUnifiedRecordingsLoaded: vi.fn()
     }
@@ -86,11 +89,11 @@ describe('useUnifiedRecordings', () => {
       })
     })
 
-    it('sets loading state during fetch', async () => {
+    it('increments loading counter during fetch', async () => {
       renderHook(() => useUnifiedRecordings())
 
       await waitFor(() => {
-        expect(storeState.setUnifiedRecordingsLoading).toHaveBeenCalledWith(true)
+        expect(storeState.incrementUnifiedRecordingsLoading).toHaveBeenCalled()
       })
     })
 
@@ -102,11 +105,11 @@ describe('useUnifiedRecordings', () => {
       })
     })
 
-    it('clears loading state after fetch completes', async () => {
+    it('decrements loading counter after fetch completes', async () => {
       renderHook(() => useUnifiedRecordings())
 
       await waitFor(() => {
-        expect(storeState.setUnifiedRecordingsLoading).toHaveBeenCalledWith(false)
+        expect(storeState.decrementUnifiedRecordingsLoading).toHaveBeenCalled()
       })
     })
   })
@@ -293,14 +296,14 @@ describe('useUnifiedRecordings', () => {
       })
     })
 
-    it('clears loading state on error', async () => {
+    it('decrements loading counter on error', async () => {
       // @ts-ignore
       window.electronAPI.recordings.getAll.mockRejectedValue(new Error('Fetch failed'))
 
       renderHook(() => useUnifiedRecordings())
 
       await waitFor(() => {
-        expect(storeState.setUnifiedRecordingsLoading).toHaveBeenCalledWith(false)
+        expect(storeState.decrementUnifiedRecordingsLoading).toHaveBeenCalled()
       })
     })
 

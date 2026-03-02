@@ -126,6 +126,13 @@ export const DeleteRecordingSchema = z.object({
 })
 
 /**
+ * Batch delete recordings request (B-LIB-007)
+ */
+export const DeleteBatchRecordingsSchema = z.object({
+  ids: z.array(z.string().uuid('Each ID must be a valid UUID')).min(1).max(1000)
+})
+
+/**
  * Link recording to meeting request
  */
 export const LinkRecordingToMeetingSchema = z.object({
@@ -250,6 +257,7 @@ export type AssignTier = z.infer<typeof AssignTierSchema>
 export type RecordingId = z.infer<typeof RecordingIdSchema>
 export type GetRecordingById = z.infer<typeof GetRecordingByIdSchema>
 export type DeleteRecording = z.infer<typeof DeleteRecordingSchema>
+export type DeleteBatchRecordings = z.infer<typeof DeleteBatchRecordingsSchema>
 export type LinkRecordingToMeeting = z.infer<typeof LinkRecordingToMeetingSchema>
 export type UnlinkRecordingFromMeeting = z.infer<typeof UnlinkRecordingFromMeetingSchema>
 export type TranscribeRecording = z.infer<typeof TranscribeRecordingSchema>

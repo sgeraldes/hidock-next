@@ -12,6 +12,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderHook } from '@testing-library/react'
 
 // Test the useAudioControls hook shape and the OperationController's exposed controls
 describe('FIX-011: Playback rate control', () => {
@@ -22,11 +23,12 @@ describe('FIX-011: Playback rate control', () => {
   it('BUG: useAudioControls must expose setPlaybackRate', async () => {
     // Import the hook
     const { useAudioControls } = await import('@/components/OperationController')
-    const controls = useAudioControls()
+    // B-LIB-002: useAudioControls uses useMemo, must be called inside renderHook
+    const { result } = renderHook(() => useAudioControls())
 
     // This MUST exist for playback rate to work
-    expect(controls).toHaveProperty('setPlaybackRate')
-    expect(typeof controls.setPlaybackRate).toBe('function')
+    expect(result.current).toHaveProperty('setPlaybackRate')
+    expect(typeof result.current.setPlaybackRate).toBe('function')
   })
 
   it('BUG: setPlaybackRate must set rate on the audio element', () => {
