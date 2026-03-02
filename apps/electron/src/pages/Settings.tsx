@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { Save, FolderOpen, RefreshCw, AlertCircle } from 'lucide-react'
+import { Save, FolderOpen, RefreshCw, AlertCircle, Eye, EyeOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
@@ -28,6 +28,8 @@ export function Settings() {
   const [geminiModel, setGeminiModel] = useState('gemini-3-pro-preview')
   const [chatProvider, setChatProvider] = useState<'gemini' | 'ollama'>('gemini')
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434')
+  const [showApiKey, setShowApiKey] = useState(false)
+  const [storageLoading, setStorageLoading] = useState(false)
 
   // Available Gemini models for transcription (audio-capable)
   // From: https://ai.google.dev/gemini-api/docs/models
@@ -153,6 +155,7 @@ export function Settings() {
   const loadStorageInfo = async () => {
     try {
       setStorageError(null) // B-SET-002: Clear previous error
+      setStorageLoading(true)
       const result = await window.electronAPI.storage.getInfo()
       if (result.success && result.data) {
         setStorageInfo(result.data)
@@ -167,6 +170,8 @@ export function Settings() {
       const errorMsg = error instanceof Error ? error.message : 'Failed to load storage info'
       setStorageError(errorMsg)
       console.error('Failed to load storage info:', error)
+    } finally {
+      setStorageLoading(false)
     }
   }
 
@@ -374,7 +379,6 @@ export function Settings() {
                     id="syncEnabled"
                     checked={syncEnabled}
                     onChange={(e) => setSyncEnabled(e.target.checked)}
-                    onKeyDown={(e) => e.key === ' ' && setSyncEnabled(!syncEnabled)}
                     disabled={saving}
                     aria-label="Enable auto-sync"
                     className="rounded"
@@ -392,7 +396,12 @@ export function Settings() {
                     min={5}
                     max={120}
                     value={syncInterval}
-                    onChange={(e) => setSyncInterval(parseInt(e.target.value) || 15)}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value)
+                      if (isNaN(val)) return
+                      // Clamp to valid range
+                      setSyncInterval(Math.min(120, Math.max(5, val)))
+                    }}
                     onKeyDown={(e) => e.key === 'Enter' && handleSaveCalendar()}
                     disabled={saving}
                     aria-label="Sync interval in minutes"
@@ -420,6 +429,11 @@ export function Settings() {
                   <RefreshCw className={`h-4 w-4 mr-2 ${calendarSyncing ? 'animate-spin' : ''}`} aria-hidden="true" />
                   Sync Now
                 </Button>
+                {config?.calendar.lastSyncAt && (
+                  <span className="text-xs text-muted-foreground ml-2">
+                    Last synced: {new Date(config.calendar.lastSyncAt).toLocaleString()}
+                  </span>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -433,18 +447,31 @@ export function Settings() {
             <CardContent className="space-y-4">
               <div>
                 <label htmlFor="geminiApiKey" className="text-sm font-medium">Gemini API Key</label>
-                <Input
-                  id="geminiApiKey"
-                  type="password"
-                  placeholder="Enter your Gemini API key"
-                  value={geminiApiKey}
-                  onChange={(e) => setGeminiApiKey(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
-                  disabled={saving}
-                  aria-label="Gemini API Key"
-                  aria-describedby="geminiApiKey-description"
-                  className="mt-1"
-                />
+                <div className="relative mt-1">
+                  <Input
+                    id="geminiApiKey"
+                    type={showApiKey ? 'text' : 'password'}
+                    placeholder="Enter your Gemini API key"
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                    disabled={saving}
+                    aria-label="Gemini API Key"
+                    aria-describedby="geminiApiKey-description"
+                    className="pr-10"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
+                    tabIndex={-1}
+                  >
+                    {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </Button>
+                </div>
                 <p id="geminiApiKey-description" className="text-xs text-muted-foreground mt-1">
                   Get your API key from{' '}
                   <a
@@ -564,6 +591,13 @@ export function Settings() {
               <CardDescription>Local data storage information</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* Storage loading indicator */}
+              {storageLoading && !storageInfo && (
+                <div className="flex items-center gap-2 py-4 justify-center">
+                  <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
+                  <span className="text-sm text-muted-foreground">Loading storage info...</span>
+                </div>
+              )}
               {/* B-SET-002: Storage error with retry button */}
               {storageError && (
                 <div className="flex items-center gap-3 p-3 rounded-md bg-destructive/10 text-destructive border border-destructive/20">

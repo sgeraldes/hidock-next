@@ -1,6 +1,6 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { Settings } from '../Settings'
 
 const mockLoadConfig = vi.fn()
@@ -24,7 +24,12 @@ vi.mock('@/store/domain/useConfigStore', () => ({
   useConfigStore: vi.fn((selector?: any) => {
     const state = {
       config: {
-        calendar: { icsUrl: 'https://example.com/cal.ics', syncEnabled: true, syncIntervalMinutes: 15 },
+        calendar: {
+          icsUrl: 'https://example.com/cal.ics',
+          syncEnabled: true,
+          syncIntervalMinutes: 15,
+          lastSyncAt: '2026-03-01T10:00:00Z'
+        },
         transcription: { geminiApiKey: 'AIzaTestKey12345', geminiModel: 'gemini-3-pro-preview' },
         chat: { provider: 'gemini' as const },
         embeddings: { ollamaBaseUrl: 'http://localhost:11434' }
@@ -128,5 +133,71 @@ describe('Settings Page', () => {
     render(<Settings />)
 
     expect(screen.getByTestId('health-check')).toBeInTheDocument()
+  })
+
+  // C-006: API key visibility toggle
+  it('should toggle API key visibility', async () => {
+    render(<Settings />)
+
+    const apiKeyInput = screen.getByLabelText('Gemini API Key') as HTMLInputElement
+
+    // Default: password type
+    expect(apiKeyInput.type).toBe('password')
+
+    // Click show API key button
+    const toggleButton = screen.getByLabelText('Show API key')
+    fireEvent.click(toggleButton)
+
+    // Should now be visible
+    expect(apiKeyInput.type).toBe('text')
+
+    // Click hide API key button
+    const hideButton = screen.getByLabelText('Hide API key')
+    fireEvent.click(hideButton)
+
+    // Should be hidden again
+    expect(apiKeyInput.type).toBe('password')
+  })
+
+  // C-006: Sync interval clamping
+  it('should clamp sync interval to valid range', async () => {
+    render(<Settings />)
+
+    const intervalInput = screen.getByLabelText('Sync interval in minutes') as HTMLInputElement
+
+    // Should initialize with the config value
+    expect(intervalInput.value).toBe('15')
+
+    // Try setting below minimum (5)
+    fireEvent.change(intervalInput, { target: { value: '2' } })
+    expect(intervalInput.value).toBe('5') // Clamped to 5
+
+    // Try setting above maximum (120)
+    fireEvent.change(intervalInput, { target: { value: '200' } })
+    expect(intervalInput.value).toBe('120') // Clamped to 120
+  })
+
+  // C-006: No redundant onKeyDown on checkbox
+  it('should toggle sync checkbox via native click', async () => {
+    render(<Settings />)
+
+    const checkbox = screen.getByLabelText('Enable auto-sync') as HTMLInputElement
+
+    // Default from mock config
+    expect(checkbox.checked).toBe(true)
+
+    fireEvent.click(checkbox)
+    expect(checkbox.checked).toBe(false)
+
+    fireEvent.click(checkbox)
+    expect(checkbox.checked).toBe(true)
+  })
+
+  // C-006: Last sync time display
+  it('should display last sync time when available', async () => {
+    render(<Settings />)
+
+    // The mock config has lastSyncAt set to '2026-03-01T10:00:00Z'
+    expect(screen.getByText(/Last synced:/)).toBeInTheDocument()
   })
 })

@@ -172,4 +172,95 @@ describe('Projects Page', () => {
 
     expect(screen.getByPlaceholderText('Search projects...')).toBeInTheDocument()
   })
+
+  // C-006: Detail loading state
+  it('should show loading state when selecting a project', async () => {
+    // Make getById slow so we can observe the loading state
+    let resolveGetById: (value: any) => void
+    const slowGetById = new Promise((resolve) => { resolveGetById = resolve })
+    ;(global.window.electronAPI as any).projects.getById = vi.fn().mockReturnValue(slowGetById)
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+
+    // Click on the project to select it
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    // Should show loading spinner
+    expect(await screen.findByText('Loading project details...')).toBeInTheDocument()
+
+    // Resolve the getById call
+    resolveGetById!({
+      success: true,
+      data: {
+        project: {
+          id: 'pr1',
+          name: 'Project Alpha',
+          status: 'active',
+          createdAt: new Date().toISOString(),
+          description: 'First project',
+          knowledgeIds: [],
+          personIds: []
+        },
+        meetings: [],
+        topics: []
+      }
+    })
+  })
+
+  // C-006: Inline description editing
+  it('should show edit button for project description', async () => {
+    // Reset getById mock
+    ;(global.window.electronAPI as any).projects.getById = mockGetById
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+
+    // Click on the project to select it
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    // Wait for the description to load
+    await screen.findByText('First project')
+
+    // Description section should have an Edit button
+    const editButton = screen.getByText('Edit')
+    expect(editButton).toBeInTheDocument()
+  })
+
+  // C-006: Parallel member resolution instead of N+1
+  it('should resolve project members in parallel', async () => {
+    const mockContactGetById = vi.fn().mockResolvedValue({
+      success: true,
+      data: { contact: { id: 'p1', name: 'Alice Smith', type: 'team' }, meetings: [] }
+    })
+    ;(global.window.electronAPI as any).contacts.getById = mockContactGetById
+    ;(global.window.electronAPI as any).projects.getById = mockGetById
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+
+    // Click to select the project
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    // Wait for member name to appear (Alice Smith)
+    await screen.findByText('Alice Smith')
+
+    // contacts.getById should have been called for member resolution
+    expect(mockContactGetById).toHaveBeenCalledWith('p1')
+  })
 })

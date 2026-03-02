@@ -157,7 +157,8 @@ describe('People Page', () => {
     expect(screen.getByText('external')).toBeInTheDocument()
   })
 
-  it('should display interaction counts', async () => {
+  // C-006: Interaction count grammar fix - singular vs plural
+  it('should display correct interaction count grammar', async () => {
     render(
       <MemoryRouter>
         <People />
@@ -166,8 +167,133 @@ describe('People Page', () => {
 
     await screen.findByText('Mario')
 
+    // "5 interactions" (plural)
     expect(screen.getByText('5 interactions')).toBeInTheDocument()
+    // "12 interactions" (plural)
     expect(screen.getByText('12 interactions')).toBeInTheDocument()
-    expect(screen.getByText('1 interactions')).toBeInTheDocument()
+    // "1 interaction" (singular - was "1 interactions" before fix)
+    expect(screen.getByText('1 interaction')).toBeInTheDocument()
+  })
+
+  // C-006: Result count indicator
+  it('should display result count indicator', async () => {
+    render(
+      <MemoryRouter>
+        <People />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Mario')
+
+    // Should show "Showing 1-3 of 3 people"
+    expect(screen.getByText(/Showing 1/)).toBeInTheDocument()
+    expect(screen.getByText(/of 3 people/)).toBeInTheDocument()
+  })
+
+  // C-006: Pagination - page size used is 30
+  it('should pass pagination offset to API', async () => {
+    render(
+      <MemoryRouter>
+        <People />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Mario')
+
+    // First call should use offset 0 with limit 30
+    expect(mockGetAll).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limit: 30,
+        offset: 0
+      })
+    )
+  })
+
+  // C-006: Pagination controls render when needed
+  it('should show pagination controls when total exceeds page size', async () => {
+    mockGetAll.mockResolvedValueOnce({
+      success: true,
+      data: {
+        contacts: [
+          {
+            id: 'p1',
+            name: 'Test Person',
+            type: 'team',
+            interactionCount: 1,
+            lastSeenAt: '2026-01-01T00:00:00Z',
+            firstSeenAt: '2026-01-01T00:00:00Z',
+            tags: [],
+            email: null,
+            role: null,
+            company: null
+          }
+        ],
+        total: 60 // Two pages of 30
+      }
+    })
+
+    render(
+      <MemoryRouter>
+        <People />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Test Person')
+
+    // Pagination controls should be visible
+    expect(screen.getByLabelText('Previous page')).toBeInTheDocument()
+    expect(screen.getByLabelText('Next page')).toBeInTheDocument()
+    expect(screen.getByText('Page 1 of 2')).toBeInTheDocument()
+  })
+
+  // C-006: No pagination controls when not needed
+  it('should not show pagination controls when total fits one page', async () => {
+    render(
+      <MemoryRouter>
+        <People />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Mario')
+
+    // No pagination buttons since total (3) fits in one page (30)
+    expect(screen.queryByLabelText('Previous page')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Next page')).not.toBeInTheDocument()
+  })
+
+  // C-006: Safe date formatting for invalid dates
+  it('should handle invalid lastSeenAt dates gracefully', async () => {
+    mockGetAll.mockResolvedValueOnce({
+      success: true,
+      data: {
+        contacts: [
+          {
+            id: 'p-bad-date',
+            name: 'Bad Date Person',
+            type: 'unknown',
+            interactionCount: 0,
+            lastSeenAt: 'not-a-date',
+            firstSeenAt: '2026-01-01T00:00:00Z',
+            tags: [],
+            email: null,
+            role: null,
+            company: null
+          }
+        ],
+        total: 1
+      }
+    })
+
+    render(
+      <MemoryRouter>
+        <People />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Bad Date Person')
+
+    // Should show "Unknown" instead of "Invalid Date"
+    expect(screen.getByText('Unknown')).toBeInTheDocument()
+    expect(screen.queryByText('Invalid Date')).not.toBeInTheDocument()
   })
 })
