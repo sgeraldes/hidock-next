@@ -21,6 +21,7 @@ import { initializeDatabase, closeDatabase } from './services/database'
 import { initializeConfig } from './services/config'
 import { initializeFileStorage } from './services/file-storage'
 import { registerIpcHandlers } from './ipc/handlers'
+import { stopAutoSync } from './ipc/calendar-handlers'
 import {
   startRecordingWatcher,
   stopRecordingWatcher,
@@ -284,6 +285,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  stopAutoSync() // B-CAL-002: Clean up calendar auto-sync interval
   stopRecordingWatcher()
   stopTranscriptionProcessor()
   closeDatabase()

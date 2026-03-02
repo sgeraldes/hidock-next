@@ -150,7 +150,11 @@ function startAutoSync(): void {
   }, intervalMs)
 }
 
-function stopAutoSync(): void {
+/**
+ * Stop the calendar auto-sync interval.
+ * B-CAL-002: Exported so it can be called during app quit cleanup.
+ */
+export function stopAutoSync(): void {
   if (syncInterval) {
     clearInterval(syncInterval)
     syncInterval = null

@@ -141,10 +141,14 @@ export interface CalendarSettings {
   lastSyncAt: string | null
 }
 
+// B-CAL-004: Error category for calendar sync failures
+export type CalendarErrorCategory = 'network' | 'parse' | 'database' | 'validation' | 'unknown'
+
 export interface CalendarSyncResult {
   success: boolean
   meetingsCount: number
   error?: string
+  errorCategory?: CalendarErrorCategory
   lastSync?: string
 }
 
