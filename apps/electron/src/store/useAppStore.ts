@@ -273,9 +273,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     return { downloadQueue: newQueue }
   }),
 
-  isDownloading: (id) => get().downloadQueue.has(id),
+  // SM-M01: Deprecated methods that use get() causing over-subscription.
+  // Components should use useIsDownloading(id) and useDownloadProgress(id) selector hooks instead.
+  isDownloading: (id) => {
+    if (import.meta.env.DEV) {
+      console.warn(
+        '[useAppStore] isDownloading() is deprecated and causes over-subscription. ' +
+        'Use the useIsDownloading(id) selector hook instead.'
+      )
+    }
+    return get().downloadQueue.has(id)
+  },
 
   getDownloadProgress: (id) => {
+    if (import.meta.env.DEV) {
+      console.warn(
+        '[useAppStore] getDownloadProgress() is deprecated and causes over-subscription. ' +
+        'Use the useDownloadProgress(id) selector hook instead.'
+      )
+    }
     const item = get().downloadQueue.get(id)
     return item ? item.progress : null
   },

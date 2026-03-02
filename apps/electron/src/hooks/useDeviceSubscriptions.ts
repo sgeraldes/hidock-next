@@ -34,6 +34,19 @@ export function useDeviceSubscriptions() {
   const addActivityLogEntry = useAppStore((s) => s.addActivityLogEntry)
   const setDeviceSyncState = useAppStore((s) => s.setDeviceSyncState)
 
+  // SM-M02: Use refs for store actions to prevent stale closures in long-lived subscriptions.
+  // The deviceSubscriptionsInitialized guard means the effect won't re-run when these
+  // action references change, so storing them in refs ensures the callbacks always use
+  // the latest function reference.
+  const setDeviceStateRef = useRef(setDeviceState)
+  setDeviceStateRef.current = setDeviceState
+  const setConnectionStatusRef = useRef(setConnectionStatus)
+  setConnectionStatusRef.current = setConnectionStatus
+  const addActivityLogEntryRef = useRef(addActivityLogEntry)
+  addActivityLogEntryRef.current = addActivityLogEntry
+  const setDeviceSyncStateRef = useRef(setDeviceSyncState)
+  setDeviceSyncStateRef.current = setDeviceSyncState
+
   // ---- Device state subscriptions (guarded for single subscription) ----
 
   useEffect(() => {
@@ -45,19 +58,19 @@ export function useDeviceSubscriptions() {
     // Get initial device state and update store
     const initialState = deviceService.getState()
     const initialStatus = deviceService.getConnectionStatus()
-    setDeviceState(initialState)
-    setConnectionStatus(initialStatus)
+    setDeviceStateRef.current(initialState)
+    setConnectionStatusRef.current(initialStatus)
 
     // Subscribe to device state changes
     const unsubStateChange = deviceService.onStateChange((state) => {
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Device state changed:', state)
-      setDeviceState(state)
+      setDeviceStateRef.current(state)
     })
 
     // Subscribe to connection status changes
     const unsubStatusChange = deviceService.onStatusChange(async (status) => {
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Connection status changed:', status)
-      setConnectionStatus(status)
+      setConnectionStatusRef.current(status)
 
       // spec-007: Cancel downloads on disconnect
       if (status.step === 'disconnected' && window.electronAPI?.downloadService) {
@@ -112,7 +125,7 @@ export function useDeviceSubscriptions() {
                 dateCreated: rec.dateCreated?.toISOString()
               }))
               await window.electronAPI.downloadService.startSession(filesToQueue)
-              setDeviceSyncState({
+              setDeviceSyncStateRef.current({
                 deviceSyncing: true,
                 deviceSyncProgress: { total: toSync.length, current: 0 },
                 deviceFileDownloading: toSync[0]?.filename ?? null
@@ -131,7 +144,7 @@ export function useDeviceSubscriptions() {
 
     // Subscribe to activity log
     const unsubActivity = deviceService.onActivity((entry) => {
-      addActivityLogEntry(entry)
+      addActivityLogEntryRef.current(entry)
     })
 
     return () => {
@@ -146,7 +159,9 @@ export function useDeviceSubscriptions() {
       unsubActivity()
       deviceSubscriptionsInitialized.current = false
     }
-  }, [deviceService, setDeviceState, setConnectionStatus, addActivityLogEntry])
+  // SM-M02: Dependencies are stable (deviceService is singleton), refs handle action freshness
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceService])
 
   // ---- Initial auto-sync for pre-connected devices ----
 
@@ -202,7 +217,8 @@ export function useDeviceSubscriptions() {
             dateCreated: rec.dateCreated?.toISOString()
           }))
           await window.electronAPI.downloadService.startSession(filesToQueue)
-          setDeviceSyncState({
+          // SM-M02: Use ref to avoid stale closure
+          setDeviceSyncStateRef.current({
             deviceSyncing: true,
             deviceSyncProgress: { total: toSync.length, current: 0 },
             deviceFileDownloading: toSync[0]?.filename ?? null
@@ -224,5 +240,7 @@ export function useDeviceSubscriptions() {
     return () => {
       unsubDeviceDisconnect()
     }
-  }, [deviceService, setDeviceSyncState])
+  // SM-M02: Dependencies are stable (deviceService is singleton), refs handle action freshness
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceService])
 }
