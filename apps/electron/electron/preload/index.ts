@@ -121,6 +121,7 @@ export interface ElectronAPI {
     selectMeeting: (recordingId: string, meetingId: string | null) => Promise<{ success: boolean; error?: string }>
     // External file import
     addExternal: () => Promise<{ success: boolean; recording?: any; error?: string }>
+    addExternalByPath: (filePath: string) => Promise<{ success: boolean; recording?: any; error?: string }>
     // Transcription
     transcribe: (recordingId: string) => Promise<void>
     addToQueue: (recordingId: string) => Promise<string | false>
@@ -487,6 +488,7 @@ const electronAPI: ElectronAPI = {
     selectMeeting: (recordingId, meetingId) => callIPC('recordings:selectMeeting', recordingId, meetingId),
     // External file import
     addExternal: () => callIPC('recordings:addExternal'),
+    addExternalByPath: (filePath: string) => callIPC('recordings:addExternalByPath', filePath),
     // Transcription
     transcribe: (recordingId) => callIPC('recordings:transcribe', recordingId),
     addToQueue: (recordingId) => callIPC('recordings:addToQueue', recordingId),

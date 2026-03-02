@@ -492,7 +492,8 @@ describe('useTranscriptionStore', () => {
           completed: 0,
           failed: 0,
           processing: 0,
-          pending: 0
+          pending: 0,
+          aggregateProgress: 0
         })
       })
 
@@ -512,13 +513,29 @@ describe('useTranscriptionStore', () => {
 
         const { result } = renderHook(() => useTranscriptionStats())
 
+        // aggregateProgress = (0 + 50 + 100 + 0 + 0) / 5 = 30
         expect(result.current).toEqual({
           total: 5,
           completed: 1,
           failed: 1,
           processing: 1,
-          pending: 2
+          pending: 2,
+          aggregateProgress: 30
         })
+      })
+
+      it('calculates aggregate progress correctly', () => {
+        const store = useTranscriptionStore.getState()
+
+        store.addToQueue('q-1', 'rec-1', 'file1.wav')
+        store.addToQueue('q-2', 'rec-2', 'file2.wav')
+        store.updateProgress('q-1', 80)
+        store.updateProgress('q-2', 40)
+
+        const { result } = renderHook(() => useTranscriptionStats())
+
+        // (80 + 40) / 2 = 60
+        expect(result.current.aggregateProgress).toBe(60)
       })
 
       it('updates when queue changes', () => {
@@ -552,6 +569,35 @@ describe('useTranscriptionStore', () => {
 
         expect(result.current.length).toBe(1)
         expect(result.current[0].id).toBe('q-1')
+      })
+
+      it('sorts pending items by priority: lower retryCount first', async () => {
+        const store = useTranscriptionStore.getState()
+        store.addToQueue('q-1', 'rec-1', 'fresh.wav')
+        store.addToQueue('q-2', 'rec-2', 'retried.wav')
+
+        // Simulate q-2 having failed and been retried (retryCount=1)
+        store.markFailed('q-2', 'Error')
+
+        // Wait for the retry IPC mock to complete
+        await vi.waitFor(() => {
+          store.retry('q-2')
+        })
+
+        // Allow the async retry promise to resolve
+        await vi.waitFor(() => {
+          const item = store.queue.get('q-2')
+          return item?.status === 'pending' && item?.retryCount === 1
+        })
+
+        const { result } = renderHook(() => usePendingTranscriptions())
+
+        // Fresh item (retryCount=0) should come before retried item (retryCount=1)
+        expect(result.current.length).toBe(2)
+        expect(result.current[0].id).toBe('q-1')
+        expect(result.current[0].retryCount).toBe(0)
+        expect(result.current[1].id).toBe('q-2')
+        expect(result.current[1].retryCount).toBe(1)
       })
     })
 

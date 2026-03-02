@@ -155,7 +155,9 @@ export const useLibraryStore = create<LibraryStore>()(
           categoryFilter: null,
           qualityFilter: null,
           statusFilter: null,
-          searchQuery: ''
+          searchQuery: '',
+          // C-005: Clear stale expansion state when filters reset to prevent accumulation
+          expandedTranscripts: new Set()
         }),
 
       // Selection

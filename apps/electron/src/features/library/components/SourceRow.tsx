@@ -10,6 +10,7 @@ import { StatusIcon } from './StatusIcon'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { useLibraryStore } from '@/store/useLibraryStore'
 import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
+import { highlightText } from '@/features/library/utils/highlightText'
 
 interface SourceRowProps {
   recording: UnifiedRecording
@@ -18,6 +19,7 @@ interface SourceRowProps {
   isPlaying: boolean
   isSelected?: boolean
   isActiveSource?: boolean
+  searchQuery?: string
   onSelectionChange?: (id: string, shiftKey: boolean) => void
   onClick?: () => void
   onPlay: () => void
@@ -31,6 +33,7 @@ export const SourceRow = memo(function SourceRow({
   isPlaying,
   isSelected = false,
   isActiveSource = false,
+  searchQuery = '',
   onSelectionChange,
   onClick,
   onPlay,
@@ -71,10 +74,10 @@ export const SourceRow = memo(function SourceRow({
   return (
     <div
       className={[
-        '@container flex items-center justify-between py-2 px-3 hover:bg-muted/50 cursor-pointer',
-        isSelected ? 'bg-primary/5' : '',
-        isActiveSource ? 'bg-primary/10 border-l-2 border-l-primary' : 'border-l-2 border-l-transparent'
-      ].join(' ')}
+        '@container flex items-center justify-between py-2 px-3 hover:bg-muted/50 cursor-pointer transition-colors',
+        isSelected ? 'bg-primary/10 border-l-2 border-l-primary/50' : 'border-l-2 border-l-transparent',
+        isActiveSource ? 'bg-primary/15 border-l-primary' : ''
+      ].filter(Boolean).join(' ')}
       role="option"
       onClick={handleRowClick}
       aria-selected={isPlaying || isSelected}
@@ -95,10 +98,10 @@ export const SourceRow = memo(function SourceRow({
         {/* Content area — flex-1 to fill remaining space */}
         <div className="flex-1 min-w-0">
           <p className="font-medium text-sm truncate text-foreground leading-tight">
-            {primaryText}
+            {searchQuery ? highlightText(primaryText, searchQuery) : primaryText}
           </p>
           <p className="text-xs text-muted-foreground truncate leading-tight mt-0.5">
-            {secondaryText}
+            {searchQuery ? highlightText(secondaryText, searchQuery) : secondaryText}
           </p>
         </div>
       </div>
@@ -154,6 +157,7 @@ export const SourceRow = memo(function SourceRow({
     prevProps.transcript?.title_suggestion === nextProps.transcript?.title_suggestion &&
     prevProps.meeting?.id === nextProps.meeting?.id &&
     prevProps.meeting?.subject === nextProps.meeting?.subject &&
+    prevProps.searchQuery === nextProps.searchQuery &&
     // Include callback props to detect when they change
     prevProps.onSelectionChange === nextProps.onSelectionChange &&
     prevProps.onClick === nextProps.onClick

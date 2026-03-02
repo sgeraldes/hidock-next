@@ -41,7 +41,8 @@ function setupDefaultMocks() {
     completed: 0,
     failed: 0,
     processing: 0,
-    pending: 0
+    pending: 0,
+    aggregateProgress: 0
   })
 
   vi.mocked(useTranscriptionStore).mockImplementation((selector: any) => {
@@ -86,7 +87,8 @@ describe('OperationsPanel', () => {
       completed: 0,
       failed: 0,
       processing: 1,
-      pending: 1
+      pending: 1,
+      aggregateProgress: 25
     })
 
     render(<OperationsPanel sidebarOpen={true} />)

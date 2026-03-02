@@ -448,6 +448,75 @@ export function registerRecordingHandlers(): void {
     }
   })
 
+  // Add external recording by file path (used by drag-and-drop import)
+  ipcMain.handle('recordings:addExternalByPath', async (_, filePath: string): Promise<{ success: boolean; recording?: Recording; error?: string }> => {
+    try {
+      // Validate file extension
+      const allowedExtensions = ['.mp3', '.m4a', '.wav', '.ogg', '.flac', '.webm', '.hda']
+      const fileExtension = extname(filePath).toLowerCase()
+      if (!allowedExtensions.includes(fileExtension)) {
+        return { success: false, error: `Unsupported file type: ${fileExtension}. Supported: ${allowedExtensions.join(', ')}` }
+      }
+
+      // Check if file exists
+      if (!existsSync(filePath)) {
+        return { success: false, error: 'File does not exist' }
+      }
+
+      // Get file stats
+      const stats = statSync(filePath)
+      const originalFilename = basename(filePath)
+
+      // Generate a unique filename for the recordings folder
+      const recordingsPath = getRecordingsPath()
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')
+      const newFilename = `external-${timestamp[0]}-${timestamp[1].substring(0, 8)}${fileExtension}`
+      const destinationPath = join(recordingsPath, newFilename)
+
+      // Copy the file to the recordings folder
+      copyFileSync(filePath, destinationPath)
+
+      // Create database entry
+      const recordingId = randomUUID()
+
+      const recording: Omit<Recording, 'created_at'> = {
+        id: recordingId,
+        filename: newFilename,
+        original_filename: originalFilename,
+        file_path: destinationPath,
+        file_size: stats.size,
+        duration_seconds: undefined,
+        date_recorded: stats.mtime.toISOString(),
+        meeting_id: undefined,
+        correlation_confidence: undefined,
+        correlation_method: undefined,
+        status: 'ready',
+        location: 'local-only',
+        transcription_status: 'none',
+        on_device: 0,
+        device_last_seen: undefined,
+        on_local: 1,
+        source: 'external',
+        is_imported: 1
+      }
+
+      insertRecording(recording)
+
+      const insertedRecording = getRecordingById(recordingId)
+      if (!insertedRecording) {
+        return { success: false, error: 'Failed to retrieve recording after insert' }
+      }
+
+      return { success: true, recording: insertedRecording }
+    } catch (error) {
+      console.error('recordings:addExternalByPath error:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred'
+      }
+    }
+  })
+
   // Select a meeting for a recording (manual linking from dialog)
   ipcMain.handle('recordings:selectMeeting', async (_, recordingId: string, meetingId: string | null) => {
     try {

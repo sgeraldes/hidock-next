@@ -219,6 +219,21 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
             )}
           </div>
 
+          {/* Aggregate progress bar */}
+          {sidebarOpen && (transcriptionStats.processing + transcriptionStats.pending > 0) && (
+            <div className="px-1">
+              <div className="w-full h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-purple-500 rounded-full transition-all duration-300"
+                  style={{ width: `${transcriptionStats.aggregateProgress}%` }}
+                />
+              </div>
+              <div className="text-[9px] text-slate-500 mt-0.5 text-right">
+                {transcriptionStats.aggregateProgress}% overall
+              </div>
+            </div>
+          )}
+
           {sidebarOpen && (
             <div className="space-y-1 px-1">
               {Array.from(transcriptionQueue.values())

@@ -136,6 +136,13 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
       const item = get().queue.get(id)
       if (!item || item.status !== 'failed') return
 
+      // C-005: Enforce max retry limit on frontend to prevent unlimited retries
+      const MAX_FRONTEND_RETRIES = 3
+      if (item.retryCount >= MAX_FRONTEND_RETRIES) {
+        console.warn(`[TranscriptionStore] Max retries (${MAX_FRONTEND_RETRIES}) reached for ${id}, not retrying`)
+        return
+      }
+
       // B-TXN-004: Make store retry contingent on IPC success
       // Only update local store state AFTER the IPC call succeeds
       window.electronAPI?.recordings?.updateQueueItem?.(id, 'pending').then((success) => {
@@ -155,7 +162,9 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
             status: 'pending',
             progress: 0,
             error: undefined,
-            retryCount: currentItem.retryCount + 1
+            retryCount: currentItem.retryCount + 1,
+            // C-005: Reset startedAt so next updateProgress sets a fresh timestamp
+            startedAt: undefined
           })
 
           return { queue }
@@ -213,7 +222,9 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
 // =============================================================================
 
 /**
- * Get all pending transcriptions
+ * Get all pending transcriptions, sorted by priority:
+ * - Lower retry count first (fresh items processed before retried ones)
+ * - Earlier startedAt first (FIFO within same retry count)
  */
 export const usePendingTranscriptions = () => {
   return useTranscriptionStore(useShallow((state) => {
@@ -222,6 +233,14 @@ export const usePendingTranscriptions = () => {
       if (item.status === 'pending') {
         pending.push(item)
       }
+    })
+    // Sort by priority: lower retryCount first, then FIFO order
+    pending.sort((a, b) => {
+      if (a.retryCount !== b.retryCount) return a.retryCount - b.retryCount
+      // FIFO: items without startedAt come before those with
+      const aTime = a.startedAt ? a.startedAt.getTime() : 0
+      const bTime = b.startedAt ? b.startedAt.getTime() : 0
+      return aTime - bTime
     })
     return pending
   }))
@@ -258,7 +277,7 @@ export const useFailedTranscriptions = () => {
 }
 
 /**
- * Get queue statistics
+ * Get queue statistics with aggregate progress
  */
 export const useTranscriptionStats = () => {
   return useTranscriptionStore(useShallow((state) => {
@@ -267,9 +286,11 @@ export const useTranscriptionStats = () => {
     let failed = 0
     let processing = 0
     let pending = 0
+    let totalProgress = 0
 
     state.queue.forEach((item) => {
       total++
+      totalProgress += item.progress
       switch (item.status) {
         case 'completed':
           completed++
@@ -286,6 +307,9 @@ export const useTranscriptionStats = () => {
       }
     })
 
-    return { total, completed, failed, processing, pending }
+    // Aggregate progress percentage across all queue items (0-100)
+    const aggregateProgress = total > 0 ? Math.round(totalProgress / total) : 0
+
+    return { total, completed, failed, processing, pending, aggregateProgress }
   }))
 }

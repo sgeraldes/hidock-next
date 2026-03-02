@@ -189,6 +189,7 @@ describe('Recording IPC Handlers', () => {
       'recordings:getCandidates',
       'recordings:getMeetingsNearDate',
       'recordings:addExternal',
+      'recordings:addExternalByPath',
       'recordings:selectMeeting',
       'recordings:addToQueue',
       'recordings:processQueue',

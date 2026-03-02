@@ -98,11 +98,18 @@ export const SourceRowExpanded = memo(function SourceRowExpanded({
     </div>
   )
 }, (prevProps, nextProps) => {
+  // C-005: Include all displayed fields in memo comparison
   return (
     prevProps.recording.id === nextProps.recording.id &&
     prevProps.recording.transcriptionStatus === nextProps.recording.transcriptionStatus &&
     prevProps.recording.quality === nextProps.recording.quality &&
+    prevProps.recording.category === nextProps.recording.category &&
+    prevProps.recording.title === nextProps.recording.title &&
+    prevProps.recording.location === nextProps.recording.location &&
+    prevProps.recording.duration === nextProps.recording.duration &&
+    prevProps.recording.size === nextProps.recording.size &&
     prevProps.transcript?.id === nextProps.transcript?.id &&
+    prevProps.transcript?.summary === nextProps.transcript?.summary &&
     prevProps.meeting?.id === nextProps.meeting?.id
   )
 })

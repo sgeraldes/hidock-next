@@ -80,6 +80,8 @@ export function useKeyboardNavigation({
         case 'ArrowDown':
           event.preventDefault()
           setFocusedIndex((prev) => {
+            // C-005: When no item is focused (-1), start at first item
+            if (prev < 0) return 0
             const next = prev < items.length - 1 ? prev + 1 : prev
             return next
           })
@@ -88,6 +90,8 @@ export function useKeyboardNavigation({
         case 'ArrowUp':
           event.preventDefault()
           setFocusedIndex((prev) => {
+            // C-005: When no item is focused (-1), start at last item
+            if (prev < 0) return items.length - 1
             const next = prev > 0 ? prev - 1 : 0
             return next
           })

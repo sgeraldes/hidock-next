@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue } f
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { RefreshCw, AlertCircle } from 'lucide-react'
+import { toast } from '@/components/ui/toaster'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import {
   UnifiedRecording,
@@ -103,6 +104,76 @@ export function Library() {
     enrichmentAbortController.current.abort()
     enrichmentAbortController.current = new AbortController()
   }, [filterMode, semanticFilter, exclusiveFilter, categoryFilter, qualityFilter, statusFilter, searchQuery])
+
+  // Drag-and-drop state for file import
+  const [isDragOver, setIsDragOver] = useState(false)
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    // Only accept files
+    if (e.dataTransfer.types.includes('Files')) {
+      e.dataTransfer.dropEffect = 'copy'
+      setIsDragOver(true)
+    }
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragOver(false)
+  }, [])
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragOver(false)
+
+    const files = Array.from(e.dataTransfer.files)
+    const audioExtensions = ['.mp3', '.m4a', '.wav', '.ogg', '.flac', '.webm', '.hda']
+    const audioFiles = files.filter(f => {
+      const ext = '.' + f.name.split('.').pop()?.toLowerCase()
+      return audioExtensions.includes(ext)
+    })
+
+    if (audioFiles.length === 0) {
+      toast.warning('No Audio Files', 'Only audio files can be imported (.mp3, .wav, .m4a, .ogg, .flac, .webm, .hda)')
+      return
+    }
+
+    let imported = 0
+    let failed = 0
+    for (const file of audioFiles) {
+      try {
+        // file.path is available in Electron renderer (non-sandboxed)
+        const filePath = (file as any).path
+        if (!filePath) {
+          failed++
+          continue
+        }
+        const result = await window.electronAPI.recordings.addExternalByPath(filePath)
+        if (result.success) {
+          imported++
+        } else {
+          console.error('Failed to import:', file.name, result.error)
+          failed++
+        }
+      } catch (err) {
+        console.error('Failed to import:', file.name, err)
+        failed++
+      }
+    }
+
+    if (imported > 0) {
+      await refresh(false)
+      const msg = failed > 0
+        ? `Imported ${imported} file${imported !== 1 ? 's' : ''}, ${failed} failed.`
+        : `Imported ${imported} file${imported !== 1 ? 's' : ''}.`
+      toast.success('Files Imported', msg)
+    } else if (failed > 0) {
+      toast.error('Import Failed', `Failed to import ${failed} file${failed !== 1 ? 's' : ''}.`)
+    }
+  }, [refresh])
 
   // View mode persisted in library store (single source of truth for library view mode)
   const viewMode = useLibraryStore((state) => state.viewMode)
@@ -265,7 +336,16 @@ export function Library() {
         const filename = rec.filename.toLowerCase()
         const meetingSubject = rec.meetingSubject?.toLowerCase() || ''
         const title = rec.title?.toLowerCase() || ''
-        return filename.includes(query) || meetingSubject.includes(query) || title.includes(query)
+        // C-005: Also search in summary and category for better discoverability
+        const summary = rec.summary?.toLowerCase() || ''
+        const category = rec.category?.toLowerCase() || ''
+        return (
+          filename.includes(query) ||
+          meetingSubject.includes(query) ||
+          title.includes(query) ||
+          summary.includes(query) ||
+          category.includes(query)
+        )
       }
       return true
     })
@@ -299,9 +379,10 @@ export function Library() {
         case 'name':
           return a.filename.localeCompare(b.filename) * sortMultiplier
         case 'quality': {
-          const qualityOrder: Record<string, number> = { high: 3, medium: 2, low: 1 }
-          const aQ = qualityOrder[a.quality || ''] || 0
-          const bQ = qualityOrder[b.quality || ''] || 0
+          // C-005: Use actual quality rating values from KnowledgeCapture type
+          const qualityOrder: Record<string, number> = { valuable: 3, archived: 2, 'low-value': 1, unrated: 0 }
+          const aQ = qualityOrder[a.quality || ''] ?? -1
+          const bQ = qualityOrder[b.quality || ''] ?? -1
           return (aQ - bQ) * sortMultiplier
         }
         default:
@@ -322,6 +403,9 @@ export function Library() {
   // Memoize the list of IDs for keyboard navigation
   const itemIds = useMemo(() => filteredRecordings.map((r) => r.id), [filteredRecordings])
 
+  // C-005: Ref to hold the latest openDetail handler, wired to handleRowClick below
+  const openDetailRef = useRef<(id: string) => void>(() => {})
+
   // Keyboard navigation for accessibility - LB-19 fix: Use focusedIndex and containerRef
   const { handleKeyDown, focusedIndex, containerRef } = useKeyboardNavigation({
     items: itemIds,
@@ -330,6 +414,7 @@ export function Library() {
     onToggleSelection: toggleSelection,
     onSelectAll: selectAll,
     onClearSelection: clearSelection,
+    onOpenDetail: useCallback((id: string) => openDetailRef.current(id), []), // C-005: Enter opens detail panel
     onToggleExpand: () => {}, // No-op - expansion removed
     onExpandRow: () => {}, // No-op - expansion removed
     onCollapseRow: () => {}, // No-op - expansion removed
@@ -657,6 +742,14 @@ export function Library() {
     }
   }, [setSelectedSourceId, audioControls])
 
+  // C-005: Keep openDetailRef in sync with handleRowClick + filteredRecordings
+  openDetailRef.current = (id: string) => {
+    const recording = filteredRecordings.find((r) => r.id === id)
+    if (recording) {
+      handleRowClick(recording)
+    }
+  }
+
   // Get selected recording and its data for SourceReader
   const selectedRecording = selectedSourceId ? recordings.find((r) => r.id === selectedSourceId) : null
   const selectedTranscript = selectedRecording ? transcripts.get(selectedRecording.id) : undefined
@@ -679,23 +772,55 @@ export function Library() {
     overscan: 5
   })
 
-  // Loading state
+  // Loading state — show skeleton layout instead of bare spinner
   if (loading && recordings.length === 0) {
     return (
       <div className="flex flex-col h-full">
         <header className="border-b px-6 py-4">
           <h1 className="text-2xl font-bold">Knowledge Library</h1>
-          <p className="text-sm text-muted-foreground">Your captured conversations and insights</p>
+          <p className="text-sm text-muted-foreground">Loading your captured conversations...</p>
         </header>
-        <div className="flex-1 flex items-center justify-center">
-          <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
+        {/* Skeleton filter bar */}
+        <div className="px-6 py-4 flex gap-3">
+          <div className="h-8 w-24 rounded-md bg-muted animate-pulse" />
+          <div className="h-8 w-32 rounded-md bg-muted animate-pulse" />
+          <div className="h-8 w-28 rounded-md bg-muted animate-pulse" />
+          <div className="h-8 flex-1 max-w-xs rounded-md bg-muted animate-pulse" />
+        </div>
+        {/* Skeleton rows */}
+        <div className="flex-1 overflow-hidden px-6 py-2 space-y-3" aria-busy="true" aria-label="Loading recordings">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-3 p-3 rounded-lg border bg-card">
+              <div className="h-5 w-5 rounded bg-muted animate-pulse shrink-0" />
+              <div className="flex-1 space-y-2">
+                <div className="h-4 w-2/3 rounded bg-muted animate-pulse" />
+                <div className="h-3 w-1/3 rounded bg-muted animate-pulse" />
+              </div>
+              <div className="h-7 w-7 rounded bg-muted animate-pulse shrink-0" />
+            </div>
+          ))}
         </div>
       </div>
     )
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div
+      className="flex flex-col h-full relative"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Drag-and-drop overlay */}
+      {isDragOver && (
+        <div className="absolute inset-0 z-50 bg-primary/10 border-2 border-dashed border-primary rounded-lg flex items-center justify-center pointer-events-none">
+          <div className="text-center">
+            <p className="text-lg font-medium text-primary">Drop audio files to import</p>
+            <p className="text-sm text-muted-foreground mt-1">Supported: .mp3, .wav, .m4a, .ogg, .flac, .webm, .hda</p>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <LibraryHeader
         stats={stats}
@@ -791,9 +916,11 @@ export function Library() {
                 // @ts-expect-error - Ref callback pattern for multiple refs
                 containerRef.current = el
               }}
-              className="h-full overflow-auto p-2 sm:p-4 lg:p-6"
+              className="h-full overflow-auto p-2 sm:p-4 lg:p-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
               onKeyDown={handleKeyDown}
               tabIndex={0}
+              role="application"
+              aria-label="Recording list navigation. Use arrow keys to navigate, Space to select, Enter to open."
               data-testid="library-list"
             >
         <div className={`lg:max-w-4xl lg:mx-auto transition-opacity ${isFilterPending ? 'opacity-60' : 'opacity-100'}`}>
@@ -848,6 +975,7 @@ export function Library() {
                           isPlaying={currentlyPlayingId === recording.id}
                           isSelected={selectedIds.has(recording.id)}
                           isActiveSource={selectedSourceId === recording.id}
+                          searchQuery={deferredSearchQuery}
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
