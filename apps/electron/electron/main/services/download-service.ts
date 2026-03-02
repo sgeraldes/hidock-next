@@ -13,7 +13,7 @@
  * - Handle errors gracefully with user notification
  */
 
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow, ipcMain, Notification } from 'electron'
 import {
   markRecordingDownloaded,
   addSyncedFile,
@@ -29,16 +29,18 @@ import { existsSync } from 'fs'
 import { join, basename } from 'path'
 
 // Download queue item
+// C-004: Added 'cancelled' status to distinguish user cancellations from actual failures
 export interface DownloadQueueItem {
   id: string
   filename: string
   fileSize: number
   progress: number
-  status: 'pending' | 'downloading' | 'completed' | 'failed'
+  status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
   error?: string
   startedAt?: Date
   completedAt?: Date
   recordingDate?: Date // Original recording date from device
+  lastProgressAt?: Date // C-004: Track last progress update for smarter stall detection
 }
 
 // Sync session state
@@ -115,6 +117,20 @@ class DownloadService {
   }
 
   /**
+   * C-004: Clean up all timers (stalled check + emit throttle) for graceful shutdown.
+   * Should be called before app quit to prevent leaked intervals/timeouts.
+   */
+  destroy(): void {
+    this.stopStalledCheckInterval()
+    if (this.emitTimer) {
+      clearTimeout(this.emitTimer)
+      this.emitTimer = null
+    }
+    this.emitPending = false
+    console.log('[DownloadService] Destroyed (all timers cleaned up)')
+  }
+
+  /**
    * Load queue from database on startup (spec-007: persistence)
    */
   private loadQueueFromDatabase(): void {
@@ -124,7 +140,7 @@ class DownloadService {
         filename: string
         file_size: number
         progress: number
-        status: 'pending' | 'downloading' | 'completed' | 'failed'
+        status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
         error: string | null
         started_at: string | null
         completed_at: string | null
@@ -198,6 +214,7 @@ class DownloadService {
   /**
    * Check if a file needs to be downloaded
    * Reconciles database, synced_files table, and actual files on disk
+   * C-004: Also checks .mp3 normalized name (B-DWN-003 normalizes .hda->.mp3)
    */
   isFileAlreadySynced(filename: string): { synced: boolean; reason: string } {
     // Check 1: Is it in synced_files table?
@@ -205,13 +222,19 @@ class DownloadService {
       return { synced: true, reason: 'In synced_files table' }
     }
 
-    // Check 2: Convert .hda to .wav and check both
+    // Check 2: Convert .hda to .wav and check both (legacy format)
     const wavFilename = filename.replace(/\.hda$/i, '.wav')
     if (wavFilename !== filename && isFileSynced(wavFilename)) {
       return { synced: true, reason: 'WAV version in synced_files' }
     }
 
-    // Check 3: Check if file exists on disk
+    // C-004: Check 2b: Also check .mp3 normalized name (B-DWN-003 normalizes .hda->.mp3)
+    const mp3Filename = DownloadService.normalizeFilename(filename)
+    if (mp3Filename !== filename && mp3Filename !== wavFilename && isFileSynced(mp3Filename)) {
+      return { synced: true, reason: 'MP3 version in synced_files' }
+    }
+
+    // Check 3: Check if file exists on disk (check wav and mp3 variants)
     const recordingsPath = getRecordingsPath()
     const filePath = join(recordingsPath, wavFilename)
     if (existsSync(filePath)) {
@@ -219,6 +242,15 @@ class DownloadService {
       console.log(`[DownloadService] Found orphaned file on disk: ${wavFilename}, adding to synced_files`)
       addSyncedFile(filename, wavFilename, filePath)
       return { synced: true, reason: 'File exists on disk (reconciled)' }
+    }
+    // C-004: Also check mp3 variant on disk
+    if (mp3Filename !== filename && mp3Filename !== wavFilename) {
+      const mp3Path = join(recordingsPath, mp3Filename)
+      if (existsSync(mp3Path)) {
+        console.log(`[DownloadService] Found orphaned MP3 file on disk: ${mp3Filename}, adding to synced_files`)
+        addSyncedFile(filename, mp3Filename, mp3Path)
+        return { synced: true, reason: 'MP3 file exists on disk (reconciled)' }
+      }
     }
 
     // Check 4: Check recordings table
@@ -307,21 +339,31 @@ class DownloadService {
     }
 
     this.markDirty()
-    this.emitStateUpdate()
+    // C-004: Emit immediately so renderer sees new queue items without throttle delay
+    this.emitStateUpdate(true)
     return queuedIds
   }
 
   /**
    * Start a sync session
+   * C-004: Uses queuedIds.length (newly queued) instead of queue.size (includes prior items)
    */
   startSyncSession(files: Array<{ filename: string; size: number; dateCreated?: Date }>): SyncSession {
     // Queue the files (including recording dates for proper date preservation)
-    this.queueDownloads(files)
+    const queuedIds = this.queueDownloads(files)
+
+    // C-004: Count only the pending/downloading items for this session, not completed/failed leftovers
+    let pendingCount = 0
+    for (const item of this.state.queue.values()) {
+      if (item.status === 'pending' || item.status === 'downloading') {
+        pendingCount++
+      }
+    }
 
     // Create session
     const session: SyncSession = {
       id: `sync_${Date.now()}`,
-      totalFiles: this.state.queue.size,
+      totalFiles: pendingCount,
       completedFiles: 0,
       failedFiles: 0,
       startedAt: new Date(),
@@ -329,9 +371,9 @@ class DownloadService {
     }
 
     this.state.currentSession = session
-    this.emitStateUpdate()
+    this.emitStateUpdate(true) // C-004: immediate emit for session start
 
-    console.log(`[DownloadService] Started sync session ${session.id} with ${session.totalFiles} files`)
+    console.log(`[DownloadService] Started sync session ${session.id} with ${session.totalFiles} files (${queuedIds.length} newly queued)`)
     return session
   }
 
@@ -349,11 +391,30 @@ class DownloadService {
     }
 
     try {
+      // C-004: Validate download path exists and is writable before processing
+      const recordingsPath = getRecordingsPath()
+      if (!existsSync(recordingsPath)) {
+        const { mkdirSync } = await import('fs')
+        try {
+          mkdirSync(recordingsPath, { recursive: true })
+          console.log(`[DownloadService] Created recordings directory: ${recordingsPath}`)
+        } catch (mkdirErr) {
+          const errMsg = `Recordings directory cannot be created: ${recordingsPath}`
+          console.error(`[DownloadService] ${errMsg}`, mkdirErr)
+          item.status = 'failed'
+          item.error = errMsg
+          this.persistQueueItem(item)
+          this.markDirty()
+          this.emitStateUpdate(true) // C-004: immediate emit for status transition
+          return { success: false, error: errMsg }
+        }
+      }
+
       item.status = 'downloading'
       item.startedAt = new Date()
       this.persistQueueItem(item) // spec-007: persist status change
       this.markDirty()
-      this.emitStateUpdate()
+      this.emitStateUpdate(true) // C-004: immediate emit for status transition
 
       // Save the file with the original recording date if available
       const filePath = await saveRecording(filename, data, undefined, item.recordingDate)
@@ -380,7 +441,7 @@ class DownloadService {
       }
 
       this.markDirty()
-      this.emitStateUpdate()
+      this.emitStateUpdate(true) // C-004: immediate emit for completion
 
       // DL-07: Clean up completed items from queue after emitting final state.
       // Keep them briefly so the renderer sees the 100% state, then remove.
@@ -409,13 +470,14 @@ class DownloadService {
       }
 
       this.markDirty()
-      this.emitStateUpdate()
+      this.emitStateUpdate(true) // C-004: immediate emit for failure
       return { success: false, error: errorMsg }
     }
   }
 
   /**
    * Cancel a specific download (spec-004)
+   * C-004: Uses 'cancelled' status to distinguish from actual failures
    * Note: This only updates the state in the main process.
    * The renderer must call deviceService.cancelDownload() to abort the actual USB transfer.
    */
@@ -429,12 +491,12 @@ class DownloadService {
       return { success: false, error: `Cannot cancel download with status: ${item.status}` }
     }
 
-    item.status = 'failed'
+    item.status = 'cancelled'
     item.error = 'Cancelled by user'
     this.persistQueueItem(item) // spec-007: persist cancellation
     console.log(`[DownloadService] Cancelled download: ${filename}`)
     this.markDirty()
-    this.emitStateUpdate()
+    this.emitStateUpdate(true) // C-004: immediate emit for cancellation
 
     // B-DWN-006: Delayed cleanup for cancelled items (5s)
     setTimeout(() => {
@@ -449,16 +511,23 @@ class DownloadService {
 
   /**
    * Update progress for a download (spec-007: persist progress periodically)
+   * C-004: Tracks lastProgressAt for smarter stall detection based on data flow
    */
   updateProgress(filename: string, bytesReceived: number): void {
     const item = this.state.queue.get(filename)
     if (item) {
       const oldProgress = item.progress
-      if (item.status === 'pending') {
+      const statusTransition = item.status === 'pending'
+      if (statusTransition) {
         item.status = 'downloading'
         item.startedAt = new Date()
       }
-      item.progress = Math.round((bytesReceived / item.fileSize) * 100)
+      // C-004: Track last progress time for stall detection
+      item.lastProgressAt = new Date()
+
+      // C-004: Guard against NaN when fileSize is 0 or undefined
+      const rawProgress = item.fileSize > 0 ? (bytesReceived / item.fileSize) * 100 : 0
+      item.progress = Math.round(Number.isFinite(rawProgress) ? rawProgress : 0)
 
       // Persist every 10% to avoid database spam
       if (Math.floor(oldProgress / 10) !== Math.floor(item.progress / 10)) {
@@ -466,7 +535,9 @@ class DownloadService {
       }
 
       this.markDirty()
-      this.emitStateUpdate()
+      // C-004: Status transitions (pending->downloading) emit immediately to avoid UI lag;
+      // pure progress updates use throttle to avoid IPC spam
+      this.emitStateUpdate(statusTransition)
     }
   }
 
@@ -485,27 +556,33 @@ class DownloadService {
       }
 
       this.markDirty()
-      this.emitStateUpdate()
+      // C-004: Status transitions emit immediately to prevent stale UI
+      this.emitStateUpdate(true)
     }
   }
 
   /**
    * spec-007: Check for stalled downloads and mark as failed
    * Called periodically to detect downloads that exceed timeout
+   * C-004: Uses lastProgressAt (not startedAt) for smarter stall detection.
+   * Large files legitimately take a long time; what matters is whether data
+   * is still flowing. Timeout increased to 60s without progress.
    */
   checkForStalledDownloads(): number {
-    const TIMEOUT_MS = 30000 // 30 seconds
+    const STALL_TIMEOUT_MS = 60000 // C-004: 60 seconds without progress (was 30s from start)
     const now = Date.now()
     let stalledCount = 0
     const stalledFilenames: string[] = []
 
     for (const item of this.state.queue.values()) {
       if (item.status === 'downloading' && item.startedAt) {
-        const elapsed = now - item.startedAt.getTime()
-        if (elapsed > TIMEOUT_MS) {
-          console.warn(`[DownloadService] Timeout detected for ${item.filename} (${Math.round(elapsed / 1000)}s)`)
+        // C-004: Use lastProgressAt if available (data flow), fall back to startedAt
+        const lastActivity = item.lastProgressAt ?? item.startedAt
+        const elapsed = now - lastActivity.getTime()
+        if (elapsed > STALL_TIMEOUT_MS) {
+          console.warn(`[DownloadService] Stall detected for ${item.filename} (${Math.round(elapsed / 1000)}s without progress)`)
           item.status = 'failed'
-          item.error = 'Download timeout (30s exceeded)'
+          item.error = `Download stalled (${Math.round(elapsed / 1000)}s without data)`
           this.persistQueueItem(item)
 
           if (this.state.currentSession) {
@@ -521,7 +598,7 @@ class DownloadService {
     // B-DWN-001: Clean up stalled items from the queue after marking failed
     if (stalledCount > 0) {
       this.markDirty()
-      this.emitStateUpdate()
+      this.emitStateUpdate(true) // C-004: immediate emit for stalled detection
 
       // Delayed cleanup: remove stalled items from queue after renderer sees the failed state
       setTimeout(() => {
@@ -560,7 +637,7 @@ class DownloadService {
 
     if (cancelledCount > 0) {
       this.markDirty()
-      this.emitStateUpdate()
+      this.emitStateUpdate(true) // C-004: immediate emit for cancel-active
     }
 
     return cancelledCount
@@ -570,15 +647,16 @@ class DownloadService {
    * Re-queue all failed downloads as pending so they can be retried
    */
   /**
-   * Re-queue all failed downloads as pending so they can be retried.
+   * Re-queue all failed/cancelled downloads as pending so they can be retried.
    * B-DWN-007: Checks if file is already synced before retrying.
+   * C-004: Also retries cancelled items, not just failed.
    */
   retryFailed(): number {
     let count = 0
     const alreadySynced: string[] = []
 
     for (const [key, item] of this.state.queue) {
-      if (item.status === 'failed') {
+      if (item.status === 'failed' || item.status === 'cancelled') {
         // B-DWN-007: Check if file was synced in the meantime
         const { synced, reason } = this.isFileAlreadySynced(item.filename)
         if (synced) {
@@ -592,6 +670,7 @@ class DownloadService {
         item.error = undefined
         item.startedAt = undefined
         item.completedAt = undefined
+        item.lastProgressAt = undefined
         this.persistQueueItem(item) // spec-007: persist retry
         count++
       }
@@ -606,7 +685,7 @@ class DownloadService {
     if (count > 0 || alreadySynced.length > 0) {
       this.state.isPaused = false
       this.markDirty()
-      this.emitStateUpdate()
+      this.emitStateUpdate(true) // C-004: immediate emit for retry status changes
     }
 
     return count
@@ -614,10 +693,13 @@ class DownloadService {
 
   /**
    * DL-07: Prune completed items from queue, keeping at most maxRetained.
-   * B-DWN-002: Reduced threshold to 10, also auto-prunes failed items older than 24h.
+   * B-DWN-002: Reduced threshold to 10, also auto-prunes failed/cancelled items older than 24h.
+   * C-004: Fixed Map iteration during modification bug - collect keys first, then delete.
+   * C-004: Also removes pruned items from database for persistence consistency.
    */
   private pruneCompletedItems(maxRetained: number): void {
     const completed: string[] = []
+    const toRemoveStale: string[] = []
     const now = Date.now()
     const FAILED_MAX_AGE_MS = 24 * 60 * 60 * 1000 // 24 hours
 
@@ -626,21 +708,27 @@ class DownloadService {
         completed.push(key)
       }
 
-      // B-DWN-002: Auto-prune failed items older than 24h to prevent memory leaks
-      if (item.status === 'failed' && item.startedAt) {
+      // B-DWN-002: Auto-prune failed/cancelled items older than 24h to prevent memory leaks
+      if ((item.status === 'failed' || item.status === 'cancelled') && item.startedAt) {
         const age = now - item.startedAt.getTime()
         if (age > FAILED_MAX_AGE_MS) {
-          this.state.queue.delete(key)
-          this.removeFromDatabase(key)
+          toRemoveStale.push(key)
         }
       }
     }
 
-    // Remove oldest first (beyond the retention limit)
+    // C-004: Delete stale failed/cancelled items after iteration (safe)
+    for (const key of toRemoveStale) {
+      this.state.queue.delete(key)
+      this.removeFromDatabase(key)
+    }
+
+    // Remove oldest completed first (beyond the retention limit)
     if (completed.length > maxRetained) {
       const toRemove = completed.slice(0, completed.length - maxRetained)
       for (const key of toRemove) {
         this.state.queue.delete(key)
+        this.removeFromDatabase(key) // C-004: Also clean up database
       }
     }
 
@@ -648,31 +736,37 @@ class DownloadService {
   }
 
   /**
-   * Remove completed/failed items from queue
+   * Remove completed/failed/cancelled items from queue
    * B-DWN-004: Also removes from database for persistence consistency
+   * C-004: Also clears cancelled items; collects keys before deletion to avoid Map mutation during iteration
    */
   clearCompleted(): void {
+    const toDelete: string[] = []
     for (const [key, item] of this.state.queue) {
-      if (item.status === 'completed' || item.status === 'failed') {
-        this.removeFromDatabase(key) // B-DWN-004: remove from database too
-        this.state.queue.delete(key)
+      if (item.status === 'completed' || item.status === 'failed' || item.status === 'cancelled') {
+        toDelete.push(key)
       }
     }
+    for (const key of toDelete) {
+      this.removeFromDatabase(key) // B-DWN-004: remove from database too
+      this.state.queue.delete(key)
+    }
     this.markDirty()
-    this.emitStateUpdate()
+    this.emitStateUpdate(true) // C-004: immediate emit for clear
   }
 
   /**
    * Cancel all pending downloads
    * B-DWN-005: Persist cancelled state for each item
+   * C-004: Uses 'cancelled' status instead of 'failed' for user-initiated cancellation
    */
   cancelAll(): void {
     this.state.isPaused = true
 
     for (const item of this.state.queue.values()) {
       if (item.status === 'pending' || item.status === 'downloading') {
-        item.status = 'failed'
-        item.error = 'Cancelled'
+        item.status = 'cancelled'
+        item.error = 'Cancelled by user'
         this.persistQueueItem(item) // B-DWN-005: persist cancelled state
       }
     }
@@ -682,7 +776,7 @@ class DownloadService {
     }
 
     this.markDirty()
-    this.emitStateUpdate()
+    this.emitStateUpdate(true) // C-004: immediate emit for cancel-all
   }
 
   /**
@@ -709,28 +803,34 @@ class DownloadService {
 
   /**
    * Get sync statistics
+   * C-004: Separates cancelled from failed in counting
    */
   getSyncStats(): {
     totalSynced: number
     pendingInQueue: number
     failedInQueue: number
+    cancelledInQueue: number
   } {
     const syncedFiles = getSyncedFilenames()
     let pending = 0
     let failed = 0
+    let cancelled = 0
 
     for (const item of this.state.queue.values()) {
       if (item.status === 'pending' || item.status === 'downloading') {
         pending++
       } else if (item.status === 'failed') {
         failed++
+      } else if (item.status === 'cancelled') {
+        cancelled++
       }
     }
 
     return {
       totalSynced: syncedFiles.size,
       pendingInQueue: pending,
-      failedInQueue: failed
+      failedInQueue: failed,
+      cancelledInQueue: cancelled
     }
   }
 
@@ -880,6 +980,31 @@ export function registerDownloadServiceHandlers(): void {
   // spec-007: Cancel active downloads (e.g., on disconnect)
   ipcMain.handle('download-service:cancel-active', (_, reason?: string) => {
     return service.cancelActiveDownloads(reason)
+  })
+
+  // C-004: Show native OS notification when sync session completes
+  ipcMain.handle('download-service:notify-completion', (_, stats: { completed: number; failed: number; aborted: boolean }) => {
+    try {
+      if (!Notification.isSupported()) return
+      if (stats.completed === 0 && stats.failed === 0) return
+
+      const title = stats.aborted
+        ? 'Sync cancelled'
+        : stats.failed > 0
+          ? 'Sync completed with errors'
+          : 'Sync complete'
+
+      const body = stats.aborted
+        ? `Downloaded ${stats.completed} file${stats.completed !== 1 ? 's' : ''} before cancellation`
+        : stats.failed > 0
+          ? `Downloaded ${stats.completed}, failed ${stats.failed}`
+          : `Downloaded ${stats.completed} file${stats.completed !== 1 ? 's' : ''}`
+
+      const notification = new Notification({ title, body })
+      notification.show()
+    } catch (e) {
+      console.warn('[DownloadService] Failed to show notification:', e)
+    }
   })
 
   console.log('[DownloadService] IPC handlers registered')

@@ -146,7 +146,7 @@ describe('DownloadService B-007 Fixes', () => {
   })
 
   describe('B-DWN-006: cancelDownload has delayed cleanup', () => {
-    it('should mark as failed and schedule cleanup', () => {
+    it('should mark as cancelled and schedule cleanup', () => {
       vi.useFakeTimers()
 
       service.queueDownloads([{ filename: 'test.wav', size: 1024 }])
@@ -154,9 +154,9 @@ describe('DownloadService B-007 Fixes', () => {
       const result = service.cancelDownload('test.wav')
       expect(result.success).toBe(true)
 
-      // Item should be marked as failed immediately
+      // C-004: Item should be marked as cancelled (not failed) immediately
       let state = service.getState()
-      expect(state.queue[0]?.status).toBe('failed')
+      expect(state.queue[0]?.status).toBe('cancelled')
       expect(state.queue[0]?.error).toBe('Cancelled by user')
 
       // After 5s, item should be removed
@@ -227,11 +227,15 @@ describe('DownloadService B-007 Fixes', () => {
 
       service.queueDownloads([{ filename: 'stalled.wav', size: 10000 }])
 
-      // Simulate download starting 31 seconds ago (past the 30s timeout)
+      // C-004: Stall detection now uses 60s timeout (was 30s) and checks
+      // lastProgressAt if available. We need to set startedAt on the internal
+      // Map item (not the serialized state snapshot) past the 60s threshold.
       service.updateProgress('stalled.wav', 1000)
-      const item = service.getState().queue[0]
-      // Manually set startedAt to 31 seconds ago
-      ;(item as any).startedAt = new Date(Date.now() - 31000)
+
+      // Access the internal queue item directly via getState and modify the internal Map
+      // The getState() returns serialized array, but we need to modify the actual Map entry
+      // To do this properly, we advance fake timers by 61 seconds to trigger the timeout
+      vi.advanceTimersByTime(61000)
 
       const stalledCount = service.checkForStalledDownloads()
       expect(stalledCount).toBe(1)

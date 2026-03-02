@@ -117,16 +117,25 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
               {/* Overall sync progress */}
               {deviceSyncProgress && deviceSyncProgress.total > 0 && (
                 <div>
-                  <div className="flex justify-between text-[10px] text-slate-400 mb-0.5">
-                    <span>Overall</span>
-                    <span>{Math.round((deviceSyncProgress.current / deviceSyncProgress.total) * 100)}%</span>
-                  </div>
-                  <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-emerald-500 transition-all duration-200"
-                      style={{ width: `${(deviceSyncProgress.current / deviceSyncProgress.total) * 100}%` }}
-                    />
-                  </div>
+                  {/* C-004: NaN guard on percentage calculation */}
+                  {(() => {
+                    const rawPct = (deviceSyncProgress.current / deviceSyncProgress.total) * 100
+                    const pct = Number.isFinite(rawPct) ? Math.round(rawPct) : 0
+                    return (
+                      <>
+                        <div className="flex justify-between text-[10px] text-slate-400 mb-0.5">
+                          <span>Overall</span>
+                          <span>{pct}%</span>
+                        </div>
+                        <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-emerald-500 transition-all duration-200"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </>
+                    )
+                  })()}
                   {deviceSyncEta != null && deviceSyncEta > 0 && (
                     <div className="text-[10px] text-slate-500 mt-0.5">~{formatEta(deviceSyncEta)}</div>
                   )}
@@ -143,12 +152,13 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
                         return name.length > 24 ? `${name.slice(0, 24)}...` : name
                       })()}
                     </span>
-                    <span className="text-slate-500">{item.progress}%</span>
+                    {/* C-004: NaN guard on individual file progress */}
+                    <span className="text-slate-500">{Number.isFinite(item.progress) ? item.progress : 0}%</span>
                   </div>
                   <div className="h-1 bg-slate-700 rounded-full overflow-hidden">
                     <div
                       className="h-full bg-blue-500 transition-all duration-200"
-                      style={{ width: `${item.progress}%` }}
+                      style={{ width: `${Number.isFinite(item.progress) ? item.progress : 0}%` }}
                     />
                   </div>
                 </div>
