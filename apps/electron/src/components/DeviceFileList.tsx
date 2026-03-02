@@ -25,9 +25,11 @@ interface DeviceFileListProps {
   recordings: Array<DeviceOnlyRecording | BothLocationsRecording>
   syncedFilenames: Set<string>
   onRefresh?: () => void
+  // B-DEV-002: Callback to refresh the full recordings list after delete/download
+  onRecordingsRefresh?: () => void
 }
 
-export function DeviceFileList({ recordings, syncedFilenames, onRefresh }: DeviceFileListProps) {
+export function DeviceFileList({ recordings, syncedFilenames, onRefresh, onRecordingsRefresh }: DeviceFileListProps) {
   const deviceService = getHiDockDeviceService()
   const [downloadingFiles, setDownloadingFiles] = useState<Set<string>>(new Set())
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
@@ -47,6 +49,8 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh }: Devic
       if (success) {
         toast.success(`Downloaded ${filename}`)
         onRefresh?.()
+        // B-DEV-002: Refresh the full recordings list after download
+        onRecordingsRefresh?.()
       } else {
         toast.error(`Failed to download ${filename}`)
       }
@@ -60,7 +64,7 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh }: Devic
         return next
       })
     }
-  }, [deviceService, onRefresh])
+  }, [deviceService, onRefresh, onRecordingsRefresh])
 
   // Handle delete confirmation dialog
   const handleDeleteClick = useCallback((filename: string) => {
@@ -69,6 +73,7 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh }: Devic
   }, [])
 
   // Handle confirmed delete
+  // B-DEV-002: Also call onRecordingsRefresh to refresh the full file list after delete
   const handleConfirmDelete = useCallback(async () => {
     if (!fileToDelete) return
 
@@ -79,6 +84,7 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh }: Devic
       if (success) {
         toast.success(`Deleted ${fileToDelete} from device`)
         onRefresh?.()
+        onRecordingsRefresh?.()
       } else {
         toast.error(`Failed to delete ${fileToDelete}`)
       }
@@ -90,7 +96,7 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh }: Devic
       setDeleteDialogOpen(false)
       setFileToDelete(null)
     }
-  }, [fileToDelete, deviceService, onRefresh])
+  }, [fileToDelete, deviceService, onRefresh, onRecordingsRefresh])
 
   // Format file size
   const formatFileSize = (bytes: number): string => {
@@ -141,10 +147,11 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh }: Devic
                         </span>
                       )}
                     </div>
+                    {/* B-DEV-004: Use correct property names from RecordingBase: size, dateRecorded */}
                     <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
-                      <span>{formatFileSize(recording.deviceFileSize)}</span>
+                      <span>{formatFileSize(recording.size)}</span>
                       <span>{formatDuration(recording.duration)}</span>
-                      <span>{recording.startTime?.toLocaleDateString()}</span>
+                      <span>{recording.dateRecorded?.toLocaleDateString()}</span>
                     </div>
                   </div>
 
@@ -153,7 +160,7 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh }: Devic
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => handleDownloadFile(filename, recording.deviceFileSize)}
+                        onClick={() => handleDownloadFile(filename, recording.size)}
                         disabled={isDownloading}
                       >
                         <Download className="h-4 w-4 mr-1" />

@@ -541,6 +541,16 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     }
   }, [loaded, loadRecordings, deviceService])
 
+  // B-DEV-007: Listen for download completion events to force refresh recordings
+  useEffect(() => {
+    const handleDownloadsCompleted = () => {
+      console.log('[useUnifiedRecordings] Downloads completed - forcing refresh')
+      loadRecordings(true)
+    }
+    window.addEventListener('hidock:downloads-completed', handleDownloadsCompleted)
+    return () => window.removeEventListener('hidock:downloads-completed', handleDownloadsCompleted)
+  }, [loadRecordings])
+
   // Subscribe to recording watcher events for auto-refresh
   useEffect(() => {
     if (!window.electronAPI?.onRecordingAdded) return
