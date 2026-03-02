@@ -300,11 +300,19 @@ export function MeetingDetail() {
               <div className="flex items-center gap-3">
                 <Clock className="h-5 w-5 text-muted-foreground" />
                 <div>
+                  {/* C-MTG-003: Timezone-aware time display */}
                   <p className="font-medium">
                     {startDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} -{' '}
                     {endDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+                    <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                      {Intl.DateTimeFormat('en-US', { timeZoneName: 'short' }).formatToParts(startDate).find(p => p.type === 'timeZoneName')?.value || ''}
+                    </span>
                   </p>
-                  <p className="text-sm text-muted-foreground">{durationMins} minutes</p>
+                  <p className="text-sm text-muted-foreground">
+                    {durationMins} minutes
+                    {' \u00b7 '}
+                    {startDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                  </p>
                 </div>
               </div>
 
@@ -417,9 +425,22 @@ export function MeetingDetail() {
             </CardHeader>
             <CardContent>
               {recordings.length === 0 ? (
-                <p className="text-muted-foreground text-center py-8">
-                  No recordings linked to this meeting
-                </p>
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <Mic className="h-10 w-10 text-muted-foreground/40 mb-3" />
+                  <p className="text-muted-foreground font-medium mb-1">No recordings linked</p>
+                  <p className="text-sm text-muted-foreground/70 max-w-sm">
+                    Recordings are automatically linked when they overlap with the meeting time.
+                    You can also manually link recordings from the Calendar view.
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-4"
+                    onClick={() => navigate('/calendar')}
+                  >
+                    Go to Calendar
+                  </Button>
+                </div>
               ) : (
                 <div className="space-y-4">
                   {recordings.map((recording) => (
@@ -441,6 +462,15 @@ export function MeetingDetail() {
                             title="Unlink recording from meeting"
                           >
                             <Unlink className="h-4 w-4" />
+                          </Button>
+                          {/* C-MTG-001: Re-link recording to a different meeting */}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleOpenLinkDialog(recording.id)}
+                            title="Link to a different meeting"
+                          >
+                            <Link className="h-4 w-4" />
                           </Button>
                           {/* B-MTG-003: Play with loading spinner */}
                           {playbackLoading === recording.id ? (

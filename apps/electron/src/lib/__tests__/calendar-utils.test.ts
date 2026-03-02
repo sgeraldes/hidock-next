@@ -1,9 +1,15 @@
 import { describe, it, expect } from 'vitest'
 import {
   computeVisibleHourRange,
+  matchRecordingsToMeetings,
+  buildCalendarRecordings,
+  createPlaceholderMeetings,
+  groupByDay,
   type CalendarRecording,
   type CalendarMeetingOverlay,
 } from '../calendar-utils'
+import type { Meeting } from '@/types'
+import type { UnifiedRecording } from '@/types/unified-recording'
 
 /**
  * B-CAL-003: Unit tests for computeVisibleHourRange
@@ -142,5 +148,191 @@ describe('computeVisibleHourRange', () => {
 
     expect(result.startHour).toBe(8) // 9 - 1
     expect(result.endHour).toBe(18) // 17 + 1
+  })
+})
+
+/**
+ * C-CAL-005: Tests for meeting deduplication in matchRecordingsToMeetings
+ */
+
+function makeMeetingEntity(id: string, subject: string, startHour: number, endHour: number): Meeting {
+  const start = new Date(2026, 2, 2, startHour, 0, 0)
+  const end = new Date(2026, 2, 2, endHour, 0, 0)
+  return {
+    id,
+    subject,
+    start_time: start.toISOString(),
+    end_time: end.toISOString(),
+    location: null,
+    organizer_name: null,
+    organizer_email: null,
+    attendees: null,
+    description: null,
+    is_recurring: 0,
+    recurrence_rule: null,
+    meeting_url: null,
+    created_at: start.toISOString(),
+    updated_at: start.toISOString(),
+  }
+}
+
+function makeUnifiedRecording(
+  id: string,
+  startHour: number,
+  durationMinutes: number,
+  meetingId?: string
+): UnifiedRecording {
+  const dateRecorded = new Date(2026, 2, 2, startHour, 0, 0)
+  return {
+    id,
+    filename: `recording-${id}.wav`,
+    dateRecorded,
+    duration: durationMinutes * 60,
+    size: 1024,
+    location: 'local-only' as const,
+    localPath: `/recordings/${id}.wav`,
+    transcriptionStatus: 'none' as const,
+    meetingId: meetingId ?? null,
+  } as UnifiedRecording
+}
+
+describe('matchRecordingsToMeetings', () => {
+  it('should match a recording to its overlapping meeting', () => {
+    const meetings = [makeMeetingEntity('m1', 'Team Standup', 9, 10)]
+    const recordings = [makeUnifiedRecording('r1', 9, 60)]
+
+    const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings(meetings, recordings)
+
+    expect(calendarMeetings).toHaveLength(1)
+    expect(calendarMeetings[0].hasRecording).toBe(true)
+    expect(calendarMeetings[0].matchedRecordingId).toBe('r1')
+    expect(orphanRecordings).toHaveLength(0)
+  })
+
+  it('should produce orphan recordings when no meeting matches', () => {
+    const meetings = [makeMeetingEntity('m1', 'Team Standup', 9, 10)]
+    const recordings = [makeUnifiedRecording('r1', 14, 30)] // 2PM, no overlap with 9AM meeting
+
+    const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings(meetings, recordings)
+
+    expect(calendarMeetings).toHaveLength(1)
+    expect(calendarMeetings[0].hasRecording).toBe(false)
+    expect(orphanRecordings).toHaveLength(1)
+    expect(orphanRecordings[0].id).toBe('r1')
+  })
+
+  it('should handle meetings with no recordings', () => {
+    const meetings = [
+      makeMeetingEntity('m1', 'Standup', 9, 10),
+      makeMeetingEntity('m2', 'Planning', 14, 15),
+    ]
+
+    const { calendarMeetings, orphanRecordings } = matchRecordingsToMeetings(meetings, [])
+
+    expect(calendarMeetings).toHaveLength(2)
+    expect(calendarMeetings.every(m => !m.hasRecording)).toBe(true)
+    expect(orphanRecordings).toHaveLength(0)
+  })
+
+  it('should prefer manually linked recording over time-based match', () => {
+    const meetings = [
+      makeMeetingEntity('m1', 'Standup', 9, 10),
+      makeMeetingEntity('m2', 'Planning', 9, 10), // same time
+    ]
+    // Recording manually linked to m2
+    const recordings = [makeUnifiedRecording('r1', 9, 60, 'm2')]
+
+    const { calendarMeetings } = matchRecordingsToMeetings(meetings, recordings)
+
+    const m1 = calendarMeetings.find(m => m.id === 'm1')
+    const m2 = calendarMeetings.find(m => m.id === 'm2')
+
+    expect(m2?.hasRecording).toBe(true)
+    expect(m2?.matchedRecordingId).toBe('r1')
+    expect(m1?.hasRecording).toBe(false)
+  })
+})
+
+describe('buildCalendarRecordings', () => {
+  it('should build recording-centric data with linked meetings', () => {
+    const meetings = [makeMeetingEntity('m1', 'Team Standup', 9, 10)]
+    const recordings = [makeUnifiedRecording('r1', 9, 60)]
+
+    const { calendarRecordings, meetingOverlays } = buildCalendarRecordings(recordings, meetings)
+
+    expect(calendarRecordings).toHaveLength(1)
+    expect(calendarRecordings[0].linkedMeeting).toBeDefined()
+    expect(calendarRecordings[0].linkedMeeting?.subject).toBe('Team Standup')
+    expect(meetingOverlays).toHaveLength(1)
+    expect(meetingOverlays[0].hasRecording).toBe(true)
+  })
+
+  it('should mark meetings without recordings in overlays', () => {
+    const meetings = [
+      makeMeetingEntity('m1', 'Standup', 9, 10),
+      makeMeetingEntity('m2', 'Planning', 14, 15),
+    ]
+    const recordings = [makeUnifiedRecording('r1', 9, 60)]
+
+    const { meetingOverlays } = buildCalendarRecordings(recordings, meetings)
+
+    const m1Overlay = meetingOverlays.find(m => m.id === 'm1')
+    const m2Overlay = meetingOverlays.find(m => m.id === 'm2')
+
+    expect(m1Overlay?.hasRecording).toBe(true)
+    expect(m2Overlay?.hasRecording).toBe(false)
+  })
+})
+
+describe('createPlaceholderMeetings', () => {
+  it('should create placeholder meetings from orphan recordings', () => {
+    const orphans = [makeUnifiedRecording('r1', 14, 30)]
+
+    const placeholders = createPlaceholderMeetings(orphans)
+
+    expect(placeholders).toHaveLength(1)
+    expect(placeholders[0].id).toBe('placeholder_r1')
+    expect(placeholders[0].isPlaceholder).toBe(true)
+    expect(placeholders[0].hasRecording).toBe(true)
+    expect(placeholders[0].matchedRecordingId).toBe('r1')
+  })
+})
+
+describe('groupByDay', () => {
+  it('should group items by their date key', () => {
+    const items = [
+      { name: 'a', date: new Date(2026, 2, 2, 9, 0) },
+      { name: 'b', date: new Date(2026, 2, 2, 14, 0) },
+      { name: 'c', date: new Date(2026, 2, 3, 10, 0) },
+    ]
+    const viewDates = [new Date(2026, 2, 2), new Date(2026, 2, 3)]
+
+    const grouped = groupByDay(items, (i) => i.date, viewDates)
+
+    const key1 = '2026-03-02'
+    const key2 = '2026-03-03'
+    expect(grouped[key1]).toHaveLength(2)
+    expect(grouped[key2]).toHaveLength(1)
+    expect(grouped[key1][0].name).toBe('a')
+    expect(grouped[key2][0].name).toBe('c')
+  })
+
+  it('should return empty arrays for days with no items', () => {
+    const viewDates = [new Date(2026, 2, 5)]
+    const grouped = groupByDay([], (i: any) => i.date, viewDates)
+
+    const key = '2026-03-05'
+    expect(grouped[key]).toEqual([])
+  })
+
+  it('should ignore items not matching any view date', () => {
+    const items = [
+      { name: 'a', date: new Date(2026, 2, 10, 9, 0) }, // not in viewDates
+    ]
+    const viewDates = [new Date(2026, 2, 2)]
+    const grouped = groupByDay(items, (i) => i.date, viewDates)
+
+    const key = '2026-03-02'
+    expect(grouped[key]).toEqual([])
   })
 })
