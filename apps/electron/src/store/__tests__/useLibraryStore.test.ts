@@ -491,27 +491,25 @@ describe('useLibraryStore', () => {
       expect(useLibraryStore.getState().selectedIds.size).toBe(0)
     })
 
-    it('isSelected returns true for selected ID', () => {
-      const { toggleSelection, isSelected } = useLibraryStore.getState()
-
-      toggleSelection('rec-1')
-      expect(isSelected('rec-1')).toBe(true)
-    })
-
-    it('isSelected returns false for unselected ID', () => {
-      const { isSelected } = useLibraryStore.getState()
-
-      expect(isSelected('non-existent')).toBe(false)
-    })
-
-    it('isSelected reflects current state accurately', () => {
+    it('selectedIds.has returns true for selected ID', () => {
       const { toggleSelection } = useLibraryStore.getState()
 
-      expect(useLibraryStore.getState().isSelected('rec-1')).toBe(false)
       toggleSelection('rec-1')
-      expect(useLibraryStore.getState().isSelected('rec-1')).toBe(true)
+      expect(useLibraryStore.getState().selectedIds.has('rec-1')).toBe(true)
+    })
+
+    it('selectedIds.has returns false for unselected ID', () => {
+      expect(useLibraryStore.getState().selectedIds.has('non-existent')).toBe(false)
+    })
+
+    it('selectedIds.has reflects current state accurately', () => {
+      const { toggleSelection } = useLibraryStore.getState()
+
+      expect(useLibraryStore.getState().selectedIds.has('rec-1')).toBe(false)
       toggleSelection('rec-1')
-      expect(useLibraryStore.getState().isSelected('rec-1')).toBe(false)
+      expect(useLibraryStore.getState().selectedIds.has('rec-1')).toBe(true)
+      toggleSelection('rec-1')
+      expect(useLibraryStore.getState().selectedIds.has('rec-1')).toBe(false)
     })
   })
 

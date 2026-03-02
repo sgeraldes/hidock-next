@@ -92,6 +92,25 @@ function createSchemaMock(idField: string | string[]) {
 vi.mock('../validation', () => ({
   GetRecordingByIdSchema: createSchemaMock('id'),
   DeleteRecordingSchema: createSchemaMock('id'),
+  DeleteBatchRecordingsSchema: {
+    safeParse: vi.fn((data: any) => {
+      if (!data?.ids || !Array.isArray(data.ids)) {
+        return { success: false, error: { issues: [{ message: 'ids must be an array' }] } }
+      }
+      if (data.ids.length === 0) {
+        return { success: false, error: { issues: [{ message: 'ids must have at least 1 element' }] } }
+      }
+      if (data.ids.length > 1000) {
+        return { success: false, error: { issues: [{ message: 'ids must have at most 1000 elements' }] } }
+      }
+      for (const id of data.ids) {
+        if (!UUID_RE.test(id)) {
+          return { success: false, error: { issues: [{ message: 'Each ID must be a valid UUID' }] } }
+        }
+      }
+      return { success: true, data }
+    })
+  },
   LinkRecordingToMeetingSchema: createSchemaMock(['recordingId', 'meetingId']),
   UnlinkRecordingFromMeetingSchema: createSchemaMock('recordingId'),
   TranscribeRecordingSchema: createSchemaMock('recordingId'),
@@ -151,6 +170,7 @@ describe('Recording IPC Handlers', () => {
       'recordings:getForMeeting',
       'recordings:getAllWithTranscripts',
       'recordings:delete',
+      'recordings:deleteBatch',
       'recordings:linkToMeeting',
       'recordings:unlinkFromMeeting',
       'recordings:getTranscript',
@@ -361,6 +381,77 @@ describe('Recording IPC Handlers', () => {
       const result = await handlers['recordings:delete'](null, id)
 
       expect(result).toBe(false)
+    })
+  })
+
+  describe('recordings:deleteBatch', () => {
+    it('should delete multiple recordings and return results', async () => {
+      const { getRecordingById, updateRecordingStatus } = await import('../../services/database')
+      const { deleteRecording } = await import('../../services/file-storage')
+
+      const id1 = '550e8400-e29b-41d4-a716-446655440000'
+      const id2 = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'
+
+      vi.mocked(getRecordingById)
+        .mockReturnValueOnce({ id: id1, file_path: '/path/file1.wav', filename: 'file1.wav' } as any)
+        .mockReturnValueOnce({ id: id2, file_path: '/path/file2.wav', filename: 'file2.wav' } as any)
+      vi.mocked(deleteRecording).mockReturnValue(true)
+
+      const result = await handlers['recordings:deleteBatch'](null, [id1, id2])
+
+      expect(result.success).toBe(true)
+      expect(result.deleted).toBe(2)
+      expect(result.failed).toBe(0)
+      expect(result.errors).toEqual([])
+    })
+
+    it('should return partial results when some deletions fail', async () => {
+      const { getRecordingById, updateRecordingStatus } = await import('../../services/database')
+      const { deleteRecording } = await import('../../services/file-storage')
+
+      const id1 = '550e8400-e29b-41d4-a716-446655440000'
+      const id2 = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'
+
+      vi.mocked(getRecordingById)
+        .mockReturnValueOnce({ id: id1, file_path: '/path/file1.wav', filename: 'file1.wav' } as any)
+        .mockReturnValueOnce(undefined) // second recording not found
+
+      vi.mocked(deleteRecording).mockReturnValue(true)
+
+      const result = await handlers['recordings:deleteBatch'](null, [id1, id2])
+
+      expect(result.success).toBe(false)
+      expect(result.deleted).toBe(1)
+      expect(result.failed).toBe(1)
+      expect(result.errors).toHaveLength(1)
+    })
+
+    it('should reject invalid IDs', async () => {
+      const result = await handlers['recordings:deleteBatch'](null, ['not-a-uuid'])
+
+      expect(result.success).toBe(false)
+      expect(result.deleted).toBe(0)
+    })
+
+    it('should reject empty array', async () => {
+      const result = await handlers['recordings:deleteBatch'](null, [])
+
+      expect(result.success).toBe(false)
+    })
+
+    it('should handle errors gracefully', async () => {
+      const { getRecordingById } = await import('../../services/database')
+      const id1 = '550e8400-e29b-41d4-a716-446655440000'
+
+      vi.mocked(getRecordingById).mockImplementation(() => {
+        throw new Error('DB error')
+      })
+
+      const result = await handlers['recordings:deleteBatch'](null, [id1])
+
+      expect(result.success).toBe(false)
+      expect(result.failed).toBe(1)
+      expect(result.errors[0].error).toBe('DB error')
     })
   })
 

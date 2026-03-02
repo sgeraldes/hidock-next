@@ -48,7 +48,6 @@ vi.mock('@/features/library/hooks', () => ({
     toggleSelection: vi.fn(),
     selectAll: vi.fn(),
     clearSelection: vi.fn(),
-    isSelected: vi.fn(() => false),
     handleSelectionClick: vi.fn()
   })),
   useKeyboardNavigation: vi.fn(() => ({
@@ -133,7 +132,6 @@ vi.mock('@/store/useLibraryStore', () => ({
       selectAll: vi.fn(),
       selectRange: vi.fn(),
       clearSelection: vi.fn(),
-      isSelected: vi.fn(() => false),
       // Panel state (tri-pane layout)
       panelSizes: [25, 45, 30],
       setPanelSizes: vi.fn(),
@@ -141,10 +139,13 @@ vi.mock('@/store/useLibraryStore', () => ({
       setSelectedSourceId: vi.fn(),
       // Expansion state
       expandedRowIds: new Set<string>(),
+      expandedTranscripts: new Set<string>(),
       toggleRowExpansion: vi.fn(),
       expandRow: vi.fn(),
       collapseRow: vi.fn(),
-      collapseAllRows: vi.fn()
+      collapseAllRows: vi.fn(),
+      toggleTranscriptExpansion: vi.fn(),
+      collapseAllTranscripts: vi.fn()
     }
     return selector(state)
   },

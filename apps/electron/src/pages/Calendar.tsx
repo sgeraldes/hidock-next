@@ -494,11 +494,11 @@ export function Calendar() {
     const deviceService = getHiDockDeviceService()
     if (!deviceService.isConnected()) return
 
-    // Check if already downloading using global store
-    if (downloadQueue.has(recording.id)) return
+    // B-LIB-009: Check if already downloading using deviceFilename as key (consistent with download orchestrator)
+    if (downloadQueue.has(recording.deviceFilename)) return
 
-    // Add to global download queue
-    addToDownloadQueue(recording.id, recording.deviceFilename, recording.size)
+    // Add to global download queue using deviceFilename as key
+    addToDownloadQueue(recording.deviceFilename, recording.deviceFilename, recording.size)
 
     try {
       console.log(`[Calendar] Starting download: ${recording.deviceFilename} (${recording.size} bytes)`)
@@ -509,7 +509,7 @@ export function Calendar() {
         // Progress callback to update global store
         (received) => {
           const percent = Math.round((received / recording.size) * 100)
-          updateDownloadProgress(recording.id, percent)
+          updateDownloadProgress(recording.deviceFilename, percent)
         },
         recording.dateRecorded // Pass the original recording date from device
       )
@@ -521,7 +521,7 @@ export function Calendar() {
       console.error('Download failed:', e)
     } finally {
       // Remove from global download queue
-      removeFromDownloadQueue(recording.id)
+      removeFromDownloadQueue(recording.deviceFilename)
     }
   }, [downloadQueue, addToDownloadQueue, updateDownloadProgress, removeFromDownloadQueue, refreshRecordings])
 
@@ -649,14 +649,14 @@ export function Calendar() {
     // Process sequentially but show progress for each
     let completedCount = 0
     for (const rec of toDownload) {
-      // Skip if already downloading
-      if (downloadQueue.has(rec.id)) {
+      // B-LIB-009: Skip if already downloading using deviceFilename as key
+      if (downloadQueue.has(rec.deviceFilename)) {
         completedCount++
         continue
       }
-      
-      addToDownloadQueue(rec.id, rec.deviceFilename, rec.size)
-      
+
+      addToDownloadQueue(rec.deviceFilename, rec.deviceFilename, rec.size)
+
       try {
         await deviceService.downloadRecordingToFile(
           rec.deviceFilename,
@@ -664,7 +664,7 @@ export function Calendar() {
           '',
           (received) => {
             const percent = Math.round((received / rec.size) * 100)
-            updateDownloadProgress(rec.id, percent)
+            updateDownloadProgress(rec.deviceFilename, percent)
           },
           rec.dateRecorded // Pass the original recording date from device
         )
@@ -676,7 +676,7 @@ export function Calendar() {
       } catch (e) {
         console.error('Download failed:', rec.filename, e)
       } finally {
-        removeFromDownloadQueue(rec.id)
+        removeFromDownloadQueue(rec.deviceFilename)
       }
     }
     

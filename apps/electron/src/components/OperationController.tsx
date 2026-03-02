@@ -12,7 +12,7 @@
  * own long-running operations or hold critical state.
  */
 
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 import { useAudioPlayback } from '@/hooks/useAudioPlayback'
@@ -55,7 +55,11 @@ export function OperationController() {
 // =============================================================================
 
 export const useAudioControls = () => {
-  return {
+  // B-LIB-002: Memoize the controls object to prevent stale closures
+  // and unnecessary re-renders in consuming components. The functions
+  // delegate to window.__audioControls at call time, so they always
+  // reference the latest implementation.
+  return useMemo(() => ({
     play: (recordingId: string, filePath: string) => {
       window.__audioControls?.play(recordingId, filePath)
     },
@@ -77,5 +81,5 @@ export const useAudioControls = () => {
     loadWaveformOnly: (recordingId: string, filePath: string) => {
       window.__audioControls?.loadWaveformOnly(recordingId, filePath)
     }
-  }
+  }), [])
 }

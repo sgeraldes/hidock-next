@@ -40,6 +40,9 @@ interface LibraryState {
   // Expansion state (transient - not persisted)
   expandedRowIds: Set<string>
 
+  // Transcript expansion state (transient - not persisted)
+  expandedTranscripts: Set<string>
+
   // Panel state (persisted)
   panelSizes: number[]
   selectedSourceId: string | null
@@ -76,13 +79,16 @@ interface LibraryActions {
   selectAll: (ids: string[]) => void
   selectRange: (ids: string[], startId: string, endId: string) => void
   clearSelection: () => void
-  isSelected: (id: string) => boolean
 
   // Row expansion
   toggleRowExpansion: (id: string) => void
   expandRow: (id: string) => void
   collapseRow: (id: string) => void
   collapseAllRows: () => void
+
+  // Transcript expansion
+  toggleTranscriptExpansion: (id: string) => void
+  collapseAllTranscripts: () => void
 
   // Error management
   setRecordingError: (id: string, error: LibraryError) => void
@@ -112,6 +118,7 @@ const initialState: LibraryState = {
   searchQuery: '',
   selectedIds: new Set(),
   expandedRowIds: new Set(),
+  expandedTranscripts: new Set(),
   panelSizes: [25, 45, 30],
   selectedSourceId: null,
   recordingErrors: new Map(),
@@ -182,8 +189,6 @@ export const useLibraryStore = create<LibraryStore>()(
 
       clearSelection: () => set({ selectedIds: new Set() }),
 
-      isSelected: (id) => get().selectedIds.has(id),
-
       // Row expansion
       toggleRowExpansion: (id) => {
         if (!validateId(id)) {
@@ -226,6 +231,20 @@ export const useLibraryStore = create<LibraryStore>()(
       },
 
       collapseAllRows: () => set({ expandedRowIds: new Set() }),
+
+      // Transcript expansion
+      toggleTranscriptExpansion: (id) =>
+        set((state) => {
+          const newExpanded = new Set(state.expandedTranscripts)
+          if (newExpanded.has(id)) {
+            newExpanded.delete(id)
+          } else {
+            newExpanded.add(id)
+          }
+          return { expandedTranscripts: newExpanded }
+        }),
+
+      collapseAllTranscripts: () => set({ expandedTranscripts: new Set() }),
 
       // Error management
       setRecordingError: (id, error) =>

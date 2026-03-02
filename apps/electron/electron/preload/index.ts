@@ -107,6 +107,12 @@ export interface ElectronAPI {
     updateTranscriptionStatus: (id: string, status: string) => Promise<{ success: boolean; data?: any; error?: string }>
     linkToMeeting: (recordingId: string, meetingId: string, confidence: number, method: string) => Promise<any>
     delete: (id: string) => Promise<boolean>
+    deleteBatch: (ids: string[]) => Promise<{
+      success: boolean
+      deleted: number
+      failed: number
+      errors: Array<{ id: string; error: string }>
+    }>
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId: string) => Promise<{ success: boolean; data: any[]; error?: string }>
     getMeetingsNearDate: (date: string) => Promise<{ success: boolean; data: any[]; error?: string }>
@@ -467,6 +473,7 @@ const electronAPI: ElectronAPI = {
     linkToMeeting: (recordingId, meetingId, confidence, method) =>
       callIPC('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
     delete: (id) => callIPC('recordings:delete', id),
+    deleteBatch: (ids) => callIPC('recordings:deleteBatch', ids),
     // Recording-Meeting linking dialog methods
     getCandidates: (recordingId) => callIPC('recordings:getCandidates', recordingId),
     getMeetingsNearDate: (date) => callIPC('recordings:getMeetingsNearDate', date),

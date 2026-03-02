@@ -16,6 +16,7 @@ interface AppState {
   unifiedRecordings: UnifiedRecording[]
   unifiedRecordingsLoaded: boolean
   unifiedRecordingsLoading: boolean
+  unifiedRecordingsLoadingCount: number
   unifiedRecordingsError: string | null
 
   // UI State
@@ -49,6 +50,8 @@ interface AppState {
   // Unified recordings actions (persists across page navigation)
   setUnifiedRecordings: (recordings: UnifiedRecording[]) => void
   setUnifiedRecordingsLoading: (loading: boolean) => void
+  incrementUnifiedRecordingsLoading: () => void
+  decrementUnifiedRecordingsLoading: () => void
   setUnifiedRecordingsError: (error: string | null) => void
   markUnifiedRecordingsLoaded: () => void
   invalidateUnifiedRecordings: () => void // Force reload on next access
@@ -98,6 +101,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   unifiedRecordings: [],
   unifiedRecordingsLoaded: false,
   unifiedRecordingsLoading: false,
+  unifiedRecordingsLoadingCount: 0,
   unifiedRecordingsError: null,
 
   currentDate: new Date(),
@@ -166,6 +170,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Unified recordings actions
   setUnifiedRecordings: (recordings) => set({ unifiedRecordings: recordings }),
   setUnifiedRecordingsLoading: (loading) => set({ unifiedRecordingsLoading: loading }),
+  incrementUnifiedRecordingsLoading: () => set((state) => {
+    const newCount = state.unifiedRecordingsLoadingCount + 1
+    return { unifiedRecordingsLoadingCount: newCount, unifiedRecordingsLoading: newCount > 0 }
+  }),
+  decrementUnifiedRecordingsLoading: () => set((state) => {
+    const newCount = Math.max(0, state.unifiedRecordingsLoadingCount - 1)
+    return { unifiedRecordingsLoadingCount: newCount, unifiedRecordingsLoading: newCount > 0 }
+  }),
   setUnifiedRecordingsError: (error) => set({ unifiedRecordingsError: error }),
   markUnifiedRecordingsLoaded: () => set({ unifiedRecordingsLoaded: true }),
   invalidateUnifiedRecordings: () => set({ unifiedRecordingsLoaded: false }),

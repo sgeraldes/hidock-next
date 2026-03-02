@@ -98,10 +98,13 @@ vi.mock('@/store/useLibraryStore', () => ({
       selectedSourceId: null,
       setSelectedSourceId: vi.fn(),
       expandedRowIds: new Set(),
+      expandedTranscripts: new Set(),
       toggleRowExpansion: vi.fn(),
       expandRow: vi.fn(),
       collapseRow: vi.fn(),
-      collapseAllRows: vi.fn()
+      collapseAllRows: vi.fn(),
+      toggleTranscriptExpansion: vi.fn(),
+      collapseAllTranscripts: vi.fn()
     }
     return typeof selector === 'function' ? selector(state) : state
   }),
@@ -127,7 +130,6 @@ vi.mock('@/features/library/hooks', () => ({
     toggleSelection: vi.fn(),
     selectAll: vi.fn(),
     clearSelection: vi.fn(),
-    isSelected: vi.fn(() => false),
     handleSelectionClick: vi.fn()
   })),
   useKeyboardNavigation: vi.fn(() => ({

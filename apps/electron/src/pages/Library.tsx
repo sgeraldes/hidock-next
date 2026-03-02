@@ -31,6 +31,7 @@ import {
 import { useSourceSelection, useKeyboardNavigation, useTransitionFilters } from '@/features/library/hooks'
 import { useLibraryStore, useLibrarySorting } from '@/store/useLibraryStore'
 import { useOperations } from '@/hooks/useOperations'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 
 export function Library() {
   const navigate = useNavigate()
@@ -62,8 +63,9 @@ export function Library() {
     return downloadQueue.has(filename)
   }, [downloadQueue])
 
-  // UI state
-  const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set())
+  // UI state - expandedTranscripts centralized in useLibraryStore (B-LIB-005)
+  const expandedTranscripts = useLibraryStore((state) => state.expandedTranscripts)
+  const toggleTranscriptExpansion = useLibraryStore((state) => state.toggleTranscriptExpansion)
 
   // Filter state - persisted in store across navigation
   // Using useTransitionFilters for non-blocking filter updates
@@ -115,6 +117,15 @@ export function Library() {
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 })
   const [deleting, setDeleting] = useState<string | null>(null)
 
+  // B-LIB-006: Confirm dialog state (replaces window.confirm)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    open: boolean
+    title: string
+    description: string
+    actionLabel: string
+    onConfirm: () => void
+  }>({ open: false, title: '', description: '', actionLabel: 'Delete', onConfirm: () => {} })
+
   // Selection for bulk operations
   const {
     selectedIds,
@@ -122,7 +133,6 @@ export function Library() {
     toggleSelection,
     selectAll,
     clearSelection,
-    isSelected,
     handleSelectionClick
   } = useSourceSelection()
 
@@ -199,6 +209,9 @@ export function Library() {
   // Note: The exhaustive-deps disable below is intentional - we use enrichmentKey to avoid
   // refetching when recordings array reference changes but IDs remain the same (optimization pattern)
   useEffect(() => {
+    // B-LIB-004: Use abort signal to discard stale enrichment results
+    const signal = enrichmentAbortController.current.signal
+
     const loadEnrichment = async () => {
       const recordingIdsForTranscripts = recordings.filter((rec) => hasLocalPath(rec)).map((rec) => rec.id)
       const meetingIds = recordings
@@ -213,12 +226,17 @@ export function Library() {
           meetingIds.length > 0 ? window.electronAPI.meetings.getByIds(meetingIds) : Promise.resolve({})
         ])
 
+        // B-LIB-004: Check abort signal after Promise.all before processing results.
+        // If filters changed during the await, discard stale data.
+        if (signal.aborted) return
+
         const newTranscripts = new Map<string, Transcript>(Object.entries(transcriptsObj) as [string, Transcript][])
         const newMeetings = new Map<string, Meeting>(Object.entries(meetingsObj) as [string, Meeting][])
 
         setTranscripts(newTranscripts)
         setMeetings(newMeetings)
       } catch (e) {
+        if (signal.aborted) return
         console.error('[Library] Failed to load enrichment data:', e)
       }
     }
@@ -330,16 +348,8 @@ export function Library() {
 
   // Handlers
   const toggleTranscript = useCallback((id: string) => {
-    setExpandedTranscripts((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) {
-        next.delete(id)
-      } else {
-        next.add(id)
-      }
-      return next
-    })
-  }, [])
+    toggleTranscriptExpansion(id)
+  }, [toggleTranscriptExpansion])
 
   const openRecordingsFolder = async () => {
     await window.electronAPI.storage.openFolder('recordings')
@@ -431,25 +441,8 @@ export function Library() {
     }
   }, [filteredRecordings, selectedIds, refresh, clearSelection, queueBulkTranscriptions])
 
-  // PESSIMISTIC UPDATE: Server-first bulk delete with transaction boundary
-  const handleSelectedDelete = useCallback(async () => {
-    const selectedRecordings = filteredRecordings.filter((r) => selectedIds.has(r.id))
-    if (selectedRecordings.length === 0) return
-
-    const hasLocalFiles = selectedRecordings.some((r) => hasLocalPath(r))
-    const hasDeviceFiles = selectedRecordings.some((r) => isDeviceOnly(r))
-
-    let message = `Delete ${selectedRecordings.length} selected item${selectedRecordings.length > 1 ? 's' : ''}?`
-    if (hasLocalFiles && hasDeviceFiles) {
-      message += ' This includes both local files and device recordings.'
-    } else if (hasLocalFiles) {
-      message += ' This will remove local files and any transcripts.'
-    } else {
-      message += ' This cannot be undone.'
-    }
-
-    if (!window.confirm(message)) return
-
+  // B-LIB-006: Extracted bulk delete execution (called after confirmation)
+  const executeBulkDelete = useCallback(async (selectedRecordings: UnifiedRecording[]) => {
     setBulkProcessing(true)
     setBulkProgress({ current: 0, total: selectedRecordings.length })
 
@@ -478,62 +471,106 @@ export function Library() {
       // Step 3: Clear selection ONLY after successful refresh
       clearSelection()
 
-      // Step 4: Show summary to user
+      // Step 4: Show summary to user via toast if errors
       if (errors.length > 0) {
-        alert(`Deleted ${successCount} of ${selectedRecordings.length} items. ${errors.length} failed.`)
+        import('@/components/ui/toaster').then(({ toast }) => {
+          toast.warning('Partial Delete', `Deleted ${successCount} of ${selectedRecordings.length} items. ${errors.length} failed.`)
+        })
       }
     } finally {
       setBulkProcessing(false)
       setBulkProgress({ current: 0, total: 0 })
     }
-  }, [filteredRecordings, selectedIds, refresh, clearSelection])
+  }, [refresh, clearSelection])
 
-  // PESSIMISTIC UPDATE: Server-first delete with proper error handling
-  const handleDeleteFromDevice = useCallback(async (recording: UnifiedRecording) => {
-    if (!deviceConnected) return
-    if (!('deviceFilename' in recording)) return
-    if (!window.confirm(`Delete "${recording.filename}" from device? This cannot be undone.`)) return
+  // PESSIMISTIC UPDATE: Server-first bulk delete with confirmation dialog
+  const handleSelectedDelete = useCallback(async () => {
+    const selectedRecordings = filteredRecordings.filter((r) => selectedIds.has(r.id))
+    if (selectedRecordings.length === 0) return
 
+    const hasLocalFiles = selectedRecordings.some((r) => hasLocalPath(r))
+    const hasDeviceFiles = selectedRecordings.some((r) => isDeviceOnly(r))
+
+    let description = `Delete ${selectedRecordings.length} selected item${selectedRecordings.length > 1 ? 's' : ''}?`
+    if (hasLocalFiles && hasDeviceFiles) {
+      description += ' This includes both local files and device recordings.'
+    } else if (hasLocalFiles) {
+      description += ' This will remove local files and any transcripts.'
+    } else {
+      description += ' This cannot be undone.'
+    }
+
+    setConfirmDialog({
+      open: true,
+      title: 'Delete Selected Items',
+      description,
+      actionLabel: 'Delete',
+      onConfirm: () => executeBulkDelete(selectedRecordings)
+    })
+  }, [filteredRecordings, selectedIds, executeBulkDelete])
+
+  // B-LIB-006: Extracted device delete execution
+  const executeDeleteFromDevice = useCallback(async (recording: UnifiedRecording) => {
     setDeleting(recording.id)
     try {
-      // Step 1: Delete on server FIRST
       await window.electronAPI.recordings.delete(recording.id)
-
-      // Step 2: Refresh data from server to update UI ONLY on success
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete from device:', e)
-      // User feedback on error (no rollback needed since we never updated state)
-      alert(`Failed to delete "${recording.filename}" from device. Please try again.`)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.error('Delete Failed', `Failed to delete "${recording.filename}" from device. Please try again.`)
+      })
     } finally {
       setDeleting(null)
     }
-  }, [deviceConnected, refresh])
+  }, [refresh])
 
-  // PESSIMISTIC UPDATE: Server-first delete with proper error handling
-  const handleDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
-    if (!hasLocalPath(recording)) return
-    const hasTranscript = transcripts.has(recording.id)
-    const message = hasTranscript
-      ? `Delete local file and transcript for "${recording.filename}"? The transcript data will be lost.`
-      : `Delete local file "${recording.filename}"?`
-    if (!window.confirm(message)) return
+  // PESSIMISTIC UPDATE: Server-first delete with confirmation dialog
+  const handleDeleteFromDevice = useCallback(async (recording: UnifiedRecording) => {
+    if (!deviceConnected) return
+    if (!('deviceFilename' in recording)) return
 
+    setConfirmDialog({
+      open: true,
+      title: 'Delete from Device',
+      description: `Delete "${recording.filename}" from device? This cannot be undone.`,
+      actionLabel: 'Delete',
+      onConfirm: () => executeDeleteFromDevice(recording)
+    })
+  }, [deviceConnected, executeDeleteFromDevice])
+
+  // B-LIB-006: Extracted local delete execution
+  const executeDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
     setDeleting(recording.id)
     try {
-      // Step 1: Delete on server FIRST
       await window.electronAPI.recordings.delete(recording.id)
-
-      // Step 2: Refresh data from server to update UI ONLY on success
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete local file:', e)
-      // User feedback on error (no rollback needed since we never updated state)
-      alert(`Failed to delete "${recording.filename}". Please try again.`)
+      import('@/components/ui/toaster').then(({ toast }) => {
+        toast.error('Delete Failed', `Failed to delete "${recording.filename}". Please try again.`)
+      })
     } finally {
       setDeleting(null)
     }
-  }, [transcripts, refresh])
+  }, [refresh])
+
+  // PESSIMISTIC UPDATE: Server-first delete with confirmation dialog
+  const handleDeleteLocal = useCallback(async (recording: UnifiedRecording) => {
+    if (!hasLocalPath(recording)) return
+    const hasTranscript = transcripts.has(recording.id)
+    const description = hasTranscript
+      ? `Delete local file and transcript for "${recording.filename}"? The transcript data will be lost.`
+      : `Delete local file "${recording.filename}"?`
+
+    setConfirmDialog({
+      open: true,
+      title: 'Delete Local File',
+      description,
+      actionLabel: 'Delete',
+      onConfirm: () => executeDeleteLocal(recording)
+    })
+  }, [transcripts, executeDeleteLocal])
 
   const handleDelete = useCallback(
     (recording: UnifiedRecording) => {
@@ -628,29 +665,11 @@ export function Library() {
   // Virtualization setup
   const parentRef = useRef<HTMLDivElement>(null)
 
+  // B-LIB-008: Simplified estimateSize — complex calculations caused unnecessary
+  // virtualizer re-measurements. The virtualizer uses measureElement for actual sizing.
   const estimateSize = useCallback(
-    (index: number) => {
-      const recording = filteredRecordings[index]
-      if (!recording) return compactView ? 48 : 200
-
-      // Base height
-      let height = compactView ? 48 : 120
-
-      // Card view specific additions
-      if (!compactView) {
-        if (currentlyPlayingId === recording.id) height += 80
-        if (recording.meetingId && meetings.get(recording.meetingId)) height += 70
-        const transcript = transcripts.get(recording.id)
-        if (transcript) {
-          height += 50
-          if (expandedTranscripts.has(recording.id)) height += 400
-        }
-        if (isDeviceOnly(recording)) height += 30
-      }
-
-      return height
-    },
-    [compactView, filteredRecordings, currentlyPlayingId, meetings, transcripts, expandedTranscripts]
+    () => compactView ? 48 : 200,
+    [compactView]
   )
 
   const rowVirtualizer = useVirtualizer({
@@ -827,7 +846,7 @@ export function Library() {
                           meeting={meeting}
                           transcript={transcripts.get(recording.id)}
                           isPlaying={currentlyPlayingId === recording.id}
-                          isSelected={isSelected(recording.id)}
+                          isSelected={selectedIds.has(recording.id)}
                           isActiveSource={selectedSourceId === recording.id}
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
@@ -882,7 +901,7 @@ export function Library() {
                           }
                           isDeleting={deleting === recording.id}
                           deviceConnected={deviceConnected}
-                          isSelected={isSelected(recording.id)}
+                          isSelected={selectedIds.has(recording.id)}
                           onSelectionChange={(id, shiftKey) =>
                             handleSelectionClick(id, shiftKey, filteredRecordings.map((r) => r.id))
                           }
@@ -966,6 +985,16 @@ export function Library() {
         />
       </div>
 
+      {/* B-LIB-006: Confirm Dialog for destructive actions */}
+      <ConfirmDialog
+        open={confirmDialog.open}
+        onOpenChange={(open) => setConfirmDialog((prev) => ({ ...prev, open }))}
+        title={confirmDialog.title}
+        description={confirmDialog.description}
+        actionLabel={confirmDialog.actionLabel}
+        variant="destructive"
+        onConfirm={confirmDialog.onConfirm}
+      />
     </div>
   )
 }

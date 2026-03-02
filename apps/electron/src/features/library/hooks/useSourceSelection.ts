@@ -16,7 +16,6 @@ interface UseSourceSelectionResult {
   toggleSelection: (id: string) => void
   selectAll: (ids: string[]) => void
   clearSelection: () => void
-  isSelected: (id: string) => boolean
 
   // Shift+Click range selection
   handleSelectionClick: (id: string, shiftKey: boolean, allIds: string[]) => void
@@ -35,7 +34,6 @@ export function useSourceSelection(): UseSourceSelectionResult {
   const selectAll = useLibraryStore((state) => state.selectAll)
   const selectRange = useLibraryStore((state) => state.selectRange)
   const clearSelection = useLibraryStore((state) => state.clearSelection)
-  const isSelected = useLibraryStore((state) => state.isSelected)
 
   // Handle selection with Shift+Click for range selection
   const handleSelectionClick = useCallback(
@@ -64,7 +62,6 @@ export function useSourceSelection(): UseSourceSelectionResult {
     toggleSelection,
     selectAll,
     clearSelection: handleClearSelection,
-    isSelected,
     handleSelectionClick
   }
 }
