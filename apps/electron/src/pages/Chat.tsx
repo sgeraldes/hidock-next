@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
 import {
   Send,
   Plus,
@@ -17,7 +18,8 @@ import {
   Bot,
   User,
   FileAudio,
-  Square
+  Square,
+  RotateCcw
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -40,8 +42,10 @@ import {
 } from '@/components/ui/alert-dialog'
 import { toast } from '@/components/ui/toaster'
 import { ContextPicker } from '@/components/ContextPicker'
-import { cn, formatDateTime } from '@/lib/utils'
+import { cn, getRelativeTime } from '@/lib/utils'
 import type { Message, Conversation, KnowledgeCapture } from '@/types/knowledge'
+
+const MAX_INPUT_LENGTH = 4000
 
 interface VectorChunk {
   id: string
@@ -90,6 +94,7 @@ export function Chat() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [failedMessageIds, setFailedMessageIds] = useState<Set<string>>(new Set())
   const [initialLoading, setInitialLoading] = useState(true)
   const [initError, setInitError] = useState<string | null>(null)
   const [status, setStatus] = useState<RAGStatus | null>(null)
@@ -104,6 +109,7 @@ export function Chat() {
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   // Initialize
   useEffect(() => {
@@ -186,6 +192,15 @@ export function Chat() {
     scrollToBottom()
   }, [messages])
 
+  // Auto-focus input on mount and when active conversation changes
+  useEffect(() => {
+    if (!initialLoading && !initError) {
+      // Small delay to let the DOM settle after state updates
+      const timer = setTimeout(() => inputRef.current?.focus(), 50)
+      return () => clearTimeout(timer)
+    }
+  }, [initialLoading, initError, activeConversation])
+
   // Clear recording context
   // PESSIMISTIC UPDATE: Server-first approach - only update store on success
   const clearRecordingContext = async () => {
@@ -217,11 +232,15 @@ export function Chat() {
   const loadConversations = async () => {
     try {
       const history = await window.electronAPI.assistant.getConversations()
-      setConversations(history)
+      // Sort by most recently updated first
+      const sorted = [...history].sort(
+        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      )
+      setConversations(sorted)
 
       // If we have conversations and none active, select the first one
-      if (history.length > 0 && !activeConversation) {
-        handleSelectConversation(history[0])
+      if (sorted.length > 0 && !activeConversation) {
+        handleSelectConversation(sorted[0])
       }
     } catch (error) {
       console.error('Failed to load conversations:', error)
@@ -444,6 +463,7 @@ export function Chat() {
       if (response.error) {
         const errorMsg = await window.electronAPI.assistant.addMessage(currentConv!.id, 'assistant', response.error)
         setMessages((prev) => [...prev, errorMsg])
+        setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
       } else {
         // Add assistant response
         const assistantMsg = await window.electronAPI.assistant.addMessage(
@@ -475,12 +495,84 @@ export function Chat() {
           'Sorry, I encountered an error processing your request. Please make sure Ollama is running and try again.'
         )
         setMessages((prev) => [...prev, errorMsg])
+        setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
       }
     } finally {
       setLoading(false)
       setIsProcessing(false)
     }
   }, [input, isProcessing, activeConversation])
+
+  // Retry a failed message: find the preceding user message and re-submit it
+  const handleRetry = useCallback(async (failedMsgId: string) => {
+    if (isProcessing || !activeConversation) return
+
+    // Find the failed message index and the preceding user message
+    const failedIdx = messages.findIndex(m => m.id === failedMsgId)
+    if (failedIdx < 0) return
+
+    // Look backwards for the user message that triggered this error
+    let userMessage: Message | null = null
+    for (let i = failedIdx - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        userMessage = messages[i]
+        break
+      }
+    }
+
+    if (!userMessage) {
+      toast.error('Cannot retry', 'Could not find the original message to retry.')
+      return
+    }
+
+    // Remove the failed assistant message from UI
+    setMessages(prev => prev.filter(m => m.id !== failedMsgId))
+    setFailedMessageIds(prev => {
+      const next = new Set(prev)
+      next.delete(failedMsgId)
+      return next
+    })
+
+    // Re-submit the user's original message
+    setIsProcessing(true)
+    setLoading(true)
+
+    try {
+      const response = await window.electronAPI.rag.chatLegacy(
+        activeConversation.id,
+        userMessage.content
+      )
+
+      if (response.error) {
+        const errorMsg = await window.electronAPI.assistant.addMessage(
+          activeConversation.id, 'assistant', response.error
+        )
+        setMessages(prev => [...prev, errorMsg])
+        setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
+      } else {
+        const assistantMsg = await window.electronAPI.assistant.addMessage(
+          activeConversation.id, 'assistant', response.answer,
+          JSON.stringify(response.sources || [])
+        )
+        setMessages(prev => [...prev, assistantMsg])
+
+        if (response.sources && response.sources.length > 0) {
+          setSources(prev => new Map(prev).set(assistantMsg.id, response.sources))
+        }
+      }
+    } catch (error) {
+      console.error('Retry error:', error)
+      const errorMsg = await window.electronAPI.assistant.addMessage(
+        activeConversation.id, 'assistant',
+        'Retry failed. Please check your connection and try again.'
+      )
+      setMessages(prev => [...prev, errorMsg])
+      setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
+    } finally {
+      setLoading(false)
+      setIsProcessing(false)
+    }
+  }, [isProcessing, activeConversation, messages])
 
   const getMessageSources = (message: Message): Source[] => {
     if (sources.has(message.id)) return sources.get(message.id)!
@@ -572,15 +664,23 @@ export function Chat() {
                       : "hover:bg-muted text-muted-foreground hover:text-foreground"
                   )}
                 >
-                  <div className="flex items-center gap-2 overflow-hidden">
-                    <MessageSquare className={cn("h-4 w-4 flex-shrink-0", activeConversation?.id === conv.id ? "text-primary-foreground" : "text-muted-foreground")} />
-                    <span className="truncate">{conv.title || 'Untitled'}</span>
+                  <div className="flex flex-col gap-0.5 overflow-hidden flex-1">
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <MessageSquare className={cn("h-4 w-4 flex-shrink-0", activeConversation?.id === conv.id ? "text-primary-foreground" : "text-muted-foreground")} />
+                      <span className="truncate">{conv.title || 'Untitled'}</span>
+                    </div>
+                    <span className={cn(
+                      "text-[10px] pl-6",
+                      activeConversation?.id === conv.id ? "text-primary-foreground/60" : "text-muted-foreground/60"
+                    )}>
+                      {getRelativeTime(conv.updatedAt)}
+                    </span>
                   </div>
                   <Button
                     variant="ghost"
                     size="icon"
                     className={cn(
-                      "h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity",
+                      "h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0",
                       activeConversation?.id === conv.id ? "text-primary-foreground hover:bg-primary-foreground/20" : "hover:text-destructive"
                     )}
                     onClick={(e) => handleDeleteClick(e, conv.id)}
@@ -850,19 +950,41 @@ export function Chat() {
                           'p-4 rounded-2xl shadow-sm border',
                           message.role === 'user'
                             ? 'bg-primary text-primary-foreground border-primary rounded-tr-none'
-                            : 'bg-background border-border rounded-tl-none'
+                            : 'bg-background border-border rounded-tl-none',
+                          failedMessageIds.has(message.id) && 'border-destructive/50 bg-destructive/5'
                         )}
                       >
-                        <p className="whitespace-pre-wrap leading-relaxed text-sm md:text-base">{message.content}</p>
+                        {message.role === 'assistant' ? (
+                          <div className="prose prose-sm max-w-none dark:prose-invert leading-relaxed text-sm md:text-base">
+                            <ReactMarkdown>{message.content}</ReactMarkdown>
+                          </div>
+                        ) : (
+                          <p className="whitespace-pre-wrap leading-relaxed text-sm md:text-base">{message.content}</p>
+                        )}
                         <p
                           className={cn(
                             'text-[10px] mt-3 opacity-50',
                             message.role === 'user' ? 'text-primary-foreground' : 'text-muted-foreground'
                           )}
+                          title={new Date(message.createdAt).toLocaleString()}
                         >
-                          {formatDateTime(message.createdAt)}
+                          {getRelativeTime(message.createdAt)}
                         </p>
                       </div>
+
+                      {/* Retry button for failed messages */}
+                      {failedMessageIds.has(message.id) && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleRetry(message.id)}
+                          disabled={isProcessing}
+                          className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive border-destructive/30"
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          Retry
+                        </Button>
+                      )}
 
                       {/* Sources for AI responses */}
                       {message.role === 'assistant' && msgSources.length > 0 && (
@@ -925,13 +1047,19 @@ export function Chat() {
           <form onSubmit={handleSubmit} className="max-w-3xl mx-auto">
             <div className="relative flex items-center">
               <Input
+                ref={inputRef}
                 placeholder={
                   status?.ready
                     ? 'Ask me anything about your knowledge base...'
                     : 'Index meetings to enable AI conversations'
                 }
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => {
+                  if (e.target.value.length <= MAX_INPUT_LENGTH) {
+                    setInput(e.target.value)
+                  }
+                }}
+                maxLength={MAX_INPUT_LENGTH}
                 disabled={isProcessing}
                 className="pr-12 py-6 rounded-2xl shadow-sm border-border bg-background focus-visible:ring-primary/20"
               />
@@ -944,9 +1072,19 @@ export function Chat() {
                 <Send className="h-5 w-5" />
               </Button>
             </div>
-            <p className="text-[10px] text-muted-foreground text-center mt-3">
-              I answer based on your meeting transcripts and documents.
-            </p>
+            <div className="flex items-center justify-between mt-3 px-1">
+              <p className="text-[10px] text-muted-foreground">
+                I answer based on your meeting transcripts and documents.
+              </p>
+              <p className={cn(
+                'text-[10px] tabular-nums',
+                input.length > MAX_INPUT_LENGTH * 0.9
+                  ? 'text-destructive'
+                  : 'text-muted-foreground'
+              )}>
+                {input.length}/{MAX_INPUT_LENGTH}
+              </p>
+            </div>
           </form>
         </div>
       </div>

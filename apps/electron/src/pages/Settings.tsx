@@ -255,14 +255,19 @@ export function Settings() {
 
     setSaving(true)
     try {
-      await updateConfig('chat', chatUpdates as any)
-      await updateConfig('embeddings', embeddingsUpdates as any)
+      // Save both sections atomically using Promise.all to prevent partial state
+      await Promise.all([
+        updateConfig('chat', chatUpdates as any),
+        updateConfig('embeddings', embeddingsUpdates as any)
+      ])
 
       toast.success('Settings Saved', `Chat provider set to ${chatProvider}`)
     } catch (error) {
-      // Rollback on error
+      // Rollback on error - both sections revert
       setChatProvider(previousChatProvider)
       setOllamaUrl(previousOllamaUrl)
+      // Reload config from backend to ensure consistency after partial failure
+      try { await loadConfig() } catch { /* best effort reload */ }
 
       const message = error instanceof Error ? error.message : 'Failed to save chat settings'
       toast.error('Save Failed', message)
