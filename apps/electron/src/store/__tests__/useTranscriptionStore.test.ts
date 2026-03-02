@@ -24,10 +24,12 @@ import {
 } from '@/store/features/useTranscriptionStore'
 
 // Mock window.electronAPI to prevent errors in retry()
+// B-TXN-004: updateQueueItem must return true for retry to update local store state
 beforeEach(() => {
   ;(window as any).electronAPI = {
     recordings: {
-      updateQueueItem: vi.fn().mockResolvedValue(undefined)
+      updateQueueItem: vi.fn().mockResolvedValue(true),
+      processQueue: vi.fn().mockResolvedValue(true)
     }
   }
 })
@@ -229,7 +231,11 @@ describe('useTranscriptionStore', () => {
   })
 
   describe('retry', () => {
-    it('resets failed item to pending with incremented retryCount', () => {
+    // B-TXN-004: retry is now async (waits for IPC success before updating local state)
+    // Tests must await microtasks to observe the state change.
+    const flushPromises = () => new Promise(resolve => setTimeout(resolve, 0))
+
+    it('resets failed item to pending with incremented retryCount', async () => {
       const { addToQueue, updateProgress, markFailed } = useTranscriptionStore.getState()
 
       addToQueue('q-1', 'rec-1', 'meeting.wav')
@@ -237,6 +243,7 @@ describe('useTranscriptionStore', () => {
       markFailed('q-1', 'Network error')
 
       useTranscriptionStore.getState().retry('q-1')
+      await flushPromises()
 
       const item = useTranscriptionStore.getState().queue.get('q-1')
       expect(item!.status).toBe('pending')
@@ -245,7 +252,7 @@ describe('useTranscriptionStore', () => {
       expect(item!.retryCount).toBe(1)
     })
 
-    it('increments retryCount on each retry', () => {
+    it('increments retryCount on each retry', async () => {
       const { addToQueue, updateProgress, markFailed } = useTranscriptionStore.getState()
 
       addToQueue('q-1', 'rec-1', 'meeting.wav')
@@ -254,10 +261,12 @@ describe('useTranscriptionStore', () => {
       updateProgress('q-1', 50)
       markFailed('q-1', 'Error 1')
       useTranscriptionStore.getState().retry('q-1')
+      await flushPromises()
 
       updateProgress('q-1', 30)
       markFailed('q-1', 'Error 2')
       useTranscriptionStore.getState().retry('q-1')
+      await flushPromises()
 
       const item = useTranscriptionStore.getState().queue.get('q-1')
       expect(item!.retryCount).toBe(2)
@@ -660,7 +669,8 @@ describe('useTranscriptionStore', () => {
       expect(useTranscriptionStore.getState().isProcessing('rec-1')).toBe(false)
     })
 
-    it('follows failure and retry lifecycle: add -> process -> fail -> retry -> process -> complete', () => {
+    it('follows failure and retry lifecycle: add -> process -> fail -> retry -> process -> complete', async () => {
+      const flushPromises = () => new Promise(resolve => setTimeout(resolve, 0))
       const store = useTranscriptionStore.getState()
 
       // Add and start processing
@@ -671,8 +681,9 @@ describe('useTranscriptionStore', () => {
       store.markFailed('q-1', 'Network timeout')
       expect(useTranscriptionStore.getState().getStatus('rec-1')).toBe('failed')
 
-      // Retry
+      // Retry (B-TXN-004: now async, must flush promises)
       useTranscriptionStore.getState().retry('q-1')
+      await flushPromises()
       expect(useTranscriptionStore.getState().getStatus('rec-1')).toBe('pending')
       expect(useTranscriptionStore.getState().getProgress('rec-1')).toBe(0)
 

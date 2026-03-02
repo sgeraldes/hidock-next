@@ -83,7 +83,17 @@ interface AppState {
   addToDownloadQueue: (id: string, filename: string, size: number) => void
   updateDownloadProgress: (id: string, progress: number) => void
   removeFromDownloadQueue: (id: string) => void
+  /**
+   * @deprecated Use `useIsDownloading(id)` selector hook instead.
+   * This method uses `get()` which causes over-subscription - the caller re-renders
+   * on any store change, not just downloadQueue changes.
+   */
   isDownloading: (id: string) => boolean
+  /**
+   * @deprecated Use `useDownloadProgress(id)` selector hook instead.
+   * This method uses `get()` which causes over-subscription - the caller re-renders
+   * on any store change, not just downloadQueue changes.
+   */
   getDownloadProgress: (id: string) => number | null
 }
 
@@ -247,12 +257,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     return { downloadQueue: newQueue }
   }),
 
-  // TODO (SM-08): isDownloading and getDownloadProgress use get() to read downloadQueue,
-  // which means the caller must subscribe to downloadQueue changes for reactivity.
-  // If a component calls useAppStore((s) => s.isDownloading(id)), it subscribes to the
-  // entire store and re-renders on any state change. Callers should subscribe to
-  // downloadQueue directly (e.g., useAppStore((s) => s.downloadQueue)) and then call
-  // these methods, or use a derived selector pattern instead.
   isDownloading: (id) => get().downloadQueue.has(id),
 
   getDownloadProgress: (id) => {

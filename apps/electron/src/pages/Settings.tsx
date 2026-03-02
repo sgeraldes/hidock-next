@@ -16,6 +16,7 @@ export function Settings() {
   const calendarSyncing = useCalendarSyncing()
   const { config, loadConfig, updateConfig, configLoading } = useConfigStore()
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
+  const [storageError, setStorageError] = useState<string | null>(null) // B-SET-002: Storage error state
   const [saving, setSaving] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -122,13 +123,20 @@ export function Settings() {
 
   const loadStorageInfo = async () => {
     try {
+      setStorageError(null) // B-SET-002: Clear previous error
       const result = await window.electronAPI.storage.getInfo()
       if (result.success && result.data) {
         setStorageInfo(result.data)
       } else {
+        // B-SET-002: Surface storage errors to user
+        const errorMsg = result.error || 'Failed to load storage info'
+        setStorageError(typeof errorMsg === 'string' ? errorMsg : String(errorMsg))
         console.error('Failed to load storage info:', result.error)
       }
     } catch (error) {
+      // B-SET-002: Surface storage errors to user
+      const errorMsg = error instanceof Error ? error.message : 'Failed to load storage info'
+      setStorageError(errorMsg)
       console.error('Failed to load storage info:', error)
     }
   }
@@ -524,6 +532,17 @@ export function Settings() {
               <CardDescription>Local data storage information</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* B-SET-002: Storage error with retry button */}
+              {storageError && (
+                <div className="flex items-center gap-3 p-3 rounded-md bg-destructive/10 text-destructive border border-destructive/20">
+                  <AlertCircle className="h-5 w-5 flex-shrink-0" />
+                  <div className="flex-1 text-sm">{storageError}</div>
+                  <Button variant="outline" size="sm" onClick={loadStorageInfo}>
+                    <RefreshCw className="h-3 w-3 mr-1" />
+                    Retry
+                  </Button>
+                </div>
+              )}
               {storageInfo && (
                 <>
                   <div className="grid grid-cols-2 gap-4 text-sm">

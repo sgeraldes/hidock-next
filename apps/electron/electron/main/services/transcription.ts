@@ -121,15 +121,29 @@ async function processQueue(): Promise<void> {
 
   try {
     // spec-014: Retry failed items with max attempts
+    // B-TXN-001: Exponential backoff before retrying failed items
     const failedItems = getQueueItems('failed')
+    const now = Date.now()
     for (const item of failedItems) {
-      const retryCount = (item as any).retry_count ?? 0
+      // B-TXN-003: Use typed property access instead of `as any` cast
+      const retryCount = item.retry_count ?? 0
       if (retryCount < MAX_RETRY_ATTEMPTS) {
+        // B-TXN-001: Calculate backoff delay: 30s * 2^retryCount, capped at 120s
+        const backoffMs = Math.min(30000 * Math.pow(2, retryCount), 120000)
+        const completedAt = item.completed_at ? new Date(item.completed_at).getTime() : 0
+        const timeSinceFailure = now - completedAt
+
+        if (timeSinceFailure < backoffMs) {
+          // Not enough time has passed; skip this retry cycle
+          console.log(`[Transcription] Backoff for ${item.id}: waiting ${Math.round((backoffMs - timeSinceFailure) / 1000)}s more (retry ${retryCount + 1}/${MAX_RETRY_ATTEMPTS})`)
+          continue
+        }
+
         // Reset to pending so it gets picked up in the processing loop
         updateQueueItem(item.id, 'pending')
         // Also reset recording status so UI shows it's retrying
         updateRecordingTranscriptionStatus(item.recording_id, 'pending')
-        console.log(`Re-queuing failed item ${item.id} (retry ${retryCount + 1}/${MAX_RETRY_ATTEMPTS})`)
+        console.log(`Re-queuing failed item ${item.id} (retry ${retryCount + 1}/${MAX_RETRY_ATTEMPTS}, backoff ${backoffMs / 1000}s)`)
       }
     }
 
@@ -151,8 +165,26 @@ async function processQueue(): Promise<void> {
         updateQueueProgress(item.id, 0) // spec-014: reset progress
         notifyRenderer('transcription:started', { queueItemId: item.id, recordingId: item.recording_id })
 
+        // B-TXN-002: Progress ticker that increments during long API calls
+        // instead of being stuck at a hardcoded value
+        let tickerProgress = 0
+        const progressTicker = setInterval(() => {
+          // Tick progress upward during API calls, capping below 95% (reserved for completion)
+          if (tickerProgress < 90) {
+            tickerProgress += 2
+            updateQueueProgress(item.id, tickerProgress)
+            notifyRenderer('transcription:progress', {
+              queueItemId: item.id,
+              recordingId: item.recording_id,
+              stage: 'transcribing',
+              progress: tickerProgress
+            })
+          }
+        }, 3000)
+
         // spec-014: Progress callback for transcription stages
         const progressCallback = (stage: string, progress: number) => {
+          tickerProgress = progress // Sync ticker with actual progress
           updateQueueProgress(item.id, progress)
           notifyRenderer('transcription:progress', {
             queueItemId: item.id,
@@ -162,7 +194,11 @@ async function processQueue(): Promise<void> {
           })
         }
 
-        await transcribeRecording(item.recording_id, progressCallback)
+        try {
+          await transcribeRecording(item.recording_id, progressCallback)
+        } finally {
+          clearInterval(progressTicker) // Always clean up the ticker
+        }
 
         updateQueueProgress(item.id, 100) // spec-014: mark complete
         updateQueueItem(item.id, 'completed')
@@ -180,8 +216,8 @@ async function processQueue(): Promise<void> {
           error: errorMessage
         })
 
-        // spec-014: Check retry count
-        const retryCount = (item as any).retry_count ?? 0
+        // B-TXN-003: Use typed property access instead of `as any` cast
+        const retryCount = item.retry_count ?? 0
         if (retryCount >= MAX_RETRY_ATTEMPTS) {
           console.log(`Recording ${item.recording_id} failed after ${retryCount} retries (max: ${MAX_RETRY_ATTEMPTS})`)
         }

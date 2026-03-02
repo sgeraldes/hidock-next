@@ -3,7 +3,10 @@
  *
  * Extracted from OperationController Phase 2+3A decomposition.
  * Owns: processDownload, processDownloadQueue, download service subscription,
- * device reconnect download resume, and download stall detection.
+ * and device reconnect download resume.
+ *
+ * B-DWN-008: Renderer-side stall detection removed. Stall detection is now
+ * handled exclusively by main process DownloadService.checkForStalledDownloads().
  */
 
 import { useEffect, useRef, useCallback } from 'react'
@@ -233,7 +236,9 @@ export function useDownloadOrchestrator() {
   const processDownloadQueueRef = useRef(processDownloadQueue)
   processDownloadQueueRef.current = processDownloadQueue
 
-  // ---- Download service subscription + device reconnect resume + stall detection ----
+  // ---- Download service subscription + device reconnect resume ----
+  // B-DWN-008: Renderer-side stall detection removed. Stall detection is handled
+  // exclusively by the main process DownloadService.checkForStalledDownloads().
 
   useEffect(() => {
     const isElectron = !!window.electronAPI?.downloadService
@@ -276,54 +281,10 @@ export function useDownloadOrchestrator() {
       }
     })
 
-    // Download stall detection heartbeat (every 15s)
-    const downloadProgressTimestamps = new Map<string, { progress: number; timestamp: number }>()
-    const DOWNLOAD_STALL_TIMEOUT = 60_000
-
-    const stallDetectionInterval = setInterval(() => {
-      const { downloadQueue } = useAppStore.getState()
-      const now = Date.now()
-
-      downloadQueue.forEach((item, id) => {
-        const prev = downloadProgressTimestamps.get(id)
-        if (!prev) {
-          downloadProgressTimestamps.set(id, { progress: item.progress, timestamp: now })
-          return
-        }
-
-        if (item.progress !== prev.progress) {
-          downloadProgressTimestamps.set(id, { progress: item.progress, timestamp: now })
-        } else if (now - prev.timestamp > DOWNLOAD_STALL_TIMEOUT && item.progress > 0 && item.progress < 100) {
-          console.warn(`[useDownloadOrchestrator] Download stalled: ${item.filename} at ${item.progress}%`)
-          toast({
-            title: 'Download stalled',
-            description: `${item.filename} stopped at ${item.progress}%. Aborting and marking as failed.`,
-            variant: 'error'
-          })
-          // DL-12: Abort the actual USB transfer, not just mark as failed
-          if (downloadAbortControllerRef.current) {
-            downloadAbortControllerRef.current.abort()
-          }
-          if (window.electronAPI?.downloadService?.markFailed) {
-            window.electronAPI.downloadService.markFailed(item.filename, `Download stalled at ${item.progress}% (no progress for ${DOWNLOAD_STALL_TIMEOUT / 1000}s)`)
-          }
-          downloadProgressTimestamps.delete(id)
-        }
-      })
-
-      // Clean up tracking for completed downloads
-      for (const [id] of downloadProgressTimestamps) {
-        if (!downloadQueue.has(id)) {
-          downloadProgressTimestamps.delete(id)
-        }
-      }
-    }, 15_000)
-
     return () => {
       downloadAbortControllerRef.current?.abort()
       unsubDownloads()
       unsubDevice()
-      clearInterval(stallDetectionInterval)
     }
   // DL-11: Only depend on deviceService (stable singleton). processDownloadQueue
   // is accessed via ref so changes don't cause re-subscription.

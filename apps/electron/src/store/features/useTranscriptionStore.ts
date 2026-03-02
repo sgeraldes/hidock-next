@@ -136,30 +136,37 @@ export const useTranscriptionStore = create<TranscriptionQueueStore>()(
       const item = get().queue.get(id)
       if (!item || item.status !== 'failed') return
 
-      // TQ-04 FIX: Update DB first so the transcription processor picks it up
-      window.electronAPI?.recordings?.updateQueueItem?.(id, 'pending').then(() => {
+      // B-TXN-004: Make store retry contingent on IPC success
+      // Only update local store state AFTER the IPC call succeeds
+      window.electronAPI?.recordings?.updateQueueItem?.(id, 'pending').then((success) => {
+        if (!success) {
+          console.error('IPC updateQueueItem returned failure for retry:', id)
+          return
+        }
+
+        // IPC succeeded - now update local store state
+        set((state) => {
+          const currentItem = state.queue.get(id)
+          if (!currentItem) return state
+
+          const queue = new Map(state.queue)
+          queue.set(id, {
+            ...currentItem,
+            status: 'pending',
+            progress: 0,
+            error: undefined,
+            retryCount: currentItem.retryCount + 1
+          })
+
+          return { queue }
+        })
+
         // Ensure transcription processor is running after retry
         window.electronAPI?.recordings?.processQueue?.().catch((e) => {
           console.error('Failed to start transcription processor after retry:', e)
         })
       }).catch((e) => {
         console.error('Failed to update queue item in DB for retry:', e)
-      })
-
-      set((state) => {
-        const currentItem = state.queue.get(id)
-        if (!currentItem) return state
-
-        const queue = new Map(state.queue)
-        queue.set(id, {
-          ...currentItem,
-          status: 'pending',
-          progress: 0,
-          error: undefined,
-          retryCount: currentItem.retryCount + 1
-        })
-
-        return { queue }
       })
     },
 

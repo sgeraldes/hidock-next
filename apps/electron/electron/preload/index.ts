@@ -745,9 +745,32 @@ const electronAPI: ElectronAPI = {
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)
 
+/**
+ * B-SET-004: Expose QA logging check via localStorage bridge.
+ * Preload scripts run in context isolation, so they cannot access Zustand stores directly.
+ * Instead, read from the persisted localStorage key that the UI store writes to.
+ */
+function isQaLogsEnabled(): boolean {
+  try {
+    const stored = localStorage.getItem('hidock-ui-store')
+    if (stored) {
+      const { state } = JSON.parse(stored)
+      return state?.qaLogsEnabled ?? false
+    }
+  } catch {
+    /* fail silently */
+  }
+  return false
+}
+
+// Make isQaLogsEnabled available globally in preload context
+contextBridge.exposeInMainWorld('isQaLogsEnabled', isQaLogsEnabled)
+
 // Type augmentation for the window object
 declare global {
   interface Window {
     electronAPI: ElectronAPI
+    /** B-SET-004: Check if QA logging is enabled via localStorage bridge */
+    isQaLogsEnabled: () => boolean
   }
 }
