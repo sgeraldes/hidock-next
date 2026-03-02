@@ -17,6 +17,8 @@ interface CalendarHeaderProps {
   lastSync: string | null
   autoSyncEnabled: boolean
   hideEmptyMeetings: boolean
+  // C-CAL-007: Sync interval display (configurable via Settings)
+  syncIntervalMinutes?: number
   formatLastSync: () => string
   onNavigatePrev: () => void
   onNavigateNext: () => void
@@ -42,6 +44,7 @@ export const CalendarHeader = memo(function CalendarHeader({
   onGoToToday,
   onSync,
   onAutoSyncToggle,
+  syncIntervalMinutes,
   onHideEmptyToggle,
   onViewToggle,
   onCalendarViewChange,
@@ -94,8 +97,12 @@ export const CalendarHeader = memo(function CalendarHeader({
             onCheckedChange={onAutoSyncToggle}
             className="scale-75"
           />
-          <Label htmlFor="auto-sync-header" className="text-xs cursor-pointer">
-            Auto
+          <Label
+            htmlFor="auto-sync-header"
+            className="text-xs cursor-pointer"
+            title={syncIntervalMinutes ? `Auto-sync every ${syncIntervalMinutes} minutes` : 'Auto-sync'}
+          >
+            Auto{syncIntervalMinutes ? ` (${syncIntervalMinutes}m)` : ''}
           </Label>
         </div>
 

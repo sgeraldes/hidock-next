@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Clock, MapPin, Users, Mic, FileText, Play, X, Edit, Check, Loader2, Link, Unlink, ChevronDown, ChevronUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -22,6 +22,39 @@ import { toast } from '@/components/ui/toaster'
 import type { MeetingDetails } from '@/types'
 
 const ATTENDEES_COLLAPSED_LIMIT = 8
+
+/**
+ * C-MTG-005: Safe date formatting that returns a fallback for invalid dates.
+ * Prevents RangeError from Intl.DateTimeFormat when date strings are malformed.
+ */
+function safeFormatTime(date: Date, options: Intl.DateTimeFormatOptions): string {
+  try {
+    if (isNaN(date.getTime())) return '--:--'
+    return date.toLocaleTimeString('en-US', options)
+  } catch {
+    return '--:--'
+  }
+}
+
+function safeFormatDate(date: Date, options: Intl.DateTimeFormatOptions): string {
+  try {
+    if (isNaN(date.getTime())) return 'Unknown date'
+    return date.toLocaleDateString('en-US', options)
+  } catch {
+    return 'Unknown date'
+  }
+}
+
+function safeGetTimezoneName(date: Date): string {
+  try {
+    if (isNaN(date.getTime())) return ''
+    return Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
+      .formatToParts(date)
+      .find(p => p.type === 'timeZoneName')?.value || ''
+  } catch {
+    return ''
+  }
+}
 
 export function MeetingDetail() {
   const { id } = useParams<{ id: string }>()
@@ -52,9 +85,21 @@ export function MeetingDetail() {
   // Attendee overflow state (B-MTG-005)
   const [showAllAttendees, setShowAllAttendees] = useState(false)
 
+  // C-MTG-006: Ref to track playback loading timeout for cleanup on unmount
+  const playbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   // Global playback state
   const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
   const audioControls = useAudioControls()
+
+  // C-MTG-006: Clean up playback timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (playbackTimeoutRef.current) {
+        clearTimeout(playbackTimeoutRef.current)
+      }
+    }
+  }, [])
 
   // B-MTG-004: Memoized loadMeetingDetails
   const loadMeetingDetails = useCallback(async (meetingId: string) => {
@@ -95,6 +140,8 @@ export function MeetingDetail() {
 
   useEffect(() => {
     if (id) {
+      // C-MTG-004: Reset attendee overflow state when navigating to a different meeting
+      setShowAllAttendees(false)
       loadMeetingDetails(id)
     }
   }, [id, loadMeetingDetails])
@@ -152,8 +199,14 @@ export function MeetingDetail() {
     setPlaybackLoading(recordingId)
     audioControls.play(recordingId, filePath)
     // Loading state will be cleared by the useEffect when currentlyPlayingId changes
-    // Also set a timeout fallback to clear loading state
-    setTimeout(() => setPlaybackLoading(prev => prev === recordingId ? null : prev), 5000)
+    // C-MTG-006: Track timeout in ref so it can be cleaned up on unmount
+    if (playbackTimeoutRef.current) {
+      clearTimeout(playbackTimeoutRef.current)
+    }
+    playbackTimeoutRef.current = setTimeout(() => {
+      setPlaybackLoading(prev => prev === recordingId ? null : prev)
+      playbackTimeoutRef.current = null
+    }, 5000)
   }
 
   // B-MTG-002: Handle recording link/unlink
@@ -242,7 +295,10 @@ export function MeetingDetail() {
   const attendees = parseAttendees(meeting.attendees)
   const startDate = new Date(meeting.start_time)
   const endDate = new Date(meeting.end_time)
-  const durationMins = Math.round((endDate.getTime() - startDate.getTime()) / 60000)
+  // C-MTG-005: Guard against invalid dates producing NaN
+  const rawDuration = (endDate.getTime() - startDate.getTime()) / 60000
+  const durationMins = Number.isFinite(rawDuration) ? Math.round(rawDuration) : 0
+  const isValidDate = !isNaN(startDate.getTime()) && !isNaN(endDate.getTime())
 
   // B-MTG-005: Control visible attendees
   const visibleAttendees = showAllAttendees ? attendees : attendees.slice(0, ATTENDEES_COLLAPSED_LIMIT)
@@ -300,11 +356,25 @@ export function MeetingDetail() {
               <div className="flex items-center gap-3">
                 <Clock className="h-5 w-5 text-muted-foreground" />
                 <div>
+                  {/* C-MTG-003: Timezone-aware time display using safe formatters */}
                   <p className="font-medium">
-                    {startDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} -{' '}
-                    {endDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+                    {safeFormatTime(startDate, { hour: '2-digit', minute: '2-digit' })} -{' '}
+                    {safeFormatTime(endDate, { hour: '2-digit', minute: '2-digit' })}
+                    {isValidDate && (
+                      <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                        {safeGetTimezoneName(startDate)}
+                      </span>
+                    )}
                   </p>
-                  <p className="text-sm text-muted-foreground">{durationMins} minutes</p>
+                  <p className="text-sm text-muted-foreground">
+                    {durationMins} minutes
+                    {isValidDate && (
+                      <>
+                        {' \u00b7 '}
+                        {safeFormatDate(startDate, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                      </>
+                    )}
+                  </p>
                 </div>
               </div>
 
@@ -417,9 +487,22 @@ export function MeetingDetail() {
             </CardHeader>
             <CardContent>
               {recordings.length === 0 ? (
-                <p className="text-muted-foreground text-center py-8">
-                  No recordings linked to this meeting
-                </p>
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <Mic className="h-10 w-10 text-muted-foreground/40 mb-3" />
+                  <p className="text-muted-foreground font-medium mb-1">No recordings linked</p>
+                  <p className="text-sm text-muted-foreground/70 max-w-sm">
+                    Recordings are automatically linked when they overlap with the meeting time.
+                    You can also manually link recordings from the Calendar view.
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-4"
+                    onClick={() => navigate('/calendar')}
+                  >
+                    Go to Calendar
+                  </Button>
+                </div>
               ) : (
                 <div className="space-y-4">
                   {recordings.map((recording) => (
@@ -441,6 +524,15 @@ export function MeetingDetail() {
                             title="Unlink recording from meeting"
                           >
                             <Unlink className="h-4 w-4" />
+                          </Button>
+                          {/* C-MTG-001: Re-link recording to a different meeting */}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleOpenLinkDialog(recording.id)}
+                            title="Link to a different meeting"
+                          >
+                            <Link className="h-4 w-4" />
                           </Button>
                           {/* B-MTG-003: Play with loading spinner */}
                           {playbackLoading === recording.id ? (

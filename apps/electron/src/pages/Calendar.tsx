@@ -94,7 +94,9 @@ export function Calendar() {
   const navigate = useNavigate()
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   // Use useToday hook to ensure "today" updates at midnight
-  const today = useToday()
+  // The return value triggers re-render; isToday() from utils uses fresh Date()
+  const _today = useToday()
+  void _today
   // SM-04 fix: Use granular selectors instead of destructuring 8+ fields
   const meetings = useMeetings()
   const currentDate = useCurrentDate()
@@ -160,8 +162,12 @@ export function Calendar() {
   // Load config on mount - must complete BEFORE first sync
   useEffect(() => {
     const initialize = async () => {
-      // Load config FIRST
-      await loadConfig()
+      try {
+        // Load config FIRST
+        await loadConfig()
+      } catch (error) {
+        console.error('[Calendar] Failed to load config on mount:', error)
+      }
     }
     initialize()
   }, [loadConfig])
@@ -219,16 +225,6 @@ export function Calendar() {
     loadMeetings(startDate, endDate)
   }, [currentDate, calendarView, loadMeetings])
 
-  // Scroll to current hour on mount
-  useEffect(() => {
-    if (scrollContainerRef.current && !showListView) {
-      const now = new Date()
-      const currentHour = now.getHours()
-      const scrollPosition = Math.max(0, (currentHour - visibleStartHour - 1) * HOUR_HEIGHT)
-      scrollContainerRef.current.scrollTop = scrollPosition
-    }
-  }, [showListView, visibleStartHour])
-
   // Get dates for current view
   const viewDates = useMemo((): Date[] => {
     switch (calendarView) {
@@ -269,14 +265,25 @@ export function Calendar() {
   }, [orphanRecordings])
 
   // Combine real meetings with placeholders (based on toggle)
+  // C-CAL-005: Deduplicate meetings by ID to prevent duplicate entries from
+  // calendar sync providing overlapping data.
   const allMeetings = useMemo(() => {
+    let combined: typeof calendarMeetings
     if (hideEmptyMeetings) {
       // Only show meetings that have recordings + orphan recordings as placeholders
       const meetingsWithRecordings = calendarMeetings.filter(m => m.hasRecording)
-      return [...meetingsWithRecordings, ...placeholderMeetings]
+      combined = [...meetingsWithRecordings, ...placeholderMeetings]
+    } else {
+      // Show all calendar meetings (with and without recordings) + orphan recordings as placeholders
+      combined = [...calendarMeetings, ...placeholderMeetings]
     }
-    // Show all calendar meetings (with and without recordings) + orphan recordings as placeholders
-    return [...calendarMeetings, ...placeholderMeetings]
+    // Deduplicate by meeting ID (keep the first occurrence, which is the real meeting if both exist)
+    const seen = new Set<string>()
+    return combined.filter(m => {
+      if (seen.has(m.id)) return false
+      seen.add(m.id)
+      return true
+    })
   }, [calendarMeetings, placeholderMeetings, hideEmptyMeetings])
 
   // Group meetings by day (for day/workweek/week views)
@@ -317,6 +324,27 @@ export function Calendar() {
   const { startHour: visibleStartHour, endHour: visibleEndHour, hours: visibleHours } = useMemo(() => {
     return computeVisibleHourRange(calendarRecordings, meetingOverlays, DEFAULT_START_HOUR, DEFAULT_END_HOUR)
   }, [calendarRecordings, meetingOverlays])
+
+  // C-CAL-001/C-CAL-002: Scroll to current hour only on initial mount or when switching
+  // FROM list view TO calendar view (not on every showListView toggle).
+  // Uses a ref to track whether we've already scrolled for the current calendar session.
+  // Placed after visibleStartHour computation to avoid TDZ reference error.
+  const hasScrolledRef = useRef(false)
+  useEffect(() => {
+    if (showListView) {
+      // Reset scroll tracking when switching to list view,
+      // so switching back to calendar will scroll again.
+      hasScrolledRef.current = false
+      return
+    }
+    if (scrollContainerRef.current && !hasScrolledRef.current) {
+      const now = new Date()
+      const currentHour = now.getHours()
+      const scrollPosition = Math.max(0, (currentHour - visibleStartHour - 1) * HOUR_HEIGHT)
+      scrollContainerRef.current.scrollTop = scrollPosition
+      hasScrolledRef.current = true
+    }
+  }, [showListView, visibleStartHour])
 
   // Group recordings by day (for day/workweek/week views)
   const recordingsByDay = useMemo(() => {
@@ -496,7 +524,12 @@ export function Calendar() {
     setAutoSyncEnabled(enabled)
     try {
       await window.electronAPI.calendar.toggleAutoSync(enabled)
-      loadConfig()
+      try {
+        await loadConfig()
+      } catch (configError) {
+        console.error('Failed to reload config after auto-sync toggle:', configError)
+        // Config reload failure is non-critical; the toggle already succeeded
+      }
     } catch (error) {
       console.error('Failed to toggle auto-sync:', error)
       setAutoSyncEnabled(!enabled)
@@ -725,6 +758,7 @@ export function Calendar() {
         lastSync={lastSync}
         autoSyncEnabled={autoSyncEnabled}
         hideEmptyMeetings={hideEmptyMeetings}
+        syncIntervalMinutes={calendarConfig?.syncIntervalMinutes}
         formatLastSync={formatLastSync}
         onNavigatePrev={handleNavigatePrev}
         onNavigateNext={handleNavigateNext}
@@ -753,6 +787,13 @@ export function Calendar() {
           <p className="text-muted-foreground">Loading...</p>
         </div>
       ) : showListView ? (
+        /* C-CAL-003: Show subtle sync indicator when resyncing with existing data */
+        <>{calendarSyncing && (
+          <div className="flex items-center gap-2 px-6 py-1.5 bg-blue-50 dark:bg-blue-950/30 border-b text-xs text-blue-600 dark:text-blue-400 flex-shrink-0">
+            <RefreshCw className="h-3 w-3 animate-spin" />
+            <span>Syncing calendar...</span>
+          </div>
+        )}
         /* List/Cards View */
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Bulk Actions Bar */}
@@ -873,9 +914,9 @@ export function Calendar() {
                         {isDeviceOnly(recording) && (
                           <Button variant="ghost" size="icon" className="h-6 w-6"
                             onClick={() => handleDownload(recording)}
-                            disabled={!deviceConnected || downloadQueue.has(recording.id)}
+                            disabled={!deviceConnected || downloadQueue.has((recording as any).deviceFilename ?? recording.id)}
                             title="Download">
-                            {downloadQueue.has(recording.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                            {downloadQueue.has((recording as any).deviceFilename ?? recording.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                           </Button>
                         )}
                         {canPlay && hasLocalPath(recording) && (
@@ -990,9 +1031,9 @@ export function Calendar() {
                         {isDeviceOnly(recording) && (
                           <Button variant="ghost" size="icon" className="h-6 w-6"
                             onClick={(e) => { e.stopPropagation(); handleDownload(recording) }}
-                            disabled={!deviceConnected || downloadQueue.has(recording.id)}
+                            disabled={!deviceConnected || downloadQueue.has((recording as any).deviceFilename ?? recording.id)}
                             title="Download from device">
-                            {downloadQueue.has(recording.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                            {downloadQueue.has((recording as any).deviceFilename ?? recording.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                           </Button>
                         )}
                         {canPlay && hasLocalPath(recording) && (
@@ -1071,7 +1112,7 @@ export function Calendar() {
             </div>
           )}
         </div>
-      ) : calendarView === 'month' ? (
+      </>) : calendarView === 'month' ? (
         /* Month View */
         /* TODO (CA-09): Design inconsistency - Month view is meeting-centric (shows meetings with
            recording indicators), while Week/Day view is recording-centric (shows recordings with
@@ -1079,6 +1120,13 @@ export function Calendar() {
            a consistent experience. Suggested approach: add recording blocks to month view cells and
            add meeting blocks as primary items to week/day view alongside recordings. */
         <div className="flex-1 flex flex-col min-h-0">
+          {/* C-CAL-003: Sync indicator for calendar views */}
+          {calendarSyncing && (
+            <div className="flex items-center gap-2 px-6 py-1.5 bg-blue-50 dark:bg-blue-950/30 border-b text-xs text-blue-600 dark:text-blue-400 flex-shrink-0">
+              <RefreshCw className="h-3 w-3 animate-spin" />
+              <span>Syncing calendar...</span>
+            </div>
+          )}
           {/* Day of Week Headers */}
           <div className="grid grid-cols-7 border-b flex-shrink-0">
             {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day, idx) => (
@@ -1100,6 +1148,11 @@ export function Calendar() {
                 const today = isToday(date)
                 const isCurrentMonth = date.getMonth() === currentDate.getMonth()
                 const isWeekend = !isWorkDay(date)
+                // C-CAL-006: Count recordings for this day to show indicator badge
+                const dayRecordingCount = calendarRecordings.filter(r => {
+                  const rKey = r.startTime.toISOString().split('T')[0]
+                  return rKey === key
+                }).length
 
                 return (
                   <div
@@ -1111,13 +1164,22 @@ export function Calendar() {
                       today && 'ring-2 ring-inset ring-primary/30'
                     )}
                   >
-                    {/* Date Number */}
-                    <div className={cn(
-                      'text-sm font-medium mb-1',
-                      !isCurrentMonth && 'text-muted-foreground',
-                      today && 'bg-primary text-primary-foreground rounded-full w-6 h-6 flex items-center justify-center'
-                    )}>
-                      {date.getDate()}
+                    {/* Date Number with recording count badge */}
+                    <div className="flex items-center justify-between mb-1">
+                      <div className={cn(
+                        'text-sm font-medium',
+                        !isCurrentMonth && 'text-muted-foreground',
+                        today && 'bg-primary text-primary-foreground rounded-full w-6 h-6 flex items-center justify-center'
+                      )}>
+                        {date.getDate()}
+                      </div>
+                      {/* C-CAL-006: Recording count indicator */}
+                      {dayRecordingCount > 0 && (
+                        <span className="flex items-center gap-0.5 text-[10px] text-emerald-600 dark:text-emerald-400">
+                          <Mic className="h-2.5 w-2.5" />
+                          {dayRecordingCount}
+                        </span>
+                      )}
                     </div>
 
                     {/* Meetings for this day */}
@@ -1126,16 +1188,16 @@ export function Calendar() {
                         <button
                           key={meeting.id}
                           onClick={() => {
-                            if (meeting.isPlaceholder || meeting.hasConflicts) {
-                              if (meeting.matchedRecordingId) {
-                                setLinkDialogRecording({
-                                  id: meeting.matchedRecordingId,
-                                  filename: meeting.subject,
-                                  date_recorded: meeting.start_time,
-                                  duration_seconds: meeting.recordingDurationSeconds ?? null
-                                })
-                              }
-                            } else {
+                            // C-CAL-004: All meeting cards should be clickable.
+                            // Placeholders open the link dialog; real meetings navigate to detail.
+                            if (meeting.isPlaceholder && meeting.matchedRecordingId) {
+                              setLinkDialogRecording({
+                                id: meeting.matchedRecordingId,
+                                filename: meeting.subject,
+                                date_recorded: meeting.start_time,
+                                duration_seconds: meeting.recordingDurationSeconds ?? null
+                              })
+                            } else if (!meeting.isPlaceholder) {
                               handleMeetingClick(meeting)
                             }
                           }}
@@ -1175,6 +1237,13 @@ export function Calendar() {
       ) : (
         /* Day/Workweek/Week View — recording-centric (see CA-09 TODO above for inconsistency) */
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          {/* C-CAL-003: Sync indicator for week/day views */}
+          {calendarSyncing && (
+            <div className="flex items-center gap-2 px-6 py-1.5 bg-blue-50 dark:bg-blue-950/30 border-b text-xs text-blue-600 dark:text-blue-400 flex-shrink-0">
+              <RefreshCw className="h-3 w-3 animate-spin" />
+              <span>Syncing calendar...</span>
+            </div>
+          )}
           {/* Day Headers - fixed, with scrollbar gutter to match content */}
           <div className="flex border-b flex-shrink-0 overflow-y-scroll" style={{ scrollbarGutter: 'stable' }}>
             <div className="w-14 flex-shrink-0" />
