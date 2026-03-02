@@ -42,8 +42,80 @@ Guidelines:
 
 Context from meeting transcripts will be provided with each question.`
 
+// B-CHAT-006: Token estimation and history trimming utilities
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4)
+}
+
+export function trimHistoryByTokens(
+  history: OllamaChatMessage[],
+  maxTokens: number = 4096
+): OllamaChatMessage[] {
+  let totalTokens = 0
+  const trimmed: OllamaChatMessage[] = []
+
+  // Walk backwards through history, keeping most recent messages first
+  for (let i = history.length - 1; i >= 0; i--) {
+    const msgTokens = estimateTokens(history[i].content)
+    if (totalTokens + msgTokens > maxTokens) break
+    totalTokens += msgTokens
+    trimmed.unshift(history[i])
+  }
+
+  return trimmed
+}
+
+// B-CHAT-002: LRU session cache with max size eviction
+const MAX_SESSIONS = 50
+
+class LRUSessionCache {
+  private cache: Map<string, ChatContext> = new Map()
+  private accessOrder: string[] = [] // Most recently accessed at end
+
+  get(sessionId: string): ChatContext | undefined {
+    const context = this.cache.get(sessionId)
+    if (context) {
+      // Move to end (most recently used)
+      this.accessOrder = this.accessOrder.filter(id => id !== sessionId)
+      this.accessOrder.push(sessionId)
+    }
+    return context
+  }
+
+  set(sessionId: string, context: ChatContext): void {
+    // If already exists, just update
+    if (this.cache.has(sessionId)) {
+      this.cache.set(sessionId, context)
+      this.accessOrder = this.accessOrder.filter(id => id !== sessionId)
+      this.accessOrder.push(sessionId)
+      return
+    }
+
+    // Evict LRU entries if at capacity
+    while (this.cache.size >= MAX_SESSIONS && this.accessOrder.length > 0) {
+      const lruKey = this.accessOrder.shift()!
+      this.cache.delete(lruKey)
+      console.log(`[RAG] LRU evicted session: ${lruKey}`)
+    }
+
+    this.cache.set(sessionId, context)
+    this.accessOrder.push(sessionId)
+  }
+
+  delete(sessionId: string): boolean {
+    this.accessOrder = this.accessOrder.filter(id => id !== sessionId)
+    return this.cache.delete(sessionId)
+  }
+
+  get size(): number {
+    return this.cache.size
+  }
+}
+
 class RAGService {
-  private contexts: Map<string, ChatContext> = new Map()
+  private contexts: LRUSessionCache = new LRUSessionCache()
+  // B-CHAT-005: Active AbortControllers for cancellable requests
+  private activeControllers: Map<string, AbortController> = new Map()
 
   async isReady(): Promise<{ ready: boolean; reason?: string }> {
     const ollama = getOllamaService()
@@ -118,7 +190,16 @@ class RAGService {
       }
     }
 
-    // Get or create session context
+    // B-CHAT-005: Create AbortController for this request
+    // Cancel any existing in-flight request for this session
+    const existingController = this.activeControllers.get(sessionId)
+    if (existingController) {
+      existingController.abort()
+    }
+    const controller = new AbortController()
+    this.activeControllers.set(sessionId, controller)
+
+    // Get or create session context (LRU cache)
     let context = this.contexts.get(sessionId)
     if (!context) {
       context = { conversationHistory: [] }
@@ -232,20 +313,22 @@ class RAGService {
 
     const userMessage = `Context:\n${contextText}\n\nQuestion: ${message}`
 
-    // Build messages for LLM (use history BEFORE adding current message to avoid duplicates)
+    // B-CHAT-006: Build messages for LLM with token-aware trimming
+    const trimmedHistory = trimHistoryByTokens(context.conversationHistory, 4096)
     const messages: OllamaChatMessage[] = [
-      ...context.conversationHistory.slice(-6), // Keep last 3 exchanges
+      ...trimmedHistory,
       { role: 'user', content: userMessage }
     ]
 
     // Add raw message to conversation history (after building messages to avoid duplicate)
     context.conversationHistory.push({ role: 'user', content: message })
 
-    // Generate response
+    // B-CHAT-005: Generate response with abort signal support
     const answer = await ollama.chat(messages, {
       systemPrompt: SYSTEM_PROMPT,
       temperature: 0.7,
-      maxTokens: 1024
+      maxTokens: 1024,
+      signal: controller.signal
     })
 
     if (!answer) {
@@ -259,10 +342,14 @@ class RAGService {
     // Add assistant response to history
     context.conversationHistory.push({ role: 'assistant', content: answer })
 
-    // Keep history limited
-    if (context.conversationHistory.length > 20) {
-      context.conversationHistory = context.conversationHistory.slice(-10)
+    // B-CHAT-006: Token-aware history pruning replaces simple slice
+    // Keep the history manageable but let trimHistoryByTokens do the real work at query time
+    if (context.conversationHistory.length > 40) {
+      context.conversationHistory = context.conversationHistory.slice(-20)
     }
+
+    // B-CHAT-005: Clean up controller after successful completion
+    this.activeControllers.delete(sessionId)
 
     return { answer, sources }
   }
@@ -334,6 +421,23 @@ ${transcript.substring(0, 8000)}`
 
   clearSession(sessionId: string): void {
     this.contexts.delete(sessionId)
+    // Also cancel any in-flight request for this session
+    const controller = this.activeControllers.get(sessionId)
+    if (controller) {
+      controller.abort()
+      this.activeControllers.delete(sessionId)
+    }
+  }
+
+  // B-CHAT-005: Cancel in-flight RAG request for a session
+  cancelRequest(sessionId: string): boolean {
+    const controller = this.activeControllers.get(sessionId)
+    if (controller) {
+      controller.abort()
+      this.activeControllers.delete(sessionId)
+      return true
+    }
+    return false
   }
 
   getStats(): {
@@ -362,20 +466,21 @@ ${transcript.substring(0, 8000)}`
     try {
       const db = getDatabase()
 
-      // Split query into individual terms for multi-term matching
+      // B-EXP-003: Multi-term LIKE search with ranking
+      // B-CHAT-007: Explicit columns instead of SELECT *
       const terms = query.trim().split(/\s+/).filter((t) => t.length > 0)
 
       if (terms.length === 0) {
         return success({ knowledge: [], people: [], projects: [] })
       }
 
-      // For single-term queries, use the simpler original approach for efficiency
+      // For single-term queries, use simpler approach
       if (terms.length === 1) {
         const escaped = escapeLikePattern(terms[0])
         const likeQuery = `%${escaped}%`
 
         const knowledgeRows = db.exec(`
-          SELECT * FROM knowledge_captures
+          SELECT id, title, summary, captured_at FROM knowledge_captures
           WHERE title LIKE ? ESCAPE '\' OR summary LIKE ? ESCAPE '\'
           LIMIT ?
         `, [likeQuery, likeQuery, limit])
@@ -384,11 +489,11 @@ ${transcript.substring(0, 8000)}`
           id: v[0],
           title: v[1],
           summary: v[2],
-          capturedAt: v[15]
+          capturedAt: v[3]
         })) : []
 
         const peopleRows = db.exec(`
-          SELECT * FROM contacts
+          SELECT id, name, email, type FROM contacts
           WHERE name LIKE ? ESCAPE '\' OR email LIKE ? ESCAPE '\' OR company LIKE ? ESCAPE '\' OR role LIKE ? ESCAPE '\'
           LIMIT ?
         `, [likeQuery, likeQuery, likeQuery, likeQuery, limit])
@@ -401,7 +506,7 @@ ${transcript.substring(0, 8000)}`
         })) : []
 
         const projectRows = db.exec(`
-          SELECT * FROM projects
+          SELECT id, name, description, status FROM projects
           WHERE name LIKE ? ESCAPE '\' OR description LIKE ? ESCAPE '\'
           LIMIT ?
         `, [likeQuery, likeQuery, limit])
@@ -430,14 +535,12 @@ ${transcript.substring(0, 8000)}`
           const escaped = escapeLikePattern(term)
           const likeVal = `%${escaped}%`
 
-          // Each term matches if ANY column contains it
           const colClauses = columns.map((col) => {
             params.push(likeVal)
             return `${col} LIKE ? ESCAPE '\'`
           })
           termClauses.push(`(${colClauses.join(' OR ')})`)
 
-          // Count: does this term match any column? (0 or 1 per term)
           const countExpr = columns.map((col) => {
             params.push(likeVal)
             return `CASE WHEN ${col} LIKE ? ESCAPE '\' THEN 1 ELSE 0 END`
@@ -453,18 +556,18 @@ ${transcript.substring(0, 8000)}`
         return { sql, params }
       }
 
-      // 1. Search knowledge captures with multi-term ranking
-      const kq = buildMultiTermQuery('knowledge_captures', ['title', 'summary'], '*', limit)
+      // 1. Search knowledge captures with explicit columns + multi-term ranking
+      const kq = buildMultiTermQuery('knowledge_captures', ['title', 'summary'], 'id, title, summary, captured_at', limit)
       const knowledgeRows = db.exec(kq.sql, kq.params)
       const knowledge = knowledgeRows.length > 0 ? knowledgeRows[0].values.map(v => ({
         id: v[0],
         title: v[1],
         summary: v[2],
-        capturedAt: v[15]
+        capturedAt: v[3]
       })) : []
 
-      // 2. Search people with multi-term ranking
-      const pq = buildMultiTermQuery('contacts', ['name', 'email', 'company', 'role'], '*', limit)
+      // 2. Search people with explicit columns + multi-term ranking
+      const pq = buildMultiTermQuery('contacts', ['name', 'email', 'company', 'role'], 'id, name, email, type', limit)
       const peopleRows = db.exec(pq.sql, pq.params)
       const people = peopleRows.length > 0 ? peopleRows[0].values.map(v => ({
         id: v[0],
@@ -473,8 +576,8 @@ ${transcript.substring(0, 8000)}`
         type: v[3]
       })) : []
 
-      // 3. Search projects with multi-term ranking
-      const prq = buildMultiTermQuery('projects', ['name', 'description'], '*', limit)
+      // 3. Search projects with explicit columns + multi-term ranking
+      const prq = buildMultiTermQuery('projects', ['name', 'description'], 'id, name, description, status', limit)
       const projectRows = db.exec(prq.sql, prq.params)
       const projects = projectRows.length > 0 ? projectRows[0].values.map(v => ({
         id: v[0],

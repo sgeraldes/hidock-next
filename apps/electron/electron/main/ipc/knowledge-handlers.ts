@@ -3,10 +3,13 @@ import { ipcMain } from 'electron'
 import { queryAll, queryOne, run } from '../services/database'
 import type { KnowledgeCapture } from '@/types/knowledge'
 
+// B-CHAT-007: Explicit column list instead of SELECT *
+const KNOWLEDGE_CAPTURE_COLUMNS = `id, title, summary, category, status, quality_rating, quality_confidence, quality_assessed_at, storage_tier, retention_days, expires_at, meeting_id, correlation_confidence, correlation_method, source_recording_id, captured_at, created_at, updated_at, deleted_at`
+
 export function registerKnowledgeHandlers(): void {
   // Get all knowledge captures
   ipcMain.handle('knowledge:getAll', async (_, { limit = 100, offset = 0, status, quality, category }: { limit?: number; offset?: number; status?: string; quality?: string; category?: string } = {}) => {
-    let sql = `SELECT * FROM knowledge_captures`
+    let sql = `SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures`
     const conditions: string[] = []
     const params: (string | number)[] = []
 
@@ -39,10 +42,27 @@ export function registerKnowledgeHandlers(): void {
     }
   })
 
+  // B-CHAT-004: Get multiple knowledge captures by IDs
+  ipcMain.handle('knowledge:getByIds', async (_, ids: string[]) => {
+    try {
+      if (!Array.isArray(ids) || ids.length === 0) return []
+      // Build parameterized WHERE IN clause
+      const placeholders = ids.map(() => '?').join(',')
+      const captures = queryAll<any>(
+        `SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures WHERE id IN (${placeholders})`,
+        ids
+      )
+      return captures.map(mapToKnowledgeCapture)
+    } catch (error) {
+      console.error('Failed to get knowledge captures by IDs:', error)
+      return []
+    }
+  })
+
   // Get by ID
   ipcMain.handle('knowledge:getById', async (_, id: string) => {
     try {
-      const capture = queryOne<any>(`SELECT * FROM knowledge_captures WHERE id = ?`, [id])
+      const capture = queryOne<any>(`SELECT ${KNOWLEDGE_CAPTURE_COLUMNS} FROM knowledge_captures WHERE id = ?`, [id])
       if (!capture) return null
       return mapToKnowledgeCapture(capture)
     } catch (error) {

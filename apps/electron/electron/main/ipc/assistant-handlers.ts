@@ -1,14 +1,19 @@
 
 import { ipcMain } from 'electron'
 import { queryAll, queryOne, run, runInTransaction } from '../services/database'
+import { getRAGService } from '../services/rag'
 import type { Conversation, Message } from '@/types/knowledge'
 import { randomUUID } from 'crypto'
+
+// B-CHAT-007: Explicit column lists instead of SELECT *
+const CONVERSATION_COLUMNS = 'id, title, created_at, updated_at'
+const MESSAGE_COLUMNS = 'id, conversation_id, role, content, sources, created_at, edited_at, original_content, created_output_id, saved_as_insight_id'
 
 export function registerAssistantHandlers(): void {
   // Get all conversations
   ipcMain.handle('assistant:getConversations', async () => {
     try {
-      const rows = queryAll<any>('SELECT * FROM conversations ORDER BY updated_at DESC')
+      const rows = queryAll<any>(`SELECT ${CONVERSATION_COLUMNS} FROM conversations ORDER BY updated_at DESC`)
       return rows.map(mapToConversation)
     } catch (error) {
       console.error('Failed to get conversations:', error)
@@ -21,10 +26,10 @@ export function registerAssistantHandlers(): void {
     try {
       const id = randomUUID()
       const now = new Date().toISOString()
-      run('INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)', 
+      run('INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)',
         [id, title || 'New Conversation', now, now])
-      
-      const newConv = queryOne<any>('SELECT * FROM conversations WHERE id = ?', [id])
+
+      const newConv = queryOne<any>(`SELECT ${CONVERSATION_COLUMNS} FROM conversations WHERE id = ?`, [id])
       return mapToConversation(newConv)
     } catch (error) {
       console.error('Failed to create conversation:', error)
@@ -33,9 +38,13 @@ export function registerAssistantHandlers(): void {
   })
 
   // Delete a conversation
+  // B-CHAT-002: Also clear RAG session when deleting a conversation
   ipcMain.handle('assistant:deleteConversation', async (_, id: string) => {
     try {
       run('DELETE FROM conversations WHERE id = ?', [id])
+      // Clear the RAG session associated with this conversation
+      const rag = getRAGService()
+      rag.clearSession(id)
       return { success: true }
     } catch (error) {
       console.error('Failed to delete conversation:', error)
@@ -44,16 +53,17 @@ export function registerAssistantHandlers(): void {
   })
 
   // Get messages for a conversation
+  // B-CHAT-001: Validate conversation exists, return error info instead of empty array
   ipcMain.handle('assistant:getMessages', async (_, conversationId: string) => {
     try {
       // Validate conversation exists
       const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
       if (!conv) {
         console.error(`getMessages: Conversation ${conversationId} not found`)
-        return []
+        return { error: 'Conversation not found', messages: [] }
       }
 
-      const rows = queryAll<any>('SELECT * FROM chat_messages WHERE conversation_id = ? ORDER BY created_at ASC', [conversationId])
+      const rows = queryAll<any>(`SELECT ${MESSAGE_COLUMNS} FROM chat_messages WHERE conversation_id = ? ORDER BY created_at ASC`, [conversationId])
       return rows.map(mapToMessage)
     } catch (error) {
       console.error('Failed to get messages:', error)
@@ -83,7 +93,7 @@ export function registerAssistantHandlers(): void {
         run('UPDATE conversations SET updated_at = ? WHERE id = ?', [now, conversationId])
       })
 
-      const newMessage = queryOne<any>('SELECT * FROM chat_messages WHERE id = ?', [id])
+      const newMessage = queryOne<any>(`SELECT ${MESSAGE_COLUMNS} FROM chat_messages WHERE id = ?`, [id])
       return mapToMessage(newMessage)
     } catch (error) {
       console.error('Failed to add message:', error)
