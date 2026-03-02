@@ -76,14 +76,38 @@ export function registerActionablesHandlers(): void {
   // Get actionables by meeting ID
   ipcMain.handle('actionables:getByMeeting', async (_, meetingId: string) => {
     try {
+      // AUD2-001: Query actionables through multiple paths:
+      // Path 1: Direct - knowledge_captures.meeting_id matches
+      // Path 2: Indirect - through recordings that belong to the meeting
       const sql = `
-        SELECT a.*
+        SELECT DISTINCT a.*
         FROM actionables a
         INNER JOIN knowledge_captures kc ON a.source_knowledge_id = kc.id
+        LEFT JOIN recordings r ON kc.source_recording_id = r.id
         WHERE kc.meeting_id = ?
+           OR r.meeting_id = ?
         ORDER BY a.created_at DESC
       `
-      const rows = queryAll<any>(sql, [meetingId])
+      const rows = queryAll<any>(sql, [meetingId, meetingId])
+
+      // Log for debugging when no actionables found
+      if (rows.length === 0) {
+        console.log(`[actionables:getByMeeting] No actionables found for meeting ${meetingId}`)
+
+        // Debug query to understand why
+        const debugSql = `
+          SELECT
+            COUNT(DISTINCT a.id) as actionable_count,
+            COUNT(DISTINCT CASE WHEN kc.meeting_id = ? THEN a.id END) as direct_match,
+            COUNT(DISTINCT CASE WHEN r.meeting_id = ? THEN a.id END) as via_recording
+          FROM actionables a
+          INNER JOIN knowledge_captures kc ON a.source_knowledge_id = kc.id
+          LEFT JOIN recordings r ON kc.source_recording_id = r.id
+        `
+        const debug = queryAll<any>(debugSql, [meetingId, meetingId])[0]
+        console.log(`[actionables:getByMeeting] Debug stats:`, debug)
+      }
+
       return rows.map(mapToActionable)
     } catch (error) {
       console.error('Failed to get actionables for meeting:', error)

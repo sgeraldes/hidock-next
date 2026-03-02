@@ -6,7 +6,7 @@ import { getDatabasePath } from './file-storage'
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 20
+const SCHEMA_VERSION = 21
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -1153,6 +1153,49 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v20 complete: Phase A consolidated fixes applied')
+  },
+  21: () => {
+    // v21: AUD2-001 — Backfill meeting_id in knowledge_captures from recordings
+    console.log('Running migration to schema v21: Backfilling meeting_id in knowledge_captures')
+    const database = getDatabase()
+
+    try {
+      // Update knowledge_captures to inherit meeting_id from their source recordings
+      const sql = `
+        UPDATE knowledge_captures
+        SET meeting_id = (
+          SELECT r.meeting_id
+          FROM recordings r
+          WHERE r.id = knowledge_captures.source_recording_id
+          AND r.meeting_id IS NOT NULL
+        ),
+        correlation_method = COALESCE(correlation_method, 'recording_migration'),
+        correlation_confidence = COALESCE(correlation_confidence, 1.0),
+        updated_at = CURRENT_TIMESTAMP
+        WHERE meeting_id IS NULL
+          AND source_recording_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM recordings r
+            WHERE r.id = knowledge_captures.source_recording_id
+            AND r.meeting_id IS NOT NULL
+          )
+      `
+      database.run(sql)
+
+      // Log how many were updated
+      const updated = database.exec(`
+        SELECT COUNT(*) as count
+        FROM knowledge_captures
+        WHERE meeting_id IS NOT NULL
+          AND correlation_method = 'recording_migration'
+      `)
+      const count = updated.length > 0 && updated[0].values.length > 0 ? updated[0].values[0][0] : 0
+      console.log(`[Migration v21] Backfilled meeting_id for ${count} knowledge captures`)
+    } catch (e) {
+      console.warn('[Migration v21] Failed to backfill meeting_id:', e)
+    }
+
+    console.log('Migration v21 complete: meeting_id backfill applied')
   }
 
 }
@@ -1930,9 +1973,22 @@ export function linkRecordingToMeeting(
   confidence: number,
   method: string
 ): void {
+  // Update the recording's meeting link
   run(
     `UPDATE recordings SET meeting_id = ?, correlation_confidence = ?, correlation_method = ? WHERE id = ?`,
     [meetingId, confidence, method, recordingId]
+  )
+
+  // AUD2-001: Propagate meeting_id to knowledge_captures that reference this recording
+  run(
+    `UPDATE knowledge_captures
+     SET meeting_id = ?,
+         correlation_confidence = ?,
+         correlation_method = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE source_recording_id = ?
+       AND (meeting_id IS NULL OR meeting_id != ?)`,
+    [meetingId, confidence, method, recordingId, meetingId]
   )
 }
 
