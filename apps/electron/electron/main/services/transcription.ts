@@ -122,11 +122,26 @@ async function processQueue(): Promise<void> {
   try {
     // spec-014: Retry failed items with max attempts
     // B-TXN-001: Exponential backoff before retrying failed items
+    // C-005: Skip non-retryable errors (missing files, missing API key)
+    const NON_RETRYABLE_ERRORS = [
+      'Recording not found',
+      'Recording file not found',
+      'Gemini API key not configured',
+      'no local file'
+    ]
     const failedItems = getQueueItems('failed')
     const now = Date.now()
     for (const item of failedItems) {
       // B-TXN-003: Use typed property access instead of `as any` cast
       const retryCount = item.retry_count ?? 0
+
+      // C-005: Don't retry items whose error indicates a permanent failure
+      const errorMsg = item.error_message || ''
+      const isNonRetryable = NON_RETRYABLE_ERRORS.some(pattern => errorMsg.includes(pattern))
+      if (isNonRetryable) {
+        continue
+      }
+
       if (retryCount < MAX_RETRY_ATTEMPTS) {
         // B-TXN-001: Calculate backoff delay: 30s * 2^retryCount, capped at 120s
         const backoffMs = Math.min(30000 * Math.pow(2, retryCount), 120000)

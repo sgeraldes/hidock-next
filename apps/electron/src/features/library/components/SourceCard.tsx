@@ -347,10 +347,16 @@ export const SourceCard = memo(function SourceCard({
   )
 }, (prevProps, nextProps) => {
   // Custom comparison for performance
+  // C-005: Include recording.location and recording.title to detect download and title changes
   return (
     prevProps.recording.id === nextProps.recording.id &&
+    prevProps.recording.location === nextProps.recording.location &&
     prevProps.recording.transcriptionStatus === nextProps.recording.transcriptionStatus &&
     prevProps.recording.quality === nextProps.recording.quality &&
+    prevProps.recording.title === nextProps.recording.title &&
+    prevProps.recording.category === nextProps.recording.category &&
+    prevProps.recording.duration === nextProps.recording.duration &&
+    prevProps.recording.size === nextProps.recording.size &&
     prevProps.isPlaying === nextProps.isPlaying &&
     prevProps.isTranscriptExpanded === nextProps.isTranscriptExpanded &&
     prevProps.isDownloading === nextProps.isDownloading &&
