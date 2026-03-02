@@ -140,6 +140,7 @@ export interface ElectronAPI {
   knowledge: {
     getAll: (options?: { limit?: number; offset?: number; status?: string }) => Promise<KnowledgeCapture[]>
     getById: (id: string) => Promise<KnowledgeCapture | null>
+    getByIds: (ids: string[]) => Promise<KnowledgeCapture[]> // B-CHAT-004
     update: (id: string, updates: Partial<KnowledgeCapture>) => Promise<{ success: boolean; error?: string }>
   }
 
@@ -239,6 +240,7 @@ export interface ElectronAPI {
     }>
     summarizeMeeting: (meetingId: string) => Promise<Result<string>>
     findActionItems: (meetingId?: string) => Promise<Result<string>>
+    cancel: (sessionId: string) => Promise<Result<boolean>> // B-CHAT-005
     clearSession: (sessionId: string) => Promise<Result<void>>
     stats: () => Promise<{
       documentCount: number
@@ -497,6 +499,7 @@ const electronAPI: ElectronAPI = {
   knowledge: {
     getAll: (options) => callIPC('knowledge:getAll', options),
     getById: (id) => callIPC('knowledge:getById', id),
+    getByIds: (ids) => callIPC('knowledge:getByIds', ids), // B-CHAT-004
     update: (id, updates) => callIPC('knowledge:update', id, updates)
   },
 
@@ -587,6 +590,7 @@ const electronAPI: ElectronAPI = {
       callIPC('rag:chat-legacy', { sessionId, message, meetingFilter }),
     summarizeMeeting: (meetingId) => callIPC('rag:summarize-meeting', meetingId),
     findActionItems: (meetingId) => callIPC('rag:find-action-items', meetingId),
+    cancel: (sessionId) => callIPC('rag:cancel', sessionId), // B-CHAT-005
     clearSession: (sessionId) => callIPC('rag:clear-session', sessionId),
     stats: () => callIPC('rag:stats'),
     indexTranscript: (transcript, metadata) =>

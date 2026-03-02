@@ -158,6 +158,21 @@ export function registerRAGHandlers(): void {
     }
   })
 
+  // B-CHAT-005: Cancel in-flight RAG request
+  ipcMain.handle('rag:cancel', async (_event, sessionId: string): Promise<Result<boolean>> => {
+    try {
+      if (!sessionId || typeof sessionId !== 'string') {
+        return error('VALIDATION_ERROR', 'Session ID is required')
+      }
+
+      const cancelled = rag.cancelRequest(sessionId)
+      return success(cancelled)
+    } catch (err) {
+      console.error('rag:cancel error:', err)
+      return error('INTERNAL_ERROR', 'Failed to cancel request', err)
+    }
+  })
+
   // Clear chat session (with Result pattern)
   ipcMain.handle('rag:clear-session', async (_event, sessionId: string): Promise<Result<void>> => {
     try {

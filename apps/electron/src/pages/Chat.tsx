@@ -16,7 +16,8 @@ import {
   BookOpen,
   Bot,
   User,
-  FileAudio
+  FileAudio,
+  Square
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -27,6 +28,17 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { toast } from '@/components/ui/toaster'
 import { ContextPicker } from '@/components/ContextPicker'
 import { cn, formatDateTime } from '@/lib/utils'
 import type { Message, Conversation, KnowledgeCapture } from '@/types/knowledge'
@@ -87,6 +99,10 @@ export function Chat() {
   const [loadingChunks, setLoadingChunks] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
 
+  // B-CHAT-003: AlertDialog state for delete confirmation
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null)
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Initialize
@@ -98,7 +114,7 @@ export function Chat() {
         if (!window.electronAPI?.rag?.status) {
           throw new Error('Electron API not available. Please restart the application.')
         }
-        
+
         await Promise.all([
           loadConversations(),
           checkRAGStatus()
@@ -186,8 +202,8 @@ export function Chat() {
         setContextItems(prev => prev.filter(item => item.id !== contextRecording.id))
       } catch (error) {
         console.error('Failed to remove context:', error)
-        // User feedback on error (no rollback needed since we never updated state)
-        alert('Failed to remove context. Please try again.')
+        // B-CHAT-003: Use toast instead of browser alert
+        toast.error('Failed to remove context', 'Please try again.')
         // Don't clear UI if server operation failed
         return
       }
@@ -202,7 +218,7 @@ export function Chat() {
     try {
       const history = await window.electronAPI.assistant.getConversations()
       setConversations(history)
-      
+
       // If we have conversations and none active, select the first one
       if (history.length > 0 && !activeConversation) {
         handleSelectConversation(history[0])
@@ -212,30 +228,45 @@ export function Chat() {
     }
   }
 
-  // Select conversation
+  // B-CHAT-001: Validate conversation exists before setting active
+  // B-CHAT-004: Use knowledge:getByIds for efficient context loading
   const handleSelectConversation = async (conv: Conversation) => {
     setActiveConversation(conv)
     try {
-      const [msgs, ctxIds] = await Promise.all([
+      const [msgsResult, ctxIds] = await Promise.all([
         window.electronAPI.assistant.getMessages(conv.id),
         window.electronAPI.assistant.getContext(conv.id)
       ])
-      
+
+      // B-CHAT-001: Check if getMessages returned an error (invalid conversation)
+      if (msgsResult && typeof msgsResult === 'object' && 'error' in msgsResult && !Array.isArray(msgsResult)) {
+        toast.error('Conversation not found', 'This conversation may have been deleted.')
+        setActiveConversation(null)
+        setMessages([])
+        setContextIds([])
+        setContextItems([])
+        // Refresh the conversation list
+        const freshConversations = await window.electronAPI.assistant.getConversations()
+        setConversations(freshConversations)
+        return
+      }
+
+      const msgs = Array.isArray(msgsResult) ? msgsResult : []
       setMessages(msgs)
       setContextIds(ctxIds)
-      
-      // Load context metadata
+
+      // B-CHAT-004: Use getByIds for efficient context metadata loading
       if (ctxIds.length > 0) {
-        // Fetch knowledge captures by IDs
-        const items = await window.electronAPI.knowledge.getAll({ limit: 1000 })
-        setContextItems(items.filter(i => ctxIds.includes(i.id)))
+        const items = await window.electronAPI.knowledge.getByIds(ctxIds)
+        setContextItems(items)
       } else {
         setContextItems([])
       }
-      
+
       setSources(new Map())
     } catch (error) {
       console.error('Failed to load conversation details:', error)
+      toast.error('Failed to load conversation', 'Could not load conversation details.')
     }
   }
 
@@ -247,14 +278,25 @@ export function Chat() {
       handleSelectConversation(newConv)
     } catch (error) {
       console.error('Failed to create new chat:', error)
+      toast.error('Failed to create chat', 'Could not create a new conversation.')
     }
   }
 
-  // Delete conversation
-  // PESSIMISTIC UPDATE: Server-first approach - only update store on success
-  const handleDeleteConversation = async (e: React.MouseEvent, id: string) => {
+  // B-CHAT-003: Open delete confirmation dialog instead of browser confirm
+  const handleDeleteClick = (e: React.MouseEvent, id: string) => {
     e.stopPropagation()
-    if (!confirm('Are you sure you want to delete this conversation?')) return
+    setDeleteTargetId(id)
+    setDeleteDialogOpen(true)
+  }
+
+  // Delete conversation (called from AlertDialog confirmation)
+  // PESSIMISTIC UPDATE: Server-first approach - only update store on success
+  const handleConfirmDelete = async () => {
+    if (!deleteTargetId) return
+
+    const id = deleteTargetId
+    setDeleteDialogOpen(false)
+    setDeleteTargetId(null)
 
     try {
       // Step 1: Delete on server FIRST
@@ -268,10 +310,11 @@ export function Chat() {
         setContextIds([])
         setContextItems([])
       }
+      toast.success('Conversation deleted')
     } catch (error) {
       console.error('Failed to delete conversation:', error)
-      // User feedback on error (no rollback needed since we never updated state)
-      alert('Failed to delete conversation. Please try again.')
+      // B-CHAT-003: Use toast instead of browser alert
+      toast.error('Failed to delete conversation', 'Please try again.')
     }
   }
 
@@ -302,8 +345,11 @@ export function Chat() {
       }
     } catch (error) {
       console.error('Failed to toggle context:', error)
-      // User feedback on error (no rollback needed since we never updated state)
-      alert(`Failed to ${isAttached ? 'remove' : 'add'} context. Please try again.`)
+      // B-CHAT-003: Use toast instead of browser alert
+      toast.error(
+        `Failed to ${isAttached ? 'remove' : 'add'} context`,
+        'Please try again.'
+      )
     }
   }
 
@@ -343,6 +389,19 @@ export function Chat() {
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
+
+  // B-CHAT-005: Cancel in-flight RAG request
+  const handleCancelRequest = useCallback(async () => {
+    if (!activeConversation) return
+    try {
+      await window.electronAPI.rag.cancel(activeConversation.id)
+      setLoading(false)
+      setIsProcessing(false)
+      toast.info('Request cancelled')
+    } catch (error) {
+      console.error('Failed to cancel request:', error)
+    }
+  }, [activeConversation])
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
@@ -464,6 +523,27 @@ export function Chat() {
 
   return (
     <div className="flex h-full bg-background">
+      {/* B-CHAT-003: Radix AlertDialog for delete confirmation */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Conversation</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this conversation? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Sidebar - Conversations History */}
       <aside className="w-64 border-r flex flex-col bg-muted/10">
         <div className="p-4 border-b">
@@ -487,8 +567,8 @@ export function Chat() {
                   onClick={() => handleSelectConversation(conv)}
                   className={cn(
                     "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center justify-between group cursor-pointer",
-                    activeConversation?.id === conv.id 
-                      ? "bg-primary text-primary-foreground" 
+                    activeConversation?.id === conv.id
+                      ? "bg-primary text-primary-foreground"
                       : "hover:bg-muted text-muted-foreground hover:text-foreground"
                   )}
                 >
@@ -503,7 +583,7 @@ export function Chat() {
                       "h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity",
                       activeConversation?.id === conv.id ? "text-primary-foreground hover:bg-primary-foreground/20" : "hover:text-destructive"
                     )}
-                    onClick={(e) => handleDeleteConversation(e, conv.id)}
+                    onClick={(e) => handleDeleteClick(e, conv.id)}
                   >
                     <Trash2 className="h-3 w-3" />
                   </Button>
@@ -545,7 +625,7 @@ export function Chat() {
                 )}
               </div>
             )}
-            
+
             {/* Context Picker */}
             <Dialog open={pickerOpen} onOpenChange={setPickerOpen}>
               <DialogTrigger asChild>
@@ -563,8 +643,8 @@ export function Chat() {
                 <DialogHeader>
                   <DialogTitle>Select Knowledge Context</DialogTitle>
                 </DialogHeader>
-                <ContextPicker 
-                  onSelect={handleToggleContext} 
+                <ContextPicker
+                  onSelect={handleToggleContext}
                   selectedIds={contextIds}
                 />
               </DialogContent>
@@ -683,7 +763,7 @@ export function Chat() {
               <div key={item.id} className="flex items-center gap-1.5 bg-background border rounded-full pl-2 pr-1 py-0.5 text-[10px] shadow-sm animate-in fade-in zoom-in duration-200">
                 <BookOpen className="h-3 w-3 text-primary" />
                 <span className="max-w-[150px] truncate">{item.title}</span>
-                <button 
+                <button
                   onClick={() => handleToggleContext(item.id)}
                   className="hover:bg-muted rounded-full p-0.5 transition-colors"
                 >
@@ -705,7 +785,8 @@ export function Chat() {
                     setContextItems([])
                   } catch (error) {
                     console.error('Failed to clear all context:', error)
-                    alert('Failed to clear all context. Please try again.')
+                    // B-CHAT-003: Use toast instead of browser alert
+                    toast.error('Failed to clear all context', 'Please try again.')
                   }
                 }
               }}
@@ -767,8 +848,8 @@ export function Chat() {
                       <div
                         className={cn(
                           'p-4 rounded-2xl shadow-sm border',
-                          message.role === 'user' 
-                            ? 'bg-primary text-primary-foreground border-primary rounded-tr-none' 
+                          message.role === 'user'
+                            ? 'bg-primary text-primary-foreground border-primary rounded-tr-none'
                             : 'bg-background border-border rounded-tl-none'
                         )}
                       >
@@ -782,7 +863,7 @@ export function Chat() {
                           {formatDateTime(message.createdAt)}
                         </p>
                       </div>
-                      
+
                       {/* Sources for AI responses */}
                       {message.role === 'assistant' && msgSources.length > 0 && (
                         <div className="flex flex-wrap gap-2 mt-1">
@@ -804,21 +885,34 @@ export function Chat() {
                 )
               })
             )}
+            {/* B-CHAT-005: Loading indicator with cancel button */}
             {loading && (
               <div className="flex gap-4">
                 <div className="flex-shrink-0 w-10 h-10 rounded-xl bg-background border border-border flex items-center justify-center shadow-sm">
                   <Bot className="h-5 w-5" />
                 </div>
-                <div className="p-4 rounded-2xl bg-muted/30 border border-border rounded-tl-none flex items-center gap-1.5 h-12">
-                  <span className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full animate-bounce" />
-                  <span
-                    className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full animate-bounce"
-                    style={{ animationDelay: '0.15s' }}
-                  />
-                  <span
-                    className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full animate-bounce"
-                    style={{ animationDelay: '0.3s' }}
-                  />
+                <div className="flex items-center gap-3">
+                  <div className="p-4 rounded-2xl bg-muted/30 border border-border rounded-tl-none flex items-center gap-1.5 h-12">
+                    <span className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full animate-bounce" />
+                    <span
+                      className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full animate-bounce"
+                      style={{ animationDelay: '0.15s' }}
+                    />
+                    <span
+                      className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full animate-bounce"
+                      style={{ animationDelay: '0.3s' }}
+                    />
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleCancelRequest}
+                    className="h-8 gap-1.5 text-muted-foreground hover:text-foreground"
+                    title="Cancel request"
+                  >
+                    <Square className="h-3.5 w-3.5" />
+                    <span className="text-xs">Cancel</span>
+                  </Button>
                 </div>
               </div>
             )}

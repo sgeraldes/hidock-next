@@ -53,10 +53,14 @@ describe('Knowledge IPC Handlers', () => {
 
       const result = await handlers['knowledge:getAll']({}, { limit: 10, offset: 0 })
 
+      // B-CHAT-007: Should use explicit columns, not SELECT *
       expect(queryAll).toHaveBeenCalledWith(
-        expect.stringContaining('SELECT * FROM knowledge_captures'),
+        expect.stringContaining('FROM knowledge_captures'),
         [10, 0]
       )
+      // Verify it does NOT use SELECT *
+      const calledSql = vi.mocked(queryAll).mock.calls[0][0]
+      expect(calledSql).not.toContain('SELECT *')
       expect(result).toHaveLength(1)
       expect(result[0]).toEqual(expect.objectContaining({
         id: '1',

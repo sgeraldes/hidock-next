@@ -134,6 +134,7 @@ class OllamaService {
       temperature?: number
       maxTokens?: number
       systemPrompt?: string
+      signal?: AbortSignal // B-CHAT-005: Support request cancellation
     } = {}
   ): Promise<string | null> {
     try {
@@ -142,7 +143,7 @@ class OllamaService {
         fullMessages.unshift({ role: 'system', content: options.systemPrompt })
       }
 
-      const response = await fetch(`${this.baseUrl}/api/chat`, {
+      const fetchOptions: RequestInit = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -154,7 +155,14 @@ class OllamaService {
             num_predict: options.maxTokens ?? 1024
           }
         })
-      })
+      }
+
+      // B-CHAT-005: Pass abort signal to fetch
+      if (options.signal) {
+        fetchOptions.signal = options.signal
+      }
+
+      const response = await fetch(`${this.baseUrl}/api/chat`, fetchOptions)
 
       if (!response.ok) {
         console.error('Ollama chat error:', response.statusText)
@@ -164,6 +172,10 @@ class OllamaService {
       const data: OllamaChatResponse = await response.json()
       return data.message.content
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        console.log('[Ollama] Chat request was cancelled')
+        return null
+      }
       console.error('Failed to chat with Ollama:', error)
       return null
     }
