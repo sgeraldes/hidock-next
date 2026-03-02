@@ -30,11 +30,20 @@ export const GetContactByIdRequestSchema = z.object({
  */
 export const UpdateContactRequestSchema = z.object({
   id: UUIDSchema,
+  name: z.string().min(1).max(500).optional(),
+  email: z.string().email().max(500).nullable().optional(),
   notes: OptionalStringSchema,
   type: z.enum(['team', 'candidate', 'customer', 'external', 'unknown']).optional(),
   role: OptionalStringSchema,
   company: OptionalStringSchema,
   tags: z.array(z.string()).optional()
+})
+
+/**
+ * Delete contact request
+ */
+export const DeleteContactRequestSchema = z.object({
+  id: UUIDSchema
 })
 
 /**
@@ -71,6 +80,7 @@ export const ContactCreateSchema = z.object({
 export type GetContactsRequest = z.infer<typeof GetContactsRequestSchema>
 export type GetContactByIdRequest = z.infer<typeof GetContactByIdRequestSchema>
 export type UpdateContactRequest = z.infer<typeof UpdateContactRequestSchema>
+export type DeleteContactRequest = z.infer<typeof DeleteContactRequestSchema>
 export type ContactRole = z.infer<typeof ContactRoleSchema>
 export type MeetingContact = z.infer<typeof MeetingContactSchema>
 export type ContactCreate = z.infer<typeof ContactCreateSchema>

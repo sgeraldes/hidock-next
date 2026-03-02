@@ -1537,6 +1537,25 @@ export function getMeetingById(id: string): Meeting | undefined {
   return queryOne<Meeting>('SELECT * FROM meetings WHERE id = ?', [id])
 }
 
+export function updateMeeting(id: string, updates: Partial<Pick<Meeting, 'subject' | 'start_time' | 'end_time' | 'location' | 'description'>>): void {
+  const fields: string[] = []
+  const params: unknown[] = []
+
+  if (updates.subject !== undefined) { fields.push('subject = ?'); params.push(updates.subject); }
+  if (updates.start_time !== undefined) { fields.push('start_time = ?'); params.push(updates.start_time); }
+  if (updates.end_time !== undefined) { fields.push('end_time = ?'); params.push(updates.end_time); }
+  if (updates.location !== undefined) { fields.push('location = ?'); params.push(updates.location); }
+  if (updates.description !== undefined) { fields.push('description = ?'); params.push(updates.description); }
+
+  if (fields.length === 0) return
+
+  fields.push('updated_at = ?')
+  params.push(new Date().toISOString())
+  params.push(id)
+
+  run(`UPDATE meetings SET ${fields.join(', ')} WHERE id = ?`, params)
+}
+
 /**
  * Batch get meetings by IDs - avoids N+1 query problem
  */
@@ -2453,6 +2472,12 @@ export function getContactsForMeeting(meetingId: string): Contact[] {
   )
 }
 
+export function deleteContact(id: string): void {
+  // Remove junction table entries first, then the contact
+  run('DELETE FROM meeting_contacts WHERE contact_id = ?', [id])
+  run('DELETE FROM contacts WHERE id = ?', [id])
+}
+
 export function linkContactToMeeting(meetingId: string, contactId: string, role: ContactRole): void {
   run(
     'INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
@@ -2468,6 +2493,7 @@ export interface Project {
   id: string
   name: string
   description: string | null
+  status: string
   created_at: string
 }
 
@@ -2476,17 +2502,27 @@ export interface MeetingProject {
   project_id: string
 }
 
-export function getProjects(search?: string, limit = 100, offset = 0): { projects: Project[]; total: number } {
+export function getProjects(search?: string, limit = 100, offset = 0, status?: string): { projects: Project[]; total: number } {
   let countSql = 'SELECT COUNT(*) as count FROM projects'
   let sql = 'SELECT * FROM projects'
   const params: unknown[] = []
+  const whereClauses: string[] = []
 
   if (search) {
     const escaped = escapeLikePattern(search)
-    const searchClause = " WHERE name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\'"
-    countSql += searchClause
-    sql += searchClause
+    whereClauses.push("(name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')")
     params.push(`%${escaped}%`, `%${escaped}%`)
+  }
+
+  if (status && status !== 'all') {
+    whereClauses.push('status = ?')
+    params.push(status)
+  }
+
+  if (whereClauses.length > 0) {
+    const whereClause = ' WHERE ' + whereClauses.join(' AND ')
+    countSql += whereClause
+    sql += whereClause
   }
 
   sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
@@ -2503,8 +2539,8 @@ export function getProjectById(id: string): Project | undefined {
 
 export function createProject(project: Omit<Project, 'created_at'>): Project {
   run(
-    'INSERT INTO projects (id, name, description) VALUES (?, ?, ?)',
-    [project.id, project.name, project.description]
+    'INSERT INTO projects (id, name, description, status) VALUES (?, ?, ?, ?)',
+    [project.id, project.name, project.description, project.status || 'active']
   )
   return { ...project, created_at: new Date().toISOString() }
 }
@@ -2565,6 +2601,35 @@ export function tagMeetingToProject(meetingId: string, projectId: string): void 
 
 export function untagMeetingFromProject(meetingId: string, projectId: string): void {
   run('DELETE FROM meeting_projects WHERE meeting_id = ? AND project_id = ?', [meetingId, projectId])
+}
+
+/**
+ * Get knowledge capture IDs associated with a project via its meetings.
+ * Path: project -> meeting_projects -> meetings -> recordings -> knowledge_captures
+ */
+export function getKnowledgeIdsForProject(projectId: string): string[] {
+  const rows = queryAll<{ id: string }>(
+    `SELECT DISTINCT kc.id FROM knowledge_captures kc
+     JOIN recordings r ON kc.source_recording_id = r.id
+     JOIN meeting_projects mp ON r.meeting_id = mp.meeting_id
+     WHERE mp.project_id = ?`,
+    [projectId]
+  )
+  return rows.map(r => r.id)
+}
+
+/**
+ * Get person/contact IDs associated with a project via its meetings.
+ * Path: project -> meeting_projects -> meeting_contacts -> contacts
+ */
+export function getPersonIdsForProject(projectId: string): string[] {
+  const rows = queryAll<{ contact_id: string }>(
+    `SELECT DISTINCT mc.contact_id FROM meeting_contacts mc
+     JOIN meeting_projects mp ON mc.meeting_id = mp.meeting_id
+     WHERE mp.project_id = ?`,
+    [projectId]
+  )
+  return rows.map(r => r.contact_id)
 }
 
 // =============================================================================

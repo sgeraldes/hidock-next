@@ -14,7 +14,9 @@ import { UUIDSchema, NonEmptyStringSchema, OptionalStringSchema, SearchPaginatio
 /**
  * Get projects request with optional search and pagination
  */
-export const GetProjectsRequestSchema = SearchPaginationSchema
+export const GetProjectsRequestSchema = SearchPaginationSchema.extend({
+  status: z.enum(['active', 'archived', 'all']).optional()
+})
 
 /**
  * Get project by ID request

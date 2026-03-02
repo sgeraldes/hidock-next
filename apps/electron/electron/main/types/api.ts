@@ -161,6 +161,8 @@ export interface GetContactByIdRequest {
  */
 export interface UpdateContactRequest {
   id: string
+  name?: string
+  email?: string | null
   notes?: string
   type?: 'team' | 'candidate' | 'customer' | 'external' | 'unknown'
   role?: string
@@ -177,6 +179,7 @@ export interface UpdateContactRequest {
  */
 export interface GetProjectsRequest {
   search?: string
+  status?: 'active' | 'archived' | 'all'
   limit?: number
   offset?: number
 }
