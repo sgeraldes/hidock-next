@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Folder,
   Search,
@@ -35,6 +35,13 @@ import {
   AlertDialogTitle
 } from '@/components/ui/alert-dialog'
 import type { Project } from '@/types/knowledge'
+
+/** Resolved member info for display in the project detail */
+interface ProjectMember {
+  id: string
+  name: string
+  type: string
+}
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 
@@ -52,6 +59,10 @@ export function Projects() {
 
   // B-PRJ-007: Delete project dialog state (replaces confirm())
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+  const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([])
+
+  // Debounce: skip firing on initial mount
+  const isFirstMount = useRef(true)
 
   // B-PRJ-005: Memoized loadProjects with useCallback
   const loadProjects = useCallback(async () => {
@@ -77,13 +88,25 @@ export function Projects() {
     }
   }, [searchQuery, statusFilter])
 
+  // Initial load: fire immediately
   useEffect(() => {
+    loadProjects()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Subsequent changes: debounce search/filter
+  useEffect(() => {
+    if (isFirstMount.current) {
+      isFirstMount.current = false
+      return
+    }
     const timer = setTimeout(() => {
       loadProjects()
     }, 300)
     return () => clearTimeout(timer)
   }, [loadProjects])
 
+  // Projects are already filtered server-side by searchQuery and statusFilter
   const filteredProjects = projects
 
   // B-PRJ-006: Create project via Dialog instead of prompt()
@@ -142,6 +165,7 @@ export function Projects() {
   // Load project details with knowledgeIds/personIds when selected
   const handleSelectProject = async (project: Project) => {
     setActiveProject(project)
+    setProjectMembers([])
     try {
       const result = await window.electronAPI.projects.getById(project.id)
       if (result.success && result.data.project) {
@@ -156,9 +180,27 @@ export function Projects() {
           personIds: p.personIds
         }
         setActiveProject(detailed)
+
+        // Resolve person names from IDs
+        if (detailed.personIds && detailed.personIds.length > 0) {
+          const members: ProjectMember[] = []
+          for (const personId of detailed.personIds) {
+            try {
+              const contactResult = await window.electronAPI.contacts.getById(personId)
+              if (contactResult.success && contactResult.data.contact) {
+                const c = contactResult.data.contact as any
+                members.push({ id: c.id, name: c.name, type: c.type || 'unknown' })
+              }
+            } catch {
+              // Skip unresolvable contacts
+              members.push({ id: personId, name: personId.substring(0, 8) + '...', type: 'unknown' })
+            }
+          }
+          setProjectMembers(members)
+        }
       }
-    } catch (error) {
-      console.error('Failed to load project details:', error)
+    } catch (err) {
+      console.error('Failed to load project details:', err)
     }
   }
 
@@ -207,7 +249,22 @@ export function Projects() {
               <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : filteredProjects.length === 0 ? (
-            <p className="text-center text-xs text-muted-foreground py-12">No {statusFilter === 'all' ? '' : statusFilter} projects</p>
+            <div className="text-center py-12 px-4">
+              <Folder className="h-8 w-8 mx-auto text-muted-foreground opacity-20 mb-3" />
+              <p className="text-xs text-muted-foreground mb-3">
+                {searchQuery
+                  ? `No projects matching "${searchQuery}"`
+                  : statusFilter === 'all'
+                    ? 'No projects yet'
+                    : `No ${statusFilter} projects`}
+              </p>
+              {!searchQuery && (
+                <Button onClick={openCreateDialog} size="sm" variant="outline" className="h-7 text-xs gap-1">
+                  <Plus className="h-3 w-3" />
+                  Create Project
+                </Button>
+              )}
+            </div>
           ) : (
             <div className="space-y-1">
               {filteredProjects.map((project) => (
@@ -321,6 +378,21 @@ export function Projects() {
                         <Users className="h-4 w-4 text-primary" />
                       </div>
                       <p className="text-2xl font-bold mt-2">{activeProject.personIds?.length ?? '\u2014'} {activeProject.personIds ? 'Involved' : ''}</p>
+                      {projectMembers.length > 0 && (
+                        <div className="mt-3 space-y-1.5">
+                          {projectMembers.slice(0, 5).map((member) => (
+                            <div key={member.id} className="flex items-center gap-2 text-xs">
+                              <div className="w-5 h-5 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px] font-bold">
+                                {member.name.charAt(0).toUpperCase()}
+                              </div>
+                              <span className="truncate">{member.name}</span>
+                            </div>
+                          ))}
+                          {projectMembers.length > 5 && (
+                            <p className="text-[10px] text-muted-foreground pl-7">+{projectMembers.length - 5} more</p>
+                          )}
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
                   <Card className="bg-muted/5">

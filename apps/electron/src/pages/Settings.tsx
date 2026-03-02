@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { Save, FolderOpen, RefreshCw, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -60,6 +60,9 @@ export function Settings() {
         if (apiKey && apiKey.length < 10) {
           return 'API key must be at least 10 characters'
         }
+        if (apiKey && !apiKey.startsWith('AIza')) {
+          return 'Gemini API keys should start with "AIza". Please verify your key.'
+        }
       }
     }
 
@@ -91,6 +94,32 @@ export function Settings() {
 
     return null // Valid
   }, [])
+
+  // C-SET: Track form dirty state per section
+  const isCalendarDirty = useMemo(() => {
+    if (!config) return false
+    return (
+      icsUrl !== config.calendar.icsUrl ||
+      syncEnabled !== config.calendar.syncEnabled ||
+      syncInterval !== config.calendar.syncIntervalMinutes
+    )
+  }, [config, icsUrl, syncEnabled, syncInterval])
+
+  const isTranscriptionDirty = useMemo(() => {
+    if (!config) return false
+    return (
+      geminiApiKey !== config.transcription.geminiApiKey ||
+      geminiModel !== (config.transcription.geminiModel || 'gemini-3-pro-preview')
+    )
+  }, [config, geminiApiKey, geminiModel])
+
+  const isChatDirty = useMemo(() => {
+    if (!config) return false
+    return (
+      chatProvider !== config.chat.provider ||
+      ollamaUrl !== config.embeddings.ollamaBaseUrl
+    )
+  }, [config, chatProvider, ollamaUrl])
 
   // Stable loadConfig with useCallback for dependency array
   const loadConfigStable = useCallback(async () => {
@@ -255,8 +284,11 @@ export function Settings() {
 
     setSaving(true)
     try {
-      await updateConfig('chat', chatUpdates as any)
-      await updateConfig('embeddings', embeddingsUpdates as any)
+      // C-SET: Save both sections in parallel instead of sequentially
+      await Promise.all([
+        updateConfig('chat', chatUpdates as any),
+        updateConfig('embeddings', embeddingsUpdates as any)
+      ])
 
       toast.success('Settings Saved', `Chat provider set to ${chatProvider}`)
     } catch (error) {
@@ -373,11 +405,11 @@ export function Settings() {
               <div className="flex items-center gap-2">
                 <Button
                   onClick={handleSaveCalendar}
-                  disabled={saving}
+                  disabled={saving || !isCalendarDirty}
                   aria-label="Save calendar settings"
                 >
                   <Save className="h-4 w-4 mr-2" aria-hidden="true" />
-                  Save
+                  {isCalendarDirty ? 'Save' : 'Saved'}
                 </Button>
                 <Button
                   variant="outline"
@@ -451,11 +483,11 @@ export function Settings() {
 
               <Button
                 onClick={handleSaveTranscription}
-                disabled={saving}
+                disabled={saving || !isTranscriptionDirty}
                 aria-label="Save transcription settings"
               >
                 <Save className="h-4 w-4 mr-2" aria-hidden="true" />
-                Save
+                {isTranscriptionDirty ? 'Save' : 'Saved'}
               </Button>
             </CardContent>
           </Card>
@@ -516,11 +548,11 @@ export function Settings() {
 
               <Button
                 onClick={handleSaveChat}
-                disabled={saving}
+                disabled={saving || !isChatDirty}
                 aria-label="Save chat settings"
               >
                 <Save className="h-4 w-4 mr-2" aria-hidden="true" />
-                Save
+                {isChatDirty ? 'Save' : 'Saved'}
               </Button>
             </CardContent>
           </Card>
