@@ -83,7 +83,9 @@ export function useDownloadOrchestrator() {
           chunks.push(chunk)
           totalReceived += chunk.length
           window.electronAPI.downloadService.updateProgress(item.filename, totalReceived)
-          updateDownloadProgress(item.filename, Math.round((totalReceived / item.fileSize) * 100))
+          // C-004: Guard against NaN when fileSize is 0
+          const pct = item.fileSize > 0 ? Math.round((totalReceived / item.fileSize) * 100) : 0
+          updateDownloadProgress(item.filename, Number.isFinite(pct) ? pct : 0)
         },
         signal
       )
@@ -159,18 +161,27 @@ export function useDownloadOrchestrator() {
 
     if (DEBUG) console.log(`[QA-MONITOR][Operation] Processing ${pendingItems.length} downloads`)
 
+    // C-004: Compute total bytes for ETA calculation
+    const totalBytes = pendingItems.reduce((sum: number, item: DownloadQueueItem) => sum + (item.fileSize || 0), 0)
+    const syncStartTime = Date.now()
+
     // DL-02: Emit initial progress event immediately after queue creation
     // so the sidebar shows 0/total before the first file starts downloading
     setDeviceSyncState({
       deviceSyncing: true,
       deviceSyncProgress: { current: 0, total: pendingItems.length },
       deviceFileProgress: 0,
-      deviceFileDownloading: pendingItems[0]?.filename ?? null
+      deviceFileDownloading: pendingItems[0]?.filename ?? null,
+      deviceSyncStartTime: syncStartTime,
+      deviceSyncBytesDownloaded: 0,
+      deviceSyncTotalBytes: totalBytes,
+      deviceSyncEta: null
     })
 
     let completed = 0
     let failed = 0
     let aborted = false
+    let bytesDownloaded = 0
 
     // TODO: DL-10: Consider pipelining: start reading next file while writing current file to disk.
     for (const item of pendingItems) {
@@ -202,7 +213,24 @@ export function useDownloadOrchestrator() {
       })
 
       const success = await processDownload(item, signal)
-      success ? completed++ : failed++
+      if (success) {
+        completed++
+        bytesDownloaded += item.fileSize || 0
+      } else {
+        failed++
+      }
+
+      // C-004: Compute ETA based on elapsed time and bytes completed
+      const elapsed = (Date.now() - syncStartTime) / 1000 // seconds
+      if (elapsed > 0 && bytesDownloaded > 0 && totalBytes > 0) {
+        const bytesPerSecond = bytesDownloaded / elapsed
+        const remainingBytes = totalBytes - bytesDownloaded
+        const etaSeconds = Math.round(remainingBytes / bytesPerSecond)
+        setDeviceSyncState({
+          deviceSyncBytesDownloaded: bytesDownloaded,
+          deviceSyncEta: Number.isFinite(etaSeconds) && etaSeconds > 0 ? etaSeconds : null
+        })
+      }
     }
 
     isProcessingDownloads.current = false
@@ -227,6 +255,13 @@ export function useDownloadOrchestrator() {
             : `Downloaded ${completed}, failed ${failed}`),
         variant: aborted ? 'default' : (failed === 0 ? 'success' : 'warning')
       })
+
+      // C-004: Show OS-level notification for download completion
+      try {
+        window.electronAPI.downloadService.notifyCompletion({ completed, failed, aborted })
+      } catch {
+        // Notification is non-critical, fail silently
+      }
     }
   }, [deviceService, processDownload, setDeviceSyncState, clearDeviceSyncState])
 

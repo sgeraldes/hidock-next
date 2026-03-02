@@ -156,10 +156,10 @@ describe('DownloadService', () => {
       // Cancel all
       service.cancelAll()
 
-      // CRITICAL: ALL items should be cancelled regardless of status
+      // C-004: ALL items should be cancelled regardless of status
       const state = service.getState()
-      const allFailed = state.queue.every((i: DownloadQueueItem) => i.status === 'failed')
-      expect(allFailed).toBe(true)
+      const allCancelled = state.queue.every((i: DownloadQueueItem) => i.status === 'cancelled')
+      expect(allCancelled).toBe(true)
     })
   })
 
@@ -180,8 +180,8 @@ describe('DownloadService', () => {
     })
   })
 
-  describe('cancelAll marks pending as failed', () => {
-    it('should mark pending items as failed', () => {
+  describe('cancelAll marks pending as cancelled', () => {
+    it('should mark pending items as cancelled', () => {
       service.queueDownloads([
         { filename: 'test1.hda', size: 1024 },
         { filename: 'test2.hda', size: 2048 }
@@ -189,8 +189,9 @@ describe('DownloadService', () => {
 
       service.cancelAll()
 
+      // C-004: cancelAll now uses 'cancelled' status to distinguish from actual failures
       const state = service.getState()
-      expect(state.queue.every((i: DownloadQueueItem) => i.status === 'failed')).toBe(true)
+      expect(state.queue.every((i: DownloadQueueItem) => i.status === 'cancelled')).toBe(true)
     })
   })
 
@@ -238,6 +239,57 @@ describe('DownloadService', () => {
 
       const state = service.getState()
       expect(Array.isArray(state.queue)).toBe(true)
+    })
+  })
+
+  // C-004: NaN protection tests
+  describe('C-004: NaN guards on progress', () => {
+    it('should not produce NaN when fileSize is 0', () => {
+      service.queueDownloads([{ filename: 'zero-size.hda', size: 0 }])
+
+      // Simulate progress update with zero fileSize
+      service.updateProgress('zero-size.hda', 100)
+
+      const state = service.getState()
+      const item = state.queue.find((i: DownloadQueueItem) => i.filename === 'zero-size.hda')
+      expect(item?.progress).toBe(0)
+      expect(Number.isNaN(item?.progress)).toBe(false)
+    })
+
+    it('should produce correct progress for normal fileSize', () => {
+      service.queueDownloads([{ filename: 'normal.hda', size: 10000 }])
+
+      service.updateProgress('normal.hda', 5000)
+
+      const state = service.getState()
+      const item = state.queue.find((i: DownloadQueueItem) => i.filename === 'normal.hda')
+      expect(item?.progress).toBe(50)
+    })
+
+    it('should handle 100% progress correctly', () => {
+      service.queueDownloads([{ filename: 'complete.hda', size: 5000 }])
+
+      service.updateProgress('complete.hda', 5000)
+
+      const state = service.getState()
+      const item = state.queue.find((i: DownloadQueueItem) => i.filename === 'complete.hda')
+      expect(item?.progress).toBe(100)
+    })
+  })
+
+  // C-004: Status transition immediate emit
+  describe('C-004: updateProgress status transitions', () => {
+    it('should transition from pending to downloading on first progress', () => {
+      service.queueDownloads([{ filename: 'transition.hda', size: 10000 }])
+
+      const stateBefore = service.getState()
+      expect(stateBefore.queue[0].status).toBe('pending')
+
+      service.updateProgress('transition.hda', 100)
+
+      const stateAfter = service.getState()
+      expect(stateAfter.queue[0].status).toBe('downloading')
+      expect(stateAfter.queue[0].startedAt).toBeDefined()
     })
   })
 })

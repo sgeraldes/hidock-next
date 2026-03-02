@@ -18,8 +18,9 @@ import {
   AlertDialogTitle
 } from '@/components/ui/alert-dialog'
 import { toast } from '@/components/ui/toaster'
-import { getHiDockDeviceService, type HiDockRecording } from '@/services/hidock-device'
+import { getHiDockDeviceService } from '@/services/hidock-device'
 import { hasDeviceFile, type DeviceOnlyRecording, type BothLocationsRecording } from '@/types/unified-recording'
+import { formatBytes, formatDuration } from '@/utils/formatters'
 
 interface DeviceFileListProps {
   recordings: Array<DeviceOnlyRecording | BothLocationsRecording>
@@ -27,6 +28,21 @@ interface DeviceFileListProps {
   onRefresh?: () => void
   // B-DEV-002: Callback to refresh the full recordings list after delete/download
   onRecordingsRefresh?: () => void
+}
+
+/**
+ * C-004: Check if a filename is synced, accounting for .hda->.mp3 and .hda->.wav normalization
+ * Exported for testing.
+ */
+export function isFilenameSynced(filename: string, syncedFilenames: Set<string>): boolean {
+  if (syncedFilenames.has(filename)) return true
+  // Check .mp3 normalized name
+  const mp3Name = filename.replace(/\.hda$/i, '.mp3')
+  if (mp3Name !== filename && syncedFilenames.has(mp3Name)) return true
+  // Check .wav normalized name (legacy)
+  const wavName = filename.replace(/\.hda$/i, '.wav')
+  if (wavName !== filename && syncedFilenames.has(wavName)) return true
+  return false
 }
 
 export function DeviceFileList({ recordings, syncedFilenames, onRefresh, onRecordingsRefresh }: DeviceFileListProps) {
@@ -98,19 +114,7 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh, onRecor
     }
   }, [fileToDelete, deviceService, onRefresh, onRecordingsRefresh])
 
-  // Format file size
-  const formatFileSize = (bytes: number): string => {
-    if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  }
-
-  // Format duration
-  const formatDuration = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins}:${secs.toString().padStart(2, '0')}`
-  }
+  // C-004: formatBytes and formatDuration are now imported from @/utils/formatters
 
   if (deviceRecordings.length === 0) {
     return null
@@ -129,7 +133,8 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh, onRecor
           <div className="space-y-2 max-h-[400px] overflow-y-auto">
             {deviceRecordings.map(recording => {
               const filename = recording.deviceFilename
-              const isSynced = syncedFilenames.has(filename)
+              // C-004: Check normalized filenames (.hda->.mp3, .hda->.wav) for sync status
+              const isSynced = isFilenameSynced(filename, syncedFilenames)
               const isDownloading = downloadingFiles.has(filename)
 
               return (
@@ -149,7 +154,7 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh, onRecor
                     </div>
                     {/* B-DEV-004: Use correct property names from RecordingBase: size, dateRecorded */}
                     <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
-                      <span>{formatFileSize(recording.size)}</span>
+                      <span>{formatBytes(recording.size)}</span>
                       <span>{formatDuration(recording.duration)}</span>
                       <span>{recording.dateRecorded?.toLocaleDateString()}</span>
                     </div>
@@ -198,7 +203,7 @@ export function DeviceFileList({ recordings, syncedFilenames, onRefresh, onRecor
               <span className="text-destructive font-medium">
                 This action cannot be undone. The file will be permanently removed from the device.
               </span>
-              {fileToDelete && syncedFilenames.has(fileToDelete) && (
+              {fileToDelete && isFilenameSynced(fileToDelete, syncedFilenames) && (
                 <span className="block mt-2 text-green-600 dark:text-green-400">
                   Note: A local copy exists in your library.
                 </span>

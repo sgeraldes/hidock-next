@@ -15,7 +15,7 @@ import { hasDeviceFile, type DeviceOnlyRecording, type BothLocationsRecording } 
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import { cancelDownloads } from '@/hooks/useDownloadOrchestrator'
 
-import { formatEta } from '@/utils/formatters'
+import { formatEta, formatBytes } from '@/utils/formatters'
 import { DeviceFileList } from '@/components/DeviceFileList'
 
 const CONNECTION_TIMEOUT_MS = 15000 // 15 second timeout
@@ -68,8 +68,11 @@ export function Device() {
   const [autoConnectConfig, setAutoConnectConfig] = useState(() => deviceService.getAutoConnectConfig())
 
   // Auto-download and auto-transcribe configuration state
-  const [autoDownload, setAutoDownload] = useState<boolean | null>(null)
-  const [autoTranscribe, setAutoTranscribe] = useState<boolean | null>(null)
+  // C-004: Default to true (matching config.ts defaults) so switches show the correct
+  // state while config loads async. The `null` sentinel caused the switch to show "off"
+  // even though the actual default is true, creating a confusing initial flash.
+  const [autoDownload, setAutoDownload] = useState<boolean | null>(true)
+  const [autoTranscribe, setAutoTranscribe] = useState<boolean | null>(true)
 
   // B-DEV-005: Loading state for device config switches
   const [configLoading, setConfigLoading] = useState<Record<string, boolean>>({})
@@ -180,12 +183,13 @@ export function Device() {
     }
     loadConfigSettings()
 
-    // Load initial download service state to check for failed downloads
+    // Load initial download service state to check for failed/cancelled downloads
     const loadDownloadServiceState = async () => {
       try {
         const state = await window.electronAPI.downloadService.getState()
         if (mounted && state?.queue) {
-          const failedCount = state.queue.filter((item: { status: string }) => item.status === 'failed').length
+          // C-004: Count both failed and cancelled items for retry button
+          const failedCount = state.queue.filter((item: { status: string }) => item.status === 'failed' || item.status === 'cancelled').length
           setFailedDownloadCount(failedCount)
         }
       } catch (e) {
@@ -195,9 +199,10 @@ export function Device() {
     loadDownloadServiceState()
 
     // Listen for download service state updates
+    // C-004: Count both failed and cancelled items for retry button
     const unsubscribeDownloadService = window.electronAPI.downloadService.onStateUpdate((state: { queue: Array<{ status: string }> }) => {
       if (!mounted) return
-      const failedCount = state.queue.filter((item) => item.status === 'failed').length
+      const failedCount = state.queue.filter((item) => item.status === 'failed' || item.status === 'cancelled').length
       setFailedDownloadCount(failedCount)
 
       // Track completed downloads to refresh sync count
@@ -759,12 +764,7 @@ export function Device() {
     }
   }
 
-  const formatBytes = (bytes: number): string => {
-    if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
-  }
+  // C-004: formatBytes is now imported from @/utils/formatters (deduplicated)
 
   return (
     <div className="flex flex-col h-full">
@@ -885,13 +885,26 @@ export function Device() {
               ) : (
                 <div className="space-y-4">
                   {/* Connected device info */}
-                  <div className="flex items-center justify-between p-4 bg-green-50 dark:bg-green-950 rounded-lg">
+                  {/* C-004: Color-coded status indicator based on sync state */}
+                  <div className={`flex items-center justify-between p-4 rounded-lg ${
+                    storeSyncing
+                      ? 'bg-blue-50 dark:bg-blue-950'
+                      : error
+                        ? 'bg-amber-50 dark:bg-amber-950'
+                        : 'bg-green-50 dark:bg-green-950'
+                  }`}>
                     <div className="flex items-center gap-3">
-                      <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse" />
+                      <div className={`w-3 h-3 rounded-full ${
+                        storeSyncing
+                          ? 'bg-blue-500 animate-pulse'
+                          : error
+                            ? 'bg-amber-500'
+                            : 'bg-green-500 animate-pulse'
+                      }`} />
                       <div>
                         <p className="font-medium capitalize">{deviceState.model.replace('-', ' ')}</p>
                         <p className="text-sm text-muted-foreground">
-                          Firmware {deviceState.firmwareVersion}
+                          {storeSyncing ? 'Syncing...' : `Firmware ${deviceState.firmwareVersion}`}
                         </p>
                       </div>
                     </div>
@@ -1192,7 +1205,7 @@ export function Device() {
                     ) : (
                       activityLog.map((entry, index) => (
                         <div
-                          key={index}
+                          key={`${entry.timestamp.getTime()}-${index}`}
                           className={`flex items-start gap-2 py-1 border-b border-muted last:border-0 ${
                             entry.type === 'error'
                               ? 'text-red-500'

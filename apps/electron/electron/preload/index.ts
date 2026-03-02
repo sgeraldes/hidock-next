@@ -293,7 +293,7 @@ export interface ElectronAPI {
         filename: string
         fileSize: number
         progress: number
-        status: 'pending' | 'downloading' | 'completed' | 'failed'
+        status: 'pending' | 'downloading' | 'completed' | 'failed' | 'cancelled'
         error?: string
       }>
       session: {
@@ -629,6 +629,8 @@ const electronAPI: ElectronAPI = {
     getStats: () => callIPC('download-service:get-stats'),
     checkStalled: () => callIPC('download-service:check-stalled'),
     cancelActive: (reason?: string) => callIPC('download-service:cancel-active', reason),
+    notifyCompletion: (stats: { completed: number; failed: number; aborted: boolean }) =>
+      callIPC('download-service:notify-completion', stats),
     onStateUpdate: (callback) => {
       const handler = (_event: any, state: any) => callback(state)
       ipcRenderer.on('download-service:state-update', handler)
