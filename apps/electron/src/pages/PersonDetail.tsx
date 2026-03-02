@@ -13,13 +13,25 @@ import {
   ExternalLink,
   Bot,
   Check,
-  X
+  X,
+  Trash2
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
 import { formatDateTime } from '@/lib/utils'
 import type { Person, PersonType } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
+import { toast } from '@/components/ui/toaster'
 
 export function PersonDetail() {
   const { id } = useParams<{ id: string }>()
@@ -32,11 +44,14 @@ export function PersonDetail() {
   const [editForm, setEditForm] = useState<{ name: string; email: string; role: string; company: string; notes: string }>({
     name: '', email: '', role: '', company: '', notes: ''
   })
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 
-  // PE-12: Wrapped in useCallback to satisfy dependency arrays
+  // B-PPL-002: Wrapped in useCallback to satisfy dependency arrays
   const loadDetails = useCallback(async () => {
     if (!id) return
     setLoading(true)
+    // B-PPL-002: Disable editing while loading
+    setIsEditing(false)
     try {
       const result = await window.electronAPI.contacts.getById(id)
       if (result.success && result.data.contact) {
@@ -51,6 +66,7 @@ export function PersonDetail() {
           createdAt: c.created_at || c.createdAt || new Date().toISOString()
         }
         setPerson(personData)
+        // B-PPL-002: Initialize form from loaded person data
         setEditForm({
           name: personData.name || '',
           email: personData.email || '',
@@ -69,19 +85,32 @@ export function PersonDetail() {
     }
   }, [id])
 
+  // B-PPL-003: Save including name and email fields
   const handleSaveEdit = async () => {
     if (!person || !id) return
     try {
-      await window.electronAPI.contacts.update({
+      const updatePayload: Record<string, string | undefined> = {
         id,
         notes: editForm.notes || undefined,
         role: editForm.role || undefined,
         company: editForm.company || undefined
-      })
+      }
+
+      // B-PPL-003: Include name and email in updates
+      if (editForm.name && editForm.name !== person.name) {
+        updatePayload.name = editForm.name
+      }
+      if (editForm.email !== (person.email || '')) {
+        updatePayload.email = editForm.email || undefined
+      }
+
+      await window.electronAPI.contacts.update(updatePayload as any)
+      toast.success('Contact updated', 'Contact details have been saved.')
       setIsEditing(false)
       await loadDetails()
     } catch (error) {
       console.error('Failed to update person:', error)
+      toast.error('Failed to update contact', error instanceof Error ? error.message : 'Unknown error')
     }
   }
 
@@ -96,6 +125,24 @@ export function PersonDetail() {
       })
     }
     setIsEditing(false)
+  }
+
+  // B-PPL-004: Delete contact
+  const handleDeleteContact = async () => {
+    if (!id || !person) return
+    try {
+      const result = await window.electronAPI.contacts.delete(id)
+      if (result.success) {
+        toast.success('Contact deleted', `${person.name} has been removed.`)
+        navigate('/people')
+      } else {
+        toast.error('Failed to delete contact', (result as any).error?.message || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to delete contact:', error)
+      toast.error('Failed to delete contact', error instanceof Error ? error.message : 'Unknown error')
+    }
+    setDeleteDialogOpen(false)
   }
 
   useEffect(() => {
@@ -146,7 +193,17 @@ export function PersonDetail() {
                 {person.name.charAt(0)}
               </div>
               <div>
-                <h1 className="text-xl font-bold leading-tight">{person.name}</h1>
+                {isEditing ? (
+                  <input
+                    type="text"
+                    value={editForm.name}
+                    onChange={(e) => setEditForm((prev) => ({ ...prev, name: e.target.value }))}
+                    className="text-xl font-bold leading-tight border rounded px-2 py-1 bg-background w-full"
+                    placeholder="Name..."
+                  />
+                ) : (
+                  <h1 className="text-xl font-bold leading-tight">{person.name}</h1>
+                )}
                 <div className="flex items-center gap-2 mt-1">
                   <span className={cn(
                     "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider",
@@ -155,20 +212,20 @@ export function PersonDetail() {
                     {person.type}
                   </span>
                   {person.company && (
-                    <span className="text-xs text-muted-foreground">• {person.company}</span>
+                    <span className="text-xs text-muted-foreground">- {person.company}</span>
                   )}
                 </div>
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => loadDetails()}>
-              <RefreshCw className="h-4 w-4 mr-2" />
+            <Button variant="outline" size="sm" onClick={() => loadDetails()} disabled={loading}>
+              <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
               Refresh
             </Button>
             {isEditing ? (
               <>
-                <Button size="sm" variant="default" onClick={handleSaveEdit}>
+                <Button size="sm" variant="default" onClick={handleSaveEdit} disabled={loading}>
                   <Check className="h-4 w-4 mr-2" />
                   Save
                 </Button>
@@ -178,10 +235,22 @@ export function PersonDetail() {
                 </Button>
               </>
             ) : (
-              <Button size="sm" variant="default" onClick={() => setIsEditing(true)}>
-                <Edit className="h-4 w-4 mr-2" />
-                Edit
-              </Button>
+              <>
+                {/* B-PPL-002: Disable edit button while loading */}
+                <Button size="sm" variant="default" onClick={() => setIsEditing(true)} disabled={loading}>
+                  <Edit className="h-4 w-4 mr-2" />
+                  Edit
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-destructive"
+                  onClick={() => setDeleteDialogOpen(true)}
+                  disabled={loading}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </>
             )}
           </div>
         </div>
@@ -198,12 +267,23 @@ export function PersonDetail() {
                   <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Information</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {person.email && (
+                  {/* B-PPL-003: Email is now editable */}
+                  {(person.email || isEditing) && (
                     <div className="flex items-start gap-3">
                       <Mail className="h-4 w-4 text-muted-foreground mt-0.5" />
                       <div className="min-w-0 flex-1">
                         <p className="text-xs text-muted-foreground mb-0.5">Email</p>
-                        <p className="text-sm font-medium truncate">{person.email}</p>
+                        {isEditing ? (
+                          <input
+                            type="email"
+                            value={editForm.email}
+                            onChange={(e) => setEditForm((prev) => ({ ...prev, email: e.target.value }))}
+                            className="text-sm font-medium w-full border rounded px-2 py-1 bg-background"
+                            placeholder="Enter email..."
+                          />
+                        ) : (
+                          <p className="text-sm font-medium truncate">{person.email}</p>
+                        )}
                       </div>
                     </div>
                   )}
@@ -222,6 +302,25 @@ export function PersonDetail() {
                           />
                         ) : (
                           <p className="text-sm font-medium truncate">{person.role}</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {(person.company || isEditing) && (
+                    <div className="flex items-start gap-3">
+                      <Briefcase className="h-4 w-4 text-muted-foreground mt-0.5" />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs text-muted-foreground mb-0.5">Company</p>
+                        {isEditing ? (
+                          <input
+                            type="text"
+                            value={editForm.company}
+                            onChange={(e) => setEditForm((prev) => ({ ...prev, company: e.target.value }))}
+                            className="text-sm font-medium w-full border rounded px-2 py-1 bg-background"
+                            placeholder="Enter company..."
+                          />
+                        ) : (
+                          <p className="text-sm font-medium truncate">{person.company}</p>
                         )}
                       </div>
                     </div>
@@ -266,7 +365,7 @@ export function PersonDetail() {
             <div className="md:col-span-2 space-y-6">
               <div className="w-full">
                 <div className="grid w-full grid-cols-2 bg-muted/50 p-1 rounded-lg">
-                  <button 
+                  <button
                     onClick={() => setActiveTab('timeline')}
                     className={cn(
                       "flex items-center justify-center gap-2 py-2 px-4 rounded-md text-sm font-medium transition-all",
@@ -276,7 +375,7 @@ export function PersonDetail() {
                     <Calendar className="h-4 w-4" />
                     Timeline
                   </button>
-                  <button 
+                  <button
                     onClick={() => setActiveTab('knowledge')}
                     className={cn(
                       "flex items-center justify-center gap-2 py-2 px-4 rounded-md text-sm font-medium transition-all",
@@ -287,7 +386,7 @@ export function PersonDetail() {
                     Knowledge Map
                   </button>
                 </div>
-                
+
                 {activeTab === 'timeline' && (
                   <div className="mt-6 space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
                     {meetings.length === 0 ? (
@@ -356,6 +455,27 @@ export function PersonDetail() {
           </div>
         </div>
       </div>
+
+      {/* B-PPL-004: Delete Confirmation AlertDialog */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Contact</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete {person.name}? This will permanently remove this contact and all their meeting associations. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleDeleteContact}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

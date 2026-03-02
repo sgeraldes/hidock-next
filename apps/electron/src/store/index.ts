@@ -30,6 +30,8 @@
 // =============================================================================
 
 export { useConfigStore } from './domain/useConfigStore'
+export { useContactsStore } from './domain/useContactsStore'
+export { useProjectsStore } from './domain/useProjectsStore'
 
 // =============================================================================
 // Feature Stores - Cross-Cutting Functionality

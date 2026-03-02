@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Users,
@@ -18,31 +18,35 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
 import type { Person, PersonType } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 
-// TODO(PE-07): Add delete contact capability. Requires a new IPC handler (contacts:delete)
-// in electron/main/ipc/ and a corresponding UI button (e.g., context menu or detail view action).
-
 export function People() {
   const navigate = useNavigate()
 
-  // TODO(PE-04): Migrate to useContactsStore from @/store instead of local useState.
-  // The store (store/domain/useContactsStore.ts) already has loadContacts, selectContact,
-  // updateContact, and setSearchQuery actions. This page duplicates that state locally.
-  // Note: The store operates on Contact (DB type) while this page uses Person (UI type).
-  // A mapping layer will be needed during migration (see PE-06 in types/knowledge.ts).
   const [people, setPeople] = useState<Person[]>([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [typeFilter, setTypeFilter] = useState<PersonType | 'all'>('all')
 
-  // PE-12: Wrapped in useCallback to stabilize reference for dependency arrays
+  // Delete confirmation state (replaces confirm())
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null)
+
   const loadPeople = useCallback(async () => {
     setLoading(true)
     try {
-      // Server-side type filter (spec-013)
       const result = await window.electronAPI.contacts.getAll({
         search: searchQuery,
         type: typeFilter,
@@ -65,7 +69,6 @@ export function People() {
     }
   }, [searchQuery, typeFilter])
 
-  // PE-05: Debounce search to avoid firing IPC on every keystroke
   useEffect(() => {
     const timer = setTimeout(() => {
       loadPeople()
@@ -73,28 +76,31 @@ export function People() {
     return () => clearTimeout(timer)
   }, [loadPeople])
 
-  const handleDelete = useCallback(async (personId: string, personName: string, event: React.MouseEvent) => {
-    event.stopPropagation() // Prevent card click navigation
+  const handleDeleteClick = useCallback((personId: string, personName: string, event: React.MouseEvent) => {
+    event.stopPropagation()
+    setDeleteTarget({ id: personId, name: personName })
+    setDeleteDialogOpen(true)
+  }, [])
 
-    if (!confirm(`Delete ${personName}? This will permanently remove this contact and all their meeting associations.`)) {
-      return
-    }
+  const handleConfirmDelete = useCallback(async () => {
+    if (!deleteTarget) return
 
     try {
-      const result = await window.electronAPI.contacts.delete(personId)
+      const result = await window.electronAPI.contacts.delete(deleteTarget.id)
       if (result.success) {
-        toast.success('Contact deleted', `${personName} has been removed`)
-        await loadPeople() // Refresh list
+        toast.success('Contact deleted', `${deleteTarget.name} has been removed`)
+        await loadPeople()
       } else {
-        toast.error('Failed to delete contact', result.error || 'Unknown error')
+        toast.error('Failed to delete contact', (result as any).error?.message || 'Unknown error')
       }
     } catch (error) {
       console.error('Failed to delete contact:', error)
       toast.error('Failed to delete contact', error instanceof Error ? error.message : 'An unexpected error occurred')
     }
-  }, [loadPeople])
+    setDeleteDialogOpen(false)
+    setDeleteTarget(null)
+  }, [deleteTarget, loadPeople])
 
-  // Server-side filtering now, so no need for client-side filter
   const filteredPeople = people
 
   const getTypeColor = (type: PersonType) => {
@@ -144,7 +150,7 @@ export function People() {
               className="pl-9 h-9"
             />
           </div>
-          
+
           <div className="flex items-center gap-2 overflow-x-auto pb-2 sm:pb-0 w-full sm:w-auto">
             <Filter className="h-4 w-4 text-muted-foreground flex-shrink-0" />
             <div className="flex gap-1">
@@ -154,8 +160,8 @@ export function People() {
                   onClick={() => setTypeFilter(t)}
                   className={cn(
                     "px-3 py-1 rounded-full text-xs font-medium border transition-all whitespace-nowrap",
-                    typeFilter === t 
-                      ? "bg-primary border-primary text-primary-foreground" 
+                    typeFilter === t
+                      ? "bg-primary border-primary text-primary-foreground"
                       : "bg-background border-border text-muted-foreground hover:bg-muted"
                   )}
                 >
@@ -189,8 +195,8 @@ export function People() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredPeople.map((person) => (
-                <Card 
-                  key={person.id} 
+                <Card
+                  key={person.id}
                   className="group hover:border-primary/50 transition-all cursor-pointer overflow-hidden shadow-sm hover:shadow-md"
                   onClick={() => navigate(`/person/${person.id}`)}
                 >
@@ -218,7 +224,7 @@ export function People() {
                           variant="ghost"
                           size="sm"
                           className="h-7 w-7 p-0 hover:bg-destructive/10 hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                          onClick={(e) => handleDelete(person.id, person.name, e)}
+                          onClick={(e) => handleDeleteClick(person.id, person.name, e)}
                           title="Delete contact"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
@@ -246,7 +252,7 @@ export function People() {
                         <span className="truncate">{person.role}</span>
                       </div>
                     )}
-                    
+
                     <div className="pt-2 flex items-center justify-between border-t border-border/50">
                       <div className="flex items-center gap-1.5 text-xs font-medium">
                         <MessageSquare className="h-3.5 w-3.5 text-primary" />
@@ -278,6 +284,27 @@ export function People() {
           )}
         </div>
       </div>
+
+      {/* Delete Confirmation AlertDialog (replaces confirm()) */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Contact</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete {deleteTarget?.name}? This will permanently remove this contact and all their meeting associations. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleConfirmDelete}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

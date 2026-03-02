@@ -1,14 +1,27 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Clock, MapPin, Users, Mic, FileText, Play, X } from 'lucide-react'
+import { ArrowLeft, Clock, MapPin, Users, Mic, FileText, Play, X, Edit, Check, Loader2, Link, Unlink, ChevronDown, ChevronUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose
+} from '@/components/ui/dialog'
 import { formatDateTime, formatDuration } from '@/lib/utils'
 import { parseAttendees, parseJsonArray } from '@/types'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
+import { toast } from '@/components/ui/toaster'
 import type { MeetingDetails } from '@/types'
+
+const ATTENDEES_COLLAPSED_LIMIT = 8
 
 export function MeetingDetail() {
   const { id } = useParams<{ id: string }>()
@@ -17,17 +30,34 @@ export function MeetingDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  // Edit meeting state (B-MTG-001)
+  const [isEditing, setIsEditing] = useState(false)
+  const [editForm, setEditForm] = useState({
+    subject: '',
+    start_time: '',
+    end_time: '',
+    location: '',
+    description: ''
+  })
+
+  // Recording link dialog state (B-MTG-002)
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false)
+  const [linkRecordingId, setLinkRecordingId] = useState<string | null>(null)
+  const [availableMeetings, setAvailableMeetings] = useState<any[]>([])
+  const [linkLoading, setLinkLoading] = useState(false)
+
+  // Playback loading state (B-MTG-003)
+  const [playbackLoading, setPlaybackLoading] = useState<string | null>(null)
+
+  // Attendee overflow state (B-MTG-005)
+  const [showAllAttendees, setShowAllAttendees] = useState(false)
+
   // Global playback state
   const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
   const audioControls = useAudioControls()
 
-  useEffect(() => {
-    if (id) {
-      loadMeetingDetails(id)
-    }
-  }, [id])
-
-  const loadMeetingDetails = async (meetingId: string) => {
+  // B-MTG-004: Memoized loadMeetingDetails
+  const loadMeetingDetails = useCallback(async (meetingId: string) => {
     setLoading(true)
     setError(null)
     try {
@@ -42,16 +72,132 @@ export function MeetingDetail() {
         data.actionables = actionables
       } catch (actionablesError) {
         console.error('Failed to load actionables:', actionablesError)
-        // Continue without actionables rather than fail entirely
         data.actionables = []
       }
 
       setDetails(data)
+
+      // Initialize edit form
+      setEditForm({
+        subject: data.meeting.subject || '',
+        start_time: data.meeting.start_time || '',
+        end_time: data.meeting.end_time || '',
+        location: data.meeting.location || '',
+        description: data.meeting.description || ''
+      })
     } catch (error) {
       console.error('Failed to load meeting details:', error)
       setError((error as Error).message || 'Failed to load meeting')
     } finally {
       setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (id) {
+      loadMeetingDetails(id)
+    }
+  }, [id, loadMeetingDetails])
+
+  // Clear playback loading when audio starts playing
+  useEffect(() => {
+    if (currentlyPlayingId && playbackLoading === currentlyPlayingId) {
+      setPlaybackLoading(null)
+    }
+  }, [currentlyPlayingId, playbackLoading])
+
+  // B-MTG-001: Save edited meeting
+  const handleSaveEdit = async () => {
+    if (!id || !details) return
+    try {
+      const updates: Record<string, string | null | undefined> = {}
+      if (editForm.subject !== details.meeting.subject) updates.subject = editForm.subject
+      if (editForm.location !== (details.meeting.location || '')) updates.location = editForm.location || null
+      if (editForm.description !== (details.meeting.description || '')) updates.description = editForm.description || null
+
+      if (Object.keys(updates).length === 0) {
+        setIsEditing(false)
+        return
+      }
+
+      const result = await window.electronAPI.meetings.update({ id, ...updates })
+      if (result.success) {
+        toast.success('Meeting updated', 'Meeting details have been saved.')
+        setIsEditing(false)
+        await loadMeetingDetails(id)
+      } else {
+        toast.error('Failed to update meeting', (result as any).error?.message || 'Unknown error')
+      }
+    } catch (err) {
+      console.error('Failed to update meeting:', err)
+      toast.error('Failed to update meeting', err instanceof Error ? err.message : 'Unknown error')
+    }
+  }
+
+  const handleCancelEdit = () => {
+    if (details) {
+      setEditForm({
+        subject: details.meeting.subject || '',
+        start_time: details.meeting.start_time || '',
+        end_time: details.meeting.end_time || '',
+        location: details.meeting.location || '',
+        description: details.meeting.description || ''
+      })
+    }
+    setIsEditing(false)
+  }
+
+  // B-MTG-003: Handle play with loading spinner
+  const handlePlay = (recordingId: string, filePath: string) => {
+    setPlaybackLoading(recordingId)
+    audioControls.play(recordingId, filePath)
+    // Loading state will be cleared by the useEffect when currentlyPlayingId changes
+    // Also set a timeout fallback to clear loading state
+    setTimeout(() => setPlaybackLoading(prev => prev === recordingId ? null : prev), 5000)
+  }
+
+  // B-MTG-002: Handle recording link/unlink
+  const handleUnlinkRecording = async (recordingId: string) => {
+    try {
+      await window.electronAPI.recordings.selectMeeting(recordingId, null)
+      toast.success('Recording unlinked', 'Recording has been unlinked from this meeting.')
+      if (id) await loadMeetingDetails(id)
+    } catch (err) {
+      console.error('Failed to unlink recording:', err)
+      toast.error('Failed to unlink recording', err instanceof Error ? err.message : 'Unknown error')
+    }
+  }
+
+  const handleOpenLinkDialog = async (recordingId: string) => {
+    setLinkRecordingId(recordingId)
+    setLinkDialogOpen(true)
+    setLinkLoading(true)
+    try {
+      const result = await window.electronAPI.recordings.getCandidates(recordingId)
+      if (result.success) {
+        setAvailableMeetings(result.data)
+      }
+    } catch (err) {
+      console.error('Failed to load meeting candidates:', err)
+    } finally {
+      setLinkLoading(false)
+    }
+  }
+
+  const handleLinkToMeeting = async (meetingId: string) => {
+    if (!linkRecordingId) return
+    try {
+      const result = await window.electronAPI.recordings.selectMeeting(linkRecordingId, meetingId)
+      if (result.success) {
+        toast.success('Recording linked', 'Recording has been linked to the meeting.')
+        setLinkDialogOpen(false)
+        if (id) await loadMeetingDetails(id)
+      } else {
+        toast.error('Failed to link recording', result.error || 'Unknown error')
+      }
+    } catch (err) {
+      console.error('Failed to link recording:', err)
+      toast.error('Failed to link recording', err instanceof Error ? err.message : 'Unknown error')
     }
   }
 
@@ -98,6 +244,10 @@ export function MeetingDetail() {
   const endDate = new Date(meeting.end_time)
   const durationMins = Math.round((endDate.getTime() - startDate.getTime()) / 60000)
 
+  // B-MTG-005: Control visible attendees
+  const visibleAttendees = showAllAttendees ? attendees : attendees.slice(0, ATTENDEES_COLLAPSED_LIMIT)
+  const hasMoreAttendees = attendees.length > ATTENDEES_COLLAPSED_LIMIT
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -106,8 +256,35 @@ export function MeetingDetail() {
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1">
-          <h1 className="text-xl font-bold">{meeting.subject}</h1>
+          {isEditing ? (
+            <Input
+              value={editForm.subject}
+              onChange={(e) => setEditForm(prev => ({ ...prev, subject: e.target.value }))}
+              className="text-xl font-bold h-auto py-1"
+            />
+          ) : (
+            <h1 className="text-xl font-bold">{meeting.subject}</h1>
+          )}
           <p className="text-sm text-muted-foreground">{formatDateTime(meeting.start_time)}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {isEditing ? (
+            <>
+              <Button size="sm" variant="default" onClick={handleSaveEdit}>
+                <Check className="h-4 w-4 mr-2" />
+                Save
+              </Button>
+              <Button size="sm" variant="ghost" onClick={handleCancelEdit}>
+                <X className="h-4 w-4 mr-2" />
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <Button size="sm" variant="outline" onClick={() => setIsEditing(true)}>
+              <Edit className="h-4 w-4 mr-2" />
+              Edit
+            </Button>
+          )}
         </div>
       </header>
 
@@ -131,10 +308,19 @@ export function MeetingDetail() {
                 </div>
               </div>
 
-              {meeting.location && (
+              {(meeting.location || isEditing) && (
                 <div className="flex items-center gap-3">
                   <MapPin className="h-5 w-5 text-muted-foreground" />
-                  <p>{meeting.location}</p>
+                  {isEditing ? (
+                    <Input
+                      value={editForm.location}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, location: e.target.value }))}
+                      placeholder="Location..."
+                      className="flex-1"
+                    />
+                  ) : (
+                    <p>{meeting.location}</p>
+                  )}
                 </div>
               )}
 
@@ -150,19 +336,59 @@ export function MeetingDetail() {
                 </div>
               )}
 
+              {/* B-MTG-005: Attendees with overflow and "Show all" toggle */}
               {attendees.length > 0 && (
                 <div>
                   <p className="font-medium mb-2">Attendees ({attendees.length})</p>
-                  <div className="flex flex-wrap gap-2">
-                    {attendees.map((attendee, i) => (
-                      <span
-                        key={i}
-                        className="px-2 py-1 bg-secondary text-secondary-foreground rounded-full text-xs"
-                      >
-                        {attendee.name || attendee.email}
-                      </span>
-                    ))}
+                  <div className="max-h-40 overflow-auto">
+                    <div className="flex flex-wrap gap-2">
+                      {visibleAttendees.map((attendee, i) => (
+                        <span
+                          key={i}
+                          className="px-2 py-1 bg-secondary text-secondary-foreground rounded-full text-xs"
+                        >
+                          {attendee.name || attendee.email}
+                        </span>
+                      ))}
+                    </div>
                   </div>
+                  {hasMoreAttendees && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="mt-2 text-xs"
+                      onClick={() => setShowAllAttendees(!showAllAttendees)}
+                    >
+                      {showAllAttendees ? (
+                        <>
+                          <ChevronUp className="h-3 w-3 mr-1" />
+                          Show less
+                        </>
+                      ) : (
+                        <>
+                          <ChevronDown className="h-3 w-3 mr-1" />
+                          Show all {attendees.length} attendees
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+              )}
+
+              {/* Description (editable) */}
+              {(meeting.description || isEditing) && (
+                <div>
+                  <p className="font-medium mb-1">Description</p>
+                  {isEditing ? (
+                    <textarea
+                      value={editForm.description}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, description: e.target.value }))}
+                      className="text-sm w-full border rounded px-3 py-2 bg-background min-h-[80px]"
+                      placeholder="Meeting description..."
+                    />
+                  ) : (
+                    <p className="text-sm text-muted-foreground whitespace-pre-wrap">{meeting.description}</p>
+                  )}
                 </div>
               )}
 
@@ -207,7 +433,19 @@ export function MeetingDetail() {
                           <span className="text-xs px-2 py-1 rounded-full bg-secondary">
                             {recording.status}
                           </span>
-                          {currentlyPlayingId === recording.id ? (
+                          {/* B-MTG-002: Unlink recording button */}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleUnlinkRecording(recording.id)}
+                            title="Unlink recording from meeting"
+                          >
+                            <Unlink className="h-4 w-4" />
+                          </Button>
+                          {/* B-MTG-003: Play with loading spinner */}
+                          {playbackLoading === recording.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                          ) : currentlyPlayingId === recording.id ? (
                             <Button
                               variant="ghost"
                               size="icon"
@@ -219,7 +457,7 @@ export function MeetingDetail() {
                             <Button
                               variant="ghost"
                               size="icon"
-                              onClick={() => recording.file_path && audioControls.play(recording.id, recording.file_path)}
+                              onClick={() => recording.file_path && handlePlay(recording.id, recording.file_path)}
                               disabled={!recording.file_path}
                               title={recording.file_path ? 'Play recording' : 'Recording not available locally'}
                             >
@@ -293,6 +531,52 @@ export function MeetingDetail() {
           </Card>
         </div>
       </div>
+
+      {/* B-MTG-002: Recording Link Dialog */}
+      <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Link Recording to Meeting</DialogTitle>
+            <DialogDescription>
+              Select a meeting to link this recording to.
+            </DialogDescription>
+          </DialogHeader>
+          {linkLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
+          ) : availableMeetings.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-8">
+              No candidate meetings found.
+            </p>
+          ) : (
+            <div className="max-h-64 overflow-auto space-y-2">
+              {availableMeetings.map((m: any) => (
+                <button
+                  key={m.meetingId || m.id}
+                  className="w-full text-left p-3 border rounded-lg hover:bg-muted transition-colors"
+                  onClick={() => handleLinkToMeeting(m.meetingId || m.id)}
+                >
+                  <p className="font-medium text-sm">{m.subject}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {formatDateTime(m.startTime || m.start_time)}
+                  </p>
+                  {m.confidenceScore !== undefined && (
+                    <p className="text-xs text-primary">
+                      Confidence: {Math.round(m.confidenceScore * 100)}%
+                    </p>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Cancel</Button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

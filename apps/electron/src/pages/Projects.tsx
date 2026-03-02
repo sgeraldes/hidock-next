@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import {
   Folder,
   Search,
@@ -15,25 +15,52 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose
+} from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
 import type { Project } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 
 export function Projects() {
-  // TODO(PJ-08): Migrate to useProjectsStore from @/store instead of local useState.
-  // The store (store/domain/useProjectsStore.ts) already has loadProjects, createProject,
-  // updateProject, deleteProject, and selectProject actions. This page should consume
-  // that store directly. The initial data load below already uses IPC via window.electronAPI.
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProject, setActiveProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'all'>('active')
 
-  const loadProjects = async () => {
+  // B-PRJ-006: Create project dialog state (replaces prompt())
+  const [createDialogOpen, setCreateDialogOpen] = useState(false)
+  const [createName, setCreateName] = useState('')
+  const [createDescription, setCreateDescription] = useState('')
+
+  // B-PRJ-007: Delete project dialog state (replaces confirm())
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+
+  // B-PRJ-005: Memoized loadProjects with useCallback
+  const loadProjects = useCallback(async () => {
     setLoading(true)
     try {
-      const result = await window.electronAPI.projects.getAll({ search: searchQuery })
+      const result = await window.electronAPI.projects.getAll({
+        search: searchQuery,
+        status: statusFilter
+      })
       if (result.success) {
         const mapped = result.data.projects.map((p: any) => ({
           ...p,
@@ -48,42 +75,90 @@ export function Projects() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [searchQuery, statusFilter])
 
-  // PJ-12: Debounce search to avoid firing IPC on every keystroke
   useEffect(() => {
     const timer = setTimeout(() => {
       loadProjects()
     }, 300)
     return () => clearTimeout(timer)
-  }, [searchQuery])
+  }, [loadProjects])
 
-  const filteredProjects = useMemo(() => {
-    return projects.filter(p => {
-      if (statusFilter !== 'all' && p.status !== statusFilter) return false
-      return true
-    })
-  }, [projects, statusFilter])
+  const filteredProjects = projects
 
+  // B-PRJ-006: Create project via Dialog instead of prompt()
   const handleCreateProject = async () => {
-    const name = prompt('Enter project name:')
-    if (!name) return
-    
+    if (!createName.trim()) return
+
     try {
-      const result = await window.electronAPI.projects.create({ name })
+      const result = await window.electronAPI.projects.create({
+        name: createName.trim(),
+        description: createDescription.trim() || undefined
+      })
       if (result.success) {
         const p = result.data as any
-        const mapped = {
+        const mapped: Project = {
           ...p,
           status: p.status || 'active',
           createdAt: p.created_at || p.createdAt || new Date().toISOString()
         }
         setProjects(prev => [mapped, ...prev])
         setActiveProject(mapped)
+        toast.success('Project created', `"${mapped.name}" has been created.`)
       }
     } catch (error) {
       console.error('Failed to create project:', error)
       toast.error('Failed to create project', error instanceof Error ? error.message : 'An unexpected error occurred')
+    }
+
+    setCreateDialogOpen(false)
+    setCreateName('')
+    setCreateDescription('')
+  }
+
+  const openCreateDialog = () => {
+    setCreateName('')
+    setCreateDescription('')
+    setCreateDialogOpen(true)
+  }
+
+  // B-PRJ-007: Delete project via AlertDialog instead of confirm()
+  const handleDeleteProject = async () => {
+    if (!activeProject) return
+    try {
+      const result = await window.electronAPI.projects.delete(activeProject.id)
+      if (result.success) {
+        toast.success('Project deleted', `"${activeProject.name}" has been deleted.`)
+        setProjects(prev => prev.filter(p => p.id !== activeProject.id))
+        setActiveProject(null)
+      }
+    } catch (error) {
+      console.error('Failed to delete project:', error)
+      toast.error('Failed to delete project', error instanceof Error ? error.message : 'An unexpected error occurred')
+    }
+    setDeleteDialogOpen(false)
+  }
+
+  // Load project details with knowledgeIds/personIds when selected
+  const handleSelectProject = async (project: Project) => {
+    setActiveProject(project)
+    try {
+      const result = await window.electronAPI.projects.getById(project.id)
+      if (result.success && result.data.project) {
+        const p = result.data.project as any
+        const detailed: Project = {
+          id: p.id,
+          name: p.name,
+          description: p.description,
+          status: p.status || 'active',
+          createdAt: p.created_at || p.createdAt || new Date().toISOString(),
+          knowledgeIds: p.knowledgeIds,
+          personIds: p.personIds
+        }
+        setActiveProject(detailed)
+      }
+    } catch (error) {
+      console.error('Failed to load project details:', error)
     }
   }
 
@@ -94,12 +169,12 @@ export function Projects() {
         <div className="p-4 border-b space-y-4">
           <div className="flex items-center justify-between">
             <h1 className="text-xl font-bold">Projects</h1>
-            <Button onClick={handleCreateProject} size="sm" className="h-8 gap-1">
+            <Button onClick={openCreateDialog} size="sm" className="h-8 gap-1">
               <Plus className="h-4 w-4" />
               New
             </Button>
           </div>
-          
+
           <div className="relative">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
@@ -111,7 +186,6 @@ export function Projects() {
           </div>
 
           <div className="flex gap-1 p-1 bg-muted rounded-lg">
-            {/* PJ-15: Added "All" filter option */}
             {(['all', 'active', 'archived'] as const).map((s) => (
               <button
                 key={s}
@@ -133,17 +207,17 @@ export function Projects() {
               <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           ) : filteredProjects.length === 0 ? (
-            <p className="text-center text-xs text-muted-foreground py-12">No {statusFilter} projects</p>
+            <p className="text-center text-xs text-muted-foreground py-12">No {statusFilter === 'all' ? '' : statusFilter} projects</p>
           ) : (
             <div className="space-y-1">
               {filteredProjects.map((project) => (
                 <div
                   key={project.id}
-                  onClick={() => setActiveProject(project)}
+                  onClick={() => handleSelectProject(project)}
                   className={cn(
                     "w-full text-left p-3 rounded-xl transition-all cursor-pointer group",
-                    activeProject?.id === project.id 
-                      ? "bg-primary text-primary-foreground shadow-md" 
+                    activeProject?.id === project.id
+                      ? "bg-primary text-primary-foreground shadow-md"
                       : "hover:bg-muted text-muted-foreground hover:text-foreground"
                   )}
                 >
@@ -219,19 +293,7 @@ export function Projects() {
                   variant="ghost"
                   size="icon"
                   className="h-9 w-9 text-muted-foreground hover:text-destructive"
-                  onClick={async () => {
-                    if (!confirm(`Delete project "${activeProject.name}"? This cannot be undone.`)) return
-                    try {
-                      const result = await window.electronAPI.projects.delete(activeProject.id)
-                      if (result.success) {
-                        setProjects(prev => prev.filter(p => p.id !== activeProject.id))
-                        setActiveProject(null)
-                      }
-                    } catch (error) {
-                      console.error('Failed to delete project:', error)
-                      toast.error('Failed to delete project', error instanceof Error ? error.message : 'An unexpected error occurred')
-                    }
-                  }}
+                  onClick={() => setDeleteDialogOpen(true)}
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>
@@ -332,13 +394,79 @@ export function Projects() {
             <p className="text-sm max-w-xs text-center leading-relaxed">
               Choose a project from the sidebar to view aggregated knowledge, people, and AI insights.
             </p>
-            <Button onClick={handleCreateProject} variant="outline" className="mt-8 gap-2">
+            <Button onClick={openCreateDialog} variant="outline" className="mt-8 gap-2">
               <Plus className="h-4 w-4" />
               Create New Project
             </Button>
           </div>
         )}
       </main>
+
+      {/* B-PRJ-006: Create Project Dialog (replaces prompt()) */}
+      <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create New Project</DialogTitle>
+            <DialogDescription>
+              Enter a name for your new project.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <label className="text-sm font-medium mb-1 block">Project Name</label>
+              <Input
+                value={createName}
+                onChange={(e) => setCreateName(e.target.value)}
+                placeholder="Enter project name..."
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && createName.trim()) {
+                    handleCreateProject()
+                  }
+                }}
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium mb-1 block">Description (optional)</label>
+              <textarea
+                value={createDescription}
+                onChange={(e) => setCreateDescription(e.target.value)}
+                placeholder="Brief description..."
+                className="w-full text-sm border rounded px-3 py-2 bg-background min-h-[60px]"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Cancel</Button>
+            </DialogClose>
+            <Button onClick={handleCreateProject} disabled={!createName.trim()}>
+              Create Project
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* B-PRJ-007: Delete Project AlertDialog (replaces confirm()) */}
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Project</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete "{activeProject?.name}"? This will remove all meeting associations for this project. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleDeleteProject}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

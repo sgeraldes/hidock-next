@@ -75,6 +75,7 @@ export interface ElectronAPI {
     getById: (id: string) => Promise<any>
     getByIds: (ids: string[]) => Promise<Record<string, any>>
     getDetails: (id: string) => Promise<any>
+    update: (request: { id: string; subject?: string; start_time?: string; end_time?: string; location?: string | null; description?: string | null }) => Promise<Result<any>>
   }
 
   // Contacts
@@ -82,12 +83,13 @@ export interface ElectronAPI {
     getAll: (request?: GetContactsRequest) => Promise<Result<GetContactsResponse>>
     getById: (id: string) => Promise<Result<ContactWithMeetings>>
     update: (request: UpdateContactRequest) => Promise<Result<Contact>>
+    delete: (id: string) => Promise<Result<void>>
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
   }
 
   // Projects
   projects: {
-    getAll: (request?: GetProjectsRequest) => Promise<Result<GetProjectsResponse>>
+    getAll: (request?: GetProjectsRequest & { status?: string }) => Promise<Result<GetProjectsResponse>>
     getById: (id: string) => Promise<Result<ProjectWithMeetings>>
     create: (request: CreateProjectRequest) => Promise<Result<Project>>
     update: (request: UpdateProjectRequest) => Promise<Result<Project>>
@@ -445,13 +447,15 @@ const electronAPI: ElectronAPI = {
     getAll: (startDate, endDate) => callIPC('db:get-meetings', startDate, endDate),
     getById: (id) => callIPC('db:get-meeting', id),
     getByIds: (ids) => callIPC('db:get-meetings-by-ids', ids),
-    getDetails: (id) => callIPC('db:get-meeting-details', id)
+    getDetails: (id) => callIPC('db:get-meeting-details', id),
+    update: (request) => callIPC('meetings:update', request)
   },
 
   contacts: {
     getAll: (request) => callIPC('contacts:getAll', request),
     getById: (id) => callIPC('contacts:getById', id),
     update: (request) => callIPC('contacts:update', request),
+    delete: (id) => callIPC('contacts:delete', id),
     getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
   },
 

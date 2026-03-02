@@ -9,6 +9,7 @@ import {
   getContacts,
   getContactById,
   updateContact,
+  deleteContact,
   getMeetingsForContact,
   getContactsForMeeting,
   Contact
@@ -17,7 +18,8 @@ import { success, error, Result } from '../types/api'
 import {
   GetContactsRequestSchema,
   GetContactByIdRequestSchema,
-  UpdateContactRequestSchema
+  UpdateContactRequestSchema,
+  DeleteContactRequestSchema
 } from '../validation/contacts'
 import type { Person } from '@/types/knowledge'
 
@@ -99,7 +101,7 @@ export function registerContactsHandlers(): void {
           return error('VALIDATION_ERROR', 'Invalid update request', parsed.error.format())
         }
 
-        const { id, tags, ...otherUpdates } = parsed.data
+        const { id, tags, name, email, ...otherUpdates } = parsed.data
         const contact = getContactById(id)
         if (!contact) {
           return error('NOT_FOUND', `Contact with ID ${id} not found`)
@@ -109,6 +111,12 @@ export function registerContactsHandlers(): void {
         if (tags) {
           updates.tags = JSON.stringify(tags)
         }
+        if (name !== undefined) {
+          updates.name = name
+        }
+        if (email !== undefined) {
+          updates.email = email
+        }
 
         updateContact(id, updates)
 
@@ -117,6 +125,33 @@ export function registerContactsHandlers(): void {
       } catch (err) {
         console.error('contacts:update error:', err)
         return error('DATABASE_ERROR', 'Failed to update contact', err)
+      }
+    }
+  )
+
+  /**
+   * Delete contact and all meeting associations
+   */
+  ipcMain.handle(
+    'contacts:delete',
+    async (_, id: unknown): Promise<Result<void>> => {
+      try {
+        const parsed = DeleteContactRequestSchema.safeParse({ id })
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid contact ID', parsed.error.format())
+        }
+
+        const contact = getContactById(parsed.data.id)
+        if (!contact) {
+          return error('NOT_FOUND', `Contact with ID ${parsed.data.id} not found`)
+        }
+
+        deleteContact(parsed.data.id)
+
+        return success(undefined)
+      } catch (err) {
+        console.error('contacts:delete error:', err)
+        return error('DATABASE_ERROR', 'Failed to delete contact', err)
       }
     }
   )

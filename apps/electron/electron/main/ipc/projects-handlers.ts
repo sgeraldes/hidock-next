@@ -18,6 +18,8 @@ import {
   getMeetingById,
   getTranscriptByRecordingId,
   getRecordingsForMeeting,
+  getKnowledgeIdsForProject,
+  getPersonIdsForProject,
   Project as DBProject
 } from '../services/database'
 import { success, error, Result } from '../types/api'
@@ -46,8 +48,8 @@ export function registerProjectsHandlers(): void {
           return error('VALIDATION_ERROR', 'Invalid request parameters', parsed.error.format())
         }
 
-        const { search, limit, offset } = parsed.data
-        const result = getProjects(search, limit, offset)
+        const { search, limit, offset, status } = parsed.data
+        const result = getProjects(search, limit, offset, status)
 
         return success({
           projects: result.projects.map(mapToProject),
@@ -96,8 +98,16 @@ export function registerProjectsHandlers(): void {
           }
         }
 
+        // Populate knowledgeIds and personIds from junction tables (B-PRJ-002)
+        const knowledgeIds = getKnowledgeIdsForProject(parsed.data.id)
+        const personIds = getPersonIdsForProject(parsed.data.id)
+
+        const project = mapToProject(dbProject)
+        project.knowledgeIds = knowledgeIds
+        project.personIds = personIds
+
         return success({
-          project: mapToProject(dbProject),
+          project,
           meetings,
           topics: Array.from(topicsSet)
         })
@@ -124,7 +134,8 @@ export function registerProjectsHandlers(): void {
         createProject({
           id,
           name: parsed.data.name,
-          description: parsed.data.description ?? null
+          description: parsed.data.description ?? null,
+          status: 'active'
         })
 
         // Re-fetch to get status and created_at
@@ -273,12 +284,12 @@ export function registerProjectsHandlers(): void {
   )
 }
 
-function mapToProject(dbProject: DBProject): Project {
+function mapToProject(dbProject: DBProject): Project & { knowledgeIds?: string[]; personIds?: string[] } {
   return {
     id: dbProject.id,
     name: dbProject.name,
     description: dbProject.description,
-    status: (dbProject as any).status || 'active',
+    status: (dbProject.status === 'archived' ? 'archived' : 'active') as 'active' | 'archived',
     createdAt: dbProject.created_at
   }
 }
