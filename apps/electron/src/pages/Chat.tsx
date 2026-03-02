@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import {
@@ -22,8 +22,7 @@ import {
   RotateCcw,
   Search,
   Download,
-  GripVertical,
-  Loader2
+  GripVertical
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -50,6 +49,13 @@ import { cn, getRelativeTime } from '@/lib/utils'
 import type { Message, Conversation, KnowledgeCapture } from '@/types/knowledge'
 
 const MAX_INPUT_LENGTH = 4000
+
+// Chat UI constants
+const CHAT_SIDEBAR = {
+  DEFAULT_WIDTH: 256,  // 16rem
+  MIN_WIDTH: 200,      // 12.5rem
+  MAX_WIDTH: 500       // 31.25rem
+} as const
 
 interface VectorChunk {
   id: string
@@ -107,8 +113,10 @@ export function Chat() {
   const [searchQuery, setSearchQuery] = useState('')
 
   // C-CHAT: Resizable sidebar
-  const [sidebarWidth, setSidebarWidth] = useState(256) // 16rem = 256px
+  const [sidebarWidth, setSidebarWidth] = useState<number>(CHAT_SIDEBAR.DEFAULT_WIDTH)
   const [isResizing, setIsResizing] = useState(false)
+  const isResizingRef = useRef(false)
+  const rafRef = useRef<number>()
   const [sources, setSources] = useState<Map<string, Source[]>>(new Map())
   const [chunks, setChunks] = useState<VectorChunk[]>([])
   const [showChunks, setShowChunks] = useState(false)
@@ -210,6 +218,7 @@ export function Chat() {
       const timer = setTimeout(() => inputRef.current?.focus(), 50)
       return () => clearTimeout(timer)
     }
+    return undefined
   }, [initialLoading, initError, activeConversation])
 
   // Clear recording context
@@ -420,19 +429,23 @@ export function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
-  // C-CHAT: Filter messages by search query
-  const filteredMessages = searchQuery.trim()
-    ? messages.filter(msg =>
-        msg.content.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : messages
+  // C-CHAT: Filter messages by search query (memoized for performance)
+  const filteredMessages = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase()
+    return query
+      ? messages.filter(msg => msg.content.toLowerCase().includes(query))
+      : messages
+  }, [searchQuery, messages])
 
   // C-CHAT: Export conversation to markdown
-  const handleExportConversation = useCallback(() => {
+  const handleExportConversation = useCallback(async () => {
     if (!activeConversation || messages.length === 0) {
       toast.error('No conversation to export')
       return
     }
+
+    const sanitizeFilename = (name: string): string =>
+      name.replace(/[/\\:*?"<>|]/g, '_').trim()
 
     const markdown = [
       `# ${activeConversation.title || 'Untitled Conversation'}`,
@@ -449,32 +462,53 @@ export function Chat() {
       })
     ].join('\n')
 
-    const blob = new Blob([markdown], { type: 'text/markdown' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${activeConversation.title || 'conversation'}.md`
-    a.click()
-    URL.revokeObjectURL(url)
-    toast.success('Conversation exported')
+    const filename = sanitizeFilename(activeConversation.title || 'conversation') + '.md'
+
+    try {
+      const result = await window.electronAPI.outputs.saveToFile(markdown, filename)
+      if (result.success) {
+        toast.success('Conversation exported', result.data)
+      } else {
+        toast.error('Export failed', result.error || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Export error:', error)
+      toast.error('Export failed', 'Could not save file')
+    }
   }, [activeConversation, messages])
 
-  // C-CHAT: Sidebar resize handlers
+  // C-CHAT: Sidebar resize handlers (throttled with RAF for performance)
   const handleMouseDown = useCallback(() => {
     setIsResizing(true)
+    isResizingRef.current = true
+  }, [])
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizingRef.current) return
+
+    // Throttle with requestAnimationFrame (~60fps)
+    if (rafRef.current) return
+
+    rafRef.current = requestAnimationFrame(() => {
+      const newWidth = Math.max(
+        CHAT_SIDEBAR.MIN_WIDTH,
+        Math.min(CHAT_SIDEBAR.MAX_WIDTH, e.clientX)
+      )
+      setSidebarWidth(newWidth)
+      rafRef.current = undefined
+    })
+  }, [])
+
+  const handleMouseUp = useCallback(() => {
+    setIsResizing(false)
+    isResizingRef.current = false
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = undefined
+    }
   }, [])
 
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isResizing) return
-      const newWidth = Math.max(200, Math.min(500, e.clientX))
-      setSidebarWidth(newWidth)
-    }
-
-    const handleMouseUp = () => {
-      setIsResizing(false)
-    }
-
     if (isResizing) {
       document.addEventListener('mousemove', handleMouseMove)
       document.addEventListener('mouseup', handleMouseUp)
@@ -484,6 +518,11 @@ export function Chat() {
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
     }
+  }, [isResizing, handleMouseMove, handleMouseUp])
+
+  // Sync ref when state changes
+  useEffect(() => {
+    isResizingRef.current = isResizing
   }, [isResizing])
 
   // B-CHAT-005: Cancel in-flight RAG request

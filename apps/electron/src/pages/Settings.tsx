@@ -10,6 +10,13 @@ import { HealthCheck } from '@/components/HealthCheck'
 import { toast } from '@/components/ui/toaster'
 import type { StorageInfo, AppConfig } from '@/types'
 
+// RAG configuration constants
+const RAG_DEFAULTS = {
+  MAX_CONTEXT_CHUNKS: 5,
+  MIN_CONTEXT_CHUNKS: 1,
+  MAX_CONTEXT_CHUNKS_LIMIT: 20
+} as const
+
 export function Settings() {
   // SM-09 fix: Use granular selectors
   const syncCalendar = useAppStore((s) => s.syncCalendar)
@@ -122,7 +129,7 @@ export function Settings() {
     return (
       chatProvider !== config.chat.provider ||
       ollamaUrl !== config.embeddings.ollamaBaseUrl ||
-      ragContextSize !== ((config.chat as any).maxContextChunks || 5)
+      ragContextSize !== config.chat.maxContextChunks
     )
   }, [config, chatProvider, ollamaUrl, ragContextSize])
 
@@ -153,9 +160,7 @@ export function Settings() {
       setChatProvider(config.chat.provider)
       setOllamaUrl(config.embeddings.ollamaBaseUrl)
       // C-CHAT: Load RAG context window size
-      if (config.chat && 'maxContextChunks' in config.chat) {
-        setRagContextSize((config.chat as any).maxContextChunks || 5)
-      }
+      setRagContextSize(config.chat.maxContextChunks)
     }
   }, [config])
 
@@ -208,8 +213,7 @@ export function Settings() {
 
     setSaving(true)
     try {
-      // TypeScript doesn't infer Partial correctly, use type assertion
-      await updateConfig('calendar', updates as any)
+      await updateConfig('calendar', updates)
 
       toast.success('Settings Saved', 'Calendar settings have been updated')
     } catch (error) {
@@ -250,7 +254,7 @@ export function Settings() {
 
     setSaving(true)
     try {
-      await updateConfig('transcription', updates as any)
+      await updateConfig('transcription', updates)
 
       toast.success('Settings Saved', `Transcription provider set to ${geminiModel}`)
     } catch (error) {
@@ -275,7 +279,7 @@ export function Settings() {
     // Store previous values for rollback
     const previousChatProvider = config?.chat.provider || 'gemini'
     const previousOllamaUrl = config?.embeddings.ollamaBaseUrl || 'http://localhost:11434'
-    const previousContextSize = (config?.chat as any)?.maxContextChunks || 5
+    const previousContextSize = config?.chat.maxContextChunks || RAG_DEFAULTS.MAX_CONTEXT_CHUNKS
 
     const chatUpdates = {
       provider: chatProvider,
@@ -300,8 +304,8 @@ export function Settings() {
     try {
       // Save both sections atomically using Promise.all to prevent partial state
       await Promise.all([
-        updateConfig('chat', chatUpdates as any),
-        updateConfig('embeddings', embeddingsUpdates as any)
+        updateConfig('chat', chatUpdates),
+        updateConfig('embeddings', embeddingsUpdates)
       ])
 
       toast.success('Settings Saved', `Chat provider set to ${chatProvider}`)
