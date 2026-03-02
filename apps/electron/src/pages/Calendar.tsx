@@ -162,8 +162,12 @@ export function Calendar() {
   // Load config on mount - must complete BEFORE first sync
   useEffect(() => {
     const initialize = async () => {
-      // Load config FIRST
-      await loadConfig()
+      try {
+        // Load config FIRST
+        await loadConfig()
+      } catch (error) {
+        console.error('[Calendar] Failed to load config on mount:', error)
+      }
     }
     initialize()
   }, [loadConfig])
@@ -520,7 +524,12 @@ export function Calendar() {
     setAutoSyncEnabled(enabled)
     try {
       await window.electronAPI.calendar.toggleAutoSync(enabled)
-      loadConfig()
+      try {
+        await loadConfig()
+      } catch (configError) {
+        console.error('Failed to reload config after auto-sync toggle:', configError)
+        // Config reload failure is non-critical; the toggle already succeeded
+      }
     } catch (error) {
       console.error('Failed to toggle auto-sync:', error)
       setAutoSyncEnabled(!enabled)
@@ -905,9 +914,9 @@ export function Calendar() {
                         {isDeviceOnly(recording) && (
                           <Button variant="ghost" size="icon" className="h-6 w-6"
                             onClick={() => handleDownload(recording)}
-                            disabled={!deviceConnected || downloadQueue.has(recording.id)}
+                            disabled={!deviceConnected || downloadQueue.has((recording as any).deviceFilename ?? recording.id)}
                             title="Download">
-                            {downloadQueue.has(recording.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                            {downloadQueue.has((recording as any).deviceFilename ?? recording.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                           </Button>
                         )}
                         {canPlay && hasLocalPath(recording) && (
@@ -1022,9 +1031,9 @@ export function Calendar() {
                         {isDeviceOnly(recording) && (
                           <Button variant="ghost" size="icon" className="h-6 w-6"
                             onClick={(e) => { e.stopPropagation(); handleDownload(recording) }}
-                            disabled={!deviceConnected || downloadQueue.has(recording.id)}
+                            disabled={!deviceConnected || downloadQueue.has((recording as any).deviceFilename ?? recording.id)}
                             title="Download from device">
-                            {downloadQueue.has(recording.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                            {downloadQueue.has((recording as any).deviceFilename ?? recording.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                           </Button>
                         )}
                         {canPlay && hasLocalPath(recording) && (

@@ -473,8 +473,10 @@ export function buildCalendarRecordings(
 
 /**
  * Format duration as string (e.g., "1h 30m" or "45m")
+ * Handles zero, negative, and NaN gracefully.
  */
 export function formatDurationStr(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0m'
   const hours = Math.floor(seconds / 3600)
   const mins = Math.round((seconds % 3600) / 60)
   return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`

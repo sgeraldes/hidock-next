@@ -5,6 +5,7 @@ import {
   buildCalendarRecordings,
   createPlaceholderMeetings,
   groupByDay,
+  formatDurationStr,
   type CalendarRecording,
   type CalendarMeetingOverlay,
 } from '../calendar-utils'
@@ -334,5 +335,45 @@ describe('groupByDay', () => {
 
     const key = '2026-03-02'
     expect(grouped[key]).toEqual([])
+  })
+})
+
+/**
+ * C-CAL-008: Tests for formatDurationStr edge cases
+ */
+describe('formatDurationStr', () => {
+  it('should format hours and minutes correctly', () => {
+    expect(formatDurationStr(3600)).toBe('1h 0m')
+    expect(formatDurationStr(5400)).toBe('1h 30m')
+    expect(formatDurationStr(7200)).toBe('2h 0m')
+  })
+
+  it('should format minutes only correctly', () => {
+    expect(formatDurationStr(60)).toBe('1m')
+    expect(formatDurationStr(300)).toBe('5m')
+    expect(formatDurationStr(2700)).toBe('45m')
+  })
+
+  it('should return "0m" for zero seconds', () => {
+    expect(formatDurationStr(0)).toBe('0m')
+  })
+
+  it('should return "0m" for negative seconds', () => {
+    expect(formatDurationStr(-100)).toBe('0m')
+    expect(formatDurationStr(-3600)).toBe('0m')
+  })
+
+  it('should return "0m" for NaN', () => {
+    expect(formatDurationStr(NaN)).toBe('0m')
+  })
+
+  it('should return "0m" for Infinity', () => {
+    expect(formatDurationStr(Infinity)).toBe('0m')
+    expect(formatDurationStr(-Infinity)).toBe('0m')
+  })
+
+  it('should handle fractional seconds', () => {
+    expect(formatDurationStr(90)).toBe('2m') // 1.5 minutes rounds to 2
+    expect(formatDurationStr(30)).toBe('1m') // 0.5 minutes rounds to 1
   })
 })

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Clock, MapPin, Users, Mic, FileText, Play, X, Edit, Check, Loader2, Link, Unlink, ChevronDown, ChevronUp } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -52,9 +52,21 @@ export function MeetingDetail() {
   // Attendee overflow state (B-MTG-005)
   const [showAllAttendees, setShowAllAttendees] = useState(false)
 
+  // C-MTG-006: Ref to track playback loading timeout for cleanup on unmount
+  const playbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   // Global playback state
   const currentlyPlayingId = useUIStore((state) => state.currentlyPlayingId)
   const audioControls = useAudioControls()
+
+  // C-MTG-006: Clean up playback timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (playbackTimeoutRef.current) {
+        clearTimeout(playbackTimeoutRef.current)
+      }
+    }
+  }, [])
 
   // B-MTG-004: Memoized loadMeetingDetails
   const loadMeetingDetails = useCallback(async (meetingId: string) => {
@@ -95,6 +107,8 @@ export function MeetingDetail() {
 
   useEffect(() => {
     if (id) {
+      // C-MTG-004: Reset attendee overflow state when navigating to a different meeting
+      setShowAllAttendees(false)
       loadMeetingDetails(id)
     }
   }, [id, loadMeetingDetails])
@@ -152,8 +166,14 @@ export function MeetingDetail() {
     setPlaybackLoading(recordingId)
     audioControls.play(recordingId, filePath)
     // Loading state will be cleared by the useEffect when currentlyPlayingId changes
-    // Also set a timeout fallback to clear loading state
-    setTimeout(() => setPlaybackLoading(prev => prev === recordingId ? null : prev), 5000)
+    // C-MTG-006: Track timeout in ref so it can be cleaned up on unmount
+    if (playbackTimeoutRef.current) {
+      clearTimeout(playbackTimeoutRef.current)
+    }
+    playbackTimeoutRef.current = setTimeout(() => {
+      setPlaybackLoading(prev => prev === recordingId ? null : prev)
+      playbackTimeoutRef.current = null
+    }, 5000)
   }
 
   // B-MTG-002: Handle recording link/unlink
@@ -242,7 +262,9 @@ export function MeetingDetail() {
   const attendees = parseAttendees(meeting.attendees)
   const startDate = new Date(meeting.start_time)
   const endDate = new Date(meeting.end_time)
-  const durationMins = Math.round((endDate.getTime() - startDate.getTime()) / 60000)
+  // C-MTG-005: Guard against invalid dates producing NaN
+  const rawDuration = (endDate.getTime() - startDate.getTime()) / 60000
+  const durationMins = Number.isFinite(rawDuration) ? Math.round(rawDuration) : 0
 
   // B-MTG-005: Control visible attendees
   const visibleAttendees = showAllAttendees ? attendees : attendees.slice(0, ATTENDEES_COLLAPSED_LIMIT)
