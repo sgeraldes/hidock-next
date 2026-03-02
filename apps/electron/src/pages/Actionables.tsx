@@ -92,10 +92,25 @@ export function Actionables() {
   generationHistoryRef.current = generationHistory
 
   // C-ACT-004: Client-side output cache to avoid redundant fetches
+  // C-ACT-M02: Cache has max size limit to prevent memory leaks in long sessions
+  const OUTPUT_CACHE_MAX_SIZE = 50
   const outputCacheRef = useRef<Map<string, { content: string; templateId: string; generatedAt: string; sourceId?: string }>>(new Map())
 
   // C-ACT-007: Confirmation dialog state for regeneration
   const [confirmRegenerate, setConfirmRegenerate] = useState<Actionable | null>(null)
+
+  // C-ACT-M02: Cache insertion helper with size eviction
+  const cacheOutput = useCallback((id: string, output: { content: string; templateId: string; generatedAt: string; sourceId?: string }) => {
+    const cache = outputCacheRef.current
+    // Evict oldest entries when cache exceeds max size
+    if (cache.size >= OUTPUT_CACHE_MAX_SIZE) {
+      const firstKey = cache.keys().next().value
+      if (firstKey !== undefined) {
+        cache.delete(firstKey)
+      }
+    }
+    cache.set(id, output)
+  }, [])
 
   const loadActionables = useCallback(async () => {
     setLoading(true)
@@ -111,6 +126,7 @@ export function Actionables() {
 
   // AC-06: Use ref to read generationHistory, avoiding stale closure and unstable deps
   // B-ACT-001: Client-side rate limit aligned with server-side (5/minute)
+  // C-ACT-M01: Clean up old timestamps to prevent unbounded growth
   const handleAutoGenerate = useCallback(async (sourceId: string, templateId: string = 'meeting_minutes') => {
     const now = Date.now()
     const recentGenerations = generationHistoryRef.current.filter(t => now - t < 60000)
@@ -133,6 +149,7 @@ export function Actionables() {
         const output = { ...result.data, sourceId }
         setGeneratedOutput(output)
         setShowOutputModal(true)
+        // C-ACT-M01: Only keep timestamps within the rate limit window (prune old ones)
         setGenerationHistory(prev => [...prev.filter(t => now - t < 60000), now])
       } else {
         setGenerationError(result.error.message || 'Failed to generate output')
@@ -145,17 +162,18 @@ export function Actionables() {
     }
   }, [])
 
+  // C-ACT-M05: Show toast feedback for copy to clipboard actions
   const copyToClipboard = async (text?: string) => {
     if (!text) return
     try {
       const result = await window.electronAPI.outputs.copyToClipboard(text)
       if (result.success) {
-        console.log('Copied to clipboard')
+        toast.success('Copied', 'Content copied to clipboard')
       } else {
-        console.error('Failed to copy:', result.error.message)
+        toast.error('Copy failed', result.error.message || 'Failed to copy to clipboard')
       }
-    } catch (error) {
-      console.error('Failed to copy to clipboard:', error)
+    } catch (error: any) {
+      toast.error('Copy failed', error?.message || 'Failed to copy to clipboard')
     }
   }
 
@@ -173,6 +191,7 @@ export function Actionables() {
   }, [generationError])
 
   // Handle navigation state from Library
+  // C-ACT-M04: Clear navigation state after processing to prevent re-triggering on refresh
   useEffect(() => {
     const state = location.state as {
       sourceId?: string
@@ -182,8 +201,10 @@ export function Actionables() {
 
     if (state?.sourceId && state?.action === 'generate') {
       handleAutoGenerate(state.sourceId, state.templateId)
+      // Clear the navigation state so page refresh doesn't re-trigger generation
+      navigate(location.pathname, { replace: true, state: null })
     }
-  }, [location.state, handleAutoGenerate])
+  }, [location.state, handleAutoGenerate, navigate, location.pathname])
 
   const filteredActionables = useMemo(() => {
     return actionables.filter(a => {
@@ -235,7 +256,7 @@ export function Actionables() {
       if (result.success) {
         const output = { ...result.data, sourceId: actionable.sourceKnowledgeId }
         // C-ACT-004: Cache the generated output
-        outputCacheRef.current.set(actionable.id, output)
+        cacheOutput(actionable.id, output)
         setGeneratedOutput(output)
         setShowOutputModal(true)
 
@@ -431,6 +452,18 @@ export function Actionables() {
                             </Button>
                           </>
                         )}
+                        {/* C-ACT-M06: Show a disabled indicator for in_progress items */}
+                        {actionable.status === 'in_progress' && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="flex-1 sm:flex-none gap-2"
+                            disabled
+                          >
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            Processing...
+                          </Button>
+                        )}
                         {actionable.status === 'generated' && (
                           <Button
                             variant="outline"
@@ -458,7 +491,7 @@ export function Actionables() {
                                 if (result.success && result.data) {
                                   const output = { ...result.data, sourceId: actionable.sourceKnowledgeId }
                                   // C-ACT-004: Cache the fetched output
-                                  outputCacheRef.current.set(actionable.id, output)
+                                  cacheOutput(actionable.id, output)
                                   setGeneratedOutput(output)
                                   setShowOutputModal(true)
                                 } else if (result.success && !result.data) {
@@ -472,7 +505,7 @@ export function Actionables() {
                                   })
                                   if (genResult.success) {
                                     const output = { ...genResult.data, sourceId: actionable.sourceKnowledgeId }
-                                    outputCacheRef.current.set(actionable.id, output)
+                                    cacheOutput(actionable.id, output)
                                     setGeneratedOutput(output)
                                     setShowOutputModal(true)
                                   } else {
@@ -555,9 +588,9 @@ export function Actionables() {
         </div>
       </div>
 
-      {/* Error Banner */}
+      {/* C-ACT-M07: Error banner positioned at bottom to avoid overlapping header/nav */}
       {generationError && (
-        <div className="fixed top-0 left-0 right-0 z-40 px-4 py-3 bg-destructive/10 border-b border-destructive/20 flex items-center justify-between gap-4">
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-center justify-between gap-4 max-w-2xl w-full shadow-lg">
           <div className="flex items-center gap-2 flex-1">
             <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
             <span className="text-sm text-destructive font-medium">{generationError}</span>
