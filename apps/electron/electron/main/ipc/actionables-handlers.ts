@@ -1,6 +1,6 @@
 
 import { ipcMain } from 'electron'
-import { queryAll, run } from '../services/database'
+import { queryAll, queryOne, run } from '../services/database'
 import type { Actionable } from '@/types/knowledge'
 
 export function registerActionablesHandlers(): void {
@@ -35,12 +35,13 @@ export function registerActionablesHandlers(): void {
         return { success: false, error: `Actionable ${id} not found` }
       }
 
-      // Define valid transitions
+      // C-ACT-001: Relaxed status transition validation
+      // Allow pending->generated for direct completion, generated->pending for re-processing
       const validTransitions: Record<string, string[]> = {
-        'pending': ['in_progress', 'dismissed'],
+        'pending': ['in_progress', 'generated', 'dismissed'],
         'in_progress': ['generated', 'pending'],
-        'generated': ['shared', 'pending'],
-        'shared': [],
+        'generated': ['shared', 'pending', 'dismissed'],
+        'shared': ['pending'],
         'dismissed': ['pending']
       }
 
@@ -49,6 +50,18 @@ export function registerActionablesHandlers(): void {
         return {
           success: false,
           error: `Invalid status transition: ${actionable.status} → ${status}`
+        }
+      }
+
+      // C-ACT-002: Clean up generated outputs when transitioning away from 'generated'
+      // When dismissing or reverting to pending, remove the associated output artifact
+      if ((status === 'dismissed' || status === 'pending') && actionable.artifact_id) {
+        try {
+          run('DELETE FROM outputs WHERE id = ?', [actionable.artifact_id])
+          run('UPDATE actionables SET artifact_id = NULL, generated_at = NULL WHERE id = ?', [id])
+        } catch (cleanupError) {
+          console.warn('[actionables:updateStatus] Failed to clean up output:', cleanupError)
+          // Continue with status update even if cleanup fails
         }
       }
 
@@ -87,8 +100,9 @@ export function registerActionablesHandlers(): void {
         return { success: false, error: `Actionable ${actionableId} not found` }
       }
 
-      if (actionable.status !== 'pending') {
-        return { success: false, error: 'Only pending actionables can be generated' }
+      // C-ACT-001: Allow regeneration from both 'pending' and 'generated' states
+      if (actionable.status !== 'pending' && actionable.status !== 'generated') {
+        return { success: false, error: `Cannot generate from '${actionable.status}' status. Must be 'pending' or 'generated'.` }
       }
 
       // Update status to in_progress

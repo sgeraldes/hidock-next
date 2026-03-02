@@ -322,19 +322,22 @@ export function Device() {
   }, [connectionStatus.step, connectionStatus.message, clearConnectionTimers])
 
   // B-DEV-011: Battery polling for P1 devices at 60-second interval
+  // C-SM-002: Use ref to avoid stale closure in setInterval callback
+  const loadBatteryStatusRef = useRef(loadBatteryStatus)
+  loadBatteryStatusRef.current = loadBatteryStatus
+
   useEffect(() => {
     if (!deviceState.connected || !deviceService.isP1Device()) return
 
     const batteryPollInterval = setInterval(() => {
       // B-DEV-006: Check isConnected() before polling
       if (deviceService.isConnected()) {
-        loadBatteryStatus()
+        loadBatteryStatusRef.current()
       }
     }, 60_000) // 60 seconds, not 5
 
     return () => clearInterval(batteryPollInterval)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceState.connected])
+  }, [deviceState.connected, deviceService])
 
   // Separate effect for auto-scrolling activity log - does NOT trigger re-renders
   useEffect(() => {
@@ -725,14 +728,15 @@ export function Device() {
   // P1-SPECIFIC HANDLERS
   // ==========================================
 
-  const loadBatteryStatus = async () => {
+  // C-SM-002: Wrap in useCallback to ensure ref-stable function for polling interval
+  const loadBatteryStatus = useCallback(async () => {
     try {
       const status = await deviceService.getBatteryStatus()
       setBatteryStatus(status)
     } catch (e) {
       console.error('Failed to load battery status:', e)
     }
-  }
+  }, [deviceService])
 
   const handleBluetoothScan = async () => {
     // B-DEV-012: Check connection before starting scan

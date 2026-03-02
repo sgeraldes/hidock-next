@@ -14,7 +14,9 @@ import {
   Bot,
   Loader2,
   AlertCircle,
-  Copy
+  Copy,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -31,12 +33,45 @@ import { toast } from '@/components/ui/toaster'
 import type { Actionable, ActionableStatus } from '@/types/knowledge'
 import type { OutputTemplateId } from '@/types'
 
+// C-ACT-006: Simple loading skeleton for initial load
+function ActionableSkeleton() {
+  return (
+    <div className="space-y-4">
+      {[1, 2, 3].map((i) => (
+        <Card key={i} className="overflow-hidden animate-pulse">
+          <div className="flex items-stretch min-h-[100px]">
+            <div className="w-1.5 bg-muted" />
+            <div className="flex-1 p-5 space-y-3">
+              <div className="flex items-center gap-2">
+                <div className="h-4 w-4 rounded-full bg-muted" />
+                <div className="h-3 w-20 bg-muted rounded" />
+              </div>
+              <div className="h-5 w-3/4 bg-muted rounded" />
+              <div className="h-3 w-1/2 bg-muted rounded" />
+              <div className="flex gap-2 mt-2">
+                <div className="h-5 w-28 bg-muted rounded-full" />
+                <div className="h-5 w-24 bg-muted rounded-full" />
+              </div>
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  )
+}
+
+// C-ACT-005: Pagination constants
+const PAGE_SIZE = 20
+
 export function Actionables() {
   const location = useLocation()
   const navigate = useNavigate()
   const [actionables, setActionables] = useState<Actionable[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState<ActionableStatus | 'all'>('pending')
+
+  // C-ACT-005: Pagination state
+  const [currentPage, setCurrentPage] = useState(1)
 
   // Generation state
   const [generating, setGenerating] = useState(false)
@@ -55,6 +90,12 @@ export function Actionables() {
   // AC-06: Use a ref to hold the latest generationHistory to avoid stale closure in useCallback
   const generationHistoryRef = useRef(generationHistory)
   generationHistoryRef.current = generationHistory
+
+  // C-ACT-004: Client-side output cache to avoid redundant fetches
+  const outputCacheRef = useRef<Map<string, { content: string; templateId: string; generatedAt: string; sourceId?: string }>>(new Map())
+
+  // C-ACT-007: Confirmation dialog state for regeneration
+  const [confirmRegenerate, setConfirmRegenerate] = useState<Actionable | null>(null)
 
   const loadActionables = useCallback(async () => {
     setLoading(true)
@@ -89,7 +130,8 @@ export function Actionables() {
       })
 
       if (result.success) {
-        setGeneratedOutput({ ...result.data, sourceId })
+        const output = { ...result.data, sourceId }
+        setGeneratedOutput(output)
         setShowOutputModal(true)
         setGenerationHistory(prev => [...prev.filter(t => now - t < 60000), now])
       } else {
@@ -150,6 +192,18 @@ export function Actionables() {
     })
   }, [actionables, statusFilter])
 
+  // C-ACT-005: Paginated subset of filtered actionables
+  const totalPages = Math.max(1, Math.ceil(filteredActionables.length / PAGE_SIZE))
+  const paginatedActionables = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE
+    return filteredActionables.slice(start, start + PAGE_SIZE)
+  }, [filteredActionables, currentPage])
+
+  // C-ACT-005: Reset page to 1 when filter changes
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [statusFilter])
+
   // B-ACT-002: Per-actionable loading state, disable button during operation, server-side revert on failure
   const handleApprove = async (actionable: Actionable) => {
     // Prevent double-clicks
@@ -179,7 +233,10 @@ export function Actionables() {
       })
 
       if (result.success) {
-        setGeneratedOutput({ ...result.data, sourceId: actionable.sourceKnowledgeId })
+        const output = { ...result.data, sourceId: actionable.sourceKnowledgeId }
+        // C-ACT-004: Cache the generated output
+        outputCacheRef.current.set(actionable.id, output)
+        setGeneratedOutput(output)
         setShowOutputModal(true)
 
         // Update actionable status to generated
@@ -226,13 +283,25 @@ export function Actionables() {
     }
   }
 
+  // C-ACT-003: Consistent status icon mapping
   const getStatusIcon = (status: ActionableStatus) => {
     switch (status) {
       case 'pending': return <Clock className="h-4 w-4 text-amber-500" />
       case 'in_progress': return <RefreshCw className="h-4 w-4 text-blue-500 animate-spin" />
       case 'generated': return <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-      case 'shared': return <Mail className="h-4 w-4 text-blue-500" />
+      case 'shared': return <Mail className="h-4 w-4 text-violet-500" />
       case 'dismissed': return <X className="h-4 w-4 text-slate-400" />
+    }
+  }
+
+  // C-ACT-003: Consistent status bar color mapping (all statuses covered)
+  const getStatusBarColor = (status: ActionableStatus): string => {
+    switch (status) {
+      case 'pending': return 'bg-amber-500'
+      case 'in_progress': return 'bg-blue-500'
+      case 'generated': return 'bg-emerald-500'
+      case 'shared': return 'bg-violet-500'
+      case 'dismissed': return 'bg-slate-300'
     }
   }
 
@@ -275,10 +344,9 @@ export function Actionables() {
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
         <div className="max-w-4xl mx-auto space-y-6">
+          {/* C-ACT-006: Loading skeleton instead of spinner */}
           {loading && actionables.length === 0 ? (
-            <div className="flex items-center justify-center py-20">
-              <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
-            </div>
+            <ActionableSkeleton />
           ) : filteredActionables.length === 0 ? (
             <Card className="border-dashed bg-muted/5">
               <CardContent className="py-16 text-center">
@@ -291,13 +359,13 @@ export function Actionables() {
             </Card>
           ) : (
             <div className="space-y-4">
-              {filteredActionables.map((actionable) => (
+              {paginatedActionables.map((actionable) => (
                 <Card key={actionable.id} className="group overflow-hidden hover:border-primary/30 transition-all shadow-sm">
                   <div className="flex items-stretch min-h-[100px]">
+                    {/* C-ACT-003: Consistent status bar colors for all statuses */}
                     <div className={cn(
                       "w-1.5 transition-colors",
-                      actionable.status === 'pending' ? "bg-amber-500" : 
-                      actionable.status === 'generated' ? "bg-emerald-500" : "bg-muted"
+                      getStatusBarColor(actionable.status)
                     )} />
                     <div className="flex-1 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                       <div className="flex-1 min-w-0">
@@ -371,18 +439,30 @@ export function Actionables() {
                             disabled={loadingActionableIds.has(actionable.id)}
                             onClick={async () => {
                               // B-ACT-004: Fetch existing output instead of re-generating
-                              // B-ACT-005: Use toast for View Output errors
+                              // C-ACT-004: Check client-side cache first
                               if (loadingActionableIds.has(actionable.id)) return
+
+                              // Check cache first
+                              const cached = outputCacheRef.current.get(actionable.id)
+                              if (cached) {
+                                setGeneratedOutput(cached)
+                                setShowOutputModal(true)
+                                return
+                              }
+
                               setLoadingActionableIds((prev) => new Set(prev).add(actionable.id))
 
                               try {
                                 const result = await window.electronAPI.outputs.getByActionableId(actionable.id)
 
                                 if (result.success && result.data) {
-                                  setGeneratedOutput({ ...result.data, sourceId: actionable.sourceKnowledgeId })
+                                  const output = { ...result.data, sourceId: actionable.sourceKnowledgeId }
+                                  // C-ACT-004: Cache the fetched output
+                                  outputCacheRef.current.set(actionable.id, output)
+                                  setGeneratedOutput(output)
                                   setShowOutputModal(true)
                                 } else if (result.success && !result.data) {
-                                  // No existing output found — fall back to regeneration
+                                  // No existing output found -- fall back to regeneration
                                   const templateId = actionable.suggestedTemplate || 'meeting_minutes'
                                   setGenerating(true)
                                   setCurrentGeneratingTemplate(templateId)
@@ -391,7 +471,9 @@ export function Actionables() {
                                     knowledgeCaptureId: actionable.sourceKnowledgeId
                                   })
                                   if (genResult.success) {
-                                    setGeneratedOutput({ ...genResult.data, sourceId: actionable.sourceKnowledgeId })
+                                    const output = { ...genResult.data, sourceId: actionable.sourceKnowledgeId }
+                                    outputCacheRef.current.set(actionable.id, output)
+                                    setGeneratedOutput(output)
                                     setShowOutputModal(true)
                                   } else {
                                     toast.error('Failed to load output', genResult.error?.message || 'Unknown error')
@@ -424,6 +506,36 @@ export function Actionables() {
                   </div>
                 </Card>
               ))}
+            </div>
+          )}
+
+          {/* C-ACT-005: Pagination controls */}
+          {filteredActionables.length > PAGE_SIZE && (
+            <div className="flex items-center justify-between pt-2">
+              <span className="text-xs text-muted-foreground">
+                Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredActionables.length)} of {filteredActionables.length}
+              </span>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={currentPage <= 1}
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+                <span className="text-xs px-2">
+                  Page {currentPage} of {totalPages}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={currentPage >= totalPages}
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
           )}
 
@@ -482,13 +594,45 @@ export function Actionables() {
         </div>
       )}
 
+      {/* C-ACT-007: Confirmation dialog before regeneration */}
+      <Dialog open={!!confirmRegenerate} onOpenChange={(open) => { if (!open) setConfirmRegenerate(null) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Regenerate Output?</DialogTitle>
+            <DialogDescription>
+              This will create a new output using the {confirmRegenerate?.suggestedTemplate || 'meeting_minutes'} template, replacing the previous result.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setConfirmRegenerate(null)}>Cancel</Button>
+            <Button onClick={() => {
+              if (confirmRegenerate) {
+                // Invalidate cache for this actionable
+                outputCacheRef.current.delete(confirmRegenerate.id)
+                handleApprove(confirmRegenerate)
+              }
+              setConfirmRegenerate(null)
+            }}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Regenerate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Output Modal */}
       <Dialog open={showOutputModal} onOpenChange={setShowOutputModal}>
         <DialogContent className="max-w-3xl max-h-[85vh] overflow-auto">
           <DialogHeader>
             <DialogTitle>Generated Output</DialogTitle>
             <DialogDescription>
-              Generated using {generatedOutput?.templateId} template
+              Generated using {generatedOutput?.templateId?.replace(/_/g, ' ')} template
+              {/* C-ACT-008: Show timestamp on generated output */}
+              {generatedOutput?.generatedAt && (
+                <span className="ml-2 text-xs text-muted-foreground">
+                  &middot; {formatDateTime(generatedOutput.generatedAt)}
+                </span>
+              )}
             </DialogDescription>
           </DialogHeader>
           <div className="prose prose-sm max-w-none dark:prose-invert bg-muted/30 p-4 rounded-md border">
