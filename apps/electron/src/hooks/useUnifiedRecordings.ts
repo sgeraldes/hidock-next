@@ -349,6 +349,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
 
   const [deviceConnected, setDeviceConnected] = useState(false)
   const loadingRef = useRef(false) // Prevent concurrent loads
+  const pendingForceRefreshRef = useRef(false)
   const deviceReadyRefreshDoneRef = useRef(false) // Track if we've done a device-ready refresh
   const lastLoadTimestampRef = useRef(0) // FL-02: Track last load to prevent triple-fire
 
@@ -375,7 +376,12 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     // The worst case is a redundant fetch, not data corruption. A full fix would use a
     // promise-based queue, but the complexity isn't warranted given the low risk.
     if (loadingRef.current) {
-      console.log('[useUnifiedRecordings] Skipping - already loading')
+      if (forceRefresh) {
+        console.log('[useUnifiedRecordings] Already loading - queuing forceRefresh')
+        pendingForceRefreshRef.current = true
+      } else {
+        console.log('[useUnifiedRecordings] Skipping - already loading')
+      }
       return
     }
     loadingRef.current = true
@@ -499,12 +505,20 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       setError(e instanceof Error ? e.message : 'Failed to load recordings')
       if (!decremented) {
         decrementLoading()
+        decremented = true
       }
     } finally {
       loadingRef.current = false
+      if (pendingForceRefreshRef.current) {
+        pendingForceRefreshRef.current = false
+        setTimeout(() => loadRecordingsRef.current(true), 0)
+      }
       console.log('[useUnifiedRecordings] loadRecordings completed')
     }
   }, [deviceService, setRecordings, incrementLoading, decrementLoading, setError, markLoaded])
+
+  const loadRecordingsRef = useRef(loadRecordings)
+  loadRecordingsRef.current = loadRecordings
 
   // TODO: FL-05: Multiple page instances each create independent subscriptions below.
   // A singleton subscription manager would prevent duplicate refreshes when multiple
