@@ -12,10 +12,18 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
+import { useUIStore } from '@/store'
 import { toast } from '@/components/ui/toaster'
 import { parseError, getErrorMessage } from '@/features/library/utils/errorHandling'
 
-const DEBUG = import.meta.env.DEV
+// QA Logging helper - respects user's QA Logs toggle in all environments
+function shouldLogQa(): boolean {
+  try {
+    return useUIStore.getState().qaLogsEnabled
+  } catch {
+    return false
+  }
+}
 
 interface DownloadQueueItem {
   id: string
@@ -72,7 +80,7 @@ export function useDownloadOrchestrator() {
   // ---- Single file download ----
 
   const processDownload = useCallback(async (item: { filename: string; fileSize: number }, signal: AbortSignal) => {
-    if (DEBUG) console.log(`[QA-MONITOR][Operation] Processing download: ${item.filename}`)
+    if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Processing download: ${item.filename}`)
 
     if (!deviceService.isConnected()) {
       console.error('[useDownloadOrchestrator] Device not connected')
@@ -132,7 +140,7 @@ export function useDownloadOrchestrator() {
       removeFromDownloadQueue(item.filename)
 
       if (result.success) {
-        if (DEBUG) console.log(`[QA-MONITOR][Operation] Download completed: ${item.filename}`)
+        if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Download completed: ${item.filename}`)
         return true
       } else {
         toast({
@@ -174,7 +182,7 @@ export function useDownloadOrchestrator() {
     _downloadAbortControllerRef = downloadAbortControllerRef.current
     const signal = downloadAbortControllerRef.current.signal
 
-    if (DEBUG) console.log(`[QA-MONITOR][Operation] Processing ${pendingItems.length} downloads`)
+    if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Processing ${pendingItems.length} downloads`)
 
     // C-004: Compute total bytes for ETA calculation
     const totalBytes = pendingItems.reduce((sum: number, item: DownloadQueueItem) => sum + (item.fileSize || 0), 0)
@@ -201,20 +209,20 @@ export function useDownloadOrchestrator() {
     // TODO: DL-10: Consider pipelining: start reading next file while writing current file to disk.
     for (const item of pendingItems) {
       if (signal.aborted) {
-        if (DEBUG) console.log('[useDownloadOrchestrator] Download aborted by user')
+        if (shouldLogQa()) console.log('[useDownloadOrchestrator] Download aborted by user')
         aborted = true
         break
       }
 
       if (!deviceService.isConnected()) {
-        if (DEBUG) console.log('[useDownloadOrchestrator] Device disconnected, stopping downloads')
+        if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device disconnected, stopping downloads')
         aborted = true
         break
       }
 
       const storeState = useAppStore.getState()
       if (!storeState.deviceSyncing) {
-        if (DEBUG) console.log('[useDownloadOrchestrator] Sync cancelled by user')
+        if (shouldLogQa()) console.log('[useDownloadOrchestrator] Sync cancelled by user')
         aborted = true
         break
       }
@@ -289,11 +297,17 @@ export function useDownloadOrchestrator() {
   const processDownloadQueueRef = useRef(processDownloadQueue)
   processDownloadQueueRef.current = processDownloadQueue
 
+  // SM-002: Initialization guard to prevent double subscription in StrictMode
+  const orchestratorInitialized = useRef(false)
+
   // ---- Download service subscription + device reconnect resume ----
   // B-DWN-008: Renderer-side stall detection removed. Stall detection is handled
   // exclusively by the main process DownloadService.checkForStalledDownloads().
 
   useEffect(() => {
+    if (orchestratorInitialized.current) return
+    orchestratorInitialized.current = true
+
     const isElectron = !!window.electronAPI?.downloadService
 
     // Subscribe to download service state updates
@@ -341,13 +355,13 @@ export function useDownloadOrchestrator() {
         window.electronAPI.downloadService.getState().then((state) => {
           const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
           if (hasPending) {
-            if (DEBUG) console.log('[useDownloadOrchestrator] Device connected, resuming downloads')
+            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device connected, resuming downloads')
             processDownloadQueueRef.current()
           }
         })
       } else if (!deviceState.connected) {
         if (isProcessingDownloads.current) {
-          if (DEBUG) console.log('[useDownloadOrchestrator] Device disconnected, aborting downloads')
+          if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device disconnected, aborting downloads')
           downloadAbortControllerRef.current?.abort()
         }
       }
@@ -359,6 +373,9 @@ export function useDownloadOrchestrator() {
       downloadAbortControllerRef.current?.abort()
       unsubDownloads()
       unsubDevice()
+      // SM-002: Do NOT reset orchestratorInitialized.current here.
+      // StrictMode does mount -> cleanup -> mount; resetting allows double subscription.
+      // When the component truly unmounts and remounts, React creates a NEW ref(false).
     }
   // DL-11: Only depend on deviceService (stable singleton). processDownloadQueue
   // is accessed via ref so changes don't cause re-subscription.
