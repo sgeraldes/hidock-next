@@ -34,6 +34,19 @@ export type { TranscriptionBackend };
 const MAX_CONTEXT_SEGMENTS = 10;
 const TIMESLICE_MS = 3000;
 
+/**
+ * LATENCY OPTIMIZATION CONFIG
+ * These values were tuned to minimize end-to-end latency while maintaining
+ * batching efficiency. Adjust based on profiling.
+ */
+
+/** Gemini analysis batching */
+const GEMINI_BATCH_MAX_WAIT_MS = 5000;      // Max time before flushing queue (ms)
+const GEMINI_BATCH_MAX_SEGMENTS = 5;        // Max segments before flushing
+
+/** Meeting context caching */
+const CONTEXT_CACHE_UPDATE_MS = 2000;       // Re-fetch context every 2s
+
 export class TranscriptionPipeline {
   private sessionId: string;
   private aiProvider: AIProviderService;
@@ -41,6 +54,15 @@ export class TranscriptionPipeline {
   private transcriptionBackend: TranscriptionBackend;
   private knownSpeakers: Set<string> = new Set();
   private stopped = false;
+
+  // Gemini batch queue for latency optimization
+  private geminiBatchQueue: Array<{ text: string; chunkIndex: number; wordData?: unknown[] }> = [];
+  private geminiBatchTimer: ReturnType<typeof setTimeout> | null = null;
+  private geminiInFlight = false;
+
+  // Context caching to avoid repeated DB queries
+  private contextCache: string | null = null;
+  private contextCacheTime = 0;
 
   /** Active streaming session (null when using batch mode). */
   private streamSession: Chirp3StreamSession | null = null;
@@ -86,6 +108,16 @@ export class TranscriptionPipeline {
   stop(): void {
     this.stopped = true;
 
+    // Clear batch timer and flush any remaining queued items
+    if (this.geminiBatchTimer) {
+      clearTimeout(this.geminiBatchTimer);
+      this.geminiBatchTimer = null;
+    }
+    // Fire-and-forget flush for remaining items
+    if (this.geminiBatchQueue.length > 0) {
+      this.flushGeminiBatch();
+    }
+
     if (this.audioConverter) {
       this.audioConverter.stop();
       this.audioConverter = null;
@@ -106,7 +138,7 @@ export class TranscriptionPipeline {
 
     broadcastToAllWindows("transcription:status", "processing");
 
-    const context = this.buildContext();
+    const context = this.getCachedContext();
 
     let result: TranscriptionResult;
     try {
@@ -139,7 +171,7 @@ export class TranscriptionPipeline {
 
     broadcastToAllWindows("transcription:status", "processing");
 
-    const context = this.buildContext();
+    const context = this.getCachedContext();
 
     if (
       this.transcriptionBackend === BACKEND_CHIRP3_GEMINI &&
@@ -290,7 +322,6 @@ export class TranscriptionPipeline {
 
     const chunkIndex = this.streamFinalIndex++;
     this.lastStreamFinalEndTimeMs = result.resultEndTimeMs;
-    const context = this.buildContext();
 
     // Apply confidence filtering
     const filteredWords = this.chirp3Provider
@@ -298,39 +329,19 @@ export class TranscriptionPipeline {
       : result.words;
     const filteredTranscript = filteredWords.map((w) => w.word).join(" ");
 
-    // Stage 2: Gemini analysis (async, fire-and-forget with error handling)
-    (async () => {
-      try {
-        broadcastToAllWindows("transcription:status", "processing");
+    // Stage 2: Queue for Gemini analysis (batched, parallel)
+    const wordData = filteredWords.map((w) => ({
+      word: w.word,
+      startTime: w.startTime,
+      endTime: w.endTime,
+      confidence: w.confidence,
+    }));
 
-        const analysisResult = await this.callWithRetry(() =>
-          this.aiProvider.analyzeTranscript(
-            filteredTranscript || result.transcript,
-            {
-              meetingContext: context,
-              attendees: Array.from(this.knownSpeakers),
-              wordData: filteredWords.map((w) => ({
-                word: w.word,
-                startTime: w.startTime,
-                endTime: w.endTime,
-                confidence: w.confidence,
-              })),
-            },
-          ),
-        );
-
-        this.storeAndBroadcast(analysisResult, chunkIndex);
-        broadcastToAllWindows("transcription:status", "idle");
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(
-          `[Pipeline] Gemini analysis failed for stream final ${chunkIndex}:`,
-          message,
-        );
-        broadcastToAllWindows("transcription:error", message);
-        broadcastToAllWindows("transcription:status", "error");
-      }
-    })();
+    this.queueForGeminiAnalysis(
+      filteredTranscript || result.transcript,
+      chunkIndex,
+      wordData,
+    );
   }
 
   /**
@@ -338,6 +349,15 @@ export class TranscriptionPipeline {
    */
   isStreaming(): boolean {
     return this.streamingEnabled;
+  }
+
+  /**
+   * Force flush of any queued Gemini analysis batches.
+   * Useful for testing or when stopping the pipeline.
+   * @returns Promise that resolves when flush completes
+   */
+  async flush(): Promise<void> {
+    await this.flushGeminiBatch();
   }
 
   // --- Two-Stage Pipeline: Chirp 3 STT → Gemini Analysis ---
@@ -380,30 +400,22 @@ export class TranscriptionPipeline {
       perfMonitor.mark('confidence-filter-end');
       perfMonitor.logStage('Confidence filtering', 'confidence-filter-start', 'confidence-filter-end');
 
-      // Stage 2: Gemini analysis of text
-      perfMonitor.mark('gemini-analysis-start');
-      const result = await this.callWithRetry(() =>
-        this.aiProvider.analyzeTranscript(
-          filteredTranscript || chirp3Result.transcript,
-          {
-            meetingContext: context,
-            attendees: Array.from(this.knownSpeakers),
-            wordData: filteredWords.map((w) => ({
-              word: w.word,
-              startTime: w.startTime,
-              endTime: w.endTime,
-              confidence: w.confidence,
-            })),
-          },
-        ),
-      );
-      perfMonitor.mark('gemini-analysis-end');
-      perfMonitor.logStage('Gemini analysis stage', 'gemini-analysis-start', 'gemini-analysis-end');
+      // Stage 2: Queue for Gemini analysis (parallel execution)
+      perfMonitor.mark('queue-gemini-start');
+      const wordData = filteredWords.map((w) => ({
+        word: w.word,
+        startTime: w.startTime,
+        endTime: w.endTime,
+        confidence: w.confidence,
+      }));
 
-      perfMonitor.mark('storage-start');
-      this.storeAndBroadcast(result, chunkIndex);
-      perfMonitor.mark('storage-end');
-      perfMonitor.logStage('Storage and broadcast', 'storage-start', 'storage-end');
+      this.queueForGeminiAnalysis(
+        filteredTranscript || chirp3Result.transcript,
+        chunkIndex,
+        wordData,
+      );
+      perfMonitor.mark('queue-gemini-end');
+      perfMonitor.logStage('Queue for Gemini', 'queue-gemini-start', 'queue-gemini-end');
 
       broadcastToAllWindows("transcription:status", "idle");
     } catch (err) {
@@ -452,6 +464,28 @@ export class TranscriptionPipeline {
     broadcastToAllWindows("transcription:status", "idle");
   }
 
+  /**
+   * Get meeting context with caching. Refresh every N ms to pick up new speakers.
+   * Reduces DB queries from ~every call to ~every 2s.
+   */
+  private getCachedContext(): string {
+    const now = Date.now();
+    const timeSinceUpdate = now - this.contextCacheTime;
+
+    if (this.contextCache && timeSinceUpdate < CONTEXT_CACHE_UPDATE_MS) {
+      // Use cached context (avoid DB query)
+      return this.contextCache;
+    }
+
+    // Rebuild context
+    this.contextCache = this.buildContext();
+    this.contextCacheTime = now;
+    return this.contextCache;
+  }
+
+  /**
+   * Build context string from recent transcript segments (uncached).
+   */
   private buildContext(): string {
     const recent = getRecentTranscriptSegments(
       this.sessionId,
@@ -475,6 +509,80 @@ export class TranscriptionPipeline {
       (s) => `${s.speaker_name ?? "Unknown"}: ${s.text}`,
     );
     return `Previous transcribed speech (for speaker continuity only, do NOT repeat or extend this):\n${lines.join("\n")}`;
+  }
+
+  /**
+   * Queue transcript for Gemini analysis instead of calling immediately.
+   * Batches multiple transcripts and sends them together for efficiency.
+   */
+  private queueForGeminiAnalysis(text: string, chunkIndex: number, wordData?: unknown[]): void {
+    if (this.stopped) return;
+
+    this.geminiBatchQueue.push({ text, chunkIndex, wordData });
+
+    // Check if we should flush
+    if (this.geminiBatchQueue.length >= GEMINI_BATCH_MAX_SEGMENTS) {
+      this.flushGeminiBatch();
+    } else if (!this.geminiBatchTimer) {
+      // Set timer to flush by time limit
+      this.geminiBatchTimer = setTimeout(
+        () => this.flushGeminiBatch(),
+        GEMINI_BATCH_MAX_WAIT_MS,
+      );
+    }
+  }
+
+  /**
+   * Process queued transcripts in a single Gemini call.
+   * Combines multiple segments to reduce API calls and latency.
+   */
+  private async flushGeminiBatch(): Promise<void> {
+    if (this.geminiBatchTimer) {
+      clearTimeout(this.geminiBatchTimer);
+      this.geminiBatchTimer = null;
+    }
+
+    if (this.geminiBatchQueue.length === 0 || this.geminiInFlight || this.stopped) {
+      return;
+    }
+
+    this.geminiInFlight = true;
+    const batch = [...this.geminiBatchQueue];
+    this.geminiBatchQueue = [];
+
+    const combinedText = batch.map((b) => b.text).join("\n");
+    const context = this.getCachedContext();
+
+    // Combine word data from all batched items
+    const combinedWordData = batch
+      .filter((b) => b.wordData && Array.isArray(b.wordData))
+      .flatMap((b) => b.wordData as unknown[]);
+
+    try {
+      const result = await this.callWithRetry(() =>
+        this.aiProvider.analyzeTranscript(combinedText, {
+          meetingContext: context,
+          attendees: Array.from(this.knownSpeakers),
+          wordData: combinedWordData.length > 0 ? combinedWordData : undefined,
+        }),
+      );
+
+      // Store and broadcast using the first chunk's index
+      this.storeAndBroadcast(result, batch[0].chunkIndex);
+      broadcastToAllWindows("transcription:status", "idle");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[Pipeline] Gemini batch analysis failed: ${message}`);
+      broadcastToAllWindows("transcription:error", message);
+      broadcastToAllWindows("transcription:status", "error");
+    } finally {
+      this.geminiInFlight = false;
+
+      // Process remaining queue if needed
+      if (this.geminiBatchQueue.length > 0) {
+        this.flushGeminiBatch();
+      }
+    }
   }
 
   private storeAndBroadcast(

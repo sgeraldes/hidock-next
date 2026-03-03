@@ -81,6 +81,7 @@ function makeMockChirp3Provider(overrides?: Partial<Chirp3Provider>) {
     filterByConfidence: vi.fn().mockImplementation((words) =>
       words.filter((w: { confidence: number }) => w.confidence >= 0.7),
     ),
+    closeStreamSession: vi.fn(),
     ...overrides,
   } as unknown as Chirp3Provider;
 }
@@ -114,6 +115,7 @@ describe("TranscriptionPipeline - Chirp 3 integration", () => {
         "audio/ogg",
         0,
       );
+      await pipeline.flush();
 
       // Stage 1: Chirp 3 recognizes (now includes sessionId)
       expect(mockChirp3.recognizeChunk).toHaveBeenCalledWith(
@@ -212,6 +214,9 @@ describe("TranscriptionPipeline - Chirp 3 integration", () => {
         0,
       );
 
+      // Flush the batched Gemini queue
+      await pipeline.flush();
+
       // Chirp 3 was called
       expect(mockChirp3.recognizeChunk).toHaveBeenCalled();
       expect(mockChirp3.filterByConfidence).toHaveBeenCalled();
@@ -237,6 +242,9 @@ describe("TranscriptionPipeline - Chirp 3 integration", () => {
         "audio/ogg",
         0,
       );
+
+      // Flush the batched Gemini queue
+      await pipeline.flush();
 
       // Database insertions
       expect(mockInsertTranscriptSegment).toHaveBeenCalledWith(
@@ -357,6 +365,7 @@ describe("TranscriptionPipeline - Chirp 3 integration", () => {
         "audio/ogg",
         0,
       );
+      await pipeline.flush();
 
       // Second chunk - analyzeTranscript should receive Alice as known attendee
       (mockAI.analyzeTranscript as ReturnType<typeof vi.fn>).mockClear();
@@ -365,6 +374,7 @@ describe("TranscriptionPipeline - Chirp 3 integration", () => {
         "audio/ogg",
         1,
       );
+      await pipeline.flush();
 
       const secondCallOptions = (mockAI.analyzeTranscript as ReturnType<typeof vi.fn>).mock.calls[0][1];
       expect(secondCallOptions.attendees).toContain("Alice");
@@ -385,6 +395,7 @@ describe("TranscriptionPipeline - Chirp 3 integration", () => {
         "audio/ogg",
         5,
       );
+      await pipeline.flush();
 
       expect(mockInsertTranscriptSegment).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -408,6 +419,7 @@ describe("TranscriptionPipeline - Chirp 3 integration", () => {
         "audio/ogg",
         3,
       );
+      await pipeline.flush();
 
       expect(mockCreateTalkingPoint).toHaveBeenCalledWith(
         expect.objectContaining({
