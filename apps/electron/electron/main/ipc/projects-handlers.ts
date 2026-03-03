@@ -16,8 +16,7 @@ import {
   tagMeetingToProject,
   untagMeetingFromProject,
   getMeetingById,
-  getTranscriptByRecordingId,
-  getRecordingsForMeeting,
+  getTopicsForProjectMeetings,
   getKnowledgeIdsForProject,
   getPersonIdsForProject,
   Project as DBProject
@@ -81,20 +80,15 @@ export function registerProjectsHandlers(): void {
 
         const meetings = getMeetingsForProject(parsed.data.id)
 
-        // Extract topics from meeting transcripts
+        // Extract topics via single JOIN query (replaces N+1 nested loops)
         const topicsSet = new Set<string>()
-        for (const meeting of meetings) {
-          const recordings = getRecordingsForMeeting(meeting.id)
-          for (const recording of recordings) {
-            const transcript = getTranscriptByRecordingId(recording.id)
-            if (transcript?.topics) {
-              try {
-                const meetingTopics = JSON.parse(transcript.topics) as string[]
-                meetingTopics.forEach((topic) => topicsSet.add(topic))
-              } catch {
-                // Invalid JSON, skip
-              }
-            }
+        const topicsJsonStrings = getTopicsForProjectMeetings(parsed.data.id)
+        for (const topicsJson of topicsJsonStrings) {
+          try {
+            const meetingTopics = JSON.parse(topicsJson) as string[]
+            meetingTopics.forEach((topic) => topicsSet.add(topic))
+          } catch {
+            // Invalid JSON, skip
           }
         }
 

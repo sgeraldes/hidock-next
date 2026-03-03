@@ -2689,6 +2689,22 @@ export function getPersonIdsForProject(projectId: string): string[] {
   return rows.map(r => r.contact_id)
 }
 
+/**
+ * Get all transcript topics for a project's meetings in a single JOIN query.
+ * Eliminates N+1: project -> meeting_projects -> recordings -> transcripts
+ * Returns the raw topics JSON strings (caller parses them).
+ */
+export function getTopicsForProjectMeetings(projectId: string): string[] {
+  const rows = queryAll<{ topics: string }>(
+    `SELECT t.topics FROM transcripts t
+     JOIN recordings r ON t.recording_id = r.id
+     JOIN meeting_projects mp ON r.meeting_id = mp.meeting_id
+     WHERE mp.project_id = ? AND t.topics IS NOT NULL`,
+    [projectId]
+  )
+  return rows.map(r => r.topics)
+}
+
 // =============================================================================
 // Recording-Meeting Candidate queries (AI-powered matching)
 // =============================================================================

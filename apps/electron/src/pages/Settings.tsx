@@ -10,9 +10,9 @@ import { HealthCheck } from '@/components/HealthCheck'
 import { toast } from '@/components/ui/toaster'
 import type { StorageInfo, AppConfig } from '@/types'
 
-// RAG configuration constants
+// RAG configuration constants — MAX_CONTEXT_CHUNKS must match config.ts default (10)
 const RAG_DEFAULTS = {
-  MAX_CONTEXT_CHUNKS: 5,
+  MAX_CONTEXT_CHUNKS: 10,
   MIN_CONTEXT_CHUNKS: 1,
   MAX_CONTEXT_CHUNKS_LIMIT: 20
 } as const
@@ -37,8 +37,8 @@ export function Settings() {
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434')
   const [showApiKey, setShowApiKey] = useState(false)
   const [storageLoading, setStorageLoading] = useState(false)
-  // C-CHAT: RAG context window
-  const [ragContextSize, setRagContextSize] = useState(5)
+  // C-CHAT: RAG context window — default matches config.ts (10)
+  const [ragContextSize, setRagContextSize] = useState(RAG_DEFAULTS.MAX_CONTEXT_CHUNKS)
 
   // Available Gemini models for transcription (audio-capable)
   // From: https://ai.google.dev/gemini-api/docs/models
@@ -613,7 +613,7 @@ export function Settings() {
                   className="mt-1"
                 />
                 <p id="ragContextSize-description" className="text-xs text-muted-foreground mt-1">
-                  Number of knowledge chunks to retrieve for context (1-20). Default: 5
+                  Number of knowledge chunks to retrieve for context (1-20). Default: 10
                 </p>
               </div>
 
