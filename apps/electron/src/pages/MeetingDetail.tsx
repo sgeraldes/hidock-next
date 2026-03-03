@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Clock, MapPin, Users, Mic, FileText, Play, X, Edit, Check, Loader2, Link, Unlink, ChevronDown, ChevronUp } from 'lucide-react'
+import { ArrowLeft, Clock, MapPin, Users, Mic, FileText, Play, X, Edit, Check, Loader2, Link, Unlink, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -83,6 +83,9 @@ export function MeetingDetail() {
   // Playback loading state (B-MTG-003)
   const [playbackLoading, setPlaybackLoading] = useState<string | null>(null)
 
+  // Actionables error state (AUD2-009)
+  const [actionablesError, setActionablesError] = useState<string | null>(null)
+
   // Attendee overflow state (B-MTG-005)
   const [showAllAttendees, setShowAllAttendees] = useState(false)
 
@@ -112,13 +115,15 @@ export function MeetingDetail() {
         throw new Error('Meeting not found')
       }
 
-      // Load actionables separately with error handling
+      // Load actionables separately with error handling (AUD2-009)
+      setActionablesError(null)
       try {
         const actionables = await window.electronAPI.actionables.getByMeeting(meetingId)
         data.actionables = actionables
-      } catch (actionablesError) {
-        console.error('Failed to load actionables:', actionablesError)
+      } catch (actErr) {
+        console.error('Failed to load actionables:', actErr)
         data.actionables = []
+        setActionablesError('Failed to load actionables')
       }
 
       setDetails(data)
@@ -624,9 +629,21 @@ export function MeetingDetail() {
           </Card>
 
           {/* AUD2-002: Actionables Section */}
-          {details.actionables && details.actionables.length > 0 && (
+          {actionablesError ? (
+            <Card>
+              <CardContent className="py-6">
+                <div className="flex items-center justify-center gap-3 text-sm text-muted-foreground">
+                  <AlertCircle className="h-4 w-4 text-destructive" />
+                  <span>{actionablesError}</span>
+                  <Button variant="ghost" size="sm" onClick={() => id && loadMeetingDetails(id)}>
+                    Retry
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ) : details.actionables && details.actionables.length > 0 ? (
             <MeetingActionables actionables={details.actionables} />
-          )}
+          ) : null}
         </div>
       </div>
 
