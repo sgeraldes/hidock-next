@@ -568,10 +568,18 @@ class DownloadService {
    * Called periodically to detect downloads that exceed timeout
    * C-004: Uses lastProgressAt (not startedAt) for smarter stall detection.
    * Large files legitimately take a long time; what matters is whether data
-   * is still flowing. Timeout increased to 60s without progress.
+   * is still flowing.
+   * AUD4-005: Adaptive timeout based on file size to reduce false positives.
+   *   - Files > 10MB: 120s without progress
+   *   - Unknown file size: 90s without progress
+   *   - All others: 60s without progress
    */
   checkForStalledDownloads(): number {
-    const STALL_TIMEOUT_MS = 60000 // C-004: 60 seconds without progress (was 30s from start)
+    const STALL_TIMEOUT_DEFAULT_MS = 60000
+    const STALL_TIMEOUT_LARGE_FILE_MS = 120000  // AUD4-005: 120s for files > 10MB
+    const STALL_TIMEOUT_UNKNOWN_SIZE_MS = 90000  // AUD4-005: 90s when file size unknown
+    const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024 // 10MB
+
     const now = Date.now()
     let stalledCount = 0
     const stalledFilenames: string[] = []
@@ -581,8 +589,19 @@ class DownloadService {
         // C-004: Use lastProgressAt if available (data flow), fall back to startedAt
         const lastActivity = item.lastProgressAt ?? item.startedAt
         const elapsed = now - lastActivity.getTime()
-        if (elapsed > STALL_TIMEOUT_MS) {
-          console.warn(`[DownloadService] Stall detected for ${item.filename} (${Math.round(elapsed / 1000)}s without progress)`)
+
+        // AUD4-005: Adaptive timeout based on file size
+        let stallTimeout: number
+        if (!item.fileSize || item.fileSize <= 0) {
+          stallTimeout = STALL_TIMEOUT_UNKNOWN_SIZE_MS
+        } else if (item.fileSize > LARGE_FILE_THRESHOLD) {
+          stallTimeout = STALL_TIMEOUT_LARGE_FILE_MS
+        } else {
+          stallTimeout = STALL_TIMEOUT_DEFAULT_MS
+        }
+
+        if (elapsed > stallTimeout) {
+          console.warn(`[DownloadService] Stall detected for ${item.filename} (${Math.round(elapsed / 1000)}s without progress, timeout=${stallTimeout / 1000}s, size=${item.fileSize})`)
           item.status = 'failed'
           item.error = `Download stalled (${Math.round(elapsed / 1000)}s without data)`
           this.persistQueueItem(item)

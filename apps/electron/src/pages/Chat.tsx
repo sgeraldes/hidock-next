@@ -95,6 +95,9 @@ export function Chat() {
   const [contextIds, setContextIds] = useState<string[]>([])
   const [contextItems, setContextItems] = useState<KnowledgeCapture[]>([])
 
+  // AUD3-004: Generation counter to prevent stale async results when rapidly switching conversations
+  const conversationLoadIdRef = useRef(0)
+
   // Recording context state (from Library navigation)
   const [contextRecording, setContextRecording] = useState<KnowledgeCapture | null>(null)
   const [contextLoading, setContextLoading] = useState(false)
@@ -269,13 +272,23 @@ export function Chat() {
 
   // B-CHAT-001: Validate conversation exists before setting active
   // B-CHAT-004: Use knowledge:getByIds for efficient context loading
+  // AUD3-004: Use generation counter to discard stale async results from rapid switching
   const handleSelectConversation = async (conv: Conversation) => {
+    const loadId = ++conversationLoadIdRef.current
     setActiveConversation(conv)
+    setMessages([]) // Clear immediately to avoid showing stale messages
+    setContextIds([])
+    setContextItems([])
+    setSources(new Map())
+
     try {
       const [msgsResult, ctxIds] = await Promise.all([
         window.electronAPI.assistant.getMessages(conv.id),
         window.electronAPI.assistant.getContext(conv.id)
       ])
+
+      // AUD3-004: Discard result if a newer conversation was selected while loading
+      if (conversationLoadIdRef.current !== loadId) return
 
       // B-CHAT-001: Check if getMessages returned an error (invalid conversation)
       if (msgsResult && typeof msgsResult === 'object' && 'error' in msgsResult && !Array.isArray(msgsResult)) {
@@ -297,13 +310,15 @@ export function Chat() {
       // B-CHAT-004: Use getByIds for efficient context metadata loading
       if (ctxIds.length > 0) {
         const items = await window.electronAPI.knowledge.getByIds(ctxIds)
+        // AUD3-004: Discard if stale after second async call
+        if (conversationLoadIdRef.current !== loadId) return
         setContextItems(items)
       } else {
         setContextItems([])
       }
-
-      setSources(new Map())
     } catch (error) {
+      // AUD3-004: Discard error handling if a newer conversation was selected
+      if (conversationLoadIdRef.current !== loadId) return
       console.error('Failed to load conversation details:', error)
       toast.error('Failed to load conversation', 'Could not load conversation details.')
     }

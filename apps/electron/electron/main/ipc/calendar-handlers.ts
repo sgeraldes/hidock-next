@@ -12,6 +12,7 @@ let syncInterval: NodeJS.Timeout | null = null
 
 export function registerCalendarHandlers(): void {
   // Sync calendar now
+  // AUD2-010: Verify sync result and catch unexpected errors at the IPC boundary
   ipcMain.handle('calendar:sync', async (): Promise<CalendarSyncResult> => {
     const config = getConfig()
 
@@ -23,10 +24,24 @@ export function registerCalendarHandlers(): void {
       }
     }
 
-    return await syncCalendar(config.calendar.icsUrl)
+    try {
+      const result = await syncCalendar(config.calendar.icsUrl)
+      // AUD2-010: Verify result is well-formed before returning to renderer
+      if (!result || typeof result.success !== 'boolean') {
+        console.error('[calendar:sync] syncCalendar returned malformed result:', result)
+        return { success: false, error: 'Sync returned an invalid result', meetingsCount: 0 }
+      }
+      return result
+    } catch (error) {
+      // AUD2-010: Guard against unexpected throws that bypass syncCalendar's internal catch
+      const message = error instanceof Error ? error.message : 'Unknown sync error'
+      console.error('[calendar:sync] Unexpected error:', error)
+      return { success: false, error: message, meetingsCount: 0 }
+    }
   })
 
   // Clear all meetings and perform a fresh sync
+  // AUD2-010: Same verification pattern as calendar:sync
   ipcMain.handle('calendar:clear-and-sync', async (): Promise<CalendarSyncResult> => {
     const config = getConfig()
 
@@ -38,8 +53,19 @@ export function registerCalendarHandlers(): void {
       }
     }
 
-    clearAllMeetings()
-    return await syncCalendar(config.calendar.icsUrl)
+    try {
+      clearAllMeetings()
+      const result = await syncCalendar(config.calendar.icsUrl)
+      if (!result || typeof result.success !== 'boolean') {
+        console.error('[calendar:clear-and-sync] syncCalendar returned malformed result:', result)
+        return { success: false, error: 'Sync returned an invalid result', meetingsCount: 0 }
+      }
+      return result
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown sync error'
+      console.error('[calendar:clear-and-sync] Unexpected error:', error)
+      return { success: false, error: message, meetingsCount: 0 }
+    }
   })
 
   // Get last sync time
