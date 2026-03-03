@@ -53,6 +53,7 @@ const { mockOnMicStatusChange } = vi.hoisted(() => ({
 vi.mock("../session-handlers", () => ({
   getSessionManager: vi.fn(() => ({
     onMicStatusChange: mockOnMicStatusChange,
+    setAudioConcatenation: vi.fn(),
   })),
   registerSessionHandlers: vi.fn(),
 }));

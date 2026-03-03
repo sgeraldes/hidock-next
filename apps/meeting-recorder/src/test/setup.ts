@@ -58,6 +58,18 @@ Object.defineProperty(window, "electronAPI", {
       get: vi.fn().mockResolvedValue(null),
       set: vi.fn().mockResolvedValue(undefined),
       getAll: vi.fn().mockResolvedValue({}),
+      getChirp3Config: vi.fn().mockResolvedValue({
+        projectId: "",
+        authType: "api-key",
+        location: "global",
+        languageCode: "en-US",
+        confidenceThreshold: 0.7,
+        hasApiKey: false,
+        hasServiceAccount: false,
+        backend: "gemini-multimodal",
+        isConfigured: false,
+      }),
+      testChirp3Connection: vi.fn().mockResolvedValue({ valid: false, error: "Not configured" }),
     },
     audio: {
       onMicStatus: vi.fn().mockReturnValue(() => {}),
@@ -70,6 +82,13 @@ Object.defineProperty(window, "electronAPI", {
     summarization: {
       generate: vi.fn().mockResolvedValue(undefined),
       onChunk: vi.fn().mockReturnValue(() => {}),
+    },
+    window: {
+      minimize: vi.fn().mockResolvedValue(undefined),
+      maximize: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      isMaximized: vi.fn().mockResolvedValue(false),
+      closeControlBar: vi.fn().mockResolvedValue(undefined),
     },
   },
   writable: true,

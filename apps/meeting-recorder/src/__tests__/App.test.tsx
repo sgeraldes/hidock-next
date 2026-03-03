@@ -68,6 +68,13 @@ beforeEach(() => {
       search: vi.fn().mockResolvedValue([]),
       delete: vi.fn().mockResolvedValue(undefined),
     },
+    window: {
+      minimize: vi.fn().mockResolvedValue(undefined),
+      maximize: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      isMaximized: vi.fn().mockResolvedValue(false),
+      closeControlBar: vi.fn().mockResolvedValue(undefined),
+    },
   } as unknown as typeof window.electronAPI;
 });
 

@@ -9,7 +9,7 @@ import {
   TranscriptionResultSchema,
   SummarizationResultSchema,
 } from "./ai-schemas";
-import { PROMPTS, buildTranscriptionPrompt } from "./ai-prompts";
+import { PROMPTS, buildTranscriptionPrompt, buildAnalysisPrompt } from "./ai-prompts";
 import { modelConfig } from "./model-config";
 import type {
   AIProviderConfig,
@@ -176,6 +176,53 @@ export class AIProviderService {
         err,
       );
       return this.fallbackTranscription("[Audio transcription failed]");
+    }
+  }
+
+  /**
+   * Stage 2 of two-stage pipeline: analyze raw text from Chirp 3
+   * and produce structured output (speakers, topics, action items).
+   * Uses text-only Gemini (no audio data), so any model works.
+   */
+  async analyzeTranscript(
+    text: string,
+    options?: {
+      meetingContext?: string;
+      attendees?: string[];
+      wordData?: Array<{
+        word: string;
+        startTime: number;
+        endTime: number;
+        confidence: number;
+      }>;
+    },
+  ): Promise<TranscriptionResult> {
+    if (!this.model || !this.config) {
+      throw new Error("AI provider not configured");
+    }
+
+    const prompt = buildAnalysisPrompt(
+      options?.meetingContext,
+      options?.attendees,
+      options?.wordData,
+    );
+
+    try {
+      const { object } = await generateObject({
+        model: this.model,
+        schema: TranscriptionResultSchema,
+        system: prompt,
+        prompt: text,
+      });
+      return object;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.isAuthError(message)) {
+        console.error("[AIProvider] Auth error during transcript analysis:", message);
+        throw new Error(`API key error: ${message}`);
+      }
+      console.warn("[AIProvider] Transcript analysis failed, using fallback:", err);
+      return this.fallbackTranscription(text);
     }
   }
 

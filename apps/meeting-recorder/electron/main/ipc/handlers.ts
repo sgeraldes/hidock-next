@@ -17,6 +17,7 @@ import { registerTranslationSummarizationHandlers } from "./translation-handlers
 import { registerHistoryHandlers } from "./history-handlers";
 import { registerModelHandlers } from "./model-handlers";
 import { registerSettingsHandlers, initializeAIFromSettings } from "./settings-handlers";
+import { registerChirp3Handlers, initializeChirp3 } from "./chirp3-handlers";
 import { registerWindowHandlers } from "./window-handlers";
 
 export function registerIpcHandlers(): void {
@@ -33,8 +34,11 @@ export function registerIpcHandlers(): void {
   registerHistoryHandlers();
   registerModelHandlers();
   registerSettingsHandlers();
+  registerChirp3Handlers();
   registerWindowHandlers();
   // Configure AI service from database settings (uses real keys, not masked)
   initializeAIFromSettings();
+  // Initialize Chirp 3 provider from database settings
+  initializeChirp3();
   console.log("[IPC] Handlers registered");
 }

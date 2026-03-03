@@ -1,4 +1,4 @@
-import { BrowserWindow, IpcMainEvent, ipcMain } from "electron";
+import { IpcMainEvent, ipcMain } from "electron";
 import { execFile } from "child_process";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -153,11 +153,7 @@ async function extractChunkAudio(
   }
 }
 
-function broadcastToAllWindows(channel: string, data: unknown): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(channel, data);
-  }
-}
+import { broadcastToAllWindows } from "../services/broadcast";
 
 export function registerAudioHandlers(): void {
   // Provide audio concatenation to session manager for automatic finalization

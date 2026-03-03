@@ -30,9 +30,35 @@ Maintain the original meaning and tone. Do not add or remove content.`,
 - Overall meeting sentiment
 
 Be factual and concise. Only include information present in the transcript.`,
+  TRANSCRIPT_ANALYSIS: `You are a meeting analysis AI. Analyze the provided speech-to-text transcript.
+
+Your job is to:
+1. Identify distinct speakers and assign them consistent names.
+2. Split the text into speaker segments (who said what).
+3. Extract key topics discussed.
+4. Identify any action items mentioned.
+5. Detect sentiment for each segment.
+
+SPEAKER IDENTIFICATION RULES:
+- Use context clues (names mentioned, role references) to identify speakers.
+- If speakers cannot be identified by name, use "Speaker 1", "Speaker 2", etc.
+- Maintain consistent speaker labels across the analysis.
+- Significant pauses between words (indicated by timing gaps) often indicate speaker changes.
+- Only create multiple speakers if the text clearly suggests different people speaking.
+
+IMPORTANT:
+- Do NOT invent content. Only analyze what is in the transcript.
+- If the transcript is very short, return minimal results rather than guessing.
+- Topics and action items should only be included if clearly discussed.
+- Detect the sentiment (positive, negative, or neutral) of each segment.`,
 } as const;
 
 export type PromptKey = keyof typeof PROMPTS;
+
+/** Strip characters that could interfere with prompt structure. */
+export function sanitizePromptInput(input: string): string {
+  return input.replace(/[<>{}]/g, "");
+}
 
 export function buildTranscriptionPrompt(
   meetingContext?: string,
@@ -40,20 +66,42 @@ export function buildTranscriptionPrompt(
 ): string {
   let prompt = PROMPTS.TRANSCRIPTION;
   if (attendees && attendees.length > 0) {
-    const sanitized = attendees.map((a) => a.replace(/[<>{}]/g, ""));
+    const sanitized = attendees.map((a) => sanitizePromptInput(a));
     prompt += `\n\nKnown attendees: ${sanitized.join(", ")}. Use these names for speaker identification when possible.`;
   }
   if (meetingContext) {
-    const sanitized = meetingContext.replace(/[<>{}]/g, "");
-    prompt += `\n\nMeeting context: ${sanitized}`;
+    prompt += `\n\nMeeting context: ${sanitizePromptInput(meetingContext)}`;
+  }
+  return prompt;
+}
+
+export function buildAnalysisPrompt(
+  meetingContext?: string,
+  attendees?: string[],
+  wordData?: Array<{ word: string; startTime: number; endTime: number; confidence: number }>,
+): string {
+  let prompt = PROMPTS.TRANSCRIPT_ANALYSIS;
+  if (attendees && attendees.length > 0) {
+    const sanitized = attendees.map((a) => sanitizePromptInput(a));
+    prompt += `\n\nKnown meeting attendees: ${sanitized.join(", ")}. Use these names for speaker identification when possible.`;
+  }
+  if (meetingContext) {
+    prompt += `\n\nPrevious context:\n${sanitizePromptInput(meetingContext)}`;
+  }
+  if (wordData && wordData.length > 0) {
+    prompt +=
+      "\n\nWord-level timing data is provided below. Use timing gaps (>0.5s) between consecutive words to detect speaker turn boundaries.";
+    const timingLines = wordData.map(
+      (w) => `${w.startTime.toFixed(2)}-${w.endTime.toFixed(2)} "${sanitizePromptInput(w.word)}"`,
+    );
+    prompt += `\n\nWord timings:\n${timingLines.join("\n")}`;
   }
   return prompt;
 }
 
 export function buildEndOfMeetingPrompt(meetingTypeTemplate?: string): string {
   if (meetingTypeTemplate) {
-    const sanitized = meetingTypeTemplate.replace(/[<>{}]/g, "");
-    return `${PROMPTS.END_OF_MEETING}\n\nMeeting type instructions: ${sanitized}`;
+    return `${PROMPTS.END_OF_MEETING}\n\nMeeting type instructions: ${sanitizePromptInput(meetingTypeTemplate)}`;
   }
   return PROMPTS.END_OF_MEETING;
 }

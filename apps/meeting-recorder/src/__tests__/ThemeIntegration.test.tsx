@@ -13,7 +13,16 @@ const mockUseSettingsStore = useSettingsStore as unknown as ReturnType<typeof vi
 
 function mockStore(theme: "light" | "dark" | "system") {
   mockUseSettingsStore.mockImplementation((selector: (s: { theme: string }) => unknown) =>
-    selector({ theme, provider: "", apiKey: "", loaded: true } as never),
+    selector({
+      theme,
+      provider: "",
+      apiKey: "",
+      loaded: true,
+      autoRecord: false,
+      loadFromIPC: vi.fn(),
+      saveToIPC: vi.fn(),
+      setField: vi.fn(),
+    } as never),
   );
 }
 
@@ -77,6 +86,13 @@ beforeEach(() => {
     history: {
       search: vi.fn().mockResolvedValue([]),
       delete: vi.fn().mockResolvedValue(undefined),
+    },
+    window: {
+      minimize: vi.fn().mockResolvedValue(undefined),
+      maximize: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+      isMaximized: vi.fn().mockResolvedValue(false),
+      closeControlBar: vi.fn().mockResolvedValue(undefined),
     },
   } as unknown as typeof window.electronAPI;
 });

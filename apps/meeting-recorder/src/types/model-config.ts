@@ -12,15 +12,6 @@ export interface ModelDefinition {
   sunset?: string;
 }
 
-/** Cost info returned by models:getCostInfo */
-export interface ModelCostInfo {
-  costMultiplier: number;
-  recommended: boolean;
-  deprecated: boolean;
-  sunset: string | null;
-  description: string;
-}
-
 /** Context definition from config */
 export interface ContextDefinition {
   name: string;

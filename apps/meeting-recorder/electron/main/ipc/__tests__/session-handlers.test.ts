@@ -15,7 +15,7 @@ vi.mock("electron", () => ({
 
 const { mockStartSession, mockEndSession, mockGetActiveSessionId, mockGetSessionList } =
   vi.hoisted(() => ({
-    mockStartSession: vi.fn().mockReturnValue("session-1"),
+    mockStartSession: vi.fn().mockReturnValue({ id: "session-1", status: "active" }),
     mockEndSession: vi.fn(),
     mockGetActiveSessionId: vi.fn().mockReturnValue(null),
     mockGetSessionList: vi.fn().mockReturnValue([]),
@@ -104,7 +104,7 @@ describe("registerSessionHandlers", () => {
     )?.[1] as (...args: unknown[]) => unknown;
     const result = await handler({});
     expect(mockStartSession).toHaveBeenCalled();
-    expect(result).toEqual({ id: "session-1" });
+    expect(result).toEqual(expect.objectContaining({ id: "session-1" }));
   });
 
   it("session:end ends the specified session", async () => {

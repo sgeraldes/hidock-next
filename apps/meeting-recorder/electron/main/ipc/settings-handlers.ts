@@ -9,6 +9,20 @@ import {
 import { getEndOfMeetingProcessor } from "./meeting-type-handlers";
 import { modelConfig } from "../services/model-config";
 import type { AIProviderConfig } from "../services/ai-provider.types";
+import { reconfigureChirp3 } from "./chirp3-handlers";
+import { BACKEND_GEMINI_MULTIMODAL } from "../services/transcription-backend";
+
+/** Debounce timer for saveDatabase (avoids serializing entire DB on every keystroke). */
+let saveDatabaseTimer: ReturnType<typeof setTimeout> | null = null;
+const SAVE_DATABASE_DEBOUNCE_MS = 300;
+
+function debouncedSaveDatabase(): void {
+  if (saveDatabaseTimer) clearTimeout(saveDatabaseTimer);
+  saveDatabaseTimer = setTimeout(() => {
+    saveDatabaseTimer = null;
+    saveDatabase();
+  }, SAVE_DATABASE_DEBOUNCE_MS);
+}
 
 const AI_SETTING_KEYS = [
   "ai.provider",
@@ -22,6 +36,14 @@ const AI_SETTING_KEYS = [
   "ai.bedrockSessionToken",
   "ai.transcriptionProvider",
   "ai.transcriptionApiKey",
+  "ai.transcriptionBackend",
+  "ai.gcp.projectId",
+  "ai.gcp.apiKey",
+  "ai.gcp.serviceAccountJson",
+  "ai.gcp.authType",
+  "ai.gcp.location",
+  "ai.chirp3.languageCode",
+  "ai.chirp3.confidenceThreshold",
 ];
 
 const SENSITIVE_KEYS = new Set([
@@ -29,13 +51,16 @@ const SENSITIVE_KEYS = new Set([
   "ai.bedrockAccessKeyId",
   "ai.bedrockSecretAccessKey",
   "ai.bedrockSessionToken",
+  "ai.gcp.apiKey",
+  "ai.gcp.serviceAccountJson",
 ]);
 
 export const MIGRATION_VERSION_KEY = "settings.migration.version";
-export const CURRENT_MIGRATION_VERSION = "2";
+export const CURRENT_MIGRATION_VERSION = "3";
 
 function maskSensitiveValue(value: string): string {
-  if (!value || value.length <= 4) return "****";
+  if (value === "" || value === null || value === undefined) return "";
+  if (value.length <= 4) return "****";
   return `****${value.slice(-4)}`;
 }
 
@@ -91,6 +116,15 @@ function reconfigureAIIfNeeded(changedKey: string): void {
     console.log(`[Settings] AI service reconfigured (${provider}/${model})`);
   } catch (err) {
     console.warn("[Settings] Failed to reconfigure AI service:", err);
+  }
+
+  // Reconfigure Chirp 3 when GCP or backend settings change
+  if (
+    changedKey.startsWith("ai.gcp.") ||
+    changedKey.startsWith("ai.chirp3.") ||
+    changedKey === "ai.transcriptionBackend"
+  ) {
+    reconfigureChirp3();
   }
 }
 
@@ -187,6 +221,14 @@ export function migrateModelSettings(): void {
     );
   }
 
+  // Migration 5: Set default transcription backend if not present
+  if (!getSetting("ai.transcriptionBackend")) {
+    setSetting("ai.transcriptionBackend", BACKEND_GEMINI_MULTIMODAL, false);
+    console.log(
+      `[Settings Migration] Set default transcription backend: gemini-multimodal`,
+    );
+  }
+
   // Mark migration as complete
   setSetting(MIGRATION_VERSION_KEY, CURRENT_MIGRATION_VERSION, false);
   saveDatabase();
@@ -262,9 +304,10 @@ export function registerSettingsHandlers(): void {
       effectiveKey.includes("apiKey") ||
       effectiveKey.includes("SecretAccessKey") ||
       effectiveKey.includes("AccessKeyId") ||
-      effectiveKey.includes("SessionToken");
+      effectiveKey.includes("SessionToken") ||
+      effectiveKey.includes("serviceAccountJson");
     setSetting(effectiveKey, effectiveValue, encrypt);
-    saveDatabase();
+    debouncedSaveDatabase();
 
     // Reconfigure AI when model-related keys change
     if (effectiveKey === "ai.model.default" || effectiveKey === "ai.provider") {

@@ -8,6 +8,7 @@ const mockGetState = vi.fn().mockReturnValue("idle");
 const mockGetMimeType = vi.fn().mockReturnValue("audio/ogg;codecs=opus");
 const mockGetPendingChunkCount = vi.fn().mockReturnValue(0);
 const mockAcknowledgeChunk = vi.fn();
+const mockDispose = vi.fn();
 
 vi.mock("../services/audio-recorder", () => ({
   AudioRecorder: vi.fn(function (
@@ -20,6 +21,7 @@ vi.mock("../services/audio-recorder", () => ({
     this.getMimeType = mockGetMimeType;
     this.getPendingChunkCount = mockGetPendingChunkCount;
     this.acknowledgeChunk = mockAcknowledgeChunk;
+    this.dispose = mockDispose;
     (this as Record<string, unknown>)._onChunk = options?.onChunk;
     (this as Record<string, unknown>)._onError = options?.onError;
   }),

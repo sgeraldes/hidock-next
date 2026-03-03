@@ -37,12 +37,18 @@ const mockAIService = {
 vi.mock("../services/database", () => ({
   insertTranscriptSegment: mockInsertSegment,
   getRecentTranscriptSegments: mockGetRecentTranscriptSegments,
+  saveDatabase: vi.fn(),
   createSession: vi.fn().mockReturnValue("session-1"),
   updateSession: vi.fn(),
   getSession: vi.fn(),
   getAllSessions: vi.fn().mockReturnValue([]),
   createRecording: vi.fn(),
   updateRecording: vi.fn(),
+}));
+
+vi.mock("../services/database-extras", () => ({
+  createTalkingPoint: vi.fn(),
+  createActionItem: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
@@ -96,9 +102,12 @@ describe("TranscriptionPipeline", () => {
 
       expect(mockBroadcast).toHaveBeenCalledWith(
         "transcription:newSegments",
-        expect.arrayContaining([
-          expect.objectContaining({ text: "Hello world", speaker: "Speaker A" }),
-        ]),
+        expect.objectContaining({
+          chunkIndex: 0,
+          segments: expect.arrayContaining([
+            expect.objectContaining({ text: "Hello world", speaker: "Speaker A" }),
+          ]),
+        }),
       );
     });
 
@@ -107,7 +116,10 @@ describe("TranscriptionPipeline", () => {
 
       expect(mockBroadcast).toHaveBeenCalledWith(
         "transcription:topicsUpdated",
-        expect.arrayContaining(["greeting"]),
+        expect.objectContaining({
+          sessionId: "session-1",
+          topics: expect.arrayContaining(["greeting"]),
+        }),
       );
     });
 
@@ -122,9 +134,12 @@ describe("TranscriptionPipeline", () => {
 
       expect(mockBroadcast).toHaveBeenCalledWith(
         "transcription:actionItemsUpdated",
-        expect.arrayContaining([
-          expect.objectContaining({ text: "Follow up on project" }),
-        ]),
+        expect.objectContaining({
+          sessionId: "session-1",
+          actionItems: expect.arrayContaining([
+            expect.objectContaining({ text: "Follow up on project" }),
+          ]),
+        }),
       );
     });
   });

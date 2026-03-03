@@ -71,9 +71,9 @@ describe('AudioRecorder', () => {
       )
     })
 
-    it('starts MediaRecorder with 15s timeslice', async () => {
+    it('starts MediaRecorder with 3s timeslice', async () => {
       await recorder.startRecording()
-      expect(mockStart).toHaveBeenCalledWith(15000)
+      expect(mockStart).toHaveBeenCalledWith(3000)
     })
 
     it('sets state to recording', async () => {

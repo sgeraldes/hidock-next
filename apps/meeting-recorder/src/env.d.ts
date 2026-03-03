@@ -44,9 +44,25 @@ interface ElectronAPI {
   transcription: {
     start: (sessionId: string) => Promise<void>;
     stop: (sessionId: string) => Promise<void>;
-    onNewSegments: (callback: (segments: unknown[]) => void) => () => void;
-    onTopicsUpdated: (callback: (topics: string[]) => void) => () => void;
-    onActionItemsUpdated: (callback: (items: unknown[]) => void) => () => void;
+    onNewSegments: (
+      callback: (data: {
+        chunkIndex: number;
+        segments: Array<{
+          speaker: string;
+          text: string;
+          sentiment?: string;
+        }>;
+      }) => void,
+    ) => () => void;
+    onTopicsUpdated: (
+      callback: (data: { sessionId: string; topics: string[] }) => void,
+    ) => () => void;
+    onActionItemsUpdated: (
+      callback: (data: {
+        sessionId: string;
+        actionItems: Array<{ text: string; assignee?: string }>;
+      }) => void,
+    ) => () => void;
     onError: (callback: (error: string) => void) => () => void;
     onStatus: (callback: (status: string) => void) => () => void;
   };
@@ -188,6 +204,18 @@ interface ElectronAPI {
     getAll: () => Promise<Record<string, string>>;
     testConnection: () => Promise<{ valid: boolean; error?: string }>;
     getModelForContext: (context: string) => Promise<string>;
+    getChirp3Config: () => Promise<{
+      projectId: string;
+      authType: string;
+      location: string;
+      languageCode: string;
+      confidenceThreshold: number;
+      hasApiKey: boolean;
+      hasServiceAccount: boolean;
+      backend: string;
+      isConfigured: boolean;
+    }>;
+    testChirp3Connection: () => Promise<{ valid: boolean; error?: string }>;
   };
   history: {
     search: (query: string) => Promise<unknown[]>;

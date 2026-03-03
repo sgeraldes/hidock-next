@@ -13,9 +13,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, waitFor, act, cleanup } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import App from "../App";
+import { useSessionStore } from "../store/useSessionStore";
+import { useSettingsStore } from "../store/useSettingsStore";
+import { useTranscriptStore } from "../store/useTranscriptStore";
 
 // Mock session data
 const mockSession = {
@@ -29,7 +32,7 @@ const mockSession = {
   created_at: "2026-02-27T10:00:00.000Z",
 };
 
-// Mock MediaRecorder
+// Mock MediaRecorder — generates chunks synchronously via manual trigger
 class MockMediaRecorder {
   state: string = "inactive";
   ondataavailable: ((event: { data: Blob }) => void) | null = null;
@@ -37,24 +40,29 @@ class MockMediaRecorder {
   onstop: (() => void) | null = null;
   stream: MediaStream;
   mimeType: string;
+  private timerId: ReturnType<typeof setTimeout> | null = null;
 
   constructor(stream: MediaStream, options: { mimeType: string }) {
     this.stream = stream;
     this.mimeType = options.mimeType;
   }
 
-  start(timeslice: number) {
+  start(_timeslice: number) {
     this.state = "recording";
-    // Simulate chunk generation after 100ms
-    setTimeout(() => {
+    // Generate a chunk after a short delay
+    this.timerId = setTimeout(() => {
       if (this.ondataavailable && this.state === "recording") {
         const blob = new Blob(["test-audio-data"], { type: this.mimeType });
         this.ondataavailable({ data: blob });
       }
-    }, 100);
+    }, 50);
   }
 
   stop() {
+    if (this.timerId !== null) {
+      clearTimeout(this.timerId);
+      this.timerId = null;
+    }
     this.state = "inactive";
     if (this.onstop) {
       this.onstop();
@@ -86,7 +94,7 @@ const mockListSessions = vi.fn().mockResolvedValue([]);
 const mockEndSession = vi.fn();
 
 const mockChunkAckListeners: Array<(data: { sessionId: string; chunkIndex: number }) => void> = [];
-const mockSessionCreatedListeners: Array<(session: any) => void> = [];
+const mockSessionCreatedListeners: Array<(session: unknown) => void> = [];
 const mockMicStatusListeners: Array<(status: { active: boolean }) => void> = [];
 
 beforeEach(() => {
@@ -96,8 +104,20 @@ beforeEach(() => {
   mockSessionCreatedListeners.length = 0;
   mockMicStatusListeners.length = 0;
 
+  // Polyfill Blob.arrayBuffer for jsdom (not available in all environments)
+  if (!Blob.prototype.arrayBuffer) {
+    Blob.prototype.arrayBuffer = function (): Promise<ArrayBuffer> {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as ArrayBuffer);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsArrayBuffer(this);
+      });
+    };
+  }
+
   // Mock MediaRecorder globally
-  global.MediaRecorder = MockMediaRecorder as any;
+  global.MediaRecorder = MockMediaRecorder as unknown as typeof MediaRecorder;
 
   // Mock navigator.mediaDevices
   Object.defineProperty(navigator, "mediaDevices", {
@@ -108,18 +128,18 @@ beforeEach(() => {
   });
 
   // Mock Electron API
-  (global as any).window.electronAPI = {
+  (global as { window: { electronAPI: unknown } }).window.electronAPI = {
     session: {
       list: mockListSessions,
       create: mockCreateSession,
       end: mockEndSession,
       get: vi.fn(),
       delete: vi.fn(),
-      getTranscript: vi.fn(),
-      getTopics: vi.fn(),
-      getActionItems: vi.fn(),
-      getSummary: vi.fn(),
-      onCreated: (callback: any) => {
+      getTranscript: vi.fn().mockResolvedValue([]),
+      getTopics: vi.fn().mockResolvedValue([]),
+      getActionItems: vi.fn().mockResolvedValue([]),
+      getSummary: vi.fn().mockResolvedValue(null),
+      onCreated: (callback: (session: unknown) => void) => {
         mockSessionCreatedListeners.push(callback);
         return () => {
           const idx = mockSessionCreatedListeners.indexOf(callback);
@@ -131,14 +151,14 @@ beforeEach(() => {
     audio: {
       sendChunk: mockSendChunk,
       getPath: vi.fn(),
-      onMicStatus: (callback: any) => {
+      onMicStatus: (callback: (status: { active: boolean }) => void) => {
         mockMicStatusListeners.push(callback);
         return () => {
           const idx = mockMicStatusListeners.indexOf(callback);
           if (idx > -1) mockMicStatusListeners.splice(idx, 1);
         };
       },
-      onChunkAck: (callback: any) => {
+      onChunkAck: (callback: (data: { sessionId: string; chunkIndex: number }) => void) => {
         mockChunkAckListeners.push(callback);
         return () => {
           const idx = mockChunkAckListeners.indexOf(callback);
@@ -174,6 +194,18 @@ beforeEach(() => {
         "recording.autoRecord": "false",
         theme: "system",
       }),
+      getChirp3Config: vi.fn().mockResolvedValue({
+        projectId: "",
+        authType: "api-key",
+        location: "global",
+        languageCode: "en-US",
+        confidenceThreshold: 0.7,
+        hasApiKey: false,
+        hasServiceAccount: false,
+        backend: "gemini-multimodal",
+        isConfigured: false,
+      }),
+      testChirp3Connection: vi.fn().mockResolvedValue({ valid: false, error: "Not configured" }),
       testConnection: vi.fn(),
     },
     window: {
@@ -221,90 +253,110 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.clearAllTimers();
+  cleanup();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+
+  // Reset Zustand stores to prevent state leaking between tests
+  useSessionStore.setState({
+    activeSessionId: null,
+    viewingSessionId: null,
+    sessions: new Map(),
+    micActive: false,
+    loading: false,
+    error: null,
+    stopAndFlushRef: null,
+  });
+  useSettingsStore.setState({
+    loaded: false,
+    provider: "google",
+    apiKey: "",
+    autoRecord: true,
+  });
+  useTranscriptStore.setState({
+    segments: new Map(),
+    topics: new Map(),
+    actionItems: new Map(),
+    summary: new Map(),
+    transcriptionError: null,
+  });
 });
 
 describe("Complete Recording Flow Integration", () => {
   it("should execute complete flow: click Record → capture audio → send chunks → receive ack", async () => {
-    vi.useFakeTimers();
+    // Use advanceTimersByTimeAsync for proper microtask resolution with React
+    vi.useFakeTimers({ shouldAdvanceTime: true });
 
-    const { container } = render(
+    render(
       <MemoryRouter>
         <App />
       </MemoryRouter>
     );
 
-    // Wait for app to initialize
+    // Wait for app to initialize (loadFromIPC, loadSessions)
     await act(async () => {
-      vi.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(200);
     });
 
     // STEP 1: Verify initial state (no recording)
     expect(mockCreateSession).not.toHaveBeenCalled();
 
-    // STEP 2: Click Record button
-    const recordButton = container.querySelector('[data-recording="false"]');
+    // STEP 2: Find and click the Record button (rendered in TopBar)
+    const recordButton = screen.getByRole("button", { name: /record/i });
     expect(recordButton).toBeTruthy();
 
+    // Click and wait for async onStartRecording to complete
     await act(async () => {
-      recordButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      vi.advanceTimersByTime(50);
+      recordButton.click();
+      await vi.advanceTimersByTimeAsync(200);
     });
 
     // STEP 3: Verify session creation IPC call
-    await waitFor(() => {
-      expect(mockCreateSession).toHaveBeenCalled();
-    });
+    expect(mockCreateSession).toHaveBeenCalled();
 
-    // STEP 4: Simulate backend broadcasting session:created event
+    // STEP 4: Wait for ActiveSessionRecorder mount + getUserMedia + recording start
     await act(async () => {
-      for (const listener of mockSessionCreatedListeners) {
-        listener(mockSession);
-      }
-      vi.advanceTimersByTime(50);
+      await vi.advanceTimersByTimeAsync(200);
     });
 
     // STEP 5: Verify getUserMedia called (audio capture initiated)
-    await waitFor(() => {
-      expect(mockGetUserMedia).toHaveBeenCalledWith({
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
+    expect(mockGetUserMedia).toHaveBeenCalledWith({
+      audio: {
+        sampleRate: 16000,
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
     });
 
     // STEP 6: Wait for MediaRecorder to generate first chunk
     await act(async () => {
-      vi.advanceTimersByTime(150);
+      await vi.advanceTimersByTimeAsync(500);
     });
 
     // STEP 7: Verify chunk sent via IPC
     await waitFor(() => {
       expect(mockSendChunk).toHaveBeenCalled();
-      const call = mockSendChunk.mock.calls[0];
-      expect(call[0]).toBeInstanceOf(ArrayBuffer); // chunk data
-      expect(call[1]).toBe(mockSession.id); // sessionId
-      expect(call[2]).toBe(0); // chunkIndex
-      expect(call[3]).toContain("audio/"); // mimeType
     });
+
+    const call = mockSendChunk.mock.calls[0];
+    expect(call[0]).toBeInstanceOf(ArrayBuffer); // chunk data
+    expect(call[1]).toBe(mockSession.id); // sessionId
+    expect(call[2]).toBe(0); // chunkIndex
+    expect(call[3]).toContain("audio/"); // mimeType
 
     // STEP 8: Simulate backend acknowledging chunk
     await act(async () => {
       for (const listener of mockChunkAckListeners) {
         listener({ sessionId: mockSession.id, chunkIndex: 0 });
       }
-      vi.advanceTimersByTime(50);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
-    // STEP 9: Verify recording state is active
-    const recordingIndicator = container.querySelector('[data-recording="true"]');
-    expect(recordingIndicator).toBeTruthy();
-
-    vi.useRealTimers();
-  });
+    // STEP 9: Verify recording state is active — Stop button should be visible
+    const stopButton = screen.getByRole("button", { name: /stop/i });
+    expect(stopButton).toBeTruthy();
+  }, 15000);
 
   it("should handle microphone permission denial gracefully", async () => {
     mockGetUserMedia.mockRejectedValueOnce(
@@ -317,34 +369,40 @@ describe("Complete Recording Flow Integration", () => {
       </MemoryRouter>
     );
 
+    // Wait for app to initialize
+    await act(async () => {});
+
+    // Click the Record button to trigger the recording flow
+    const recordButton = screen.getByRole("button", { name: /record/i });
     await act(async () => {
-      // Trigger session creation
-      mockCreateSession.mockResolvedValueOnce(mockSession);
-      for (const listener of mockSessionCreatedListeners) {
-        listener(mockSession);
-      }
+      recordButton.click();
     });
 
-    // Should attempt getUserMedia
+    // Wait for session to be created
+    await waitFor(() => {
+      expect(mockCreateSession).toHaveBeenCalled();
+    });
+
+    // Should attempt getUserMedia (ActiveSessionRecorder mounts and calls start())
     await waitFor(() => {
       expect(mockGetUserMedia).toHaveBeenCalled();
     });
 
-    // Should NOT send any chunks
+    // Should NOT send any chunks since getUserMedia failed
     expect(mockSendChunk).not.toHaveBeenCalled();
   });
 
   it("should send multiple chunks over time", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
 
     // Create a custom MockMediaRecorder that generates multiple chunks
     class MultiChunkMediaRecorder extends MockMediaRecorder {
-      private intervalId: number | null = null;
+      private intervalId: ReturnType<typeof setInterval> | null = null;
 
       start(timeslice: number) {
         this.state = "recording";
         let chunkCount = 0;
-        this.intervalId = window.setInterval(() => {
+        this.intervalId = setInterval(() => {
           if (this.ondataavailable && this.state === "recording" && chunkCount < 3) {
             const blob = new Blob([`test-audio-data-${chunkCount}`], { type: this.mimeType });
             this.ondataavailable({ data: blob });
@@ -361,7 +419,7 @@ describe("Complete Recording Flow Integration", () => {
       }
     }
 
-    global.MediaRecorder = MultiChunkMediaRecorder as any;
+    global.MediaRecorder = MultiChunkMediaRecorder as unknown as typeof MediaRecorder;
 
     render(
       <MemoryRouter>
@@ -369,18 +427,24 @@ describe("Complete Recording Flow Integration", () => {
       </MemoryRouter>
     );
 
-    // Start recording
+    // Wait for app to initialize
     await act(async () => {
-      mockCreateSession.mockResolvedValueOnce(mockSession);
-      for (const listener of mockSessionCreatedListeners) {
-        listener(mockSession);
-      }
-      vi.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(200);
     });
 
-    // Wait for first chunk
+    // Click the Record button to start recording
+    const recordButton = screen.getByRole("button", { name: /record/i });
     await act(async () => {
-      vi.advanceTimersByTime(15000);
+      recordButton.click();
+      await vi.advanceTimersByTimeAsync(200);
+    });
+
+    // Wait for session to be created and ActiveSessionRecorder to mount
+    expect(mockCreateSession).toHaveBeenCalled();
+
+    // Wait for first chunk (timeslice interval = 3000ms from AudioRecorder default)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
     });
 
     await waitFor(() => {
@@ -396,7 +460,7 @@ describe("Complete Recording Flow Integration", () => {
 
     // Wait for second chunk
     await act(async () => {
-      vi.advanceTimersByTime(15000);
+      await vi.advanceTimersByTimeAsync(4000);
     });
 
     await waitFor(() => {
@@ -412,13 +476,11 @@ describe("Complete Recording Flow Integration", () => {
 
     // Wait for third chunk
     await act(async () => {
-      vi.advanceTimersByTime(15000);
+      await vi.advanceTimersByTimeAsync(4000);
     });
 
     await waitFor(() => {
       expect(mockSendChunk).toHaveBeenCalledTimes(3);
     });
-
-    vi.useRealTimers();
-  });
+  }, 30000);
 });

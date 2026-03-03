@@ -1,5 +1,5 @@
-import { BrowserWindow } from "electron";
 import type { AIProviderService } from "./ai-provider";
+import type { Chirp3Provider } from "./chirp3-provider";
 import {
   insertTranscriptSegment,
   getRecentTranscriptSegments,
@@ -10,24 +10,38 @@ import {
   createActionItem,
 } from "./database-extras";
 import type { TranscriptionResult } from "./ai-provider.types";
+import { broadcastToAllWindows } from "./broadcast";
 
-function broadcastToAllWindows(channel: string, data: unknown): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(channel, data);
-  }
-}
+import {
+  BACKEND_CHIRP3_GEMINI,
+  BACKEND_GEMINI_MULTIMODAL,
+} from "./transcription-backend";
+import type { TranscriptionBackend } from "./transcription-backend";
+
+export { BACKEND_CHIRP3_GEMINI, BACKEND_GEMINI_MULTIMODAL };
+export type { TranscriptionBackend };
 
 const MAX_CONTEXT_SEGMENTS = 10;
+const TIMESLICE_MS = 3000;
 
 export class TranscriptionPipeline {
   private sessionId: string;
   private aiProvider: AIProviderService;
+  private chirp3Provider: Chirp3Provider | null;
+  private transcriptionBackend: TranscriptionBackend;
   private knownSpeakers: Set<string> = new Set();
   private stopped = false;
 
-  constructor(sessionId: string, aiProvider: AIProviderService) {
+  constructor(
+    sessionId: string,
+    aiProvider: AIProviderService,
+    chirp3Provider?: Chirp3Provider | null,
+    transcriptionBackend?: TranscriptionBackend,
+  ) {
     this.sessionId = sessionId;
     this.aiProvider = aiProvider;
+    this.chirp3Provider = chirp3Provider ?? null;
+    this.transcriptionBackend = transcriptionBackend ?? BACKEND_GEMINI_MULTIMODAL;
   }
 
   getSessionId(): string {
@@ -75,6 +89,81 @@ export class TranscriptionPipeline {
 
     const context = this.buildContext();
 
+    if (
+      this.transcriptionBackend === BACKEND_CHIRP3_GEMINI &&
+      this.chirp3Provider?.isConfigured()
+    ) {
+      await this.processWithChirp3(audioData, mimeType, chunkIndex, context);
+    } else {
+      await this.processWithGemini(audioData, mimeType, chunkIndex, context);
+    }
+  }
+
+  // --- Two-Stage Pipeline: Chirp 3 STT → Gemini Analysis ---
+
+  private async processWithChirp3(
+    audioData: Buffer,
+    mimeType: string,
+    chunkIndex: number,
+    context: string,
+  ): Promise<void> {
+    try {
+      // Stage 1: Chirp 3 Speech-to-Text
+      const chirp3Result = await this.callWithRetry(() =>
+        this.chirp3Provider!.recognizeChunk(audioData, mimeType),
+      );
+
+      if (!chirp3Result.transcript.trim()) {
+        console.log(
+          `[Pipeline] Chunk ${chunkIndex}: Chirp 3 returned empty transcript (silence)`,
+        );
+        broadcastToAllWindows("transcription:status", "idle");
+        return;
+      }
+
+      // Apply confidence filtering
+      const filteredWords =
+        this.chirp3Provider!.filterByConfidence(chirp3Result.words);
+      const filteredTranscript = filteredWords.map((w) => w.word).join(" ");
+
+      // Stage 2: Gemini analysis of text
+      const result = await this.callWithRetry(() =>
+        this.aiProvider.analyzeTranscript(
+          filteredTranscript || chirp3Result.transcript,
+          {
+            meetingContext: context,
+            attendees: Array.from(this.knownSpeakers),
+            wordData: filteredWords.map((w) => ({
+              word: w.word,
+              startTime: w.startTime,
+              endTime: w.endTime,
+              confidence: w.confidence,
+            })),
+          },
+        ),
+      );
+
+      this.storeAndBroadcast(result, chunkIndex);
+      broadcastToAllWindows("transcription:status", "idle");
+    } catch (err) {
+      // If Chirp 3 fails, attempt fallback to Gemini multimodal
+      console.warn(
+        `[Pipeline] Chirp 3 failed for chunk ${chunkIndex}, falling back to Gemini multimodal:`,
+        err,
+      );
+      broadcastToAllWindows("transcription:status", "chirp3-fallback");
+      await this.processWithGemini(audioData, mimeType, chunkIndex, context);
+    }
+  }
+
+  // --- Single-Stage Pipeline: Gemini Multimodal (existing behavior) ---
+
+  private async processWithGemini(
+    audioData: Buffer,
+    mimeType: string,
+    chunkIndex: number,
+    context: string,
+  ): Promise<void> {
     let result: TranscriptionResult;
     try {
       result = await this.callWithRetry(() =>
@@ -123,35 +212,34 @@ export class TranscriptionPipeline {
     result: TranscriptionResult,
     chunkIndex: number,
   ): void {
-    // Store transcript segments
-    // Use 3000ms timeslice (matches AudioRecorder default)
-    const TIMESLICE_MS = 3000;
     for (const segment of result.segments) {
       this.knownSpeakers.add(segment.speaker);
+
+      // Use AI-provided timestamps when available, fall back to chunk-boundary estimates
+      const chunkStartMs = chunkIndex * TIMESLICE_MS;
+      const chunkEndMs = (chunkIndex + 1) * TIMESLICE_MS;
 
       insertTranscriptSegment({
         session_id: this.sessionId,
         speaker_name: segment.speaker,
         text: segment.text,
-        start_ms: chunkIndex * TIMESLICE_MS,
-        end_ms: (chunkIndex + 1) * TIMESLICE_MS,
+        start_ms: segment.startMs ?? chunkStartMs,
+        end_ms: segment.endMs ?? chunkEndMs,
         sentiment: segment.sentiment,
         chunk_index: chunkIndex,
       });
     }
 
-    // FIX TOP-007: Store topics to database
     if (result.topics.length > 0) {
       for (const topic of result.topics) {
         createTalkingPoint({
           session_id: this.sessionId,
           topic: topic,
-          first_mentioned_ms: chunkIndex * 5000,
+          first_mentioned_ms: chunkIndex * TIMESLICE_MS,
         });
       }
     }
 
-    // FIX ACT-001: Store action items to database
     if (result.actionItems.length > 0) {
       for (const item of result.actionItems) {
         createActionItem({
@@ -162,17 +250,14 @@ export class TranscriptionPipeline {
       }
     }
 
-    // Save database after all inserts
     saveDatabase();
 
-    // Broadcast events to frontend (include chunkIndex for timestamp calculation)
     broadcastToAllWindows("transcription:newSegments", {
       chunkIndex,
       segments: result.segments,
     });
 
     if (result.topics.length > 0) {
-      // FIX TOP-002: Include sessionId in event payload
       broadcastToAllWindows("transcription:topicsUpdated", {
         sessionId: this.sessionId,
         topics: result.topics,
@@ -180,7 +265,6 @@ export class TranscriptionPipeline {
     }
 
     if (result.actionItems.length > 0) {
-      // FIX ACT-004: Include sessionId in event payload
       broadcastToAllWindows("transcription:actionItemsUpdated", {
         sessionId: this.sessionId,
         actionItems: result.actionItems,
@@ -198,7 +282,6 @@ export class TranscriptionPipeline {
         return await fn();
       } catch (err) {
         lastError = err;
-        // Don't retry auth/config errors - they'll fail every time
         const message = err instanceof Error ? err.message : String(err);
         if (message.includes("API key error") || message.includes("not configured")) {
           console.error(`[TranscriptionPipeline] Non-retryable error: ${message}`);

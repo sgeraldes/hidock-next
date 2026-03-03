@@ -118,7 +118,7 @@ describe("AudioStorage", () => {
   });
 
   describe("pruneOldChunks", () => {
-    it("deletes oldest chunks when exceeding 50 files", () => {
+    it("deletes oldest chunks when exceeding 50 files (skips chunk-000 header)", () => {
       const chunks = Array.from({ length: 52 }, (_, i) =>
         `chunk-${String(i).padStart(3, "0")}.ogg`,
       );
@@ -127,10 +127,8 @@ describe("AudioStorage", () => {
 
       storage.saveChunk(VALID_UUID, 52, Buffer.from([1]));
 
-      expect(mockUnlinkSync).toHaveBeenCalledTimes(2);
-      expect(mockUnlinkSync).toHaveBeenCalledWith(
-        expect.stringContaining("chunk-000.ogg"),
-      );
+      // chunk-000 is protected (contains WebM header), so only chunk-001 is deleted
+      expect(mockUnlinkSync).toHaveBeenCalledTimes(1);
       expect(mockUnlinkSync).toHaveBeenCalledWith(
         expect.stringContaining("chunk-001.ogg"),
       );

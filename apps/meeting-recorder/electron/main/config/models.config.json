@@ -123,6 +123,16 @@
     }
   },
   "contexts": {
+    "default": {
+      "name": "Default",
+      "description": "General purpose analysis - balanced approach",
+      "priority": "quality"
+    },
+    "draft": {
+      "name": "Draft Analysis",
+      "description": "Quick draft analysis - prioritizes speed",
+      "priority": "speed"
+    },
     "realtime": {
       "name": "Real-time Transcription",
       "description": "During active recording - prioritizes speed",
@@ -142,6 +152,16 @@
       "name": "Batch Processing",
       "description": "Processing multiple recordings - prioritizes cost",
       "priority": "cost"
+    },
+    "final": {
+      "name": "Final Quality Analysis",
+      "description": "Final quality analysis with maximum detail",
+      "priority": "quality"
+    },
+    "important": {
+      "name": "High-Importance Analysis",
+      "description": "High-importance analysis requiring top priority",
+      "priority": "quality"
     }
   }
 }

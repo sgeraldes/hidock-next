@@ -59,7 +59,7 @@ describe("RightPanel", () => {
     setupStores(null);
     render(<RightPanel />);
     expect(screen.getByRole("button", { name: /topics/i })).toBeInTheDocument();
-    expect(screen.getByText(/no topics detected yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/no topics yet/i)).toBeInTheDocument();
   });
 
   it("shows topics for the viewing session", () => {

@@ -20,13 +20,6 @@ export type SettingsField =
   | "startMinimized"
   | "closeToTray";
 
-/** Known model contexts from the config */
-export type ModelContext =
-  | "realtime"
-  | "postprocess"
-  | "critical"
-  | "batch";
-
 export interface SettingsState {
   provider: string;
   model: string;              // The default model (ai.model.default)

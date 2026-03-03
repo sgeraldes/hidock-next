@@ -17,6 +17,8 @@ import {
   Calendar
 } from "lucide-react";
 import { useSettingsStore, type SettingsField } from "../store/useSettingsStore";
+import TranscriptionBackendSettings from "../components/settings/TranscriptionBackendSettings";
+import { SettingRow } from "../components/settings/SettingRow";
 
 const SETTING_KEY_MAP: Record<string, string> = {
   provider: "ai.provider",
@@ -46,30 +48,6 @@ interface MeetingTypeItem {
   prompt_template: string | null;
   is_default: number;
   created_at: string;
-}
-
-interface SettingRowProps {
-  icon: React.ElementType;
-  label: string;
-  description: string;
-  control: React.ReactNode;
-}
-
-function SettingRow({ icon: Icon, label, description, control }: SettingRowProps) {
-  return (
-    <div className="flex items-center gap-4 py-3">
-      <div className="w-8 h-8 rounded-full bg-accent/50 flex items-center justify-center shrink-0">
-        <Icon className="w-4 h-4 text-foreground" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium text-foreground">{label}</div>
-        <div className="text-xs text-muted-foreground">{description}</div>
-      </div>
-      <div className="shrink-0">
-        {control}
-      </div>
-    </div>
-  );
 }
 
 interface ToggleSwitchProps {
@@ -420,6 +398,11 @@ export default function Settings() {
                 />
               </div>
             </div>
+          </div>
+
+          {/* Transcription Backend Section */}
+          <div className="bg-card border border-border rounded-lg p-6">
+            <TranscriptionBackendSettings />
           </div>
 
           {/* Recording Section */}

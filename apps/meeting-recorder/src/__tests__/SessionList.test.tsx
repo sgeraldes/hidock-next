@@ -37,7 +37,7 @@ describe("SessionList", () => {
       { id: "abc12345", status: "active", started_at: "2026-01-01T10:00:00Z" },
     ]);
     render(<SessionList />);
-    expect(screen.getByText("abc12345")).toBeInTheDocument();
+    expect(screen.getByText("Session abc12345")).toBeInTheDocument();
   });
 
   it("uses title when available", () => {
@@ -53,7 +53,7 @@ describe("SessionList", () => {
       { id: "abc12345", status: "inactive", started_at: "2026-01-01T10:00:00Z" },
     ]);
     render(<SessionList />);
-    await userEvent.click(screen.getByText("abc12345"));
+    await userEvent.click(screen.getByText("Session abc12345"));
     expect(mockSwitchView).toHaveBeenCalledWith("abc12345");
   });
 
@@ -64,6 +64,6 @@ describe("SessionList", () => {
     );
     render(<SessionList />);
     const button = screen.getByRole("button");
-    expect(button.className).toContain("bg-accent");
+    expect(button.className).toContain("bg-primary/10");
   });
 });

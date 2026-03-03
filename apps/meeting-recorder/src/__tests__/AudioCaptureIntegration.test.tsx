@@ -8,6 +8,7 @@ import { MemoryRouter } from "react-router-dom";
 
 const mockStart = vi.fn().mockResolvedValue(undefined);
 const mockStop = vi.fn();
+const mockStopAndFlush = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("../hooks/useAudioCapture", () => ({
   useAudioCapture: vi.fn(() => ({
@@ -17,6 +18,7 @@ vi.mock("../hooks/useAudioCapture", () => ({
     pendingChunks: 0,
     start: mockStart,
     stop: mockStop,
+    stopAndFlush: mockStopAndFlush,
   })),
 }));
 
@@ -37,6 +39,7 @@ const { mockSettingsState, mockSessionState } = vi.hoisted(() => ({
     micActive: false,
     loading: false,
     error: null as string | null,
+    stopAndFlushRef: null,
     switchView: vi.fn(),
     loadSessions: vi.fn(),
     addSession: vi.fn(),
@@ -45,6 +48,7 @@ const { mockSettingsState, mockSessionState } = vi.hoisted(() => ({
     setMicActive: vi.fn(),
     setLoading: vi.fn(),
     setError: vi.fn(),
+    setStopAndFlushRef: vi.fn(),
   },
 }));
 
@@ -90,7 +94,9 @@ import { useAudioCapture } from "../hooks/useAudioCapture";
 beforeEach(() => {
   mockStart.mockClear();
   mockStop.mockClear();
+  mockStopAndFlush.mockClear();
   mockSessionState.activeSessionId = "active-session-1";
+  mockSessionState.setStopAndFlushRef.mockClear();
   (useAudioCapture as ReturnType<typeof vi.fn>).mockClear();
 });
 

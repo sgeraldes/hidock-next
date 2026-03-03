@@ -18,6 +18,8 @@ export function registerModelHandlers(): void {
     },
   );
 
+  // Returns the config-recommended model for a context (ignores user overrides).
+  // For user-preference-aware resolution, use settings:getModelForContext instead.
   ipcMain.handle("models:getForContext", (_, context: string) => {
     const provider = getSetting("ai.provider") || "google";
     return modelConfig.getModelForContext(provider, context);

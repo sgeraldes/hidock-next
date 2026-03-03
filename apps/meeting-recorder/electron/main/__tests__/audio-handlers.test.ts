@@ -81,6 +81,7 @@ const { mockOnMicStatusChange } = vi.hoisted(() => ({
 vi.mock("../ipc/session-handlers", () => ({
   getSessionManager: vi.fn().mockReturnValue({
     onMicStatusChange: mockOnMicStatusChange,
+    setAudioConcatenation: vi.fn(),
   }),
   registerSessionHandlers: vi.fn(),
 }));
@@ -140,16 +141,18 @@ describe("registerAudioHandlers", () => {
       (c: unknown[]) => c[0] === "audio:chunk",
     );
     const handler = chunkHandler![1];
+    // Use chunkIndex=0 which takes the direct path (no ffmpeg extraction needed)
     const data = new ArrayBuffer(16);
-    handler(makeEvent(), data, "session-1", 2, "audio/webm");
+    handler(makeEvent(), data, "session-1", 0, "audio/webm");
 
-    await Promise.resolve();
+    // Wait for the async pipeline call (isSilent check + processAudioChunk)
+    await new Promise((r) => setTimeout(r, 50));
 
     expect(mockGetPipeline).toHaveBeenCalledWith("session-1");
     expect(mockProcessAudioChunk).toHaveBeenCalledWith(
       expect.any(Buffer),
       "audio/webm",
-      2,
+      0,
     );
   });
 

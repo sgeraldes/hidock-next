@@ -138,13 +138,15 @@ describe("useTranscriptStore", () => {
       expect(state.topics.get("session-1")).toEqual(["budget", "roadmap"]);
     });
 
-    it("replaces existing topics on re-set", () => {
+    it("accumulates topics on re-set (deduplicating)", () => {
       useTranscriptStore.getState().setTopics("session-1", ["old"]);
       useTranscriptStore
         .getState()
         .setTopics("session-1", ["new1", "new2"]);
 
+      // FIX TOP-001: setTopics now accumulates instead of replacing
       expect(useTranscriptStore.getState().topics.get("session-1")).toEqual([
+        "old",
         "new1",
         "new2",
       ]);

@@ -61,9 +61,9 @@ describe("SessionManager", () => {
 
   describe("startSession", () => {
     it("creates a new session in the database", () => {
-      const sessionId = manager.startSession();
+      const session = manager.startSession();
       expect(mockCreateSession).toHaveBeenCalled();
-      expect(sessionId).toBe("session-uuid-1");
+      expect(session).toEqual(expect.objectContaining({ id: "session-uuid-1" }));
     });
 
     it("sets the session as active", () => {

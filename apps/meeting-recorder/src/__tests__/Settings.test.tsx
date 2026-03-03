@@ -71,6 +71,18 @@ beforeEach(() => {
       set: vi.fn().mockResolvedValue(undefined),
       getAll: vi.fn().mockResolvedValue({}),
       testConnection: vi.fn().mockResolvedValue({ valid: true }),
+      getChirp3Config: vi.fn().mockResolvedValue({
+        projectId: "",
+        authType: "api-key",
+        location: "global",
+        languageCode: "en-US",
+        confidenceThreshold: 0.7,
+        hasApiKey: false,
+        hasServiceAccount: false,
+        backend: "gemini-multimodal",
+        isConfigured: false,
+      }),
+      testChirp3Connection: vi.fn().mockResolvedValue({ valid: false, error: "Not configured" }),
     },
     history: {
       search: vi.fn().mockResolvedValue([]),

@@ -1,14 +1,8 @@
-import { BrowserWindow } from "electron";
 import { createSession, updateSession, getAllSessions } from "./database";
 import type { MicStatus } from "./mic-detector";
 import type { Session } from "./database.types";
 import type { AudioConcatenation } from "./audio-concatenation";
-
-function broadcastToAllWindows(channel: string, data: unknown): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(channel, data);
-  }
-}
+import { broadcastToAllWindows } from "./broadcast";
 
 export class SessionManager {
   private activeSessionId: string | null = null;

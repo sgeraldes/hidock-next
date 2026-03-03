@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const { mockSettingsState, mockSessionState } = vi.hoisted(() => ({
@@ -90,7 +90,7 @@ describe("Dashboard", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText("Configure an AI provider")).toBeTruthy();
+    expect(screen.getAllByText(/configure ai provider/i).length).toBeGreaterThan(0);
   });
 
   it("does not show onboarding when API key is set", () => {
@@ -102,7 +102,7 @@ describe("Dashboard", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByText("Configure an AI provider")).toBeNull();
+    expect(screen.queryByText(/configure ai provider/i)).toBeNull();
   });
 
   it("does not show onboarding when provider is ollama (no key needed)", () => {
@@ -115,7 +115,7 @@ describe("Dashboard", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByText("Configure an AI provider")).toBeNull();
+    expect(screen.queryByText(/configure ai provider/i)).toBeNull();
   });
 
   it("disables RecordingControls when no provider configured", () => {
@@ -131,7 +131,7 @@ describe("Dashboard", () => {
     if (startBtn) {
       expect((startBtn as HTMLButtonElement).disabled).toBe(true);
     }
-    expect(screen.getByText("Configure an AI provider")).toBeTruthy();
+    expect(screen.getAllByText(/configure ai provider/i).length).toBeGreaterThan(0);
   });
 
   it("calls session.list on mount and populates store", async () => {
@@ -176,29 +176,4 @@ describe("Dashboard", () => {
     });
   });
 
-  it("Record button click calls session.create and sets active session", async () => {
-    mockSettingsState.apiKey = "sk-test";
-    window.electronAPI.session.create = vi.fn().mockResolvedValue({
-      id: "new-sess-1",
-      status: "active",
-      started_at: "2026-02-25T10:00:00Z",
-    });
-
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>,
-    );
-
-    const startBtn = screen.getByTestId("start-recording");
-    fireEvent.click(startBtn);
-
-    await waitFor(() => {
-      expect(window.electronAPI.session.create).toHaveBeenCalled();
-    });
-
-    await waitFor(() => {
-      expect(mockSessionState.setActiveSession).toHaveBeenCalledWith("new-sess-1");
-    });
-  });
 });

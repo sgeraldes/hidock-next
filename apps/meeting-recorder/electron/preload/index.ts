@@ -223,6 +223,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     testConnection: () => ipcRenderer.invoke("settings:testConnection"),
     getModelForContext: (context: string) =>
       ipcRenderer.invoke("settings:getModelForContext", context),
+    getChirp3Config: () => ipcRenderer.invoke("settings:getChirp3Config"),
+    testChirp3Connection: () =>
+      ipcRenderer.invoke("settings:testChirp3Connection"),
   },
 
   history: {

@@ -95,7 +95,7 @@ describe("TranscriptPanel", () => {
 
   it("shows empty state when no segments", () => {
     render(<TranscriptPanel segments={[]} />);
-    expect(screen.getByText(/waiting for audio/i)).toBeInTheDocument();
+    expect(screen.getByText(/ready to record/i)).toBeInTheDocument();
   });
 
   it("shows onboarding prompt when provider not configured", () => {
@@ -105,7 +105,7 @@ describe("TranscriptPanel", () => {
       </MemoryRouter>,
     );
     expect(
-      screen.getByText(/configure an AI provider/i),
+      screen.getByText(/configure AI provider/i),
     ).toBeInTheDocument();
   });
 

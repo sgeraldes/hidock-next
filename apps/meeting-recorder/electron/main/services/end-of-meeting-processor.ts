@@ -1,5 +1,4 @@
 import { generateObject, type LanguageModel } from "ai";
-import { BrowserWindow } from "electron";
 import { EndOfMeetingResultSchema } from "./ai-schemas";
 import { buildEndOfMeetingPrompt } from "./ai-prompts";
 import {
@@ -15,12 +14,7 @@ import type {
   MeetingType,
 } from "./database.types";
 import type { EndOfMeetingResult } from "./ai-provider.types";
-
-function broadcastToAllWindows(channel: string, data: unknown): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send(channel, data);
-  }
-}
+import { broadcastToAllWindows } from "./broadcast";
 
 function buildTranscriptText(segments: TranscriptSegment[]): string {
   return segments

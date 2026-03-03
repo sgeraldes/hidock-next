@@ -52,7 +52,7 @@ describe("MeetingTypeEditor", () => {
     expect(screen.getByText("Daily standup")).toBeTruthy();
   });
 
-  it("renders the create form with name input", () => {
+  it("renders the create form with name input after clicking the create button", () => {
     render(
       <MeetingTypeEditor
         meetingTypes={mockTypes}
@@ -60,7 +60,10 @@ describe("MeetingTypeEditor", () => {
       />,
     );
 
-    expect(screen.getByPlaceholderText("Type name")).toBeTruthy();
+    // The form is hidden until the user clicks "Create custom meeting type"
+    fireEvent.click(screen.getByText("Create custom meeting type"));
+
+    expect(screen.getByPlaceholderText("Name")).toBeTruthy();
   });
 
   it("calls onCreate with form data when submitted", async () => {
@@ -73,17 +76,20 @@ describe("MeetingTypeEditor", () => {
       />,
     );
 
-    fireEvent.change(screen.getByPlaceholderText("Type name"), {
+    // Open the create form first
+    fireEvent.click(screen.getByText("Create custom meeting type"));
+
+    fireEvent.change(screen.getByPlaceholderText("Name"), {
       target: { value: "Retrospective" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Description (optional)"), {
+    fireEvent.change(screen.getByPlaceholderText("Description"), {
       target: { value: "Sprint retrospective" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Prompt template (optional)"), {
+    fireEvent.change(screen.getByPlaceholderText("Focus on sprint goals, capacity planning, and task breakdown..."), {
       target: { value: "Summarize the retro." },
     });
 
-    fireEvent.click(screen.getByText("Create"));
+    fireEvent.click(screen.getByText("Create meeting type"));
 
     await waitFor(() => {
       expect(onCreate).toHaveBeenCalledWith({
@@ -104,7 +110,14 @@ describe("MeetingTypeEditor", () => {
       />,
     );
 
-    fireEvent.click(screen.getByText("Create"));
+    // Open the create form first
+    fireEvent.click(screen.getByText("Create custom meeting type"));
+
+    // The "Create meeting type" button is disabled when name is empty
+    const createButton = screen.getByText("Create meeting type");
+    expect(createButton.closest("button")).toBeTruthy();
+    // Disabled attribute prevents the click from triggering handleCreate
+    expect((createButton.closest("button") as HTMLButtonElement).disabled).toBe(true);
 
     expect(onCreate).not.toHaveBeenCalled();
   });
@@ -119,16 +132,21 @@ describe("MeetingTypeEditor", () => {
       />,
     );
 
-    const nameInput = screen.getByPlaceholderText("Type name") as HTMLInputElement;
-    fireEvent.change(nameInput, { target: { value: "Retro" } });
-    fireEvent.click(screen.getByText("Create"));
+    // Open the create form first
+    fireEvent.click(screen.getByText("Create custom meeting type"));
 
+    const nameInput = screen.getByPlaceholderText("Name") as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "Retro" } });
+    fireEvent.click(screen.getByText("Create meeting type"));
+
+    // After creation the form is hidden (showCreateForm = false), so the button
+    // to open it reappears — which confirms the form was reset and closed.
     await waitFor(() => {
-      expect(nameInput.value).toBe("");
+      expect(screen.getByText("Create custom meeting type")).toBeTruthy();
     });
   });
 
-  it("renders empty state when no meeting types", () => {
+  it("renders the create button when no meeting types exist", () => {
     render(
       <MeetingTypeEditor
         meetingTypes={[]}
@@ -136,7 +154,9 @@ describe("MeetingTypeEditor", () => {
       />,
     );
 
-    expect(screen.getByText(/no custom meeting types/i)).toBeTruthy();
+    // The component always shows the "Create custom meeting type" button
+    // when the form is not open, regardless of whether types exist.
+    expect(screen.getByText("Create custom meeting type")).toBeTruthy();
   });
 
   it("shows default badge for default types", () => {

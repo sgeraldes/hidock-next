@@ -15,11 +15,15 @@ describe('electron.vite.config', () => {
 
   it('electron main entry point exists', () => {
     const mainEntry = resolve(__dirname, '../../electron/main/index.ts')
-    expect(mainEntry).toContain('electron/main/index.ts')
+    // Normalize separators for cross-platform compatibility
+    const normalized = mainEntry.replace(/\\/g, '/')
+    expect(normalized).toContain('electron/main/index.ts')
   })
 
   it('src entry point path convention is correct', () => {
     const srcEntry = resolve(__dirname, '../../src/index.html')
-    expect(srcEntry).toContain('src/index.html')
+    // Normalize separators for cross-platform compatibility
+    const normalized = srcEntry.replace(/\\/g, '/')
+    expect(normalized).toContain('src/index.html')
   })
 })
