@@ -209,10 +209,16 @@ export function Chat() {
     }
   }, [location.state, loadRecordingContext])
 
-  // Auto-scroll to bottom
+  // AUD3-001: Auto-scroll only when a new message is added, not on filter changes.
+  // Tracking messages.length prevents scroll-to-bottom when the user filters messages.
+  const prevMessageCountRef = useRef(messages.length)
   useEffect(() => {
-    scrollToBottom()
-  }, [messages])
+    if (messages.length > prevMessageCountRef.current) {
+      // New message added - scroll to bottom
+      scrollToBottom()
+    }
+    prevMessageCountRef.current = messages.length
+  }, [messages.length])
 
   // Auto-focus input on mount and when active conversation changes
   useEffect(() => {

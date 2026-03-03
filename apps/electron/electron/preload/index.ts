@@ -325,7 +325,7 @@ export interface ElectronAPI {
     clearCompleted: () => Promise<void>
     cancel: (filename: string) => Promise<{ success: boolean; error?: string }>
     cancelAll: () => Promise<void>
-    retryFailed: () => Promise<number>
+    retryFailed: (deviceConnected?: boolean) => Promise<{ count: number; error?: string }>
     getStats: () => Promise<{ totalSynced: number; pendingInQueue: number; failedInQueue: number }>
     checkStalled: () => Promise<number>
     cancelActive: (reason?: string) => Promise<number>
@@ -631,7 +631,7 @@ const electronAPI: ElectronAPI = {
     clearCompleted: () => callIPC('download-service:clear-completed'),
     cancel: (filename) => callIPC('download-service:cancel', filename),
     cancelAll: () => callIPC('download-service:cancel-all'),
-    retryFailed: () => callIPC('download-service:retry-failed'),
+    retryFailed: (deviceConnected?: boolean) => callIPC('download-service:retry-failed', deviceConnected),
     getStats: () => callIPC('download-service:get-stats'),
     checkStalled: () => callIPC('download-service:check-stalled'),
     cancelActive: (reason?: string) => callIPC('download-service:cancel-active', reason),
