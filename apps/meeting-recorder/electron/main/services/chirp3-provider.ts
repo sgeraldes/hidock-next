@@ -5,6 +5,7 @@ import type {
   Chirp3Result,
   Chirp3Word,
 } from "./chirp3-provider.types";
+import { getSetting } from "./database-extras";
 
 /** Factory type for creating SpeechClient instances (enables testing). */
 export type SpeechClientFactory = () => { SpeechClient: new (opts?: unknown) => unknown };
@@ -76,6 +77,7 @@ export class Chirp3Provider {
   async recognizeChunk(
     audioData: Buffer,
     mimeType: string,
+    sessionId?: string,
   ): Promise<Chirp3Result> {
     if (!this.client || !this.configured) {
       throw new Error("Chirp3Provider not configured");
@@ -97,7 +99,22 @@ export class Chirp3Provider {
       },
     };
 
+    // Performance monitoring: measure API call time
+    const apiStartTime = performance.now();
     const [response] = await this.client.recognize(request);
+    const apiEndTime = performance.now();
+
+    // Log timing if QA is enabled and we have a session ID
+    if (sessionId) {
+      const qaEnabled = getSetting('ui.qaLogsEnabled') === 'true';
+      if (qaEnabled) {
+        const duration = apiEndTime - apiStartTime;
+        console.log(
+          `[QA-MONITOR] [Perf] Chirp3 API call: ${duration.toFixed(1)}ms (session: ${sessionId})`
+        );
+      }
+    }
+
     return this.mapResponse(response);
   }
 
@@ -123,7 +140,12 @@ export class Chirp3Provider {
     threshold?: number,
   ): Chirp3Word[] {
     const t = threshold ?? this.confidenceThreshold;
-    return words.filter((w) => w.confidence >= t);
+    const filtered = words.filter((w) => w.confidence >= t);
+
+    // Log filtering statistics if QA logs are enabled
+    this.logFilteringStats(words, filtered, t);
+
+    return filtered;
   }
 
   buildFilteredTranscript(
@@ -155,6 +177,47 @@ export class Chirp3Provider {
   }
 
   // --- Private helpers ---
+
+  private logFilteringStats(
+    allWords: Chirp3Word[],
+    filteredWords: Chirp3Word[],
+    threshold: number,
+  ): void {
+    const qaEnabled = getSetting("ui.qaLogsEnabled") === "true";
+    if (!qaEnabled) return;
+
+    const totalWords = allWords.length;
+    const keptWords = filteredWords.length;
+    const removedWords = totalWords - keptWords;
+    const removedPercentage =
+      totalWords > 0 ? ((removedWords / totalWords) * 100).toFixed(1) : "0.0";
+
+    const stats = this.calculateConfidenceStats(filteredWords);
+
+    console.log(
+      `[QA-MONITOR] Chirp3 confidence filtering: ${totalWords} words → ${keptWords} kept, ` +
+        `${removedWords} removed (${removedPercentage}%), ` +
+        `threshold=${(threshold * 100).toFixed(0)}%, ` +
+        `min=${(stats.min * 100).toFixed(0)}% max=${(stats.max * 100).toFixed(0)}% mean=${(stats.mean * 100).toFixed(0)}%`,
+    );
+  }
+
+  private calculateConfidenceStats(words: Chirp3Word[]): {
+    min: number;
+    max: number;
+    mean: number;
+  } {
+    if (words.length === 0) {
+      return { min: 0, max: 0, mean: 0 };
+    }
+
+    const confidences = words.map((w) => w.confidence);
+    const min = Math.min(...confidences);
+    const max = Math.max(...confidences);
+    const mean = confidences.reduce((sum, c) => sum + c, 0) / confidences.length;
+
+    return { min, max, mean };
+  }
 
   private mapEncoding(mimeType: string): string {
     const base = mimeType.split(";")[0].trim();
