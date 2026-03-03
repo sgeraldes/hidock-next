@@ -299,17 +299,23 @@ export function useDownloadOrchestrator() {
     // Subscribe to download service state updates
     const unsubDownloads = isElectron
       ? window.electronAPI.downloadService.onStateUpdate((state) => {
+          // Sync renderer queue with main process state
+          const rendererQueue = useAppStore.getState().downloadQueue
+          for (const item of state.queue) {
+            if ((item.status === 'pending' || item.status === 'downloading') && !rendererQueue.has(item.filename)) {
+              useAppStore.getState().addToDownloadQueue(item.filename, item.filename, item.fileSize || 0)
+            }
+          }
+          for (const [key] of rendererQueue) {
+            const mainItem = state.queue.find((i: DownloadQueueItem) => i.filename === key)
+            if (!mainItem || mainItem.status === 'completed' || mainItem.status === 'failed' || mainItem.status === 'cancelled') {
+              useAppStore.getState().removeFromDownloadQueue(key)
+            }
+          }
+
           if (_cancelEpoch > _lastProcessedEpoch) {
             _lastProcessedEpoch = _cancelEpoch
             return
-          }
-
-          // Reconcile renderer queue with main process state: remove cancelled items
-          for (const [key] of useAppStore.getState().downloadQueue) {
-            const mainItem = state.queue.find((i: DownloadQueueItem) => i.filename === key)
-            if (mainItem && mainItem.status === 'cancelled') {
-              useAppStore.getState().removeFromDownloadQueue(key)
-            }
           }
 
           const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
