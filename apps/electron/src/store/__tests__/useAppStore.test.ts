@@ -274,6 +274,144 @@ describe('useAppStore', () => {
 
       expect(useAppStore.getState().activityLog).toEqual([])
     })
+
+    // spec-002: Batch activity log tests
+    it('addActivityLogBatch adds multiple new entries in single update', () => {
+      const { addActivityLogBatch } = useAppStore.getState()
+
+      const entries = [
+        { timestamp: new Date('2026-03-03T10:00:00Z'), message: 'Log 1', type: 'info' as const },
+        { timestamp: new Date('2026-03-03T10:00:01Z'), message: 'Log 2', type: 'info' as const },
+        { timestamp: new Date('2026-03-03T10:00:02Z'), message: 'Log 3', type: 'info' as const }
+      ]
+
+      addActivityLogBatch(entries)
+
+      const log = useAppStore.getState().activityLog
+      expect(log).toHaveLength(3)
+      expect(log[0].message).toBe('Log 1')
+      expect(log[2].message).toBe('Log 3')
+    })
+
+    it('addActivityLogBatch filters out duplicate entries', () => {
+      const { addActivityLogEntry, addActivityLogBatch } = useAppStore.getState()
+
+      const entry1 = {
+        timestamp: new Date('2026-03-03T10:00:00Z'),
+        message: 'Duplicate Log',
+        type: 'info' as const
+      }
+
+      addActivityLogEntry(entry1)
+      expect(useAppStore.getState().activityLog).toHaveLength(1)
+
+      // Attempt to add same entry again via batch
+      addActivityLogBatch([entry1])
+
+      expect(useAppStore.getState().activityLog).toHaveLength(1)  // Still 1, not 2
+    })
+
+    it('addActivityLogBatch adds only non-duplicate entries', () => {
+      const { addActivityLogEntry, addActivityLogBatch } = useAppStore.getState()
+
+      const existing = {
+        timestamp: new Date('2026-03-03T10:00:00Z'),
+        message: 'Existing',
+        type: 'info' as const
+      }
+
+      addActivityLogEntry(existing)
+
+      const batch = [
+        existing,  // Duplicate
+        { timestamp: new Date('2026-03-03T10:00:01Z'), message: 'New 1', type: 'info' as const },
+        { timestamp: new Date('2026-03-03T10:00:02Z'), message: 'New 2', type: 'info' as const }
+      ]
+
+      addActivityLogBatch(batch)
+
+      const log = useAppStore.getState().activityLog
+      expect(log).toHaveLength(3)  // 1 existing + 2 new
+      expect(log[1].message).toBe('New 1')
+    })
+
+    it('addActivityLogBatch enforces MAX_LOG_ENTRIES limit', () => {
+      const { addActivityLogBatch } = useAppStore.getState()
+
+      // Fill store with 100 entries (use milliseconds to avoid duplicate timestamps)
+      const oldEntries = Array.from({ length: 100 }, (_, i) => ({
+        timestamp: new Date(2026, 2, 3, 10, 0, 0, i),  // Use milliseconds for uniqueness
+        message: `Old ${i}`,
+        type: 'info' as const
+      }))
+
+      addActivityLogBatch(oldEntries)
+      expect(useAppStore.getState().activityLog).toHaveLength(100)
+
+      // Add 10 more entries
+      const newEntries = Array.from({ length: 10 }, (_, i) => ({
+        timestamp: new Date(2026, 2, 3, 11, 0, 0, i),  // Use milliseconds for uniqueness
+        message: `New ${i}`,
+        type: 'info' as const
+      }))
+
+      addActivityLogBatch(newEntries)
+
+      const log = useAppStore.getState().activityLog
+      expect(log).toHaveLength(100)  // Still 100
+      expect(log[0].message).toBe('Old 10')  // Oldest 10 dropped
+      expect(log[99].message).toBe('New 9')  // Newest kept
+    })
+
+    it('addActivityLogBatch handles empty array gracefully', () => {
+      const { addActivityLogBatch } = useAppStore.getState()
+
+      addActivityLogBatch([])
+
+      expect(useAppStore.getState().activityLog).toHaveLength(0)  // No crash, no-op
+    })
+
+    it('addActivityLogBatch triggers only one store update', () => {
+      let renderCount = 0
+      const unsubscribe = useAppStore.subscribe(() => {
+        renderCount++
+      })
+
+      const entries = Array.from({ length: 50 }, (_, i) => ({
+        timestamp: new Date(`2026-03-03T10:00:${String(i).padStart(2, '0')}Z`),
+        message: `Log ${i}`,
+        type: 'info' as const
+      }))
+
+      useAppStore.getState().addActivityLogBatch(entries)
+
+      // Should only trigger one state update for entire batch, not 50 times
+      expect(renderCount).toBe(1)
+
+      unsubscribe()
+    })
+
+    it('addActivityLogBatch skips malformed entries gracefully', () => {
+      const { addActivityLogBatch } = useAppStore.getState()
+
+      const batch = [
+        null,  // Invalid: null entry
+        undefined,  // Invalid: undefined entry
+        { timestamp: 'not-a-date', message: 'Test' },  // Invalid: string timestamp
+        { timestamp: new Date(), message: null },  // Invalid: null message
+        { timestamp: new Date(NaN), message: 'Invalid Date' },  // Invalid: NaN Date
+        { timestamp: new Date('2026-03-03T10:00:00Z'), message: 'Valid 1', type: 'info' as const },  // Valid
+        { timestamp: new Date('2026-03-03T10:00:01Z'), message: 'Valid 2', type: 'info' as const }   // Valid
+      ]
+
+      addActivityLogBatch(batch as any)
+
+      // Should only add the 2 valid entries
+      const log = useAppStore.getState().activityLog
+      expect(log).toHaveLength(2)
+      expect(log[0].message).toBe('Valid 1')
+      expect(log[1].message).toBe('Valid 2')
+    })
   })
 
   describe('Device Sync State', () => {

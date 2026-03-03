@@ -81,6 +81,7 @@ interface AppState {
   setDeviceState: (state: HiDockDeviceState) => void
   setConnectionStatus: (status: ConnectionStatus) => void
   addActivityLogEntry: (entry: ActivityLogEntry) => void
+  addActivityLogBatch: (entries: ActivityLogEntry[]) => void
   clearActivityLog: () => void
 
   // Device sync actions
@@ -237,6 +238,43 @@ export const useAppStore = create<AppState>((set, get) => ({
     const MAX_LOG_ENTRIES = 100
     const newLog = [...state.activityLog, entry]
     return { activityLog: newLog.slice(-MAX_LOG_ENTRIES) }
+  }),
+  addActivityLogBatch: (entries) => set((state) => {
+    // Handle empty array case
+    if (!entries || entries.length === 0) {
+      return state  // No-op, don't trigger re-render
+    }
+
+    const MAX_LOG_ENTRIES = 100
+
+    // Build deduplication set from existing logs (defensive: handle undefined state)
+    const existingKeys = new Set(
+      (state.activityLog || []).map(log =>
+        `${log.timestamp.getTime()}-${log.message}`
+      )
+    )
+
+    // Filter out duplicates and invalid entries from incoming batch
+    const newEntries = entries.filter(entry => {
+      // CRITICAL FIX: Validate entry has required fields
+      if (!entry?.timestamp || !entry?.message) return false
+      if (!(entry.timestamp instanceof Date)) return false
+      if (isNaN(entry.timestamp.getTime())) return false
+
+      const key = `${entry.timestamp.getTime()}-${entry.message}`
+      return !existingKeys.has(key)
+    })
+
+    // If all entries are duplicates or invalid, don't update
+    if (newEntries.length === 0) {
+      return state
+    }
+
+    // Combine and enforce max limit (keep most recent)
+    const combinedLog = [...(state.activityLog || []), ...newEntries]
+    return {
+      activityLog: combinedLog.slice(-MAX_LOG_ENTRIES)
+    }
   }),
   clearActivityLog: () => set({ activityLog: [] }),
 
