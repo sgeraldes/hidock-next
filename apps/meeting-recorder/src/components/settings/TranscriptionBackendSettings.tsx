@@ -257,20 +257,33 @@ export default function TranscriptionBackendSettings() {
           <SettingRow
             icon={SlidersHorizontal}
             label="Confidence threshold"
-            description="Minimum word confidence (0.0-1.0). Lower values include more words"
+            description="Lower thresholds include more words (even with lower confidence); higher thresholds only include highly confident words"
             control={
-              <input
-                type="number"
-                value={confidenceThreshold}
-                onChange={(e) => {
-                  setConfidenceThreshold(e.target.value);
-                  saveSetting("ai.chirp3.confidenceThreshold", e.target.value);
-                }}
-                className={INPUT_CLASS}
-                min="0"
-                max="1"
-                step="0.05"
-              />
+              <div className="flex items-center gap-4 w-full max-w-sm">
+                <div className="flex-1">
+                  <input
+                    type="range"
+                    min="50"
+                    max="100"
+                    step="5"
+                    value={Math.round(parseFloat(confidenceThreshold) * 100)}
+                    onChange={(e) => {
+                      const percentValue = parseInt(e.target.value, 10);
+                      const decimalValue = (percentValue / 100).toFixed(2);
+                      setConfidenceThreshold(decimalValue);
+                      saveSetting("ai.chirp3.confidenceThreshold", decimalValue);
+                    }}
+                    aria-label="Confidence threshold percentage"
+                    aria-valuenow={Math.round(parseFloat(confidenceThreshold) * 100)}
+                    aria-valuemin={50}
+                    aria-valuemax={100}
+                    className="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900"
+                  />
+                </div>
+                <div className="text-sm font-semibold text-foreground min-w-[3rem] text-right">
+                  {Math.round(parseFloat(confidenceThreshold) * 100)}%
+                </div>
+              </div>
             }
           />
 

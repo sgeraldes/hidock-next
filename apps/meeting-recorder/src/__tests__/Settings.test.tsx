@@ -243,4 +243,130 @@ describe("Settings", () => {
       expect(screen.getByText("Chunk interval")).toBeTruthy();
     });
   });
+
+  it("does not render confidence threshold slider when backend is not Chirp3", async () => {
+    window.electronAPI.settings.getChirp3Config = vi.fn().mockResolvedValue({
+      backend: "gemini-multimodal",
+      confidenceThreshold: 0.7,
+    });
+
+    render(
+      <MemoryRouter>
+        <Settings />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("AI Configuration")).toBeTruthy();
+    });
+
+    // Confidence threshold should not be visible
+    expect(screen.queryByLabelText(/confidence threshold/i)).toBeNull();
+  });
+
+  it("renders confidence threshold slider when backend is Chirp3", async () => {
+    window.electronAPI.settings.getChirp3Config = vi.fn().mockResolvedValue({
+      backend: "chirp3+gemini",
+      projectId: "test-project",
+      authType: "api-key",
+      location: "global",
+      languageCode: "en-US",
+      confidenceThreshold: 0.7,
+      hasApiKey: true,
+      hasServiceAccount: false,
+      isConfigured: true,
+    });
+
+    render(
+      <MemoryRouter>
+        <Settings />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Confidence threshold")).toBeTruthy();
+      const slider = screen.getByLabelText(/confidence threshold percentage/i);
+      expect(slider).toBeTruthy();
+      expect(slider.getAttribute("type")).toBe("range");
+    });
+  });
+
+  it("displays confidence threshold as percentage", async () => {
+    window.electronAPI.settings.getChirp3Config = vi.fn().mockResolvedValue({
+      backend: "chirp3+gemini",
+      confidenceThreshold: 0.7,
+      projectId: "test-project",
+      authType: "api-key",
+      location: "global",
+      languageCode: "en-US",
+      hasApiKey: true,
+      hasServiceAccount: false,
+      isConfigured: true,
+    });
+
+    render(
+      <MemoryRouter>
+        <Settings />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("70%")).toBeTruthy();
+    });
+  });
+
+  it("saves confidence threshold when slider is changed", async () => {
+    window.electronAPI.settings.getChirp3Config = vi.fn().mockResolvedValue({
+      backend: "chirp3+gemini",
+      confidenceThreshold: 0.7,
+      projectId: "test-project",
+      authType: "api-key",
+      location: "global",
+      languageCode: "en-US",
+      hasApiKey: true,
+      hasServiceAccount: false,
+      isConfigured: true,
+    });
+
+    const setSpy = vi.spyOn(window.electronAPI.settings, "set");
+
+    render(
+      <MemoryRouter>
+        <Settings />
+      </MemoryRouter>,
+    );
+
+    const slider = await screen.findByLabelText(/confidence threshold percentage/i);
+    fireEvent.change(slider, { target: { value: "80" } });
+
+    await waitFor(() => {
+      expect(setSpy).toHaveBeenCalledWith("ai.chirp3.confidenceThreshold", "0.80");
+    });
+  });
+
+  it("enforces slider range constraints (50-100%, step 5%)", async () => {
+    window.electronAPI.settings.getChirp3Config = vi.fn().mockResolvedValue({
+      backend: "chirp3+gemini",
+      confidenceThreshold: 0.7,
+      projectId: "test-project",
+      authType: "api-key",
+      location: "global",
+      languageCode: "en-US",
+      hasApiKey: true,
+      hasServiceAccount: false,
+      isConfigured: true,
+    });
+
+    render(
+      <MemoryRouter>
+        <Settings />
+      </MemoryRouter>,
+    );
+
+    const slider = await screen.findByLabelText(/confidence threshold percentage/i);
+
+    expect(slider.getAttribute("min")).toBe("50");
+    expect(slider.getAttribute("max")).toBe("100");
+    expect(slider.getAttribute("step")).toBe("5");
+  });
 });
