@@ -8,7 +8,7 @@ import ffmpegPath from "ffmpeg-static";
 import { AudioStorage } from "../services/audio-storage";
 import { AudioConcatenation } from "../services/audio-concatenation";
 import { MicDetector, MicStatus } from "../services/mic-detector";
-import { getSetting, updateSession } from "../services/database";
+import { getSetting, updateSession, getSession } from "../services/database";
 import { getPipeline } from "./transcription-handlers";
 import { getSessionManager } from "./session-handlers";
 import { PerformanceMonitor } from "../services/performance-monitor";
@@ -295,11 +295,9 @@ export function registerAudioHandlers(): void {
   ipcMain.handle("audio:getPath", async (_, sessionId: string) => {
     try {
       // First check if session already has audio_path stored
-      const { getSession } = await import("../services/database-queries");
       const session = getSession(sessionId);
 
       if (session?.audio_path) {
-        const { existsSync } = await import("fs");
         // Return existing path if file still exists
         if (existsSync(session.audio_path)) {
           return session.audio_path;
@@ -323,8 +321,6 @@ export function registerAudioHandlers(): void {
   // Electron blocks file:// URLs in the renderer, so we serve audio data via IPC
   ipcMain.handle("audio:readFile", async (_, sessionId: string) => {
     try {
-      const { getSession } = await import("../services/database-queries");
-      const { readFileSync, existsSync } = await import("fs");
       const session = getSession(sessionId);
 
       let audioPath = session?.audio_path;

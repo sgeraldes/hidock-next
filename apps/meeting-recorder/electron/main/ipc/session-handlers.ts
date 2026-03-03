@@ -6,9 +6,10 @@ import {
   hideControlBar,
   setMainWindowAlwaysOnTop,
 } from "../services/window-manager";
-import { startPipeline, stopPipeline } from "./transcription-handlers";
+import { startPipeline, stopPipeline, getPipeline } from "./transcription-handlers";
 import { clearSessionInitSegment, markSessionStopped } from "./audio-handlers";
-import { existsSync } from "fs";
+import { existsSync, readFileSync, readdirSync } from "fs";
+import { join } from "path";
 import { AudioStorage } from "../services/audio-storage";
 
 let sessionManager: SessionManager;
@@ -143,10 +144,8 @@ export function registerSessionHandlers(): void {
       if (session.audio_path && existsSync(session.audio_path)) {
         // Start a new pipeline and feed it the saved audio
         startPipeline(sessionId);
-        const { getPipeline } = await import("./transcription-handlers");
         const pipeline = getPipeline(sessionId);
         if (pipeline) {
-          const { readFileSync } = await import("fs");
           const audioBuffer = readFileSync(session.audio_path);
           // Process the entire file as a single chunk (chunk index 0)
           await pipeline.processAudioChunk(audioBuffer, "audio/ogg", 0);
@@ -158,11 +157,8 @@ export function registerSessionHandlers(): void {
         const sessionDir = storage.getSessionDir(sessionId);
         if (existsSync(sessionDir)) {
           startPipeline(sessionId);
-          const { getPipeline } = await import("./transcription-handlers");
           const pipeline = getPipeline(sessionId);
           if (pipeline) {
-            const { readdirSync, readFileSync } = await import("fs");
-            const { join } = await import("path");
             const chunks = readdirSync(sessionDir)
               .filter((f: string) => f.startsWith("chunk-"))
               .sort();
