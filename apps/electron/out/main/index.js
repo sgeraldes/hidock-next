@@ -434,7 +434,7 @@ function readRecordingFile(filePath) {
 }
 let db = null;
 let dbPath = "";
-const SCHEMA_VERSION = 20;
+const SCHEMA_VERSION = 21;
 const SCHEMA = `
 -- Calendar events from ICS
 CREATE TABLE IF NOT EXISTS meetings (
@@ -1458,6 +1458,43 @@ const MIGRATIONS = {
       console.warn("[Migration v20] download_queue table creation failed:", e);
     }
     console.log("Migration v20 complete: Phase A consolidated fixes applied");
+  },
+  21: () => {
+    console.log("Running migration to schema v21: Backfilling meeting_id in knowledge_captures");
+    const database2 = getDatabase();
+    try {
+      const sql = `
+        UPDATE knowledge_captures
+        SET meeting_id = (
+          SELECT r.meeting_id
+          FROM recordings r
+          WHERE r.id = knowledge_captures.source_recording_id
+          AND r.meeting_id IS NOT NULL
+        ),
+        correlation_method = COALESCE(correlation_method, 'recording_migration'),
+        correlation_confidence = COALESCE(correlation_confidence, 1.0),
+        updated_at = CURRENT_TIMESTAMP
+        WHERE meeting_id IS NULL
+          AND source_recording_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM recordings r
+            WHERE r.id = knowledge_captures.source_recording_id
+            AND r.meeting_id IS NOT NULL
+          )
+      `;
+      database2.run(sql);
+      const updated = database2.exec(`
+        SELECT COUNT(*) as count
+        FROM knowledge_captures
+        WHERE meeting_id IS NOT NULL
+          AND correlation_method = 'recording_migration'
+      `);
+      const count = updated.length > 0 && updated[0].values.length > 0 ? updated[0].values[0][0] : 0;
+      console.log(`[Migration v21] Backfilled meeting_id for ${count} knowledge captures`);
+    } catch (e) {
+      console.warn("[Migration v21] Failed to backfill meeting_id:", e);
+    }
+    console.log("Migration v21 complete: meeting_id backfill applied");
   }
 };
 function runMigrations(currentVersion) {
@@ -1963,6 +2000,16 @@ function linkRecordingToMeeting(recordingId, meetingId, confidence, method) {
     `UPDATE recordings SET meeting_id = ?, correlation_confidence = ?, correlation_method = ? WHERE id = ?`,
     [meetingId, confidence, method, recordingId]
   );
+  run(
+    `UPDATE knowledge_captures
+     SET meeting_id = ?,
+         correlation_confidence = ?,
+         correlation_method = ?,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE source_recording_id = ?
+       AND (meeting_id IS NULL OR meeting_id != ?)`,
+    [meetingId, confidence, method, recordingId, meetingId]
+  );
 }
 function getTranscriptByRecordingId(recordingId) {
   return queryOne("SELECT * FROM transcripts WHERE recording_id = ?", [recordingId]);
@@ -2333,6 +2380,16 @@ function getPersonIdsForProject(projectId) {
   );
   return rows.map((r) => r.contact_id);
 }
+function getTopicsForProjectMeetings(projectId) {
+  const rows = queryAll(
+    `SELECT t.topics FROM transcripts t
+     JOIN recordings r ON t.recording_id = r.id
+     JOIN meeting_projects mp ON r.meeting_id = mp.meeting_id
+     WHERE mp.project_id = ? AND t.topics IS NOT NULL`,
+    [projectId]
+  );
+  return rows.map((r) => r.topics);
+}
 function findCandidateMeetingsForRecording(recordingId) {
   const recording = getRecordingById(recordingId);
   if (!recording) return [];
@@ -2580,6 +2637,7 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   getRecordingsForMeeting,
   getSyncedFile,
   getSyncedFilenames,
+  getTopicsForProjectMeetings,
   getTranscriptByRecordingId,
   getTranscriptByRecordingIdAsync,
   getTranscriptsByRecordingIds,
@@ -3069,7 +3127,11 @@ async function syncCalendar(icsUrl) {
       throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : "Unknown database error"}`);
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    await updateConfig("calendar", { lastSyncAt: now });
+    try {
+      await updateConfig("calendar", { lastSyncAt: now });
+    } catch (configError) {
+      console.error("Failed to persist sync timestamp:", configError);
+    }
     console.log(`Calendar sync complete: ${meetings.length} meetings`);
     return {
       success: true,
@@ -3339,7 +3401,18 @@ function registerCalendarHandlers() {
         meetingsCount: 0
       };
     }
-    return await syncCalendar(config22.calendar.icsUrl);
+    try {
+      const result = await syncCalendar(config22.calendar.icsUrl);
+      if (!result || typeof result.success !== "boolean") {
+        console.error("[calendar:sync] syncCalendar returned malformed result:", result);
+        return { success: false, error: "Sync returned an invalid result", meetingsCount: 0 };
+      }
+      return result;
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : "Unknown sync error";
+      console.error("[calendar:sync] Unexpected error:", error2);
+      return { success: false, error: message, meetingsCount: 0 };
+    }
   });
   electron.ipcMain.handle("calendar:clear-and-sync", async () => {
     const config22 = getConfig();
@@ -3350,8 +3423,19 @@ function registerCalendarHandlers() {
         meetingsCount: 0
       };
     }
-    clearAllMeetings();
-    return await syncCalendar(config22.calendar.icsUrl);
+    try {
+      clearAllMeetings();
+      const result = await syncCalendar(config22.calendar.icsUrl);
+      if (!result || typeof result.success !== "boolean") {
+        console.error("[calendar:clear-and-sync] syncCalendar returned malformed result:", result);
+        return { success: false, error: "Sync returned an invalid result", meetingsCount: 0 };
+      }
+      return result;
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : "Unknown sync error";
+      console.error("[calendar:clear-and-sync] Unexpected error:", error2);
+      return { success: false, error: message, meetingsCount: 0 };
+    }
   });
   electron.ipcMain.handle("calendar:get-last-sync", async () => {
     return getLastSyncTime();
@@ -5452,6 +5536,18 @@ Meeting transcripts:
 ${transcript.substring(0, 8e3)}`;
     return ollama.generate(prompt);
   }
+  /**
+   * Remove the last N messages from a session's conversation history.
+   * Used during retry to strip the failed user message and any partial assistant response
+   * without losing all prior context.
+   */
+  removeLastMessages(sessionId, count) {
+    const context = this.contexts.get(sessionId);
+    if (!context || count <= 0) return 0;
+    const toRemove = Math.min(count, context.conversationHistory.length);
+    context.conversationHistory.splice(-toRemove);
+    return toRemove;
+  }
   clearSession(sessionId) {
     this.contexts.delete(sessionId);
     const controller = this.activeControllers.get(sessionId);
@@ -5762,6 +5858,21 @@ function registerRAGHandlers() {
     } catch (err) {
       console.error("rag:cancel error:", err);
       return error("INTERNAL_ERROR", "Failed to cancel request", err);
+    }
+  });
+  electron.ipcMain.handle("rag:removeLastMessages", async (_event, sessionId, count) => {
+    try {
+      if (!sessionId || typeof sessionId !== "string") {
+        return error("VALIDATION_ERROR", "Session ID is required");
+      }
+      if (typeof count !== "number" || count < 1) {
+        return error("VALIDATION_ERROR", "Count must be a positive number");
+      }
+      const removed = rag.removeLastMessages(sessionId, count);
+      return success(removed);
+    } catch (err) {
+      console.error("rag:removeLastMessages error:", err);
+      return error("INTERNAL_ERROR", "Failed to remove messages from session", err);
     }
   });
   electron.ipcMain.handle("rag:clear-session", async (_event, sessionId) => {
@@ -6092,17 +6203,12 @@ function registerProjectsHandlers() {
         }
         const meetings = getMeetingsForProject(parsed.data.id);
         const topicsSet = /* @__PURE__ */ new Set();
-        for (const meeting of meetings) {
-          const recordings = getRecordingsForMeeting(meeting.id);
-          for (const recording of recordings) {
-            const transcript = getTranscriptByRecordingId(recording.id);
-            if (transcript?.topics) {
-              try {
-                const meetingTopics = JSON.parse(transcript.topics);
-                meetingTopics.forEach((topic) => topicsSet.add(topic));
-              } catch {
-              }
-            }
+        const topicsJsonStrings = getTopicsForProjectMeetings(parsed.data.id);
+        for (const topicsJson of topicsJsonStrings) {
+          try {
+            const meetingTopics = JSON.parse(topicsJson);
+            meetingTopics.forEach((topic) => topicsSet.add(topic));
+          } catch {
           }
         }
         const knowledgeIds = getKnowledgeIdsForProject(parsed.data.id);
@@ -8181,6 +8287,7 @@ class DownloadService {
   };
   stalledCheckInterval = null;
   // spec-007: periodic stalled check
+  cancelLock = false;
   // B-DWN-009: Dirty-flag caching for getState() to avoid creating new arrays on every call
   dirty = true;
   cachedQueueArray = [];
@@ -8573,10 +8680,17 @@ class DownloadService {
    * Called periodically to detect downloads that exceed timeout
    * C-004: Uses lastProgressAt (not startedAt) for smarter stall detection.
    * Large files legitimately take a long time; what matters is whether data
-   * is still flowing. Timeout increased to 60s without progress.
+   * is still flowing.
+   * AUD4-005: Adaptive timeout based on file size to reduce false positives.
+   *   - Files > 10MB: 120s without progress
+   *   - Unknown file size: 90s without progress
+   *   - All others: 60s without progress
    */
   checkForStalledDownloads() {
-    const STALL_TIMEOUT_MS = 6e4;
+    const STALL_TIMEOUT_DEFAULT_MS = 6e4;
+    const STALL_TIMEOUT_LARGE_FILE_MS = 12e4;
+    const STALL_TIMEOUT_UNKNOWN_SIZE_MS = 9e4;
+    const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024;
     const now = Date.now();
     let stalledCount = 0;
     const stalledFilenames = [];
@@ -8584,8 +8698,16 @@ class DownloadService {
       if (item.status === "downloading" && item.startedAt) {
         const lastActivity = item.lastProgressAt ?? item.startedAt;
         const elapsed = now - lastActivity.getTime();
-        if (elapsed > STALL_TIMEOUT_MS) {
-          console.warn(`[DownloadService] Stall detected for ${item.filename} (${Math.round(elapsed / 1e3)}s without progress)`);
+        let stallTimeout;
+        if (!item.fileSize || item.fileSize <= 0) {
+          stallTimeout = STALL_TIMEOUT_UNKNOWN_SIZE_MS;
+        } else if (item.fileSize > LARGE_FILE_THRESHOLD) {
+          stallTimeout = STALL_TIMEOUT_LARGE_FILE_MS;
+        } else {
+          stallTimeout = STALL_TIMEOUT_DEFAULT_MS;
+        }
+        if (elapsed > stallTimeout) {
+          console.warn(`[DownloadService] Stall detected for ${item.filename} (${Math.round(elapsed / 1e3)}s without progress, timeout=${stallTimeout / 1e3}s, size=${item.fileSize})`);
           item.status = "failed";
           item.error = `Download stalled (${Math.round(elapsed / 1e3)}s without data)`;
           this.persistQueueItem(item);
@@ -8642,7 +8764,11 @@ class DownloadService {
    * B-DWN-007: Checks if file is already synced before retrying.
    * C-004: Also retries cancelled items, not just failed.
    */
-  retryFailed() {
+  retryFailed(deviceConnected = true) {
+    if (!deviceConnected) {
+      console.warn("[DownloadService] retryFailed called but device is not connected");
+      return { count: 0, error: "Device not connected" };
+    }
     let count = 0;
     const alreadySynced = [];
     for (const [key, item] of this.state.queue) {
@@ -8672,7 +8798,7 @@ class DownloadService {
       this.markDirty();
       this.emitStateUpdate(true);
     }
-    return count;
+    return { count };
   }
   /**
    * DL-07: Prune completed items from queue, keeping at most maxRetained.
@@ -8732,21 +8858,47 @@ class DownloadService {
    * Cancel all pending downloads
    * B-DWN-005: Persist cancelled state for each item
    * C-004: Uses 'cancelled' status instead of 'failed' for user-initiated cancellation
+   * AUD4-008: Re-entrancy guard + batch SQLite writes in a transaction
    */
   cancelAll() {
-    this.state.isPaused = true;
-    for (const item of this.state.queue.values()) {
-      if (item.status === "pending" || item.status === "downloading") {
-        item.status = "cancelled";
-        item.error = "Cancelled by user";
-        this.persistQueueItem(item);
+    if (this.cancelLock) return;
+    try {
+      this.cancelLock = true;
+      this.state.isPaused = true;
+      const itemsToCancel = [];
+      for (const item of this.state.queue.values()) {
+        if (item.status === "pending" || item.status === "downloading") {
+          item.status = "cancelled";
+          item.error = "Cancelled by user";
+          itemsToCancel.push(item);
+        }
       }
+      if (itemsToCancel.length > 0) {
+        runInTransaction(() => {
+          for (const item of itemsToCancel) {
+            this.persistQueueItem(item);
+          }
+        });
+      }
+      if (this.state.currentSession) {
+        this.state.currentSession.status = "cancelled";
+      }
+      this.markDirty();
+      this.emitStateUpdate(true);
+      const cancelledFilenames = itemsToCancel.map((i) => i.filename);
+      if (cancelledFilenames.length > 0) {
+        setTimeout(() => {
+          for (const filename of cancelledFilenames) {
+            this.state.queue.delete(filename);
+            this.removeFromDatabase(filename);
+          }
+          this.markDirty();
+          this.emitStateUpdate();
+        }, 5e3);
+      }
+    } finally {
+      this.cancelLock = false;
     }
-    if (this.state.currentSession) {
-      this.state.currentSession.status = "cancelled";
-    }
-    this.markDirty();
-    this.emitStateUpdate(true);
   }
   /**
    * Get current state
@@ -8874,8 +9026,8 @@ function registerDownloadServiceHandlers() {
   electron.ipcMain.handle("download-service:cancel-all", () => {
     service.cancelAll();
   });
-  electron.ipcMain.handle("download-service:retry-failed", () => {
-    return service.retryFailed();
+  electron.ipcMain.handle("download-service:retry-failed", (_, deviceConnected) => {
+    return service.retryFailed(deviceConnected ?? true);
   });
   electron.ipcMain.handle("download-service:get-stats", () => {
     return service.getSyncStats();
@@ -10066,6 +10218,22 @@ function registerAssistantHandlers() {
       return { success: false, error: error2.message };
     }
   });
+  electron.ipcMain.handle("assistant:updateConversationTitle", async (_, conversationId, title) => {
+    try {
+      const conv = queryOne("SELECT id FROM conversations WHERE id = ?", [conversationId]);
+      if (!conv) {
+        return { success: false, error: "Conversation not found" };
+      }
+      run(
+        "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+        [title, (/* @__PURE__ */ new Date()).toISOString(), conversationId]
+      );
+      return { success: true };
+    } catch (error2) {
+      console.error("Failed to update conversation title:", error2);
+      return { success: false, error: error2.message };
+    }
+  });
   electron.ipcMain.handle("assistant:getContext", async (_, conversationId) => {
     try {
       const rows = queryAll(
@@ -10159,13 +10327,29 @@ function registerActionablesHandlers() {
   electron.ipcMain.handle("actionables:getByMeeting", async (_, meetingId) => {
     try {
       const sql = `
-        SELECT a.*
+        SELECT DISTINCT a.*
         FROM actionables a
         INNER JOIN knowledge_captures kc ON a.source_knowledge_id = kc.id
+        LEFT JOIN recordings r ON kc.source_recording_id = r.id
         WHERE kc.meeting_id = ?
+           OR r.meeting_id = ?
         ORDER BY a.created_at DESC
       `;
-      const rows = queryAll(sql, [meetingId]);
+      const rows = queryAll(sql, [meetingId, meetingId]);
+      if (rows.length === 0) {
+        console.log(`[actionables:getByMeeting] No actionables found for meeting ${meetingId}`);
+        const debugSql = `
+          SELECT
+            COUNT(DISTINCT a.id) as actionable_count,
+            COUNT(DISTINCT CASE WHEN kc.meeting_id = ? THEN a.id END) as direct_match,
+            COUNT(DISTINCT CASE WHEN r.meeting_id = ? THEN a.id END) as via_recording
+          FROM actionables a
+          INNER JOIN knowledge_captures kc ON a.source_knowledge_id = kc.id
+          LEFT JOIN recordings r ON kc.source_recording_id = r.id
+        `;
+        const debug = queryAll(debugSql, [meetingId, meetingId])[0];
+        console.log(`[actionables:getByMeeting] Debug stats:`, debug);
+      }
       return rows.map(mapToActionable);
     } catch (error2) {
       console.error("Failed to get actionables for meeting:", error2);

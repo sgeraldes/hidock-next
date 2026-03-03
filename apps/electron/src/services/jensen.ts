@@ -4,6 +4,7 @@
  */
 
 import { GrowableBuffer } from './growable-buffer'
+import { shouldLogQa } from './qa-monitor'
 
 // Command IDs from the Jensen protocol
 // Source: Official HiDock HiNotes jensen.js (December 2025)
@@ -132,7 +133,7 @@ export interface CardInfo {
  * - Default: 16kHz stereo 8-bit with 4x correction
  */
 function calculateDurationSeconds(fileLength: number, fileVersion: number): number {
-  console.log(`[Jensen] calculateDurationSeconds: fileLength=${fileLength}, fileVersion=${fileVersion}`)
+  if (shouldLogProtocol()) console.log(`[Jensen] calculateDurationSeconds: fileLength=${fileLength}, fileVersion=${fileVersion}`)
 
   const WAV_HEADER_SIZE = 44
   const CHANNELS = 2  // Stereo
@@ -144,7 +145,7 @@ function calculateDurationSeconds(fileLength: number, fileVersion: number): numb
     // Example: 15.7MB file = 1959 seconds = 32m39s at 8000 bytes/sec effective rate
     // Note: Python uses different formula but this was empirically verified
     const duration = Math.round(fileLength / 8000)
-    console.log(`[Jensen] Version 1 duration: ${duration} seconds (${Math.floor(duration/60)}m ${duration%60}s)`)
+    if (shouldLogProtocol()) console.log(`[Jensen] Version 1 duration: ${duration} seconds (${Math.floor(duration/60)}m ${duration%60}s)`)
     return duration
   } else if (fileVersion === 2) {
     // Version 2: 48kHz stereo 8-bit WAV with 4x correction
@@ -152,7 +153,7 @@ function calculateDurationSeconds(fileLength: number, fileVersion: number): numb
     const bytesPerSecond = 48000 * CHANNELS * BYTES_PER_SAMPLE  // 96000
     const effectiveBps = bytesPerSecond / CORRECTION_FACTOR  // 24000
     const duration = fileLength > WAV_HEADER_SIZE ? Math.round((fileLength - WAV_HEADER_SIZE) / effectiveBps) : 0
-    console.log(`[Jensen] Version 2 duration: ${duration} seconds`)
+    if (shouldLogProtocol()) console.log(`[Jensen] Version 2 duration: ${duration} seconds`)
     return duration
   } else if (fileVersion === 3) {
     // Version 3: 24kHz stereo 8-bit WAV with 4x correction
@@ -160,14 +161,14 @@ function calculateDurationSeconds(fileLength: number, fileVersion: number): numb
     const bytesPerSecond = 24000 * CHANNELS * BYTES_PER_SAMPLE  // 48000
     const effectiveBps = bytesPerSecond / CORRECTION_FACTOR  // 12000
     const duration = fileLength > WAV_HEADER_SIZE ? Math.round((fileLength - WAV_HEADER_SIZE) / effectiveBps) : 0
-    console.log(`[Jensen] Version 3 duration: ${duration} seconds`)
+    if (shouldLogProtocol()) console.log(`[Jensen] Version 3 duration: ${duration} seconds`)
     return duration
   } else if (fileVersion === 5) {
     // Version 5: 12kHz format with 4x correction
     // Python: (file_size / 12000) * 4 = file_size / 3000
     const effectiveBps = 12000 / CORRECTION_FACTOR  // 3000
     const duration = Math.round(fileLength / effectiveBps)
-    console.log(`[Jensen] Version 5 duration: ${duration} seconds`)
+    if (shouldLogProtocol()) console.log(`[Jensen] Version 5 duration: ${duration} seconds`)
     return duration
   } else {
     // Default: 16kHz stereo 8-bit with 4x correction
@@ -175,7 +176,7 @@ function calculateDurationSeconds(fileLength: number, fileVersion: number): numb
     const bytesPerSecond = 16000 * CHANNELS * BYTES_PER_SAMPLE  // 32000
     const effectiveBps = bytesPerSecond / CORRECTION_FACTOR  // 8000
     const duration = Math.round(fileLength / effectiveBps)
-    console.log(`[Jensen] Default (version ${fileVersion}) duration: ${duration} seconds`)
+    if (shouldLogProtocol()) console.log(`[Jensen] Default (version ${fileVersion}) duration: ${duration} seconds`)
     return duration
   }
 }
@@ -288,9 +289,10 @@ interface ResponseMessage {
   body: Uint8Array
 }
 
-// Logging configuration - set to true for debugging download issues
-const DEBUG_USB = false // Enable detailed USB transfer logging
-const DEBUG_PROTOCOL = true // Enable protocol-level logging
+// USB-level logging is gated behind shouldLogQa() from qa-monitor
+// Protocol-level logging is also gated behind shouldLogQa()
+const shouldLogUsb = () => shouldLogQa()
+const shouldLogProtocol = () => shouldLogQa()
 
 // Main Jensen device class
 export class JensenDevice {
@@ -326,7 +328,7 @@ export class JensenDevice {
    * This is called when the device is physically unplugged.
    */
   private handleDisconnect(): void {
-    console.log('[Jensen] USB device physically disconnected (via event)')
+    if (shouldLogProtocol()) console.log('[Jensen] USB device physically disconnected (via event)')
 
     // Clean up state
     this.device = null
@@ -356,7 +358,7 @@ export class JensenDevice {
     }
 
     navigator.usb.addEventListener('disconnect', this.usbDisconnectHandler)
-    if (DEBUG_PROTOCOL) console.log('[Jensen] USB disconnect listener active')
+    if (shouldLogProtocol()) console.log('[Jensen] USB disconnect listener active')
   }
 
   /**
@@ -366,7 +368,7 @@ export class JensenDevice {
     if (this.usbDisconnectHandler) {
       navigator.usb.removeEventListener('disconnect', this.usbDisconnectHandler)
       this.usbDisconnectHandler = null
-      if (DEBUG_PROTOCOL) console.log('[Jensen] USB disconnect listener removed')
+      if (shouldLogProtocol()) console.log('[Jensen] USB disconnect listener removed')
     }
   }
 
@@ -390,14 +392,14 @@ export class JensenDevice {
       const device = event.device
       // Only react to HiDock devices (check all known vendor IDs)
       if (USB_VENDOR_IDS.includes(device.vendorId) && device.productName?.toLowerCase().includes('hidock')) {
-        console.log('[Jensen] USB device connected event detected, triggering tryConnect')
+        if (shouldLogProtocol()) console.log('[Jensen] USB device connected event detected, triggering tryConnect')
         this.tryConnect()
       }
     }
 
     navigator.usb.onconnect = this.usbConnectHandler
     this.usbListenersActive = true
-    if (DEBUG_PROTOCOL) console.log('[Jensen] USB connect listener active')
+    if (shouldLogProtocol()) console.log('[Jensen] USB connect listener active')
   }
 
   /**
@@ -413,7 +415,7 @@ export class JensenDevice {
     }
     this.usbConnectHandler = null
     this.usbListenersActive = false
-    if (DEBUG_PROTOCOL) console.log('[Jensen] USB connect listener removed')
+    if (shouldLogProtocol()) console.log('[Jensen] USB connect listener removed')
   }
 
   /**
@@ -437,13 +439,13 @@ export class JensenDevice {
 
       // We now hold the lock
       this.lockHolder = operationName
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] Lock acquired for: ${operationName}`)
+      if (shouldLogProtocol()) console.log(`[Jensen] Lock acquired for: ${operationName}`)
 
       // Execute the operation
       return await operation()
     } finally {
       // Release the lock
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] Lock released for: ${operationName}`)
+      if (shouldLogProtocol()) console.log(`[Jensen] Lock released for: ${operationName}`)
       this.lockHolder = null
       releaseLock!()
     }
@@ -474,11 +476,11 @@ export class JensenDevice {
     let device: USBDevice | null = null
 
     try {
-      if (DEBUG_PROTOCOL) console.log('connect: Starting connection process')
+      if (shouldLogProtocol()) console.log('connect: Starting connection process')
 
       // First try to find already authorized devices
       const devices = await navigator.usb.getDevices()
-      if (DEBUG_PROTOCOL) console.log('connect: Found', devices.length, 'authorized devices')
+      if (shouldLogProtocol()) console.log('connect: Found', devices.length, 'authorized devices')
 
       // Check abort after async operation
       if (signal?.aborted) {
@@ -490,17 +492,17 @@ export class JensenDevice {
       )
 
       if (!device) {
-        if (DEBUG_PROTOCOL) console.log('connect: No authorized HiDock found, showing device picker')
+        if (shouldLogProtocol()) console.log('connect: No authorized HiDock found, showing device picker')
         // Request a new device - include filters for all known vendor IDs
         device = await navigator.usb.requestDevice({
           filters: USB_VENDOR_IDS.map((vendorId) => ({ vendorId }))
         })
       } else {
-        if (DEBUG_PROTOCOL) console.log('connect: Found authorized HiDock:', device.productName)
+        if (shouldLogProtocol()) console.log('connect: Found authorized HiDock:', device.productName)
       }
 
       if (!device) {
-        if (DEBUG_PROTOCOL) console.log('connect: No device selected')
+        if (shouldLogProtocol()) console.log('connect: No device selected')
         return false
       }
 
@@ -509,11 +511,11 @@ export class JensenDevice {
         throw new DOMException('Connection aborted', 'AbortError')
       }
 
-      if (DEBUG_PROTOCOL) console.log('connect: Opening device...')
+      if (shouldLogProtocol()) console.log('connect: Opening device...')
 
       // Check if device is already open (stale state from previous session)
       if (device.opened) {
-        console.log('connect: Device already open, closing first...')
+        if (shouldLogProtocol()) console.log('connect: Device already open, closing first...')
         try {
           await device.close()
         } catch (e) {
@@ -522,7 +524,7 @@ export class JensenDevice {
       }
 
       await device.open()
-      if (DEBUG_PROTOCOL) console.log('connect: Device opened, selecting configuration...')
+      if (shouldLogProtocol()) console.log('connect: Device opened, selecting configuration...')
 
       // Check abort after device open
       if (signal?.aborted) {
@@ -531,14 +533,14 @@ export class JensenDevice {
       }
 
       // Log device state for debugging
-      console.log('connect: Device state after open:', {
+      if (shouldLogUsb()) console.log('connect: Device state after open:', {
         opened: device.opened,
         configuration: device.configuration?.configurationValue,
         configurations: device.configurations?.length
       })
 
       await device.selectConfiguration(1)
-      if (DEBUG_PROTOCOL) console.log('connect: Claiming interface...')
+      if (shouldLogProtocol()) console.log('connect: Claiming interface...')
 
       // Check abort after configuration
       if (signal?.aborted) {
@@ -549,7 +551,7 @@ export class JensenDevice {
       // Log interface info before claiming
       if (device.configuration) {
         const iface = device.configuration.interfaces[0]
-        console.log('connect: Interface 0 info:', {
+        if (shouldLogUsb()) console.log('connect: Interface 0 info:', {
           interfaceNumber: iface?.interfaceNumber,
           claimed: iface?.claimed,
           alternates: iface?.alternates?.length
@@ -557,9 +559,9 @@ export class JensenDevice {
       }
 
       await device.claimInterface(0)
-      if (DEBUG_PROTOCOL) console.log('connect: Selecting alternate interface...')
+      if (shouldLogProtocol()) console.log('connect: Selecting alternate interface...')
       await device.selectAlternateInterface(0, 0)
-      if (DEBUG_PROTOCOL) console.log('connect: Interface claimed successfully')
+      if (shouldLogProtocol()) console.log('connect: Interface claimed successfully')
 
       // Check abort after interface claim
       if (signal?.aborted) {
@@ -570,7 +572,7 @@ export class JensenDevice {
       this.device = device
 
       // Log device configuration for debugging
-      if (DEBUG_USB) {
+      if (shouldLogUsb()) {
         console.log('[Jensen] Device configuration:', {
           vendorId: device.vendorId.toString(16),
           productId: device.productId.toString(16),
@@ -618,7 +620,7 @@ export class JensenDevice {
           this.model = 'unknown'
       }
 
-      console.log(`[Jensen] Connected to ${this.model}`)
+      if (shouldLogProtocol()) console.log(`[Jensen] Connected to ${this.model}`)
 
       // Reset ALL protocol state on new connection (matches official jensen.js setup function)
       // This is critical for proper sequencing and prevents stale data issues
@@ -645,7 +647,7 @@ export class JensenDevice {
 
       // Re-throw abort errors
       if (error instanceof DOMException && error.name === 'AbortError') {
-        console.log('[Jensen] Connection aborted')
+        if (shouldLogProtocol()) console.log('[Jensen] Connection aborted')
         throw error
       }
 
@@ -671,13 +673,13 @@ export class JensenDevice {
 
     // Don't reconnect if already connected - prevents race conditions during HMR
     if (this.isConnected()) {
-      console.log('[Jensen] tryConnect: Already connected, skipping')
+      if (shouldLogProtocol()) console.log('[Jensen] tryConnect: Already connected, skipping')
       return true
     }
 
     // Don't try to connect if an operation is in progress
     if (this.isOperationInProgress()) {
-      console.log(`[Jensen] tryConnect: Operation in progress (${this.lockHolder}), skipping`)
+      if (shouldLogProtocol()) console.log(`[Jensen] tryConnect: Operation in progress (${this.lockHolder}), skipping`)
       return false
     }
 
@@ -778,7 +780,7 @@ export class JensenDevice {
   async reset(): Promise<boolean> {
     if (!this.device) return false
 
-    console.log('[Jensen] Resetting device...')
+    if (shouldLogProtocol()) console.log('[Jensen] Resetting device...')
     try {
       // Clear internal state first
       this.sequenceId = 0
@@ -790,7 +792,7 @@ export class JensenDevice {
       if (this.device.opened) {
         try {
           await this.device.reset()
-          console.log('[Jensen] Device reset successful')
+          if (shouldLogProtocol()) console.log('[Jensen] Device reset successful')
         } catch (e) {
           console.warn('[Jensen] Device reset failed, trying close/reopen:', e)
           // Fall back to close and reopen (no releaseInterface - just close)
@@ -833,7 +835,7 @@ export class JensenDevice {
         // Important: Use slice() to create a copy, as the underlying buffer may be reused
         const newData = new Uint8Array(result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength))
         this.receiveBuffer.append(newData)
-        if (DEBUG_USB) console.log(`[Jensen] Read ${newData.length} bytes, buffer now ${this.receiveBuffer.length} bytes`)
+        if (shouldLogUsb()) console.log(`[Jensen] Read ${newData.length} bytes, buffer now ${this.receiveBuffer.length} bytes`)
         return true
       }
       return false
@@ -875,7 +877,7 @@ export class JensenDevice {
 
     // Discard any data before sync marker
     if (syncPos > 0) {
-      if (DEBUG_USB) console.warn(`[Jensen] Discarding ${syncPos} bytes before sync marker`)
+      if (shouldLogUsb()) console.warn(`[Jensen] Discarding ${syncPos} bytes before sync marker`)
       this.receiveBuffer.consume(syncPos)
     }
 
@@ -917,23 +919,23 @@ export class JensenDevice {
     const timeoutMs = timeoutSec * 1000
     let readAttempts = 0
 
-    if (DEBUG_PROTOCOL) console.log(`[Jensen] receiveResponse: waiting for cmd=${expectedCmdId}, seq=${expectedSeqId}, timeout=${timeoutSec}s`)
+    if (shouldLogProtocol()) console.log(`[Jensen] receiveResponse: waiting for cmd=${expectedCmdId}, seq=${expectedSeqId}, timeout=${timeoutSec}s`)
 
     while (Date.now() - startTime < timeoutMs) {
       try {
         readAttempts++
         // Read data from device with larger buffer for better performance (same as web app)
         const readSize = 4096 * 16 // 64KB buffer
-        if (DEBUG_USB) console.log(`[Jensen] receiveResponse: attempt ${readAttempts}, calling transferIn(2, ${readSize})...`)
+        if (shouldLogUsb()) console.log(`[Jensen] receiveResponse: attempt ${readAttempts}, calling transferIn(2, ${readSize})...`)
         const result = await this.device!.transferIn(2, readSize)
-        if (DEBUG_USB) console.log(`[Jensen] receiveResponse: transferIn returned, status=${result.status}, bytesRead=${result.data?.byteLength || 0}`)
+        if (shouldLogUsb()) console.log(`[Jensen] receiveResponse: transferIn returned, status=${result.status}, bytesRead=${result.data?.byteLength || 0}`)
 
         if (result.status === 'ok' && result.data && result.data.byteLength > 0) {
           // Append to receive buffer
           // Important: Use slice() to create a copy, as the underlying buffer may be reused
           const newData = new Uint8Array(result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength))
           this.receiveBuffer.append(newData)
-          if (DEBUG_USB) console.log(`[Jensen] Read ${newData.length} bytes, buffer now ${this.receiveBuffer.length} bytes`)
+          if (shouldLogUsb()) console.log(`[Jensen] Read ${newData.length} bytes, buffer now ${this.receiveBuffer.length} bytes`)
 
           // Try to parse all complete packets in buffer
           let packetParsed = true
@@ -944,7 +946,7 @@ export class JensenDevice {
               break
             }
 
-            if (DEBUG_PROTOCOL) console.log(`[Jensen] Received: cmd=${msg.id}, seq=${msg.sequence}, bodyLen=${msg.body.length}`)
+            if (shouldLogProtocol()) console.log(`[Jensen] Received: cmd=${msg.id}, seq=${msg.sequence}, bodyLen=${msg.body.length}`)
 
             // Check if this is the response we're waiting for (match by sequence ID like web app)
             if (msg.sequence === expectedSeqId) {
@@ -952,13 +954,13 @@ export class JensenDevice {
             }
 
             // Unexpected message, log and continue (don't discard - might be for different command)
-            if (DEBUG_PROTOCOL) console.warn(`[Jensen] Unexpected seq: expected seq=${expectedSeqId}, got cmd=${msg.id} seq=${msg.sequence}. Discarding.`)
+            if (shouldLogProtocol()) console.warn(`[Jensen] Unexpected seq: expected seq=${expectedSeqId}, got cmd=${msg.id} seq=${msg.sequence}. Discarding.`)
           }
         }
       } catch (error) {
         // Handle DOMException errors like the web app does
         if (error instanceof DOMException) {
-          if (DEBUG_USB) console.log(`[Jensen] receiveResponse: DOMException caught: ${error.name} - ${error.message}`)
+          if (shouldLogUsb()) console.log(`[Jensen] receiveResponse: DOMException caught: ${error.name} - ${error.message}`)
           if (error.name === 'NetworkError') {
             // Timeout is expected, continue trying
             continue
@@ -1063,7 +1065,7 @@ export class JensenDevice {
         // Calculate used space (capacity - free)
         const usedMiB = capacityMiB - freeMiB
 
-        if (DEBUG_PROTOCOL) {
+        if (shouldLogProtocol()) {
           console.log(`[Jensen] Storage: free=${freeMiB} MiB, capacity=${capacityMiB} MiB, used=${usedMiB} MiB, status=0x${statusRaw.toString(16)}`)
         }
 
@@ -1153,13 +1155,13 @@ export class JensenDevice {
     msg.sequence(seqId)
 
     const timeout = timeoutSec ?? 10
-    if (DEBUG_PROTOCOL) console.log(`[Jensen] Sending: cmd=${msg.command}, seq=${seqId}`)
+    if (shouldLogProtocol()) console.log(`[Jensen] Sending: cmd=${msg.command}, seq=${seqId}`)
 
     const data = msg.make()
 
     try {
       await this.device.transferOut(1, data as unknown as BufferSource)
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] Command sent: cmd=${msg.command}, seq=${seqId}`)
+      if (shouldLogProtocol()) console.log(`[Jensen] Command sent: cmd=${msg.command}, seq=${seqId}`)
     } catch (error) {
       console.error(`[Jensen] Failed to send cmd=${msg.command}:`, error)
       throw new Error(`Failed to send USB command: ${error instanceof Error ? error.message : String(error)}`)
@@ -1195,12 +1197,12 @@ export class JensenDevice {
   async getDeviceInfo(timeout = 10): Promise<DeviceInfo | null> {
     return this.withLock('getDeviceInfo', async () => {
       try {
-        if (DEBUG_PROTOCOL) console.log('getDeviceInfo: Sending CMD_GET_DEVICE_INFO')
+        if (shouldLogProtocol()) console.log('getDeviceInfo: Sending CMD_GET_DEVICE_INFO')
         const result = await this.send<{ versionCode: string; versionNumber: number; sn: string }>(
           new JensenMessage(CMD.GET_DEVICE_INFO),
           timeout
         )
-        if (DEBUG_PROTOCOL) console.log('getDeviceInfo: Received result:', result)
+        if (shouldLogProtocol()) console.log('getDeviceInfo: Received result:', result)
         return {
           versionCode: result.versionCode,
           versionNumber: result.versionNumber,
@@ -1291,14 +1293,14 @@ export class JensenDevice {
     // But if versionNumber is not yet set (e.g., getDeviceInfo hasn't completed),
     // we should still try since it might succeed
     if (this.versionNumber !== null && this.versionNumber < 327733) {
-      if (DEBUG_PROTOCOL) console.log('getCardInfo: Firmware too old, returning null')
+      if (shouldLogProtocol()) console.log('getCardInfo: Firmware too old, returning null')
       return null
     }
     return this.withLock('getCardInfo', async () => {
       try {
-        if (DEBUG_PROTOCOL) console.log('getCardInfo: Sending CMD_GET_CARD_INFO')
+        if (shouldLogProtocol()) console.log('getCardInfo: Sending CMD_GET_CARD_INFO')
         const result = await this.send<CardInfo>(new JensenMessage(CMD.GET_CARD_INFO), timeout)
-        if (DEBUG_PROTOCOL) console.log('getCardInfo: Received result:', result)
+        if (shouldLogProtocol()) console.log('getCardInfo: Received result:', result)
         return result
       } catch (error) {
         console.error('[Jensen] getCardInfo error:', error)
@@ -1368,7 +1370,7 @@ export class JensenDevice {
       const seqId = this.sequenceId++
       const msg = new JensenMessage(CMD.GET_FILE_LIST)
       msg.sequence(seqId)
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Sending command, seq=${seqId}, expected=${expectedFiles}`)
+      if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Sending command, seq=${seqId}, expected=${expectedFiles}`)
       await this.device.transferOut(1, msg.make() as unknown as BufferSource)
 
       // Incremental parsing state
@@ -1383,7 +1385,7 @@ export class JensenDevice {
 
       while (Date.now() - startTime < overallTimeout && !this.abortOperations) {
         if (this.abortOperations) {
-          console.log(`[Jensen] listFiles: Aborted`)
+          if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Aborted`)
           return allFiles
         }
 
@@ -1412,7 +1414,7 @@ export class JensenDevice {
                 if (parsedMsg.body.length === 0) {
                   // Empty body = end of transmission (if we have data)
                   if (allFiles.length > 0 || packetsReceived > 0) {
-                    if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Complete, ${allFiles.length} files`)
+                    if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Complete, ${allFiles.length} files`)
                     return allFiles
                   }
                   continue // First empty packet might be ACK
@@ -1460,7 +1462,7 @@ export class JensenDevice {
             // Stop if we have all expected files
             const effectiveExpected = expectedFiles > 0 ? expectedFiles : totalFilesFromHeader
             if (effectiveExpected > 0 && allFiles.length >= effectiveExpected) {
-              if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Got all ${allFiles.length}/${effectiveExpected} files`)
+              if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Got all ${allFiles.length}/${effectiveExpected} files`)
               break
             }
           }
@@ -1469,7 +1471,7 @@ export class JensenDevice {
             if (error.name === 'NetworkError') {
               // USB timeout - check if we should stop (5 second idle timeout)
               if (allFiles.length > 0 && Date.now() - lastDataTime > 5000) {
-                if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Idle timeout after 5s with ${allFiles.length} files`)
+                if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Idle timeout after 5s with ${allFiles.length} files`)
                 break
               }
               // Timeout is expected when waiting for more data, continue
@@ -1483,7 +1485,7 @@ export class JensenDevice {
         }
       }
 
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] listFiles: Complete - ${allFiles.length} files from ${packetsReceived} packets, elapsed: ${Date.now() - startTime}ms`)
+      if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Complete - ${allFiles.length} files from ${packetsReceived} packets, elapsed: ${Date.now() - startTime}ms`)
       return allFiles
     })
   }
@@ -1505,7 +1507,7 @@ export class JensenDevice {
         ((buffer[4] & 0xff) << 8) |
         (buffer[5] & 0xff)
       pos = 6
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] Found total files in header: ${totalFilesFromHeader}`)
+      if (shouldLogProtocol()) console.log(`[Jensen] Found total files in header: ${totalFilesFromHeader}`)
     }
 
     // Parse file entries until we run out of complete records
@@ -1656,18 +1658,18 @@ export class JensenDevice {
 
       // Check if already aborted before starting
       if (signal?.aborted) {
-        console.log(`[Jensen] downloadFile: Already aborted before start`)
+        if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Already aborted before start`)
         return false
       }
 
       // Clear receive buffer before download to prevent stale data issues
       this.receiveBuffer.clear()
 
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] downloadFile: Starting download of ${filename}, size=${fileSize}`)
+      if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Starting download of ${filename}, size=${fileSize}`)
 
       // Set up abort listener to set the abort flag
       const abortHandler = () => {
-        console.log(`[Jensen] downloadFile: Abort signal received for ${filename}`)
+        if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Abort signal received for ${filename}`)
         this.abortOperations = true
       }
       signal?.addEventListener('abort', abortHandler)
@@ -1682,7 +1684,7 @@ export class JensenDevice {
       const msg = new JensenMessage(CMD.TRANSFER_FILE).body(body)
       msg.sequence(seqId)
       await this.device.transferOut(1, msg.make() as unknown as BufferSource)
-      if (DEBUG_PROTOCOL) console.log(`[Jensen] downloadFile: Sent TRANSFER_FILE command, seq=${seqId}`)
+      if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Sent TRANSFER_FILE command, seq=${seqId}`)
 
       // Receive file data
       let received = 0
@@ -1696,7 +1698,7 @@ export class JensenDevice {
         // Check for abort request (from disconnect or AbortSignal)
         if (this.abortOperations || signal?.aborted) {
           signal?.removeEventListener('abort', abortHandler)
-          console.log(`[Jensen] downloadFile: Aborted (flag=${this.abortOperations}, signal=${signal?.aborted})`)
+          if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Aborted (flag=${this.abortOperations}, signal=${signal?.aborted})`)
           return false
         }
 
@@ -1724,7 +1726,7 @@ export class JensenDevice {
             // Log progress every 10%
             const percent = Math.floor((received / fileSize) * 100)
             if (percent >= lastProgressLog + 10) {
-              console.log(`[Jensen] Download progress: ${percent}% (${received}/${fileSize} bytes)`)
+              if (shouldLogProtocol()) console.log(`[Jensen] Download progress: ${percent}% (${received}/${fileSize} bytes)`)
               lastProgressLog = percent
             }
           }
@@ -1737,11 +1739,11 @@ export class JensenDevice {
       const success = received >= fileSize
       if (!success) {
         if (this.abortOperations || signal?.aborted) {
-          console.log(`[Jensen] downloadFile: Cancelled after receiving ${received}/${fileSize} bytes`)
+          if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Cancelled after receiving ${received}/${fileSize} bytes`)
         } else {
           console.error(`[Jensen] downloadFile FAILED: received=${received}/${fileSize}, consecutiveTimeouts=${consecutiveTimeouts}, elapsed=${Date.now() - startTime}ms`)
         }
-      } else if (DEBUG_PROTOCOL) {
+      } else if (shouldLogProtocol()) {
         console.log(`[Jensen] downloadFile: Complete, received=${received}/${fileSize} in ${Date.now() - startTime}ms`)
       }
       return success

@@ -6,17 +6,26 @@ import { contextBridge, ipcRenderer } from 'electron'
  * Instead, read from the persisted localStorage key that the UI store writes to.
  * Defined early so callIPC can use it for QA-MONITOR gating.
  */
+let _qaLogsCache = false
+let _qaLogsCacheTime = 0
+const QA_CACHE_TTL = 5000
+
 function isQaLogsEnabled(): boolean {
+  const now = Date.now()
+  if (now - _qaLogsCacheTime < QA_CACHE_TTL) return _qaLogsCache
   try {
     const stored = localStorage.getItem('hidock-ui-store')
     if (stored) {
       const { state } = JSON.parse(stored)
-      return state?.qaLogsEnabled ?? false
+      _qaLogsCache = state?.qaLogsEnabled ?? false
+    } else {
+      _qaLogsCache = false
     }
   } catch {
-    /* fail silently */
+    _qaLogsCache = false
   }
-  return false
+  _qaLogsCacheTime = now
+  return _qaLogsCache
 }
 
 // --- IPC Logging Wrapper ---
@@ -789,14 +798,9 @@ const electronAPI: ElectronAPI = {
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)
 
-// Make isQaLogsEnabled available globally in preload context (function defined at top of file)
-contextBridge.exposeInMainWorld('isQaLogsEnabled', isQaLogsEnabled)
-
 // Type augmentation for the window object
 declare global {
   interface Window {
     electronAPI: ElectronAPI
-    /** B-SET-004: Check if QA logging is enabled via localStorage bridge */
-    isQaLogsEnabled: () => boolean
   }
 }

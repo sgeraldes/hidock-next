@@ -19,8 +19,7 @@ import { useAudioPlayback } from '@/hooks/useAudioPlayback'
 import { useDownloadOrchestrator } from '@/hooks/useDownloadOrchestrator'
 import { useDeviceSubscriptions } from '@/hooks/useDeviceSubscriptions'
 import { useTranscriptionSync } from '@/hooks/useTranscriptionSync'
-
-const DEBUG = import.meta.env.DEV
+import { shouldLogQa } from '@/services/qa-monitor'
 
 export function OperationController() {
   // Compose focused hooks for each responsibility
@@ -40,9 +39,9 @@ export function OperationController() {
   }, [config?.calendar?.icsUrl, config?.calendar?.syncEnabled, loadMeetings])
 
   useEffect(() => {
-    if (DEBUG) console.log('[OperationController] Mounted (decomposed)')
+    if (shouldLogQa()) console.log('[QA-MONITOR][OperationController] Mounted (decomposed)')
     return () => {
-      if (DEBUG) console.log('[OperationController] Unmounting')
+      if (shouldLogQa()) console.log('[QA-MONITOR][OperationController] Unmounting')
     }
   }, [])
 

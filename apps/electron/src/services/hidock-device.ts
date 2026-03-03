@@ -18,6 +18,7 @@ import {
 } from './jensen'
 import { validateDevicePath } from '../utils/path-validation'
 import { withTimeout, isAbortError } from '../utils/timeout'
+import { shouldLogQa } from './qa-monitor'
 
 export interface HiDockRecording {
   id: string
@@ -82,9 +83,6 @@ export interface ActivityLogEntry {
 }
 
 const MAX_LOG_ENTRIES = 100 // Maximum activity log entries to keep in memory
-
-// Logging configuration - set to false to reduce console noise
-const DEBUG_DEVICE = false // Enable detailed device service logging
 
 type ActivityListener = (entry: ActivityLogEntry) => void
 
@@ -183,22 +181,22 @@ class HiDockDeviceService {
   // Load auto-connect config from main process config file
   private async loadAutoConnectConfig(): Promise<void> {
     try {
-      console.log('[HiDockDevice] Loading config from main process...')
+      if (shouldLogQa()) console.log('[HiDockDevice] Loading config from main process...')
 
       // Wait a small amount for electronAPI to be available (may not be ready immediately)
       let attempts = 0
       const maxAttempts = 20 // Increased to 2 seconds for slower startup
       while (!window.electronAPI?.config?.get && attempts < maxAttempts) {
-        console.log(`[HiDockDevice] Waiting for electronAPI... attempt ${attempts + 1}/${maxAttempts}`)
+        if (shouldLogQa()) console.log(`[HiDockDevice] Waiting for electronAPI... attempt ${attempts + 1}/${maxAttempts}`)
         await new Promise((resolve) => setTimeout(resolve, 100))
         attempts++
       }
 
       // Use Electron IPC to get config from main process
       if (window.electronAPI?.config?.get) {
-        console.log('[HiDockDevice] electronAPI available, fetching config...')
+        if (shouldLogQa()) console.log('[HiDockDevice] electronAPI available, fetching config...')
         const result = await window.electronAPI.config.get()
-        console.log('[HiDockDevice] Config result received:', result?.success)
+        if (shouldLogQa()) console.log('[HiDockDevice] Config result received:', result?.success)
 
         if (result?.success && result?.data?.device) {
           const config = result.data
@@ -206,7 +204,7 @@ class HiDockDeviceService {
           this.autoConnectConfig.enabled = config.device.autoConnect === true
           this.autoConnectConfig.connectOnStartup = config.device.autoConnect === true
           this.configLoaded = true
-          console.log(`[HiDockDevice] Config loaded: autoConnect = ${this.autoConnectConfig.enabled}`)
+          if (shouldLogQa()) console.log(`[HiDockDevice] Config loaded: autoConnect = ${this.autoConnectConfig.enabled}`)
         } else if (result?.success) {
           console.warn('[HiDockDevice] Config loaded but device section missing, defaulting to disabled')
           this.configLoaded = true // Mark as loaded even without device section
@@ -297,24 +295,24 @@ class HiDockDeviceService {
     // CRITICAL: Synchronous guard BEFORE any async work
     // This prevents duplicate initialization from React StrictMode double-invoking effects
     if (this.initAutoConnectStarted) {
-      if (DEBUG_DEVICE) console.log('[HiDockDevice] initAutoConnect: Already started (sync guard), skipping')
+      if (shouldLogQa()) console.log('[HiDockDevice] initAutoConnect: Already started (sync guard), skipping')
       return
     }
     this.initAutoConnectStarted = true // Set immediately, before any await
 
     // Prevent duplicate initialization - check interval OR if already connected
     if (this.autoConnectInterval) {
-      if (DEBUG_DEVICE) console.log('[HiDockDevice] initAutoConnect: Already initialized, skipping')
+      if (shouldLogQa()) console.log('[HiDockDevice] initAutoConnect: Already initialized, skipping')
       return
     }
 
     // If already connected, don't try to reconnect (handles HMR scenarios)
     if (this.state.connected) {
-      if (DEBUG_DEVICE) console.log('[HiDockDevice] initAutoConnect: Already connected, skipping')
+      if (shouldLogQa()) console.log('[HiDockDevice] initAutoConnect: Already connected, skipping')
       return
     }
 
-    if (DEBUG_DEVICE) console.log('[HiDockDevice] initAutoConnect: Waiting for config to load...')
+    if (shouldLogQa()) console.log('[HiDockDevice] initAutoConnect: Waiting for config to load...')
 
     // Wait for the config load promise to complete
     if (this.configLoadPromise) {
@@ -327,7 +325,7 @@ class HiDockDeviceService {
 
     // Double-check with polling if needed (in case promise completed before we awaited it)
     if (!this.configLoaded) {
-      if (DEBUG_DEVICE) console.log('[HiDockDevice] initAutoConnect: Config not yet loaded, waiting...')
+      if (shouldLogQa()) console.log('[HiDockDevice] initAutoConnect: Config not yet loaded, waiting...')
       // Wait up to 2 seconds for config to load
       for (let i = 0; i < 20; i++) {
         await new Promise((resolve) => setTimeout(resolve, 100))
@@ -335,7 +333,7 @@ class HiDockDeviceService {
       }
     }
 
-    if (DEBUG_DEVICE) console.log(`[HiDockDevice] initAutoConnect: Config loaded=${this.configLoaded}, enabled=${this.autoConnectConfig.enabled}, connectOnStartup=${this.autoConnectConfig.connectOnStartup}`)
+    if (shouldLogQa()) console.log(`[HiDockDevice] initAutoConnect: Config loaded=${this.configLoaded}, enabled=${this.autoConnectConfig.enabled}, connectOnStartup=${this.autoConnectConfig.connectOnStartup}`)
 
     // Silently start auto-connect if enabled - no activity log spam
     if (this.autoConnectConfig.enabled && this.autoConnectConfig.connectOnStartup) {
@@ -602,7 +600,7 @@ class HiDockDeviceService {
 
     // Notify listeners - log count for debugging
     const listenerCount = this.activityListeners.size
-    if (DEBUG_DEVICE) {
+    if (shouldLogQa()) {
       console.log(`[HiDockDevice] logActivity: ${type} "${message}" - notifying ${listenerCount} listeners`)
     }
 
@@ -748,9 +746,9 @@ class HiDockDeviceService {
     onProgress?: (filesFound: number, expectedFiles: number) => void,
     forceRefresh: boolean = false
   ): Promise<HiDockRecording[]> {
-    console.log('[HiDockDevice] >>> listRecordings ENTRY, connected:', this.isConnected(), 'initialized:', this.initializationComplete, 'forceRefresh:', forceRefresh)
+    if (shouldLogQa()) console.log('[HiDockDevice] >>> listRecordings ENTRY, connected:', this.isConnected(), 'initialized:', this.initializationComplete, 'forceRefresh:', forceRefresh)
     if (!this.isConnected()) {
-      console.log('[HiDockDevice] >>> listRecordings: NOT CONNECTED, returning []')
+      if (shouldLogQa()) console.log('[HiDockDevice] >>> listRecordings: NOT CONNECTED, returning []')
       this.logActivity('error', 'Cannot list files', 'Device not connected')
       return []
     }
@@ -760,7 +758,7 @@ class HiDockDeviceService {
     if (!forceRefresh && this.cachedRecordings !== null) {
       const timeSinceLast = Date.now() - this.listRecordingsLastCompleted
       if (timeSinceLast < HiDockDeviceService.LIST_RECORDINGS_DEBOUNCE_MS) {
-        console.log(`[HiDockDevice] >>> listRecordings: DEBOUNCED (${timeSinceLast}ms since last), returning cached`)
+        if (shouldLogQa()) console.log(`[HiDockDevice] >>> listRecordings: DEBOUNCED (${timeSinceLast}ms since last), returning cached`)
         onProgress?.(this.cachedRecordings.length, this.cachedRecordings.length)
         return this.cachedRecordings
       }
@@ -769,7 +767,7 @@ class HiDockDeviceService {
     // FL-01/FL-08: forceRefresh must wait for existing operation to complete,
     // then start a new one — never run concurrently
     if (forceRefresh && (this.listRecordingsLock || this.listRecordingsPromise)) {
-      console.log('[HiDockDevice] >>> listRecordings: forceRefresh waiting for existing operation to complete')
+      if (shouldLogQa()) console.log('[HiDockDevice] >>> listRecordings: forceRefresh waiting for existing operation to complete')
       if (this.listRecordingsPromise) {
         try {
           await this.listRecordingsPromise
@@ -786,7 +784,7 @@ class HiDockDeviceService {
     if (lockHolder) {
       // Case 1: File listing already in progress - wait for in-flight promise
       if (lockHolder === 'listFiles' && this.listRecordingsPromise) {
-        console.log('[HiDockDevice] >>> listRecordings: listFiles lock held, waiting for in-flight promise')
+        if (shouldLogQa()) console.log('[HiDockDevice] >>> listRecordings: listFiles lock held, waiting for in-flight promise')
         try {
           const result = await this.listRecordingsPromise
           onProgress?.(result.length, this.state.recordingCount || result.length)
@@ -797,7 +795,7 @@ class HiDockDeviceService {
       }
       // Case 2: Download in progress - protect by returning cached data
       if (lockHolder.startsWith('downloadFile:')) {
-        console.log('[HiDockDevice] >>> listRecordings: download in progress, returning cached')
+        if (shouldLogQa()) console.log('[HiDockDevice] >>> listRecordings: download in progress, returning cached')
         if (this.cachedRecordings !== null) {
           onProgress?.(this.cachedRecordings.length, this.cachedRecordings.length)
           return this.cachedRecordings
@@ -807,7 +805,7 @@ class HiDockDeviceService {
       }
       // Case 3: Delete in progress - protect it
       if (lockHolder.startsWith('deleteFile:')) {
-        console.log('[HiDockDevice] >>> listRecordings: delete in progress, returning cached')
+        if (shouldLogQa()) console.log('[HiDockDevice] >>> listRecordings: delete in progress, returning cached')
         if (this.cachedRecordings !== null) {
           onProgress?.(this.cachedRecordings.length, this.cachedRecordings.length)
           return this.cachedRecordings
@@ -815,13 +813,13 @@ class HiDockDeviceService {
         return []
       }
       // Case 4: Init commands (short-lived) - fall through to init-wait guard
-      console.log(`[HiDockDevice] >>> listRecordings: init lock '${lockHolder}' held, falling through to init wait`)
+      if (shouldLogQa()) console.log(`[HiDockDevice] >>> listRecordings: init lock '${lockHolder}' held, falling through to init wait`)
     }
 
     // Wait for initialization to complete before listing files
     // This ensures recordingCount is populated for accurate progress reporting
     if (!this.initializationComplete) {
-      console.log('[HiDockDevice] >>> listRecordings: WAITING FOR INIT')
+      if (shouldLogQa()) console.log('[HiDockDevice] >>> listRecordings: WAITING FOR INIT')
       this.logActivity('info', 'Waiting for initialization', 'File list request waiting for device init...')
       // FL-06: Emit periodic status updates so the UI shows "Initializing device..."
       // instead of appearing frozen during the wait
@@ -862,18 +860,18 @@ class HiDockDeviceService {
       expectedFileCount > 0
 
     if (cacheValid) {
-      console.log(`[HiDockDevice] >>> listRecordings: CACHE HIT, returning ${this.cachedRecordings!.length} files`)
+      if (shouldLogQa()) console.log(`[HiDockDevice] >>> listRecordings: CACHE HIT, returning ${this.cachedRecordings!.length} files`)
       // Don't log cache hits - they're too noisy when multiple components request data
       // Report instant progress
       onProgress?.(expectedFileCount, expectedFileCount)
       return this.cachedRecordings!
     }
-    console.log(`[HiDockDevice] >>> listRecordings: CACHE MISS, forceRefresh=${forceRefresh}, cached=${this.cachedRecordings?.length ?? 'null'}, cachedCount=${this.cachedRecordingCount}, expected=${expectedFileCount}`)
+    if (shouldLogQa()) console.log(`[HiDockDevice] >>> listRecordings: CACHE MISS, forceRefresh=${forceRefresh}, cached=${this.cachedRecordings?.length ?? 'null'}, cachedCount=${this.cachedRecordingCount}, expected=${expectedFileCount}`)
 
     // Prevent concurrent requests - use synchronous lock to prevent TOCTOU race
     // Check both the lock flag (set synchronously) and promise (set after lock)
     if ((this.listRecordingsLock || this.listRecordingsPromise) && !forceRefresh) {
-      if (DEBUG_DEVICE) console.log('[HiDockDevice] listRecordings: Request already in progress, waiting...')
+      if (shouldLogQa()) console.log('[HiDockDevice] listRecordings: Request already in progress, waiting...')
       // Don't log - this is just coordination between components
       // Wait for the promise if it exists, or poll for it if lock is set but promise not yet
       const waitForPromise = async (): Promise<HiDockRecording[]> => {
@@ -919,12 +917,12 @@ class HiDockDeviceService {
     this.listRecordingsLock = true
 
     // Only log to console (DEBUG), not activity log - cache invalidation is internal detail
-    if (!forceRefresh && this.cachedRecordings !== null && DEBUG_DEVICE) {
+    if (!forceRefresh && this.cachedRecordings !== null && shouldLogQa()) {
       console.log(`[HiDockDevice] Cache invalid: cached=${this.cachedRecordingCount}, device=${expectedFileCount}`)
     }
 
     this.logActivity('usb-out', 'CMD: List Files', `Requesting file list (${expectedFileCount} files expected)`)
-    console.log('[HiDockDevice] >>> listRecordings: CALLING JENSEN.LISTFILES(), expected:', expectedFileCount)
+    if (shouldLogQa()) console.log('[HiDockDevice] >>> listRecordings: CALLING JENSEN.LISTFILES(), expected:', expectedFileCount)
 
     // Send initial progress immediately so UI shows 0/N
     onProgress?.(0, expectedFileCount)
@@ -968,7 +966,7 @@ class HiDockDeviceService {
         animationCancelled = true
         clearInterval(animationInterval)
 
-        if (DEBUG_DEVICE) console.log(`[HiDockDevice] listRecordings: Received ${files.length} files`)
+        if (shouldLogQa()) console.log(`[HiDockDevice] listRecordings: Received ${files.length} files`)
         this.logActivity('usb-in', 'File List Received', `${files.length} files found`)
 
         const recordings = files.map((f) => this.fileInfoToRecording(f))
@@ -1229,7 +1227,7 @@ class HiDockDeviceService {
   cancelDownload(filename: string): boolean {
     const controller = this.abortControllers.get(filename)
     if (controller) {
-      console.log(`[HiDockDevice] Cancelling download: ${filename}`)
+      if (shouldLogQa()) console.log(`[HiDockDevice] Cancelling download: ${filename}`)
       controller.abort()
       this.abortControllers.delete(filename)
       this.logActivity('warning', 'Download cancelled', filename)
@@ -1245,7 +1243,7 @@ class HiDockDeviceService {
   cancelAllDownloads(): number {
     let count = 0
     for (const [filename, controller] of this.abortControllers.entries()) {
-      console.log(`[HiDockDevice] Cancelling download: ${filename}`)
+      if (shouldLogQa()) console.log(`[HiDockDevice] Cancelling download: ${filename}`)
       controller.abort()
       count++
     }
@@ -1258,14 +1256,14 @@ class HiDockDeviceService {
 
   // Private methods
   private async handleConnect(): Promise<void> {
-    if (DEBUG_DEVICE) console.log('[HiDockDevice] handleConnect called')
+    if (shouldLogQa()) console.log('[HiDockDevice] handleConnect called')
     this.initAborted = false // Reset abort flag on new connection
     this.state.connected = true
     this.state.model = this.jensen.getModel()
     this.notifyStateChange()
 
     this.logActivity('success', 'USB device connected', `Model: ${this.state.model}`)
-    console.log(`[HiDockDevice] Connected to ${this.state.model}`)
+    if (shouldLogQa()) console.log(`[HiDockDevice] Connected to ${this.state.model}`)
 
     // Initialize device - track failures to detect unresponsive device
     // Each step has a timeout to prevent hanging
@@ -1423,7 +1421,7 @@ class HiDockDeviceService {
     // skip the connection change notification for 'connected=true' to prevent
     // duplicate refresh triggers in subscribers
     if (connected && Date.now() - this.lastReadyStatusTimestamp < HiDockDeviceService.READY_DEDUP_MS) {
-      console.log('[HiDockDevice] Skipping notifyConnectionChange(true) - ready status just fired')
+      if (shouldLogQa()) console.log('[HiDockDevice] Skipping notifyConnectionChange(true) - ready status just fired')
       return
     }
     for (const listener of this.connectionListeners) {

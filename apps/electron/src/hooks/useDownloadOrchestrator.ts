@@ -12,18 +12,9 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
-import { useUIStore } from '@/store'
 import { toast } from '@/components/ui/toaster'
 import { parseError, getErrorMessage } from '@/features/library/utils/errorHandling'
-
-// QA Logging helper - respects user's QA Logs toggle in all environments
-function shouldLogQa(): boolean {
-  try {
-    return useUIStore.getState().qaLogsEnabled
-  } catch {
-    return false
-  }
-}
+import { shouldLogQa } from '@/services/qa-monitor'
 
 interface DownloadQueueItem {
   id: string
@@ -112,7 +103,7 @@ export function useDownloadOrchestrator() {
       )
 
       if (!success) {
-        console.error(`[QA-MONITOR][Operation] Download failed: ${item.filename}`)
+        console.error(`[useDownloadOrchestrator] Download failed: ${item.filename}`)
         await window.electronAPI.downloadService.markFailed(item.filename, 'USB transfer failed')
         removeFromDownloadQueue(item.filename)
         toast({
@@ -152,7 +143,7 @@ export function useDownloadOrchestrator() {
       }
     } catch (error) {
       const libraryError = parseError(error, 'download')
-      console.error(`[QA-MONITOR][Operation] Error: ${item.filename}`, error)
+      console.error(`[useDownloadOrchestrator] Error: ${item.filename}`, error)
       await window.electronAPI.downloadService.markFailed(item.filename, libraryError.message)
       if (!signal.aborted) {
         removeFromDownloadQueue(item.filename)

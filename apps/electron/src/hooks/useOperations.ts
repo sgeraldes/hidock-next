@@ -31,8 +31,9 @@ export function useOperations() {
 
     // Check if API key is configured before queuing
     try {
-      const apiKey = await window.electronAPI.config.getValue('transcription.geminiApiKey')
-      if (!apiKey || apiKey.trim() === '') {
+      const result = await window.electronAPI.config.getValue('transcription.geminiApiKey')
+      const apiKey = result?.success ? result.data : null
+      if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
         toast({
           title: 'API key required',
           description: 'Please configure your Gemini API key in Settings before transcribing.',
@@ -74,8 +75,9 @@ export function useOperations() {
 
     // Check if API key is configured before queuing
     try {
-      const apiKey = await window.electronAPI.config.getValue('transcription.geminiApiKey')
-      if (!apiKey || apiKey.trim() === '') {
+      const result = await window.electronAPI.config.getValue('transcription.geminiApiKey')
+      const apiKey = result?.success ? result.data : null
+      if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
         toast({
           title: 'API key required',
           description: 'Please configure your Gemini API key in Settings before transcribing.',

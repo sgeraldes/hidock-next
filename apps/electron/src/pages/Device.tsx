@@ -17,9 +17,9 @@ import { cancelDownloads } from '@/hooks/useDownloadOrchestrator'
 
 import { formatEta, formatBytes } from '@/utils/formatters'
 import { DeviceFileList } from '@/components/DeviceFileList'
+import { shouldLogQa } from '@/services/qa-monitor'
 
 const CONNECTION_TIMEOUT_MS = 15000 // 15 second timeout
-const DEBUG_DEVICE_UI = false // Enable verbose UI logging
 
 export function Device() {
   // B-DEV-001: Unified syncing state - use only store as single source of truth
@@ -121,7 +121,7 @@ export function Device() {
   const refreshSyncedFilenames = useCallback(async () => {
     const now = Date.now()
     if (now - lastSyncedRefreshRef.current < 500) {
-      if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Debounced refreshSyncedFilenames call')
+      if (shouldLogQa()) console.log('[Device.tsx] Debounced refreshSyncedFilenames call')
       return
     }
     lastSyncedRefreshRef.current = now
@@ -129,7 +129,7 @@ export function Device() {
     try {
       const filenames = await window.electronAPI.syncedFiles.getFilenames()
       setSyncedFilenames(new Set(filenames))
-      if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Refreshed ${filenames.length} synced filenames`)
+      if (shouldLogQa()) console.log(`[Device.tsx] Refreshed ${filenames.length} synced filenames`)
     } catch (e) {
       console.error('[Device.tsx] Failed to refresh synced filenames:', e)
     }
@@ -146,7 +146,7 @@ export function Device() {
         const filenames = await window.electronAPI.syncedFiles.getFilenames()
         if (mounted) {
           setSyncedFilenames(new Set(filenames))
-          if (DEBUG_DEVICE_UI) console.log(`[Device.tsx] Loaded ${filenames.length} synced filenames`)
+          if (shouldLogQa()) console.log(`[Device.tsx] Loaded ${filenames.length} synced filenames`)
         }
       } catch (e) {
         console.error('[Device.tsx] Failed to load synced filenames:', e)
@@ -159,7 +159,9 @@ export function Device() {
     // and the initial useState may read the default value before config is loaded
     const loadConfigSettings = async () => {
       try {
-        const config = await window.electronAPI.config.get()
+        const result = await window.electronAPI.config.get()
+        // config:get IPC returns Result wrapper { success, data }
+        const config = result?.success ? result.data : result
         if (mounted) {
           // Auto-connect - must be loaded here because service loads async and
           // useState may have captured the default before config loaded
@@ -221,11 +223,11 @@ export function Device() {
 
     // Load additional data if already connected (recordings are loaded by useUnifiedRecordings hook)
     const loadInitialData = async () => {
-      if (DEBUG_DEVICE_UI) console.log('[Device.tsx] loadInitialData called, isConnected:', deviceService.isConnected())
+      if (shouldLogQa()) console.log('[Device.tsx] loadInitialData called, isConnected:', deviceService.isConnected())
       if (deviceService.isConnected()) {
         try {
           if (deviceService.isP1Device()) {
-            if (DEBUG_DEVICE_UI) console.log('[Device.tsx] P1 device detected, loading battery status...')
+            if (shouldLogQa()) console.log('[Device.tsx] P1 device detected, loading battery status...')
             const status = await deviceService.getBatteryStatus()
             if (mounted) setBatteryStatus(status)
           }
@@ -233,7 +235,7 @@ export function Device() {
           console.error('[Device.tsx] Failed to load initial data:', e)
         }
       } else {
-        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device not connected, skipping initial data load')
+        if (shouldLogQa()) console.log('[Device.tsx] Device not connected, skipping initial data load')
       }
     }
     loadInitialData()
@@ -241,20 +243,20 @@ export function Device() {
     // Subscribe to connection changes (recordings are managed by useUnifiedRecordings hook)
     const unsubscribe = deviceService.onConnectionChange(async (connected) => {
       if (!mounted) return
-      if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Connection change:', connected)
+      if (shouldLogQa()) console.log('[Device.tsx] Connection change:', connected)
       setConnecting(false)
       clearConnectionTimers() // Clear timers on connection change
       if (connected) {
-        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device connected')
+        if (shouldLogQa()) console.log('[Device.tsx] Device connected')
         setError(null) // Clear any previous errors
 
         // Load P1-specific data
         if (deviceService.isP1Device()) {
-          if (DEBUG_DEVICE_UI) console.log('[Device.tsx] P1 device, loading battery status...')
+          if (shouldLogQa()) console.log('[Device.tsx] P1 device, loading battery status...')
           loadBatteryStatus()
         }
       } else {
-        if (DEBUG_DEVICE_UI) console.log('[Device.tsx] Device disconnected, clearing state...')
+        if (shouldLogQa()) console.log('[Device.tsx] Device disconnected, clearing state...')
         setBatteryStatus(null)
         // Reset auto-sync flag so it triggers on reconnect
         autoSyncTriggeredRef.current = false
@@ -464,7 +466,7 @@ export function Device() {
       const filesWithStatus = await window.electronAPI.downloadService.getFilesToSync(filesToCheck)
       const toSync = filesWithStatus.filter(f => !f.skipReason)
 
-      if (DEBUG_DEVICE_UI) {
+      if (shouldLogQa()) {
         console.log(`[Device.tsx] handleSyncAll: ${toSync.length} need sync, ${filesWithStatus.length - toSync.length} already synced`)
         // Log skip reasons for debugging
         for (const f of filesWithStatus.filter(f => f.skipReason)) {

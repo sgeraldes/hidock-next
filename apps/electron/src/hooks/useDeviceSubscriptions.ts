@@ -9,17 +9,8 @@
 import { useEffect, useRef } from 'react'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
-import { useUIStore } from '@/store'
+import { shouldLogQa } from '@/services/qa-monitor'
 import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
-
-// QA Logging helper - respects user's QA Logs toggle in all environments
-function shouldLogQa(): boolean {
-  try {
-    return useUIStore.getState().qaLogsEnabled
-  } catch {
-    return false
-  }
-}
 
 export function useDeviceSubscriptions() {
   const deviceService = getHiDockDeviceService()

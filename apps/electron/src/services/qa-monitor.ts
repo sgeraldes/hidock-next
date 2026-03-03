@@ -13,6 +13,15 @@ function isQaEnabled(): boolean {
   }
 }
 
+/**
+ * Shared QA logging check for hooks and services.
+ * Respects the user's QA Logs toggle in all environments.
+ * Import this instead of defining local shouldLogQa() in each file.
+ */
+export function shouldLogQa(): boolean {
+  return isQaEnabled()
+}
+
 export function NavigationLogger() {
   const location = useLocation()
   const qaEnabled = useUIStore((s) => s.qaLogsEnabled)
@@ -92,17 +101,7 @@ export function cleanupQAMonitor() {
   cleanupFunctions = []
   window.hasInitializedInteractionLogger = false
 
-  console.log('[QA-MONITOR] All event listeners cleaned up')
-}
-
-export function logStateChange(storeName: string, partialState: any) {
-  if (!isQaEnabled()) return
-  const keys = Object.keys(partialState)
-  const filteredKeys = keys.filter(k => !['meetings', 'recordings', 'unifiedRecordings', 'activityLog'].includes(k))
-  if (filteredKeys.length > 0) {
-    const updates = filteredKeys.reduce((acc, k) => ({ ...acc, [k]: partialState[k] }), {})
-    console.log(`[QA-MONITOR] State [${storeName}]:`, updates)
-  }
+  if (isQaEnabled()) console.log('[QA-MONITOR] All event listeners cleaned up')
 }
 
 declare global {

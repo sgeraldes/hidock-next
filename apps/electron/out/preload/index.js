@@ -1,17 +1,37 @@
 "use strict";
 const electron = require("electron");
+let _qaLogsCache = false;
+let _qaLogsCacheTime = 0;
+const QA_CACHE_TTL = 5e3;
+function isQaLogsEnabled() {
+  const now = Date.now();
+  if (now - _qaLogsCacheTime < QA_CACHE_TTL) return _qaLogsCache;
+  try {
+    const stored = localStorage.getItem("hidock-ui-store");
+    if (stored) {
+      const { state } = JSON.parse(stored);
+      _qaLogsCache = state?.qaLogsEnabled ?? false;
+    } else {
+      _qaLogsCache = false;
+    }
+  } catch {
+    _qaLogsCache = false;
+  }
+  _qaLogsCacheTime = now;
+  return _qaLogsCache;
+}
 const callIPC = async (channel, ...args) => {
   const isPolling = ["recordings:getTranscriptionStatus", "db:get-recordings", "knowledge:getAll"].includes(channel);
   try {
     const start = performance.now();
     const result = await electron.ipcRenderer.invoke(channel, ...args);
     const duration = (performance.now() - start).toFixed(1);
-    if (!isPolling) {
+    if (!isPolling && isQaLogsEnabled()) {
       console.log(`[QA-MONITOR][IPC] ${channel} (${duration}ms)`);
     }
     return result;
   } catch (error) {
-    if (!isPolling) {
+    if (!isPolling && isQaLogsEnabled()) {
       console.error(`[QA-MONITOR][IPC-ERR] ${channel}:`, error);
     }
     throw error;
@@ -106,6 +126,7 @@ const electronAPI = {
     deleteConversation: (id) => callIPC("assistant:deleteConversation", id),
     getMessages: (conversationId) => callIPC("assistant:getMessages", conversationId),
     addMessage: (conversationId, role, content, sources) => callIPC("assistant:addMessage", conversationId, role, content, sources),
+    updateConversationTitle: (conversationId, title) => callIPC("assistant:updateConversationTitle", conversationId, title),
     addContext: (conversationId, knowledgeCaptureId) => callIPC("assistant:addContext", conversationId, knowledgeCaptureId),
     removeContext: (conversationId, knowledgeCaptureId) => callIPC("assistant:removeContext", conversationId, knowledgeCaptureId),
     getContext: (conversationId) => callIPC("assistant:getContext", conversationId)
@@ -173,6 +194,7 @@ const electronAPI = {
     findActionItems: (meetingId) => callIPC("rag:find-action-items", meetingId),
     cancel: (sessionId) => callIPC("rag:cancel", sessionId),
     // B-CHAT-005
+    removeLastMessages: (sessionId, count) => callIPC("rag:removeLastMessages", sessionId, count),
     clearSession: (sessionId) => callIPC("rag:clear-session", sessionId),
     stats: () => callIPC("rag:stats"),
     indexTranscript: (transcript, metadata) => callIPC("rag:index-transcript", { transcript, metadata }),
@@ -192,7 +214,7 @@ const electronAPI = {
     clearCompleted: () => callIPC("download-service:clear-completed"),
     cancel: (filename) => callIPC("download-service:cancel", filename),
     cancelAll: () => callIPC("download-service:cancel-all"),
-    retryFailed: () => callIPC("download-service:retry-failed"),
+    retryFailed: (deviceConnected) => callIPC("download-service:retry-failed", deviceConnected),
     getStats: () => callIPC("download-service:get-stats"),
     checkStalled: () => callIPC("download-service:check-stalled"),
     cancelActive: (reason) => callIPC("download-service:cancel-active", reason),
@@ -310,15 +332,3 @@ const electronAPI = {
   }
 };
 electron.contextBridge.exposeInMainWorld("electronAPI", electronAPI);
-function isQaLogsEnabled() {
-  try {
-    const stored = localStorage.getItem("hidock-ui-store");
-    if (stored) {
-      const { state } = JSON.parse(stored);
-      return state?.qaLogsEnabled ?? false;
-    }
-  } catch {
-  }
-  return false;
-}
-electron.contextBridge.exposeInMainWorld("isQaLogsEnabled", isQaLogsEnabled);

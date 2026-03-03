@@ -11,14 +11,7 @@ import { useUIStore } from '@/store/useUIStore'
 import { toast } from '@/components/ui/toaster'
 import { parseError, getErrorMessage } from '@/features/library/utils/errorHandling'
 import { generateWaveformData, decodeAudioData, getAudioMimeType } from '@/utils/audioUtils'
-
-function shouldLogQa(): boolean {
-  try {
-    return useUIStore.getState().qaLogsEnabled
-  } catch {
-    return false
-  }
-}
+import { shouldLogQa } from '@/services/qa-monitor'
 
 export function useAudioPlayback() {
   const audioRef = useRef<HTMLAudioElement | null>(null)
