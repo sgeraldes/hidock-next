@@ -624,11 +624,19 @@ export function Device() {
 
   const handleRetryFailed = async () => {
     try {
-      const count = await window.electronAPI.downloadService.retryFailed()
-      if (count > 0) {
+      // AUD4-016: Pass device connection state so retryFailed can reject when disconnected
+      const deviceConnected = deviceService.isConnected()
+      const result = await window.electronAPI.downloadService.retryFailed(deviceConnected)
+      if (result.error) {
+        toast({
+          title: 'Cannot retry downloads',
+          description: result.error,
+          variant: 'error'
+        })
+      } else if (result.count > 0) {
         toast({
           title: 'Retrying downloads',
-          description: `Re-queued ${count} failed download${count !== 1 ? 's' : ''}`,
+          description: `Re-queued ${result.count} failed download${result.count !== 1 ? 's' : ''}`,
           variant: 'default'
         })
         setDeviceSyncState({ deviceSyncing: true })

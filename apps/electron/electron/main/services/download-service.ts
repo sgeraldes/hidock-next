@@ -672,7 +672,13 @@ class DownloadService {
    * B-DWN-007: Checks if file is already synced before retrying.
    * C-004: Also retries cancelled items, not just failed.
    */
-  retryFailed(): number {
+  retryFailed(deviceConnected: boolean = true): { count: number; error?: string } {
+    // AUD4-016: Check if device is connected before retrying
+    if (!deviceConnected) {
+      console.warn('[DownloadService] retryFailed called but device is not connected')
+      return { count: 0, error: 'Device not connected' }
+    }
+
     let count = 0
     const alreadySynced: string[] = []
 
@@ -709,7 +715,7 @@ class DownloadService {
       this.emitStateUpdate(true) // C-004: immediate emit for retry status changes
     }
 
-    return count
+    return { count }
   }
 
   /**
@@ -1013,8 +1019,9 @@ export function registerDownloadServiceHandlers(): void {
   })
 
   // Retry failed downloads
-  ipcMain.handle('download-service:retry-failed', () => {
-    return service.retryFailed()
+  // AUD4-016: Accepts deviceConnected flag from renderer to prevent retrying while disconnected
+  ipcMain.handle('download-service:retry-failed', (_, deviceConnected?: boolean) => {
+    return service.retryFailed(deviceConnected ?? true)
   })
 
   // Get sync stats

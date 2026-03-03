@@ -352,6 +352,7 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
   const pendingForceRefreshRef = useRef(false)
   const deviceReadyRefreshDoneRef = useRef(false) // Track if we've done a device-ready refresh
   const lastLoadTimestampRef = useRef(0) // FL-02: Track last load to prevent triple-fire
+  const connectionEventCooldownRef = useRef(0) // AUD5-014: Suppress polling right after connection events
 
   const deviceService = getHiDockDeviceService()
 
@@ -537,14 +538,19 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     setDeviceConnected(deviceService.isConnected())
 
     // Subscribe to device connection changes
+    // AUD5-014: Use forceRefresh=false here - the connection event fires before the device
+    // is fully ready. The onStatusChange('ready') handler below is the real "ready" signal
+    // and uses forceRefresh=true. This prevents triple-refresh on connect.
     const unsubConnection = deviceService.onConnectionChange((connected) => {
       setDeviceConnected(connected)
       // Reset the device-ready refresh flag when disconnecting
       if (!connected) {
         deviceReadyRefreshDoneRef.current = false
       }
-      // Reload when connection status changes (device data may have changed)
-      loadRecordings()
+      // AUD5-014: Set cooldown to suppress polling for 5 seconds after connection event
+      connectionEventCooldownRef.current = Date.now()
+      // Reload with forceRefresh=false - just checks cached/local data
+      loadRecordings(false)
     })
 
     // Subscribe to connection STATUS changes (important: 'ready' means device is fully initialized)
@@ -554,6 +560,8 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
       if (status.step === 'ready' && !deviceReadyRefreshDoneRef.current) {
         console.log('[useUnifiedRecordings] Device ready - forcing refresh to get device files')
         deviceReadyRefreshDoneRef.current = true
+        // AUD5-014: Set cooldown to suppress polling after ready event
+        connectionEventCooldownRef.current = Date.now()
         // Force refresh when device becomes ready to ensure we get fresh device data
         loadRecordings(true)
       }
@@ -608,6 +616,11 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
         // FL-04: Skip polling when a connection-triggered refresh is already in progress
         // This prevents the polling effect from racing with connection event handlers
         if (loadingRef.current) return
+
+        // AUD5-014: Skip polling during cooldown after a connection event
+        // This prevents the poll from firing a redundant refresh right after connect/ready
+        const cooldownElapsed = Date.now() - connectionEventCooldownRef.current
+        if (cooldownElapsed < 5000) return
 
         // Get current device recordings count
         const deviceRecs = deviceService.getCachedRecordings()

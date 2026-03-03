@@ -3,6 +3,7 @@ import { X, Download, Sparkles, RefreshCw, AlertCircle, RotateCcw } from 'lucide
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useDownloadQueue, useDeviceSyncProgress, useDeviceSyncEta } from '@/store/useAppStore'
+import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useTranscriptionStore, useTranscriptionStats } from '@/store/features/useTranscriptionStore'
 import { useOperations } from '@/hooks/useOperations'
 import { toast } from '@/components/ui/toaster'
@@ -48,11 +49,19 @@ export function OperationsPanel({ sidebarOpen }: OperationsPanelProps) {
 
   const handleRetryFailed = useCallback(async () => {
     try {
-      const count = await window.electronAPI.downloadService.retryFailed()
-      if (count > 0) {
+      // AUD4-016: Pass device connection state so retryFailed can reject when disconnected
+      const deviceConnected = getHiDockDeviceService().isConnected()
+      const result = await window.electronAPI.downloadService.retryFailed(deviceConnected)
+      if (result.error) {
+        toast({
+          title: 'Cannot retry downloads',
+          description: result.error,
+          variant: 'error'
+        })
+      } else if (result.count > 0) {
         toast({
           title: 'Retrying downloads',
-          description: `Re-queued ${count} failed download${count !== 1 ? 's' : ''}`,
+          description: `Re-queued ${result.count} failed download${result.count !== 1 ? 's' : ''}`,
           variant: 'default'
         })
       }
