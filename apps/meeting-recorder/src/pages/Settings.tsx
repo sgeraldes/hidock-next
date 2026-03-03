@@ -286,7 +286,7 @@ export default function Settings() {
                       value={store.model}
                       onChange={(e) => handleFieldChange("model", e.target.value)}
                       className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                      placeholder="e.g. gemini-2.0-flash"
+                      placeholder="e.g. gemini-2.5-flash"
                     />
                   }
                 />

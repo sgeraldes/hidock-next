@@ -1,7 +1,14 @@
-export const DEFAULT_MODELS: Record<string, string> = {
-  google: "gemini-2.0-flash",
-  openai: "gpt-4o",
-  anthropic: "claude-sonnet-4-20250514",
-  bedrock: "anthropic.claude-sonnet-4-20250514-v1:0",
-  ollama: "llama3.2",
-};
+// Model defaults are now loaded from models.config.json via IPC.
+// This file retains only type re-exports needed by the renderer.
+//
+// To get default models in the renderer:
+//   const config = await window.electronAPI.models.getConfig();
+//   const defaultModel = config.providers[providerId].defaultModel;
+
+// Re-export provider key type for renderer convenience
+export type AIProviderKey =
+  | "google"
+  | "openai"
+  | "anthropic"
+  | "bedrock"
+  | "ollama";

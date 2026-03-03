@@ -7,17 +7,21 @@ import {
   getSummarizationService,
 } from "./translation-handlers";
 import { getEndOfMeetingProcessor } from "./meeting-type-handlers";
+import { modelConfig } from "../services/model-config";
 import type { AIProviderConfig } from "../services/ai-provider.types";
 
 const AI_SETTING_KEYS = [
   "ai.provider",
-  "ai.model",
+  "ai.model",          // Keep for backward compat
+  "ai.model.default",  // Primary model key
   "ai.apiKey",
   "ai.ollamaBaseUrl",
   "ai.bedrockRegion",
   "ai.bedrockAccessKeyId",
   "ai.bedrockSecretAccessKey",
   "ai.bedrockSessionToken",
+  "ai.transcriptionProvider",
+  "ai.transcriptionApiKey",
 ];
 
 const SENSITIVE_KEYS = new Set([
@@ -27,17 +31,35 @@ const SENSITIVE_KEYS = new Set([
   "ai.bedrockSessionToken",
 ]);
 
+export const MIGRATION_VERSION_KEY = "settings.migration.version";
+export const CURRENT_MIGRATION_VERSION = "2";
+
 function maskSensitiveValue(value: string): string {
-  if (!value) return "";
+  if (!value || value.length <= 4) return "****";
   return `****${value.slice(-4)}`;
 }
 
 function reconfigureAIIfNeeded(changedKey: string): void {
-  if (!AI_SETTING_KEYS.includes(changedKey)) return;
+  if (
+    !AI_SETTING_KEYS.includes(changedKey) &&
+    !changedKey.startsWith("ai.model.context.")
+  ) {
+    return;
+  }
 
   const provider = getSetting("ai.provider");
-  const model = getSetting("ai.model");
+  // Read from ai.model.default, falling back to old ai.model for migration
+  const model =
+    getSetting("ai.model.default") ||
+    getSetting("ai.model") ||
+    modelConfig.getDefaultModel(provider || "google");
   if (!provider || !model) return;
+
+  // Also get the transcription model from context config
+  const transcriptionModelId =
+    getSetting("ai.model.context.realtime") ||
+    modelConfig.getModelForContext(provider, "realtime") ||
+    model;
 
   const config: AIProviderConfig = {
     provider: provider as AIProviderConfig["provider"],
@@ -49,6 +71,10 @@ function reconfigureAIIfNeeded(changedKey: string): void {
     bedrockSecretAccessKey:
       getSetting("ai.bedrockSecretAccessKey") ?? undefined,
     bedrockSessionToken: getSetting("ai.bedrockSessionToken") ?? undefined,
+    transcriptionModel: transcriptionModelId,
+    transcriptionProvider:
+      (getSetting("ai.transcriptionProvider") as "google") ?? undefined,
+    transcriptionApiKey: getSetting("ai.transcriptionApiKey") ?? undefined,
   };
 
   try {
@@ -68,8 +94,110 @@ function reconfigureAIIfNeeded(changedKey: string): void {
   }
 }
 
+/** Migrate old settings to new schema and handle deprecated models. */
+export function migrateModelSettings(): void {
+  const currentVersion = getSetting(MIGRATION_VERSION_KEY);
+  if (currentVersion === CURRENT_MIGRATION_VERSION) {
+    return; // Already migrated
+  }
+
+  console.log("[Settings Migration] Starting model settings migration...");
+
+  const provider = getSetting("ai.provider") || "google";
+  const existingModel = getSetting("ai.model");
+  const existingDefault = getSetting("ai.model.default");
+
+  // Backup: store original values before migration
+  if (existingModel || provider) {
+    const backupKey = `settings.migration.backup.${Date.now()}`;
+    setSetting(
+      backupKey,
+      JSON.stringify({ provider, model: existingModel }),
+      false,
+    );
+    console.log(
+      `[Settings Migration] Backed up original settings to "${backupKey}"`,
+    );
+  }
+
+  // Migration 1: ai.model -> ai.model.default (if new key doesn't exist yet)
+  if (existingModel && !existingDefault) {
+    // Handle deprecated model migration inline
+    let migratedModel = existingModel;
+    if (modelConfig.isModelDeprecated(provider, existingModel)) {
+      const migration = modelConfig.getDeprecationMigration(
+        provider,
+        existingModel,
+      );
+      if (migration) {
+        migratedModel = migration;
+        console.log(
+          `[Settings Migration] Upgrading deprecated model: ` +
+          `${existingModel} -> ${migration}`,
+        );
+      }
+    }
+    setSetting("ai.model.default", migratedModel, false);
+    console.log(
+      `[Settings Migration] Migrated ai.model -> ai.model.default = "${migratedModel}"`,
+    );
+  }
+
+  // Migration 2: If ai.model.default exists but is deprecated, upgrade it
+  const currentDefault = getSetting("ai.model.default");
+  if (currentDefault && modelConfig.isModelDeprecated(provider, currentDefault)) {
+    const migration = modelConfig.getDeprecationMigration(
+      provider,
+      currentDefault,
+    );
+    if (migration) {
+      console.log(
+        `[Settings Migration] Migrating deprecated default: ` +
+        `${currentDefault} -> ${migration}`,
+      );
+      setSetting("ai.model.default", migration, false);
+      // Also update legacy key for backward compatibility
+      if (existingModel) {
+        setSetting("ai.model", migration, false);
+      }
+    }
+  }
+
+  // Migration 3: Set context defaults from config if not already set
+  const contexts = modelConfig.getContextIds();
+  for (const contextId of contexts) {
+    const key = `ai.model.context.${contextId}`;
+    if (!getSetting(key)) {
+      const contextModel = modelConfig.getModelForContext(provider, contextId);
+      if (contextModel) {
+        setSetting(key, contextModel, false);
+        console.log(
+          `[Settings Migration] Set context default: ${key} = "${contextModel}"`,
+        );
+      }
+    }
+  }
+
+  // Migration 4: Ensure ai.model.default has a valid value
+  if (!getSetting("ai.model.default")) {
+    const defaultModel = modelConfig.getDefaultModel(provider);
+    setSetting("ai.model.default", defaultModel, false);
+    console.log(
+      `[Settings Migration] Set default model: ai.model.default = "${defaultModel}"`,
+    );
+  }
+
+  // Mark migration as complete
+  setSetting(MIGRATION_VERSION_KEY, CURRENT_MIGRATION_VERSION, false);
+  saveDatabase();
+  console.log(
+    `[Settings Migration] Migration complete (v${CURRENT_MIGRATION_VERSION})`,
+  );
+}
+
 /** Configure AI service from database on startup (avoids masked key bug). */
 export function initializeAIFromSettings(): void {
+  migrateModelSettings();
   reconfigureAIIfNeeded("ai.provider");
 }
 
@@ -83,14 +211,67 @@ export function registerSettingsHandlers(): void {
   });
 
   ipcMain.handle("settings:set", (_, key: string, value: string) => {
+    // Validate key prefix to prevent arbitrary writes
+    const WRITABLE_PREFIXES = ["ai.", "recording.", "general.", "ui."];
+    if (!WRITABLE_PREFIXES.some((p) => key.startsWith(p))) {
+      console.warn(`[Settings] Rejected write to unauthorized key: "${key}"`);
+      return;
+    }
+
+    // Backward compatibility: redirect old ai.model writes to ai.model.default
+    const effectiveKey = key === "ai.model" ? "ai.model.default" : key;
+
+    // When provider changes, update default model from config if current
+    // default doesn't exist in the new provider
+    if (effectiveKey === "ai.provider") {
+      const newDefaultModel = modelConfig.getDefaultModel(value);
+      if (newDefaultModel) {
+        const currentDefault = getSetting("ai.model.default");
+        if (!currentDefault || !modelConfig.validateModel(value, currentDefault)) {
+          setSetting("ai.model.default", newDefaultModel, false);
+          console.log(
+            `[Settings] Provider changed to "${value}", ` +
+            `default model set to "${newDefaultModel}"`,
+          );
+        }
+      }
+    }
+
+    // Validate model against config when setting any ai.model.* key
+    let effectiveValue = value;
+    if (effectiveKey.startsWith("ai.model.")) {
+      const provider = getSetting("ai.provider") || "google";
+      const model = modelConfig.getModel(provider, effectiveValue);
+
+      if (model?.deprecated) {
+        const fallback = modelConfig.getDefaultModel(provider);
+        console.warn(
+          `[Settings] Model "${effectiveValue}" is deprecated. Redirecting to "${fallback}".`,
+        );
+        effectiveValue = fallback;
+      } else if (!model) {
+        // Unknown model: allow but warn (supports custom models)
+        console.warn(
+          `[Settings] Model "${effectiveValue}" not found in config for ` +
+          `"${provider}". Allowing as custom model.`,
+        );
+      }
+    }
+
     const encrypt =
-      key.includes("apiKey") ||
-      key.includes("SecretAccessKey") ||
-      key.includes("AccessKeyId") ||
-      key.includes("SessionToken");
-    setSetting(key, value, encrypt);
+      effectiveKey.includes("apiKey") ||
+      effectiveKey.includes("SecretAccessKey") ||
+      effectiveKey.includes("AccessKeyId") ||
+      effectiveKey.includes("SessionToken");
+    setSetting(effectiveKey, effectiveValue, encrypt);
     saveDatabase();
-    reconfigureAIIfNeeded(key);
+
+    // Reconfigure AI when model-related keys change
+    if (effectiveKey === "ai.model.default" || effectiveKey === "ai.provider") {
+      reconfigureAIIfNeeded("ai.model.default");
+    } else {
+      reconfigureAIIfNeeded(effectiveKey);
+    }
   });
 
   ipcMain.handle("settings:getAll", () => {
@@ -110,6 +291,39 @@ export function registerSettingsHandlers(): void {
     }
     return settings;
   });
+
+  ipcMain.handle(
+    "settings:getModelForContext",
+    (_, context: string): string => {
+      const provider = getSetting("ai.provider") || "google";
+
+      // Step 1: Check context-specific setting
+      const contextModel = getSetting(`ai.model.context.${context}`);
+      if (contextModel) {
+        const model = modelConfig.getModel(provider, contextModel);
+        if (model && !model.deprecated) {
+          return contextModel;
+        }
+        // Stored model is deprecated or removed -- fall through
+        console.warn(
+          `[Settings] Context model "${contextModel}" for "${context}" ` +
+          `is deprecated/invalid. Falling back.`,
+        );
+      }
+
+      // Step 2: Fall back to default model setting
+      const defaultModel = getSetting("ai.model.default");
+      if (defaultModel) {
+        const model = modelConfig.getModel(provider, defaultModel);
+        if (model && !model.deprecated) {
+          return defaultModel;
+        }
+      }
+
+      // Step 3: Fall back to config's default for the provider
+      return modelConfig.getDefaultModel(provider);
+    },
+  );
 
   ipcMain.handle("settings:testConnection", async () => {
     const provider = getSetting("ai.provider");

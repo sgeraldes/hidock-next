@@ -119,11 +119,75 @@ interface ElectronAPI {
     ) => Promise<void>;
     processSession: (sessionId: string) => Promise<void>;
   };
+  models: {
+    getConfig: () => Promise<{
+      version: number;
+      providers: Record<string, {
+        name: string;
+        audioCapable: boolean;
+        models: Array<{
+          id: string;
+          name: string;
+          description: string;
+          costMultiplier: number;
+          contexts: string[];
+          capabilities: string[];
+          deprecated?: boolean;
+          recommended?: boolean;
+          migratesTo?: string;
+          sunset?: string;
+        }>;
+        defaultModel: string;
+        requiresTranscription?: boolean;
+        transcriptionProvider?: string;
+        allowCustomModels?: boolean;
+      }>;
+      contexts: Record<string, {
+        name: string;
+        description: string;
+        priority: "speed" | "quality" | "cost";
+      }>;
+    }>;
+    getForProvider: (providerId: string) => Promise<Array<{
+      id: string;
+      name: string;
+      description: string;
+      costMultiplier: number;
+      contexts: string[];
+      capabilities: string[];
+      deprecated?: boolean;
+      recommended?: boolean;
+      migratesTo?: string;
+      sunset?: string;
+    }>>;
+    getActiveForProvider: (providerId: string) => Promise<Array<{
+      id: string;
+      name: string;
+      description: string;
+      costMultiplier: number;
+      contexts: string[];
+      capabilities: string[];
+      recommended?: boolean;
+    }>>;
+    getForContext: (context: string) => Promise<string>;
+    getContexts: () => Promise<Record<string, {
+      name: string;
+      description: string;
+      priority: "speed" | "quality" | "cost";
+    }>>;
+    validate: (providerId: string, modelId: string) => Promise<{
+      valid: boolean;
+      deprecated: boolean;
+      migratesTo: string | null;
+    }>;
+    getCostMultiplier: (providerId: string, modelId: string) => Promise<number>;
+  };
   settings: {
     get: (key: string) => Promise<string | null>;
     set: (key: string, value: string) => Promise<void>;
     getAll: () => Promise<Record<string, string>>;
     testConnection: () => Promise<{ valid: boolean; error?: string }>;
+    getModelForContext: (context: string) => Promise<string>;
   };
   history: {
     search: (query: string) => Promise<unknown[]>;

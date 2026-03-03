@@ -200,12 +200,29 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
   },
 
+  models: {
+    getConfig: () => ipcRenderer.invoke("models:getConfig"),
+    getForProvider: (providerId: string) =>
+      ipcRenderer.invoke("models:getForProvider", providerId),
+    getActiveForProvider: (providerId: string) =>
+      ipcRenderer.invoke("models:getActiveForProvider", providerId),
+    getForContext: (context: string) =>
+      ipcRenderer.invoke("models:getForContext", context),
+    getContexts: () => ipcRenderer.invoke("models:getContexts"),
+    validate: (providerId: string, modelId: string) =>
+      ipcRenderer.invoke("models:validate", providerId, modelId),
+    getCostMultiplier: (providerId: string, modelId: string) =>
+      ipcRenderer.invoke("models:getCostMultiplier", providerId, modelId),
+  },
+
   settings: {
     get: (key: string) => ipcRenderer.invoke("settings:get", key),
     set: (key: string, value: string) =>
       ipcRenderer.invoke("settings:set", key, value),
     getAll: () => ipcRenderer.invoke("settings:getAll"),
     testConnection: () => ipcRenderer.invoke("settings:testConnection"),
+    getModelForContext: (context: string) =>
+      ipcRenderer.invoke("settings:getModelForContext", context),
   },
 
   history: {

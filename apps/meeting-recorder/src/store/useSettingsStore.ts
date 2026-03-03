@@ -3,7 +3,7 @@ import { persist, createJSONStorage } from "zustand/middleware";
 
 export type SettingsField =
   | "provider"
-  | "model"
+  | "model"        // Maps to ai.model.default
   | "apiKey"
   | "ollamaBaseUrl"
   | "bedrockRegion"
@@ -20,9 +20,16 @@ export type SettingsField =
   | "startMinimized"
   | "closeToTray";
 
+/** Known model contexts from the config */
+export type ModelContext =
+  | "realtime"
+  | "postprocess"
+  | "critical"
+  | "batch";
+
 export interface SettingsState {
   provider: string;
-  model: string;
+  model: string;              // The default model (ai.model.default)
   apiKey: string;
   ollamaBaseUrl: string;
   bedrockRegion: string;
@@ -43,16 +50,24 @@ export interface SettingsState {
 
   loaded: boolean;
 
+  // Context-aware model selections (transient -- NOT persisted in localStorage)
+  contextModels: Record<string, string>;
+
+  // Actions
   setField: (key: SettingsField, value: string | number | boolean) => void;
   loadFromIPC: () => Promise<void>;
   saveToIPC: (key: string, value: string) => Promise<void>;
+
+  // Context-aware model actions
+  updateModelForContext: (context: string, modelId: string) => Promise<void>;
+  getModelForContext: (context: string) => Promise<string>;
 }
 
 export const useSettingsStore = create<SettingsState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       provider: "google",
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       apiKey: "",
       ollamaBaseUrl: "http://localhost:11434/api",
       bedrockRegion: "us-east-1",
@@ -73,6 +88,9 @@ export const useSettingsStore = create<SettingsState>()(
 
       loaded: false,
 
+      // Transient: NOT persisted (see partialize below)
+      contextModels: {},
+
       setField: (key, value) => {
         set({ [key]: value });
       },
@@ -83,7 +101,12 @@ export const useSettingsStore = create<SettingsState>()(
           const updates: Partial<SettingsState> = { loaded: true };
 
           if (all["ai.provider"]) updates.provider = all["ai.provider"];
-          if (all["ai.model"]) updates.model = all["ai.model"];
+          // Read from ai.model.default, fall back to old ai.model
+          if (all["ai.model.default"]) {
+            updates.model = all["ai.model.default"];
+          } else if (all["ai.model"]) {
+            updates.model = all["ai.model"];
+          }
           if (all["ai.apiKey"]) updates.apiKey = all["ai.apiKey"];
           if (all["ai.ollamaBaseUrl"])
             updates.ollamaBaseUrl = all["ai.ollamaBaseUrl"];
@@ -123,6 +146,17 @@ export const useSettingsStore = create<SettingsState>()(
           if (all["general.closeToTray"])
             updates.closeToTray = all["general.closeToTray"] === "true";
 
+          // Load context-specific model selections
+          const contextModels: Record<string, string> = {};
+          const contextPrefix = "ai.model.context.";
+          for (const [key, value] of Object.entries(all)) {
+            if (key.startsWith(contextPrefix) && value) {
+              const context = key.slice(contextPrefix.length);
+              contextModels[context] = value;
+            }
+          }
+          updates.contextModels = contextModels;
+
           set(updates);
 
           // NOTE: AI service is auto-configured in the main process at startup
@@ -145,6 +179,42 @@ export const useSettingsStore = create<SettingsState>()(
           console.warn("[SettingsStore] Failed to save setting:", key, err);
         }
       },
+
+      updateModelForContext: async (context: string, modelId: string) => {
+        const key = `ai.model.context.${context}`;
+        try {
+          await window.electronAPI.settings.set(key, modelId);
+          set((state) => ({
+            contextModels: {
+              ...state.contextModels,
+              [context]: modelId,
+            },
+          }));
+        } catch (err) {
+          console.warn(
+            "[SettingsStore] Failed to update context model:",
+            context,
+            err,
+          );
+        }
+      },
+
+      getModelForContext: async (context: string): Promise<string> => {
+        try {
+          const resolved =
+            await window.electronAPI.settings.getModelForContext(context);
+          return resolved;
+        } catch (err) {
+          console.warn(
+            "[SettingsStore] Failed to resolve model for context:",
+            context,
+            err,
+          );
+          // Local fallback
+          const state = get();
+          return state.contextModels[context] || state.model;
+        }
+      },
     }),
     {
       name: "meeting-recorder-settings",
@@ -153,7 +223,23 @@ export const useSettingsStore = create<SettingsState>()(
         provider: state.provider,
         model: state.model,
         theme: state.theme,
+        // contextModels intentionally NOT persisted -- loaded fresh from IPC
+        // (see zustand-stores.md: transient state excluded from partialize)
       }),
     },
   ),
 );
+
+// ---------- Granular selector hooks ----------
+
+/** Current default model */
+export const useDefaultModel = () =>
+  useSettingsStore((s) => s.model);
+
+/** Current provider */
+export const useProvider = () =>
+  useSettingsStore((s) => s.provider);
+
+/** Whether settings have loaded from IPC */
+export const useSettingsLoaded = () =>
+  useSettingsStore((s) => s.loaded);

@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { DEFAULT_MODELS } from "../../lib/ai-constants";
+import { useState, useEffect } from "react";
 import { CheckCircle2, AlertCircle, ExternalLink } from "lucide-react";
+import { ModelSelector } from "./ModelSelector";
+import { ContextModelSettings } from "./ContextModelSettings";
 
 interface ProviderSettingsProps {
   provider: string;
@@ -80,6 +81,23 @@ export default function ProviderSettings({
   const [editingApiKey, setEditingApiKey] = useState(false);
   const [editingBedrockKeys, setEditingBedrockKeys] = useState(false);
 
+  // Load default models from config via IPC (replaces hardcoded DEFAULT_MODELS)
+  const [defaultModels, setDefaultModels] = useState<Record<string, string>>({});
+  useEffect(() => {
+    window.electronAPI.models
+      .getConfig()
+      .then((config) => {
+        const defaults: Record<string, string> = {};
+        for (const [key, prov] of Object.entries(config.providers)) {
+          defaults[key] = prov.defaultModel;
+        }
+        setDefaultModels(defaults);
+      })
+      .catch(() => {
+        // Fallback: empty map - model field won't auto-populate on provider change
+      });
+  }, []);
+
   const currentProvider = PROVIDERS.find((p) => p.value === provider);
   const needsApiKey = provider !== "ollama";
   const isBedrock = provider === "bedrock";
@@ -101,8 +119,7 @@ export default function ProviderSettings({
           value={provider}
           onChange={(e) => {
             onFieldChange("provider", e.target.value);
-            const defaultModel =
-              DEFAULT_MODELS[e.target.value as keyof typeof DEFAULT_MODELS];
+            const defaultModel = defaultModels[e.target.value];
             if (defaultModel) {
               onFieldChange("model", defaultModel);
             }
@@ -173,23 +190,19 @@ export default function ProviderSettings({
 
       {/* Model Selection */}
       <div className="py-3">
-        <label htmlFor="model" className="text-sm font-medium text-foreground block mb-1">
+        <label className="text-sm font-medium text-foreground block mb-1">
           Model
         </label>
-        <p className="text-sm text-muted-foreground mb-3">
-          {provider === "google" && "Try gemini-2.0-flash (fastest) or gemini-1.5-pro (best quality)"}
-          {provider === "openai" && "Try gpt-4o (recommended) or gpt-3.5-turbo (faster)"}
-          {provider === "anthropic" && "Try claude-3-5-sonnet-latest or claude-3-opus-latest"}
-          {provider === "ollama" && "Try llama3.2, mistral, or phi3"}
-        </p>
-        <input
-          id="model"
-          type="text"
+        <ModelSelector
+          provider={provider}
           value={model}
-          onChange={(e) => onFieldChange("model", e.target.value)}
-          className="w-full bg-background text-foreground border border-input rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-          placeholder="e.g. gemini-2.0-flash, gpt-4, claude-3-opus"
+          onChange={(newModel) => onFieldChange("model", newModel)}
         />
+      </div>
+
+      {/* Context-Specific Model Overrides */}
+      <div className="py-3">
+        <ContextModelSettings provider={provider} />
       </div>
 
       {/* API Key (non-Bedrock providers) */}

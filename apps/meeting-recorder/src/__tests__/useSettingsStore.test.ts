@@ -9,7 +9,7 @@ const mockSet = vi.fn();
 beforeEach(() => {
   useSettingsStore.setState({
     provider: "google",
-    model: "gemini-2.0-flash",
+    model: "gemini-2.5-flash",
     apiKey: "",
     ollamaBaseUrl: "http://localhost:11434/api",
     bedrockRegion: "us-east-1",
@@ -45,7 +45,7 @@ describe("useSettingsStore", () => {
   it("starts with default values and loaded=false", () => {
     const state = useSettingsStore.getState();
     expect(state.provider).toBe("google");
-    expect(state.model).toBe("gemini-2.0-flash");
+    expect(state.model).toBe("gemini-2.5-flash");
     expect(state.autoRecord).toBe(true);
     expect(state.pollInterval).toBe(3);
     expect(state.loaded).toBe(false);
@@ -134,6 +134,27 @@ describe("useSettingsStore", () => {
       await useSettingsStore.getState().loadFromIPC();
 
       expect(useSettingsStore.getState().startMinimized).toBe(true);
+    });
+
+    it("prefers ai.model.default over ai.model", async () => {
+      mockGetAll.mockResolvedValue({
+        "ai.model": "old-model",
+        "ai.model.default": "gemini-2.5-flash",
+      });
+
+      await useSettingsStore.getState().loadFromIPC();
+
+      expect(useSettingsStore.getState().model).toBe("gemini-2.5-flash");
+    });
+
+    it("falls back to ai.model when ai.model.default is absent", async () => {
+      mockGetAll.mockResolvedValue({
+        "ai.model": "gpt-4o",
+      });
+
+      await useSettingsStore.getState().loadFromIPC();
+
+      expect(useSettingsStore.getState().model).toBe("gpt-4o");
     });
 
     it("sets loaded=true even when getAll throws", async () => {

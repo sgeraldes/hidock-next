@@ -9,7 +9,7 @@ const {
   mockGenerateObject,
   mockGenerateText,
 } = vi.hoisted(() => ({
-  mockGoogleModel: vi.fn().mockReturnValue({ modelId: "gemini-2.0-flash" }),
+  mockGoogleModel: vi.fn().mockReturnValue({ modelId: "gemini-2.5-flash" }),
   mockOpenAIModel: vi.fn().mockReturnValue({ modelId: "gpt-4o" }),
   mockAnthropicModel: vi
     .fn()
@@ -62,6 +62,24 @@ vi.mock("electron", () => ({
   },
 }));
 
+vi.mock("../services/model-config", () => ({
+  modelConfig: {
+    validateModel: vi.fn().mockReturnValue(true),
+    isModelDeprecated: vi.fn().mockReturnValue(false),
+    getDeprecationMigration: vi.fn().mockReturnValue(null),
+    getDefaultModel: vi.fn().mockReturnValue("gemini-2.5-flash"),
+    getModelForContext: vi.fn().mockReturnValue("gemini-2.5-flash"),
+    isAudioCapable: vi.fn().mockImplementation((p: string) => p === "google"),
+    getCostMultiplier: vi.fn().mockReturnValue(1),
+    getModelsForProvider: vi.fn().mockReturnValue([]),
+    getActiveModelsForProvider: vi.fn().mockReturnValue([]),
+    getFullConfig: vi.fn().mockReturnValue({ version: 1, providers: {}, contexts: {} }),
+    getProviderIds: vi.fn().mockReturnValue(["google", "openai", "anthropic", "bedrock", "ollama"]),
+    getContextIds: vi.fn().mockReturnValue(["realtime", "postprocess", "critical", "batch"]),
+    reload: vi.fn(),
+  },
+}));
+
 import { AIProviderService } from "../services/ai-provider";
 import type { AIProviderConfig } from "../services/ai-provider.types";
 
@@ -85,7 +103,7 @@ describe("AIProviderService", () => {
     it("accepts google provider config", () => {
       const config: AIProviderConfig = {
         provider: "google",
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         apiKey: "test-key",
       };
       expect(() => service.configure(config)).not.toThrow();
@@ -132,7 +150,7 @@ describe("AIProviderService", () => {
     it("re-configuring replaces the active provider", () => {
       service.configure({
         provider: "google",
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         apiKey: "key-1",
       });
       service.configure({
@@ -152,7 +170,7 @@ describe("AIProviderService", () => {
     it("returns the configured provider key", () => {
       service.configure({
         provider: "google",
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         apiKey: "test",
       });
       expect(service.getActiveProvider()).toBe("google");
@@ -163,7 +181,7 @@ describe("AIProviderService", () => {
     it("returns true for google", () => {
       service.configure({
         provider: "google",
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         apiKey: "test",
       });
       expect(service.isAudioCapable()).toBe(true);
@@ -187,7 +205,7 @@ describe("AIProviderService", () => {
     it("calls generateObject with transcription schema", async () => {
       service.configure({
         provider: "google",
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         apiKey: "test",
       });
 
@@ -211,7 +229,7 @@ describe("AIProviderService", () => {
     it("returns fallback result when generateObject fails", async () => {
       service.configure({
         provider: "google",
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         apiKey: "test",
       });
 
@@ -228,7 +246,7 @@ describe("AIProviderService", () => {
     it("calls generateObject with audio data for audio-capable providers", async () => {
       service.configure({
         provider: "google",
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         apiKey: "test",
       });
 
@@ -274,7 +292,7 @@ describe("AIProviderService", () => {
     it("does not create transcription model when main provider is audio-capable", async () => {
       service.configure({
         provider: "google",
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         apiKey: "test",
       });
 
@@ -295,7 +313,7 @@ describe("AIProviderService", () => {
 
       service.configure({
         provider: "google",
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         apiKey: "test",
       });
 

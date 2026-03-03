@@ -25,7 +25,7 @@
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^4.0.64",
     "@ai-sdk/anthropic": "^3.0.47",
-    "@ai-sdk/google": "^3.0.31",
+    "@ai-sdk/google": "^3.0.36",
     "@ai-sdk/openai": "^3.0.33",
     "@electron-toolkit/preload": "^3.0.1",
     "@electron-toolkit/utils": "^4.0.0",

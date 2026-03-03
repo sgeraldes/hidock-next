@@ -18,6 +18,8 @@ export interface AIProviderConfig {
   transcriptionProvider?: "google";
   /** API key for the secondary transcription provider. */
   transcriptionApiKey?: string;
+  /** Model to use for transcription fallback (from config). */
+  transcriptionModel?: string;
 }
 
 export interface TranscriptionSegment {
@@ -57,12 +59,7 @@ export interface EndOfMeetingResult {
   duration?: string;
 }
 
-export const AUDIO_CAPABLE_PROVIDERS: AIProviderKey[] = ["google"];
+// REMOVED: AUDIO_CAPABLE_PROVIDERS constant -- now served by modelConfig.isAudioCapable()
+// REMOVED: DEFAULT_MODELS constant -- now served by ModelConfigService (models.config.json)
+// See: electron/main/config/models.config.json for the single source of truth.
 
-export const DEFAULT_MODELS: Record<AIProviderKey, string> = {
-  google: "gemini-2.0-flash",
-  openai: "gpt-4o",
-  anthropic: "claude-sonnet-4-20250514",
-  bedrock: "anthropic.claude-sonnet-4-20250514-v1:0",
-  ollama: "llama3.2",
-};

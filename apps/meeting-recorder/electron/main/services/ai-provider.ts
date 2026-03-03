@@ -10,6 +10,7 @@ import {
   SummarizationResultSchema,
 } from "./ai-schemas";
 import { PROMPTS, buildTranscriptionPrompt } from "./ai-prompts";
+import { modelConfig } from "./model-config";
 import type {
   AIProviderConfig,
   AIProviderKey,
@@ -24,6 +25,24 @@ export class AIProviderService {
   private transcriptionModel: LanguageModel | null = null;
 
   configure(config: AIProviderConfig): void {
+    // Validate model against config (warn but don't block for custom models)
+    if (!modelConfig.validateModel(config.provider, config.model)) {
+      console.warn(
+        `[AIProvider] Model "${config.model}" not found in config for provider "${config.provider}". Proceeding anyway.`,
+      );
+    }
+
+    // Warn if model is deprecated
+    if (modelConfig.isModelDeprecated(config.provider, config.model)) {
+      const migration = modelConfig.getDeprecationMigration(
+        config.provider,
+        config.model,
+      );
+      console.warn(
+        `[AIProvider] Model "${config.model}" is deprecated.${migration ? ` Consider migrating to "${migration}".` : ""}`,
+      );
+    }
+
     this.config = config;
     this.model = this.createModel(config);
 
@@ -35,7 +54,12 @@ export class AIProviderService {
       const google = createGoogleGenerativeAI({
         apiKey: config.transcriptionApiKey,
       });
-      this.transcriptionModel = google("gemini-2.0-flash");
+      // Use transcription model from config, or provider default
+      const transcriptionModelId =
+        config.transcriptionModel ||
+        modelConfig.getModelForContext("google", "realtime") ||
+        modelConfig.getDefaultModel("google");
+      this.transcriptionModel = google(transcriptionModelId);
     } else {
       this.transcriptionModel = null;
     }
@@ -55,7 +79,7 @@ export class AIProviderService {
   }
 
   private isAudioCapableForConfig(config: AIProviderConfig): boolean {
-    return config.provider === "google";
+    return modelConfig.isAudioCapable(config.provider);
   }
 
   async transcribe(
@@ -212,20 +236,23 @@ export class AIProviderService {
   }
 
   private createModel(config: AIProviderConfig): LanguageModel {
+    const modelId =
+      config.model || modelConfig.getDefaultModel(config.provider);
+
     switch (config.provider) {
       case "google": {
         const google = createGoogleGenerativeAI({
           apiKey: config.apiKey,
         });
-        return google(config.model);
+        return google(modelId);
       }
       case "openai": {
         const openai = createOpenAI({ apiKey: config.apiKey });
-        return openai(config.model);
+        return openai(modelId);
       }
       case "anthropic": {
         const anthropic = createAnthropic({ apiKey: config.apiKey });
-        return anthropic(config.model);
+        return anthropic(modelId);
       }
       case "bedrock": {
         const bedrock = createAmazonBedrock({
@@ -234,13 +261,13 @@ export class AIProviderService {
           secretAccessKey: config.bedrockSecretAccessKey,
           sessionToken: config.bedrockSessionToken,
         });
-        return bedrock(config.model);
+        return bedrock(modelId);
       }
       case "ollama": {
         const ollama = createOllama({
           baseURL: config.ollamaBaseUrl ?? "http://localhost:11434/api",
         });
-        return ollama(config.model) as unknown as LanguageModel;
+        return ollama(modelId) as unknown as LanguageModel;
       }
       default:
         throw new Error(`Unknown provider: ${config.provider}`);

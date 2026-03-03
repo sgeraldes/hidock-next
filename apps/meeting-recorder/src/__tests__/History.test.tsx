@@ -42,7 +42,7 @@ beforeEach(() => {
       onStatus: vi.fn().mockReturnValue(() => {}),
     },
     ai: {
-      configure: vi.fn().mockResolvedValue({ provider: "google", model: "gemini-2.0-flash" }),
+      configure: vi.fn().mockResolvedValue({ provider: "google", model: "gemini-2.5-flash" }),
       getActiveProvider: vi.fn().mockResolvedValue(null),
       isAudioCapable: vi.fn().mockResolvedValue(false),
       transcribe: vi.fn(),
