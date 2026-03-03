@@ -88,6 +88,7 @@ interface AppState {
   addToDownloadQueue: (id: string, filename: string, size: number) => void
   updateDownloadProgress: (id: string, progress: number) => void
   removeFromDownloadQueue: (id: string) => void
+  clearDownloadQueue: () => void
   /**
    * @deprecated Use `useIsDownloading(id)` selector hook instead.
    * This method uses `get()` which causes over-subscription - the caller re-renders
@@ -272,6 +273,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     newQueue.delete(id)
     return { downloadQueue: newQueue }
   }),
+
+  clearDownloadQueue: () => set({ downloadQueue: new Map() }),
 
   // SM-M01: Deprecated methods that use get() causing over-subscription.
   // Components should use useIsDownloading(id) and useDownloadProgress(id) selector hooks instead.

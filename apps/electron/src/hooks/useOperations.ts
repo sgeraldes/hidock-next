@@ -1,7 +1,7 @@
 import { useCallback } from 'react'
 import { toast } from '@/components/ui/toaster'
 import { useTranscriptionStore } from '@/store/features/useTranscriptionStore'
-import { cancelDownloads } from '@/hooks/useDownloadOrchestrator'
+import { cancelDownloads, cancelDownloadsComplete } from '@/hooks/useDownloadOrchestrator'
 import type { UnifiedRecording } from '@/types/unified-recording'
 import { hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 
@@ -176,11 +176,12 @@ export function useOperations() {
 
   const cancelAllDownloads = useCallback(async () => {
     try {
-      // DL-14: Also abort the in-progress USB transfer in the renderer
       cancelDownloads()
       await window.electronAPI.downloadService.cancelAll()
+      cancelDownloadsComplete()
       toast({ title: 'All downloads cancelled' })
     } catch (e) {
+      cancelDownloadsComplete()
       console.error('Failed to cancel downloads:', e)
     }
   }, [])

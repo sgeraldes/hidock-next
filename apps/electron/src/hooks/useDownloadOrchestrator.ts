@@ -29,11 +29,20 @@ interface DownloadQueueItem {
 // DL-14: Module-level abort controller ref so cancelDownloads can be called from outside the hook
 let _downloadAbortControllerRef: AbortController | null = null
 
+let _cancelInProgress = false
+let _cancelEpoch = 0
+let _lastProcessedEpoch = 0
+
 /**
  * Cancel in-progress downloads by aborting the USB transfer.
  * Call this from UI cancel buttons in addition to setting deviceSyncing = false.
+ * Idempotent: if a cancel is already in progress, returns immediately.
  */
 export function cancelDownloads(): void {
+  if (_cancelInProgress) return
+  _cancelInProgress = true
+  _cancelEpoch++
+
   if (_downloadAbortControllerRef) {
     _downloadAbortControllerRef.abort()
     _downloadAbortControllerRef = null
@@ -43,6 +52,10 @@ export function cancelDownloads(): void {
   deviceService.cancelAllDownloads()
   // Also set store state so the queue loop breaks
   useAppStore.getState().cancelDeviceSync()
+}
+
+export function cancelDownloadsComplete(): void {
+  _cancelInProgress = false
 }
 
 export function useDownloadOrchestrator() {
@@ -133,7 +146,9 @@ export function useDownloadOrchestrator() {
       const libraryError = parseError(error, 'download')
       console.error(`[QA-MONITOR][Operation] Error: ${item.filename}`, error)
       await window.electronAPI.downloadService.markFailed(item.filename, libraryError.message)
-      removeFromDownloadQueue(item.filename)
+      if (!signal.aborted) {
+        removeFromDownloadQueue(item.filename)
+      }
       toast({
         title: 'Download error',
         description: getErrorMessage(libraryError.type),
@@ -238,6 +253,10 @@ export function useDownloadOrchestrator() {
     _downloadAbortControllerRef = null
     clearDeviceSyncState()
 
+    if (aborted) {
+      useAppStore.getState().clearDownloadQueue()
+    }
+
     // B-DEV-007: Force refresh recordings after download completes
     // Emit a custom event so useUnifiedRecordings can do a forced refresh (with device data)
     // instead of just invalidating (which only refreshes cached data)
@@ -280,6 +299,19 @@ export function useDownloadOrchestrator() {
     // Subscribe to download service state updates
     const unsubDownloads = isElectron
       ? window.electronAPI.downloadService.onStateUpdate((state) => {
+          if (_cancelEpoch > _lastProcessedEpoch) {
+            _lastProcessedEpoch = _cancelEpoch
+            return
+          }
+
+          // Reconcile renderer queue with main process state: remove cancelled items
+          for (const [key] of useAppStore.getState().downloadQueue) {
+            const mainItem = state.queue.find((i: DownloadQueueItem) => i.filename === key)
+            if (mainItem && mainItem.status === 'cancelled') {
+              useAppStore.getState().removeFromDownloadQueue(key)
+            }
+          }
+
           const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
           if (hasPending && !isProcessingDownloads.current && deviceService.isConnected()) {
             processDownloadQueueRef.current()
