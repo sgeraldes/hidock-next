@@ -11,6 +11,7 @@ import { MicDetector, MicStatus } from "../services/mic-detector";
 import { getSetting, updateSession } from "../services/database";
 import { getPipeline } from "./transcription-handlers";
 import { getSessionManager } from "./session-handlers";
+import { PerformanceMonitor } from "../services/performance-monitor";
 
 const execFileAsync = promisify(execFile);
 
@@ -62,7 +63,7 @@ async function isSilent(
 
     // Use volumedetect filter to get audio statistics
     // Output goes to stderr, so we capture it
-    const { stderr } = await execFileAsync(ffmpegPath, [
+    const { stderr } = await execFileAsync(ffmpegPath as string, [
       "-i", tempAnalyze,
       "-af", "volumedetect",
       "-f", "null",
@@ -131,7 +132,7 @@ async function extractChunkAudio(
 
     const startSeconds = (chunkIndex * TIMESLICE_MS) / 1000;
 
-    await execFileAsync(ffmpegPath, [
+    await execFileAsync(ffmpegPath as string, [
       "-i", tempInput,
       "-ss", String(startSeconds),
       "-c", "copy",
@@ -180,10 +181,17 @@ export function registerAudioHandlers(): void {
       chunkIndex: number,
       mimeType: string,
     ) => {
+      const perfMonitor = new PerformanceMonitor(sessionId, chunkIndex);
+      perfMonitor.mark('chunk-arrival');
+
       console.log(`[AudioHandlers] Received chunk ${chunkIndex} for session ${sessionId}: ${data?.byteLength ?? 0} bytes, mime=${mimeType}`);
       try {
         const buffer = Buffer.from(data);
         audioStorage.saveChunk(sessionId, chunkIndex, buffer);
+
+        perfMonitor.mark('chunk-saved');
+        perfMonitor.logStage('Chunk save', 'chunk-arrival', 'chunk-saved');
+
         event.sender.send("audio:chunkAck", { sessionId, chunkIndex });
 
         const pipeline = getPipeline(sessionId);
@@ -200,6 +208,8 @@ export function registerAudioHandlers(): void {
               if (chunkIndex === 0) {
                 cumulativeBuffers.set(sessionId, buffer);
                 transcriptionBuffer = buffer;
+                perfMonitor.mark('chunk-direct-ready');
+                perfMonitor.logStage('Chunk 0 direct ready', 'chunk-saved', 'chunk-direct-ready');
                 console.log(`[AudioHandlers] Chunk 0: sending ${buffer.length} bytes directly for transcription`);
               } else {
                 const prev = cumulativeBuffers.get(sessionId);
@@ -209,7 +219,10 @@ export function registerAudioHandlers(): void {
                 cumulativeBuffers.set(sessionId, cumulative);
 
                 const sessionDir = audioStorage.getSessionDir(sessionId);
+                perfMonitor.mark('extract-start');
                 const extracted = await extractChunkAudio(cumulative, chunkIndex, sessionDir);
+                perfMonitor.mark('extract-end');
+                perfMonitor.logStage('FFmpeg extraction', 'extract-start', 'extract-end');
 
                 if (!extracted) {
                   console.warn(`[AudioHandlers] Skipping transcription for chunk ${chunkIndex} (extraction failed)`);
@@ -221,7 +234,10 @@ export function registerAudioHandlers(): void {
               // Silence detection: skip transcription if audio is silent
               // This prevents wasting API tokens and avoids AI hallucinations on silent chunks
               const sessionDir = audioStorage.getSessionDir(sessionId);
+              perfMonitor.mark('silence-check-start');
               const silent = await isSilent(transcriptionBuffer, sessionDir, chunkIndex);
+              perfMonitor.mark('silence-check-end');
+              perfMonitor.logStage('Silence detection', 'silence-check-start', 'silence-check-end');
 
               if (silent) {
                 console.log(`[AudioHandlers] Skipping transcription for chunk ${chunkIndex} (silent audio detected)`);
@@ -237,7 +253,13 @@ export function registerAudioHandlers(): void {
                 return;
               }
 
+              perfMonitor.mark('pipeline-start');
               await pipeline.processAudioChunk(transcriptionBuffer, mimeType, chunkIndex);
+              perfMonitor.mark('pipeline-end');
+              perfMonitor.logStage('Pipeline processing', 'pipeline-start', 'pipeline-end');
+
+              // Total end-to-end timing
+              perfMonitor.logTotal();
             } catch (err: unknown) {
               console.error("[AudioHandlers] Pipeline error:", err);
               // Propagate pipeline errors to renderer (ERR-003)

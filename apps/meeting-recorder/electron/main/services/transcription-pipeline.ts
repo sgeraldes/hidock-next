@@ -13,6 +13,7 @@ import {
 } from "./database-extras";
 import type { TranscriptionResult } from "./ai-provider.types";
 import { broadcastToAllWindows } from "./broadcast";
+import { PerformanceMonitor } from "./performance-monitor";
 
 import {
   BACKEND_CHIRP3_GEMINI,
@@ -87,6 +88,9 @@ export class TranscriptionPipeline {
   ): Promise<void> {
     if (this.stopped) return;
 
+    const perfMonitor = new PerformanceMonitor(this.sessionId, chunkIndex);
+    perfMonitor.mark('pipeline-entry');
+
     broadcastToAllWindows("transcription:status", "processing");
 
     const context = this.buildContext();
@@ -95,10 +99,13 @@ export class TranscriptionPipeline {
       this.transcriptionBackend === BACKEND_CHIRP3_GEMINI &&
       this.chirp3Provider?.isConfigured()
     ) {
-      await this.processWithChirp3(audioData, mimeType, chunkIndex, context);
+      await this.processWithChirp3(audioData, mimeType, chunkIndex, context, perfMonitor);
     } else {
-      await this.processWithGemini(audioData, mimeType, chunkIndex, context);
+      await this.processWithGemini(audioData, mimeType, chunkIndex, context, perfMonitor);
     }
+
+    perfMonitor.mark('pipeline-exit');
+    perfMonitor.logStage('Total pipeline', 'pipeline-entry', 'pipeline-exit');
   }
 
   // --- Two-Stage Pipeline: Chirp 3 STT → Gemini Analysis ---
@@ -108,6 +115,7 @@ export class TranscriptionPipeline {
     mimeType: string,
     chunkIndex: number,
     context: string,
+    perfMonitor: PerformanceMonitor,
   ): Promise<void> {
     if (!this.chirp3Provider) {
       throw new Error("Chirp3 provider not available");
@@ -117,9 +125,12 @@ export class TranscriptionPipeline {
 
     try {
       // Stage 1: Chirp 3 Speech-to-Text
+      perfMonitor.mark('chirp3-stage-start');
       const chirp3Result = await this.callWithRetry(() =>
-        provider.recognizeChunk(audioData, mimeType),
+        provider.recognizeChunk(audioData, mimeType, this.sessionId),
       );
+      perfMonitor.mark('chirp3-stage-end');
+      perfMonitor.logStage('Chirp3 STT stage', 'chirp3-stage-start', 'chirp3-stage-end');
 
       if (!chirp3Result.transcript.trim()) {
         console.log(
@@ -130,11 +141,15 @@ export class TranscriptionPipeline {
       }
 
       // Apply confidence filtering
+      perfMonitor.mark('confidence-filter-start');
       const filteredWords =
         provider.filterByConfidence(chirp3Result.words);
       const filteredTranscript = filteredWords.map((w) => w.word).join(" ");
+      perfMonitor.mark('confidence-filter-end');
+      perfMonitor.logStage('Confidence filtering', 'confidence-filter-start', 'confidence-filter-end');
 
       // Stage 2: Gemini analysis of text
+      perfMonitor.mark('gemini-analysis-start');
       const result = await this.callWithRetry(() =>
         this.aiProvider.analyzeTranscript(
           filteredTranscript || chirp3Result.transcript,
@@ -150,8 +165,14 @@ export class TranscriptionPipeline {
           },
         ),
       );
+      perfMonitor.mark('gemini-analysis-end');
+      perfMonitor.logStage('Gemini analysis stage', 'gemini-analysis-start', 'gemini-analysis-end');
 
+      perfMonitor.mark('storage-start');
       this.storeAndBroadcast(result, chunkIndex);
+      perfMonitor.mark('storage-end');
+      perfMonitor.logStage('Storage and broadcast', 'storage-start', 'storage-end');
+
       broadcastToAllWindows("transcription:status", "idle");
     } catch (err) {
       // If Chirp 3 fails, attempt fallback to Gemini multimodal
@@ -160,7 +181,7 @@ export class TranscriptionPipeline {
         err,
       );
       broadcastToAllWindows("transcription:status", "chirp3-fallback");
-      await this.processWithGemini(audioData, mimeType, chunkIndex, context);
+      await this.processWithGemini(audioData, mimeType, chunkIndex, context, perfMonitor);
     }
   }
 
@@ -171,15 +192,19 @@ export class TranscriptionPipeline {
     mimeType: string,
     chunkIndex: number,
     context: string,
+    perfMonitor: PerformanceMonitor,
   ): Promise<void> {
     let result: TranscriptionResult;
     try {
+      perfMonitor.mark('gemini-multimodal-start');
       result = await this.callWithRetry(() =>
         this.aiProvider.transcribeAudio(audioData, mimeType, {
           meetingContext: context,
           attendees: Array.from(this.knownSpeakers),
         }),
       );
+      perfMonitor.mark('gemini-multimodal-end');
+      perfMonitor.logStage('Gemini multimodal transcription', 'gemini-multimodal-start', 'gemini-multimodal-end');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       broadcastToAllWindows("transcription:error", message);
@@ -187,7 +212,11 @@ export class TranscriptionPipeline {
       return;
     }
 
+    perfMonitor.mark('storage-start');
     this.storeAndBroadcast(result, chunkIndex);
+    perfMonitor.mark('storage-end');
+    perfMonitor.logStage('Storage and broadcast', 'storage-start', 'storage-end');
+
     broadcastToAllWindows("transcription:status", "idle");
   }
 

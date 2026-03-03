@@ -5,6 +5,10 @@ vi.mock("fs", () => ({
   promises: { readFile: vi.fn() },
 }));
 
+vi.mock("../services/database-extras", () => ({
+  getSetting: vi.fn(() => 'false'),
+}));
+
 import { Chirp3Provider } from "../services/chirp3-provider";
 import type { SpeechClientFactory } from "../services/chirp3-provider";
 import type { Chirp3Config } from "../services/chirp3-provider.types";

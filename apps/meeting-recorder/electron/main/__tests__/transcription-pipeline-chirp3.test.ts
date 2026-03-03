@@ -115,10 +115,11 @@ describe("TranscriptionPipeline - Chirp 3 integration", () => {
         0,
       );
 
-      // Stage 1: Chirp 3 recognizes
+      // Stage 1: Chirp 3 recognizes (now includes sessionId)
       expect(mockChirp3.recognizeChunk).toHaveBeenCalledWith(
         Buffer.from("audio-data"),
         "audio/ogg",
+        "session-1",
       );
       // Stage 2: Gemini analyzes text
       expect(mockAI.analyzeTranscript).toHaveBeenCalled();
