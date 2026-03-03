@@ -1020,19 +1020,52 @@ class HiDockDeviceService {
   }
 
   async formatStorage(): Promise<boolean> {
-    if (!this.isConnected()) return false
+    // AUD4-007: Pre-check device connection before starting format
+    if (!this.isConnected()) {
+      this.logActivity('error', 'Format aborted: device not connected')
+      return false
+    }
 
     this.logActivity('usb-out', 'CMD: Format Card', 'Formatting device storage')
-    const result = await this.jensen.formatCard()
+
+    let result: { result: string } | null = null
+    try {
+      result = await this.jensen.formatCard()
+    } catch (err) {
+      // AUD4-007: Catch USB disconnection or communication errors during format
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      this.logActivity('error', 'Format storage failed with exception', message)
+      // Invalidate cache to force re-read on next access since state is unknown
+      this.cachedRecordings = null
+      this.cachedRecordingCount = -1
+      throw new Error(`Format storage failed: ${message}. Check device connection and try again.`)
+    }
+
     if (result?.result === 'success') {
       this.logActivity('success', 'Storage formatted')
       // Invalidate cache since all recordings were deleted
       this.cachedRecordings = null
       this.cachedRecordingCount = -1
+
+      // AUD4-007: Post-check - verify format succeeded by checking file count
+      try {
+        const count = await this.getRecordingCount()
+        if (count > 0) {
+          this.logActivity('warning', 'Format may be incomplete', `${count} files still on device after format`)
+        }
+      } catch {
+        // Post-check is best-effort; don't fail the overall operation
+        this.logActivity('warning', 'Could not verify format result (device may have disconnected)')
+      }
+
+      return true
     } else {
       this.logActivity('error', 'Failed to format storage')
+      // Invalidate cache since device state may be inconsistent
+      this.cachedRecordings = null
+      this.cachedRecordingCount = -1
+      return false
     }
-    return result?.result === 'success'
   }
 
   async setAutoRecord(enabled: boolean): Promise<boolean> {

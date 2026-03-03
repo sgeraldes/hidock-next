@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Check, Search, BookOpen, Clock } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { Check, Search, BookOpen, Clock, RefreshCw } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { formatDateTime } from '@/lib/utils'
 import type { KnowledgeCapture } from '@/types/knowledge'
@@ -14,21 +14,26 @@ interface ContextPickerProps {
 export function ContextPicker({ onSelect, selectedIds, className }: ContextPickerProps) {
   const [knowledge, setKnowledge] = useState<KnowledgeCapture[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
 
-  useEffect(() => {
-    const loadKnowledge = async () => {
-      try {
-        const data = await window.electronAPI.knowledge.getAll({ limit: 50 })
-        setKnowledge(data)
-      } catch (error) {
-        console.error('Failed to load knowledge for picker:', error)
-      } finally {
-        setLoading(false)
-      }
+  const loadKnowledge = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const data = await window.electronAPI.knowledge.getAll({ limit: 50 })
+      setKnowledge(data)
+    } catch (err) {
+      console.error('Failed to load knowledge for picker:', err)
+      setError('Failed to load knowledge items')
+    } finally {
+      setLoading(false)
     }
-    loadKnowledge()
   }, [])
+
+  useEffect(() => {
+    loadKnowledge()
+  }, [loadKnowledge])
 
   const filteredKnowledge = knowledge.filter(k => 
     k.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -50,6 +55,17 @@ export function ContextPicker({ onSelect, selectedIds, className }: ContextPicke
       <div className="h-[300px] overflow-auto pr-2 space-y-1 custom-scrollbar">
         {loading ? (
           <p className="text-center text-sm text-muted-foreground py-8">Loading knowledge...</p>
+        ) : error ? (
+          <div className="flex flex-col items-center justify-center py-8 gap-2">
+            <p className="text-sm text-muted-foreground">{error}</p>
+            <button
+              onClick={loadKnowledge}
+              className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+            >
+              <RefreshCw className="h-3 w-3" />
+              Retry
+            </button>
+          </div>
         ) : filteredKnowledge.length === 0 ? (
           <p className="text-center text-sm text-muted-foreground py-8">No results found</p>
         ) : (
