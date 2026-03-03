@@ -42,6 +42,10 @@ vi.mock("../../services/transcription-pipeline", () => ({
   ) {
     this.stop = vi.fn();
     this.processChunk = vi.fn();
+    this.initializeStreaming = vi.fn();
+    this.isStreaming = vi.fn().mockReturnValue(false);
+    this.feedAudioStream = vi.fn();
+    this.flush = vi.fn().mockResolvedValue(undefined);
     mockPipelineInstances.push({
       stop: this.stop as ReturnType<typeof vi.fn>,
       processChunk: this.processChunk as ReturnType<typeof vi.fn>,

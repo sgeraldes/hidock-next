@@ -132,7 +132,10 @@ describe("registerAudioHandlers", () => {
   });
 
   it("feeds audio chunk to transcription pipeline when available", async () => {
-    const pipeline = { processAudioChunk: mockProcessAudioChunk };
+    const pipeline = {
+      processAudioChunk: mockProcessAudioChunk,
+      isStreaming: vi.fn().mockReturnValue(false)
+    };
     mockGetPipeline.mockReturnValue(pipeline);
 
     registerAudioHandlers();
