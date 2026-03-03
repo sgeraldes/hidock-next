@@ -135,8 +135,9 @@ export class Chirp3StreamSession {
     this.bytesWrittenToCurrentStream += audioData.length;
 
     // Wake up the generator if it is waiting for data
-    if (this.audioQueueResolve) {
-      this.audioQueueResolve();
+    const resolve = this.audioQueueResolve;
+    if (resolve) {
+      resolve();
       this.audioQueueResolve = null;
     }
   }
@@ -155,8 +156,9 @@ export class Chirp3StreamSession {
 
     // Signal the generator to stop (half-close the write side)
     this.audioQueue.push(null);
-    if (this.audioQueueResolve) {
-      this.audioQueueResolve();
+    const resolve = this.audioQueueResolve;
+    if (resolve) {
+      resolve();
       this.audioQueueResolve = null;
     }
 
@@ -418,8 +420,9 @@ export class Chirp3StreamSession {
 
     // Signal the old generator to stop
     this.audioQueue.push(null);
-    if (this.audioQueueResolve) {
-      this.audioQueueResolve();
+    const resolve = this.audioQueueResolve;
+    if (resolve) {
+      resolve();
       this.audioQueueResolve = null;
     }
 
@@ -443,8 +446,9 @@ export class Chirp3StreamSession {
         this.audioQueue.push(frame);
       }
       // Wake the generator
-      if (this.audioQueueResolve) {
-        this.audioQueueResolve();
+      const resolve = this.audioQueueResolve;
+      if (resolve) {
+        resolve();
         this.audioQueueResolve = null;
       }
     }

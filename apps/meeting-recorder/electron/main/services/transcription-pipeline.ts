@@ -53,12 +53,18 @@ export class TranscriptionPipeline {
    * Used as the chunkIndex equivalent for storeAndBroadcast().
    */
   private streamFinalIndex = 0;
-  /** Tracks the recording start time for absolute timestamp calculation. */
+  /**
+   * Tracks the recording start time for absolute timestamp calculation.
+   * @unused Reserved for future use in timestamp calculations.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private recordingStartTimeMs = 0;
   /**
    * Tracks the resultEndTimeMs of the last final result processed by the pipeline.
    * Used for fallback timestamp calculation in storeAndBroadcast().
+   * @unused Reserved for future use in timestamp calculations.
    */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private lastStreamFinalEndTimeMs = 0;
 
   constructor(
