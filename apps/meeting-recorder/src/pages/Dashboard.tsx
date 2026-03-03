@@ -63,9 +63,13 @@ export default function Dashboard() {
   const setTranscriptionError = useTranscriptStore(
     (s) => s.setTranscriptionError,
   );
+  const interimResultMap = useTranscriptStore((s) => s.interimResult);
   const segments = viewingSessionId
     ? (segmentMap.get(viewingSessionId) ?? EMPTY_SEGMENTS)
     : EMPTY_SEGMENTS;
+  const interimResult = viewingSessionId && interimResultMap
+    ? (interimResultMap.get(viewingSessionId) ?? null)
+    : null;
 
   const provider = useSettingsStore((s) => s.provider);
   const apiKey = useSettingsStore((s) => s.apiKey);
@@ -230,6 +234,7 @@ export default function Dashboard() {
                 <TranscriptPanel
                   segments={segments}
                   providerConfigured={isProviderConfigured}
+                  interimResult={interimResult}
                 />
               </>
             )}

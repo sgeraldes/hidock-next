@@ -175,6 +175,7 @@ beforeEach(() => {
       onActionItemsUpdated: vi.fn(() => () => {}),
       onError: vi.fn(() => () => {}),
       onStatus: vi.fn(() => () => {}),
+      onInterimResult: vi.fn(() => () => {}),
     },
     ai: {
       configure: vi.fn(),

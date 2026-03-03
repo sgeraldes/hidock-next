@@ -78,7 +78,10 @@ Object.defineProperty(window, "electronAPI", {
     },
     transcription: {
       onNewSegments: vi.fn().mockReturnValue(() => {}),
+      onTopicsUpdated: vi.fn().mockReturnValue(() => {}),
+      onActionItemsUpdated: vi.fn().mockReturnValue(() => {}),
       onError: vi.fn().mockReturnValue(() => {}),
+      onInterimResult: vi.fn().mockReturnValue(() => {}),
     },
     summarization: {
       generate: vi.fn().mockResolvedValue(undefined),

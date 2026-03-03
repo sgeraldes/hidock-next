@@ -15,6 +15,11 @@ interface TranscriptPanelProps {
   segments: TranscriptSegment[];
   providerConfigured?: boolean;
   translations?: Map<string, string>;
+  interimResult?: {
+    text: string;
+    speaker: string;
+    timestamp: string;
+  } | null;
 }
 
 const SPEAKER_COLORS = [
@@ -43,24 +48,28 @@ export function TranscriptPanel({
   segments,
   providerConfigured = true,
   translations,
+  interimResult,
 }: TranscriptPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const isAutoScrolling = useRef(true);
 
   const speakers = Array.from(new Set(segments.map((s) => s.speaker)));
 
+  const hasInterim = interimResult != null && interimResult.text.length > 0;
+  const totalCount = segments.length + (hasInterim ? 1 : 0);
+
   const virtualizer = useVirtualizer({
-    count: segments.length,
+    count: totalCount,
     getScrollElement: () => scrollRef.current,
     estimateSize: useCallback(() => 72, []),
     overscan: 5,
   });
 
   useEffect(() => {
-    if (isAutoScrolling.current && segments.length > 0) {
-      virtualizer.scrollToIndex(segments.length - 1, { align: "end" });
+    if (isAutoScrolling.current && totalCount > 0) {
+      virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
     }
-  }, [segments.length, virtualizer]);
+  }, [totalCount, virtualizer]);
 
   function handleScroll() {
     if (!scrollRef.current) return;
@@ -128,7 +137,43 @@ export function TranscriptPanel({
         }}
       >
         {virtualItems.map((virtualItem) => {
-          const segment = segments[virtualItem.index];
+          const isInterimRow = hasInterim && virtualItem.index === segments.length;
+          const segment = isInterimRow ? null : segments[virtualItem.index];
+
+          if (isInterimRow && interimResult) {
+            return (
+              <div
+                key="interim"
+                data-index={virtualItem.index}
+                ref={virtualizer.measureElement}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  transform: `translateY(${virtualItem.start}px)`,
+                }}
+              >
+                <div className="flex gap-3 p-2 rounded mb-3">
+                  <span className="text-xs text-muted-foreground font-mono w-10 shrink-0 pt-0.5">
+                    {interimResult.timestamp}
+                  </span>
+                  <div className="flex-1">
+                    <span className="text-sm font-semibold text-muted-foreground/60">
+                      {interimResult.speaker}
+                    </span>
+                    <p className="text-sm text-muted-foreground italic mt-0.5 transition-opacity duration-150">
+                      {interimResult.text}
+                      <span className="inline-block w-0.5 h-3.5 bg-muted-foreground/40 ml-0.5 animate-pulse align-text-bottom" />
+                    </p>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
+          if (!segment) return null;
+
           return (
             <div
               key={virtualItem.key}

@@ -8,6 +8,17 @@ interface TranscriptSegment {
   sentiment: "positive" | "negative" | "neutral";
 }
 
+interface InterimResult {
+  /** The partial transcript text currently being recognized */
+  text: string;
+  /** Speaker name if known from diarization, otherwise "..." */
+  speaker: string;
+  /** Timestamp string of when this utterance started */
+  timestamp: string;
+  /** Monotonic counter to detect stale updates */
+  sequence: number;
+}
+
 interface TranscriptState {
   segments: Map<string, TranscriptSegment[]>;
   topics: Map<string, string[]>;
@@ -20,6 +31,8 @@ interface TranscriptState {
   summaryLoading: Map<string, boolean>;
   /** Current transcription error message, null when no error */
   transcriptionError: string | null;
+  /** Active interim (partial) result per session, null when no speech in progress (NOT persisted) */
+  interimResult: Map<string, InterimResult>;
 
   addSegments: (sessionId: string, newSegments: TranscriptSegment[]) => void;
   setTopics: (sessionId: string, topics: string[]) => void;
@@ -33,6 +46,9 @@ interface TranscriptState {
   appendSummaryChunk: (sessionId: string, chunk: string) => void;
   setSummaryLoading: (sessionId: string, loading: boolean) => void;
   setTranscriptionError: (error: string | null) => void;
+  setInterimResult: (sessionId: string, result: InterimResult) => void;
+  clearInterimResult: (sessionId: string) => void;
+  getInterimResult: (sessionId: string) => InterimResult | null;
   clearSession: (sessionId: string) => void;
 }
 
@@ -44,6 +60,7 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
   summaries: new Map(),
   summaryLoading: new Map(),
   transcriptionError: null,
+  interimResult: new Map(),
 
   addSegments: (sessionId, newSegments) =>
     set((state) => {
@@ -120,6 +137,24 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
 
   setTranscriptionError: (error) => set({ transcriptionError: error }),
 
+  setInterimResult: (sessionId, result) =>
+    set((state) => {
+      const map = new Map(state.interimResult);
+      map.set(sessionId, result);
+      return { interimResult: map };
+    }),
+
+  clearInterimResult: (sessionId) =>
+    set((state) => {
+      const map = new Map(state.interimResult);
+      map.delete(sessionId);
+      return { interimResult: map };
+    }),
+
+  getInterimResult: (sessionId) => {
+    return get().interimResult.get(sessionId) ?? null;
+  },
+
   clearSession: (sessionId) =>
     set((state) => {
       const segments = new Map(state.segments);
@@ -127,11 +162,13 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
       const actionItems = new Map(state.actionItems);
       const summaries = new Map(state.summaries);
       const summaryLoading = new Map(state.summaryLoading);
+      const interimResult = new Map(state.interimResult);
       segments.delete(sessionId);
       topics.delete(sessionId);
       actionItems.delete(sessionId);
       summaries.delete(sessionId);
       summaryLoading.delete(sessionId);
-      return { segments, topics, actionItems, summaries, summaryLoading };
+      interimResult.delete(sessionId);
+      return { segments, topics, actionItems, summaries, summaryLoading, interimResult };
     }),
 }));

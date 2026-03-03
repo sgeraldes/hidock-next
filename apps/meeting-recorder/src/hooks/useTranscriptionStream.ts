@@ -8,6 +8,8 @@ export function useTranscriptionStream(sessionId: string | null) {
   const setTopics = useTranscriptStore((state) => state.setTopics);
   const setActionItems = useTranscriptStore((state) => state.setActionItems);
   const setSummary = useTranscriptStore((state) => state.setSummary);
+  const setInterimResult = useTranscriptStore((state) => state.setInterimResult);
+  const clearInterimResult = useTranscriptStore((state) => state.clearInterimResult);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -101,19 +103,42 @@ export function useTranscriptionStream(sessionId: string | null) {
       }
     };
 
+    const handleInterimResult = (data: {
+      sessionId: string;
+      transcript: string;
+      resultEndTimeMs: number;
+      speaker?: string;
+      sequence: number;
+      isFinal: boolean;
+    }) => {
+      if (data.isFinal) {
+        clearInterimResult(sessionId!);
+      } else if (data.transcript) {
+        setInterimResult(sessionId!, {
+          text: data.transcript,
+          speaker: data.speaker ?? "...",
+          timestamp: formatTimestamp(data.resultEndTimeMs),
+          sequence: data.sequence,
+        });
+      }
+    };
+
     const cleanupSegments =
       window.electronAPI.transcription.onNewSegments(handleSegments);
     const cleanupTopics =
       window.electronAPI.transcription.onTopicsUpdated(handleTopics);
     const cleanupActions =
       window.electronAPI.transcription.onActionItemsUpdated(handleActions);
+    const cleanupInterim =
+      window.electronAPI.transcription.onInterimResult(handleInterimResult);
 
     return () => {
       cleanupSegments();
       cleanupTopics();
       cleanupActions();
+      cleanupInterim();
     };
-  }, [sessionId, addSegments, setTopics, setActionItems, setSummary]);
+  }, [sessionId, addSegments, setTopics, setActionItems, setSummary, setInterimResult, clearInterimResult]);
 }
 
 // FIX TRX-006: Format timestamp from milliseconds
