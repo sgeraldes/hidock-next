@@ -26,7 +26,7 @@ import {
 import { RecordingLinkDialog } from '@/components/RecordingLinkDialog'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import { useToday } from '@/hooks/useToday'
-import { UnifiedRecording, DeviceOnlyRecording, BothLocationsRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
+import { UnifiedRecording, hasLocalPath, isDeviceOnly, hasDeviceFile } from '@/types/unified-recording'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { useAudioControls } from '@/components/OperationController'
@@ -112,10 +112,6 @@ export function Calendar() {
   const setCurrentDate = useAppStore((s) => s.setCurrentDate)
   const setCalendarView = useAppStore((s) => s.setCalendarView)
   const loadMeetings = useAppStore((s) => s.loadMeetings)
-  const addToDownloadQueue = useAppStore((s) => s.addToDownloadQueue)
-  const updateDownloadProgress = useAppStore((s) => s.updateDownloadProgress)
-  const removeFromDownloadQueue = useAppStore((s) => s.removeFromDownloadQueue)
-  const setDeviceSyncState = useAppStore((s) => s.setDeviceSyncState)
   // B-CAL-005: Granular config selectors to prevent excess re-renders
   const calendarConfig = useConfigStore((s) => s.config?.calendar)
   const uiConfig = useConfigStore((s) => s.config?.ui)
@@ -129,7 +125,7 @@ export function Calendar() {
   const { recordings: unifiedRecordings, loading: recordingsLoading, refresh: refreshRecordings, deviceConnected, stats } = useUnifiedRecordings()
 
   // Centralized operations
-  const { queueTranscription } = useOperations()
+  const { queueTranscription, queueDownload, queueBulkDownloads } = useOperations()
 
   // State from config (with defaults)
   // calendarView now comes from useAppStore (single source of truth — CA-04)
@@ -536,48 +532,14 @@ export function Calendar() {
     }
   }, [loadConfig])
 
-  // Download recording from device (memoized) - supports multiple concurrent downloads
-  // Uses global download queue for persistence across page navigation
+  // Download recording from device via centralized useOperations
   const handleDownload = useCallback(async (recording: UnifiedRecording) => {
-    if (!isDeviceOnly(recording)) return
-
-    const deviceService = getHiDockDeviceService()
-    if (!deviceService.isConnected()) return
-
-    // B-LIB-009: Check if already downloading using deviceFilename as key (consistent with download orchestrator)
-    if (downloadQueue.has(recording.deviceFilename)) return
-
-    // Add to global download queue using deviceFilename as key
-    addToDownloadQueue(recording.deviceFilename, recording.deviceFilename, recording.size)
-
-    try {
-      console.log(`[Calendar] Starting download: ${recording.deviceFilename} (${recording.size} bytes)`)
-      const success = await deviceService.downloadRecordingToFile(
-        recording.deviceFilename,
-        recording.size,
-        '',
-        // Progress callback to update global store
-        (received) => {
-          const percent = Math.round((received / recording.size) * 100)
-          updateDownloadProgress(recording.deviceFilename, percent)
-        },
-        recording.dateRecorded // Pass the original recording date from device
-      )
-      console.log(`[Calendar] Download ${success ? 'succeeded' : 'FAILED'}: ${recording.deviceFilename}`)
-      if (success) {
-        await refreshRecordings(false)
-      }
-    } catch (e) {
-      console.error('Download failed:', e)
-    } finally {
-      // Remove from global download queue
-      removeFromDownloadQueue(recording.deviceFilename)
-    }
-  }, [downloadQueue, addToDownloadQueue, updateDownloadProgress, removeFromDownloadQueue, refreshRecordings])
+    await queueDownload(recording)
+  }, [queueDownload])
 
   // Delete recording from device (memoized)
   const handleDeleteFromDevice = useCallback(async (recording: UnifiedRecording) => {
-    if (recording.location !== 'device-only' && recording.location !== 'both') return
+    if (!hasDeviceFile(recording)) return
 
     const deviceService = getHiDockDeviceService()
     if (!deviceService.isConnected()) return
@@ -588,8 +550,7 @@ export function Calendar() {
 
     setDeleting(recording.id)
     try {
-      const filename = (recording as DeviceOnlyRecording | BothLocationsRecording).deviceFilename || recording.filename
-      await deviceService.deleteRecording(filename)
+      await deviceService.deleteRecording(recording.deviceFilename)
       await refreshRecordings(true)
     } catch (e) {
       console.error('Delete failed:', e)
@@ -678,63 +639,16 @@ export function Calendar() {
     setSelectedIds(new Set(filteredRecordings.map(r => r.id)))
   }, [filteredRecordings])
 
-  // Bulk download selected device-only recordings (memoized)
+  // Bulk download selected device-only recordings via centralized useOperations
   const handleBulkDownload = useCallback(async () => {
-    const toDownload = filteredRecordings.filter(
-      (r): r is DeviceOnlyRecording => selectedIds.has(r.id) && isDeviceOnly(r)
-    )
-    if (toDownload.length === 0) return
-
-    const deviceService = getHiDockDeviceService()
-    if (!deviceService.isConnected()) return
+    const selected = filteredRecordings.filter((r) => selectedIds.has(r.id))
+    if (selected.length === 0) return
 
     setBulkDownloading(true)
-    
-    // Set initial total count for sidebar progress
-    setDeviceSyncState({
-      deviceSyncing: true,
-      deviceSyncProgress: { current: 0, total: toDownload.length }
-    })
-    
-    // Process sequentially but show progress for each
-    let completedCount = 0
-    for (const rec of toDownload) {
-      // B-LIB-009: Skip if already downloading using deviceFilename as key
-      if (downloadQueue.has(rec.deviceFilename)) {
-        completedCount++
-        continue
-      }
-
-      addToDownloadQueue(rec.deviceFilename, rec.deviceFilename, rec.size)
-
-      try {
-        await deviceService.downloadRecordingToFile(
-          rec.deviceFilename,
-          rec.size,
-          '',
-          (received) => {
-            const percent = Math.round((received / rec.size) * 100)
-            updateDownloadProgress(rec.deviceFilename, percent)
-          },
-          rec.dateRecorded // Pass the original recording date from device
-        )
-        completedCount++
-        // Update sidebar progress count
-        setDeviceSyncState({
-          deviceSyncProgress: { current: completedCount, total: toDownload.length }
-        })
-      } catch (e) {
-        console.error('Download failed:', rec.filename, e)
-      } finally {
-        removeFromDownloadQueue(rec.deviceFilename)
-      }
-    }
-    
-    await refreshRecordings(false)
+    await queueBulkDownloads(selected)
     setBulkDownloading(false)
-    setDeviceSyncState({ deviceSyncing: false, deviceSyncProgress: null })
     clearSelection()
-  }, [filteredRecordings, selectedIds, refreshRecordings, clearSelection, downloadQueue, addToDownloadQueue, updateDownloadProgress, removeFromDownloadQueue, setDeviceSyncState])
+  }, [filteredRecordings, selectedIds, queueBulkDownloads, clearSelection])
 
   // Location filter handler (memoized)
   const handleLocationFilterChange = useCallback((filter: LocationFilter) => {
@@ -914,9 +828,9 @@ export function Calendar() {
                         {isDeviceOnly(recording) && (
                           <Button variant="ghost" size="icon" className="h-6 w-6"
                             onClick={() => handleDownload(recording)}
-                            disabled={!deviceConnected || downloadQueue.has((recording as any).deviceFilename ?? recording.id)}
+                            disabled={!deviceConnected || downloadQueue.has(recording.deviceFilename)}
                             title="Download">
-                            {downloadQueue.has((recording as any).deviceFilename ?? recording.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                            {downloadQueue.has(recording.deviceFilename) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                           </Button>
                         )}
                         {canPlay && hasLocalPath(recording) && (
@@ -1031,9 +945,9 @@ export function Calendar() {
                         {isDeviceOnly(recording) && (
                           <Button variant="ghost" size="icon" className="h-6 w-6"
                             onClick={(e) => { e.stopPropagation(); handleDownload(recording) }}
-                            disabled={!deviceConnected || downloadQueue.has((recording as any).deviceFilename ?? recording.id)}
+                            disabled={!deviceConnected || downloadQueue.has(recording.deviceFilename)}
                             title="Download from device">
-                            {downloadQueue.has((recording as any).deviceFilename ?? recording.id) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                            {downloadQueue.has(recording.deviceFilename) ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                           </Button>
                         )}
                         {canPlay && hasLocalPath(recording) && (

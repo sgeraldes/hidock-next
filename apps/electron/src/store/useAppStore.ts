@@ -5,6 +5,18 @@ import type { UnifiedRecording } from '@/types/unified-recording'
 // CA-10: CalendarViewType shared between store and calendar-utils
 import type { CalendarViewType } from '@/lib/calendar-utils'
 
+/**
+ * Returns the canonical download queue key for a recording.
+ * The standard key is `deviceFilename` (original device filename with extension).
+ * Returns null for recordings that are not downloadable (local-only).
+ */
+export function getDownloadQueueKey(recording: UnifiedRecording): string | null {
+  if (recording.location === 'device-only' || recording.location === 'both') {
+    return recording.deviceFilename
+  }
+  return null
+}
+
 interface AppState {
   // Calendar
   meetings: Meeting[]
@@ -88,6 +100,7 @@ interface AppState {
   addToDownloadQueue: (id: string, filename: string, size: number) => void
   updateDownloadProgress: (id: string, progress: number) => void
   removeFromDownloadQueue: (id: string) => void
+  clearDownloadQueue: () => void
   /**
    * @deprecated Use `useIsDownloading(id)` selector hook instead.
    * This method uses `get()` which causes over-subscription - the caller re-renders
@@ -272,6 +285,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     newQueue.delete(id)
     return { downloadQueue: newQueue }
   }),
+
+  clearDownloadQueue: () => set({ downloadQueue: new Map() }),
 
   // SM-M01: Deprecated methods that use get() causing over-subscription.
   // Components should use useIsDownloading(id) and useDownloadProgress(id) selector hooks instead.

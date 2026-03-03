@@ -22,7 +22,8 @@ import {
   getSyncedFilenames,
   queryOne,
   queryAll,
-  run
+  run,
+  runInTransaction
 } from './database'
 import { saveRecording, getRecordingsPath } from './file-storage'
 import { existsSync } from 'fs'
@@ -69,6 +70,7 @@ class DownloadService {
     isPaused: false
   }
   private stalledCheckInterval: NodeJS.Timeout | null = null // spec-007: periodic stalled check
+  private cancelLock = false
 
   // B-DWN-009: Dirty-flag caching for getState() to avoid creating new arrays on every call
   private dirty = true
@@ -759,24 +761,53 @@ class DownloadService {
    * Cancel all pending downloads
    * B-DWN-005: Persist cancelled state for each item
    * C-004: Uses 'cancelled' status instead of 'failed' for user-initiated cancellation
+   * AUD4-008: Re-entrancy guard + batch SQLite writes in a transaction
    */
   cancelAll(): void {
-    this.state.isPaused = true
+    if (this.cancelLock) return
+    try {
+      this.cancelLock = true
+      this.state.isPaused = true
 
-    for (const item of this.state.queue.values()) {
-      if (item.status === 'pending' || item.status === 'downloading') {
-        item.status = 'cancelled'
-        item.error = 'Cancelled by user'
-        this.persistQueueItem(item) // B-DWN-005: persist cancelled state
+      const itemsToCancel: DownloadQueueItem[] = []
+      for (const item of this.state.queue.values()) {
+        if (item.status === 'pending' || item.status === 'downloading') {
+          item.status = 'cancelled'
+          item.error = 'Cancelled by user'
+          itemsToCancel.push(item)
+        }
       }
-    }
 
-    if (this.state.currentSession) {
-      this.state.currentSession.status = 'cancelled'
-    }
+      if (itemsToCancel.length > 0) {
+        runInTransaction(() => {
+          for (const item of itemsToCancel) {
+            this.persistQueueItem(item)
+          }
+        })
+      }
 
-    this.markDirty()
-    this.emitStateUpdate(true) // C-004: immediate emit for cancel-all
+      if (this.state.currentSession) {
+        this.state.currentSession.status = 'cancelled'
+      }
+
+      this.markDirty()
+      this.emitStateUpdate(true)
+
+      // Delayed cleanup for cancelled items
+      const cancelledFilenames = itemsToCancel.map(i => i.filename)
+      if (cancelledFilenames.length > 0) {
+        setTimeout(() => {
+          for (const filename of cancelledFilenames) {
+            this.state.queue.delete(filename)
+            this.removeFromDatabase(filename)
+          }
+          this.markDirty()
+          this.emitStateUpdate()
+        }, 5000)
+      }
+    } finally {
+      this.cancelLock = false
+    }
   }
 
   /**
