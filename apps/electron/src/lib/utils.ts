@@ -50,6 +50,15 @@ export function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`
 }
 
+/**
+ * Type guard to check if a value is a valid Date object
+ * @param date Value to check
+ * @returns true if date is a Date instance with a valid timestamp
+ */
+export function isValidDate(date: unknown): date is Date {
+  return date instanceof Date && !isNaN(date.getTime())
+}
+
 export function getWeekDates(date: Date): Date[] {
   const start = new Date(date)
   const day = start.getDay()

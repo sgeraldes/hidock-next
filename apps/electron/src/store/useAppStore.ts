@@ -5,6 +5,11 @@ import type { HiDockDeviceState, ConnectionStatus, ActivityLogEntry } from '@/se
 import type { UnifiedRecording } from '@/types/unified-recording'
 // CA-10: CalendarViewType shared between store and calendar-utils
 import type { CalendarViewType } from '@/lib/calendar-utils'
+import {
+  MAX_ACTIVITY_LOG_ENTRIES,
+  createActivityLogKey,
+  isValidActivityLogEntry
+} from '@/constants/activity-log'
 
 /**
  * Returns the canonical download queue key for a recording.
@@ -235,34 +240,28 @@ export const useAppStore = create<AppState>((set, get) => ({
   setDeviceState: (deviceState) => set({ deviceState }),
   setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
   addActivityLogEntry: (entry) => set((state) => {
-    const MAX_LOG_ENTRIES = 100
+    // Validate entry before adding (prevents corruption from invalid entries)
+    if (!isValidActivityLogEntry(entry)) {
+      console.warn('[AppStore] Invalid activity log entry rejected:', entry)
+      return state // No-op, don't trigger re-render
+    }
+
     const newLog = [...state.activityLog, entry]
-    return { activityLog: newLog.slice(-MAX_LOG_ENTRIES) }
+    return { activityLog: newLog.slice(-MAX_ACTIVITY_LOG_ENTRIES) }
   }),
   addActivityLogBatch: (entries) => set((state) => {
     // Handle empty array case
     if (!entries || entries.length === 0) {
-      return state  // No-op, don't trigger re-render
+      return state // No-op, don't trigger re-render
     }
 
-    const MAX_LOG_ENTRIES = 100
+    // Build deduplication set from existing logs
+    const existingKeys = new Set(state.activityLog.map(createActivityLogKey))
 
-    // Build deduplication set from existing logs (defensive: handle undefined state)
-    const existingKeys = new Set(
-      (state.activityLog || []).map(log =>
-        `${log.timestamp.getTime()}-${log.message}`
-      )
-    )
-
-    // Filter out duplicates and invalid entries from incoming batch
-    const newEntries = entries.filter(entry => {
-      // CRITICAL FIX: Validate entry has required fields
-      if (!entry?.timestamp || !entry?.message) return false
-      if (!(entry.timestamp instanceof Date)) return false
-      if (isNaN(entry.timestamp.getTime())) return false
-
-      const key = `${entry.timestamp.getTime()}-${entry.message}`
-      return !existingKeys.has(key)
+    // Validate and deduplicate in single pass (avoids double key generation)
+    const newEntries = entries.filter((entry) => {
+      if (!isValidActivityLogEntry(entry)) return false
+      return !existingKeys.has(createActivityLogKey(entry))
     })
 
     // If all entries are duplicates or invalid, don't update
@@ -271,9 +270,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     // Combine and enforce max limit (keep most recent)
-    const combinedLog = [...(state.activityLog || []), ...newEntries]
+    const combinedLog = [...state.activityLog, ...newEntries]
     return {
-      activityLog: combinedLog.slice(-MAX_LOG_ENTRIES)
+      activityLog: combinedLog.slice(-MAX_ACTIVITY_LOG_ENTRIES)
     }
   }),
   clearActivityLog: () => set({ activityLog: [] }),

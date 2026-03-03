@@ -82,7 +82,8 @@ export interface ActivityLogEntry {
   details?: string
 }
 
-const MAX_LOG_ENTRIES = 100 // Maximum activity log entries to keep in memory
+// Import shared activity log constant
+import { MAX_ACTIVITY_LOG_ENTRIES } from '../constants/activity-log'
 
 type ActivityListener = (entry: ActivityLogEntry) => void
 
@@ -609,8 +610,8 @@ class HiDockDeviceService {
 
     // Store in persisted log
     this.activityLog.push(entry)
-    if (this.activityLog.length > MAX_LOG_ENTRIES) {
-      this.activityLog = this.activityLog.slice(-MAX_LOG_ENTRIES)
+    if (this.activityLog.length > MAX_ACTIVITY_LOG_ENTRIES) {
+      this.activityLog = this.activityLog.slice(-MAX_ACTIVITY_LOG_ENTRIES)
     }
 
     // Notify listeners - log count for debugging
