@@ -326,6 +326,17 @@ export function Device() {
     }
   }, [connectionStatus.step, connectionStatus.message, clearConnectionTimers])
 
+  // C-SM-002: Wrap in useCallback to ensure ref-stable function for polling interval
+  // Moved here (before the polling effect) to avoid temporal dead zone reference error
+  const loadBatteryStatus = useCallback(async () => {
+    try {
+      const status = await deviceService.getBatteryStatus()
+      setBatteryStatus(status)
+    } catch (e) {
+      console.error('Failed to load battery status:', e)
+    }
+  }, [deviceService])
+
   // B-DEV-011: Battery polling for P1 devices at 60-second interval
   // C-SM-002: Use ref to avoid stale closure in setInterval callback
   const loadBatteryStatusRef = useRef(loadBatteryStatus)
@@ -732,16 +743,6 @@ export function Device() {
   // ==========================================
   // P1-SPECIFIC HANDLERS
   // ==========================================
-
-  // C-SM-002: Wrap in useCallback to ensure ref-stable function for polling interval
-  const loadBatteryStatus = useCallback(async () => {
-    try {
-      const status = await deviceService.getBatteryStatus()
-      setBatteryStatus(status)
-    } catch (e) {
-      console.error('Failed to load battery status:', e)
-    }
-  }, [deviceService])
 
   const handleBluetoothScan = async () => {
     // B-DEV-012: Check connection before starting scan

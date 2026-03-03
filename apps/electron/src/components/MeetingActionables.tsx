@@ -1,6 +1,5 @@
 import { useMemo } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
 import { CheckCircle2, Circle, AlertCircle, Clock } from 'lucide-react'
 import { formatDateTime } from '@/lib/utils'
 import type { Actionable } from '@/types'
@@ -89,9 +88,9 @@ export function MeetingActionables({ actionables }: MeetingActionablesProps) {
               <div className="flex-1 min-w-0 space-y-1">
                 <div className="flex items-start justify-between gap-2">
                   <p className="font-medium text-sm leading-tight">{actionable.title}</p>
-                  <Badge variant="secondary" className={`shrink-0 text-xs ${priorityColor}`}>
+                  <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${priorityColor}`}>
                     {actionable.type}
-                  </Badge>
+                  </span>
                 </div>
 
                 {actionable.description && (
