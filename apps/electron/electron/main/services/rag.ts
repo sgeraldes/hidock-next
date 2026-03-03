@@ -419,6 +419,20 @@ ${transcript.substring(0, 8000)}`
     return ollama.generate(prompt)
   }
 
+  /**
+   * Remove the last N messages from a session's conversation history.
+   * Used during retry to strip the failed user message and any partial assistant response
+   * without losing all prior context.
+   */
+  removeLastMessages(sessionId: string, count: number): number {
+    const context = this.contexts.get(sessionId)
+    if (!context || count <= 0) return 0
+
+    const toRemove = Math.min(count, context.conversationHistory.length)
+    context.conversationHistory.splice(-toRemove)
+    return toRemove
+  }
+
   clearSession(sessionId: string): void {
     this.contexts.delete(sessionId)
     // Also cancel any in-flight request for this session

@@ -596,6 +596,20 @@ export function Chat() {
         }
       }
 
+      // Auto-generate title if the conversation still has the default name
+      if (currentConv!.title === 'New Chat' || currentConv!.title === 'New Conversation') {
+        const autoTitle = userMessageContent.slice(0, 40) + (userMessageContent.length > 40 ? '...' : '')
+        try {
+          await window.electronAPI.assistant.updateConversationTitle(currentConv!.id, autoTitle)
+          setActiveConversation(prev => prev ? { ...prev, title: autoTitle } : prev)
+          setConversations(prev => prev.map(c =>
+            c.id === currentConv!.id ? { ...c, title: autoTitle } : c
+          ))
+        } catch {
+          // Title update is best-effort; don't block the chat flow
+        }
+      }
+
       // Update updated_at in UI
       setConversations(prev => prev.map(c =>
         c.id === currentConv!.id ? { ...c, updatedAt: new Date().toISOString() } : c
@@ -648,6 +662,15 @@ export function Chat() {
       next.delete(failedMsgId)
       return next
     })
+
+    // Trim stale user message + partial assistant response from RAG session history
+    // so the retry doesn't send duplicate/error context to the LLM
+    try {
+      await window.electronAPI.rag.removeLastMessages(activeConversation.id, 2)
+    } catch {
+      // If trim fails, fall back to clearing the whole session
+      await window.electronAPI.rag.clearSession(activeConversation.id)
+    }
 
     // Re-submit the user's original message
     setIsProcessing(true)

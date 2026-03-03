@@ -173,6 +173,24 @@ export function registerRAGHandlers(): void {
     }
   })
 
+  // Remove last N messages from RAG session history (for retry without losing all context)
+  ipcMain.handle('rag:removeLastMessages', async (_event, sessionId: string, count: number): Promise<Result<number>> => {
+    try {
+      if (!sessionId || typeof sessionId !== 'string') {
+        return error('VALIDATION_ERROR', 'Session ID is required')
+      }
+      if (typeof count !== 'number' || count < 1) {
+        return error('VALIDATION_ERROR', 'Count must be a positive number')
+      }
+
+      const removed = rag.removeLastMessages(sessionId, count)
+      return success(removed)
+    } catch (err) {
+      console.error('rag:removeLastMessages error:', err)
+      return error('INTERNAL_ERROR', 'Failed to remove messages from session', err)
+    }
+  })
+
   // Clear chat session (with Result pattern)
   ipcMain.handle('rag:clear-session', async (_event, sessionId: string): Promise<Result<void>> => {
     try {

@@ -146,6 +146,23 @@ export function registerAssistantHandlers(): void {
     }
   })
 
+  // Update conversation title
+  ipcMain.handle('assistant:updateConversationTitle', async (_, conversationId: string, title: string) => {
+    try {
+      const conv = queryOne<any>('SELECT id FROM conversations WHERE id = ?', [conversationId])
+      if (!conv) {
+        return { success: false, error: 'Conversation not found' }
+      }
+
+      run('UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?',
+        [title, new Date().toISOString(), conversationId])
+      return { success: true }
+    } catch (error) {
+      console.error('Failed to update conversation title:', error)
+      return { success: false, error: (error as Error).message }
+    }
+  })
+
   // Get context for conversation
   ipcMain.handle('assistant:getContext', async (_, conversationId: string) => {
     try {
