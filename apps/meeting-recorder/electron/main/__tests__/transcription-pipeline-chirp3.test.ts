@@ -27,6 +27,8 @@ vi.mock("../services/database", () => ({
 vi.mock("../services/database-extras", () => ({
   createTalkingPoint: mockCreateTalkingPoint,
   createActionItem: mockCreateActionItem,
+  getTalkingPointsBySession: vi.fn().mockReturnValue([]),
+  getActionItemsBySession: vi.fn().mockReturnValue([]),
 }));
 
 import { TranscriptionPipeline } from "../services/transcription-pipeline";

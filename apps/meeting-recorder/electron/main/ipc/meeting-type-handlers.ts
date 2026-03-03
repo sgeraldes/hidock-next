@@ -34,6 +34,7 @@ export function registerMeetingTypeHandlers(): void {
     "meetingType:setForSession",
     (_, sessionId: string, meetingTypeId: string | null) => {
       updateSession(sessionId, { meeting_type_id: meetingTypeId });
+      saveDatabase();
     },
   );
 

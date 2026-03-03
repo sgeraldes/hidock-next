@@ -8,6 +8,8 @@ import {
 import {
   createTalkingPoint,
   createActionItem,
+  getTalkingPointsBySession,
+  getActionItemsBySession,
 } from "./database-extras";
 import type { TranscriptionResult } from "./ai-provider.types";
 import { broadcastToAllWindows } from "./broadcast";
@@ -231,22 +233,32 @@ export class TranscriptionPipeline {
     }
 
     if (result.topics.length > 0) {
+      const existingTopics = getTalkingPointsBySession(this.sessionId);
+      const existingTopicSet = new Set(existingTopics.map((tp) => tp.topic.toLowerCase()));
       for (const topic of result.topics) {
-        createTalkingPoint({
-          session_id: this.sessionId,
-          topic: topic,
-          first_mentioned_ms: chunkIndex * TIMESLICE_MS,
-        });
+        if (!existingTopicSet.has(topic.toLowerCase())) {
+          createTalkingPoint({
+            session_id: this.sessionId,
+            topic: topic,
+            first_mentioned_ms: chunkIndex * TIMESLICE_MS,
+          });
+          existingTopicSet.add(topic.toLowerCase());
+        }
       }
     }
 
     if (result.actionItems.length > 0) {
+      const existingActions = getActionItemsBySession(this.sessionId);
+      const existingActionSet = new Set(existingActions.map((ai) => ai.text.toLowerCase()));
       for (const item of result.actionItems) {
-        createActionItem({
-          session_id: this.sessionId,
-          text: item.text,
-          assignee: item.assignee,
-        });
+        if (!existingActionSet.has(item.text.toLowerCase())) {
+          createActionItem({
+            session_id: this.sessionId,
+            text: item.text,
+            assignee: item.assignee,
+          });
+          existingActionSet.add(item.text.toLowerCase());
+        }
       }
     }
 

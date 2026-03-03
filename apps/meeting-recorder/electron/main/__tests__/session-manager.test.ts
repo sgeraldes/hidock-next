@@ -26,6 +26,7 @@ vi.mock("../services/database", () => ({
   getAllSessions: mockGetAllSessions,
   createRecording: vi.fn().mockReturnValue("recording-uuid-1"),
   updateRecording: vi.fn(),
+  saveDatabase: vi.fn(),
 }));
 
 const { mockBroadcast } = vi.hoisted(() => ({

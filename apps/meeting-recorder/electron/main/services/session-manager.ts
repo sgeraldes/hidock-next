@@ -1,4 +1,4 @@
-import { createSession, updateSession, getAllSessions } from "./database";
+import { createSession, updateSession, getAllSessions, saveDatabase } from "./database";
 import type { MicStatus } from "./mic-detector";
 import type { Session } from "./database.types";
 import type { AudioConcatenation } from "./audio-concatenation";
@@ -46,6 +46,8 @@ export class SessionManager {
         console.error('[SessionManager] Failed to concatenate audio:', err);
       }
     }
+
+    saveDatabase();
 
     broadcastToAllWindows("session:statusChanged", {
       id: sessionId,

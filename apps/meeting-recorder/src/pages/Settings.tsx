@@ -22,7 +22,7 @@ import { SettingRow } from "../components/settings/SettingRow";
 
 const SETTING_KEY_MAP: Record<string, string> = {
   provider: "ai.provider",
-  model: "ai.model",
+  model: "ai.model.default",
   apiKey: "ai.apiKey",
   ollamaBaseUrl: "ai.ollamaBaseUrl",
   bedrockRegion: "ai.bedrockRegion",
@@ -49,6 +49,19 @@ interface MeetingTypeItem {
   is_default: number;
   created_at: string;
 }
+
+/** Detect masked values returned from IPC (e.g. "****abcd") to prevent overwriting real keys */
+function isMaskedValue(value: string): boolean {
+  return value.startsWith("****") || value === "••••••••";
+}
+
+/** Sensitive field keys that receive masked values from IPC */
+const SENSITIVE_FIELDS = new Set([
+  "apiKey",
+  "bedrockAccessKeyId",
+  "bedrockSecretAccessKey",
+  "bedrockSessionToken",
+]);
 
 interface ToggleSwitchProps {
   checked: boolean;
@@ -114,6 +127,10 @@ export default function Settings() {
 
   const handleFieldChange = useCallback(
     (key: string, value: string | number | boolean) => {
+      // Block saving masked values — they'd overwrite the real encrypted credential
+      if (SENSITIVE_FIELDS.has(key) && typeof value === "string" && isMaskedValue(value)) {
+        return;
+      }
       store.setField(key as SettingsField, value);
       const ipcKey = SETTING_KEY_MAP[key];
       if (ipcKey) {
@@ -279,8 +296,9 @@ export default function Settings() {
                         type="password"
                         value={store.apiKey}
                         onChange={(e) => handleFieldChange("apiKey", e.target.value)}
+                        onFocus={(e) => { if (isMaskedValue(e.target.value)) { store.setField("apiKey", ""); } }}
                         className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                        placeholder="Enter API key"
+                        placeholder={isMaskedValue(store.apiKey) ? "Key configured — click to change" : "Enter API key"}
                       />
                     }
                   />
@@ -329,8 +347,9 @@ export default function Settings() {
                           type="password"
                           value={store.bedrockAccessKeyId}
                           onChange={(e) => handleFieldChange("bedrockAccessKeyId", e.target.value)}
+                          onFocus={(e) => { if (isMaskedValue(e.target.value)) { store.setField("bedrockAccessKeyId", ""); } }}
                           className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                          placeholder="Enter access key"
+                          placeholder={isMaskedValue(store.bedrockAccessKeyId) ? "Configured — click to change" : "Enter access key"}
                         />
                       }
                     />
@@ -344,8 +363,9 @@ export default function Settings() {
                           type="password"
                           value={store.bedrockSecretAccessKey}
                           onChange={(e) => handleFieldChange("bedrockSecretAccessKey", e.target.value)}
+                          onFocus={(e) => { if (isMaskedValue(e.target.value)) { store.setField("bedrockSecretAccessKey", ""); } }}
                           className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                          placeholder="Enter secret key"
+                          placeholder={isMaskedValue(store.bedrockSecretAccessKey) ? "Configured — click to change" : "Enter secret key"}
                         />
                       }
                     />
@@ -359,8 +379,9 @@ export default function Settings() {
                           type="password"
                           value={store.bedrockSessionToken}
                           onChange={(e) => handleFieldChange("bedrockSessionToken", e.target.value)}
+                          onFocus={(e) => { if (isMaskedValue(e.target.value)) { store.setField("bedrockSessionToken", ""); } }}
                           className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                          placeholder="Optional"
+                          placeholder={isMaskedValue(store.bedrockSessionToken) ? "Configured — click to change" : "Optional"}
                         />
                       }
                     />
@@ -434,16 +455,16 @@ export default function Settings() {
                 <SettingRow
                   icon={Clock}
                   label="Poll interval"
-                  description="Microphone check interval (milliseconds)"
+                  description="Microphone check interval (seconds)"
                   control={
                     <input
                       type="number"
                       value={store.pollInterval}
                       onChange={(e) => handleFieldChange("pollInterval", Number(e.target.value))}
                       className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                      min="100"
-                      max="5000"
-                      step="100"
+                      min="1"
+                      max="10"
+                      step="1"
                     />
                   }
                 />
@@ -451,16 +472,16 @@ export default function Settings() {
                 <SettingRow
                   icon={Hourglass}
                   label="Grace period"
-                  description="Silence duration before stopping (milliseconds)"
+                  description="Silence duration before stopping (seconds)"
                   control={
                     <input
                       type="number"
                       value={store.gracePeriod}
                       onChange={(e) => handleFieldChange("gracePeriod", Number(e.target.value))}
                       className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                      min="1000"
-                      max="30000"
-                      step="1000"
+                      min="5"
+                      max="60"
+                      step="5"
                     />
                   }
                 />
@@ -468,15 +489,15 @@ export default function Settings() {
                 <SettingRow
                   icon={Scissors}
                   label="Chunk interval"
-                  description="Audio chunk duration (milliseconds)"
+                  description="Audio chunk duration (seconds)"
                   control={
                     <input
                       type="number"
                       value={store.chunkInterval}
                       onChange={(e) => handleFieldChange("chunkInterval", Number(e.target.value))}
                       className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                      min="1000"
-                      max="10000"
+                      min="10"
+                      max="30"
                       step="1000"
                     />
                   }

@@ -49,6 +49,8 @@ vi.mock("../services/database", () => ({
 vi.mock("../services/database-extras", () => ({
   createTalkingPoint: vi.fn(),
   createActionItem: vi.fn(),
+  getTalkingPointsBySession: vi.fn().mockReturnValue([]),
+  getActionItemsBySession: vi.fn().mockReturnValue([]),
 }));
 
 vi.mock("electron", () => ({
