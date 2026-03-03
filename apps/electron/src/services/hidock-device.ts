@@ -556,7 +556,22 @@ class HiDockDeviceService {
   }
 
   onActivity(listener: ActivityListener): () => void {
+    // Add listener to the set first
     this.activityListeners.add(listener)
+
+    // Replay historical logs to the new listener
+    // Use snapshot to prevent concurrent modification during iteration
+    const logsSnapshot = [...this.activityLog]
+
+    for (const entry of logsSnapshot) {
+      try {
+        listener(entry)
+      } catch (e) {
+        console.error('Activity listener error during replay:', e)
+      }
+    }
+
+    // Return unsubscribe function
     return () => this.activityListeners.delete(listener)
   }
 
