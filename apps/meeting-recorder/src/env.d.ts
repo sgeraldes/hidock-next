@@ -1,6 +1,6 @@
 interface ElectronAPI {
   app: {
-    info: () => Promise<{ version: string; platform: string }>;
+    info: () => Promise<{ name: string; version: string; path: string }>;
   };
   session: {
     list: () => Promise<unknown[]>;

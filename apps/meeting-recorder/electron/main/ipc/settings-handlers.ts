@@ -256,8 +256,7 @@ export function registerSettingsHandlers(): void {
     // Validate key prefix to prevent arbitrary writes
     const WRITABLE_PREFIXES = ["ai.", "recording.", "general.", "ui."];
     if (!WRITABLE_PREFIXES.some((p) => key.startsWith(p))) {
-      console.warn(`[Settings] Rejected write to unauthorized key: "${key}"`);
-      return;
+      throw new Error(`Unauthorized settings key: "${key}"`);
     }
 
     // Backward compatibility: redirect old ai.model writes to ai.model.default

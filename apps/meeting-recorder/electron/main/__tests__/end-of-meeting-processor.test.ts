@@ -194,7 +194,8 @@ describe("EndOfMeetingProcessor", () => {
 
     mockGenerateObject.mockRejectedValue(new Error("API quota exceeded"));
 
-    await processor.process("s1");
+    // process() re-throws after writing error state so the caller can handle it
+    await expect(processor.process("s1")).rejects.toThrow("API quota exceeded");
 
     expect(mockUpdateSession).toHaveBeenCalledWith("s1", {
       title: "Processing Failed",

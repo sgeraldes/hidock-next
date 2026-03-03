@@ -132,10 +132,9 @@ ST-015, ST-016, ST-017
 
 ---
 
-## Phase 2 Fixes Applied
+## All Fixes Applied
 
-These issues were fixed in the audit pass:
-
+### Phase 2 commit (a47be470):
 1. **IC-010/ST-007** - FIXED: serviceAccountJson now encrypted at rest
 2. **MC-001** - FIXED: Added default/draft/final/important contexts to registry
 3. **MC-002** - DOCUMENTED: Added clarifying comment differentiating the two handlers
@@ -145,17 +144,50 @@ These issues were fixed in the audit pass:
 7. **AP-011** - FIXED: Made chirp3 projectId optional (inferred from credentials)
 8. **IC-001/IC-002/IC-003** - FIXED: Updated env.d.ts types to match actual IPC payload shapes
 
-## Remaining Issues (deferred to Phase D)
+### Phase D commit (6deb339d):
+9. **ST-001/ST-002** - FIXED: Masked API key/Bedrock credential corruption prevented
+10. **AP-004** - FIXED: saveDatabase() now called in endSession
+11. **AP-005** - FIXED: saveDatabase() now called in meetingType:setForSession
+12. **AP-006** - FIXED: Topic/action item deduplication by session
+13. **ST-003** - FIXED: SETTING_KEY_MAP updated to ai.model.default
+14. **ST-006** - FIXED: Recording settings show correct units (seconds)
 
-Pre-existing issues not introduced by Phase 2:
-- ST-001/ST-002: Masked API key corruption in Settings.tsx (CRITICAL - needs ProviderSettings integration)
-- AP-001: EndOfMeetingProcessor swallows errors
-- AP-002/IC-011: retranscribe creates empty pipeline
-- AP-004: saveDatabase not called in endSession
-- AP-005: meetingType:setForSession doesn't save
-- AP-006: Duplicate topics/action items per chunk
-- ST-003: SETTING_KEY_MAP deprecated key
+### Phase D continued:
+15. **AP-001** - FIXED: EndOfMeetingProcessor re-throws after writing error state
+16. **AP-002/IC-011** - FIXED: retranscribe now replays saved audio through pipeline
+17. **AP-007** - FIXED: deleteTranscript clears summary and title
+18. **IC-004** - FIXED: env.d.ts app.info type matches handler return
+19. **IC-009** - FIXED: settings:set throws on unauthorized key writes
+20. **IC-012** - FIXED: audio:readFile buffer sliced to correct size
+21. **IC-015** - FIXED: session:delete cleans up pipeline and cumulative buffer
+
+## Remaining Issues (backlog)
+
+### MEDIUM (not yet fixed):
+- MC-003: gpt-4-turbo as "realtime" model for non-audio-capable OpenAI
+- MC-005: ModelSelector fetches all models including deprecated
+- MC-006: validateModel allows deprecated with allowCustomModels
+- MC-007: getDefaultModel returns "" for unknown provider
+- MC-008: loadConfig minimal validation (no schema validation)
+- AP-008: Summary field stores full JSON instead of text
+- AP-009: Race condition between chunk processing and session:end
+- AP-010: validateApiKey only checks format, not connectivity
+- AP-012: Unsanitized transcript content in prompts
+- AP-013: isAudioCapable checks provider-level, not model-level
+- AP-014: Pipeline map not cleaned for auto-started sessions
+- AP-015: Cumulative buffer leak for auto-ended sessions
 - ST-004: Model text input fires every keystroke
-- ST-005: Dead settings components
-- ST-006: Recording settings wrong units
-- See full details in the MEDIUM and LOW sections above
+- ST-005: Dead settings components not integrated
+- ST-008: Non-functional search in Settings
+- ST-009: API key shown for Bedrock provider
+- ST-010: No visual indicator for configured credentials
+- ST-011: handleFieldChange over-broad deps
+- ST-012: No loading state guard in Settings page
+- ST-013: setField no type validation
+- ST-014: No input validation on numeric fields
+
+### LOW (not yet fixed):
+- IC-005, IC-006, IC-008, IC-013
+- MC-010, MC-012, MC-013, MC-014, MC-015
+- AP-016, AP-017, AP-018, AP-019, AP-020
+- ST-015, ST-016, ST-017

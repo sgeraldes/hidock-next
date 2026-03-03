@@ -73,6 +73,8 @@ export function registerSessionHandlers(): void {
 
   ipcMain.handle("session:delete", (_, sessionId: string) => {
     try {
+      stopPipeline(sessionId);
+      clearSessionInitSegment(sessionId);
       deleteSession(sessionId);
       saveDatabase();
     } catch (err) {
@@ -100,8 +102,8 @@ export function registerSessionHandlers(): void {
   ipcMain.handle("session:deleteTranscript", (_, sessionId: string) => {
     try {
       deleteSessionTranscript(sessionId);
-      // Also clear summary from session
-      updateSession(sessionId, { status: "inactive" });
+      // Clear summary and title along with transcript
+      updateSession(sessionId, { status: "inactive", summary: null, title: null });
       saveDatabase();
     } catch (err) {
       console.error("[SessionHandlers] Failed to delete transcript:", err);
@@ -113,12 +115,56 @@ export function registerSessionHandlers(): void {
 
   ipcMain.handle("session:retranscribe", async (_, sessionId: string) => {
     try {
-      // Clear existing transcript data first
+      const session = getSession(sessionId);
+      if (!session) {
+        throw new Error(`Session ${sessionId} not found`);
+      }
+
+      // Clear existing transcript data
       deleteSessionTranscript(sessionId);
+      updateSession(sessionId, { status: "inactive", summary: null, title: null });
       saveDatabase();
-      // Re-start the transcription pipeline
+
+      // Stop any existing pipeline for this session
       stopPipeline(sessionId);
-      startPipeline(sessionId);
+
+      // Check if we have a concatenated audio file to re-process
+      if (session.audio_path && existsSync(session.audio_path)) {
+        // Start a new pipeline and feed it the saved audio
+        startPipeline(sessionId);
+        const { getPipeline } = await import("./transcription-handlers");
+        const pipeline = getPipeline(sessionId);
+        if (pipeline) {
+          const { readFileSync } = await import("fs");
+          const audioBuffer = readFileSync(session.audio_path);
+          // Process the entire file as a single chunk (chunk index 0)
+          await pipeline.processAudioChunk(audioBuffer, "audio/ogg", 0);
+          stopPipeline(sessionId);
+        }
+      } else {
+        // No audio file available — check if raw chunks exist
+        const storage = new AudioStorage();
+        const sessionDir = storage.getSessionDir(sessionId);
+        if (existsSync(sessionDir)) {
+          startPipeline(sessionId);
+          const { getPipeline } = await import("./transcription-handlers");
+          const pipeline = getPipeline(sessionId);
+          if (pipeline) {
+            const { readdirSync, readFileSync } = await import("fs");
+            const { join } = await import("path");
+            const chunks = readdirSync(sessionDir)
+              .filter((f: string) => f.startsWith("chunk-"))
+              .sort();
+            for (let i = 0; i < chunks.length; i++) {
+              const chunkData = readFileSync(join(sessionDir, chunks[i]));
+              await pipeline.processAudioChunk(chunkData, "audio/ogg", i);
+            }
+          }
+          stopPipeline(sessionId);
+        } else {
+          throw new Error("No audio data available for re-transcription");
+        }
+      }
     } catch (err) {
       console.error("[SessionHandlers] Failed to retranscribe:", err);
       throw new Error(

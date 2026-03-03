@@ -120,6 +120,9 @@ export class EndOfMeetingProcessor {
         sessionId,
         error: message,
       });
+
+      // Re-throw so the caller can handle the failure (e.g., NOT marking session complete)
+      throw error;
     }
   }
 }

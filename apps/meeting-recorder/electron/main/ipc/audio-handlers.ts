@@ -298,7 +298,7 @@ export function registerAudioHandlers(): void {
         : ext === 'webm' ? 'audio/webm;codecs=opus'
         : 'audio/webm';
 
-      return { data: buffer.buffer, mimeType };
+      return { data: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength), mimeType };
     } catch (err) {
       console.error("[AudioHandlers] Failed to read audio file:", err);
       return null;
