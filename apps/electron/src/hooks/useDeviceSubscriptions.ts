@@ -12,10 +12,8 @@ import { useAppStore } from '@/store/useAppStore'
 import { useUIStore } from '@/store'
 import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
 
-// QA Logging helper - respects user's QA Logs toggle
+// QA Logging helper - respects user's QA Logs toggle in all environments
 function shouldLogQa(): boolean {
-  const IS_PROD = import.meta.env.PROD
-  if (!IS_PROD) return true // Always log in dev
   try {
     return useUIStore.getState().qaLogsEnabled
   } catch {
@@ -157,7 +155,9 @@ export function useDeviceSubscriptions() {
       unsubStateChange()
       unsubStatusChange()
       unsubActivity()
-      deviceSubscriptionsInitialized.current = false
+      // SM-001: Do NOT reset deviceSubscriptionsInitialized.current here.
+      // StrictMode does mount → cleanup → mount; resetting allows double subscription.
+      // When the component truly unmounts and remounts, React creates a NEW ref(false).
     }
   // SM-M02: Dependencies are stable (deviceService is singleton), refs handle action freshness
   // eslint-disable-next-line react-hooks/exhaustive-deps
