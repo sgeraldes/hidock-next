@@ -13,6 +13,8 @@
  * C-004-DS-008: getSyncStats separates cancelled from failed
  * C-004-DS-009: destroy() cleans up all timers
  * C-004-DS-010: updateProgress tracks lastProgressAt
+ *
+ * @vitest-environment node
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -41,6 +43,7 @@ vi.mock('../database', () => ({
   queryOne: vi.fn(() => null),
   queryAll: vi.fn(() => []),
   run: vi.fn(),
+  runInTransaction: vi.fn((fn: () => void) => fn()), // Execute callback immediately
   getDatabase: vi.fn(() => ({
     exec: vi.fn(() => []),
     run: vi.fn()
@@ -53,9 +56,9 @@ vi.mock('../file-storage', () => ({
   getRecordingsPath: vi.fn(() => '/mock/recordings')
 }))
 
-// Mock fs
-vi.mock('fs', async () => {
-  const actual = await vi.importActual<typeof import('fs')>('fs')
+// Mock fs - use importOriginal to avoid vite-browser-external conflicts
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>()
   return {
     ...actual,
     default: { ...actual, existsSync: vi.fn(() => false) },
@@ -228,8 +231,8 @@ describe('DownloadService C-004 Fixes', () => {
       expect(state.queue.every((i: DownloadQueueItem) => i.status === 'cancelled')).toBe(true)
 
       // Retry should work for cancelled items
-      const retryCount = service.retryFailed()
-      expect(retryCount).toBe(2)
+      const result = service.retryFailed()
+      expect(result.count).toBe(2)
 
       state = service.getState()
       expect(state.queue.every((i: DownloadQueueItem) => i.status === 'pending')).toBe(true)
@@ -245,8 +248,8 @@ describe('DownloadService C-004 Fixes', () => {
       service.markFailed('fail.hda', 'Error')
       service.cancelDownload('cancel.hda')
 
-      const retryCount = service.retryFailed()
-      expect(retryCount).toBe(2) // Both failed and cancelled
+      const result = service.retryFailed()
+      expect(result.count).toBe(2) // Both failed and cancelled
 
       const state = service.getState()
       const pendingItems = state.queue.filter((i: DownloadQueueItem) => i.status === 'pending')

@@ -27,6 +27,7 @@ vi.mock('../../services/database', () => ({
   getMeetingById: vi.fn(),
   getTranscriptByRecordingId: vi.fn(),
   getRecordingsForMeeting: vi.fn(),
+  getTopicsForProjectMeetings: vi.fn(),
   getKnowledgeIdsForProject: vi.fn(),
   getPersonIdsForProject: vi.fn(),
   getDatabase: vi.fn(() => ({
@@ -94,7 +95,7 @@ describe('Projects IPC Handlers', () => {
   })
 
   it('should populate knowledgeIds and personIds for getById (B-PRJ-002)', async () => {
-    const { getProjectById, getMeetingsForProject, getKnowledgeIdsForProject, getPersonIdsForProject } = await import('../../services/database')
+    const { getProjectById, getMeetingsForProject, getTopicsForProjectMeetings, getKnowledgeIdsForProject, getPersonIdsForProject } = await import('../../services/database')
 
     vi.mocked(getProjectById).mockReturnValue({
       id: '550e8400-e29b-41d4-a716-446655440000',
@@ -104,6 +105,7 @@ describe('Projects IPC Handlers', () => {
       created_at: '2025-01-01'
     } as any)
     vi.mocked(getMeetingsForProject).mockReturnValue([])
+    vi.mocked(getTopicsForProjectMeetings).mockReturnValue([])
     vi.mocked(getKnowledgeIdsForProject).mockReturnValue(['k1', 'k2'])
     vi.mocked(getPersonIdsForProject).mockReturnValue(['p1'])
 

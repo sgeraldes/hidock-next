@@ -9,7 +9,8 @@ vi.mock('@/components/ui/toaster', () => ({
 
 // Mock useDownloadOrchestrator
 vi.mock('@/hooks/useDownloadOrchestrator', () => ({
-  cancelDownloads: vi.fn()
+  cancelDownloads: vi.fn(),
+  cancelDownloadsComplete: vi.fn()
 }))
 
 // Mock transcription store
@@ -57,7 +58,7 @@ global.window.electronAPI = {
     cancelAll: mockCancelAllDownloads
   },
   config: {
-    getValue: vi.fn().mockResolvedValue('test-api-key')
+    getValue: vi.fn().mockResolvedValue({ success: true, data: 'test-api-key' })
   }
 } as any
 

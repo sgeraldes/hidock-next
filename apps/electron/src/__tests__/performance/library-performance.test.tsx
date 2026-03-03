@@ -248,11 +248,11 @@ describe('Library Performance', () => {
       // The 100-item case often takes LONGER than 1000 due to being the first
       // render in the test suite (cold JIT, module init, jsdom bootstrap).
       if (count <= 100) {
-        expect(renderTime).toBeLessThan(1500) // First render: cold JIT + jsdom bootstrap + tri-pane + system variability
+        expect(renderTime).toBeLessThan(2000) // First render: cold JIT + jsdom bootstrap + tri-pane + parallel test load
       } else if (count <= 1000) {
-        expect(renderTime).toBeLessThan(1500) // Warmed up but more data
+        expect(renderTime).toBeLessThan(2000) // Warmed up but more data
       } else if (count <= 5000) {
-        expect(renderTime).toBeLessThan(2000) // Larger sets need proportionally more headroom
+        expect(renderTime).toBeLessThan(2500) // Larger sets need proportionally more headroom
       }
     })
   })

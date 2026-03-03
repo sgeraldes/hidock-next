@@ -6,8 +6,11 @@
  *   ROOT CAUSE: processQueue() catch block updates queue item to 'failed' but did NOT
  *   update recordings.status back from 'transcribing' to 'failed'
  *   FIX: Added updateRecordingStatus(recordingId, 'failed') in the catch block
+ *
+ * @vitest-environment node
  */
 
+// This test runs in node environment, so we must define mocks BEFORE imports
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // Track calls to updateRecordingStatus
@@ -65,15 +68,15 @@ vi.mock('@google/generative-ai', () => ({
   }))
 }))
 
-// Mock fs with working existsSync and readFile (callback-based, used by promisify)
-vi.mock('fs', async () => {
-  const actual = await vi.importActual<typeof import('fs')>('fs')
+// Mock fs - simple approach that works in jsdom environment
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>()
   return {
     ...actual,
-    default: { ...actual, existsSync: vi.fn(() => true), readFileSync: vi.fn(() => Buffer.from('fake audio')), readFile: vi.fn((_path: string, cb: (err: null, data: Buffer) => void) => cb(null, Buffer.from('fake audio data'))) },
     existsSync: vi.fn(() => true),
-    readFileSync: vi.fn(() => Buffer.from('fake audio data')),
-    readFile: vi.fn((_path: string, cb: (err: null, data: Buffer) => void) => cb(null, Buffer.from('fake audio data')))
+    readFile: vi.fn((_path: string, cb: (err: null, data: Buffer) => void) => {
+      cb(null, Buffer.from('fake audio data'))
+    })
   }
 })
 

@@ -10,6 +10,8 @@
  * - B-DWN-006: cancelDownload has delayed cleanup
  * - B-DWN-007: Retry checks if file already synced first
  * - B-DWN-009: getState() uses dirty-flag caching
+ *
+ * @vitest-environment node
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -37,6 +39,7 @@ vi.mock('../database', () => ({
   queryOne: vi.fn(() => null),
   queryAll: vi.fn(() => []),
   run: (...args: any[]) => mockRun(...args),
+  runInTransaction: vi.fn((fn: () => void) => fn()), // Execute callback immediately
   getDatabase: vi.fn(() => ({
     exec: vi.fn(() => []),
     run: vi.fn()
@@ -49,9 +52,9 @@ vi.mock('../file-storage', () => ({
   getRecordingsPath: vi.fn(() => '/mock/recordings')
 }))
 
-// Mock fs
-vi.mock('fs', async () => {
-  const actual = await vi.importActual<typeof import('fs')>('fs')
+// Mock fs - use importOriginal to avoid vite-browser-external conflicts
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>()
   return {
     ...actual,
     default: { ...actual, existsSync: vi.fn(() => false) },
@@ -183,10 +186,10 @@ describe('DownloadService B-007 Fixes', () => {
         return filename === 'synced.wav'
       })
 
-      const retryCount = service.retryFailed()
+      const result = service.retryFailed()
 
       // Only 1 should be retried (notsynced.wav)
-      expect(retryCount).toBe(1)
+      expect(result.count).toBe(1)
 
       const state = service.getState()
       const pending = state.queue.filter((i: DownloadQueueItem) => i.status === 'pending')

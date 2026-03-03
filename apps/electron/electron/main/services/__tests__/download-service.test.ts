@@ -12,6 +12,8 @@
  *
  * BUG-DS-003: No progress throttling - emitStateUpdate() fires for every chunk
  *   OBSERVED: Every call to updateProgress() immediately broadcasts full state to all windows
+ *
+ * @vitest-environment node
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -26,7 +28,7 @@ vi.mock('electron', () => ({
   }
 }))
 
-// Mock database functions (spec-007: added queryOne, queryAll, run, getDatabase)
+// Mock database functions (spec-007: added queryOne, queryAll, run, getDatabase, runInTransaction)
 vi.mock('../database', () => ({
   markRecordingDownloaded: vi.fn(),
   addSyncedFile: vi.fn(),
@@ -37,6 +39,7 @@ vi.mock('../database', () => ({
   queryOne: vi.fn(() => null), // No existing entries by default
   queryAll: vi.fn(() => []),   // Empty queue by default
   run: vi.fn(),                // No-op by default
+  runInTransaction: vi.fn((fn: () => void) => fn()), // Execute callback immediately
   getDatabase: vi.fn(() => ({  // Mock database instance
     exec: vi.fn(() => []),
     run: vi.fn()
@@ -49,9 +52,9 @@ vi.mock('../file-storage', () => ({
   getRecordingsPath: vi.fn(() => '/mock/recordings')
 }))
 
-// Mock fs - needs default export for CJS interop
-vi.mock('fs', async () => {
-  const actual = await vi.importActual<typeof import('fs')>('fs')
+// Mock fs - use importOriginal to avoid vite-browser-external conflicts
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>()
   return {
     ...actual,
     default: { ...actual, existsSync: vi.fn(() => false) },
@@ -129,9 +132,9 @@ describe('DownloadService', () => {
       expect(failedBefore).toHaveLength(2)
 
       // CRITICAL: retryFailed() should reset failed items back to 'pending'
-      const retryCount = (service as any).retryFailed()
+      const result = (service as any).retryFailed()
 
-      expect(retryCount).toBe(2)
+      expect(result.count).toBe(2)
 
       state = service.getState()
       const failedAfter = state.queue.filter((i: DownloadQueueItem) => i.status === 'failed')
