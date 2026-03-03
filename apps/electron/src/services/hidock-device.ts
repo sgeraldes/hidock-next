@@ -197,18 +197,22 @@ class HiDockDeviceService {
       // Use Electron IPC to get config from main process
       if (window.electronAPI?.config?.get) {
         console.log('[HiDockDevice] electronAPI available, fetching config...')
-        const config = await window.electronAPI.config.get()
-        console.log('[HiDockDevice] Config received:', JSON.stringify(config?.device))
+        const result = await window.electronAPI.config.get()
+        console.log('[HiDockDevice] Config result received:', result?.success)
 
-        if (config?.device) {
+        if (result?.success && result?.data?.device) {
+          const config = result.data
           // Use explicit boolean check - undefined/null defaults to false (safe default)
           this.autoConnectConfig.enabled = config.device.autoConnect === true
           this.autoConnectConfig.connectOnStartup = config.device.autoConnect === true
           this.configLoaded = true
           console.log(`[HiDockDevice] Config loaded: autoConnect = ${this.autoConnectConfig.enabled}`)
-        } else {
+        } else if (result?.success) {
           console.warn('[HiDockDevice] Config loaded but device section missing, defaulting to disabled')
           this.configLoaded = true // Mark as loaded even without device section
+        } else {
+          console.warn('[HiDockDevice] Config load failed, defaulting to disabled')
+          this.configLoaded = true // Mark as loaded to prevent infinite waiting
         }
       } else {
         console.warn('[HiDockDevice] electronAPI.config not available after waiting, auto-connect will be disabled')

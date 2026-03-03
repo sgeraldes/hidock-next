@@ -1,5 +1,24 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+/**
+ * B-SET-004 / QAM-002: QA logging check via localStorage bridge.
+ * Preload scripts run in context isolation, so they cannot access Zustand stores directly.
+ * Instead, read from the persisted localStorage key that the UI store writes to.
+ * Defined early so callIPC can use it for QA-MONITOR gating.
+ */
+function isQaLogsEnabled(): boolean {
+  try {
+    const stored = localStorage.getItem('hidock-ui-store')
+    if (stored) {
+      const { state } = JSON.parse(stored)
+      return state?.qaLogsEnabled ?? false
+    }
+  } catch {
+    /* fail silently */
+  }
+  return false
+}
+
 // --- IPC Logging Wrapper ---
 const callIPC = async (channel: string, ...args: any[]) => {
   const isPolling = ['recordings:getTranscriptionStatus', 'db:get-recordings', 'knowledge:getAll'].includes(channel);
@@ -9,12 +28,12 @@ const callIPC = async (channel: string, ...args: any[]) => {
     const result = await ipcRenderer.invoke(channel, ...args);
     const duration = (performance.now() - start).toFixed(1);
 
-    if (!isPolling) {
+    if (!isPolling && isQaLogsEnabled()) {
         console.log(`[QA-MONITOR][IPC] ${channel} (${duration}ms)`);
     }
     return result;
   } catch (error) {
-    if (!isPolling) {
+    if (!isPolling && isQaLogsEnabled()) {
         console.error(`[QA-MONITOR][IPC-ERR] ${channel}:`, error);
     }
     throw error;
@@ -770,25 +789,7 @@ const electronAPI: ElectronAPI = {
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)
 
-/**
- * B-SET-004: Expose QA logging check via localStorage bridge.
- * Preload scripts run in context isolation, so they cannot access Zustand stores directly.
- * Instead, read from the persisted localStorage key that the UI store writes to.
- */
-function isQaLogsEnabled(): boolean {
-  try {
-    const stored = localStorage.getItem('hidock-ui-store')
-    if (stored) {
-      const { state } = JSON.parse(stored)
-      return state?.qaLogsEnabled ?? false
-    }
-  } catch {
-    /* fail silently */
-  }
-  return false
-}
-
-// Make isQaLogsEnabled available globally in preload context
+// Make isQaLogsEnabled available globally in preload context (function defined at top of file)
 contextBridge.exposeInMainWorld('isQaLogsEnabled', isQaLogsEnabled)
 
 // Type augmentation for the window object

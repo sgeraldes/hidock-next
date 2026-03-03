@@ -528,7 +528,12 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
   // are properly cleaned up on unmount so this does not cause leaks in production.
 
   // Initial load (only if not already loaded) and device connection subscription
+  const initialLoadDoneRef = useRef(false)
+
   useEffect(() => {
+    if (initialLoadDoneRef.current) return
+    initialLoadDoneRef.current = true
+
     // Only load if not already loaded or if device connection changed
     if (!loaded) {
       loadRecordings()

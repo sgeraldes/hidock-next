@@ -6,11 +6,16 @@
  * useTranscriptionStore with the database queue state.
  */
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useTranscriptionStore } from '@/store/features/useTranscriptionStore'
 
 export function useTranscriptionSync() {
+  const initializedRef = useRef(false)
+
   useEffect(() => {
+    if (initializedRef.current) return
+    initializedRef.current = true
+
     const isElectron = !!window.electronAPI?.recordings?.getTranscriptionQueue
 
     // Hydrate transcription queue from database on mount
