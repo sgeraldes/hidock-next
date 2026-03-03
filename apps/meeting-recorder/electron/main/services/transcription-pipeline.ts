@@ -109,10 +109,16 @@ export class TranscriptionPipeline {
     chunkIndex: number,
     context: string,
   ): Promise<void> {
+    if (!this.chirp3Provider) {
+      throw new Error("Chirp3 provider not available");
+    }
+
+    const provider = this.chirp3Provider;
+
     try {
       // Stage 1: Chirp 3 Speech-to-Text
       const chirp3Result = await this.callWithRetry(() =>
-        this.chirp3Provider!.recognizeChunk(audioData, mimeType),
+        provider.recognizeChunk(audioData, mimeType),
       );
 
       if (!chirp3Result.transcript.trim()) {
@@ -125,7 +131,7 @@ export class TranscriptionPipeline {
 
       // Apply confidence filtering
       const filteredWords =
-        this.chirp3Provider!.filterByConfidence(chirp3Result.words);
+        provider.filterByConfidence(chirp3Result.words);
       const filteredTranscript = filteredWords.map((w) => w.word).join(" ");
 
       // Stage 2: Gemini analysis of text
@@ -295,7 +301,16 @@ export class TranscriptionPipeline {
       } catch (err) {
         lastError = err;
         const message = err instanceof Error ? err.message : String(err);
-        if (message.includes("API key error") || message.includes("not configured")) {
+        const lower = message.toLowerCase();
+        const nonRetryable =
+          lower.includes("api key error") ||
+          lower.includes("not configured") ||
+          lower.includes("model not found") ||
+          lower.includes("not found") ||
+          lower.includes("invalid model") ||
+          lower.includes("content too large") ||
+          lower.includes("quota exceeded");
+        if (nonRetryable) {
           console.error(`[TranscriptionPipeline] Non-retryable error: ${message}`);
           throw err;
         }

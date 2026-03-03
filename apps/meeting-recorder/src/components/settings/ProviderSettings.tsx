@@ -1,3 +1,9 @@
+// NOTE: This component is currently unused (dead code per ST-005 audit finding).
+// Settings.tsx does not render ProviderSettings. The hardcoded PROVIDERS metadata
+// (especially audioCapable) may diverge from the canonical config in the main process.
+// If this component is revived, PROVIDERS should be fetched from models:getConfig IPC
+// instead of being hardcoded here.
+
 import { useState, useEffect } from "react";
 import { CheckCircle2, AlertCircle, ExternalLink } from "lucide-react";
 import { ModelSelector } from "./ModelSelector";

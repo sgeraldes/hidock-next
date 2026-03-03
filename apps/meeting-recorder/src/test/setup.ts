@@ -73,7 +73,8 @@ Object.defineProperty(window, "electronAPI", {
     },
     audio: {
       onMicStatus: vi.fn().mockReturnValue(() => {}),
-      onChunk: vi.fn().mockReturnValue(() => {}),
+      onChunkAck: vi.fn().mockReturnValue(() => {}),
+      onChunkError: vi.fn().mockReturnValue(() => {}),
     },
     transcription: {
       onNewSegments: vi.fn().mockReturnValue(() => {}),

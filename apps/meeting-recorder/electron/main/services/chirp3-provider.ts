@@ -87,7 +87,8 @@ export class Chirp3Provider {
       audio: { content: audioData.toString("base64") },
       config: {
         encoding,
-        sampleRateHertz: 16000,
+        // Omit sampleRateHertz for OGG_OPUS — the API auto-detects from the container
+        ...(encoding !== "OGG_OPUS" && { sampleRateHertz: 16000 }),
         languageCode: this.languageCode,
         model: this.model,
         enableWordTimeOffsets: true,

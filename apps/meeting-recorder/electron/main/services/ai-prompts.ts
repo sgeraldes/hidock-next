@@ -55,9 +55,12 @@ IMPORTANT:
 
 export type PromptKey = keyof typeof PROMPTS;
 
-/** Strip characters that could interfere with prompt structure. */
+/** Strip characters that could interfere with prompt structure or enable injection. */
 export function sanitizePromptInput(input: string): string {
-  return input.replace(/[<>{}]/g, "");
+  return input
+    .replace(/[<>{}]/g, "")
+    // Collapse sequences that look like prompt delimiters
+    .replace(/^---+\s*(system|user|assistant|instruction)/gim, "[$1]");
 }
 
 export function buildTranscriptionPrompt(

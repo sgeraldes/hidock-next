@@ -186,5 +186,8 @@ export function registerSessionHandlers(): void {
 }
 
 export function getSessionManager(): SessionManager {
+  if (!sessionManager) {
+    throw new Error("SessionManager not initialized. Call registerSessionHandlers() first.");
+  }
   return sessionManager;
 }
