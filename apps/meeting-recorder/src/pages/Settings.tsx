@@ -142,7 +142,7 @@ export default function Settings() {
         store.saveToIPC(ipcKey, String(value));
       }
     },
-    [store],
+    [store.setField, store.saveToIPC],
   );
 
   const handleCreateMeetingType = useCallback(
@@ -466,7 +466,7 @@ export default function Settings() {
                     <input
                       type="number"
                       value={store.pollInterval}
-                      onChange={(e) => handleFieldChange("pollInterval", Number(e.target.value))}
+                      onChange={(e) => { const v = Number(e.target.value); if (v > 0 && v <= 10) handleFieldChange("pollInterval", v); }}
                       className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                       min="1"
                       max="10"
@@ -483,7 +483,7 @@ export default function Settings() {
                     <input
                       type="number"
                       value={store.gracePeriod}
-                      onChange={(e) => handleFieldChange("gracePeriod", Number(e.target.value))}
+                      onChange={(e) => { const v = Number(e.target.value); if (v >= 5 && v <= 60) handleFieldChange("gracePeriod", v); }}
                       className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                       min="5"
                       max="60"
@@ -500,7 +500,7 @@ export default function Settings() {
                     <input
                       type="number"
                       value={store.chunkInterval}
-                      onChange={(e) => handleFieldChange("chunkInterval", Number(e.target.value))}
+                      onChange={(e) => { const v = Number(e.target.value); if (v >= 10 && v <= 30) handleFieldChange("chunkInterval", v); }}
                       className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                       min="10"
                       max="30"
