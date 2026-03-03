@@ -179,8 +179,14 @@ ST-015, ST-016, ST-017
 - ST-013: setField no type validation
 - ST-014: No input validation on numeric fields
 
-### LOW (not yet fixed):
-- IC-005, IC-006, IC-008, IC-013
-- MC-010, MC-012, MC-013, MC-014, MC-015
-- AP-016, AP-017, AP-018, AP-019, AP-020
-- ST-015, ST-016, ST-017
+### LOW (deferred — accepted risk or requires large-scope work):
+- IC-005: transcription:processChunk IPC registered but unused by renderer (harmless, used by text-mode pipeline)
+- IC-006: chunk ack uses event.sender vs broadcast for mic status (by design — ack is per-sender)
+- IC-013: chirp3 settings handlers in chirp3-handlers.ts not settings-handlers.ts (organizational only)
+- MC-010: Store default model "gemini-2.5-flash" is hardcoded (loadFromIPC overwrites on mount)
+- MC-012: ModelDefinition duplicated between main/renderer (Electron compilation separation)
+- MC-013: Loose truthiness on transcriptionApiKey (functionally correct — empty string is falsy)
+- MC-014: Typo'd model names pass for non-custom providers (partially addressed by MC-006 fix)
+- ST-005: Dead settings components need full UI redesign to integrate (FUTURE WORK)
+- ST-015: autoRecord defaults true with no DB indicator (acceptable UX — user can toggle off)
+- ST-016/ST-017: Dead GeneralSettings/RecordingSettings + window.prompt() for meeting types (FUTURE WORK)
