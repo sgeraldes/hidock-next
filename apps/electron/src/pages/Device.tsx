@@ -39,6 +39,7 @@ export function Device() {
   const [connectionElapsed, setConnectionElapsed] = useState(0)
   const connectionTimeoutRef = useRef<number | null>(null)
   const connectionTimerRef = useRef<number | null>(null)
+  const connectionAttemptRef = useRef(0)
 
   // Realtime streaming state
   const [realtimeActive, setRealtimeActive] = useState(false)
@@ -378,6 +379,8 @@ export function Device() {
     setConnecting(true)
     setError(null)
 
+    const attemptId = ++connectionAttemptRef.current
+
     // Start timing
     const startTime = Date.now()
     setConnectionElapsed(0)
@@ -387,9 +390,10 @@ export function Device() {
       setConnectionElapsed(Date.now() - startTime)
     }, 100)
 
-    // Set up timeout
-    // B-DEV-003: Cancel USB connection on timeout to properly tear down
+    // Set up timeout - guarded by attemptId to prevent stale timeout from
+    // disconnecting a device that connected at the race boundary
     connectionTimeoutRef.current = window.setTimeout(() => {
+      if (connectionAttemptRef.current !== attemptId) return
       if (!deviceService.isConnected()) {
         clearConnectionTimers()
         setConnecting(false)
@@ -401,17 +405,14 @@ export function Device() {
     try {
       const success = await deviceService.connect()
       if (!success) {
-        clearConnectionTimers()
         setError('Failed to connect to device. Check if the device is connected and not in use.')
       }
     } catch (e) {
-      clearConnectionTimers()
       setError(e instanceof Error ? e.message : 'Connection failed')
     } finally {
-      // Don't clear timers here if still connecting - let timeout handle it
-      if (deviceService.isConnected()) {
-        clearConnectionTimers()
-      }
+      // connect() has resolved (success or failure), so always clear timers -
+      // the timeout is no longer relevant for this attempt
+      clearConnectionTimers()
       setConnecting(false)
     }
   }

@@ -168,6 +168,7 @@ export interface ElectronAPI {
     deleteConversation: (id: string) => Promise<{ success: boolean; error?: string }>
     getMessages: (conversationId: string) => Promise<Message[]>
     addMessage: (conversationId: string, role: 'user' | 'assistant', content: string, sources?: string) => Promise<Message>
+    updateConversationTitle: (conversationId: string, title: string) => Promise<{ success: boolean; error?: string }>
     addContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
     removeContext: (conversationId: string, knowledgeCaptureId: string) => Promise<{ success: boolean; error?: string }>
     getContext: (conversationId: string) => Promise<string[]>
@@ -251,6 +252,7 @@ export interface ElectronAPI {
     summarizeMeeting: (meetingId: string) => Promise<Result<string>>
     findActionItems: (meetingId?: string) => Promise<Result<string>>
     cancel: (sessionId: string) => Promise<Result<boolean>> // B-CHAT-005
+    removeLastMessages: (sessionId: string, count: number) => Promise<Result<number>>
     clearSession: (sessionId: string) => Promise<Result<void>>
     stats: () => Promise<{
       documentCount: number
@@ -530,6 +532,7 @@ const electronAPI: ElectronAPI = {
     deleteConversation: (id) => callIPC('assistant:deleteConversation', id),
     getMessages: (conversationId) => callIPC('assistant:getMessages', conversationId),
     addMessage: (conversationId, role, content, sources) => callIPC('assistant:addMessage', conversationId, role, content, sources),
+    updateConversationTitle: (conversationId, title) => callIPC('assistant:updateConversationTitle', conversationId, title),
     addContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:addContext', conversationId, knowledgeCaptureId),
     removeContext: (conversationId, knowledgeCaptureId) => callIPC('assistant:removeContext', conversationId, knowledgeCaptureId),
     getContext: (conversationId) => callIPC('assistant:getContext', conversationId)
@@ -606,6 +609,7 @@ const electronAPI: ElectronAPI = {
     summarizeMeeting: (meetingId) => callIPC('rag:summarize-meeting', meetingId),
     findActionItems: (meetingId) => callIPC('rag:find-action-items', meetingId),
     cancel: (sessionId) => callIPC('rag:cancel', sessionId), // B-CHAT-005
+    removeLastMessages: (sessionId, count) => callIPC('rag:removeLastMessages', sessionId, count),
     clearSession: (sessionId) => callIPC('rag:clear-session', sessionId),
     stats: () => callIPC('rag:stats'),
     indexTranscript: (transcript, metadata) =>
