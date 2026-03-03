@@ -111,8 +111,8 @@ describe("ModelConfigService", () => {
     expect(modelConfig.getModelForContext("nonexistent", "realtime")).toBe("");
   });
 
-  it("returns empty string for unknown provider default", () => {
-    expect(modelConfig.getDefaultModel("nonexistent")).toBe("");
+  it("falls back to Google default for unknown provider", () => {
+    expect(modelConfig.getDefaultModel("nonexistent")).toBe("gemini-2.5-flash");
   });
 
   it("getFullConfig returns valid structure", () => {

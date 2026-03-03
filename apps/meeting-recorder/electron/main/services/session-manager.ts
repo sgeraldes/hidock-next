@@ -4,13 +4,23 @@ import type { Session } from "./database.types";
 import type { AudioConcatenation } from "./audio-concatenation";
 import { broadcastToAllWindows } from "./broadcast";
 
+export interface SessionLifecycleCallbacks {
+  onSessionStarted?: (sessionId: string) => void;
+  onSessionEnding?: (sessionId: string) => void;
+}
+
 export class SessionManager {
   private activeSessionId: string | null = null;
   private audioConcatenation: AudioConcatenation | null = null;
   private manuallyStarted: boolean = false; // Track if session was manually started
+  private lifecycleCallbacks: SessionLifecycleCallbacks = {};
 
   setAudioConcatenation(concatenation: AudioConcatenation): void {
     this.audioConcatenation = concatenation;
+  }
+
+  setLifecycleCallbacks(callbacks: SessionLifecycleCallbacks): void {
+    this.lifecycleCallbacks = callbacks;
   }
 
   startSession(isManual: boolean = false): Session {
@@ -24,6 +34,9 @@ export class SessionManager {
 
     broadcastToAllWindows("session:created", session);
 
+    // Notify lifecycle listeners (e.g., start transcription pipeline)
+    this.lifecycleCallbacks.onSessionStarted?.(session.id);
+
     return session;  // FIX REC-001: Return full session object
   }
 
@@ -31,6 +44,9 @@ export class SessionManager {
     if (this.activeSessionId !== sessionId) return;
 
     const now = new Date().toISOString();
+    // Notify lifecycle listeners (e.g., stop pipeline, clean up buffers)
+    this.lifecycleCallbacks.onSessionEnding?.(sessionId);
+
     updateSession(sessionId, { status: "inactive", ended_at: now });
     this.activeSessionId = null;
     this.manuallyStarted = false; // Reset flag

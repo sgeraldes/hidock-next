@@ -21,12 +21,25 @@ const { mockStartSession, mockEndSession, mockGetActiveSessionId, mockGetSession
     mockGetSessionList: vi.fn().mockReturnValue([]),
   }));
 
+// Capture lifecycle callbacks so mock SessionManager can trigger them
+let capturedCallbacks: { onSessionStarted?: (id: string) => void; onSessionEnding?: (id: string) => void } = {};
+
 vi.mock("../../services/session-manager", () => ({
   SessionManager: vi.fn(function (this: Record<string, unknown>) {
-    this.startSession = mockStartSession;
-    this.endSession = mockEndSession;
+    this.startSession = (...args: unknown[]) => {
+      const result = mockStartSession(...args);
+      capturedCallbacks.onSessionStarted?.(result.id);
+      return result;
+    };
+    this.endSession = async (...args: unknown[]) => {
+      capturedCallbacks.onSessionEnding?.(args[0] as string);
+      return mockEndSession(...args);
+    };
     this.getActiveSessionId = mockGetActiveSessionId;
     this.getSessionList = mockGetSessionList;
+    this.setLifecycleCallbacks = (cbs: typeof capturedCallbacks) => {
+      capturedCallbacks = cbs;
+    };
   }),
 }));
 
@@ -37,6 +50,9 @@ const { mockDeleteSession, mockSaveDatabase } = vi.hoisted(() => ({
 
 vi.mock("../../services/database", () => ({
   deleteSession: mockDeleteSession,
+  deleteSessionTranscript: vi.fn(),
+  getSession: vi.fn().mockReturnValue(null),
+  updateSession: vi.fn(),
   saveDatabase: mockSaveDatabase,
 }));
 
@@ -58,10 +74,28 @@ vi.mock("../transcription-handlers", () => ({
   registerTranscriptionHandlers: vi.fn(),
 }));
 
+vi.mock("../audio-handlers", () => ({
+  clearSessionInitSegment: vi.fn(),
+}));
+
+vi.mock("../../services/audio-storage", () => ({
+  AudioStorage: vi.fn().mockImplementation(() => ({
+    getSessionDir: vi.fn().mockReturnValue("/tmp/test-session"),
+  })),
+}));
+
+vi.mock("fs", () => ({
+  default: {},
+  existsSync: vi.fn().mockReturnValue(false),
+  readFileSync: vi.fn().mockReturnValue(Buffer.alloc(0)),
+  readdirSync: vi.fn().mockReturnValue([]),
+}));
+
 import { registerSessionHandlers, getSessionManager } from "../session-handlers";
 
 describe("registerSessionHandlers", () => {
   beforeEach(() => {
+    capturedCallbacks = {};
     mockHandle.mockClear();
     mockOn.mockClear();
     mockStartSession.mockClear();

@@ -16,6 +16,18 @@ let sessionManager: SessionManager;
 export function registerSessionHandlers(): void {
   sessionManager = new SessionManager();
 
+  // Wire up lifecycle callbacks for auto-started/ended sessions
+  // so pipeline and buffer cleanup happens regardless of manual vs auto flow
+  sessionManager.setLifecycleCallbacks({
+    onSessionStarted: (sessionId) => {
+      startPipeline(sessionId);
+    },
+    onSessionEnding: (sessionId) => {
+      stopPipeline(sessionId);
+      clearSessionInitSegment(sessionId);
+    },
+  });
+
   ipcMain.handle("session:list", () => {
     return sessionManager.getSessionList();
   });
@@ -25,10 +37,9 @@ export function registerSessionHandlers(): void {
     try {
       console.log("[SessionHandlers] Creating session with manuallyStarted=true");
       // FIX REC-004: Mark session as manually started to prevent MicDetector auto-end
+      // startSession calls lifecycle callback which starts the pipeline
       const session = sessionManager.startSession(true);  // true = manually started
       console.log("[SessionHandlers] Session created:", session);
-      console.log("[SessionHandlers] Starting transcription pipeline");
-      startPipeline(session.id);
       console.log("[SessionHandlers] Showing control bar");
       showControlBar();
       console.log("[SessionHandlers] Setting always on top");
@@ -46,10 +57,9 @@ export function registerSessionHandlers(): void {
   ipcMain.handle("session:end", async (_, sessionId: string) => {
     console.log(`[SessionHandlers] ===== SESSION:END CALLED for ${sessionId} =====`);
     try {
+      // endSession calls lifecycle callback which stops pipeline and clears buffers
       await sessionManager.endSession(sessionId);
-      console.log(`[SessionHandlers] Session ended, stopping pipeline`);
-      stopPipeline(sessionId);
-      clearSessionInitSegment(sessionId);
+      console.log(`[SessionHandlers] Session ended`);
       const activeSessions = sessionManager
         .getSessionList()
         .filter((s) => s.status === "active");

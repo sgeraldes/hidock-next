@@ -103,6 +103,7 @@ export default function Settings() {
       theme: s.theme,
       startMinimized: s.startMinimized,
       closeToTray: s.closeToTray,
+      loaded: s.loaded,
       setField: s.setField,
       loadFromIPC: s.loadFromIPC,
       saveToIPC: s.saveToIPC,
@@ -112,6 +113,12 @@ export default function Settings() {
 
   const [meetingTypes, setMeetingTypes] = useState<MeetingTypeItem[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [localModel, setLocalModel] = useState(store.model);
+
+  // Sync local model input when store value changes (e.g. after loadFromIPC)
+  useEffect(() => {
+    setLocalModel(store.model);
+  }, [store.model]);
 
   useEffect(() => {
     loadFromIPC();
@@ -153,6 +160,17 @@ export default function Settings() {
     },
     [],
   );
+
+  if (!store.loaded) {
+    return (
+      <div className="flex h-full items-center justify-center bg-background text-foreground">
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted-foreground/30 border-t-primary" />
+          <p className="text-sm text-muted-foreground">Loading settings...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
@@ -278,15 +296,17 @@ export default function Settings() {
                   control={
                     <input
                       type="text"
-                      value={store.model}
-                      onChange={(e) => handleFieldChange("model", e.target.value)}
+                      value={localModel}
+                      onChange={(e) => setLocalModel(e.target.value)}
+                      onBlur={() => { if (localModel !== store.model) handleFieldChange("model", localModel); }}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.currentTarget.blur(); } }}
                       className="w-48 bg-background text-foreground border border-input rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                       placeholder="e.g. gemini-2.5-flash"
                     />
                   }
                 />
 
-                {store.provider !== "ollama" && (
+                {store.provider !== "ollama" && store.provider !== "bedrock" && (
                   <SettingRow
                     icon={Key}
                     label="API key"

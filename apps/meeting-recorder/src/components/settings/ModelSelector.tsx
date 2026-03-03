@@ -25,7 +25,7 @@ export function ModelSelector({ provider, value, onChange }: ModelSelectorProps)
     setLoading(true);
 
     window.electronAPI.models
-      .getForProvider(provider)
+      .getActiveForProvider(provider)
       .then((result: ModelDefinition[]) => {
         if (cancelled) return;
         setModels(result);

@@ -51,8 +51,8 @@ describe("ModelConfigService - Fault Tolerance", () => {
       expect(modelConfig.validateModel("", "")).toBe(false);
     });
 
-    it("getDefaultModel returns empty for empty provider", () => {
-      expect(modelConfig.getDefaultModel("")).toBe("");
+    it("getDefaultModel falls back to Google default for empty provider", () => {
+      expect(modelConfig.getDefaultModel("")).toBe("gemini-2.5-flash");
     });
 
     it("getModel returns null for empty provider", () => {
@@ -115,8 +115,8 @@ describe("ModelConfigService - Fault Tolerance", () => {
       expect(modelConfig.validateModel("goo<script>gle", "gemini-2.5-flash")).toBe(false);
     });
 
-    it("getDefaultModel returns empty for provider with spaces", () => {
-      expect(modelConfig.getDefaultModel("go ogle")).toBe("");
+    it("getDefaultModel falls back to Google default for provider with spaces", () => {
+      expect(modelConfig.getDefaultModel("go ogle")).toBe("gemini-2.5-flash");
     });
 
     it("getModel returns null for model with SQL injection attempt", () => {
@@ -135,7 +135,7 @@ describe("ModelConfigService - Fault Tolerance", () => {
       const unknownProvider = "nonexistent-provider-xyz";
 
       expect(modelConfig.getProvider(unknownProvider)).toBeUndefined();
-      expect(modelConfig.getDefaultModel(unknownProvider)).toBe("");
+      expect(modelConfig.getDefaultModel(unknownProvider)).toBe("gemini-2.5-flash");
       expect(modelConfig.getModel(unknownProvider, "some-model")).toBeNull();
       expect(modelConfig.getModelsForProvider(unknownProvider)).toEqual([]);
       expect(modelConfig.getActiveModelsForProvider(unknownProvider)).toEqual([]);

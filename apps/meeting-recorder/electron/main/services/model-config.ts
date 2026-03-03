@@ -90,9 +90,11 @@ class ModelConfigService {
     const provider = this.getProvider(providerId);
     if (!provider) {
       console.warn(
-        `[ModelConfig] Unknown provider "${providerId}", returning empty default`,
+        `[ModelConfig] Unknown provider "${providerId}", falling back to Google default`,
       );
-      return "";
+      // Fall back to Google's default model rather than returning empty string
+      const googleProvider = this.getProvider("google");
+      return googleProvider?.defaultModel ?? "gemini-2.5-flash";
     }
     return provider.defaultModel;
   }
