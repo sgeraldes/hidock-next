@@ -453,7 +453,12 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
 
     // Update last sync time in config and persist it
     const now = new Date().toISOString()
-    await updateConfig('calendar', { lastSyncAt: now })
+    try {
+      await updateConfig('calendar', { lastSyncAt: now })
+    } catch (configError) {
+      console.error('Failed to persist sync timestamp:', configError)
+      // Meetings already saved - timestamp will catch up on next sync
+    }
 
     console.log(`Calendar sync complete: ${meetings.length} meetings`)
 

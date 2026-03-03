@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 import type { Meeting, CalendarSyncResult } from '@/types'
 import type { HiDockDeviceState, ConnectionStatus, ActivityLogEntry } from '@/services/hidock-device'
 import type { UnifiedRecording } from '@/types/unified-recording'
@@ -377,7 +378,7 @@ export const useDeviceSyncProgress = () => useAppStore((s) => s.deviceSyncProgre
 export const useDeviceSyncEta = () => useAppStore((s) => s.deviceSyncEta)
 
 // Download queue selectors
-export const useDownloadQueue = () => useAppStore((s) => s.downloadQueue)
+export const useDownloadQueue = () => useAppStore(useShallow((s) => s.downloadQueue))
 export const useIsDownloading = (id: string) => useAppStore((s) => s.downloadQueue.has(id))
 export const useDownloadProgress = (id: string) => useAppStore((s) => s.downloadQueue.get(id)?.progress ?? null)
 

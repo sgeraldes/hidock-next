@@ -22,9 +22,7 @@ export function useTranscriptionSync() {
           if (item.status === 'pending' || item.status === 'processing') {
             store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
             if (item.status === 'processing') {
-              // TQ-08 FIX: Use 50 as placeholder instead of -1 for indeterminate progress
-              // Real progress should come from transcription service events (TQ-09)
-              store.updateProgress(item.id, 50)
+              store.updateProgress(item.id, item.progress ?? 0)
             }
           }
         }
@@ -41,7 +39,19 @@ export function useTranscriptionSync() {
           window.electronAPI.onTranscriptionStarted((data) => {
             const store = useTranscriptionStore.getState()
             if (data.queueItemId) {
-              store.updateProgress(data.queueItemId, 50)
+              store.updateProgress(data.queueItemId, 0)
+            }
+          })
+        )
+      }
+
+      // Listen for transcription progress
+      if (window.electronAPI.onTranscriptionProgress) {
+        unsubscribers.push(
+          window.electronAPI.onTranscriptionProgress((data) => {
+            const store = useTranscriptionStore.getState()
+            if (data.queueItemId) {
+              store.updateProgress(data.queueItemId, data.progress)
             }
           })
         )
@@ -123,9 +133,9 @@ export function useTranscriptionSync() {
                 if (!store.queue.has(item.id)) {
                   store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
                 }
-                // TQ-08 FIX: Use 50 as placeholder instead of -1 for indeterminate progress
-                // Real progress should come from transcription service events (TQ-09)
-                store.updateProgress(item.id, 50)
+                if (item.progress != null) {
+                  store.updateProgress(item.id, item.progress)
+                }
               } else if (item.status === 'pending') {
                 if (!store.queue.has(item.id)) {
                   store.addToQueue(item.id, item.recording_id, item.filename || 'Unknown')
