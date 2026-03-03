@@ -125,10 +125,16 @@ class ModelConfigService {
     const provider = this.getProvider(providerId);
     if (!provider) return false;
 
+    // Check known models first — if it's a known deprecated model, reject it
+    const knownModel = provider.models.find((m) => m.id === modelId);
+    if (knownModel) {
+      return !knownModel.deprecated;
+    }
+
     // Allow custom models for providers that support them (e.g., ollama)
     if (provider.allowCustomModels) return true;
 
-    return provider.models.some((m) => m.id === modelId);
+    return false;
   }
 
   isModelDeprecated(providerId: string, modelId: string): boolean {
@@ -148,8 +154,17 @@ class ModelConfigService {
     return this.getModel(providerId, modelId)?.costMultiplier ?? 1;
   }
 
-  isAudioCapable(providerId: string): boolean {
-    return this.getProvider(providerId)?.audioCapable === true;
+  isAudioCapable(providerId: string, modelId?: string): boolean {
+    const provider = this.getProvider(providerId);
+    if (!provider?.audioCapable) return false;
+    // If a specific model is given, check its capabilities array
+    if (modelId) {
+      const model = this.getModel(providerId, modelId);
+      if (model) {
+        return model.capabilities.includes("audio");
+      }
+    }
+    return true;
   }
 
   getContext(contextId: string): ContextDefinition | undefined {

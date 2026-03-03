@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
-  Search,
   Brain,
   Cpu,
   Key,
@@ -112,7 +111,6 @@ export default function Settings() {
   const loadFromIPC = store.loadFromIPC;
 
   const [meetingTypes, setMeetingTypes] = useState<MeetingTypeItem[]>([]);
-  const [searchQuery, setSearchQuery] = useState("");
   const [localModel, setLocalModel] = useState(store.model);
 
   // Sync local model input when store value changes (e.g. after loadFromIPC)
@@ -174,24 +172,12 @@ export default function Settings() {
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
-      {/* Header with Search */}
-      <div className="border-b border-border bg-card px-6 py-4 flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold text-foreground">Settings</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Configure AI providers, recording behavior, and meeting intelligence
-          </p>
-        </div>
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <input
-            type="text"
-            placeholder="Search for settings"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-64 pl-9 pr-3 py-1.5 text-sm bg-background border border-input rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
-          />
-        </div>
+      {/* Header */}
+      <div className="border-b border-border bg-card px-6 py-4">
+        <h1 className="text-lg font-semibold text-foreground">Settings</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          Configure AI providers, recording behavior, and meeting intelligence
+        </p>
       </div>
 
       {/* Content */}

@@ -53,7 +53,7 @@
           "name": "GPT-4 Turbo",
           "description": "Fast GPT-4 variant",
           "costMultiplier": 10,
-          "contexts": ["realtime"],
+          "contexts": ["postprocess"],
           "capabilities": ["text"]
         }
       ],

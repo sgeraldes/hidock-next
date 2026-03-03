@@ -99,7 +99,7 @@ export class EndOfMeetingProcessor {
 
       updateSession(sessionId, {
         title: result.title,
-        summary: JSON.stringify(result),
+        summary: result.summary,
       });
       saveDatabase();
 

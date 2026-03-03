@@ -165,24 +165,17 @@ ST-015, ST-016, ST-017
 
 ### MEDIUM (not yet fixed):
 - MC-003: gpt-4-turbo as "realtime" model for non-audio-capable OpenAI
-- MC-005: ModelSelector fetches all models including deprecated
 - MC-006: validateModel allows deprecated with allowCustomModels
-- MC-007: getDefaultModel returns "" for unknown provider
 - MC-008: loadConfig minimal validation (no schema validation)
 - AP-008: Summary field stores full JSON instead of text
 - AP-009: Race condition between chunk processing and session:end
 - AP-010: validateApiKey only checks format, not connectivity
 - AP-012: Unsanitized transcript content in prompts
 - AP-013: isAudioCapable checks provider-level, not model-level
-- AP-014: Pipeline map not cleaned for auto-started sessions
-- AP-015: Cumulative buffer leak for auto-ended sessions
-- ST-004: Model text input fires every keystroke
-- ST-005: Dead settings components not integrated
+- ST-005: Dead settings components not integrated (needs UI redesign)
 - ST-008: Non-functional search in Settings
-- ST-009: API key shown for Bedrock provider
 - ST-010: No visual indicator for configured credentials
 - ST-011: handleFieldChange over-broad deps
-- ST-012: No loading state guard in Settings page
 - ST-013: setField no type validation
 - ST-014: No input validation on numeric fields
 

@@ -110,7 +110,7 @@ describe("EndOfMeetingProcessor", () => {
 
     expect(mockUpdateSession).toHaveBeenCalledWith("s1", {
       title: "Roadmap Discussion",
-      summary: expect.stringContaining("Roadmap Discussion"),
+      summary: "Team discussed Q1 roadmap priorities.",
     });
     expect(mockSaveDatabase).toHaveBeenCalled();
   });
@@ -308,7 +308,7 @@ describe("EndOfMeetingProcessor", () => {
     expect(call.prompt).toContain("Bob: Hi Alice");
   });
 
-  it("stores structured JSON as summary", async () => {
+  it("stores summary text and title from AI result", async () => {
     mockGetTranscriptBySession.mockReturnValue([
       {
         id: "seg1",
@@ -337,10 +337,9 @@ describe("EndOfMeetingProcessor", () => {
 
     await processor.process("s1");
 
-    const updateCall = mockUpdateSession.mock.calls[0];
-    const stored = JSON.parse(updateCall[1].summary);
-    expect(stored.title).toBe("Team Sync");
-    expect(stored.keyTopics).toEqual(["Updates"]);
-    expect(stored.actionItems[0].text).toBe("Follow up");
+    expect(mockUpdateSession).toHaveBeenCalledWith("s1", {
+      title: "Team Sync",
+      summary: "Quick team sync.",
+    });
   });
 });
