@@ -196,12 +196,19 @@ export function registerAudioHandlers(): void {
 
         const pipeline = getPipeline(sessionId);
         if (pipeline) {
-          // Transcription: each chunk sent to the AI must be a valid, decodable audio file.
-          // Chunk 0 is a complete WebM (EBML header + Segment + Tracks + Cluster) — send directly.
-          // Chunks 1+ are raw byte-stream continuations with NO headers and NO element boundary
-          // alignment. We cumulative-concat chunks 0..N, then ffmpeg-extract from N*3s onward
-          // to produce a valid standalone audio clip for the AI.
-          (async () => {
+          if (pipeline.isStreaming()) {
+            // Streaming mode: feed audio directly to the pipeline.
+            // No cumulative buffer, no ffmpeg extraction, no silence detection needed.
+            // The Chirp 3 stream handles all of this internally.
+            pipeline.feedAudioStream(buffer, mimeType);
+          } else {
+            // Batch mode: existing cumulative buffer + ffmpeg extraction logic
+            // Transcription: each chunk sent to the AI must be a valid, decodable audio file.
+            // Chunk 0 is a complete WebM (EBML header + Segment + Tracks + Cluster) — send directly.
+            // Chunks 1+ are raw byte-stream continuations with NO headers and NO element boundary
+            // alignment. We cumulative-concat chunks 0..N, then ffmpeg-extract from N*3s onward
+            // to produce a valid standalone audio clip for the AI.
+            (async () => {
             try {
               let transcriptionBuffer: Buffer;
 
@@ -269,7 +276,8 @@ export function registerAudioHandlers(): void {
                 error: err instanceof Error ? err.message : "Pipeline error",
               });
             }
-          })();
+            })();
+          }
         }
       } catch (err) {
         console.error("[AudioHandlers] Failed to save chunk:", err);

@@ -120,6 +120,25 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.on("transcription:status", handler);
       return () => ipcRenderer.removeListener("transcription:status", handler);
     },
+    onInterimResult: (callback: (data: {
+      sessionId: string;
+      transcript: string;
+      resultEndTimeMs: number;
+      speaker?: string;
+      sequence: number;
+      isFinal: boolean;
+    }) => void) => {
+      const handler = (_: unknown, data: {
+        sessionId: string;
+        transcript: string;
+        resultEndTimeMs: number;
+        speaker?: string;
+        sequence: number;
+        isFinal: boolean;
+      }) => callback(data);
+      ipcRenderer.on("transcription:interimResult", handler);
+      return () => ipcRenderer.removeListener("transcription:interimResult", handler);
+    },
   },
 
   ai: {

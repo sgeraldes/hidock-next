@@ -4,11 +4,17 @@ import type {
   Chirp3Config,
   Chirp3Result,
   Chirp3Word,
+  Chirp3StreamConfig,
+  Chirp3StreamEvents,
 } from "./chirp3-provider.types";
 import { getSetting } from "./database-extras";
+import { Chirp3StreamSession, MAX_CONCURRENT_STREAMS } from "./chirp3-stream-session";
 
 /** Factory type for creating SpeechClient instances (enables testing). */
 export type SpeechClientFactory = () => { SpeechClient: new (opts?: unknown) => unknown };
+
+/** Factory type for the V2 client (includes v2.SpeechClient). */
+export type V2SpeechClientFactory = () => { SpeechClient: new (opts?: unknown) => unknown };
 
 /**
  * Wraps Google Cloud Speech-to-Text with Chirp 3 (chirp_2 model ID)
@@ -21,17 +27,24 @@ export type SpeechClientFactory = () => { SpeechClient: new (opts?: unknown) => 
 export class Chirp3Provider {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private client: any = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private v2Client: any = null;
   private languageCode = "en-US";
   private model = "chirp_2";
   private confidenceThreshold = 0.7;
   private configured = false;
   private speechClientFactory: SpeechClientFactory;
+  private config: Chirp3Config | null = null;
+
+  /** Active streaming sessions keyed by session ID. */
+  private streamSessions = new Map<string, Chirp3StreamSession>();
 
   constructor(speechClientFactory?: SpeechClientFactory) {
     this.speechClientFactory = speechClientFactory ?? requireSpeechModule;
   }
 
   configure(config: Chirp3Config): void {
+    this.config = config;
     const { SpeechClient } = this.speechClientFactory();
 
     const clientOptions: Record<string, unknown> = {};
@@ -164,7 +177,132 @@ export class Chirp3Provider {
     return this.confidenceThreshold;
   }
 
+  /**
+   * Create and start a new streaming recognition session.
+   * Audio frames are written via the returned session's writeAudio() method.
+   *
+   * @param sessionId - Unique identifier for this recording session
+   * @param events - Callbacks for results, errors, and lifecycle events
+   * @param streamConfig - Optional override for stream configuration
+   * @returns The created Chirp3StreamSession
+   * @throws If sessionId already has an active (non-stopped) session
+   * @throws If MAX_CONCURRENT_STREAMS limit is reached
+   * @throws If projectId is not configured (required for V2 API)
+   */
+  createStreamSession(
+    sessionId: string,
+    events: Chirp3StreamEvents,
+    streamConfig?: Partial<Chirp3StreamConfig>,
+  ): Chirp3StreamSession {
+    if (!this.client || !this.configured) {
+      throw new Error("Chirp3Provider not configured");
+    }
+
+    // Reject duplicate: if an active session exists for this sessionId, throw
+    const existing = this.streamSessions.get(sessionId);
+    if (existing && !existing.isStopped()) {
+      throw new Error(
+        `Streaming session already active for sessionId "${sessionId}". ` +
+          `Call closeStreamSession() first.`,
+      );
+    }
+
+    // Clean up stopped session if present
+    if (existing) {
+      this.streamSessions.delete(sessionId);
+    }
+
+    // Enforce concurrent session limit
+    const activeSessions = [...this.streamSessions.values()].filter(
+      (s) => !s.isStopped(),
+    );
+    if (activeSessions.length >= MAX_CONCURRENT_STREAMS) {
+      throw new Error(
+        `Maximum concurrent streaming sessions (${MAX_CONCURRENT_STREAMS}) reached. ` +
+          `Close an existing session before creating a new one.`,
+      );
+    }
+
+    // Validate projectId (required for V2 recognizer resource path)
+    if (!this.config?.projectId) {
+      throw new Error(
+        "Chirp3Provider: projectId is required for streaming (V2 API). " +
+          "Configure it in Settings > Chirp 3 > GCP Project ID.",
+      );
+    }
+
+    const v2Client = this.getOrCreateV2Client();
+
+    const config: Chirp3StreamConfig = {
+      encoding: "LINEAR16",
+      sampleRateHertz: 16000,
+      audioChannelCount: 1,
+      interimResults: true,
+      enableWordTimeOffsets: true,
+      enableWordConfidence: true,
+      enableAutomaticPunctuation: true,
+      ...streamConfig,
+    };
+
+    const session = new Chirp3StreamSession(
+      v2Client,
+      {
+        credentials: { type: "api-key" }, // not used by session, client is already configured
+        projectId: this.config.projectId,
+        location: this.config.location ?? "us-central1",
+        languageCode: this.languageCode,
+        model: this.model,
+        confidenceThreshold: this.confidenceThreshold,
+      },
+      config,
+      events,
+    );
+
+    this.streamSessions.set(sessionId, session);
+    session.start();
+
+    console.log(
+      `[Chirp3Provider] V2 streaming session created for ${sessionId} ` +
+        `(active sessions: ${activeSessions.length + 1}/${MAX_CONCURRENT_STREAMS})`,
+    );
+    return session;
+  }
+
+  /**
+   * Get the active streaming session for a given session ID.
+   */
+  getStreamSession(sessionId: string): Chirp3StreamSession | undefined {
+    return this.streamSessions.get(sessionId);
+  }
+
+  /**
+   * Close and clean up a streaming session.
+   */
+  closeStreamSession(sessionId: string): void {
+    const session = this.streamSessions.get(sessionId);
+    if (session) {
+      session.stop();
+      this.streamSessions.delete(sessionId);
+      console.log(
+        `[Chirp3Provider] Streaming session closed for ${sessionId}`,
+      );
+    }
+  }
+
   dispose(): void {
+    for (const [sessionId] of this.streamSessions) {
+      this.closeStreamSession(sessionId);
+    }
+
+    if (this.v2Client) {
+      try {
+        this.v2Client.close();
+      } catch {
+        /* ignore close errors */
+      }
+      this.v2Client = null;
+    }
+
     if (this.client) {
       try {
         this.client.close();
@@ -177,6 +315,43 @@ export class Chirp3Provider {
   }
 
   // --- Private helpers ---
+
+  /**
+   * Lazy-initialize the V2 SpeechClient for streaming.
+   * The V2 client uses a regional endpoint and the same credentials as the V1 client.
+   */
+  private getOrCreateV2Client(): unknown {
+    if (this.v2Client) return this.v2Client;
+
+    const speechModule = this.speechClientFactory();
+    // Access the V2 SpeechClient: require('@google-cloud/speech').v2.SpeechClient
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const v2 = (speechModule as any).v2;
+    if (!v2?.SpeechClient) {
+      throw new Error(
+        "@google-cloud/speech v2 API not available. Ensure version >= 6.0.0 is installed.",
+      );
+    }
+
+    // V2 requires a regional endpoint (not "global")
+    const location = this.config?.location ?? "us-central1";
+    const clientOptions: Record<string, unknown> = {
+      apiEndpoint: `${location}-speech.googleapis.com`,
+    };
+
+    // Reuse the same credentials as the V1 client
+    if (this.config?.credentials.type === "api-key" && this.config.credentials.apiKey) {
+      clientOptions.apiKey = this.config.credentials.apiKey;
+    } else if (
+      this.config?.credentials.type === "service-account" &&
+      this.config.credentials.serviceAccountJson
+    ) {
+      clientOptions.credentials = JSON.parse(this.config.credentials.serviceAccountJson);
+    }
+
+    this.v2Client = new v2.SpeechClient(clientOptions);
+    return this.v2Client;
+  }
 
   private logFilteringStats(
     allWords: Chirp3Word[],

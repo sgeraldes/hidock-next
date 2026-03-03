@@ -44,6 +44,7 @@ const AI_SETTING_KEYS = [
   "ai.gcp.location",
   "ai.chirp3.languageCode",
   "ai.chirp3.confidenceThreshold",
+  "ai.chirp3.useStreaming",
 ];
 
 const SENSITIVE_KEYS = new Set([

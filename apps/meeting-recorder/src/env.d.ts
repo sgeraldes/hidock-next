@@ -65,6 +65,16 @@ interface ElectronAPI {
     ) => () => void;
     onError: (callback: (error: string) => void) => () => void;
     onStatus: (callback: (status: string) => void) => () => void;
+    onInterimResult: (
+      callback: (data: {
+        sessionId: string;
+        transcript: string;
+        resultEndTimeMs: number;
+        speaker?: string;
+        sequence: number;
+        isFinal: boolean;
+      }) => void,
+    ) => () => void;
   };
   ai: {
     configure: (

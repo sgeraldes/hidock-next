@@ -16,12 +16,21 @@ function createPipeline(sessionId: string): TranscriptionPipeline {
     (getSetting("ai.transcriptionBackend") as TranscriptionBackend) ||
     BACKEND_GEMINI_MULTIMODAL;
 
-  return new TranscriptionPipeline(
+  const pipeline = new TranscriptionPipeline(
     sessionId,
     getAIService(),
     chirp3,
     backend,
   );
+
+  // Attempt to enable streaming mode. This checks:
+  // 1. Backend is chirp3+gemini
+  // 2. Chirp 3 provider is configured
+  // 3. Feature flag ai.chirp3.useStreaming is not "false"
+  // If any condition fails, the pipeline silently falls back to batch mode.
+  pipeline.initializeStreaming();
+
+  return pipeline;
 }
 
 export function registerTranscriptionHandlers(): void {

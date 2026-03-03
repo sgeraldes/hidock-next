@@ -10,10 +10,17 @@ import {
   createActionItem,
   getTalkingPointsBySession,
   getActionItemsBySession,
+  getSetting,
 } from "./database-extras";
 import type { TranscriptionResult } from "./ai-provider.types";
 import { broadcastToAllWindows } from "./broadcast";
 import { PerformanceMonitor } from "./performance-monitor";
+import type {
+  Chirp3StreamResult,
+  Chirp3StreamEvents,
+} from "./chirp3-provider.types";
+import type { Chirp3StreamSession } from "./chirp3-stream-session";
+import { AudioConverter } from "./audio-converter";
 
 import {
   BACKEND_CHIRP3_GEMINI,
@@ -35,6 +42,25 @@ export class TranscriptionPipeline {
   private knownSpeakers: Set<string> = new Set();
   private stopped = false;
 
+  /** Active streaming session (null when using batch mode). */
+  private streamSession: Chirp3StreamSession | null = null;
+  /** Audio converter: WebM/Opus -> LINEAR16 PCM. */
+  private audioConverter: AudioConverter | null = null;
+  /** Whether streaming mode is active for this pipeline instance. */
+  private streamingEnabled = false;
+  /**
+   * Index counter for final results received via streaming.
+   * Used as the chunkIndex equivalent for storeAndBroadcast().
+   */
+  private streamFinalIndex = 0;
+  /** Tracks the recording start time for absolute timestamp calculation. */
+  private recordingStartTimeMs = 0;
+  /**
+   * Tracks the resultEndTimeMs of the last final result processed by the pipeline.
+   * Used for fallback timestamp calculation in storeAndBroadcast().
+   */
+  private lastStreamFinalEndTimeMs = 0;
+
   constructor(
     sessionId: string,
     aiProvider: AIProviderService,
@@ -53,6 +79,20 @@ export class TranscriptionPipeline {
 
   stop(): void {
     this.stopped = true;
+
+    if (this.audioConverter) {
+      this.audioConverter.stop();
+      this.audioConverter = null;
+    }
+
+    if (this.streamSession) {
+      this.streamSession.stop();
+      this.streamSession = null;
+    }
+
+    if (this.chirp3Provider) {
+      this.chirp3Provider.closeStreamSession(this.sessionId);
+    }
   }
 
   async processChunk(text: string, chunkIndex: number): Promise<void> {
@@ -106,6 +146,192 @@ export class TranscriptionPipeline {
 
     perfMonitor.mark('pipeline-exit');
     perfMonitor.logStage('Total pipeline', 'pipeline-entry', 'pipeline-exit');
+  }
+
+  /**
+   * Initialize streaming mode. Call this when the session starts,
+   * before any audio data arrives.
+   *
+   * Streaming is activated only when ALL of the following are true:
+   * 1. Backend is chirp3+gemini
+   * 2. Chirp 3 provider is configured
+   * 3. Feature flag ai.chirp3.useStreaming is not "false" (default: enabled)
+   */
+  initializeStreaming(): void {
+    if (
+      this.transcriptionBackend !== BACKEND_CHIRP3_GEMINI ||
+      !this.chirp3Provider?.isConfigured()
+    ) {
+      console.log(
+        "[Pipeline] Streaming not available (backend or provider not ready), " +
+          "falling back to batch mode",
+      );
+      return;
+    }
+
+    // Feature flag: ai.chirp3.useStreaming (default: "true")
+    const streamingFlag = getSetting("ai.chirp3.useStreaming");
+    if (streamingFlag === "false") {
+      console.log(
+        "[Pipeline] Streaming disabled by feature flag (ai.chirp3.useStreaming=false), " +
+          "using batch mode",
+      );
+      return;
+    }
+
+    this.streamingEnabled = true;
+    this.streamFinalIndex = 0;
+    this.recordingStartTimeMs = Date.now();
+    this.lastStreamFinalEndTimeMs = 0;
+
+    console.log(`[Pipeline] Streaming mode initialized for session ${this.sessionId}`);
+  }
+
+  /**
+   * Feed raw audio data from the renderer into the streaming pipeline.
+   * This replaces processAudioChunk() when streaming is active.
+   *
+   * @param audioData - WebM/Opus audio chunk from MediaRecorder
+   * @param mimeType - MIME type of the audio data
+   */
+  feedAudioStream(audioData: Buffer, mimeType: string): void {
+    if (this.stopped || !this.streamingEnabled) return;
+
+    // Lazy-initialize the converter and stream session on first audio data
+    if (!this.audioConverter) {
+      this.audioConverter = new AudioConverter();
+      this.audioConverter.start(
+        mimeType,
+        (pcmData: Buffer) => {
+          // Forward PCM frames to the Chirp 3 stream
+          this.streamSession?.writeAudio(pcmData);
+        },
+        (err: Error) => {
+          console.error("[Pipeline] Audio converter error:", err);
+          broadcastToAllWindows("transcription:error", err.message);
+        },
+      );
+    }
+
+    if (!this.streamSession && this.chirp3Provider) {
+      const events: Chirp3StreamEvents = {
+        onResult: (result: Chirp3StreamResult) => {
+          this.handleStreamResult(result);
+        },
+        onError: (error: Error, isRecoverable: boolean) => {
+          console.error(
+            `[Pipeline] Stream error (recoverable=${isRecoverable}):`,
+            error.message,
+          );
+          if (!isRecoverable) {
+            broadcastToAllWindows("transcription:error", error.message);
+            broadcastToAllWindows("transcription:status", "error");
+          }
+        },
+        onClose: (reason) => {
+          console.log(`[Pipeline] Stream closed: ${reason}`);
+          if (reason === "error") {
+            broadcastToAllWindows("transcription:status", "error");
+          }
+        },
+        onReconnecting: (attempt: number) => {
+          console.log(`[Pipeline] Stream reconnecting (attempt ${attempt})`);
+          broadcastToAllWindows("transcription:status", "reconnecting");
+        },
+        onReconnected: () => {
+          console.log("[Pipeline] Stream reconnected");
+          broadcastToAllWindows("transcription:status", "processing");
+        },
+      };
+
+      this.streamSession = this.chirp3Provider.createStreamSession(
+        this.sessionId,
+        events,
+      );
+      broadcastToAllWindows("transcription:status", "processing");
+    }
+
+    // Write the WebM chunk into the converter; PCM output goes to stream session
+    this.audioConverter.write(audioData);
+  }
+
+  /**
+   * Handle a streaming result (interim or final).
+   */
+  private handleStreamResult(result: Chirp3StreamResult): void {
+    if (this.stopped) return;
+
+    if (!result.isFinal) {
+      // Interim result: broadcast to renderer for live display only.
+      // Do NOT store in database or send to Gemini.
+      // Channel: "transcription:interimResult" (matches existing camelCase convention)
+      broadcastToAllWindows("transcription:interimResult", {
+        sessionId: this.sessionId,
+        transcript: result.transcript,
+        resultEndTimeMs: result.resultEndTimeMs,
+        speaker: result.speaker ?? undefined,
+        sequence: result.sequence,
+        isFinal: false,
+      });
+      return;
+    }
+
+    // Final result: run Stage 2 Gemini analysis, then store and broadcast.
+    if (!result.transcript.trim()) {
+      // Empty final result (silence segment), skip
+      return;
+    }
+
+    const chunkIndex = this.streamFinalIndex++;
+    this.lastStreamFinalEndTimeMs = result.resultEndTimeMs;
+    const context = this.buildContext();
+
+    // Apply confidence filtering
+    const filteredWords = this.chirp3Provider
+      ? this.chirp3Provider.filterByConfidence(result.words)
+      : result.words;
+    const filteredTranscript = filteredWords.map((w) => w.word).join(" ");
+
+    // Stage 2: Gemini analysis (async, fire-and-forget with error handling)
+    (async () => {
+      try {
+        broadcastToAllWindows("transcription:status", "processing");
+
+        const analysisResult = await this.callWithRetry(() =>
+          this.aiProvider.analyzeTranscript(
+            filteredTranscript || result.transcript,
+            {
+              meetingContext: context,
+              attendees: Array.from(this.knownSpeakers),
+              wordData: filteredWords.map((w) => ({
+                word: w.word,
+                startTime: w.startTime,
+                endTime: w.endTime,
+                confidence: w.confidence,
+              })),
+            },
+          ),
+        );
+
+        this.storeAndBroadcast(analysisResult, chunkIndex);
+        broadcastToAllWindows("transcription:status", "idle");
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[Pipeline] Gemini analysis failed for stream final ${chunkIndex}:`,
+          message,
+        );
+        broadcastToAllWindows("transcription:error", message);
+        broadcastToAllWindows("transcription:status", "error");
+      }
+    })();
+  }
+
+  /**
+   * Check if this pipeline is operating in streaming mode.
+   */
+  isStreaming(): boolean {
+    return this.streamingEnabled;
   }
 
   // --- Two-Stage Pipeline: Chirp 3 STT → Gemini Analysis ---
