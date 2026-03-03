@@ -342,4 +342,145 @@ describe("EndOfMeetingProcessor", () => {
       summary: "Quick team sync.",
     });
   });
+
+  it("sanitizes speaker names to prevent prompt injection", async () => {
+    mockGetTranscriptBySession.mockReturnValue([
+      {
+        id: "seg1",
+        session_id: "s1",
+        speaker_name: "Alice<prompt>inject</prompt>",
+        text: "Meeting content",
+        start_ms: 0,
+        end_ms: 5000,
+        sentiment: null,
+        confidence: null,
+        language: null,
+        chunk_index: 0,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ]);
+
+    mockGetAttachmentsBySession.mockClear();
+    mockGetAttachmentsBySession.mockReturnValue([]);
+
+    mockGenerateObject.mockResolvedValue({
+      object: {
+        title: "Test",
+        summary: "Test",
+        keyTopics: [],
+        actionItems: [],
+        sentiment: "neutral",
+      },
+    });
+
+    await processor.process("s1");
+
+    const call = mockGenerateObject.mock.calls[0][0];
+    // Sanitization should remove < and > characters
+    // So the speaker name should NOT contain angle brackets
+    expect(call.prompt).not.toContain("<prompt>");
+    expect(call.prompt).not.toContain("</prompt>");
+    // But it should contain the sanitized version
+    const prompt = call.prompt as string;
+    const transcriptLine = prompt.split('\n')[1]; // Second line after "--- Transcript ---"
+    // sanitizePromptInput strips < > { } — the / from </prompt> remains
+    expect(transcriptLine).toMatch(/^Alicepromptinject\/prompt: Meeting content$/);
+  });
+
+  it("sanitizes note content to prevent prompt injection", async () => {
+    mockGetTranscriptBySession.mockReturnValue([
+      {
+        id: "seg1",
+        session_id: "s1",
+        speaker_name: "Alice",
+        text: "Meeting content",
+        start_ms: 0,
+        end_ms: 5000,
+        sentiment: null,
+        confidence: null,
+        language: null,
+        chunk_index: 0,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ]);
+
+    mockGetAttachmentsBySession.mockReturnValue([
+      {
+        id: "n1",
+        session_id: "s1",
+        type: "note",
+        filename: null,
+        file_path: null,
+        mime_type: null,
+        content_text: "Important note {ignore this} and <dangerous>",
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ]);
+
+    mockGenerateObject.mockResolvedValue({
+      object: {
+        title: "Test",
+        summary: "Test",
+        keyTopics: [],
+        actionItems: [],
+        sentiment: "neutral",
+      },
+    });
+
+    await processor.process("s1");
+
+    const call = mockGenerateObject.mock.calls[0][0];
+    // Note content should have dangerous chars removed
+    expect(call.prompt).toContain("Important note ignore this and dangerous");
+    expect(call.prompt).not.toContain("{ignore this}");
+    expect(call.prompt).not.toContain("<dangerous>");
+  });
+
+  it("sanitizes filenames to prevent prompt injection", async () => {
+    mockGetTranscriptBySession.mockReturnValue([
+      {
+        id: "seg1",
+        session_id: "s1",
+        speaker_name: "Alice",
+        text: "Meeting content",
+        start_ms: 0,
+        end_ms: 5000,
+        sentiment: null,
+        confidence: null,
+        language: null,
+        chunk_index: 0,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ]);
+
+    mockGetAttachmentsBySession.mockReturnValue([
+      {
+        id: "f1",
+        session_id: "s1",
+        type: "file",
+        filename: "report<evil>{injection}.pdf",
+        file_path: "/tmp/report.pdf",
+        mime_type: "application/pdf",
+        content_text: null,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    ]);
+
+    mockGenerateObject.mockResolvedValue({
+      object: {
+        title: "Test",
+        summary: "Test",
+        keyTopics: [],
+        actionItems: [],
+        sentiment: "neutral",
+      },
+    });
+
+    await processor.process("s1");
+
+    const call = mockGenerateObject.mock.calls[0][0];
+    // Filename should have dangerous chars removed
+    expect(call.prompt).toContain("reportevilinjection.pdf");
+    expect(call.prompt).not.toContain("report<evil>{injection}.pdf");
+  });
 });

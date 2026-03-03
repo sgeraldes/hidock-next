@@ -7,7 +7,7 @@ import {
   setMainWindowAlwaysOnTop,
 } from "../services/window-manager";
 import { startPipeline, stopPipeline } from "./transcription-handlers";
-import { clearSessionInitSegment } from "./audio-handlers";
+import { clearSessionInitSegment, markSessionStopped } from "./audio-handlers";
 import { existsSync } from "fs";
 import { AudioStorage } from "../services/audio-storage";
 
@@ -23,6 +23,7 @@ export function registerSessionHandlers(): void {
       startPipeline(sessionId);
     },
     onSessionEnding: (sessionId) => {
+      markSessionStopped(sessionId);
       stopPipeline(sessionId);
       clearSessionInitSegment(sessionId);
     },

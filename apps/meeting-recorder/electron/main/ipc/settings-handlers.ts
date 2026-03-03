@@ -372,6 +372,7 @@ export function registerSettingsHandlers(): void {
     const apiKey = getSetting("ai.apiKey") ?? "";
     if (!provider) return { valid: false, error: "No provider configured" };
 
+    // Step 1: Format validation
     const extras: Record<string, string> = {};
     const region = getSetting("ai.bedrockRegion");
     const accessKeyId = getSetting("ai.bedrockAccessKeyId");
@@ -380,17 +381,34 @@ export function registerSettingsHandlers(): void {
     if (accessKeyId) extras.bedrockAccessKeyId = accessKeyId;
     if (secretAccessKey) extras.bedrockSecretAccessKey = secretAccessKey;
 
+    const formatCheck = getAIService().validateApiKey(
+      provider as AIProviderConfig["provider"],
+      apiKey,
+      Object.keys(extras).length > 0 ? extras : undefined,
+    );
+    if (!formatCheck.valid) return formatCheck;
+
+    // Step 2: Actual connectivity test — make a minimal API call
     try {
-      return await getAIService().validateApiKey(
-        provider as AIProviderConfig["provider"],
-        apiKey,
-        Object.keys(extras).length > 0 ? extras : undefined,
-      );
+      const { generateText } = await import("ai");
+      const aiService = getAIService();
+      const model = aiService.getModel();
+      if (!model) {
+        return { valid: false, error: "AI model not configured" };
+      }
+      await generateText({
+        model,
+        prompt: "Reply with OK",
+        maxTokens: 5,
+      });
+      return { valid: true };
     } catch (err) {
-      return {
-        valid: false,
-        error: err instanceof Error ? err.message : "Test failed",
-      };
+      const message = err instanceof Error ? err.message : "Connection test failed";
+      // Distinguish auth errors from other failures
+      if (message.includes("401") || message.includes("403") || message.includes("Unauthorized") || message.includes("invalid")) {
+        return { valid: false, error: `Authentication failed: ${message}` };
+      }
+      return { valid: false, error: message };
     }
   });
 }

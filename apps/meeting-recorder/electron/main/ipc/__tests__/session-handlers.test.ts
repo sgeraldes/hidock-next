@@ -76,6 +76,7 @@ vi.mock("../transcription-handlers", () => ({
 
 vi.mock("../audio-handlers", () => ({
   clearSessionInitSegment: vi.fn(),
+  markSessionStopped: vi.fn(),
 }));
 
 vi.mock("../../services/audio-storage", () => ({

@@ -1,6 +1,6 @@
 import { generateObject, type LanguageModel } from "ai";
 import { EndOfMeetingResultSchema } from "./ai-schemas";
-import { buildEndOfMeetingPrompt } from "./ai-prompts";
+import { buildEndOfMeetingPrompt, sanitizePromptInput } from "./ai-prompts";
 import {
   getTranscriptBySession,
   getAttachmentsBySession,
@@ -18,7 +18,7 @@ import { broadcastToAllWindows } from "./broadcast";
 
 function buildTranscriptText(segments: TranscriptSegment[]): string {
   return segments
-    .map((s) => `${s.speaker_name ?? "Unknown"}: ${s.text}`)
+    .map((s) => `${sanitizePromptInput(s.speaker_name ?? "Unknown")}: ${s.text}`)
     .join("\n");
 }
 
@@ -29,7 +29,7 @@ function buildContextSection(attachments: Attachment[]): string {
   if (notes.length > 0) {
     parts.push("--- Notes ---");
     for (const note of notes) {
-      parts.push(note.content_text!);
+      parts.push(sanitizePromptInput(note.content_text!));
     }
   }
 
@@ -37,7 +37,7 @@ function buildContextSection(attachments: Attachment[]): string {
   if (files.length > 0) {
     parts.push("--- Attached Files ---");
     for (const file of files) {
-      parts.push(`- ${file.filename} (${file.mime_type ?? "unknown type"})`);
+      parts.push(`- ${sanitizePromptInput(file.filename!)} (${file.mime_type ?? "unknown type"})`);
     }
   }
 

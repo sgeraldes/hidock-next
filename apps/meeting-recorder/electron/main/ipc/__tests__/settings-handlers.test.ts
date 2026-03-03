@@ -162,8 +162,8 @@ describe("registerSettingsHandlers", () => {
     expect(result.valid).toBe(true);
   });
 
-  it("settings:testConnection returns error object on failure", async () => {
-    mockValidateApiKey.mockRejectedValue(new Error("Network error"));
+  it("settings:testConnection returns error when format check fails", async () => {
+    mockValidateApiKey.mockReturnValue({ valid: false, error: "API key is required" });
 
     registerSettingsHandlers();
     const result = (await getHandler("settings:testConnection")({})) as {
@@ -172,6 +172,6 @@ describe("registerSettingsHandlers", () => {
     };
 
     expect(result.valid).toBe(false);
-    expect(result.error).toBeDefined();
+    expect(result.error).toBe("API key is required");
   });
 });

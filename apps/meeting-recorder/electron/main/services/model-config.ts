@@ -38,6 +38,44 @@ class ModelConfigService {
             );
             continue;
           }
+          // Validate provider defaultModels
+          for (const [providerId, provider] of Object.entries(parsed.providers)) {
+            const modelIds = provider.models.map((m) => m.id);
+            if (!modelIds.includes(provider.defaultModel)) {
+              console.warn(
+                `[ModelConfig] Provider "${providerId}" defaultModel "${provider.defaultModel}" not found in models array`,
+              );
+            }
+          }
+
+          // Validate model migratesTo references
+          for (const [providerId, provider] of Object.entries(parsed.providers)) {
+            for (const model of provider.models) {
+              if (model.migratesTo) {
+                const targetExists = provider.models.some(
+                  (m) => m.id === model.migratesTo,
+                );
+                if (!targetExists) {
+                  console.warn(
+                    `[ModelConfig] Model "${model.id}" in provider "${providerId}" migratesTo "${model.migratesTo}" but target does not exist`,
+                  );
+                }
+              }
+            }
+          }
+
+          // Validate and fix negative costMultiplier values
+          for (const [providerId, provider] of Object.entries(parsed.providers)) {
+            for (const model of provider.models) {
+              if (model.costMultiplier < 0) {
+                console.warn(
+                  `[ModelConfig] Model "${model.id}" in provider "${providerId}" has negative costMultiplier ${model.costMultiplier}, defaulting to 1`,
+                );
+                model.costMultiplier = 1;
+              }
+            }
+          }
+
           console.log(
             `[ModelConfig] Loaded config v${parsed.version} from ${candidate}`,
           );

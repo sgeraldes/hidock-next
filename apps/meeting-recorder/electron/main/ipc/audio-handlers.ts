@@ -31,6 +31,17 @@ const micDetector = new MicDetector();
  */
 const cumulativeBuffers = new Map<string, Buffer>();
 
+/**
+ * Tracks session IDs that have been stopped/ended. Used to guard against the
+ * race condition where an async chunk-processing IIFE is still in-flight when
+ * session:end fires — the pipeline gets destroyed but the IIFE still holds a
+ * stale reference and would try to write segments to a finished session.
+ *
+ * Entries are cleaned up after 30 seconds to prevent unbounded growth.
+ */
+const stoppedSessions = new Set<string>();
+const STOPPED_SESSION_CLEANUP_MS = 30_000;
+
 /** Must match AudioRecorder.timesliceMs (default 3000). */
 const TIMESLICE_MS = 3000;
 
@@ -217,6 +228,15 @@ export function registerAudioHandlers(): void {
                 return;
               }
 
+              // Guard: session may have ended while extraction/silence-detection was in-flight
+              if (stoppedSessions.has(sessionId)) {
+                console.log(
+                  `[AudioHandlers] Session ${sessionId} was stopped during async chunk processing — ` +
+                  `skipping transcription for chunk ${chunkIndex}`,
+                );
+                return;
+              }
+
               await pipeline.processAudioChunk(transcriptionBuffer, mimeType, chunkIndex);
             } catch (err: unknown) {
               console.error("[AudioHandlers] Pipeline error:", err);
@@ -321,6 +341,18 @@ export function stopMicDetector(): void {
 
 export function getAudioStorage(): AudioStorage {
   return audioStorage;
+}
+
+/**
+ * Mark a session as stopped so in-flight async chunk processing can bail out
+ * before calling pipeline.processAudioChunk() on a destroyed pipeline.
+ * Call this from the session-ending lifecycle callback BEFORE stopping the pipeline.
+ */
+export function markSessionStopped(sessionId: string): void {
+  stoppedSessions.add(sessionId);
+  setTimeout(() => {
+    stoppedSessions.delete(sessionId);
+  }, STOPPED_SESSION_CLEANUP_MS);
 }
 
 /** Clean up audio caches when a session ends. */

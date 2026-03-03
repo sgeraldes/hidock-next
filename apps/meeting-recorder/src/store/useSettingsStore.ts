@@ -85,7 +85,20 @@ export const useSettingsStore = create<SettingsState>()(
       contextModels: {},
 
       setField: (key, value) => {
-        set({ [key]: value });
+        // Runtime type coercion for fields with known types
+        const NUMERIC_FIELDS: SettingsField[] = ["pollInterval", "gracePeriod", "chunkInterval"];
+        const BOOLEAN_FIELDS: SettingsField[] = ["autoRecord", "startMinimized", "closeToTray"];
+
+        let coerced = value;
+        if (NUMERIC_FIELDS.includes(key) && typeof value !== "number") {
+          coerced = Number(value);
+          if (isNaN(coerced as number)) return; // reject invalid numbers
+        }
+        if (BOOLEAN_FIELDS.includes(key) && typeof value !== "boolean") {
+          coerced = value === "true" || value === true;
+        }
+
+        set({ [key]: coerced });
       },
 
       loadFromIPC: async () => {
