@@ -37,8 +37,11 @@ function App(): React.ReactElement {
     // Without this, the device stays "in use" and subsequent connections fail
     const handleBeforeUnload = () => {
       if (deviceService.isConnected()) {
-        // Use synchronous disconnect to ensure it completes before window closes
-        deviceService.disconnect()
+        // Release USB interface before window closes, but preserve the auto-connect
+        // setting so it survives the reload. Without preserveAutoConnect: true,
+        // disconnect() calls disableAutoConnect() which writes false to config.json,
+        // causing the toggle to show OFF on next startup.
+        deviceService.disconnect({ preserveAutoConnect: true })
       }
     }
 

@@ -113,7 +113,9 @@ export function Device() {
     setConnecting(false)
     setError('Connection cancelled')
     deviceService.stopAutoConnect()
-    deviceService.disconnect()
+    // Preserve auto-connect setting: cancel is not the user choosing to disable
+    // auto-connect, so don't write false to config.json
+    deviceService.disconnect({ preserveAutoConnect: true })
   }, [clearConnectionTimers, deviceService])
 
   // Helper to refresh synced filenames (used after syncs complete)
@@ -400,7 +402,9 @@ export function Device() {
         clearConnectionTimers()
         setConnecting(false)
         setError('Connection timed out. Make sure your HiDock is connected via USB and not in use by another application.')
-        deviceService.disconnect()
+        // Preserve auto-connect setting: timeout is not the user choosing to
+        // disable auto-connect, so don't write false to config.json
+        deviceService.disconnect({ preserveAutoConnect: true })
       }
     }, CONNECTION_TIMEOUT_MS)
 
