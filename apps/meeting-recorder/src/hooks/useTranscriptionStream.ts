@@ -1,8 +1,6 @@
 import { useEffect } from "react";
 import { useTranscriptStore } from "../store/useTranscriptStore";
 
-let nextSegmentId = 0;
-
 export function useTranscriptionStream(sessionId: string | null) {
   const addSegments = useTranscriptStore((state) => state.addSegments);
   const setSegments = useTranscriptStore((state) => state.setSegments);

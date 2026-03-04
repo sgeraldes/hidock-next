@@ -369,26 +369,27 @@ class HiDockDeviceService {
     this.initAutoConnectStarted = false
   }
 
-  // Disable auto-connect (e.g., when user explicitly disconnects)
+  // Disable auto-connect attempts for this session (e.g. user clicked Disconnect).
+  //
+  // IMPORTANT: This sets SESSION STATE only. It does NOT touch config.json.
+  // config.autoConnect is the USER'S PREFERENCE and is only changed by
+  // setAutoConnectConfig() when the user toggles the switch.
+  // On next app startup (new service instance), userInitiatedDisconnect resets
+  // to false and auto-connect fires again if config.autoConnect is true.
   disableAutoConnect(): void {
     this.autoConnectEnabled = false
     this.userInitiatedDisconnect = true
-    // CRITICAL: Update persistent config so setting survives app restart
-    this.autoConnectConfig.enabled = false
-    this.autoConnectConfig.connectOnStartup = false
-    this.saveAutoConnectConfig() // Persists to config.json
     this.stopAutoConnect()
-    this.logActivity('info', 'Auto-connect disabled by user')
+    this.logActivity('info', 'Auto-connect paused for this session')
   }
 
-  // Re-enable auto-connect (e.g., when user clicks connect)
+  // Re-enable auto-connect attempts (e.g. user clicked Connect).
+  //
+  // IMPORTANT: SESSION STATE only. Does not touch config.json.
   enableAutoConnect(): void {
     this.autoConnectEnabled = true
     this.userInitiatedDisconnect = false
-    this.autoConnectConfig.enabled = true
-    this.autoConnectConfig.connectOnStartup = true
-    this.saveAutoConnectConfig() // Persist so setting survives app restart
-    this.logActivity('info', 'Auto-connect re-enabled')
+    this.logActivity('info', 'Auto-connect resumed')
   }
 
   isAutoConnectEnabled(): boolean {
@@ -485,18 +486,14 @@ class HiDockDeviceService {
   }
 
   // Disconnect from device.
-  // By default, also disables auto-connect so we don't immediately reconnect
-  // (intentional user disconnect). Pass { preserveAutoConnect: true } when
-  // disconnecting only to release the USB interface (e.g. app cleanup / restart),
-  // so the auto-connect setting survives to the next startup.
-  async disconnect(options: { preserveAutoConnect?: boolean } = {}): Promise<void> {
-    this.logActivity('info', options.preserveAutoConnect ? 'Disconnecting (cleanup)' : 'User initiated disconnect')
+  // Always calls disableAutoConnect() which sets session state only —
+  // it no longer writes to config.json, so auto-connect setting is always preserved.
+  async disconnect(): Promise<void> {
+    this.logActivity('info', 'Disconnecting')
     // Abort any running initialization immediately
     this.initAborted = true
-    if (!options.preserveAutoConnect) {
-      // Disable auto-connect so we don't immediately reconnect
-      this.disableAutoConnect()
-    }
+    // Sets session state (userInitiatedDisconnect=true). Does NOT touch config.json.
+    this.disableAutoConnect()
     await this.jensen.disconnect()
   }
 
