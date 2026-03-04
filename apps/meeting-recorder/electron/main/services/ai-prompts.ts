@@ -3,15 +3,17 @@ export const PROMPTS = {
 
 CRITICAL RULES:
 - Transcribe ONLY the actual words spoken in the audio. If you cannot hear clear speech, return an empty segments array.
+- If the audio contains ONLY background noise, silence, breathing, or unintelligible sounds with NO clear human speech, you MUST return an empty segments array with no text. Do NOT fabricate or imagine speech.
 - Do NOT create fictional conversations or dialogue that was not spoken.
 - Do NOT add words, sentences, or exchanges that are not in the audio.
+- Do NOT switch languages unless the speaker clearly and audibly does so. Random foreign words in silence are hallucinations — never output them.
 - If there is only one speaker, use only ONE speaker label ("Speaker 1"). Do NOT invent additional speakers.
 - Only create multiple speaker segments if you can clearly hear distinct different voices.
 - For topics and actionItems: only include if explicitly discussed. Return empty arrays if none are clear.
 - If the audio is very short, noisy, or unclear, it is BETTER to return fewer/empty segments than to guess.
 - Detect the sentiment (positive, negative, or neutral) and language of what was actually said.
 
-Remember: accuracy over completeness. An empty or minimal result is far better than a fabricated one.`,
+Remember: accuracy over completeness. An empty or minimal result is far better than a fabricated one. When in doubt, return EMPTY.`,
 
   SUMMARIZATION: `You are a meeting summarization assistant. Given the following meeting transcript, provide:
 - A concise summary (2-4 sentences)

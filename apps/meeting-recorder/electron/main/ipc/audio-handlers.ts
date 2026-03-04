@@ -12,6 +12,7 @@ import { getSetting, updateSession, getSession } from "../services/database";
 import { getPipeline } from "./transcription-handlers";
 import { getSessionManager } from "./session-handlers";
 import { PerformanceMonitor } from "../services/performance-monitor";
+import { isSilent } from "../services/silence-detector";
 
 const execFileAsync = promisify(execFile);
 
@@ -46,72 +47,7 @@ const STOPPED_SESSION_CLEANUP_MS = 30_000;
 /** Must match AudioRecorder.timesliceMs (default 3000). */
 const TIMESLICE_MS = 3000;
 
-/**
- * Detect if an audio buffer is silent (below threshold).
- * Uses ffmpeg's volumedetect filter to analyze peak and mean volume levels.
- * Returns true if audio is silent (should skip transcription).
- */
-async function isSilent(
-  audioBuffer: Buffer,
-  sessionDir: string,
-  chunkIndex: number,
-): Promise<boolean> {
-  const tempAnalyze = join(sessionDir, `_silence-${chunkIndex}.webm`);
-
-  try {
-    writeFileSync(tempAnalyze, audioBuffer);
-
-    // Use volumedetect filter to get audio statistics
-    // Output goes to stderr, so we capture it
-    const { stderr } = await execFileAsync(ffmpegPath as string, [
-      "-i", tempAnalyze,
-      "-af", "volumedetect",
-      "-f", "null",
-      "-",
-    ]);
-
-    // Parse volumedetect output:
-    // [Parsed_volumedetect_0 @ ...] max_volume: -91.0 dB
-    // [Parsed_volumedetect_0 @ ...] mean_volume: -inf dB
-    const maxVolumeMatch = stderr.match(/max_volume:\s*(-?\d+\.?\d*)\s*dB/);
-    const meanVolumeMatch = stderr.match(/mean_volume:\s*(-?\d+\.?\d*|-inf)\s*dB/);
-
-    if (!maxVolumeMatch) {
-      console.warn(`[AudioHandlers] Could not parse max_volume for chunk ${chunkIndex}`);
-      return false; // If we can't determine, send it anyway (fail open)
-    }
-
-    const maxVolume = parseFloat(maxVolumeMatch[1]);
-    const meanVolume = meanVolumeMatch?.[1] === "-inf"
-      ? -Infinity
-      : parseFloat(meanVolumeMatch?.[1] ?? "-Infinity");
-
-    // Threshold: if max volume is below -50dB, consider it silent
-    // -50dB is very quiet (whisper is ~30-40dB, silence is -90dB+)
-    const SILENCE_THRESHOLD_DB = -50;
-
-    const isSilentChunk = maxVolume < SILENCE_THRESHOLD_DB;
-
-    if (isSilentChunk) {
-      console.log(
-        `[AudioHandlers] Chunk ${chunkIndex} is SILENT (max: ${maxVolume.toFixed(1)}dB, ` +
-        `mean: ${meanVolume === -Infinity ? "-inf" : meanVolume.toFixed(1)}dB) — skipping transcription`,
-      );
-    } else {
-      console.log(
-        `[AudioHandlers] Chunk ${chunkIndex} has audio (max: ${maxVolume.toFixed(1)}dB, ` +
-        `mean: ${meanVolume === -Infinity ? "-inf" : meanVolume.toFixed(1)}dB)`,
-      );
-    }
-
-    return isSilentChunk;
-  } catch (err) {
-    console.error(`[AudioHandlers] Failed to analyze silence for chunk ${chunkIndex}:`, err);
-    return false; // If analysis fails, send it anyway (fail open)
-  } finally {
-    try { if (existsSync(tempAnalyze)) unlinkSync(tempAnalyze); } catch { /* ignore */ }
-  }
-}
+// Silence detection moved to ../services/silence-detector.ts (SPEC-002)
 
 /**
  * Extract the last timeslice of audio from the cumulative WebM stream.
