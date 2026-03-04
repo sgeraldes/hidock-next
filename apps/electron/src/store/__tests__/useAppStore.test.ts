@@ -19,12 +19,28 @@
  * are not tested here. They would require mocking the full electronAPI.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import { useAppStore } from '@/store/useAppStore'
 import type { HiDockDeviceState, ConnectionStatus, ActivityLogEntry } from '@/services/hidock-device'
 
-// Reset store before each test
+// Mock window.electronAPI for async tests
+const mockElectronAPI = {
+  meetings: {
+    getAll: vi.fn()
+  },
+  calendar: {
+    sync: vi.fn()
+  }
+}
+
+// @ts-ignore - Mock global window
+global.window = {
+  electronAPI: mockElectronAPI
+} as any
+
+// Reset store and mocks before each test
 beforeEach(() => {
+  vi.clearAllMocks()
   const store = useAppStore.getState()
 
   // Reset meetings
@@ -1124,6 +1140,384 @@ describe('useAppStore', () => {
     it('useDownloadProgress returns null for missing id', () => {
       const progress = useAppStore.getState().downloadQueue.get('missing-id')?.progress ?? null
       expect(progress).toBeNull()
+    })
+  })
+
+  describe('Calendar Sync Actions', () => {
+    it('setCalendarSyncing sets syncing flag', () => {
+      const { setCalendarSyncing } = useAppStore.getState()
+
+      setCalendarSyncing(true)
+      expect(useAppStore.getState().calendarSyncing).toBe(true)
+
+      setCalendarSyncing(false)
+      expect(useAppStore.getState().calendarSyncing).toBe(false)
+    })
+
+    it('setLastCalendarSync sets last sync timestamp', () => {
+      const { setLastCalendarSync } = useAppStore.getState()
+      const timestamp = '2026-03-03T10:00:00Z'
+
+      setLastCalendarSync(timestamp)
+      expect(useAppStore.getState().lastCalendarSync).toBe(timestamp)
+    })
+
+    it('setLastCalendarSync can clear timestamp with null', () => {
+      const { setLastCalendarSync } = useAppStore.getState()
+
+      setLastCalendarSync('2026-03-03T10:00:00Z')
+      setLastCalendarSync(null)
+      expect(useAppStore.getState().lastCalendarSync).toBeNull()
+    })
+  })
+
+  describe('Activity Log Validation', () => {
+    it('addActivityLogEntry rejects invalid entry (missing timestamp)', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const { addActivityLogEntry } = useAppStore.getState()
+
+      const invalidEntry = {
+        type: 'info',
+        message: 'Test'
+        // Missing timestamp
+      } as any
+
+      addActivityLogEntry(invalidEntry)
+
+      expect(useAppStore.getState().activityLog.length).toBe(0) // Should not be added
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[AppStore] Invalid activity log entry rejected'),
+        invalidEntry
+      )
+
+      warnSpy.mockRestore()
+    })
+
+    it('addActivityLogEntry rejects invalid entry (missing message)', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const { addActivityLogEntry } = useAppStore.getState()
+
+      const invalidEntry = {
+        timestamp: new Date(),
+        type: 'info'
+        // Missing message
+      } as any
+
+      addActivityLogEntry(invalidEntry)
+
+      expect(useAppStore.getState().activityLog.length).toBe(0)
+      expect(warnSpy).toHaveBeenCalled()
+
+      warnSpy.mockRestore()
+    })
+
+    it('addActivityLogEntry rejects null entry', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const { addActivityLogEntry } = useAppStore.getState()
+
+      addActivityLogEntry(null as any)
+
+      expect(useAppStore.getState().activityLog.length).toBe(0)
+      expect(warnSpy).toHaveBeenCalled()
+
+      warnSpy.mockRestore()
+    })
+
+    it('addActivityLogEntry rejects entry with invalid timestamp', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const { addActivityLogEntry } = useAppStore.getState()
+
+      const invalidEntry = {
+        timestamp: 'not-a-date',
+        type: 'info',
+        message: 'Test'
+      } as any
+
+      addActivityLogEntry(invalidEntry)
+
+      expect(useAppStore.getState().activityLog.length).toBe(0)
+      expect(warnSpy).toHaveBeenCalled()
+
+      warnSpy.mockRestore()
+    })
+
+    it('addActivityLogEntry does not trigger re-render on invalid entry', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      let renderCount = 0
+      const unsubscribe = useAppStore.subscribe(() => {
+        renderCount++
+      })
+
+      const invalidEntry = { type: 'info' } as any // Missing required fields
+
+      useAppStore.getState().addActivityLogEntry(invalidEntry)
+
+      // Should not trigger re-render for invalid entry
+      expect(renderCount).toBe(0)
+
+      unsubscribe()
+      warnSpy.mockRestore()
+    })
+  })
+
+  describe('Download Queue - clearDownloadQueue', () => {
+    it('clearDownloadQueue removes all items from queue', () => {
+      const { addToDownloadQueue, clearDownloadQueue } = useAppStore.getState()
+
+      addToDownloadQueue('dl-1', 'file1.wav', 500000)
+      addToDownloadQueue('dl-2', 'file2.wav', 750000)
+      addToDownloadQueue('dl-3', 'file3.wav', 1000000)
+
+      expect(useAppStore.getState().downloadQueue.size).toBe(3)
+
+      clearDownloadQueue()
+
+      expect(useAppStore.getState().downloadQueue.size).toBe(0)
+    })
+
+    it('clearDownloadQueue is safe when queue is already empty', () => {
+      const { clearDownloadQueue } = useAppStore.getState()
+
+      clearDownloadQueue()
+
+      expect(useAppStore.getState().downloadQueue.size).toBe(0)
+    })
+
+    it('clearDownloadQueue creates new empty Map instance', () => {
+      const { addToDownloadQueue, clearDownloadQueue } = useAppStore.getState()
+
+      addToDownloadQueue('dl-1', 'file.wav', 500000)
+      const beforeQueue = useAppStore.getState().downloadQueue
+
+      clearDownloadQueue()
+      const afterQueue = useAppStore.getState().downloadQueue
+
+      expect(afterQueue).toBeInstanceOf(Map)
+      expect(afterQueue).not.toBe(beforeQueue) // New instance
+      expect(afterQueue.size).toBe(0)
+    })
+  })
+
+  describe('Async Calendar Operations', () => {
+    it('loadMeetings sets loading state and loads meetings', async () => {
+      const mockMeetings = [
+        {
+          id: 'm-1',
+          subject: 'Team Standup',
+          startTime: '2026-03-03T10:00:00Z',
+          endTime: '2026-03-03T10:30:00Z'
+        }
+      ]
+
+      mockElectronAPI.meetings.getAll.mockResolvedValue(mockMeetings)
+
+      const { loadMeetings } = useAppStore.getState()
+
+      const promise = loadMeetings('2026-03-01T00:00:00Z', '2026-03-07T23:59:59Z')
+
+      // Should set loading to true immediately
+      expect(useAppStore.getState().meetingsLoading).toBe(true)
+
+      await promise
+
+      // Should set meetings and loading to false
+      expect(useAppStore.getState().meetings).toEqual(mockMeetings)
+      expect(useAppStore.getState().meetingsLoading).toBe(false)
+      expect(mockElectronAPI.meetings.getAll).toHaveBeenCalledWith(
+        '2026-03-01T00:00:00Z',
+        '2026-03-07T23:59:59Z'
+      )
+    })
+
+    it('loadMeetings handles error gracefully', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const testError = new Error('Calendar API error')
+
+      mockElectronAPI.meetings.getAll.mockRejectedValue(testError)
+
+      const { loadMeetings } = useAppStore.getState()
+
+      await loadMeetings('2026-03-01T00:00:00Z', '2026-03-07T23:59:59Z')
+
+      // Should set loading to false on error
+      expect(useAppStore.getState().meetingsLoading).toBe(false)
+      expect(errorSpy).toHaveBeenCalledWith('Failed to load meetings:', testError)
+
+      errorSpy.mockRestore()
+    })
+
+    it('syncCalendar sets syncing state and syncs calendar', async () => {
+      const mockResult = {
+        success: true,
+        meetingsCount: 5,
+        lastSync: '2026-03-03T10:00:00Z'
+      }
+
+      const mockMeetings = [
+        {
+          id: 'm-1',
+          subject: 'Meeting 1',
+          startTime: '2026-03-03T10:00:00Z',
+          endTime: '2026-03-03T11:00:00Z'
+        }
+      ]
+
+      mockElectronAPI.calendar.sync.mockResolvedValue(mockResult)
+      mockElectronAPI.meetings.getAll.mockResolvedValue(mockMeetings)
+
+      const { syncCalendar, setCurrentDate, setCalendarView } = useAppStore.getState()
+
+      // Set a known date and view for deterministic helper function calls
+      setCurrentDate(new Date(2026, 2, 3)) // March 3, 2026
+      setCalendarView('week')
+
+      const resultPromise = syncCalendar()
+
+      // Should set syncing to true immediately
+      expect(useAppStore.getState().calendarSyncing).toBe(true)
+
+      const result = await resultPromise
+
+      // Should set lastSync and syncing to false
+      expect(result).toEqual(mockResult)
+      expect(useAppStore.getState().lastCalendarSync).toBe('2026-03-03T10:00:00Z')
+      expect(useAppStore.getState().calendarSyncing).toBe(false)
+      expect(mockElectronAPI.calendar.sync).toHaveBeenCalled()
+      expect(mockElectronAPI.meetings.getAll).toHaveBeenCalled() // Should reload meetings
+    })
+
+    it('syncCalendar handles sync error gracefully', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const testError = new Error('Sync failed')
+
+      mockElectronAPI.calendar.sync.mockRejectedValue(testError)
+
+      const { syncCalendar } = useAppStore.getState()
+
+      const result = await syncCalendar()
+
+      // Should return error result
+      expect(result).toEqual({
+        success: false,
+        meetingsCount: 0,
+        error: 'Error: Sync failed'
+      })
+      expect(useAppStore.getState().calendarSyncing).toBe(false)
+      expect(errorSpy).toHaveBeenCalledWith('Failed to sync calendar:', testError)
+
+      errorSpy.mockRestore()
+    })
+
+    it('syncCalendar does not reload meetings when sync fails', async () => {
+      mockElectronAPI.calendar.sync.mockResolvedValue({
+        success: false,
+        meetingsCount: 0
+      })
+
+      const { syncCalendar } = useAppStore.getState()
+
+      await syncCalendar()
+
+      // Should NOT call loadMeetings when sync fails
+      expect(mockElectronAPI.meetings.getAll).not.toHaveBeenCalled()
+      expect(useAppStore.getState().calendarSyncing).toBe(false)
+    })
+
+    it('syncCalendar uses default timestamp when lastSync is missing', async () => {
+      const mockResult = {
+        success: true,
+        meetingsCount: 3
+        // No lastSync field
+      }
+
+      mockElectronAPI.calendar.sync.mockResolvedValue(mockResult)
+      mockElectronAPI.meetings.getAll.mockResolvedValue([])
+
+      const { syncCalendar } = useAppStore.getState()
+
+      await syncCalendar()
+
+      // Should use current date as fallback
+      const lastSync = useAppStore.getState().lastCalendarSync
+      expect(lastSync).toBeTruthy()
+      expect(typeof lastSync).toBe('string')
+    })
+
+    it('syncCalendar handles different calendar view types (day)', async () => {
+      mockElectronAPI.calendar.sync.mockResolvedValue({
+        success: true,
+        meetingsCount: 1,
+        lastSync: '2026-03-03T10:00:00Z'
+      })
+      mockElectronAPI.meetings.getAll.mockResolvedValue([])
+
+      const { syncCalendar, setCurrentDate, setCalendarView } = useAppStore.getState()
+
+      setCurrentDate(new Date(2026, 2, 3)) // March 3, 2026
+      setCalendarView('day')
+
+      await syncCalendar()
+
+      // Should call getAll with day range
+      expect(mockElectronAPI.meetings.getAll).toHaveBeenCalled()
+    })
+
+    it('syncCalendar handles different calendar view types (workweek)', async () => {
+      mockElectronAPI.calendar.sync.mockResolvedValue({
+        success: true,
+        meetingsCount: 5,
+        lastSync: '2026-03-03T10:00:00Z'
+      })
+      mockElectronAPI.meetings.getAll.mockResolvedValue([])
+
+      const { syncCalendar, setCurrentDate, setCalendarView } = useAppStore.getState()
+
+      setCurrentDate(new Date(2026, 2, 3)) // March 3, 2026 (Tuesday)
+      setCalendarView('workweek')
+
+      await syncCalendar()
+
+      // Should call getAll with workweek range (Mon-Fri)
+      expect(mockElectronAPI.meetings.getAll).toHaveBeenCalled()
+    })
+
+    it('syncCalendar handles different calendar view types (month)', async () => {
+      mockElectronAPI.calendar.sync.mockResolvedValue({
+        success: true,
+        meetingsCount: 10,
+        lastSync: '2026-03-03T10:00:00Z'
+      })
+      mockElectronAPI.meetings.getAll.mockResolvedValue([])
+
+      const { syncCalendar, setCurrentDate, setCalendarView } = useAppStore.getState()
+
+      setCurrentDate(new Date(2026, 2, 15)) // March 15, 2026
+      setCalendarView('month')
+
+      await syncCalendar()
+
+      // Should call getAll with full month range
+      expect(mockElectronAPI.meetings.getAll).toHaveBeenCalled()
+    })
+
+    it('syncCalendar handles Sunday edge case in week view', async () => {
+      mockElectronAPI.calendar.sync.mockResolvedValue({
+        success: true,
+        meetingsCount: 3,
+        lastSync: '2026-03-01T10:00:00Z'
+      })
+      mockElectronAPI.meetings.getAll.mockResolvedValue([])
+
+      const { syncCalendar, setCurrentDate, setCalendarView } = useAppStore.getState()
+
+      // Sunday, March 1, 2026 (day 0)
+      setCurrentDate(new Date(2026, 2, 1))
+      setCalendarView('week')
+
+      await syncCalendar()
+
+      // Should handle Sunday correctly (start on previous Monday)
+      expect(mockElectronAPI.meetings.getAll).toHaveBeenCalled()
     })
   })
 })
