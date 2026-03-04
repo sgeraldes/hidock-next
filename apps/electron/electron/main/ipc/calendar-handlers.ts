@@ -168,9 +168,17 @@ function startAutoSync(): void {
     const currentConfig = getConfig()
     if (currentConfig.calendar.icsUrl) {
       try {
-        await syncCalendar(currentConfig.calendar.icsUrl)
+        const result = await syncCalendar(currentConfig.calendar.icsUrl)
+        if (!result.success) {
+          // syncCalendar already emits 'error' log, but periodic failures should
+          // also be visible so users know background sync is not working
+          const { emitActivityLog } = await import('../services/activity-log')
+          emitActivityLog('warning', 'Background calendar sync failed', result.error ?? 'Unknown error')
+        }
       } catch (err) {
         console.error('Calendar sync failed:', err)
+        const { emitActivityLog } = await import('../services/activity-log')
+        emitActivityLog('error', 'Background calendar sync crashed', err instanceof Error ? err.message : 'Unknown error')
       }
     }
   }, intervalMs)

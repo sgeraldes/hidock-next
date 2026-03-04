@@ -950,6 +950,9 @@ class HiDockDeviceService {
     // This prevents the TOCTOU race where two callers both pass the check above
     this.listRecordingsLock = true
 
+    // User-visible scan start entry in Activity Log
+    this.logActivity('info', 'Scanning device files...', `Requesting file list (${expectedFileCount} expected)`)
+
     // Only log to console (DEBUG), not activity log - cache invalidation is internal detail
     if (!forceRefresh && this.cachedRecordings !== null && shouldLogQa()) {
       console.log(`[HiDockDevice] Cache invalid: cached=${this.cachedRecordingCount}, device=${expectedFileCount}`)
@@ -1002,6 +1005,12 @@ class HiDockDeviceService {
 
         if (shouldLogQa()) console.log(`[HiDockDevice] listRecordings: Received ${files.length} files`)
         this.logActivity('usb-in', 'File List Received', `${files.length} files found`)
+        // User-facing result entry
+        if (files.length === 0) {
+          this.logActivity('info', 'No recordings on device', 'Device storage is empty')
+        } else {
+          this.logActivity('success', `Found ${files.length} recording${files.length === 1 ? '' : 's'} on device`)
+        }
 
         const recordings = files.map((f) => this.fileInfoToRecording(f))
 

@@ -414,6 +414,7 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
     // Validate URL to prevent SSRF attacks
     const validation = validateCalendarUrl(icsUrl)
     if (!validation.valid) {
+      emitActivityLog('error', 'Calendar sync failed', validation.error ?? 'Invalid URL')
       return {
         success: false,
         meetingsCount: 0,

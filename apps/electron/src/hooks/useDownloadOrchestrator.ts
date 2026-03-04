@@ -75,6 +75,7 @@ export function useDownloadOrchestrator() {
 
     if (!deviceService.isConnected()) {
       console.error('[useDownloadOrchestrator] Device not connected')
+      deviceService.log('error', 'Download failed', `${item.filename}: Device not connected`)
       await window.electronAPI.downloadService.markFailed(item.filename, 'Device not connected')
       return false
     }
@@ -149,15 +150,20 @@ export function useDownloadOrchestrator() {
       const libraryError = parseError(error, 'download')
       console.error(`[useDownloadOrchestrator] Error: ${item.filename}`, error)
       await window.electronAPI.downloadService.markFailed(item.filename, libraryError.message)
-      deviceService.log('error', 'Download failed', `${item.filename}: ${libraryError.message}`)
+      if (signal.aborted) {
+        // User-initiated cancellation — log as info, not error
+        deviceService.log('info', 'Download cancelled', `${item.filename}: Cancelled by user`)
+      } else {
+        deviceService.log('error', 'Download failed', `${item.filename}: ${libraryError.message}`)
+      }
       if (!signal.aborted) {
         removeFromDownloadQueue(item.filename)
+        toast({
+          title: 'Download error',
+          description: getErrorMessage(libraryError.type),
+          variant: 'error'
+        })
       }
-      toast({
-        title: 'Download error',
-        description: getErrorMessage(libraryError.type),
-        variant: 'error'
-      })
       return false
     }
   }, [deviceService, addToDownloadQueue, updateDownloadProgress, removeFromDownloadQueue])
