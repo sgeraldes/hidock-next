@@ -59,7 +59,7 @@ export function TranscriptPanel({
   const scrollRef = useRef<HTMLDivElement>(null);
   const isAutoScrolling = useRef(true);
   const [copied, setCopied] = useState(false);
-  const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
+  const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null);
   const [speakerRenames, setSpeakerRenames] = useState<Map<string, string>>(new Map());
   const [activeSegmentIndex, setActiveSegmentIndex] = useState<number>(-1);
 
@@ -134,30 +134,28 @@ export function TranscriptPanel({
     }
   };
 
-  const handleSpeakerClick = (speaker: string) => {
-    setEditingSpeaker(speaker);
+  const handleSpeakerClick = (index: number) => {
+    setEditingSegmentIndex(index);
   };
 
   const handleSpeakerRename = (oldName: string, newName: string) => {
     if (newName.trim() && newName !== oldName) {
-      // Update local renames
       const newRenames = new Map(speakerRenames);
       newRenames.set(oldName, newName);
       setSpeakerRenames(newRenames);
 
-      // Call IPC if available
       if (onRenameSpeaker && sessionId) {
         onRenameSpeaker(oldName, newName);
       }
     }
-    setEditingSpeaker(null);
+    setEditingSegmentIndex(null);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, oldName: string) => {
     if (e.key === "Enter") {
       handleSpeakerRename(oldName, e.currentTarget.value);
     } else if (e.key === "Escape") {
-      setEditingSpeaker(null);
+      setEditingSegmentIndex(null);
     }
   };
 
@@ -301,7 +299,7 @@ export function TranscriptPanel({
                   {segment.timestamp}
                 </span>
                 <div className="flex-1">
-                  {editingSpeaker === segment.speaker ? (
+                  {editingSegmentIndex === virtualItem.index ? (
                     <input
                       type="text"
                       defaultValue={displayName}
@@ -313,7 +311,7 @@ export function TranscriptPanel({
                     />
                   ) : (
                     <span
-                      onClick={() => handleSpeakerClick(segment.speaker)}
+                      onClick={() => handleSpeakerClick(virtualItem.index)}
                       className={`text-sm font-semibold cursor-pointer hover:underline ${getSpeakerColor(segment.speaker, speakers)}`}
                     >
                       {displayName}

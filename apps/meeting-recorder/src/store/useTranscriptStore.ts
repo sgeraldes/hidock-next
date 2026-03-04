@@ -71,7 +71,10 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
     set((state) => {
       const map = new Map(state.segments);
       const existing = map.get(sessionId) ?? [];
-      map.set(sessionId, [...existing, ...newSegments]);
+      // Deduplicate: skip segments whose text+speaker already exists
+      const existingKeys = new Set(existing.map((s) => `${s.speaker}:${s.text}`));
+      const unique = newSegments.filter((s) => !existingKeys.has(`${s.speaker}:${s.text}`));
+      map.set(sessionId, [...existing, ...unique]);
       return { segments: map };
     }),
 
