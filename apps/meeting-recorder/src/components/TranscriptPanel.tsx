@@ -77,10 +77,13 @@ export function TranscriptPanel({
     overscan: 5,
   });
 
+  // Auto-scroll to bottom only when new segments arrive (totalCount increases)
+  const prevTotalCount = useRef(totalCount);
   useEffect(() => {
-    if (isAutoScrolling.current && totalCount > 0) {
+    if (isAutoScrolling.current && totalCount > prevTotalCount.current) {
       virtualizer.scrollToIndex(totalCount - 1, { align: "end" });
     }
+    prevTotalCount.current = totalCount;
   }, [totalCount, virtualizer]);
 
   // Throttled audio-text sync highlighting
@@ -204,7 +207,7 @@ export function TranscriptPanel({
   const virtualItems = virtualizer.getVirtualItems();
 
   return (
-    <div className="flex-1 relative flex flex-col">
+    <div className="flex-1 min-h-0 relative flex flex-col">
       {/* Copy button - only show when segments exist */}
       {segments.length > 0 && (
         <div className="absolute top-2 right-2 z-10">
