@@ -52,6 +52,7 @@ import {
   updateRecording,
   insertTranscriptSegment,
   getTranscriptBySession,
+  renameSpeakerInSession,
   createSpeaker,
   getSpeakers,
   linkSpeakerToSession,
@@ -253,6 +254,49 @@ describe('Database Service', () => {
       const segments = getTranscriptBySession('s1')
       expect(segments).toHaveLength(2)
       expect(segments[0].speaker_name).toBe('Alice')
+    })
+  })
+
+  // SPEC-007: Rename count accuracy
+  describe('renameSpeakerInSession (SPEC-007)', () => {
+    it('returns the count of segments renamed, not the inflated post-rename total', async () => {
+      await initializeDatabase()
+      mockExec.mockClear()
+      // Pre-count: 3 segments have the OLD name "Speaker 1"
+      mockExec.mockReturnValueOnce([{ columns: ['cnt'], values: [[3]] }])
+
+      const count = renameSpeakerInSession('sess-1', 'Speaker 1', 'Alice')
+
+      // The COUNT query must use oldName ('Speaker 1'), not newName ('Alice')
+      expect(mockExec).toHaveBeenCalledWith(
+        expect.stringContaining('COUNT'),
+        ['sess-1', 'Speaker 1'],
+      )
+      // Returns the pre-rename count — not the inflated post-rename total
+      expect(count).toBe(3)
+    })
+
+    it('returns 0 when the old speaker name does not exist in the session', async () => {
+      await initializeDatabase()
+      mockExec.mockClear()
+      mockExec.mockReturnValueOnce([{ columns: ['cnt'], values: [[0]] }])
+
+      const count = renameSpeakerInSession('sess-1', 'Ghost', 'Alice')
+
+      expect(count).toBe(0)
+    })
+
+    it('still runs the UPDATE regardless of pre-count', async () => {
+      await initializeDatabase()
+      mockRun.mockClear()
+      mockExec.mockReturnValueOnce([{ columns: ['cnt'], values: [[2]] }])
+
+      renameSpeakerInSession('sess-1', 'Bob', 'Robert')
+
+      expect(mockRun).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE transcript_segments'),
+        ['Robert', 'sess-1', 'Bob'],
+      )
     })
   })
 

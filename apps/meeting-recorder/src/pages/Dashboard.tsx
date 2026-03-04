@@ -59,6 +59,7 @@ export default function Dashboard() {
     : null;
 
   const segmentMap = useTranscriptStore((s) => s.segments);
+  const setSegments = useTranscriptStore((s) => s.setSegments);
   const transcriptionError = useTranscriptStore((s) => s.transcriptionError);
   const setTranscriptionError = useTranscriptStore(
     (s) => s.setTranscriptionError,
@@ -81,15 +82,26 @@ export default function Dashboard() {
   const handleRenameSpeaker = async (oldName: string, newName: string) => {
     if (!viewingSessionId) return;
     try {
-      await (window as Record<string, unknown>).electronAPI?.session?.renameSpeaker?.(
-        viewingSessionId,
-        oldName,
-        newName,
-      );
-      // Refresh transcript to show updates
+      await window.electronAPI.session.renameSpeaker(viewingSessionId, oldName, newName);
+      // Immediately refresh the store so renamed speakers are visible without a session switch
       const transcript = await window.electronAPI.session.getTranscript(viewingSessionId);
-      // The store will be updated via the historical load in useTranscriptionStream
-      // For immediate update, we could manually update the store here
+      if (Array.isArray(transcript)) {
+        const mapped = (transcript as Array<{
+          id?: string;
+          speaker_name?: string;
+          text: string;
+          sentiment?: string;
+          start_ms: number;
+        }>).map((seg, i) => ({
+          id: seg.id ?? `seg-rename-${i}`,
+          speaker: seg.speaker_name ?? "Unknown",
+          text: seg.text,
+          timestamp: `${Math.floor(seg.start_ms / 60000)}:${String(Math.floor((seg.start_ms % 60000) / 1000)).padStart(2, "0")}`,
+          startMs: seg.start_ms,
+          sentiment: (seg.sentiment ?? "neutral") as "positive" | "negative" | "neutral",
+        }));
+        setSegments(viewingSessionId, mapped);
+      }
     } catch (err) {
       console.error("Failed to rename speaker:", err);
     }

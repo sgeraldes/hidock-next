@@ -37,6 +37,7 @@ vi.mock('../database', () => ({
   cancelPendingTranscriptions: vi.fn(() => 0),
   acquireTranscriptionLock: vi.fn().mockReturnValue(true),
   releaseTranscriptionLock: vi.fn().mockReturnValue(true),
+  clearStaleTranscriptionLock: vi.fn(), // Called on startTranscriptionProcessor()
   run: vi.fn(),
   queryOne: vi.fn()
 }))

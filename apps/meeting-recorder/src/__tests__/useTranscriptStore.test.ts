@@ -5,7 +5,8 @@ const makeSegment = (id: string, text: string) => ({
   id,
   speaker: "Speaker 1",
   text,
-  timestamp: "00:00:00",
+  timestamp: "0:00",
+  startMs: 0,
   sentiment: "neutral" as const,
 });
 
@@ -162,6 +163,110 @@ describe("useTranscriptStore", () => {
       const state = useTranscriptStore.getState();
       expect(state.actionItems.get("session-1")).toHaveLength(1);
       expect(state.actionItems.get("session-1")![0].assignee).toBe("Alice");
+    });
+  });
+
+  describe("setSegments (replace — for historical loads)", () => {
+    it("replaces all existing segments for a session", () => {
+      useTranscriptStore
+        .getState()
+        .addSegments("session-1", [makeSegment("seg1", "Original text")]);
+
+      useTranscriptStore.getState().setSegments("session-1", [
+        { ...makeSegment("seg2", "Original text"), speaker: "Sebastian" },
+      ]);
+
+      const result = useTranscriptStore.getState().getSegments("session-1");
+      expect(result).toHaveLength(1);
+      expect(result[0].speaker).toBe("Sebastian");
+    });
+
+    it("does not duplicate segments when speaker was renamed between visits", () => {
+      // Simulate: session loaded the first time → "Speaker 1" segments in store
+      useTranscriptStore.getState().addSegments("session-1", [
+        { ...makeSegment("seg1", "Hello"), speaker: "Speaker 1" },
+        { ...makeSegment("seg2", "World"), speaker: "Speaker 1" },
+      ]);
+
+      // User renames "Speaker 1" → "Sebastian" in DB. On session revisit,
+      // loadHistoricalData calls setSegments with the updated DB rows.
+      useTranscriptStore.getState().setSegments("session-1", [
+        { ...makeSegment("seg3", "Hello"), speaker: "Sebastian" },
+        { ...makeSegment("seg4", "World"), speaker: "Sebastian" },
+      ]);
+
+      const result = useTranscriptStore.getState().getSegments("session-1");
+      // Must have exactly 2 segments — not 4 (old + renamed duplicates)
+      expect(result).toHaveLength(2);
+      expect(result.every((s) => s.speaker === "Sebastian")).toBe(true);
+    });
+
+    it("does not affect other sessions", () => {
+      useTranscriptStore
+        .getState()
+        .addSegments("session-2", [makeSegment("seg-b", "Session B text")]);
+
+      useTranscriptStore.getState().setSegments("session-1", [
+        makeSegment("seg-a", "Session A text"),
+      ]);
+
+      expect(
+        useTranscriptStore.getState().getSegments("session-2"),
+      ).toHaveLength(1);
+      expect(
+        useTranscriptStore.getState().getSegments("session-2")[0].text,
+      ).toBe("Session B text");
+    });
+
+    it("can set an empty array to clear all segments for a session", () => {
+      useTranscriptStore
+        .getState()
+        .addSegments("session-1", [makeSegment("seg1", "Some text")]);
+
+      useTranscriptStore.getState().setSegments("session-1", []);
+
+      expect(
+        useTranscriptStore.getState().getSegments("session-1"),
+      ).toHaveLength(0);
+    });
+  });
+
+  // SPEC-006: clearSession must clean up associated translations
+  describe("clearSession and translations (SPEC-006)", () => {
+    it("clearSession removes translations for segments in that session", () => {
+      // Add segments and translations for session-1
+      useTranscriptStore.getState().addSegments("session-1", [
+        makeSegment("seg-a1", "Hello"),
+        makeSegment("seg-a2", "World"),
+      ]);
+      useTranscriptStore.getState().setTranslation("seg-a1", "Hola");
+      useTranscriptStore.getState().setTranslation("seg-a2", "Mundo");
+
+      useTranscriptStore.getState().clearSession("session-1");
+
+      const { translations } = useTranscriptStore.getState();
+      expect(translations.has("seg-a1")).toBe(false);
+      expect(translations.has("seg-a2")).toBe(false);
+    });
+
+    it("clearSession does not remove translations for other sessions", () => {
+      // session-1 with translations
+      useTranscriptStore.getState().addSegments("session-1", [
+        makeSegment("seg-a1", "Hello"),
+      ]);
+      useTranscriptStore.getState().setTranslation("seg-a1", "Hola");
+
+      // session-2 with translations
+      useTranscriptStore.getState().addSegments("session-2", [
+        makeSegment("seg-b1", "Goodbye"),
+      ]);
+      useTranscriptStore.getState().setTranslation("seg-b1", "Adios");
+
+      useTranscriptStore.getState().clearSession("session-1");
+
+      const { translations } = useTranscriptStore.getState();
+      expect(translations.has("seg-a1")).toBe(false);
+      expect(translations.get("seg-b1")).toBe("Adios");
     });
   });
 

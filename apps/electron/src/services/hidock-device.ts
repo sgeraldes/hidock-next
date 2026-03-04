@@ -354,6 +354,21 @@ class HiDockDeviceService {
     this.jensen.removeUsbConnectListener()
   }
 
+  /**
+   * Reset the initAutoConnect guard so it can run again after a renderer reload.
+   *
+   * In development mode, the "Restart" button calls webContents.reload() which
+   * only reloads the renderer — the service singleton persists with
+   * initAutoConnectStarted = true. App.tsx calls initAutoConnect() on mount but
+   * the guard blocks it silently. Calling this during cleanup lets the next mount
+   * trigger auto-connect correctly.
+   *
+   * Must be called from App.tsx cleanup (useEffect return).
+   */
+  resetInitAutoConnect(): void {
+    this.initAutoConnectStarted = false
+  }
+
   // Disable auto-connect (e.g., when user explicitly disconnects)
   disableAutoConnect(): void {
     this.autoConnectEnabled = false
@@ -469,13 +484,19 @@ class HiDockDeviceService {
     }
   }
 
-  // Disconnect from device - this disables auto-connect until user clicks connect again
-  async disconnect(): Promise<void> {
-    this.logActivity('info', 'User initiated disconnect')
+  // Disconnect from device.
+  // By default, also disables auto-connect so we don't immediately reconnect
+  // (intentional user disconnect). Pass { preserveAutoConnect: true } when
+  // disconnecting only to release the USB interface (e.g. app cleanup / restart),
+  // so the auto-connect setting survives to the next startup.
+  async disconnect(options: { preserveAutoConnect?: boolean } = {}): Promise<void> {
+    this.logActivity('info', options.preserveAutoConnect ? 'Disconnecting (cleanup)' : 'User initiated disconnect')
     // Abort any running initialization immediately
     this.initAborted = true
-    // Disable auto-connect so we don't immediately reconnect
-    this.disableAutoConnect()
+    if (!options.preserveAutoConnect) {
+      // Disable auto-connect so we don't immediately reconnect
+      this.disableAutoConnect()
+    }
     await this.jensen.disconnect()
   }
 

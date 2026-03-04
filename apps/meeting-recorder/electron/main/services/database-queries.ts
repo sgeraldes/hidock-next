@@ -323,9 +323,10 @@ export function getSessionSpeakers(sessionId: string): Speaker[] {
 }
 
 /**
- * SPEC-003 REQ-4: Rename a speaker in all transcript segments for a session.
+ * SPEC-003 REQ-4 / SPEC-007: Rename a speaker in all transcript segments for a session.
  * Updates the inline speaker_name column in transcript_segments.
- * Returns the number of segments updated.
+ * Returns the number of segments whose speaker_name was changed from oldName to newName.
+ * (Pre-counts oldName rows before the UPDATE to avoid inflated post-rename totals.)
  */
 export function renameSpeakerInSession(
   sessionId: string,
@@ -333,16 +334,20 @@ export function renameSpeakerInSession(
   newName: string,
 ): number {
   const database = getDatabase();
+  // Count matching rows BEFORE the update so the result reflects what changed,
+  // not the inflated post-update total (which would include pre-existing newName rows).
+  // sql.js doesn't expose affected-row counts, so we measure what we're about to change.
+  const preCountResult = database.exec(
+    "SELECT COUNT(*) as cnt FROM transcript_segments WHERE session_id = ? AND speaker_name = ?",
+    [sessionId, oldName],
+  );
+  const count =
+    preCountResult.length > 0 && preCountResult[0].values.length > 0
+      ? (preCountResult[0].values[0][0] as number)
+      : 0;
   database.run(
     "UPDATE transcript_segments SET speaker_name = ? WHERE session_id = ? AND speaker_name = ?",
     [newName, sessionId, oldName],
   );
-  // sql.js doesn't return affected rows directly, count manually
-  const result = database.exec(
-    "SELECT COUNT(*) as cnt FROM transcript_segments WHERE session_id = ? AND speaker_name = ?",
-    [sessionId, newName],
-  );
-  return result.length > 0 && result[0].values.length > 0
-    ? (result[0].values[0][0] as number)
-    : 0;
+  return count;
 }

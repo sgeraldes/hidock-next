@@ -44,16 +44,23 @@ function App(): React.ReactElement {
 
     window.addEventListener('beforeunload', handleBeforeUnload)
 
-    // Cleanup on unmount (shouldn't happen for App, but good practice)
+    // Cleanup on unmount (renderer reload in dev, or genuine unmount)
     return () => {
       // Clean up QA monitor event listeners
       cleanupQAMonitor()
-      // Stop device auto-connect and disconnect
+      // Stop device auto-connect
       deviceService.stopAutoConnect()
+      // Reset the init guard so initAutoConnect() runs again on next mount.
+      // In dev mode, the "Restart" button only reloads the renderer — the service
+      // singleton persists. Without this reset, initAutoConnect() is permanently
+      // blocked by its once-per-session guard (BUG-AC-001).
+      deviceService.resetInitAutoConnect()
       window.removeEventListener('beforeunload', handleBeforeUnload)
-      // Also disconnect on unmount
+      // Disconnect to release USB, but preserve auto-connect setting so it
+      // survives the reload (BUG-AC-002: passing preserveAutoConnect prevents
+      // disableAutoConnect() from saving false to config.json).
       if (deviceService.isConnected()) {
-        deviceService.disconnect()
+        deviceService.disconnect({ preserveAutoConnect: true })
       }
     }
   }, [])

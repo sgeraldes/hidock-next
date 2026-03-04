@@ -38,6 +38,8 @@ interface TranscriptState {
   playbackTimeMs: number;
 
   addSegments: (sessionId: string, newSegments: TranscriptSegment[]) => void;
+  /** Replace all segments for a session (used for historical loads and post-rename refreshes). */
+  setSegments: (sessionId: string, segments: TranscriptSegment[]) => void;
   setTopics: (sessionId: string, topics: string[]) => void;
   setActionItems: (
     sessionId: string,
@@ -75,6 +77,13 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
       const existingKeys = new Set(existing.map((s) => `${s.speaker}:${s.text}`));
       const unique = newSegments.filter((s) => !existingKeys.has(`${s.speaker}:${s.text}`));
       map.set(sessionId, [...existing, ...unique]);
+      return { segments: map };
+    }),
+
+  setSegments: (sessionId, segments) =>
+    set((state) => {
+      const map = new Map(state.segments);
+      map.set(sessionId, segments);
       return { segments: map };
     }),
 
@@ -173,12 +182,18 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
       const summaries = new Map(state.summaries);
       const summaryLoading = new Map(state.summaryLoading);
       const interimResult = new Map(state.interimResult);
+      // Remove translation entries for all segments in this session before deleting segments
+      const translations = new Map(state.translations);
+      const sessionSegments = segments.get(sessionId) ?? [];
+      for (const seg of sessionSegments) {
+        translations.delete(seg.id);
+      }
       segments.delete(sessionId);
       topics.delete(sessionId);
       actionItems.delete(sessionId);
       summaries.delete(sessionId);
       summaryLoading.delete(sessionId);
       interimResult.delete(sessionId);
-      return { segments, topics, actionItems, summaries, summaryLoading, interimResult };
+      return { segments, topics, actionItems, summaries, summaryLoading, interimResult, translations };
     }),
 }));

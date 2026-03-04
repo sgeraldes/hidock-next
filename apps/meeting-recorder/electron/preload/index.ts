@@ -94,8 +94,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("transcription:start", sessionId),
     stop: (sessionId: string) =>
       ipcRenderer.invoke("transcription:stop", sessionId),
-    onNewSegments: (callback: (segments: unknown[]) => void) => {
-      const handler = (_: unknown, segments: unknown[]) => callback(segments);
+    onNewSegments: (callback: (data: { sessionId: string; chunkIndex: number; segments: unknown[] }) => void) => {
+      const handler = (_: unknown, data: { sessionId: string; chunkIndex: number; segments: unknown[] }) => callback(data);
       ipcRenderer.on("transcription:newSegments", handler);
       return () =>
         ipcRenderer.removeListener("transcription:newSegments", handler);

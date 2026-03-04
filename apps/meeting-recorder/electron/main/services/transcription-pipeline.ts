@@ -640,6 +640,7 @@ export class TranscriptionPipeline {
     saveDatabase();
 
     broadcastToAllWindows("transcription:newSegments", {
+      sessionId: this.sessionId,
       chunkIndex,
       segments: result.segments,
     });

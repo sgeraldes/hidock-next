@@ -2552,6 +2552,13 @@ async function updateRecordingStorageTierAsync(recordingId, tier) {
     });
   });
 }
+function clearStaleTranscriptionLock() {
+  const database2 = getDatabase();
+  database2.run(
+    `UPDATE transcription_service_lock SET process_id = NULL, acquired_at = NULL, updated_at = ? WHERE id = 1`,
+    [(/* @__PURE__ */ new Date()).toISOString()]
+  );
+}
 function acquireTranscriptionLock(processId) {
   const database2 = getDatabase();
   const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -2598,6 +2605,7 @@ const database = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProp
   clearAllMeetings,
   clearAllSyncedFiles,
   clearChatHistory,
+  clearStaleTranscriptionLock,
   closeDatabase,
   createProject,
   deleteContact,
@@ -4307,6 +4315,7 @@ function startTranscriptionProcessor() {
     console.log("Transcription processor already running");
     return;
   }
+  clearStaleTranscriptionLock();
   console.log("Starting transcription processor");
   processingInterval = setInterval(() => {
     processQueue();
