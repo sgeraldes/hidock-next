@@ -36,6 +36,7 @@ export function useTranscriptionStream(sessionId: string | null) {
             speaker: seg.speaker_name ?? "Unknown",
             text: seg.text,
             timestamp: formatTimestamp(seg.start_ms),
+            startMs: seg.start_ms,
             sentiment: (seg.sentiment ?? "neutral") as "positive" | "negative" | "neutral",
           }));
           addSegments(sessionId, mapped);
@@ -70,6 +71,7 @@ export function useTranscriptionStream(sessionId: string | null) {
           speaker: string;
           text: string;
           sentiment?: string;
+          startMs?: number;
         }>;
       };
       const TIMESLICE_MS = 3000;
@@ -77,7 +79,8 @@ export function useTranscriptionStream(sessionId: string | null) {
         id: `seg-${nextSegmentId++}`,
         speaker: s.speaker,
         text: s.text,
-        timestamp: formatTimestamp(payload.chunkIndex * TIMESLICE_MS),
+        timestamp: formatTimestamp(s.startMs ?? payload.chunkIndex * TIMESLICE_MS),
+        startMs: s.startMs ?? payload.chunkIndex * TIMESLICE_MS,
         sentiment: (s.sentiment ?? "neutral") as
           | "positive"
           | "negative"

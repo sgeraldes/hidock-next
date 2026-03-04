@@ -15,6 +15,11 @@ interface ElectronAPI {
     getTopics: (sessionId: string) => Promise<string[]>;
     getActionItems: (sessionId: string) => Promise<unknown[]>;
     getSummary: (sessionId: string) => Promise<string | null>;
+    renameSpeaker: (
+      sessionId: string,
+      oldName: string,
+      newName: string,
+    ) => Promise<{ success: boolean; count: number }>;
     onCreated: (callback: (session: unknown) => void) => () => void;
     onStatusChanged: (callback: (data: unknown) => void) => () => void;
   };

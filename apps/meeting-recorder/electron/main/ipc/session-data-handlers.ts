@@ -2,6 +2,8 @@ import { ipcMain } from "electron";
 import {
   getTranscriptBySession,
   getSession,
+  renameSpeakerInSession,
+  saveDatabase,
 } from "../services/database";
 import {
   getTalkingPointsBySession,
@@ -56,4 +58,24 @@ export function registerSessionDataHandlers(): void {
       return null;
     }
   });
+
+  // SPEC-003 REQ-4: Rename a speaker in all transcript segments for a session
+  ipcMain.handle(
+    "session:renameSpeaker",
+    async (_, sessionId: string, oldName: string, newName: string) => {
+      try {
+        const count = renameSpeakerInSession(sessionId, oldName, newName);
+        saveDatabase();
+        console.log(
+          `[SessionDataHandlers] Renamed speaker "${oldName}" to "${newName}" in ${count} segments for session ${sessionId}`,
+        );
+        return { success: true, count };
+      } catch (err) {
+        console.error("[SessionDataHandlers] Failed to rename speaker:", err);
+        throw new Error(
+          `Failed to rename speaker: ${err instanceof Error ? err.message : "Unknown error"}`,
+        );
+      }
+    },
+  );
 }

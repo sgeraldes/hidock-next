@@ -78,6 +78,23 @@ export default function Dashboard() {
 
   useTranscriptionStream(viewingSessionId);
 
+  const handleRenameSpeaker = async (oldName: string, newName: string) => {
+    if (!viewingSessionId) return;
+    try {
+      await (window as Record<string, unknown>).electronAPI?.session?.renameSpeaker?.(
+        viewingSessionId,
+        oldName,
+        newName,
+      );
+      // Refresh transcript to show updates
+      const transcript = await window.electronAPI.session.getTranscript(viewingSessionId);
+      // The store will be updated via the historical load in useTranscriptionStream
+      // For immediate update, we could manually update the store here
+    } catch (err) {
+      console.error("Failed to rename speaker:", err);
+    }
+  };
+
   useEffect(() => {
     const cleanupMicStatus = window.electronAPI.audio.onMicStatus(
       (status: { active: boolean }) => {
@@ -235,6 +252,8 @@ export default function Dashboard() {
                   segments={segments}
                   providerConfigured={isProviderConfigured}
                   interimResult={interimResult}
+                  sessionId={viewingSessionId ?? undefined}
+                  onRenameSpeaker={handleRenameSpeaker}
                 />
               </>
             )}

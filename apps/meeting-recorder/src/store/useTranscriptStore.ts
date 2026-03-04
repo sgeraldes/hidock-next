@@ -5,6 +5,7 @@ interface TranscriptSegment {
   speaker: string;
   text: string;
   timestamp: string;
+  startMs: number;
   sentiment: "positive" | "negative" | "neutral";
 }
 
@@ -33,6 +34,8 @@ interface TranscriptState {
   transcriptionError: string | null;
   /** Active interim (partial) result per session, null when no speech in progress (NOT persisted) */
   interimResult: Map<string, InterimResult>;
+  /** Current audio playback position in milliseconds (transient, NOT persisted) */
+  playbackTimeMs: number;
 
   addSegments: (sessionId: string, newSegments: TranscriptSegment[]) => void;
   setTopics: (sessionId: string, topics: string[]) => void;
@@ -49,6 +52,7 @@ interface TranscriptState {
   setInterimResult: (sessionId: string, result: InterimResult) => void;
   clearInterimResult: (sessionId: string) => void;
   getInterimResult: (sessionId: string) => InterimResult | null;
+  setPlaybackTimeMs: (ms: number) => void;
   clearSession: (sessionId: string) => void;
 }
 
@@ -61,6 +65,7 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
   summaryLoading: new Map(),
   transcriptionError: null,
   interimResult: new Map(),
+  playbackTimeMs: 0,
 
   addSegments: (sessionId, newSegments) =>
     set((state) => {
@@ -154,6 +159,8 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
   getInterimResult: (sessionId) => {
     return get().interimResult.get(sessionId) ?? null;
   },
+
+  setPlaybackTimeMs: (ms) => set({ playbackTimeMs: ms }),
 
   clearSession: (sessionId) =>
     set((state) => {

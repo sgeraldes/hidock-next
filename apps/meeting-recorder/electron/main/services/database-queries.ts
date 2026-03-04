@@ -321,3 +321,28 @@ export function getSessionSpeakers(sessionId: string): Speaker[] {
   );
   return mapRows<Speaker>(result, SPEAKER_COLS);
 }
+
+/**
+ * SPEC-003 REQ-4: Rename a speaker in all transcript segments for a session.
+ * Updates the inline speaker_name column in transcript_segments.
+ * Returns the number of segments updated.
+ */
+export function renameSpeakerInSession(
+  sessionId: string,
+  oldName: string,
+  newName: string,
+): number {
+  const database = getDatabase();
+  database.run(
+    "UPDATE transcript_segments SET speaker_name = ? WHERE session_id = ? AND speaker_name = ?",
+    [newName, sessionId, oldName],
+  );
+  // sql.js doesn't return affected rows directly, count manually
+  const result = database.exec(
+    "SELECT COUNT(*) as cnt FROM transcript_segments WHERE session_id = ? AND speaker_name = ?",
+    [sessionId, newName],
+  );
+  return result.length > 0 && result[0].values.length > 0
+    ? (result[0].values[0][0] as number)
+    : 0;
+}

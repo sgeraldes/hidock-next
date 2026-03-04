@@ -1,13 +1,15 @@
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useState } from "react";
 import { Link } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Mic, Settings as SettingsIcon } from "lucide-react";
+import { Mic, Settings as SettingsIcon, Copy, Check } from "lucide-react";
+import { useTranscriptStore } from "../store/useTranscriptStore";
 
 interface TranscriptSegment {
   id: string;
   speaker: string;
   text: string;
   timestamp: string;
+  startMs: number;
   sentiment: "positive" | "negative" | "neutral";
 }
 
@@ -20,6 +22,8 @@ interface TranscriptPanelProps {
     speaker: string;
     timestamp: string;
   } | null;
+  sessionId?: string;
+  onRenameSpeaker?: (oldName: string, newName: string) => void;
 }
 
 const SPEAKER_COLORS = [
@@ -49,9 +53,17 @@ export function TranscriptPanel({
   providerConfigured = true,
   translations,
   interimResult,
+  sessionId,
+  onRenameSpeaker,
 }: TranscriptPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const isAutoScrolling = useRef(true);
+  const [copied, setCopied] = useState(false);
+  const [editingSpeaker, setEditingSpeaker] = useState<string | null>(null);
+  const [speakerRenames, setSpeakerRenames] = useState<Map<string, string>>(new Map());
+  const [activeSegmentIndex, setActiveSegmentIndex] = useState<number>(-1);
+
+  const playbackTimeMs = useTranscriptStore((s) => s.playbackTimeMs);
 
   const speakers = Array.from(new Set(segments.map((s) => s.speaker)));
 
@@ -71,12 +83,80 @@ export function TranscriptPanel({
     }
   }, [totalCount, virtualizer]);
 
+  // Throttled audio-text sync highlighting
+  useEffect(() => {
+    if (playbackTimeMs === 0 || segments.length === 0) {
+      setActiveSegmentIndex(-1);
+      return;
+    }
+
+    // Throttle to 250ms (4 updates/sec)
+    const interval = setInterval(() => {
+      // Binary search for active segment
+      let index = -1;
+      for (let i = 0; i < segments.length; i++) {
+        if (segments[i].startMs <= playbackTimeMs) {
+          index = i;
+        } else {
+          break;
+        }
+      }
+      setActiveSegmentIndex(index);
+    }, 250);
+
+    return () => clearInterval(interval);
+  }, [playbackTimeMs, segments]);
+
   function handleScroll() {
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
     const isAtBottom = scrollHeight - scrollTop - clientHeight < 50;
     isAutoScrolling.current = isAtBottom;
   }
+
+  const handleCopyToClipboard = async () => {
+    const formatted = segments
+      .map((seg) => {
+        const displayName = speakerRenames.get(seg.speaker) || seg.speaker;
+        return `[${seg.timestamp}] ${displayName}: ${seg.text}`;
+      })
+      .join("\n");
+
+    try {
+      await navigator.clipboard.writeText(formatted);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy to clipboard:", err);
+    }
+  };
+
+  const handleSpeakerClick = (speaker: string) => {
+    setEditingSpeaker(speaker);
+  };
+
+  const handleSpeakerRename = (oldName: string, newName: string) => {
+    if (newName.trim() && newName !== oldName) {
+      // Update local renames
+      const newRenames = new Map(speakerRenames);
+      newRenames.set(oldName, newName);
+      setSpeakerRenames(newRenames);
+
+      // Call IPC if available
+      if (onRenameSpeaker && sessionId) {
+        onRenameSpeaker(oldName, newName);
+      }
+    }
+    setEditingSpeaker(null);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, oldName: string) => {
+    if (e.key === "Enter") {
+      handleSpeakerRename(oldName, e.currentTarget.value);
+    } else if (e.key === "Escape") {
+      setEditingSpeaker(null);
+    }
+  };
 
   if (!providerConfigured) {
     return (
@@ -124,18 +204,36 @@ export function TranscriptPanel({
   const virtualItems = virtualizer.getVirtualItems();
 
   return (
-    <div
-      ref={scrollRef}
-      className="flex-1 overflow-y-auto p-4"
-      onScroll={handleScroll}
-    >
+    <div className="flex-1 relative flex flex-col">
+      {/* Copy button - only show when segments exist */}
+      {segments.length > 0 && (
+        <div className="absolute top-2 right-2 z-10">
+          <button
+            onClick={handleCopyToClipboard}
+            title={copied ? "Copied!" : "Copy transcript to clipboard"}
+            className="w-8 h-8 flex items-center justify-center rounded bg-card hover:bg-accent border border-border transition-colors"
+          >
+            {copied ? (
+              <Check className="w-4 h-4 text-green-600" />
+            ) : (
+              <Copy className="w-4 h-4" />
+            )}
+          </button>
+        </div>
+      )}
+
       <div
-        style={{
-          height: `${virtualizer.getTotalSize()}px`,
-          width: "100%",
-          position: "relative",
-        }}
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto p-4"
+        onScroll={handleScroll}
       >
+        <div
+          style={{
+            height: `${virtualizer.getTotalSize()}px`,
+            width: "100%",
+            position: "relative",
+          }}
+        >
         {virtualItems.map((virtualItem) => {
           const isInterimRow = hasInterim && virtualItem.index === segments.length;
           const segment = isInterimRow ? null : segments[virtualItem.index];
@@ -174,6 +272,9 @@ export function TranscriptPanel({
 
           if (!segment) return null;
 
+          const isActive = virtualItem.index === activeSegmentIndex && playbackTimeMs > 0;
+          const displayName = speakerRenames.get(segment.speaker) || segment.speaker;
+
           return (
             <div
               key={virtualItem.key}
@@ -188,17 +289,32 @@ export function TranscriptPanel({
               }}
             >
               <div
-                className={`flex gap-3 p-2 rounded mb-3 ${SENTIMENT_ICONS[segment.sentiment] ?? ""}`}
+                data-active={isActive ? "true" : undefined}
+                className={`flex gap-3 p-2 rounded mb-3 ${SENTIMENT_ICONS[segment.sentiment] ?? ""} ${
+                  isActive ? "bg-primary/10 ring-1 ring-primary/30" : ""
+                }`}
               >
                 <span className="text-xs text-muted-foreground font-mono w-10 shrink-0 pt-0.5">
                   {segment.timestamp}
                 </span>
                 <div className="flex-1">
-                  <span
-                    className={`text-sm font-semibold ${getSpeakerColor(segment.speaker, speakers)}`}
-                  >
-                    {segment.speaker}
-                  </span>
+                  {editingSpeaker === segment.speaker ? (
+                    <input
+                      type="text"
+                      defaultValue={displayName}
+                      autoFocus
+                      onKeyDown={(e) => handleKeyDown(e, segment.speaker)}
+                      onBlur={(e) => handleSpeakerRename(segment.speaker, e.target.value)}
+                      className="text-sm font-semibold bg-background border border-primary rounded px-1 py-0.5 mb-1"
+                    />
+                  ) : (
+                    <span
+                      onClick={() => handleSpeakerClick(segment.speaker)}
+                      className={`text-sm font-semibold cursor-pointer hover:underline ${getSpeakerColor(segment.speaker, speakers)}`}
+                    >
+                      {displayName}
+                    </span>
+                  )}
                   <p className="text-sm text-foreground mt-0.5">
                     {segment.text}
                   </p>
@@ -212,6 +328,7 @@ export function TranscriptPanel({
             </div>
           );
         })}
+        </div>
       </div>
     </div>
   );

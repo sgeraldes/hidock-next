@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("session:getActionItems", sessionId),
     getSummary: (sessionId: string) =>
       ipcRenderer.invoke("session:getSummary", sessionId),
+    renameSpeaker: (sessionId: string, oldName: string, newName: string) =>
+      ipcRenderer.invoke("session:renameSpeaker", sessionId, oldName, newName),
     onCreated: (callback: (session: unknown) => void) => {
       const handler = (_: unknown, session: unknown) => callback(session);
       ipcRenderer.on("session:created", handler);

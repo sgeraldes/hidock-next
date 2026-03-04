@@ -311,6 +311,7 @@ export {
   getSpeakers,
   linkSpeakerToSession,
   getSessionSpeakers,
+  renameSpeakerInSession,
 } from "./database-queries";
 
 export { searchSessions, getRecentTranscriptSegments } from "./database-search";

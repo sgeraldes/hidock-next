@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Play, Pause, SkipBack, SkipForward } from "lucide-react";
+import { useTranscriptStore } from "../store/useTranscriptStore";
 
 interface AudioPlayerProps {
   sessionId: string;
@@ -70,17 +71,28 @@ export function AudioPlayer({ sessionId }: AudioPlayerProps) {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const handleTimeUpdate = () => setCurrentTime(audio.currentTime);
+    const handleTimeUpdate = () => {
+      setCurrentTime(audio.currentTime);
+      // Update store for audio-text sync
+      useTranscriptStore.getState().setPlaybackTimeMs(audio.currentTime * 1000);
+    };
     const handleDurationChange = () => {
       if (isFinite(audio.duration)) {
         setDuration(audio.duration);
       }
     };
-    const handleEnded = () => setIsPlaying(false);
+    const handleEnded = () => {
+      setIsPlaying(false);
+      useTranscriptStore.getState().setPlaybackTimeMs(0);
+    };
+    const handlePause = () => {
+      useTranscriptStore.getState().setPlaybackTimeMs(0);
+    };
 
     audio.addEventListener("timeupdate", handleTimeUpdate);
     audio.addEventListener("durationchange", handleDurationChange);
     audio.addEventListener("ended", handleEnded);
+    audio.addEventListener("pause", handlePause);
 
     // If duration is already available (cached or preloaded), read it now
     if (isFinite(audio.duration) && audio.duration > 0) {
@@ -91,6 +103,9 @@ export function AudioPlayer({ sessionId }: AudioPlayerProps) {
       audio.removeEventListener("timeupdate", handleTimeUpdate);
       audio.removeEventListener("durationchange", handleDurationChange);
       audio.removeEventListener("ended", handleEnded);
+      audio.removeEventListener("pause", handlePause);
+      // Reset on unmount
+      useTranscriptStore.getState().setPlaybackTimeMs(0);
     };
   }, [audioSrc]);
 
