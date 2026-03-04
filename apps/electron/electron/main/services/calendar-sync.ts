@@ -407,6 +407,8 @@ function safeToJSDate(icalTime: ICAL.Time | null | undefined, tzidHint?: string)
 
 export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> {
   console.log('Starting calendar sync...')
+  const { emitActivityLog } = await import('./activity-log')
+  emitActivityLog('info', 'Syncing calendar...', 'Fetching calendar events')
 
   try {
     // Validate URL to prevent SSRF attacks
@@ -461,6 +463,7 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
     }
 
     console.log(`Calendar sync complete: ${meetings.length} meetings`)
+    emitActivityLog('success', 'Calendar sync complete', `Loaded ${meetings.length} meetings`)
 
     return {
       success: true,
@@ -470,6 +473,7 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
   } catch (error) {
     console.error('Calendar sync failed:', error)
     const categorized = categorizeCalendarError(error)
+    emitActivityLog('error', 'Calendar sync failed', categorized.message)
     return {
       success: false,
       meetingsCount: 0,

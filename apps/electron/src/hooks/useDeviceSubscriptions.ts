@@ -131,10 +131,24 @@ export function useDeviceSubscriptions() {
       }, 2000) // spec-007: 2 second debounce
     })
 
-    // Subscribe to activity log
+    // Subscribe to activity log (renderer-side: device service events)
     const unsubActivity = deviceService.onActivity((entry) => {
       addActivityLogEntryRef.current(entry)
     })
+
+    // Subscribe to activity log (main-process bridge: transcription, calendar, download)
+    // These services run in the main process and cannot call deviceService.log() directly.
+    let unsubMainActivity: (() => void) | null = null
+    if (window.electronAPI?.onActivityLogEntry) {
+      unsubMainActivity = window.electronAPI.onActivityLogEntry((entry) => {
+        addActivityLogEntryRef.current({
+          type: entry.type as any,
+          message: entry.message,
+          details: entry.details,
+          timestamp: new Date(entry.timestamp)
+        })
+      })
+    }
 
     return () => {
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Unsubscribing from device state')
@@ -146,6 +160,7 @@ export function useDeviceSubscriptions() {
       unsubStateChange()
       unsubStatusChange()
       unsubActivity()
+      unsubMainActivity?.()
       // SM-001: Do NOT reset deviceSubscriptionsInitialized.current here.
       // StrictMode does mount → cleanup → mount; resetting allows double subscription.
       // When the component truly unmounts and remounts, React creates a NEW ref(false).

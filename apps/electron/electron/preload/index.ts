@@ -458,6 +458,9 @@ export interface ElectronAPI {
 
   // Security Warning Events
   onSecurityWarning: (callback: (data: { type: string; message: string }) => void) => () => void
+
+  // Activity Log bridge — main process services (transcription, calendar, download) emit entries here
+  onActivityLogEntry: (callback: (entry: { type: string; message: string; details?: string; timestamp: string }) => void) => () => void
 }
 
 // Expose the API to the renderer process
@@ -792,6 +795,15 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('security-warning', handler)
     return () => {
       ipcRenderer.removeListener('security-warning', handler)
+    }
+  },
+
+  onActivityLogEntry: (callback) => {
+    const handler = (_event: any, entry: { type: string; message: string; details?: string; timestamp: string }) =>
+      callback(entry)
+    ipcRenderer.on('activity-log:entry', handler)
+    return () => {
+      ipcRenderer.removeListener('activity-log:entry', handler)
     }
   }
 }

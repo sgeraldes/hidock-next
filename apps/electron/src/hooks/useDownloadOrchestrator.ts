@@ -82,6 +82,7 @@ export function useDownloadOrchestrator() {
     if (signal.aborted) return false
 
     addToDownloadQueue(item.filename, item.filename, item.fileSize)
+    deviceService.log('info', 'Starting download', item.filename)
 
     try {
       const chunks: Uint8Array[] = []
@@ -106,6 +107,7 @@ export function useDownloadOrchestrator() {
         console.error(`[useDownloadOrchestrator] Download failed: ${item.filename}`)
         await window.electronAPI.downloadService.markFailed(item.filename, 'USB transfer failed')
         removeFromDownloadQueue(item.filename)
+        deviceService.log('error', 'Download failed', `${item.filename}: USB transfer failed`)
         toast({
           title: 'Download failed',
           description: `Failed to download ${item.filename}`,
@@ -132,8 +134,10 @@ export function useDownloadOrchestrator() {
 
       if (result.success) {
         if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Download completed: ${item.filename}`)
+        deviceService.log('success', 'Download complete', item.filename)
         return true
       } else {
+        deviceService.log('error', 'Download save failed', `${item.filename}: ${result.error}`)
         toast({
           title: 'Save failed',
           description: `Failed to save ${item.filename}: ${result.error}`,
@@ -145,6 +149,7 @@ export function useDownloadOrchestrator() {
       const libraryError = parseError(error, 'download')
       console.error(`[useDownloadOrchestrator] Error: ${item.filename}`, error)
       await window.electronAPI.downloadService.markFailed(item.filename, libraryError.message)
+      deviceService.log('error', 'Download failed', `${item.filename}: ${libraryError.message}`)
       if (!signal.aborted) {
         removeFromDownloadQueue(item.filename)
       }

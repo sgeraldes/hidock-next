@@ -185,6 +185,10 @@ async function processQueue(): Promise<void> {
         updateQueueItem(item.id, 'processing')
         updateQueueProgress(item.id, 0) // spec-014: reset progress
         notifyRenderer('transcription:started', { queueItemId: item.id, recordingId: item.recording_id })
+        const { emitActivityLog } = await import('./activity-log')
+        const recording = getRecordingById(item.recording_id)
+        const filename = recording?.filename ?? item.recording_id
+        emitActivityLog('info', 'Transcribing recording', filename)
 
         // B-TXN-002: Progress ticker that increments during long API calls
         // instead of being stuck at a hardcoded value
@@ -224,6 +228,9 @@ async function processQueue(): Promise<void> {
         updateQueueProgress(item.id, 100) // spec-014: mark complete
         updateQueueItem(item.id, 'completed')
         notifyRenderer('transcription:completed', { queueItemId: item.id, recordingId: item.recording_id })
+        const { emitActivityLog: emitDone } = await import('./activity-log')
+        const recDone = getRecordingById(item.recording_id)
+        emitDone('success', 'Transcription complete', recDone?.filename ?? item.recording_id)
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error'
         console.error('Transcription failed:', errorMessage)
@@ -236,6 +243,9 @@ async function processQueue(): Promise<void> {
           recordingId: item.recording_id,
           error: errorMessage
         })
+        const { emitActivityLog: emitFail } = await import('./activity-log')
+        const recFail = getRecordingById(item.recording_id)
+        emitFail('error', 'Transcription failed', `${recFail?.filename ?? item.recording_id}: ${errorMessage}`)
 
         // B-TXN-003: Use typed property access instead of `as any` cast
         const retryCount = item.retry_count ?? 0

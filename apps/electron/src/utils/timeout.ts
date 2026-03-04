@@ -30,10 +30,21 @@ export async function withTimeout<T>(
       reject(new DOMException(`Operation timed out after ${timeoutMs}ms`, 'AbortError'))
     }, timeoutMs)
 
+    // CRITICAL: clearTimeout BEFORE resolve/reject so the timer is guaranteed
+    // cancelled before the caller receives the result and starts new operations.
+    // Using .then(resolve).finally(clearTimeout) is wrong: the outer promise
+    // resolves first, the caller continues, new USB commands start, and THEN
+    // clearTimeout runs — by which point the 5s timer may have already fired
+    // and aborted those new commands with AbortError.
     promise
-      .then(resolve)
-      .catch(reject)
-      .finally(() => clearTimeout(timer))
+      .then((result) => {
+        clearTimeout(timer)
+        resolve(result)
+      })
+      .catch((error) => {
+        clearTimeout(timer)
+        reject(error)
+      })
   })
 }
 
