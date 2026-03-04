@@ -75,17 +75,23 @@ export function useTranscriptionStream(sessionId: string | null) {
         }>;
       };
       const TIMESLICE_MS = 3000;
-      const mapped = payload.segments.map((s) => ({
+      const chunkOffsetMs = payload.chunkIndex * TIMESLICE_MS;
+      const mapped = payload.segments.map((s) => {
+        // AI-returned startMs is relative to the chunk's audio clip, not the session.
+        // Add the chunk offset to get absolute session time.
+        const absoluteMs = chunkOffsetMs + (s.startMs ?? 0);
+        return {
         id: `seg-${nextSegmentId++}`,
         speaker: s.speaker,
         text: s.text,
-        timestamp: formatTimestamp(s.startMs ?? payload.chunkIndex * TIMESLICE_MS),
-        startMs: s.startMs ?? payload.chunkIndex * TIMESLICE_MS,
+        timestamp: formatTimestamp(absoluteMs),
+        startMs: absoluteMs,
         sentiment: (s.sentiment ?? "neutral") as
           | "positive"
           | "negative"
           | "neutral",
-      }));
+      };
+      });
       addSegments(sessionId, mapped);
     };
 
