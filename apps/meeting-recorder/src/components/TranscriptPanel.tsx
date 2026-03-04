@@ -61,6 +61,12 @@ export function TranscriptPanel({
   const [copied, setCopied] = useState(false);
   const [editingSegmentIndex, setEditingSegmentIndex] = useState<number | null>(null);
   const [speakerRenames, setSpeakerRenames] = useState<Map<string, string>>(new Map());
+
+  // Reset renames and editing when session changes
+  useEffect(() => {
+    setSpeakerRenames(new Map());
+    setEditingSegmentIndex(null);
+  }, [sessionId]);
   const [activeSegmentIndex, setActiveSegmentIndex] = useState<number>(-1);
 
   const playbackTimeMs = useTranscriptStore((s) => s.playbackTimeMs);
