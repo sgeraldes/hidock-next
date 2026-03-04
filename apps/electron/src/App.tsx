@@ -45,24 +45,28 @@ function App(): React.ReactElement {
 
     window.addEventListener('beforeunload', handleBeforeUnload)
 
-    // Cleanup on unmount (renderer reload in dev, or genuine unmount)
+    // Cleanup: runs on React StrictMode double-mount AND on real unmount.
+    // IMPORTANT: Do NOT call disconnect() here.
+    //
+    // App is the top-level component — it never unmounts during normal navigation.
+    // The cleanup runs in two cases:
+    //   1. React StrictMode double-mount (dev): fires almost immediately after
+    //      the effect, while auto-connect's handleConnect() may have already set
+    //      state.connected=true but USB initialization is still in-flight. Calling
+    //      disconnect() here calls releaseInterface(0) which cancels the pending
+    //      transferIn with AbortError, breaking the entire connection sequence.
+    //   2. Real page unload (reload/close): handleBeforeUnload already handles
+    //      USB release via the 'beforeunload' event registered above.
+    //
+    // USB release is handled by:
+    //   - handleBeforeUnload: real page close/reload
+    //   - Device.tsx handleDisconnect: user explicitly clicks Disconnect
     return () => {
-      // Clean up QA monitor event listeners
       cleanupQAMonitor()
-      // Stop device auto-connect
       deviceService.stopAutoConnect()
-      // Reset the init guard so initAutoConnect() runs again on next mount.
-      // In dev mode, the "Restart" button only reloads the renderer — the service
-      // singleton persists. Without this reset, initAutoConnect() is permanently
-      // blocked by its once-per-session guard (BUG-AC-001).
+      // Reset the init guard so initAutoConnect() can run again after renderer reload.
       deviceService.resetInitAutoConnect()
       window.removeEventListener('beforeunload', handleBeforeUnload)
-      // Disconnect to release USB, but preserve auto-connect setting so it
-      // survives the reload (BUG-AC-002: passing preserveAutoConnect prevents
-      // disableAutoConnect() from saving false to config.json).
-      if (deviceService.isConnected()) {
-        deviceService.disconnect({ preserveAutoConnect: true })
-      }
     }
   }, [])
 
