@@ -308,7 +308,8 @@ export function TranscriptPanel({
                       autoFocus
                       onKeyDown={(e) => handleKeyDown(e, segment.speaker)}
                       onBlur={(e) => handleSpeakerRename(segment.speaker, e.target.value)}
-                      className="text-sm font-semibold bg-background border border-primary rounded px-1 py-0.5 mb-1"
+                      className="text-sm font-semibold bg-background text-foreground border-2 border-primary rounded px-2 py-1 mb-1 outline-none ring-2 ring-primary/50 w-40"
+                      onClick={(e) => e.stopPropagation()}
                     />
                   ) : (
                     <span
