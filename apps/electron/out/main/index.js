@@ -3108,6 +3108,8 @@ function safeToJSDate(icalTime, tzidHint) {
 }
 async function syncCalendar(icsUrl) {
   console.log("Starting calendar sync...");
+  const { emitActivityLog } = await Promise.resolve().then(() => require("./chunks/activity-log-D93aD6mA.js"));
+  emitActivityLog("info", "Syncing calendar...", "Fetching calendar events");
   try {
     const validation = validateCalendarUrl(icsUrl);
     if (!validation.valid) {
@@ -3141,6 +3143,7 @@ async function syncCalendar(icsUrl) {
       console.error("Failed to persist sync timestamp:", configError);
     }
     console.log(`Calendar sync complete: ${meetings.length} meetings`);
+    emitActivityLog("success", "Calendar sync complete", `Loaded ${meetings.length} meetings`);
     return {
       success: true,
       meetingsCount: meetings.length,
@@ -3149,6 +3152,7 @@ async function syncCalendar(icsUrl) {
   } catch (error2) {
     console.error("Calendar sync failed:", error2);
     const categorized = categorizeCalendarError(error2);
+    emitActivityLog("error", "Calendar sync failed", categorized.message);
     return {
       success: false,
       meetingsCount: 0,
@@ -4414,6 +4418,10 @@ async function processQueue() {
         updateQueueItem(item.id, "processing");
         updateQueueProgress(item.id, 0);
         notifyRenderer("transcription:started", { queueItemId: item.id, recordingId: item.recording_id });
+        const { emitActivityLog } = await Promise.resolve().then(() => require("./chunks/activity-log-D93aD6mA.js"));
+        const recording = getRecordingById(item.recording_id);
+        const filename = recording?.filename ?? item.recording_id;
+        emitActivityLog("info", "Transcribing recording", filename);
         let tickerProgress = 0;
         const progressTicker = setInterval(() => {
           if (tickerProgress < 90) {
@@ -4445,6 +4453,9 @@ async function processQueue() {
         updateQueueProgress(item.id, 100);
         updateQueueItem(item.id, "completed");
         notifyRenderer("transcription:completed", { queueItemId: item.id, recordingId: item.recording_id });
+        const { emitActivityLog: emitDone } = await Promise.resolve().then(() => require("./chunks/activity-log-D93aD6mA.js"));
+        const recDone = getRecordingById(item.recording_id);
+        emitDone("success", "Transcription complete", recDone?.filename ?? item.recording_id);
       } catch (error2) {
         const errorMessage = error2 instanceof Error ? error2.message : "Unknown error";
         console.error("Transcription failed:", errorMessage);
@@ -4455,6 +4466,9 @@ async function processQueue() {
           recordingId: item.recording_id,
           error: errorMessage
         });
+        const { emitActivityLog: emitFail } = await Promise.resolve().then(() => require("./chunks/activity-log-D93aD6mA.js"));
+        const recFail = getRecordingById(item.recording_id);
+        emitFail("error", "Transcription failed", `${recFail?.filename ?? item.recording_id}: ${errorMessage}`);
         const retryCount = item.retry_count ?? 0;
         if (retryCount >= MAX_RETRY_ATTEMPTS) {
           console.log(`Recording ${item.recording_id} failed after ${retryCount} retries (max: ${MAX_RETRY_ATTEMPTS})`);

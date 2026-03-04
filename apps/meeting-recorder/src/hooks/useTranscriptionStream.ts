@@ -67,8 +67,10 @@ export function useTranscriptionStream(sessionId: string | null) {
     const handleSegments = (data: unknown) => {
       // SPEC-005: Guard — discard events that belong to a different session.
       // Matches the pattern already used by handleTopics and handleActions.
+      // When sessionId is absent from the payload (pre-SPEC-005 main process), accept it
+      // rather than silently discarding — absent is not the same as "wrong session".
       const payload = data as {
-        sessionId: string;
+        sessionId?: string;
         chunkIndex: number;
         segments: Array<{
           speaker: string;
@@ -77,7 +79,7 @@ export function useTranscriptionStream(sessionId: string | null) {
           startMs?: number;
         }>;
       };
-      if (payload.sessionId !== sessionId) return;
+      if (payload.sessionId !== undefined && payload.sessionId !== sessionId) return;
 
       const TIMESLICE_MS = 3000;
       const chunkOffsetMs = payload.chunkIndex * TIMESLICE_MS;

@@ -329,6 +329,13 @@ const electronAPI = {
     return () => {
       electron.ipcRenderer.removeListener("security-warning", handler);
     };
+  },
+  onActivityLogEntry: (callback) => {
+    const handler = (_event, entry) => callback(entry);
+    electron.ipcRenderer.on("activity-log:entry", handler);
+    return () => {
+      electron.ipcRenderer.removeListener("activity-log:entry", handler);
+    };
   }
 };
 electron.contextBridge.exposeInMainWorld("electronAPI", electronAPI);

@@ -563,6 +563,19 @@ export class JensenDevice {
       await device.selectAlternateInterface(0, 0)
       if (shouldLogProtocol()) console.log('connect: Interface claimed successfully')
 
+      // Clear USB endpoint halts to reset any stale state from a previous session.
+      // Without this, the IN endpoint (0x82) may have a pending transferIn from
+      // a previous aborted command, causing getDeviceInfo to hang forever waiting
+      // for a response that never comes.
+      try {
+        await device.clearHalt('out', 1)
+        await device.clearHalt('in', 2)
+        if (shouldLogProtocol()) console.log('connect: Endpoint halts cleared')
+      } catch (haltError) {
+        // clearHalt may fail if endpoints are not halted — that's fine, continue
+        if (shouldLogProtocol()) console.log('connect: clearHalt skipped (endpoints not halted):', haltError)
+      }
+
       // Check abort after interface claim
       if (signal?.aborted) {
         await device.close()
@@ -705,6 +718,14 @@ export class JensenDevice {
       await device.selectConfiguration(1)
       await device.claimInterface(0)
       await device.selectAlternateInterface(0, 0)
+
+      // Clear endpoint halts (same as connect() above)
+      try {
+        await device.clearHalt('out', 1)
+        await device.clearHalt('in', 2)
+      } catch {
+        // Not halted — fine
+      }
 
       this.device = device
 
