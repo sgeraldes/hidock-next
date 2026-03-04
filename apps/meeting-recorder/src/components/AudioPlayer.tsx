@@ -6,6 +6,7 @@ interface AudioPlayerProps {
 }
 
 function formatTime(seconds: number): string {
+  if (!isFinite(seconds) || isNaN(seconds) || seconds < 0) return "0:00";
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, "0")}`;
@@ -70,19 +71,28 @@ export function AudioPlayer({ sessionId }: AudioPlayerProps) {
     if (!audio) return;
 
     const handleTimeUpdate = () => setCurrentTime(audio.currentTime);
-    const handleDurationChange = () => setDuration(audio.duration);
+    const handleDurationChange = () => {
+      if (isFinite(audio.duration)) {
+        setDuration(audio.duration);
+      }
+    };
     const handleEnded = () => setIsPlaying(false);
 
     audio.addEventListener("timeupdate", handleTimeUpdate);
     audio.addEventListener("durationchange", handleDurationChange);
     audio.addEventListener("ended", handleEnded);
 
+    // If duration is already available (cached or preloaded), read it now
+    if (isFinite(audio.duration) && audio.duration > 0) {
+      setDuration(audio.duration);
+    }
+
     return () => {
       audio.removeEventListener("timeupdate", handleTimeUpdate);
       audio.removeEventListener("durationchange", handleDurationChange);
       audio.removeEventListener("ended", handleEnded);
     };
-  }, []);
+  }, [audioSrc]);
 
   const togglePlay = async () => {
     if (!audioRef.current) return;
@@ -91,8 +101,12 @@ export function AudioPlayer({ sessionId }: AudioPlayerProps) {
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      await audioRef.current.play();
-      setIsPlaying(true);
+      try {
+        await audioRef.current.play();
+        setIsPlaying(true);
+      } catch (err) {
+        console.error("[AudioPlayer] Play failed:", err);
+      }
     }
   };
 

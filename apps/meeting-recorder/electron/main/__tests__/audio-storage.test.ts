@@ -117,32 +117,17 @@ describe("AudioStorage", () => {
     });
   });
 
-  describe("pruneOldChunks", () => {
-    it("deletes oldest chunks when exceeding 50 files (skips chunk-000 header)", () => {
-      const chunks = Array.from({ length: 52 }, (_, i) =>
+  describe("REQ-10: no chunk pruning during recording", () => {
+    it("does NOT delete chunks even when exceeding 50 files", () => {
+      const chunks = Array.from({ length: 60 }, (_, i) =>
         `chunk-${String(i).padStart(3, "0")}.ogg`,
       );
       mockExistsSync.mockReturnValue(true);
       mockReaddirSync.mockReturnValue(chunks);
 
-      storage.saveChunk(VALID_UUID, 52, Buffer.from([1]));
+      storage.saveChunk(VALID_UUID, 60, Buffer.from([1]));
 
-      // chunk-000 is protected (contains WebM header), so only chunk-001 is deleted
-      expect(mockUnlinkSync).toHaveBeenCalledTimes(1);
-      expect(mockUnlinkSync).toHaveBeenCalledWith(
-        expect.stringContaining("chunk-001.ogg"),
-      );
-    });
-
-    it("does not delete when at or below 50 files", () => {
-      const chunks = Array.from({ length: 50 }, (_, i) =>
-        `chunk-${String(i).padStart(3, "0")}.ogg`,
-      );
-      mockExistsSync.mockReturnValue(true);
-      mockReaddirSync.mockReturnValue(chunks);
-
-      storage.saveChunk(VALID_UUID, 50, Buffer.from([1]));
-
+      // REQ-10: No pruning during recording — all chunks must survive until concatenation
       expect(mockUnlinkSync).not.toHaveBeenCalled();
     });
   });

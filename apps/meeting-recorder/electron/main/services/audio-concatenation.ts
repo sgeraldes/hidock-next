@@ -80,6 +80,18 @@ export class AudioConcatenation {
       console.log(
         `[AudioConcatenation] Re-muxed recording.webm with duration metadata for session ${sessionId}`,
       );
+
+      // REQ-9: Clean up chunk files after successful concatenation
+      for (const chunkFile of chunkFiles) {
+        const chunkPath = join(sessionDir, chunkFile);
+        try {
+          unlinkSync(chunkPath);
+        } catch (delErr) {
+          console.warn(`[AudioConcatenation] Failed to delete chunk ${chunkFile}: ${delErr}`);
+        }
+      }
+      console.log(`[AudioConcatenation] Deleted ${chunkFiles.length} chunk files for session ${sessionId}`);
+
       return outputPath;
     } catch (err) {
       console.error(`[AudioConcatenation] Failed to concatenate session ${sessionId}:`, err);

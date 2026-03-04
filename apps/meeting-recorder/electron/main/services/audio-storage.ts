@@ -4,11 +4,8 @@ import {
   mkdirSync,
   readdirSync,
   writeFileSync,
-  unlinkSync,
 } from "fs";
 import { join } from "path";
-
-const MAX_CHUNK_FILES = 50;
 
 export class AudioStorage {
   private baseDir: string;
@@ -41,7 +38,7 @@ export class AudioStorage {
     const filename = `chunk-${paddedIndex}.ogg`;
     const filePath = join(this.getSessionDir(sessionId), filename);
     writeFileSync(filePath, data);
-    this.pruneOldChunks(sessionId);
+    // REQ-10: No pruning during recording — chunks must survive until concatenation
     return filePath;
   }
 
@@ -52,21 +49,6 @@ export class AudioStorage {
     return files
       .filter((f) => f.startsWith("chunk-") && f.endsWith(".ogg"))
       .sort();
-  }
-
-  private pruneOldChunks(sessionId: string): void {
-    const chunks = this.getChunkFiles(sessionId);
-    if (chunks.length <= MAX_CHUNK_FILES) return;
-    const dir = this.getSessionDir(sessionId);
-    const toRemove = chunks.slice(0, chunks.length - MAX_CHUNK_FILES);
-    for (const filename of toRemove) {
-      // NEVER prune chunk-000 — it contains the WebM EBML header + Segment + Tracks.
-      // Without it, binary concatenation produces an invalid file that can't be parsed.
-      if (filename === "chunk-000.ogg") continue;
-      try {
-        unlinkSync(join(dir, filename));
-      } catch {}
-    }
   }
 
   getRecordingPath(sessionId: string, filename: string): string {
