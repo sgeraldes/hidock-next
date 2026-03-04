@@ -633,7 +633,13 @@ export class JensenDevice {
       // Set up USB disconnect listener for instant detection
       this.setupUsbDisconnectListener()
 
-      this.onconnect?.()
+      // Defer onconnect until after connect() returns to the caller.
+      // Firing synchronously here means handleConnect() starts USB commands
+      // while the outer withTimeout() controller is still active. If that
+      // controller aborts (the 5s timeout), it cancels in-flight transferOut
+      // calls causing AbortError, then InvalidStateError on every subsequent
+      // command as the USB device is left in a bad state.
+      setTimeout(() => this.onconnect?.(), 0)
       return true
     } catch (error) {
       // Ensure device is closed on abort or error
@@ -739,7 +745,8 @@ export class JensenDevice {
       // Set up USB disconnect listener for instant detection
       this.setupUsbDisconnectListener()
 
-      this.onconnect?.()
+      // Same deferred-callback fix as the user-initiated connect above.
+      setTimeout(() => this.onconnect?.(), 0)
       return true
     } catch {
       return false

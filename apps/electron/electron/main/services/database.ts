@@ -3114,6 +3114,20 @@ export async function updateRecordingStorageTierAsync(
 // =============================================================================
 
 /**
+ * Clear any stale transcription lock left by a previous app instance.
+ * Must be called once on startup before the transcription processor starts.
+ * The lock is per-process-run (process_id includes Date.now()), so any lock
+ * present at startup is guaranteed stale — the process that held it is dead.
+ */
+export function clearStaleTranscriptionLock(): void {
+  const database = getDatabase()
+  database.run(
+    `UPDATE transcription_service_lock SET process_id = NULL, acquired_at = NULL, updated_at = ? WHERE id = 1`,
+    [new Date().toISOString()]
+  )
+}
+
+/**
  * Atomically acquire the transcription service lock.
  * Uses a database transaction to ensure only one process can acquire the lock.
  * @param processId Unique process identifier

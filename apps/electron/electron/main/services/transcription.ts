@@ -23,6 +23,7 @@ import {
   queryOne,
   acquireTranscriptionLock,
   releaseTranscriptionLock,
+  clearStaleTranscriptionLock,
   type Transcript
 } from './database'
 import { BrowserWindow } from 'electron'
@@ -41,6 +42,11 @@ export function startTranscriptionProcessor(): void {
     console.log('Transcription processor already running')
     return
   }
+
+  // Clear any lock left by a previous app instance that crashed or was killed
+  // before releasing it. The lock is identified by a unique process+timestamp ID,
+  // so any lock present at startup belongs to a dead process.
+  clearStaleTranscriptionLock()
 
   console.log('Starting transcription processor')
 
