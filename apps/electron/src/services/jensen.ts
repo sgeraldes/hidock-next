@@ -652,7 +652,7 @@ export class JensenDevice {
       // controller aborts (the 5s timeout), it cancels in-flight transferOut
       // calls causing AbortError, then InvalidStateError on every subsequent
       // command as the USB device is left in a bad state.
-      setTimeout(() => this.onconnect?.(), 0)
+      setTimeout(() => this.onconnect?.(), 300)  // 300ms: device firmware stabilization window
       return true
     } catch (error) {
       // Ensure device is closed on abort or error
@@ -767,7 +767,7 @@ export class JensenDevice {
       this.setupUsbDisconnectListener()
 
       // Same deferred-callback fix as the user-initiated connect above.
-      setTimeout(() => this.onconnect?.(), 0)
+      setTimeout(() => this.onconnect?.(), 300)  // 300ms: device firmware stabilization window
       return true
     } catch {
       return false

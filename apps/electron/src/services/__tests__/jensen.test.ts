@@ -410,10 +410,9 @@ describe('JensenDevice', () => {
       device.onconnect = onconnectSpy
 
       await device.connect()
-      // onconnect is deferred via setTimeout(0) so the USB connection setup
-      // is fully complete before handleConnect() starts sending commands.
-      // Flush the deferred callback before asserting.
-      await new Promise(resolve => setTimeout(resolve, 0))
+      // onconnect is deferred via setTimeout(300) to give the device firmware
+      // time to stabilize after USB interface is claimed before sending commands.
+      await new Promise(resolve => setTimeout(resolve, 350))
       expect(onconnectSpy).toHaveBeenCalledTimes(1)
     })
 
