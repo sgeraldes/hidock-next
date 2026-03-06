@@ -32,6 +32,7 @@ import { getVectorStore } from './vector-store'
 let mainWindow: BrowserWindow | null = null
 let isProcessing = false
 let processingInterval: ReturnType<typeof setInterval> | null = null
+let lastSkipLogAt = 0 // Throttle "skipping" spam to once per 60s
 
 export function setMainWindowForTranscription(win: BrowserWindow): void {
   mainWindow = win
@@ -94,7 +95,12 @@ async function processQueue(): Promise<void> {
   const processId = `proc_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`
   const lockAcquired = acquireTranscriptionLock(processId)
   if (!lockAcquired) {
-    console.log('[Transcription] Another process is already processing the queue, skipping')
+    // Throttle to once per 60s — this fires every 10s during active transcription, which is expected
+    const now = Date.now()
+    if (now - lastSkipLogAt > 60000) {
+      console.log('[Transcription] Another process is already processing the queue, skipping')
+      lastSkipLogAt = now
+    }
     return
   }
 
