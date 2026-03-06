@@ -92,7 +92,6 @@ describe('AudioRecorder', () => {
   let recorder: AudioRecorder
 
   beforeEach(() => {
-    recorder = new AudioRecorder()
     vi.clearAllMocks()
     mockGetUserMedia.mockResolvedValue({
       getTracks: () => [{ stop: vi.fn() }],
@@ -115,6 +114,7 @@ describe('AudioRecorder', () => {
     })
     mockOnDataAvailable = null
     lastMediaRecorderInstance = null
+    recorder = new AudioRecorder()
   })
 
   describe('startRecording', () => {
