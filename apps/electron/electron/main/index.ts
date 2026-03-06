@@ -21,7 +21,7 @@ import { initializeDatabase, closeDatabase } from './services/database'
 import { initializeConfig } from './services/config'
 import { initializeFileStorage } from './services/file-storage'
 import { registerIpcHandlers } from './ipc/handlers'
-import { stopAutoSync } from './ipc/calendar-handlers'
+import { stopAutoSync, initializeCalendarAutoSync } from './ipc/calendar-handlers'
 import {
   startRecordingWatcher,
   stopRecordingWatcher,
@@ -163,6 +163,9 @@ async function initializeServices(): Promise<void> {
 
   registerIpcHandlers()
   console.log('IPC handlers registered')
+
+  // CS-010: Initialize calendar auto-sync after IPC handlers and DB are ready
+  initializeCalendarAutoSync()
 
   updateSplashStatus('Starting application...', 100)
 }

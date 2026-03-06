@@ -1,6 +1,25 @@
-import { app } from 'electron'
+import { app, safeStorage } from 'electron'
 import { join } from 'path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+
+// CS-007: Encrypt sensitive config values (ICS URL) at rest using Electron safeStorage
+function encryptSensitive(value: string): string {
+  try {
+    if (safeStorage.isEncryptionAvailable() && value) {
+      return '__enc__' + safeStorage.encryptString(value).toString('base64')
+    }
+  } catch { /* fall through to plaintext */ }
+  return value
+}
+
+function decryptSensitive(value: string): string {
+  try {
+    if (value.startsWith('__enc__') && safeStorage.isEncryptionAvailable()) {
+      return safeStorage.decryptString(Buffer.from(value.slice(7), 'base64'))
+    }
+  } catch { /* fall through to return as-is */ }
+  return value
+}
 
 export interface AppConfig {
   version: string
@@ -111,6 +130,10 @@ export async function initializeConfig(): Promise<void> {
     if (existsSync(configPath)) {
       const fileContent = readFileSync(configPath, 'utf-8')
       const savedConfig = JSON.parse(fileContent)
+      // CS-007: Decrypt sensitive fields before loading into memory
+      if (savedConfig.calendar?.icsUrl) {
+        savedConfig.calendar.icsUrl = decryptSensitive(savedConfig.calendar.icsUrl)
+      }
       // Merge with defaults to handle new fields
       config = deepMerge(DEFAULT_CONFIG, savedConfig)
     } else {
@@ -137,7 +160,15 @@ export async function saveConfig(newConfig: Partial<AppConfig>): Promise<void> {
     mkdirSync(configDir, { recursive: true })
   }
 
-  writeFileSync(configPath, JSON.stringify(config, null, 2))
+  // CS-007: Encrypt sensitive fields before writing to disk
+  const toWrite = {
+    ...config,
+    calendar: {
+      ...config.calendar,
+      icsUrl: encryptSensitive(config.calendar.icsUrl)
+    }
+  }
+  writeFileSync(configPath, JSON.stringify(toWrite, null, 2))
 }
 
 export async function updateConfig<K extends keyof AppConfig>(

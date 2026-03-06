@@ -439,10 +439,8 @@ export function Calendar() {
         toast.error('Calendar sync failed', result.error || 'Unknown error occurred')
       } else if (result && result.success) {
         // CA-03 FIX: Update lastSync state after successful sync
-        // B-CAL-001: Use named action instead of raw setState
-        if (result.lastSync) {
-          setLastCalendarSync(result.lastSync)
-        }
+        // CS-002: Always update — don't guard on result.lastSync which may be absent
+        setLastCalendarSync(result.lastSync ?? new Date().toISOString())
         toast.success(`Calendar synced successfully: ${result.meetingsCount || 0} meetings`)
       }
       // Reload meetings for current view

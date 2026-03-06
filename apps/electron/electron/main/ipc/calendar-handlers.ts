@@ -141,7 +141,14 @@ export function registerCalendarHandlers(): void {
     return getConfig().calendar
   })
 
-  // Initialize auto-sync if enabled
+}
+
+/**
+ * CS-010: Initialize calendar auto-sync after DB is ready.
+ * Must be called explicitly from index.ts after initializeDatabase(),
+ * NOT as a side-effect of registerCalendarHandlers().
+ */
+export function initializeCalendarAutoSync(): void {
   const config = getConfig()
   if (config.calendar.syncEnabled && config.calendar.icsUrl) {
     startAutoSync()

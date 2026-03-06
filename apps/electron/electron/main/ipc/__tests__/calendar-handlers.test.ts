@@ -337,6 +337,9 @@ describe('Calendar IPC Handlers', () => {
         return undefined as any
       })
       registerCalendarHandlers()
+      // CS-010: auto-sync is now initialized explicitly via initializeCalendarAutoSync()
+      const { initializeCalendarAutoSync } = await import('../calendar-handlers')
+      initializeCalendarAutoSync()
 
       // syncCalendar is called immediately on start when auto-sync is enabled
       // Need to flush the microtask queue
