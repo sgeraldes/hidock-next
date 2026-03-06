@@ -90,12 +90,26 @@ export function useAudioCapture(sessionId: string): AudioCaptureResult {
       const msg = err instanceof Error ? err.message : String(err);
       const errName = err instanceof DOMException ? err.name : "";
       setError(msg);
-      // Show user-facing notification for recording start errors (AUD-002)
-      // Check for NotAllowedError (permission denied) or fallback to string matching
-      if (errName === "NotAllowedError" || msg.includes("permission")) {
+
+      if (msg.includes("System audio capture failed")) {
+        const inner = msg.replace("System audio capture failed: ", "");
+        if (inner.includes("NotAllowed") || inner.includes("Permission") || inner.includes("denied")) {
+          showNotification(
+            "error",
+            "Screen recording permission denied. Grant permission in System Settings → Privacy → Screen Recording, then restart the app.",
+            10000,
+          );
+        } else {
+          showNotification(
+            "error",
+            "System audio capture is unavailable. This app requires system audio to record all meeting participants.",
+            10000,
+          );
+        }
+      } else if (errName === "NotAllowedError" || msg.includes("permission")) {
         showNotification(
           "error",
-          "Microphone permission denied. Please enable microphone access in your browser settings.",
+          "Microphone permission denied. Please enable microphone access and try again.",
           7000,
         );
       } else if (errName === "NotFoundError") {
