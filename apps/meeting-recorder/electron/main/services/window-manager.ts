@@ -31,29 +31,26 @@ export function createMainWindow(): BrowserWindow {
     mainWindow = null;
   });
 
-  // SPEC-008: Intercept getDisplayMedia() to provide system audio loopback.
-  // On Windows: audio: 'loopback' = WASAPI loopback (all system audio, automatic, no dialog).
-  // On macOS/Linux: audio: source = system audio via picker (user grants permission once).
-  (win.webContents.session as unknown as {
-    setDisplayMediaRequestHandler: (
-      handler: (
-        _request: unknown,
-        callback: (response: { video?: unknown; audio?: unknown }) => void,
-      ) => void,
-    ) => void;
-  }).setDisplayMediaRequestHandler((_request, callback) => {
-    desktopCapturer.getSources({ types: ["screen"] }).then((sources) => {
-      if (sources.length === 0) {
-        callback({});
-        return;
-      }
-      const audioConfig =
-        process.platform === "win32" ? "loopback" : sources[0];
-      callback({ video: sources[0], audio: audioConfig as "loopback" });
-    }).catch(() => {
-      callback({});
-    });
-  });
+  // SPEC-008: System audio loopback via WASAPI (Windows only).
+  // On Windows: intercept getDisplayMedia() to provide automatic loopback audio.
+  // On macOS/Linux: do NOT register a handler — let the OS picker show so the user
+  // can enable "Share audio" (macOS) or PipeWire audio capture (Linux) themselves.
+  if (process.platform === "win32") {
+    win.webContents.session.setDisplayMediaRequestHandler(
+      (_request, callback) => {
+        desktopCapturer.getSources({ types: ["screen"] }).then((sources) => {
+          if (sources.length === 0) {
+            callback({});
+            return;
+          }
+          callback({ video: sources[0], audio: "loopback" });
+        }).catch((err) => {
+          console.warn("[window-manager] desktopCapturer.getSources failed:", err);
+          callback({});
+        });
+      },
+    );
+  }
 
   if (is.dev && process.env["ELECTRON_RENDERER_URL"]) {
     win.loadURL(process.env["ELECTRON_RENDERER_URL"]);
