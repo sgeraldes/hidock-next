@@ -1,4 +1,4 @@
-import { BrowserWindow, screen } from "electron";
+import { BrowserWindow, desktopCapturer, screen } from "electron";
 import { join } from "path";
 import { is } from "@electron-toolkit/utils";
 
@@ -29,6 +29,30 @@ export function createMainWindow(): BrowserWindow {
 
   win.on("closed", () => {
     mainWindow = null;
+  });
+
+  // SPEC-008: Intercept getDisplayMedia() to provide system audio loopback.
+  // On Windows: audio: 'loopback' = WASAPI loopback (all system audio, automatic, no dialog).
+  // On macOS/Linux: audio: source = system audio via picker (user grants permission once).
+  (win.webContents.session as unknown as {
+    setDisplayMediaRequestHandler: (
+      handler: (
+        _request: unknown,
+        callback: (response: { video?: unknown; audio?: unknown }) => void,
+      ) => void,
+    ) => void;
+  }).setDisplayMediaRequestHandler((_request, callback) => {
+    desktopCapturer.getSources({ types: ["screen"] }).then((sources) => {
+      if (sources.length === 0) {
+        callback({});
+        return;
+      }
+      const audioConfig =
+        process.platform === "win32" ? "loopback" : sources[0];
+      callback({ video: sources[0], audio: audioConfig as "loopback" });
+    }).catch(() => {
+      callback({});
+    });
   });
 
   if (is.dev && process.env["ELECTRON_RENDERER_URL"]) {
