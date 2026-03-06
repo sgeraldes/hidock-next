@@ -312,6 +312,15 @@ describe('AudioRecorder', () => {
       await expect(recorder.startRecording()).rejects.toThrow('System audio capture failed')
     })
 
+    it('throws if getDisplayMedia returns a stream with no audio tracks', async () => {
+      mockGetDisplayMedia.mockResolvedValueOnce({
+        getTracks: () => [],
+        getVideoTracks: () => [],
+        getAudioTracks: () => [],  // zero audio tracks
+      })
+      await expect(recorder.startRecording()).rejects.toThrow('System audio capture failed')
+    })
+
     it('stops mic tracks when getDisplayMedia fails', async () => {
       const micTrackStop = vi.fn()
       mockGetUserMedia.mockResolvedValueOnce({

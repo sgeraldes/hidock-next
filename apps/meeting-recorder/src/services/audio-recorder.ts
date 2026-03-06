@@ -94,6 +94,13 @@ export class AudioRecorder {
     // Video is only needed to satisfy the API; discard it immediately.
     displayStream.getVideoTracks().forEach((t) => t.stop());
 
+    // Verify system audio was actually captured — the main process handler may have
+    // returned an empty stream if no screen sources were available.
+    if (displayStream.getAudioTracks().length === 0) {
+      micStream.getTracks().forEach((t) => t.stop());
+      throw new Error("System audio capture failed: No audio tracks in display stream");
+    }
+
     if (this.disposed) {
       console.warn('[AudioRecorder] Disposed during getDisplayMedia, releasing streams');
       micStream.getTracks().forEach((t) => t.stop());
