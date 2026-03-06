@@ -16,14 +16,18 @@ import {
   CheckCircle2,
   Loader2,
   XCircle,
-  RotateCcw
+  RotateCcw,
+  Terminal,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
   useAppStore,
   useLastCalendarSync,
   useDeviceState,
-  useConnectionStatus
+  useConnectionStatus,
+  useActivityLog
 } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 
@@ -90,6 +94,23 @@ export function Layout({ children }: LayoutProps) {
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const qaLogsEnabled = useUIStore((s) => s.qaLogsEnabled)
   const setQaLogsEnabled = useUIStore((s) => s.setQaLogsEnabled)
+
+  // AL-001: Global activity log — visible from all pages
+  const activityLog = useActivityLog()
+  const [logExpanded, setLogExpanded] = useState(false)
+  const logContainerRef = useRef<HTMLDivElement>(null)
+  const hasErrors = activityLog.some(e => e.type === 'error' || e.type === 'warning')
+
+  // AL-004: Auto-scroll when expanded or new entries arrive
+  useEffect(() => {
+    if (logExpanded && activityLog.length > 0 && logContainerRef.current) {
+      requestAnimationFrame(() => {
+        if (logContainerRef.current) {
+          logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
+        }
+      })
+    }
+  }, [activityLog.length, logExpanded])
 
   // Track previous state for toast notifications
   const prevConnectedRef = useRef<boolean | null>(null)
@@ -311,6 +332,75 @@ export function Layout({ children }: LayoutProps) {
 
         {/* Operations Panel - Downloads + Transcriptions */}
         <OperationsPanel sidebarOpen={sidebarOpen} />
+
+        {/* AL-001: Global Activity Log — accessible from all pages */}
+        <div className="border-t border-slate-700">
+          {sidebarOpen ? (
+            <div>
+              <button
+                className="flex w-full items-center justify-between px-3 py-2 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
+                onClick={() => setLogExpanded(p => !p)}
+              >
+                <span className="flex items-center gap-1.5">
+                  <Terminal className="h-3.5 w-3.5" />
+                  Activity Log
+                  {activityLog.length > 0 && (
+                    <span className={cn(
+                      'text-[10px] px-1 rounded',
+                      hasErrors ? 'bg-red-900/50 text-red-400' : 'bg-slate-700 text-slate-400'
+                    )}>
+                      {activityLog.length}
+                    </span>
+                  )}
+                </span>
+                <span className="flex items-center gap-1">
+                  <span
+                    className="text-[10px] hover:text-slate-300"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      useAppStore.getState().clearActivityLog?.()
+                    }}
+                    title="Clear log"
+                  >Clear</span>
+                  {logExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
+                </span>
+              </button>
+              {logExpanded && (
+                <div
+                  ref={logContainerRef}
+                  className="max-h-40 overflow-y-auto bg-slate-950 px-2 py-1 font-mono"
+                >
+                  {activityLog.length === 0 ? (
+                    <p className="text-[10px] text-slate-600 py-1">No activity</p>
+                  ) : (
+                    activityLog.map((entry, i) => (
+                      <div key={`${entry.timestamp.getTime()}-${i}`}
+                        className={cn(
+                          'text-[10px] leading-4 py-0.5',
+                          entry.type === 'error' ? 'text-red-400'
+                          : entry.type === 'success' ? 'text-green-400'
+                          : entry.type === 'warning' ? 'text-amber-400'
+                          : entry.type === 'usb-out' ? 'text-blue-400'
+                          : entry.type === 'usb-in' ? 'text-purple-400'
+                          : 'text-slate-400'
+                        )}>
+                        <span className="text-slate-600 mr-1">
+                          {entry.timestamp.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                        </span>
+                        {entry.message}
+                        {entry.details && <span className="text-slate-600 ml-1">— {entry.details}</span>}
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          ) : hasErrors ? (
+            <div className="flex justify-center py-2" title="Activity log has errors or warnings">
+              <Terminal className="h-4 w-4 text-amber-400" />
+            </div>
+          ) : null}
+        </div>
 
         {/* Dev Tools */}
         {isDevMode && (

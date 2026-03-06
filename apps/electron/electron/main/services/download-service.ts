@@ -509,6 +509,7 @@ class DownloadService {
     item.status = 'cancelled'
     item.error = 'Cancelled by user'
     this.persistQueueItem(item) // spec-007: persist cancellation
+    emitActivityLog('info', `Download cancelled: ${filename}`)
     console.log(`[DownloadService] Cancelled download: ${filename}`)
     this.markDirty()
     this.emitStateUpdate(true) // C-004: immediate emit for cancellation
@@ -565,6 +566,7 @@ class DownloadService {
       item.status = 'failed'
       item.error = error
       this.persistQueueItem(item) // spec-007: persist failure
+      emitActivityLog('error', `Download failed: ${filename}`, error)
 
       if (this.state.currentSession) {
         this.state.currentSession.failedFiles++
@@ -824,6 +826,7 @@ class DownloadService {
             this.persistQueueItem(item)
           }
         })
+        emitActivityLog('info', 'All downloads cancelled', `${itemsToCancel.length} items`)
       }
 
       if (this.state.currentSession) {
