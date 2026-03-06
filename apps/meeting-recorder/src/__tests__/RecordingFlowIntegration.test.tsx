@@ -87,6 +87,13 @@ const mockGetUserMedia = vi.fn().mockResolvedValue({
   getTracks: () => [{ stop: vi.fn() }],
 } as unknown as MediaStream);
 
+// Mock getDisplayMedia (for system audio capture)
+const mockGetDisplayMedia = vi.fn().mockResolvedValue({
+  getTracks: () => [],
+  getVideoTracks: () => [{ stop: vi.fn() }],
+  getAudioTracks: () => [{ stop: vi.fn() }],
+} as unknown as MediaStream);
+
 // Mock IPC API
 const mockSendChunk = vi.fn();
 const mockCreateSession = vi.fn().mockResolvedValue(mockSession);
@@ -119,13 +126,40 @@ beforeEach(() => {
   // Mock MediaRecorder globally
   global.MediaRecorder = MockMediaRecorder as unknown as typeof MediaRecorder;
 
-  // Mock navigator.mediaDevices
+  // Reset display media mock
+  mockGetDisplayMedia.mockResolvedValue({
+    getTracks: () => [],
+    getVideoTracks: () => [{ stop: vi.fn() }],
+    getAudioTracks: () => [{ stop: vi.fn() }],
+  } as unknown as MediaStream);
+
+  // Mock navigator.mediaDevices (getUserMedia + getDisplayMedia for system audio)
   Object.defineProperty(navigator, "mediaDevices", {
     value: {
       getUserMedia: mockGetUserMedia,
+      getDisplayMedia: mockGetDisplayMedia,
     },
     writable: true,
   });
+
+  // Mock AudioContext for mic + system audio mixing
+  const mockDestinationStream = {
+    getTracks: () => [],
+    getVideoTracks: () => [],
+    getAudioTracks: () => [],
+  };
+  const mockDestination = { stream: mockDestinationStream };
+  const mockConnect = vi.fn();
+  const mockClose = vi.fn().mockResolvedValue(undefined);
+  const mockCreateMediaStreamSource = vi.fn().mockReturnValue({ connect: mockConnect });
+  const mockCreateMediaStreamDestination = vi.fn().mockReturnValue(mockDestination);
+  global.AudioContext = vi.fn().mockImplementation(function () {
+    return {
+      createMediaStreamSource: mockCreateMediaStreamSource,
+      createMediaStreamDestination: mockCreateMediaStreamDestination,
+      close: mockClose,
+    };
+  }) as unknown as typeof AudioContext;
 
   // Mock Electron API
   (global as { window: { electronAPI: unknown } }).window.electronAPI = {
@@ -321,14 +355,11 @@ describe("Complete Recording Flow Integration", () => {
     });
 
     // STEP 5: Verify getUserMedia called (audio capture initiated)
-    expect(mockGetUserMedia).toHaveBeenCalledWith({
-      audio: {
-        sampleRate: 16000,
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-      },
-    });
+    expect(mockGetUserMedia).toHaveBeenCalledWith(
+      expect.objectContaining({
+        audio: expect.any(Object),
+      }),
+    );
 
     // STEP 6: Wait for MediaRecorder to generate first chunk
     await act(async () => {

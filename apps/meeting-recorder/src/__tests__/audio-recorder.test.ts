@@ -6,12 +6,19 @@ const mockStop = vi.fn()
 const mockPause = vi.fn()
 const mockResume = vi.fn()
 let mockOnDataAvailable: ((event: { data: Blob }) => void) | null = null
+let lastMediaRecorderInstance: MockMediaRecorder | null = null
 
 class MockMediaRecorder {
+  stream: MediaStream | null = null
   state: string = 'inactive'
   ondataavailable: ((event: { data: Blob }) => void) | null = null
   onstop: (() => void) | null = null
   onerror: ((event: { error: Error }) => void) | null = null
+
+  constructor(stream: MediaStream, _options: { mimeType: string }) {
+    this.stream = stream
+    lastMediaRecorderInstance = this
+  }
 
   start(timeslice?: number) {
     this.state = 'recording'
@@ -44,9 +51,38 @@ const mockGetUserMedia = vi.fn().mockResolvedValue({
   getTracks: () => [{ stop: vi.fn() }],
 })
 
+const mockGetDisplayMedia = vi.fn().mockResolvedValue({
+  getTracks: () => [],
+  getVideoTracks: () => [{ kind: 'video', stop: vi.fn() }],
+  getAudioTracks: () => [{ kind: 'audio', stop: vi.fn() }],
+})
+
 Object.defineProperty(global.navigator, 'mediaDevices', {
-  value: { getUserMedia: mockGetUserMedia },
+  value: {
+    getUserMedia: mockGetUserMedia,
+    getDisplayMedia: mockGetDisplayMedia,
+  },
   writable: true,
+})
+
+const mockConnect = vi.fn()
+const mockClose = vi.fn().mockResolvedValue(undefined)
+const mockDestinationStream = {
+  getTracks: () => [],
+  getVideoTracks: () => [],
+  getAudioTracks: () => [],
+}
+const mockDestination = { stream: mockDestinationStream }
+const mockCreateMediaStreamSource = vi.fn().mockReturnValue({ connect: mockConnect })
+const mockCreateMediaStreamDestination = vi.fn().mockReturnValue(mockDestination)
+
+// @ts-expect-error - global mock
+global.AudioContext = vi.fn().mockImplementation(function () {
+  return {
+    createMediaStreamSource: mockCreateMediaStreamSource,
+    createMediaStreamDestination: mockCreateMediaStreamDestination,
+    close: mockClose,
+  }
 })
 
 // @ts-expect-error - global mock
@@ -58,7 +94,27 @@ describe('AudioRecorder', () => {
   beforeEach(() => {
     recorder = new AudioRecorder()
     vi.clearAllMocks()
+    mockGetUserMedia.mockResolvedValue({
+      getTracks: () => [{ stop: vi.fn() }],
+    })
+    mockGetDisplayMedia.mockResolvedValue({
+      getTracks: () => [],
+      getVideoTracks: () => [{ kind: 'video', stop: vi.fn() }],
+      getAudioTracks: () => [{ kind: 'audio', stop: vi.fn() }],
+    })
+    mockCreateMediaStreamSource.mockReturnValue({ connect: mockConnect })
+    mockCreateMediaStreamDestination.mockReturnValue(mockDestination)
+    mockClose.mockResolvedValue(undefined)
+    // Re-apply AudioContext implementation after clearAllMocks resets it
+    ;(global.AudioContext as unknown as ReturnType<typeof vi.fn>).mockImplementation(function () {
+      return {
+        createMediaStreamSource: mockCreateMediaStreamSource,
+        createMediaStreamDestination: mockCreateMediaStreamDestination,
+        close: mockClose,
+      }
+    })
     mockOnDataAvailable = null
+    lastMediaRecorderInstance = null
   })
 
   describe('startRecording', () => {
@@ -215,6 +271,61 @@ describe('AudioRecorder', () => {
       await recorder.startRecording()
       const mime = recorder.getMimeType()
       expect(mime).toMatch(/^audio\/(ogg|webm)/)
+    })
+  })
+
+  describe('system audio capture', () => {
+    it('calls getDisplayMedia during startRecording', async () => {
+      await recorder.startRecording()
+      expect(mockGetDisplayMedia).toHaveBeenCalledWith({
+        audio: true,
+        video: { width: 1, height: 1 },
+      })
+    })
+
+    it('stops video tracks from display stream immediately', async () => {
+      const videoTrackStop = vi.fn()
+      mockGetDisplayMedia.mockResolvedValueOnce({
+        getTracks: () => [],
+        getVideoTracks: () => [{ stop: videoTrackStop }],
+        getAudioTracks: () => [{ stop: vi.fn() }],
+      })
+      await recorder.startRecording()
+      expect(videoTrackStop).toHaveBeenCalled()
+    })
+
+    it('creates AudioContext and connects both streams to destination', async () => {
+      await recorder.startRecording()
+      expect(global.AudioContext).toHaveBeenCalled()
+      expect(mockCreateMediaStreamSource).toHaveBeenCalledTimes(2)
+      expect(mockConnect).toHaveBeenCalledTimes(2)
+    })
+
+    it('uses mixed destination stream for MediaRecorder, not raw mic stream', async () => {
+      await recorder.startRecording()
+      expect(lastMediaRecorderInstance).not.toBeNull()
+      expect(lastMediaRecorderInstance!.stream).toBe(mockDestinationStream)
+    })
+
+    it('throws with "System audio capture failed" message if getDisplayMedia rejects', async () => {
+      mockGetDisplayMedia.mockRejectedValueOnce(new Error('Permission denied'))
+      await expect(recorder.startRecording()).rejects.toThrow('System audio capture failed')
+    })
+
+    it('stops mic tracks when getDisplayMedia fails', async () => {
+      const micTrackStop = vi.fn()
+      mockGetUserMedia.mockResolvedValueOnce({
+        getTracks: () => [{ stop: micTrackStop }],
+      })
+      mockGetDisplayMedia.mockRejectedValueOnce(new Error('NotAllowed'))
+      await expect(recorder.startRecording()).rejects.toThrow()
+      expect(micTrackStop).toHaveBeenCalled()
+    })
+
+    it('closes AudioContext when dispose is called', async () => {
+      await recorder.startRecording()
+      recorder.dispose()
+      expect(mockClose).toHaveBeenCalled()
     })
   })
 })

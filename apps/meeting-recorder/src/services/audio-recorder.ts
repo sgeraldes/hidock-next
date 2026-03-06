@@ -32,6 +32,12 @@ export class AudioRecorder {
   private timesliceMs: number;
   /** Set to true when dispose() is called; prevents async getUserMedia from starting a zombie recorder. */
   private disposed = false;
+  /** Raw microphone MediaStream kept alive during recording. */
+  private micStream: MediaStream | null = null;
+  /** System audio MediaStream from getDisplayMedia, kept alive during recording. */
+  private displayStream: MediaStream | null = null;
+  /** Web Audio mixing context. Closed on dispose(). */
+  private audioContext: AudioContext | null = null;
   /** Resolves when MediaRecorder's onstop event fires (after final ondataavailable). */
   private stoppedPromise: Promise<void> | null = null;
   private stoppedResolve: (() => void) | null = null;
@@ -54,36 +60,73 @@ export class AudioRecorder {
       return;
     }
 
-    this.stream = await navigator.mediaDevices.getUserMedia({
+    // 1. Capture microphone (raw audio, no browser-side processing)
+    const micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        sampleRate: 16000,
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
       },
     });
 
-    // After the async getUserMedia, check if we were disposed during the await
-    // (React Strict Mode unmounts between mount and remount, so the first
-    // recorder's getUserMedia resolves after dispose() was called)
     if (this.disposed) {
-      console.warn('[AudioRecorder] Disposed during getUserMedia, releasing stream and aborting');
-      this.releaseStream();
+      console.warn('[AudioRecorder] Disposed during getUserMedia, releasing mic stream');
+      micStream.getTracks().forEach((t) => t.stop());
       return;
     }
+
+    // 2. Capture system audio via getDisplayMedia.
+    //    On Windows: intercepted by setDisplayMediaRequestHandler → WASAPI loopback, automatic.
+    //    On macOS/Linux: shows OS picker where user enables audio sharing.
+    //    If this fails, recording is blocked — we require system audio for full meeting capture.
+    let displayStream: MediaStream;
+    try {
+      displayStream = await navigator.mediaDevices.getDisplayMedia({
+        audio: true,
+        video: { width: 1, height: 1 },
+      });
+    } catch (err) {
+      micStream.getTracks().forEach((t) => t.stop());
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`System audio capture failed: ${reason}`);
+    }
+
+    // Video is only needed to satisfy the API; discard it immediately.
+    displayStream.getVideoTracks().forEach((t) => t.stop());
+
+    if (this.disposed) {
+      console.warn('[AudioRecorder] Disposed during getDisplayMedia, releasing streams');
+      micStream.getTracks().forEach((t) => t.stop());
+      displayStream.getAudioTracks().forEach((t) => t.stop());
+      return;
+    }
+
+    this.micStream = micStream;
+    this.displayStream = displayStream;
+
+    // 3. Mix mic + system audio using Web Audio API.
+    const audioCtx = new AudioContext();
+    this.audioContext = audioCtx;
+
+    const micSource = audioCtx.createMediaStreamSource(micStream);
+    const sysSource = audioCtx.createMediaStreamSource(displayStream);
+    const destination = audioCtx.createMediaStreamDestination();
+
+    micSource.connect(destination);
+    sysSource.connect(destination);
+
+    // MediaRecorder uses the mixed stream, not the raw mic or display streams.
+    this.stream = destination.stream;
 
     this.mimeType = this.selectMimeType();
     this.chunkIndex = 0;
     this.pendingChunks = 0;
 
-    // Create a promise that resolves when onstop fires (after final ondataavailable)
     this.stoppedPromise = new Promise<void>((resolve) => {
       this.stoppedResolve = resolve;
     });
 
-    this.mediaRecorder = new MediaRecorder(this.stream, {
-      mimeType: this.mimeType,
-    });
+    this.mediaRecorder = new MediaRecorder(this.stream, { mimeType: this.mimeType });
 
     this.mediaRecorder.ondataavailable = (event: BlobEvent) => {
       console.log(`[AudioRecorder] ondataavailable fired: size=${event.data.size}, type=${event.data.type}`);
@@ -91,23 +134,17 @@ export class AudioRecorder {
         console.warn('[AudioRecorder] Empty chunk, skipping');
         return;
       }
-
       if (this.pendingChunks >= this.maxQueueSize) {
         console.warn(
           `[AudioRecorder] Queue full (${this.pendingChunks}/${this.maxQueueSize}), dropping chunk`,
         );
         return;
       }
-
       const idx = this.chunkIndex++;
       this.pendingChunks++;
       console.log(`[AudioRecorder] Sending chunk ${idx} (${event.data.size} bytes) to onChunk callback`);
       this.onChunk?.(event.data, idx);
-
-      if (
-        this.pendingChunks >= this.pauseThreshold &&
-        this.mediaRecorder?.state === "recording"
-      ) {
+      if (this.pendingChunks >= this.pauseThreshold && this.mediaRecorder?.state === 'recording') {
         console.warn(
           `[AudioRecorder] Backpressure: pausing at ${this.pendingChunks} pending chunks`,
         );
@@ -118,18 +155,13 @@ export class AudioRecorder {
 
     this.mediaRecorder.onerror = (event: Event) => {
       console.error('[AudioRecorder] MediaRecorder error event:', event);
-      const error =
-        event instanceof ErrorEvent
-          ? event.error
-          : new Error("MediaRecorder error");
+      const error = event instanceof ErrorEvent ? event.error : new Error('MediaRecorder error');
       this.onError?.(error);
     };
 
     this.mediaRecorder.onstop = () => {
-      console.log('[AudioRecorder] MediaRecorder stopped, releasing stream');
+      console.log('[AudioRecorder] MediaRecorder stopped, releasing streams');
       this.releaseStream();
-      // Resolve the stoppedPromise so waitForAllChunksAcked knows the final
-      // ondataavailable has already fired (onstop fires AFTER it)
       this.stoppedResolve?.();
       this.stoppedResolve = null;
     };
@@ -253,9 +285,19 @@ export class AudioRecorder {
   }
 
   private releaseStream(): void {
-    if (this.stream) {
-      this.stream.getTracks().forEach((track) => track.stop());
-      this.stream = null;
+    if (this.micStream) {
+      this.micStream.getTracks().forEach((t) => t.stop());
+      this.micStream = null;
     }
+    if (this.displayStream) {
+      this.displayStream.getTracks().forEach((t) => t.stop());
+      this.displayStream = null;
+    }
+    if (this.audioContext) {
+      this.audioContext.close().catch(() => {});
+      this.audioContext = null;
+    }
+    // this.stream is the AudioContext destination stream — owned by the context, cleared here.
+    this.stream = null;
   }
 }
