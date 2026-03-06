@@ -414,7 +414,14 @@ class HiDockDeviceService {
     this.autoConnectInProgress = true
     try {
       this.logActivity('info', 'Auto-connect', 'Checking for authorized HiDock devices...')
-      const success = await this.jensen.tryConnect()
+
+      // BUG-005: Add 8s timeout so a non-responsive device doesn't hang auto-connect indefinitely
+      const TIMEOUT_MS = 8000
+      const timeoutPromise = new Promise<boolean>((resolve) =>
+        setTimeout(() => resolve(false), TIMEOUT_MS)
+      )
+      const success = await Promise.race([this.jensen.tryConnect(), timeoutPromise])
+
       // Note: handleConnect() is called via the onconnect callback in jensen.ts
       // We should NOT call it here to avoid duplicate initialization
       if (success) {
