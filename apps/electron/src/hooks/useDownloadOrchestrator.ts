@@ -49,6 +49,8 @@ export function cancelDownloads(): void {
   // Cancel all downloads at device service level (aborts USB transfers)
   const deviceService = getHiDockDeviceService()
   deviceService.cancelAllDownloads()
+  // DL-003: Also cancel main-process transfers
+  window.electronAPI?.downloadService?.cancelAll?.()
   // Also set store state so the queue loop breaks
   useAppStore.getState().cancelDeviceSync()
 }
@@ -61,6 +63,9 @@ export function useDownloadOrchestrator() {
   const deviceService = getHiDockDeviceService()
   const isProcessingDownloads = useRef(false)
   const downloadAbortControllerRef = useRef<AbortController | null>(null)
+  // DL-STALL: Track the filename currently being downloaded so onStateUpdate can abort
+  // when the main process marks it as failed (e.g., stall detection)
+  const currentlyDownloadingRef = useRef<string | null>(null)
 
   const setDeviceSyncState = useAppStore((s) => s.setDeviceSyncState)
   const clearDeviceSyncState = useAppStore((s) => s.clearDeviceSyncState)
@@ -172,13 +177,16 @@ export function useDownloadOrchestrator() {
 
   const processDownloadQueue = useCallback(async () => {
     if (isProcessingDownloads.current) return
+    // DL-008: Set lock before first await to prevent double-processing
+    isProcessingDownloads.current = true
 
     const state = await window.electronAPI.downloadService.getState()
     const pendingItems = state.queue.filter((item: DownloadQueueItem) => item.status === 'pending')
 
-    if (pendingItems.length === 0 || !deviceService.isConnected()) return
-
-    isProcessingDownloads.current = true
+    if (pendingItems.length === 0 || !deviceService.isConnected()) {
+      isProcessingDownloads.current = false
+      return
+    }
     downloadAbortControllerRef.current = new AbortController()
     // DL-14: Sync module-level ref so cancelDownloads() can abort from outside
     _downloadAbortControllerRef = downloadAbortControllerRef.current
@@ -237,7 +245,11 @@ export function useDownloadOrchestrator() {
         deviceFileProgress: 0
       })
 
+      // DL-STALL: Track the currently downloading file so onStateUpdate can abort
+      // if the main process marks it failed (e.g., stall detection)
+      currentlyDownloadingRef.current = item.filename
       const success = await processDownload(item, signal)
+      currentlyDownloadingRef.current = null
       if (success) {
         completed++
         bytesDownloaded += item.fileSize || 0
@@ -261,6 +273,8 @@ export function useDownloadOrchestrator() {
     isProcessingDownloads.current = false
     // DL-14: Clear module-level ref when processing finishes
     _downloadAbortControllerRef = null
+    // DL-005: Reset cancel flag so subsequent cancels work correctly
+    _cancelInProgress = false
     clearDeviceSyncState()
 
     if (aborted) {
@@ -310,6 +324,11 @@ export function useDownloadOrchestrator() {
     if (orchestratorInitialized.current) return
     orchestratorInitialized.current = true
 
+    // DL-005: Reset module-level state on mount so stale cancel flags don't block new downloads
+    _cancelInProgress = false
+    _cancelEpoch = 0
+    _lastProcessedEpoch = 0
+
     const isElectron = !!window.electronAPI?.downloadService
 
     // Subscribe to download service state updates
@@ -334,8 +353,25 @@ export function useDownloadOrchestrator() {
             return
           }
 
+          // DL-STALL: If the main process marked the currently-active download as failed
+          // (e.g., stall detection), abort the renderer-side USB transfer so the loop can proceed
+          if (currentlyDownloadingRef.current && isProcessingDownloads.current) {
+            const activeItem = state.queue.find(
+              (i: DownloadQueueItem) => i.filename === currentlyDownloadingRef.current
+            )
+            if (activeItem?.status === 'failed' || activeItem?.status === 'cancelled') {
+              if (shouldLogQa()) {
+                console.log(`[useDownloadOrchestrator] Main process marked ${currentlyDownloadingRef.current} as ${activeItem.status} — aborting USB transfer`)
+              }
+              downloadAbortControllerRef.current?.abort()
+            }
+          }
+
           const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
-          if (hasPending && !isProcessingDownloads.current && deviceService.isConnected()) {
+          // DL-001: Use store connection step instead of deviceService.isConnected() — the service
+          // returns true during early init steps before the device is fully ready
+          const isDeviceReady = useAppStore.getState().connectionStatus.step === 'ready'
+          if (hasPending && !isProcessingDownloads.current && isDeviceReady) {
             processDownloadQueueRef.current()
           }
         })

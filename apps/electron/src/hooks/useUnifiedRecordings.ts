@@ -17,6 +17,8 @@ interface DatabaseRecording {
   duration_seconds?: number
   date_recorded?: string
   meeting_id?: string
+  // FL-001: transcription_status is the authoritative column; status is the legacy fallback
+  transcription_status?: string
   status: string
 }
 
@@ -198,7 +200,7 @@ function buildRecordingMap(
         size: deviceRec.size,
         duration: deviceRec.duration || dbRec?.duration_seconds || 0,
         dateRecorded,
-        transcriptionStatus: mapTranscriptionStatus(dbRec?.status, capture?.status ?? undefined),
+        transcriptionStatus: mapTranscriptionStatus(dbRec?.transcription_status ?? dbRec?.status, capture?.status ?? undefined),
         meetingId: dbRec?.meeting_id,
         location: 'both',
         deviceFilename: deviceRec.filename,
@@ -578,11 +580,14 @@ export function useUnifiedRecordings(): UseUnifiedRecordingsResult {
     }
   }, [loaded, loadRecordings, deviceService])
 
-  // B-DEV-007: Listen for download completion events to force refresh recordings
+  // B-DEV-007: Listen for download completion events to refresh recordings
+  // DL-USB-CONCURRENCY: Use forceRefresh=false — the DB is already updated when downloads complete
+  // (via markRecordingDownloaded). forceRefresh=true would call listRecordings() over USB while
+  // new downloads may be starting, causing USB concurrency conflicts and stalls.
   useEffect(() => {
     const handleDownloadsCompleted = () => {
-      console.log('[useUnifiedRecordings] Downloads completed - forcing refresh')
-      loadRecordings(true)
+      console.log('[useUnifiedRecordings] Downloads completed - refreshing from DB')
+      loadRecordings(false)
     }
     window.addEventListener('hidock:downloads-completed', handleDownloadsCompleted)
     return () => window.removeEventListener('hidock:downloads-completed', handleDownloadsCompleted)

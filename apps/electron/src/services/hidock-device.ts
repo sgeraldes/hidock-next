@@ -380,7 +380,7 @@ class HiDockDeviceService {
     this.autoConnectEnabled = false
     this.userInitiatedDisconnect = true
     this.stopAutoConnect()
-    this.logActivity('info', 'Auto-connect paused for this session')
+    this.logActivity('info', 'Auto-connect disabled for this session')
   }
 
   // Re-enable auto-connect attempts (e.g. user clicked Connect).

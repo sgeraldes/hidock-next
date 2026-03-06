@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import { getConfig, saveConfig, updateConfig, AppConfig } from '../services/config'
 import { success, error as errorResult } from '../types/api'
+import { emitActivityLog } from '../services/activity-log'
 
 export function registerConfigHandlers(): void {
   // Get full config
@@ -21,9 +22,11 @@ export function registerConfigHandlers(): void {
   ipcMain.handle('config:set', async (_, newConfig: Partial<AppConfig>) => {
     try {
       await saveConfig(newConfig)
+      emitActivityLog('info', 'Settings saved')
       return success(getConfig())
     } catch (err) {
       console.error('[config:set] Error:', err)
+      emitActivityLog('error', 'Failed to save settings', err instanceof Error ? err.message : undefined)
       return errorResult(
         'VALIDATION_ERROR',
         err instanceof Error ? err.message : 'Failed to save configuration',
@@ -38,9 +41,11 @@ export function registerConfigHandlers(): void {
     async <K extends keyof AppConfig>(_, section: K, values: Partial<AppConfig[K]>) => {
       try {
         await updateConfig(section, values)
+        emitActivityLog('info', `Settings updated: ${String(section)}`)
         return success(getConfig())
       } catch (err) {
         console.error(`[config:update-section] Error updating ${String(section)}:`, err)
+        emitActivityLog('error', `Failed to update ${String(section)} settings`, err instanceof Error ? err.message : undefined)
         return errorResult(
           'VALIDATION_ERROR',
           err instanceof Error ? err.message : `Failed to update ${String(section)} settings`,

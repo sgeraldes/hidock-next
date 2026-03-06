@@ -26,6 +26,7 @@ import {
   runInTransaction
 } from './database'
 import { saveRecording, getRecordingsPath } from './file-storage'
+import { emitActivityLog } from './activity-log'
 import { existsSync } from 'fs'
 import { join, basename } from 'path'
 
@@ -418,6 +419,18 @@ class DownloadService {
       this.markDirty()
       this.emitStateUpdate(true) // C-004: immediate emit for status transition
 
+      // DL-002: Integrity check — reject truncated transfers before saving
+      if (item.fileSize && item.fileSize > 0 && data.length !== item.fileSize) {
+        const errMsg = `File size mismatch: expected ${item.fileSize} bytes, received ${data.length} bytes`
+        console.error(`[DownloadService] Integrity check failed: ${filename} — ${errMsg}`)
+        item.status = 'failed'
+        item.error = errMsg
+        this.persistQueueItem(item)
+        this.markDirty()
+        this.emitStateUpdate(true)
+        return { success: false, error: errMsg }
+      }
+
       // Save the file with the original recording date if available
       const filePath = await saveRecording(filename, data, undefined, item.recordingDate)
 
@@ -601,10 +614,12 @@ class DownloadService {
         }
 
         if (elapsed > stallTimeout) {
+          const stallMsg = `Download stalled (${Math.round(elapsed / 1000)}s without data)`
           console.warn(`[DownloadService] Stall detected for ${item.filename} (${Math.round(elapsed / 1000)}s without progress, timeout=${stallTimeout / 1000}s, size=${item.fileSize})`)
           item.status = 'failed'
-          item.error = `Download stalled (${Math.round(elapsed / 1000)}s without data)`
+          item.error = stallMsg
           this.persistQueueItem(item)
+          emitActivityLog('warning', `Download stalled: ${item.filename}`, stallMsg)
 
           if (this.state.currentSession) {
             this.state.currentSession.failedFiles++

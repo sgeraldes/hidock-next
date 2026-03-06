@@ -1,5 +1,4 @@
 import ICAL from 'ical.js'
-import { writeFileSync } from 'fs'
 import { join } from 'path'
 import { getCachePath } from './file-storage'
 import { upsertMeetingsBatch, Meeting } from './database'
@@ -90,7 +89,8 @@ const WINDOWS_TIMEZONE_OFFSETS: Record<string, number> = {
 }
 
 // B-CAL-004: Error category for calendar sync failures
-export type CalendarErrorCategory = 'network' | 'parse' | 'database' | 'validation' | 'unknown'
+// CS-003: Added 'auth' category for 401/403 errors
+export type CalendarErrorCategory = 'network' | 'parse' | 'database' | 'validation' | 'auth' | 'unknown'
 
 export interface CalendarSyncResult {
   success: boolean
@@ -110,6 +110,18 @@ export function categorizeCalendarError(error: unknown): { message: string; cate
   }
 
   const message = error instanceof Error ? error.message : String(error)
+
+  // CS-003: Auth errors (401/403) must be categorized as 'auth', not 'network'
+  if (
+    message.includes('401') ||
+    message.includes('403') ||
+    message.includes('Unauthorized') ||
+    message.includes('Forbidden') ||
+    message.includes('authentication') ||
+    message.includes('authorization')
+  ) {
+    return { message, category: 'auth' }
+  }
 
   // Network errors
   if (
@@ -432,9 +444,10 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
 
     const icsData = await response.text()
 
-    // Cache the ICS file locally
+    // CS-009: Use async writeFile to avoid blocking the event loop
     const cachePath = join(getCachePath(), 'calendar.ics')
-    writeFileSync(cachePath, icsData, 'utf-8')
+    const { writeFile } = await import('fs/promises')
+    await writeFile(cachePath, icsData, 'utf-8')
 
     // Yield before heavy parsing
     await yieldToEventLoop()
@@ -506,8 +519,9 @@ export async function parseICSAsync(icsData: string): Promise<Omit<Meeting, 'cre
     const vevent = vevents[eventIndex]
     const event = new ICAL.Event(vevent)
 
-    // Skip cancelled events
-    if ((event as any).status === 'CANCELLED') {
+    // CS-008: Use ICAL.js vevent property API — event.status is not a real ICAL.Event property
+    const eventStatus = vevent.getFirstPropertyValue('status') as string | null
+    if (eventStatus === 'CANCELLED') {
       continue
     }
 
@@ -604,7 +618,8 @@ export async function parseICSAsync(icsData: string): Promise<Omit<Meeting, 'cre
         organizer_email: organizerEmail,
         attendees: attendees.length > 0 ? JSON.stringify(attendees) : undefined,
         description,
-        is_recurring: 0,
+        // CS-005: Use actual isRecurring flag instead of hardcoded 0
+        is_recurring: isRecurring ? 1 : 0,
         recurrence_rule: undefined,
         meeting_url: meetingUrl
       })

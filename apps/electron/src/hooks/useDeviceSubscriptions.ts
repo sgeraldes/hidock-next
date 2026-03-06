@@ -61,8 +61,8 @@ export function useDeviceSubscriptions() {
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Connection status changed:', status)
       setConnectionStatusRef.current(status)
 
-      // spec-007: Cancel downloads on disconnect
-      if (status.step === 'disconnected' && window.electronAPI?.downloadService) {
+      // DL-008: 'disconnected' is not a valid ConnectionStep — device goes to 'idle' on disconnect
+      if (status.step === 'idle' && !deviceService.isConnected() && window.electronAPI?.downloadService) {
         const cancelled = await window.electronAPI.downloadService.cancelActive('Device disconnected')
         if (cancelled > 0) {
           if (shouldLogQa()) console.log(`[useDeviceSubscriptions] Cancelled ${cancelled} downloads due to disconnect`)

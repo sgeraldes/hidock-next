@@ -19,7 +19,7 @@ import { formatEta, formatBytes } from '@/utils/formatters'
 import { DeviceFileList } from '@/components/DeviceFileList'
 import { shouldLogQa } from '@/services/qa-monitor'
 
-const CONNECTION_TIMEOUT_MS = 15000 // 15 second timeout
+const CONNECTION_TIMEOUT_MS = 10000 // 10 second timeout (BUG-006)
 
 export function Device() {
   // B-DEV-001: Unified syncing state - use only store as single source of truth
@@ -360,14 +360,15 @@ export function Device() {
 
   // Separate effect for auto-scrolling activity log - does NOT trigger re-renders
   useEffect(() => {
-    if (activityLog.length > 0 && logContainerRef.current) {
+    if (activityLog.length > 0 && logExpanded && logContainerRef.current) {
       requestAnimationFrame(() => {
         if (logContainerRef.current) {
           logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight
         }
       })
     }
-  }, [activityLog.length])
+  // AL-004: logExpanded must be in deps so scroll fires when panel is opened
+  }, [activityLog.length, logExpanded])
 
   // Refresh synced filenames when device-accessible recordings change (catches new syncs)
   const deviceRecordingsCount = recordings.filter(rec => hasDeviceFile(rec)).length
@@ -1227,11 +1228,13 @@ export function Device() {
                               ? 'text-red-500'
                               : entry.type === 'success'
                                 ? 'text-green-500'
-                                : entry.type === 'usb-out'
-                                  ? 'text-blue-500'
-                                  : entry.type === 'usb-in'
-                                    ? 'text-purple-500'
-                                    : 'text-muted-foreground'
+                                : entry.type === 'warning'
+                                  ? 'text-amber-500'
+                                  : entry.type === 'usb-out'
+                                    ? 'text-blue-500'
+                                    : entry.type === 'usb-in'
+                                      ? 'text-purple-500'
+                                      : 'text-muted-foreground'
                           }`}
                         >
                           <span className="text-muted-foreground/60 shrink-0">
@@ -1252,7 +1255,9 @@ export function Device() {
                                   ? '[ERR]'
                                   : entry.type === 'success'
                                     ? '[OK]'
-                                    : '[INFO]'}
+                                    : entry.type === 'warning'
+                                      ? '[WARN]'
+                                      : '[INFO]'}
                           </span>
                           <span className="flex-1">
                             {entry.message}
