@@ -77,4 +77,13 @@ describe('highlightText — multi-token queries', () => {
     const { container } = render(<>{result}</>)
     expect(container.querySelector('mark')!.textContent).toBe('World')
   })
+
+  it('highlights longer token correctly when shorter token is its prefix', () => {
+    const result = highlightText('testing the test', 'test testing')
+    const { container } = render(<>{result}</>)
+    const marks = container.querySelectorAll('mark')
+    const texts = Array.from(marks).map((m) => m.textContent)
+    expect(texts).toContain('testing')
+    expect(texts).toContain('test')
+  })
 })

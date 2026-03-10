@@ -24,7 +24,9 @@ export function highlightText(text: string, query: string): React.ReactNode {
   if (tokens.length === 0) return text
 
   // Build alternation regex from all tokens
-  const escapedTokens = tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const escapedTokens = tokens
+    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .sort((a, b) => b.length - a.length)
   const regex = new RegExp(`(${escapedTokens.join('|')})`, 'gi')
   const parts = text.split(regex)
 
