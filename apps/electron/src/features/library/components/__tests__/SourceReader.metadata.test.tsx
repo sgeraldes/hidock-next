@@ -87,6 +87,23 @@ vi.mock('../TranscriptViewer', () => ({
   TranscriptViewer: () => <div data-testid="transcript-viewer" />,
 }))
 
+// Mock Radix Select — jsdom cannot open portals, so render a native <select>
+vi.mock('@/components/ui/select', () => ({
+  Select: ({ onValueChange, value, children }: any) => (
+    <select
+      data-testid="category-select"
+      value={value}
+      onChange={(e) => onValueChange(e.target.value)}
+    >
+      {children}
+    </select>
+  ),
+  SelectTrigger: () => null,
+  SelectValue: () => null,
+  SelectContent: ({ children }: any) => <>{children}</>,
+  SelectItem: ({ children, value }: any) => <option value={value}>{children}</option>,
+}))
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -235,14 +252,23 @@ describe('SourceReader — metadata editing', () => {
     const rec = makeRecording({ knowledgeCaptureId: 'kc-1', category: 'meeting' })
     render(<SourceReader recording={rec} />)
 
-    // Simulate onValueChange from Select
-    // We directly invoke handleCategoryChange by testing through the component's internals.
-    // Since Radix Select is hard to open in jsdom, we look for the hidden SelectItem inputs or mock the select trigger.
-    // Instead, check that the Select component rendered with correct value.
-    const trigger = screen.getByRole('combobox')
-    expect(trigger).toBeInTheDocument()
-    // The category 'meeting' maps to 'Meeting' label
-    expect(trigger).toHaveTextContent('Meeting')
+    fireEvent.change(screen.getByTestId('category-select'), { target: { value: 'interview' } })
+
+    await waitFor(() => {
+      expect(mockKnowledgeUpdate).toHaveBeenCalledWith('kc-1', { category: 'interview' })
+    })
+  })
+
+  // 9b. Same category makes no IPC call
+  it('selecting the same category makes no IPC call', async () => {
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1', category: 'meeting' })
+    render(<SourceReader recording={rec} />)
+
+    fireEvent.change(screen.getByTestId('category-select'), { target: { value: 'meeting' } })
+
+    // Allow microtasks to flush
+    await new Promise((r) => setTimeout(r, 0))
+    expect(mockKnowledgeUpdate).not.toHaveBeenCalled()
   })
 
   // 10. onMetadataEdited fires on successful title save
