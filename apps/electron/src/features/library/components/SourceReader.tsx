@@ -536,6 +536,7 @@ export function SourceReader({
       {/* Meeting link dialog */}
       <RecordingLinkDialog
         recording={linkDialogOpen ? linkDialogRecording : null}
+        meeting={meeting}
         open={linkDialogOpen}
         onClose={() => setLinkDialogOpen(false)}
         onResolved={() => {
