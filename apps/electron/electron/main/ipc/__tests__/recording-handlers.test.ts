@@ -737,13 +737,13 @@ describe('Recording IPC Handlers', () => {
       const result = await handlers['recordings:getCandidates'](null, recId)
 
       expect(getCandidatesForRecordingWithDetails).toHaveBeenCalledWith(recId)
-      expect(result).toEqual(mockCandidates)
+      expect(result).toEqual({ success: true, data: mockCandidates })
     })
 
-    it('should return empty array for invalid recording ID', async () => {
+    it('should return error shape for invalid recording ID', async () => {
       const result = await handlers['recordings:getCandidates'](null, 'bad-id')
 
-      expect(result).toEqual([])
+      expect(result).toEqual({ success: false, data: [], error: 'Invalid recording ID' })
     })
   })
 
@@ -756,16 +756,16 @@ describe('Recording IPC Handlers', () => {
       const result = await handlers['recordings:getMeetingsNearDate'](null, '2025-06-15T10:00:00Z')
 
       expect(getMeetingsNearDate).toHaveBeenCalledWith('2025-06-15T10:00:00Z')
-      expect(result).toEqual(mockMeetings)
+      expect(result).toEqual({ success: true, data: mockMeetings })
     })
 
-    it('should return empty array for non-string date input', async () => {
+    it('should return error shape for non-string date input', async () => {
       const result = await handlers['recordings:getMeetingsNearDate'](null, 12345)
 
-      expect(result).toEqual([])
+      expect(result).toEqual({ success: false, data: [], error: 'Invalid date' })
     })
 
-    it('should return empty array on error', async () => {
+    it('should return error shape on error', async () => {
       const { getMeetingsNearDate } = await import('../../services/database')
       vi.mocked(getMeetingsNearDate).mockImplementation(() => {
         throw new Error('DB error')
@@ -773,7 +773,7 @@ describe('Recording IPC Handlers', () => {
 
       const result = await handlers['recordings:getMeetingsNearDate'](null, '2025-06-15')
 
-      expect(result).toEqual([])
+      expect(result).toEqual({ success: false, data: [], error: 'DB error' })
     })
   })
 

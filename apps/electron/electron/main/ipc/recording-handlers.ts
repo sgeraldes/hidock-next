@@ -341,12 +341,13 @@ export function registerRecordingHandlers(): void {
       const result = GetRecordingByIdSchema.safeParse({ id: recordingId })
       if (!result.success) {
         console.error('recordings:getCandidates validation error:', result.error)
-        return []
+        return { success: false, data: [], error: 'Invalid recording ID' }
       }
-      return getCandidatesForRecordingWithDetails(result.data.id)
+      const data = getCandidatesForRecordingWithDetails(result.data.id)
+      return { success: true, data }
     } catch (error) {
       console.error('recordings:getCandidates error:', error)
-      return []
+      return { success: false, data: [], error: error instanceof Error ? error.message : 'Unknown error' }
     }
   })
 
@@ -355,12 +356,13 @@ export function registerRecordingHandlers(): void {
     try {
       if (typeof dateStr !== 'string') {
         console.error('recordings:getMeetingsNearDate invalid date:', dateStr)
-        return []
+        return { success: false, data: [], error: 'Invalid date' }
       }
-      return getMeetingsNearDate(dateStr)
+      const data = getMeetingsNearDate(dateStr)
+      return { success: true, data }
     } catch (error) {
       console.error('recordings:getMeetingsNearDate error:', error)
-      return []
+      return { success: false, data: [], error: error instanceof Error ? error.message : 'Unknown error' }
     }
   })
 
