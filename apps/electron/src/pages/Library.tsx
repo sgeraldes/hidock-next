@@ -30,6 +30,7 @@ import {
   AssistantPanel
 } from '@/features/library/components'
 import { useSourceSelection, useKeyboardNavigation, useTransitionFilters } from '@/features/library/hooks'
+import { buildSearchCorpus } from '@/features/library/utils/buildSearchCorpus'
 import { useLibraryStore, useLibrarySorting } from '@/store/useLibraryStore'
 import { useOperations } from '@/hooks/useOperations'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
@@ -332,20 +333,14 @@ export function Library() {
       if (qualityFilter !== null && rec.quality !== qualityFilter) return false
       if (statusFilter !== null && rec.status !== statusFilter) return false
       if (deferredSearchQuery) {
-        const query = deferredSearchQuery.toLowerCase()
-        const filename = rec.filename.toLowerCase()
-        const meetingSubject = rec.meetingSubject?.toLowerCase() || ''
-        const title = rec.title?.toLowerCase() || ''
-        // C-005: Also search in summary and category for better discoverability
-        const summary = rec.summary?.toLowerCase() || ''
-        const category = rec.category?.toLowerCase() || ''
-        return (
-          filename.includes(query) ||
-          meetingSubject.includes(query) ||
-          title.includes(query) ||
-          summary.includes(query) ||
-          category.includes(query)
-        )
+        const tokens = deferredSearchQuery
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((t) => t.length > 0)
+        const meeting = rec.meetingId ? meetings.get(rec.meetingId) : undefined
+        const transcript = transcripts.get(rec.id)
+        const corpus = buildSearchCorpus(rec, meeting, transcript)
+        if (!tokens.every((token) => corpus.includes(token))) return false
       }
       return true
     })
