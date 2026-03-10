@@ -49,3 +49,32 @@ describe('highlightText', () => {
     expect(marks[0].textContent).toBe('def')
   })
 })
+
+describe('highlightText — multi-token queries', () => {
+  it('highlights both words in a two-word query', () => {
+    const result = highlightText('Sofia - Ejercicio Connect', 'Sofia Connect')
+    const { container } = render(<>{result}</>)
+    const texts = Array.from(container.querySelectorAll('mark')).map((m) => m.textContent)
+    expect(texts).toContain('Sofia')
+    expect(texts).toContain('Connect')
+  })
+
+  it('handles extra whitespace in query', () => {
+    const result = highlightText('Hello World', '  hello  ')
+    const { container } = render(<>{result}</>)
+    expect(container.querySelectorAll('mark')).toHaveLength(1)
+    expect(container.querySelector('mark')!.textContent).toBe('Hello')
+  })
+
+  it('preserves full text content with multi-token highlighting', () => {
+    const result = highlightText('Sofia - Ejercicio Connect', 'sofia connect')
+    const { container } = render(<>{result}</>)
+    expect(container.textContent).toBe('Sofia - Ejercicio Connect')
+  })
+
+  it('single-word query still works', () => {
+    const result = highlightText('Hello World', 'world')
+    const { container } = render(<>{result}</>)
+    expect(container.querySelector('mark')!.textContent).toBe('World')
+  })
+})
