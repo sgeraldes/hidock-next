@@ -33,9 +33,10 @@ repos:
     hooks:
       - id: bandit
         name: bandit (security)
-        args: ["-q", "-r", "apps/desktop/src", "hidock_shims", "--skip", "B101,B105,B110,B112,B311,B324,B403,B404,B603,B606,B607,B108"]
+        args: ["-q", "-r", "apps/desktop/src", "hidock_shims", "--skip", "B101,B110,B112,B311,B324,B403,B404,B603,B606,B607,B108"]
         additional_dependencies: ["bandit[toml]"]
         pass_filenames: false
+        stages: [pre-commit]
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
     hooks:
