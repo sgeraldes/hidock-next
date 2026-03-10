@@ -1109,6 +1109,8 @@ export function Library() {
               isDeleting={selectedRecording ? deleting === selectedRecording.id : false}
               // Navigation
               onNavigateToMeeting={handleNavigateToMeeting}
+              // Metadata editing
+              onMetadataEdited={() => refresh(false)}
             />
           }
           rightPanel={
