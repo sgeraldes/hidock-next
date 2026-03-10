@@ -19,24 +19,24 @@ Part of the HiDock Next ecosystem - see ../../CLAUDE.md for complete architectur
 
 # main.py
 
-import sys
 import os
+import sys
 import tkinter  # For tkinter.Menu and messagebox
 import traceback
 
 # Suppress pygame welcome message before any imports that might use pygame
-os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 # Add the src directory to Python path so all existing imports work
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 import customtkinter as ctk  # For CTkInputDialog in settings, and CTk itself
 
 from config_and_logger import logger  # For the top-level exception handler
-from scripts.runtime_deps_check import check_and_handle_runtime_deps  # Runtime dependency checker
 
 # Import the main GUI class and the logger
 from gui_main_window import HiDockToolGUI
+from scripts.runtime_deps_check import check_and_handle_runtime_deps  # Runtime dependency checker
 
 
 def main() -> None:
@@ -46,7 +46,7 @@ def main() -> None:
     if not check_and_handle_runtime_deps():
         print("Runtime dependencies check failed or was cancelled.")
         sys.exit(1)
-    
+
     # It's good practice to set the appearance mode and theme early,
     # though HiDockToolGUI also does this. This ensures CTk is initialized
     # with a theme before any widgets might be created, even implicitly.

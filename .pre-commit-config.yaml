@@ -4,12 +4,12 @@ repos:
     hooks:
       - id: check-yaml
       - id: end-of-file-fixer
-        stages: [commit]
+        stages: [pre-commit]
       - id: trailing-whitespace
-        stages: [commit]
+        stages: [pre-commit]
       - id: mixed-line-ending
         args: [--fix=lf]
-        stages: [commit]
+        stages: [pre-commit]
       - id: check-added-large-files
         args: ["--maxkb=500"]
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -33,7 +33,7 @@ repos:
     hooks:
       - id: bandit
         name: bandit (security)
-        args: ["-q", "-r", "apps/desktop/src", "hidock_shims", "--skip", "B101,B105,B110,B112,B311,B324,B403,B404,B603,B606,B607,B608,B108"]
+        args: ["-q", "-r", "apps/desktop/src", "hidock_shims", "--skip", "B101,B105,B110,B112,B311,B324,B403,B404,B603,B606,B607,B108"]
         additional_dependencies: ["bandit[toml]"]
         pass_filenames: false
   - repo: https://github.com/Yelp/detect-secrets
@@ -41,7 +41,7 @@ repos:
     hooks:
       - id: detect-secrets
         name: detect-secrets (secret scanning)
-        args: ['--baseline', '.secrets.baseline', '--exclude-files', '\.secrets\.baseline$|\.git/|\.venv|node_modules/|package-lock\.json']
+        args: ['--baseline', '.secrets.baseline', '--exclude-files', '\.secrets\.baseline$|\.git/|\.venv|node_modules/|package-lock\.json|tsconfig.*\.tsbuildinfo$|out/main/index\.js$']
   - repo: local
     hooks:
       - id: pytest-fast
@@ -49,7 +49,7 @@ repos:
         entry: python -m pytest -q
         language: system
         pass_filenames: false
-        stages: [commit]
+        stages: [pre-commit]
         types: [python]
         additional_dependencies: []
         # Allow skipping with SKIP_TESTS=1 env var
