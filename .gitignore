@@ -68,6 +68,7 @@ audio/
 # Temporary fix/utility scripts
 fix_*.py
 temp_*.py
+spec_writer.*
 *.sqlite3
 
 # ===================================================================
@@ -173,6 +174,7 @@ NUL
 # QA & Automation Artifacts
 # ===================================================================
 qa-artifacts/
+/*.png
 *.png.encrypted
 /docs/qa/screenshots/*.encrypted
 
