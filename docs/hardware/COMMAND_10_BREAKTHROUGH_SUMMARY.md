@@ -30,18 +30,18 @@ What started as a mystery command that appeared to "cause device failure" was re
 The Command 10 discoveries have been comprehensively integrated across all HiDock documentation:
 
 ### Core Protocol Documentation
-✅ **[JENSEN_PROTOCOL_COMPLETE.md](../firmware-analysis/JENSEN_PROTOCOL_COMPLETE.md)**
+✅ **[JENSEN_PROTOCOL_COMPLETE.md](JENSEN_PROTOCOL_COMPLETE.md)**
 - Updated Command 10 from "mystery command" to fully documented demo control system
 - Added complete parameter protocol and response codes
 - Included neural architecture details revealed by demo
 
-✅ **[HARDWARE_SPECIFICATIONS.md](../hardware-analysis/HARDWARE_SPECIFICATIONS.md)**
+✅ **[HARDWARE_SPECIFICATIONS.md](HARDWARE_SPECIFICATIONS.md)**
 - Added new section: "Neural Audio Processing Architecture"
 - Documented dual-core neural processor specifications
 - Included AI-powered noise cancellation capabilities
 - Technical implementation details and performance characteristics
 
-✅ **[COMPLETE_FIRMWARE_ANALYSIS.md](../firmware-analysis/COMPLETE_FIRMWARE_ANALYSIS.md)**
+✅ **[COMPLETE_FIRMWARE_ANALYSIS.md](COMPLETE_FIRMWARE_ANALYSIS.md)**
 - Corrected Command 10 analysis from "complex operation" to "demo control system"
 - Updated with breakthrough discovery details and neural architecture findings
 - Added production readiness assessment

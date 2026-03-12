@@ -540,4 +540,4 @@ This protocol foundation enables the development of advanced features that can u
 **Document Status**: ✅ **Complete** with hardware validation and HiNotes December 2025 commands
 **Last Updated**: 2025-12-07
 **Major Update**: Added realtime streaming (Cmd 32-34), Bluetooth (Cmd 4097-4104), Battery (Cmd 4100)
-**Related**: [COMPLETE_FIRMWARE_ANALYSIS.md](COMPLETE_FIRMWARE_ANALYSIS.md), [DEVICE_MODELS.md](../hardware-analysis/DEVICE_MODELS.md)
+**Related**: [COMPLETE_FIRMWARE_ANALYSIS.md](COMPLETE_FIRMWARE_ANALYSIS.md), [DEVICE_MODELS.md](DEVICE_MODELS.md)
