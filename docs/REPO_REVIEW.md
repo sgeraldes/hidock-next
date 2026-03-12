@@ -15,7 +15,7 @@ The repository follows a **Monorepo** structure, housing multiple applications a
     *   `web/`: A browser-based version (React + WebUSB).
     *   `desktop/`: A Python/CustomTkinter desktop application (likely legacy or alternative).
     *   `audio/` & `audio-insights/`: Service/Utility modules.
-*   `conductor/`: Project management and AI context files.
+*   `docs/conductor/`: Project management and AI context files.
 *   `config/`: Shared configuration.
 *   `docs/`: Extensive project documentation.
 *   `firmware/`: Device firmware files.

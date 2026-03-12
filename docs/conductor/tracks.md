@@ -5,4 +5,4 @@ This file tracks all major tracks for the project. Each track has its own detail
 ---
 
 ## [ ] Track: Complete Knowledge App Redesign Implementation
-*Link: [./conductor/tracks/knowledge_redesign_20251228/](./conductor/tracks/knowledge_redesign_20251228/)*
+*Link: [./tracks/knowledge_redesign_20251228/](./tracks/knowledge_redesign_20251228/)*
