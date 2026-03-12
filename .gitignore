@@ -110,6 +110,7 @@ dist/
 build/
 *.egg-info/
 *.egg
+*.tsbuildinfo
 apps/desktop/*.egg-info/
 apps/desktop/build/
 apps/desktop/dist/
