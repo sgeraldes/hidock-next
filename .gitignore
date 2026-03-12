@@ -71,6 +71,14 @@ temp_*.py
 spec_writer.*
 *.sqlite3
 
+# Development session artifacts (CHANGES logs, phase reports, verification docs)
+/CHANGES*.md
+/PHASE*.md
+/VERIFICATION*.md
+/IMPLEMENTATION*.md
+/MANUAL-VERIFICATION*.md
+/WAVE2*.md
+
 # ===================================================================
 # General Development
 # ===================================================================
