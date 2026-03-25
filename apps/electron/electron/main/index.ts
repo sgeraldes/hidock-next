@@ -175,9 +175,13 @@ async function initializeServices(): Promise<void> {
 // Without this, devices on the blocklist get "Access denied" errors
 app.commandLine.appendSwitch('disable-usb-blocklist')
 
-// Suppress Chromium-level USB enumeration noise (usb_service_win.cc SetupDiGetDeviceProperty
-// errors that fire for every non-HiDock USB device during system enumeration — harmless)
-app.commandLine.appendSwitch('disable-features', 'UsbDeviceEventLog')
+// Suppress Chromium-level USB/device enumeration noise on Windows
+// (usb_service_win.cc SetupDiGetDeviceProperty errors for non-HiDock devices — harmless)
+if (process.platform === 'win32') {
+  app.commandLine.appendSwitch('disable-usb-device-event-log')
+  // Suppress device_event_log severity to FATAL-only (3) to hide USB enumeration errors
+  app.commandLine.appendSwitch('device-event-log-level', '3')
+}
 
 // Conditionally enable remote debugging (dev mode or explicit opt-in)
 const enableRemoteDebugging = is.dev || process.env.ENABLE_REMOTE_DEBUGGING === 'true'

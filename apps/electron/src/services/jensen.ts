@@ -444,6 +444,10 @@ export class JensenDevice {
 
     if (shouldLog()) console.log(`[Jensen] Connected to ${this.model}`)
 
+    // Brief stabilization delay after USB interface claim — some devices (especially H1E)
+    // need time before firmware is ready to accept Jensen protocol commands
+    await new Promise(resolve => setTimeout(resolve, 300))
+
     // Set up USB disconnect listener
     this.setupUsbDisconnectListener()
 
@@ -1368,13 +1372,6 @@ export class JensenDevice {
 
       if (!st) return undefined // Lock released by timeout; absorb late packet
 
-      // Diagnostic: log first and every 100th handler call to track progress
-      if (st.files.length === 0 && st.tailLen === 0) {
-        console.log(`[Jensen] listFiles handler: first packet received, bodyLen=${msg.body.length}`)
-      } else if (st.files.length % 100 === 0 && st.files.length > 0) {
-        console.log(`[Jensen] listFiles handler: ${st.files.length} files parsed so far`)
-      }
-
       // Fix 3: Build working buffer = tail bytes from previous packet + current body
       const bodyLen = msg.body.length
       const workLen = st.tailLen + bodyLen
@@ -1399,6 +1396,20 @@ export class JensenDevice {
       // Incrementally parse file entries from the working buffer
       const prevCount = st.files.length
       let pos = parseStart
+
+      // Diagnostic: log first packet with data dump to debug parsing
+      if (prevCount === 0 && st.tailLen === 0) {
+        const hexDump = Array.from(work.slice(0, Math.min(40, workLen))).map(b => b.toString(16).padStart(2, '0')).join(' ')
+        console.log(`[Jensen] listFiles handler: bodyLen=${bodyLen}, workLen=${workLen}, headerParsed=${st.headerParsed}, headerTotal=${st.headerTotal}, parseStart=${parseStart}`)
+        console.log(`[Jensen] listFiles first 40 bytes: ${hexDump}`)
+        if (parseStart < workLen) {
+          const firstVersion = work[parseStart] & 0xff
+          const nameLen = parseStart + 4 <= workLen
+            ? ((work[parseStart + 1] & 0xff) << 16) | ((work[parseStart + 2] & 0xff) << 8) | (work[parseStart + 3] & 0xff)
+            : -1
+          console.log(`[Jensen] listFiles first entry: version=${firstVersion}, nameLen=${nameLen}`)
+        }
+      }
 
       while (pos < workLen) {
         const entryStart = pos
@@ -1466,6 +1477,12 @@ export class JensenDevice {
         st.tailBuffer.set(work.subarray(pos), 0)
       }
       st.tailLen = remaining
+
+      // Diagnostic: log parse results for first few packets
+      const newlyParsed = st.files.length - prevCount
+      if (st.files.length <= 200 || newlyParsed === 0) {
+        console.log(`[Jensen] listFiles parse: +${newlyParsed} files (total: ${st.files.length}), remaining tail: ${remaining} bytes, workLen: ${workLen}`)
+      }
 
       // Emit only newly-parsed files for streaming display
       if (onNewFiles && st.files.length > prevCount) {
