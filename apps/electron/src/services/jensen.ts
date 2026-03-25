@@ -1820,19 +1820,6 @@ export class JensenDevice {
     return result
   }
 
-  /** Flatten array of Uint8Arrays into single Uint8Array */
-  private flattenChunks(chunks: Uint8Array[]): Uint8Array {
-    let totalLen = 0
-    for (const chunk of chunks) totalLen += chunk.length
-    const flat = new Uint8Array(totalLen)
-    let pos = 0
-    for (const chunk of chunks) {
-      flat.set(chunk, pos)
-      pos += chunk.length
-    }
-    return flat
-  }
-
   /**
    * Parse file list from flat byte buffer.
    * Matches jensen.js file parsing in the GET_FILE_LIST handler.
