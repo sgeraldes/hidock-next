@@ -1368,6 +1368,13 @@ export class JensenDevice {
 
       if (!st) return undefined // Lock released by timeout; absorb late packet
 
+      // Diagnostic: log first and every 100th handler call to track progress
+      if (st.files.length === 0 && st.tailLen === 0) {
+        console.log(`[Jensen] listFiles handler: first packet received, bodyLen=${msg.body.length}`)
+      } else if (st.files.length % 100 === 0 && st.files.length > 0) {
+        console.log(`[Jensen] listFiles handler: ${st.files.length} files parsed so far`)
+      }
+
       // Fix 3: Build working buffer = tail bytes from previous packet + current body
       const bodyLen = msg.body.length
       const workLen = st.tailLen + bodyLen
@@ -1500,27 +1507,32 @@ export class JensenDevice {
         // Replace handler with no-op absorber so late packets don't re-trigger anything
         this.handlers.set(CMD.GET_FILE_LIST, () => undefined)
 
-        // Force-resolve the pending sendCommand promise and unblock the queue
+        // Build the result FIRST — before touching the command promise
+        let result: FileInfo[]
+        if (st && st.files.length > 0) {
+          result = st.files.filter(f => f.time !== null)
+          console.warn(`[Jensen] listFiles timeout after 120s — returning ${result.length} partial files`)
+        } else {
+          result = []
+          console.warn(`[Jensen] listFiles timeout after 120s — no files parsed (handler called: ${st ? 'yes' : 'no'}, tailLen: ${st?.tailLen ?? 'N/A'})`)
+        }
+
+        // Resolve the timeout promise FIRST so it wins Promise.race
+        resolve(result)
+
+        // THEN clean up the pending sendCommand promise and unblock the queue.
+        // Don't resolve it (would race with our resolve above) — just delete it.
         if (this.currentCommandTag) {
           const pending = this.pendingPromises.get(this.currentCommandTag)
           if (pending) {
             if (pending.timeout) clearTimeout(pending.timeout)
-            pending.resolve(null)
+            // Resolve with same result to avoid unhandled rejection
+            pending.resolve(result)
             this.pendingPromises.delete(this.currentCommandTag)
           }
           this.currentCommandTag = null
           this.currentOperationName = null
           this.sendNextCommand()
-        }
-
-        // Resolve with whatever was parsed so far
-        if (st && st.files.length > 0) {
-          const filtered = st.files.filter(f => f.time !== null)
-          console.warn(`[Jensen] listFiles timeout after 120s — returning ${filtered.length} partial files`)
-          resolve(filtered)
-        } else {
-          console.warn('[Jensen] listFiles timeout after 120s — no data accumulated')
-          resolve([])
         }
       }, LISTFILES_TIMEOUT_MS)
     })
