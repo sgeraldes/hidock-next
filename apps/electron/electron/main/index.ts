@@ -175,6 +175,10 @@ async function initializeServices(): Promise<void> {
 // Without this, devices on the blocklist get "Access denied" errors
 app.commandLine.appendSwitch('disable-usb-blocklist')
 
+// Suppress Chromium-level USB enumeration noise (usb_service_win.cc SetupDiGetDeviceProperty
+// errors that fire for every non-HiDock USB device during system enumeration — harmless)
+app.commandLine.appendSwitch('disable-features', 'UsbDeviceEventLog')
+
 // Conditionally enable remote debugging (dev mode or explicit opt-in)
 const enableRemoteDebugging = is.dev || process.env.ENABLE_REMOTE_DEBUGGING === 'true'
 if (enableRemoteDebugging) {
@@ -245,7 +249,6 @@ app.whenReady().then(async () => {
   session.defaultSession.setUSBProtectedClassesHandler(() => {
     // Return empty array to protect nothing (allow all classes)
     // This is necessary for HiDock devices which may use protected USB classes
-    console.log('[USB] Protected classes request received')
     return []
   })
 
