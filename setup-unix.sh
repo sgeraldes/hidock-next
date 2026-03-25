@@ -4,6 +4,9 @@
 
 set -e  # Exit on any error
 
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SELECT_VENV_SCRIPT="$ROOT_DIR/scripts/env/select_venv.py"
+
 echo ""
 echo "================================"
 echo "   HiDock Next - Quick Setup"
@@ -113,27 +116,27 @@ else
     echo "⚠️  Skipping system dependencies. Some features may not work."
 fi
 
-cd apps/desktop || {
+cd "$ROOT_DIR/apps/desktop" || {
     echo "❌ Failed to navigate to apps/desktop directory"
     exit 1
 }
 
 echo "Resolving per-platform virtual environment (selector)..."
-VENV_PATH=$(python scripts/env/select_venv.py --print 2>/dev/null || true)
+VENV_PATH=$("$PYTHON_CMD" "$SELECT_VENV_SCRIPT" --print 2>/dev/null || true)
 if [ -z "$VENV_PATH" ]; then
   echo "Creating/ensuring environment..."
-  VENV_PATH=$(python scripts/env/select_venv.py --ensure --print 2>/dev/null || true)
+  VENV_PATH=$("$PYTHON_CMD" "$SELECT_VENV_SCRIPT" --ensure --print 2>/dev/null || true)
 fi
 
 if [ -z "$VENV_PATH" ]; then
   echo "❌ Failed to resolve virtual environment path."
-  echo "Run manually: python scripts/env/select_venv.py --ensure --print"
+  echo "Run manually: $PYTHON_CMD $SELECT_VENV_SCRIPT --ensure --print"
   exit 1
 fi
 
 if [ ! -d "$VENV_PATH" ]; then
   echo "Environment directory missing, creating..."
-  python scripts/env/select_venv.py --ensure || {
+  "$PYTHON_CMD" "$SELECT_VENV_SCRIPT" --ensure || {
     echo "❌ Environment creation failed"; exit 1; }
 fi
 
@@ -141,14 +144,14 @@ echo "Using environment: $VENV_PATH"
 if [ ! -f "$VENV_PATH/bin/python" ]; then
   echo "❌ python executable missing inside venv (corrupted). Recreating..."
   rm -rf "$VENV_PATH"
-  python scripts/env/select_venv.py --ensure || { echo "❌ Recreate failed"; exit 1; }
+  "$PYTHON_CMD" "$SELECT_VENV_SCRIPT" --ensure || { echo "❌ Recreate failed"; exit 1; }
 fi
 
 echo "Upgrading pip and build tooling..."
 "$VENV_PATH/bin/python" -m pip install --upgrade pip setuptools wheel || echo "⚠️  pip upgrade failed (continuing)"
 
 echo "Installing desktop dependencies (editable, dev extras)..."
-"$VENV_PATH/bin/python" -m pip install -e "apps/desktop[dev]" || {
+"$VENV_PATH/bin/python" -m pip install -e "$ROOT_DIR/apps/desktop[dev]" || {
   echo "❌ Failed to install desktop dependencies"; exit 1; }
 
 echo "✅ Desktop app setup complete!"

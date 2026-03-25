@@ -3,9 +3,18 @@
 echo "Starting HiDock Desktop Application..."
 echo
 
-# Navigate to project root (two levels up from scripts/run)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# cd "$SCRIPT_DIR/../.."
+# Navigate to project root
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR" || exit 1
+
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_CMD="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_CMD="python"
+else
+    echo "Error: Python 3 is not installed or not in PATH."
+    exit 1
+fi
 
 # Check if we're in the correct directory
 if [ ! -d "apps/desktop" ]; then
@@ -16,22 +25,22 @@ if [ ! -d "apps/desktop" ]; then
     exit 1
 fi
 
-VENV_PATH=$(python scripts/env/select_venv.py --print 2>/dev/null || true)
+VENV_PATH=$("$PYTHON_CMD" scripts/env/select_venv.py --print 2>/dev/null || true)
 if [ -z "$VENV_PATH" ]; then
     echo "Resolving virtual environment (creating if needed)..."
-    VENV_PATH=$(python scripts/env/select_venv.py --ensure --print 2>/dev/null || true)
+    VENV_PATH=$("$PYTHON_CMD" scripts/env/select_venv.py --ensure --print 2>/dev/null || true)
 fi
 
 if [ -z "$VENV_PATH" ]; then
     echo "Error: Failed to resolve/ensure virtual environment."
-    echo "Run: python scripts/env/select_venv.py --ensure --print"
+    echo "Run: $PYTHON_CMD scripts/env/select_venv.py --ensure --print"
     printf "Press Enter to continue..."; read
     exit 1
 fi
 
 if [ ! -d "$VENV_PATH" ]; then
     echo "Creating environment at $VENV_PATH ..."
-    python scripts/env/select_venv.py --ensure || {
+    "$PYTHON_CMD" scripts/env/select_venv.py --ensure || {
         echo "Error: creation failed"; printf "Press Enter to continue..."; read; exit 1; }
 fi
 
@@ -47,7 +56,7 @@ if [ -f "$VENV_PATH/bin/activate" ]; then
     . "$VENV_PATH/bin/activate"
 else
     echo "Activation script missing ($VENV_PATH/bin/activate). Recreating..."
-    python scripts/env/select_venv.py --ensure || {
+    "$PYTHON_CMD" scripts/env/select_venv.py --ensure || {
         echo "Failed to recreate environment."; printf "Press Enter to continue..."; read; exit 1; }
     if [ -f "$VENV_PATH/bin/activate" ]; then
         . "$VENV_PATH/bin/activate"
@@ -79,7 +88,7 @@ echo
 export PYTHONIOENCODING=utf-8
 
 # Use Python from the activated virtual environment
-python main.py
+"$VENV_PATH/bin/python" main.py
 
 # Check exit status
 if [ $? -ne 0 ]; then

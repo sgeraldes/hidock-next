@@ -4,8 +4,6 @@ Provides prominent, customizable toast notifications for user feedback.
 """
 
 import customtkinter as ctk
-import threading
-import time
 from typing import Literal, Optional
 
 
@@ -43,7 +41,7 @@ class ToastNotification:
         self.height = height
         
         self.toast_window: Optional[ctk.CTkToplevel] = None
-        self.dismiss_timer: Optional[threading.Timer] = None
+        self.dismiss_after_id: Optional[str] = None
         self.is_dismissed = False
         
         # Color schemes for different toast types
@@ -238,9 +236,7 @@ class ToastNotification:
         
         # Auto-dismiss timer
         if self.duration > 0:
-            self.dismiss_timer = threading.Timer(self.duration / 1000.0, self.dismiss)
-            self.dismiss_timer.daemon = True
-            self.dismiss_timer.start()
+            self.dismiss_after_id = self.parent.after(self.duration, self.dismiss)
     
     def _position_toast(self):
         """Position the toast based on the specified position."""
@@ -299,8 +295,12 @@ class ToastNotification:
         self.is_dismissed = True
         
         # Cancel timer if running
-        if self.dismiss_timer:
-            self.dismiss_timer.cancel()
+        if self.dismiss_after_id:
+            try:
+                self.parent.after_cancel(self.dismiss_after_id)
+            except Exception:
+                pass
+            self.dismiss_after_id = None
         
         # Destroy window safely
         try:

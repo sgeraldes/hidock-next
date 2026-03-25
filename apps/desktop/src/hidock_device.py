@@ -1,6 +1,7 @@
 import struct
 
 # For platform detection (e.g., in connect method for kernel driver)
+import subprocess
 import sys
 import threading
 import time
@@ -514,7 +515,7 @@ class HiDockJensen:
                         "Device busy (errno 16) - in use by another application",
                     )
                     self._increment_error_count("connection_lost")
-                    return False, "Device busy - close other applications and try again"
+                    return False, self._build_busy_error_message()
                 elif e_cfg.errno == 13:  # Access denied
                     logger.debug(  # Log at debug level for access denied
                         "Jensen",
@@ -522,7 +523,7 @@ class HiDockJensen:
                         "Access denied (errno 13) - device may be in use or need admin permissions",
                     )
                     self._increment_error_count("connection_lost")
-                    return False, "Access denied - device may be in use or need admin permissions"
+                    return False, self._build_busy_error_message(access_denied=True)
                 else:  # pragma: no cover
                     # For other USB errors during set_configuration
                     logger.error(
@@ -560,7 +561,7 @@ class HiDockJensen:
                     )
                     self._increment_error_count("connection_lost")
                     # Return graceful failure instead of raising exception
-                    return False, "Device busy - close other applications and try again"
+                    return False, self._build_busy_error_message()
                 else:  # pragma: no cover
                     self._increment_error_count("protocol_error")
                     raise  # Re-raise other claim errors
@@ -682,6 +683,83 @@ class HiDockJensen:
             )
             self.disconnect()
             return False, error_msg
+
+    def _build_busy_error_message(self, access_denied: bool = False) -> str:
+        """Build a more actionable Linux USB busy/access-denied error message."""
+        base = (
+            "Access denied - device may be in use or need admin permissions"
+            if access_denied
+            else "Device busy - close other applications and try again"
+        )
+        details = self._get_linux_usb_holder_details()
+        return f"{base}. {details}" if details else base
+
+    def _get_linux_usb_holder_details(self) -> str:
+        """Return a short description of processes holding the current USB node on Linux."""
+        if sys.platform == "win32" or not self.device:
+            return ""
+
+        bus = getattr(self.device, "bus", None)
+        address = getattr(self.device, "address", None)
+        if bus is None or address is None:
+            return ""
+
+        device_path = f"/dev/bus/usb/{int(bus):03d}/{int(address):03d}"
+        holders = self._get_linux_usb_holders_via_lsof(device_path)
+        if holders:
+            holder_text = ", ".join(dict.fromkeys(holders))
+            return f"USB node {device_path} is currently held by: {holder_text}"
+
+        holders = self._get_linux_usb_holders_via_fuser(device_path)
+        if holders:
+            holder_text = ", ".join(dict.fromkeys(holders))
+            return f"USB node {device_path} is currently held by: {holder_text}"
+
+        return ""
+
+    def _get_linux_usb_holders_via_lsof(self, device_path: str) -> list[str]:
+        """Use lsof to identify processes holding a USB device node."""
+        try:
+            result = subprocess.run(
+                ["lsof", device_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (FileNotFoundError, PermissionError, OSError):
+            return []
+
+        holders = []
+        for line in (result.stdout or "").splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 3:
+                command, pid, user = parts[:3]
+                holders.append(f"{command} (pid {pid}, user {user})")
+        return holders
+
+    def _get_linux_usb_holders_via_fuser(self, device_path: str) -> list[str]:
+        """Fallback to fuser when lsof is unavailable."""
+        try:
+            result = subprocess.run(
+                ["fuser", "-v", device_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (FileNotFoundError, PermissionError, OSError):
+            return []
+
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        holders = []
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith(device_path) or "USER" in stripped:
+                continue
+            parts = stripped.split()
+            if len(parts) >= 4:
+                user, pid, _access, command = parts[:4]
+                holders.append(f"{command} (pid {pid}, user {user})")
+        return holders
 
     def disconnect(self):
         """

@@ -112,6 +112,8 @@ class HiDockToolGUI(
         self.title("HiDock Explorer Tool")
         try:
             saved_geometry = self.config.get("window_geometry", "950x850+100+100")
+            if not saved_geometry or saved_geometry == "950x850+100+100":
+                saved_geometry = self._get_default_window_geometry()
             validated_geometry = self._validate_window_geometry(saved_geometry)
             self.geometry(validated_geometry)
         except tkinter.TclError as e:
@@ -120,7 +122,8 @@ class HiDockToolGUI(
                 "__init__",
                 f"Failed to apply saved geometry: {e}. Using default.",
             )
-            self.geometry("950x850+100+100")
+            self.geometry(self._get_default_window_geometry())
+        self.minsize(1100, 780)
 
         # Make the icon path relative to the root directory (parent of src/)
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -258,6 +261,8 @@ class HiDockToolGUI(
         self._cached_device_info = None
         self._device_info_cache_time = 0
         self._cached_storage_info = None
+        self._responsive_layout_timer = None
+        self._tree_frame = None
         self._storage_info_cache_time = 0
         self._cached_storage_text = None
 
@@ -536,6 +541,16 @@ class HiDockToolGUI(
             )
             return "950x850+100+100"  # Safe fallback
 
+    def _get_default_window_geometry(self):
+        """Return a screen-aware default geometry for first launch and legacy configs."""
+        screen_width = max(self.winfo_screenwidth(), 1280)
+        screen_height = max(self.winfo_screenheight(), 900)
+        width = min(max(int(screen_width * 0.82), 1200), screen_width - 80)
+        height = min(max(int(screen_height * 0.82), 820), screen_height - 80)
+        x = max(20, (screen_width - width) // 2)
+        y = max(20, (screen_height - height) // 2)
+        return f"{width}x{height}+{x}+{y}"
+
     def _get_calendar_tolerance_minutes(self):
         """Get calendar tolerance minutes from configuration."""
         config = load_config()
@@ -768,6 +783,7 @@ class HiDockToolGUI(
     def _create_file_tree_frame_at_row(self, parent_frame, row=1):
         """Create file tree frame at specified row (modified version of _create_file_tree_frame)."""
         tree_frame = ctk.CTkFrame(parent_frame, fg_color="transparent", border_width=0)
+        self._tree_frame = tree_frame
         tree_frame.grid(row=row, column=0, sticky="nsew", padx=5, pady=5)
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
@@ -838,6 +854,7 @@ class HiDockToolGUI(
         # Configure frame columns
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(1, weight=0)
+        tree_frame.bind("<Configure>", self._schedule_responsive_layout_update)
         self.file_tree.bind("<<TreeviewSelect>>", self.on_file_selection_change)
         self.file_tree.bind("<Double-1>", self._on_file_double_click_filtered)
         self.file_tree.bind("<Button-3>", self._on_file_right_click)
@@ -848,6 +865,7 @@ class HiDockToolGUI(
         self.file_tree.bind("<ButtonPress-1>", self._on_file_button1_press)
         self.file_tree.bind("<B1-Motion>", self._on_file_b1_motion)
         self.file_tree.bind("<ButtonRelease-1>", self._on_file_button1_release)
+        self.after(100, self._apply_responsive_layout)
 
         # Set up keyboard shortcuts for search
         self._setup_calendar_search_shortcuts()
@@ -1438,6 +1456,16 @@ class HiDockToolGUI(
             image=self.icons.get("settings"),
         )
         self.toolbar_settings_button.pack(side="right", padx=(2, 5), pady=toolbar_button_pady)
+        self._toolbar_buttons = [
+            self.toolbar_connect_button,
+            self.toolbar_refresh_button,
+            self.toolbar_download_button,
+            self.toolbar_play_button,
+            self.toolbar_insights_button,
+            self.toolbar_delete_button,
+            self.toolbar_cancel_button,
+            self.toolbar_settings_button,
+        ]
 
     def _create_status_bar(self):
         """
@@ -3797,12 +3825,97 @@ You can dismiss this warning and continue using the application with limited aud
         """Handle window resize/move events and save geometry."""
         # Only handle events for the main window (not child widgets)
         if event.widget == self:
+            self._schedule_responsive_layout_update()
             # Cancel any existing timer to avoid excessive saves
             if self._geometry_save_timer:
                 self.after_cancel(self._geometry_save_timer)
 
             # Schedule geometry save after a short delay to batch multiple events
             self._geometry_save_timer = self.after(500, self._save_window_geometry)
+
+    def _schedule_responsive_layout_update(self, _event=None):
+        """Debounce responsive layout updates during resize."""
+        if self._responsive_layout_timer:
+            self.after_cancel(self._responsive_layout_timer)
+        self._responsive_layout_timer = self.after(80, self._apply_responsive_layout)
+
+    def _apply_responsive_layout(self):
+        """Update widgets that depend on the current window size."""
+        self._responsive_layout_timer = None
+        self._update_toolbar_layout()
+        self._update_file_tree_columns()
+
+    def _update_toolbar_layout(self):
+        """Adjust toolbar button widths for narrow and wide window sizes."""
+        if not hasattr(self, "toolbar_frame") or not self.toolbar_frame or not self.toolbar_frame.winfo_exists():
+            return
+
+        window_width = max(self.winfo_width(), 0)
+        compact = window_width and window_width < 1380
+        default_width = 82 if compact else 100
+        settings_width = 90 if compact else 100
+        insights_width = 95 if compact else 110
+
+        for button in getattr(self, "_toolbar_buttons", []):
+            if button and button.winfo_exists():
+                button.configure(width=default_width)
+
+        if hasattr(self, "toolbar_insights_button") and self.toolbar_insights_button.winfo_exists():
+            self.toolbar_insights_button.configure(
+                width=insights_width,
+                text="Insights" if compact else "Get Insights",
+            )
+        if hasattr(self, "toolbar_cancel_button") and self.toolbar_cancel_button.winfo_exists():
+            self.toolbar_cancel_button.configure(text="Cancel" if compact else "🛑 Cancel")
+        if hasattr(self, "toolbar_settings_button") and self.toolbar_settings_button.winfo_exists():
+            self.toolbar_settings_button.configure(width=settings_width)
+
+    def _update_file_tree_columns(self):
+        """Resize visible treeview columns to use the current window width more effectively."""
+        if not (
+            hasattr(self, "file_tree")
+            and self.file_tree
+            and self.file_tree.winfo_exists()
+            and hasattr(self, "_tree_frame")
+            and self._tree_frame
+            and self._tree_frame.winfo_exists()
+        ):
+            return
+
+        tree_width = self._tree_frame.winfo_width() - 24
+        if tree_width <= 0:
+            return
+
+        column_specs = {
+            "num": {"min": 40, "weight": 0},
+            "name": {"min": 220, "weight": 4},
+            "datetime": {"min": 170, "weight": 3},
+            "size": {"min": 90, "weight": 1},
+            "duration": {"min": 100, "weight": 1},
+            "meeting": {"min": 220, "weight": 3},
+            "version": {"min": 80, "weight": 1},
+            "status": {"min": 120, "weight": 2},
+            "transcription": {"min": 120, "weight": 2},
+        }
+
+        displaycolumns = list(self.file_tree["displaycolumns"])
+        if displaycolumns == ["#all"]:
+            displaycolumns = list(self.file_tree["columns"])
+
+        visible_columns = [col for col in self.file_tree["columns"] if col in displaycolumns]
+        if not visible_columns:
+            return
+
+        base_width = sum(column_specs.get(col, {"min": 100})["min"] for col in visible_columns)
+        extra_width = max(0, tree_width - base_width)
+        total_weight = sum(column_specs.get(col, {"weight": 1})["weight"] for col in visible_columns)
+
+        for col in visible_columns:
+            spec = column_specs.get(col, {"min": 100, "weight": 1})
+            width = spec["min"]
+            if total_weight and spec["weight"] > 0:
+                width += int(extra_width * (spec["weight"] / total_weight))
+            self.file_tree.column(col, width=width)
 
     def _save_window_geometry(self):
         """Save the current window geometry to configuration."""
