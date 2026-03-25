@@ -27,6 +27,7 @@ class TreeViewMixin:
         tree_frame.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         tree_frame.grid_columnconfigure(0, weight=1)
         tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(1, weight=0)
         columns = ("num", "name", "datetime", "size", "duration", "meeting", "version", "status", "transcription")
         # Set initial selectmode based on configuration
         initial_selectmode = "browse" if self.single_selection_mode_var.get() else "extended"
@@ -89,7 +90,9 @@ class TreeViewMixin:
         # Create and configure scrollbar - simplest possible approach
         self.tree_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.file_tree.yview)
         self.tree_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.file_tree.configure(yscrollcommand=self.tree_scrollbar.set)
+        self.tree_x_scrollbar = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.file_tree.xview)
+        self.tree_x_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.file_tree.configure(yscrollcommand=self.tree_scrollbar.set, xscrollcommand=self.tree_x_scrollbar.set)
 
         # Configure frame columns
         tree_frame.grid_columnconfigure(0, weight=1)
