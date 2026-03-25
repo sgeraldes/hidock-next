@@ -1,12 +1,13 @@
 import initSqlJs, { Database as SqlJsDatabase } from 'sql.js'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { randomUUID } from 'crypto'
 import { getDatabasePath } from './file-storage'
 
 let db: SqlJsDatabase | null = null
 let dbPath: string = ''
 
-const SCHEMA_VERSION = 21
+const SCHEMA_VERSION = 24
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -302,7 +303,7 @@ CREATE TABLE IF NOT EXISTS download_queue (
     filename TEXT NOT NULL UNIQUE,
     file_size INTEGER NOT NULL,
     progress INTEGER DEFAULT 0,
-    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'downloading', 'completed', 'failed')),
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'downloading', 'completed', 'failed', 'cancelled')),
     error TEXT,
     started_at TEXT,
     completed_at TEXT,
@@ -1196,6 +1197,153 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v21 complete: meeting_id backfill applied')
+  },
+
+  22: () => {
+    // v22: SPEC-002 — Convert legacy rec_ IDs to standard UUIDs
+    // recording-watcher used to generate IDs like "rec_1700000000000" which fail
+    // Zod UUID validation and cause data fragmentation.
+    console.log('Running migration to schema v22: Converting legacy rec_ IDs to UUIDs')
+    const database = getDatabase()
+
+    try {
+      const legacyRows = database.exec("SELECT id FROM recordings WHERE id LIKE 'rec_%'")
+      if (legacyRows.length === 0 || legacyRows[0].values.length === 0) {
+        console.log('[Migration v22] No legacy rec_ IDs found — nothing to migrate')
+        return
+      }
+
+      const legacyIds = legacyRows[0].values.map(row => row[0] as string)
+      console.log(`[Migration v22] Found ${legacyIds.length} legacy rec_ IDs to migrate`)
+
+      let migratedCount = 0
+      for (const oldId of legacyIds) {
+        const newId = randomUUID()
+
+        // Update foreign keys first (transcription_queue, transcriptions, etc.)
+        database.run('UPDATE transcription_queue SET recording_id = ? WHERE recording_id = ?', [newId, oldId])
+        database.run('UPDATE transcripts SET recording_id = ? WHERE recording_id = ?', [newId, oldId])
+        database.run('UPDATE vector_embeddings SET transcript_id = ? WHERE transcript_id = ?', [newId, oldId])
+        database.run('UPDATE recording_meeting_candidates SET recording_id = ? WHERE recording_id = ?', [newId, oldId])
+
+        // SQLite doesn't allow updating a PRIMARY KEY directly — use INSERT + DELETE
+        const recRows = database.exec('SELECT * FROM recordings WHERE id = ?', [oldId])
+        if (recRows.length > 0 && recRows[0].values.length > 0) {
+          const columns = recRows[0].columns
+          const values = [...recRows[0].values[0]]
+          const idIndex = columns.indexOf('id')
+          if (idIndex !== -1) {
+            values[idIndex] = newId
+          }
+          const placeholders = columns.map(() => '?').join(', ')
+          const columnList = columns.join(', ')
+          database.run(`INSERT INTO recordings (${columnList}) VALUES (${placeholders})`, values)
+          database.run('DELETE FROM recordings WHERE id = ?', [oldId])
+          migratedCount++
+        }
+      }
+
+      console.log(`[Migration v22] Migrated ${migratedCount} recordings from rec_ to UUID format`)
+    } catch (e) {
+      console.warn('[Migration v22] Failed to migrate legacy rec_ IDs:', e)
+    }
+
+    console.log('Migration v22 complete: legacy rec_ ID conversion applied')
+  },
+
+  23: () => {
+    // v23: Fix for v22 which crashed on non-existent vector_embeddings table.
+    // Re-run rec_ → UUID migration with correct table references.
+    console.log('Running migration to schema v23: Re-running rec_ ID migration with corrected tables')
+    const database = getDatabase()
+
+    try {
+      const legacyRows = database.exec("SELECT id FROM recordings WHERE id LIKE 'rec_%'")
+      if (legacyRows.length === 0 || legacyRows[0].values.length === 0) {
+        console.log('[Migration v23] No legacy rec_ IDs found — v22 may have partially succeeded or none existed')
+        return
+      }
+
+      const legacyIds = legacyRows[0].values.map(row => row[0] as string)
+      console.log(`[Migration v23] Found ${legacyIds.length} legacy rec_ IDs to migrate`)
+
+      let migratedCount = 0
+      for (const oldId of legacyIds) {
+        const newId = randomUUID()
+
+        database.run('UPDATE transcription_queue SET recording_id = ? WHERE recording_id = ?', [newId, oldId])
+        database.run('UPDATE transcripts SET recording_id = ? WHERE recording_id = ?', [newId, oldId])
+        database.run('UPDATE recording_meeting_candidates SET recording_id = ? WHERE recording_id = ?', [newId, oldId])
+        database.run('UPDATE quality_assessments SET recording_id = ? WHERE recording_id = ?', [newId, oldId])
+        database.run('UPDATE knowledge_captures SET source_recording_id = ? WHERE source_recording_id = ?', [newId, oldId])
+
+        const recRows = database.exec('SELECT * FROM recordings WHERE id = ?', [oldId])
+        if (recRows.length > 0 && recRows[0].values.length > 0) {
+          const columns = recRows[0].columns
+          const values = [...recRows[0].values[0]]
+          const idIndex = columns.indexOf('id')
+          if (idIndex !== -1) {
+            values[idIndex] = newId
+          }
+          const placeholders = columns.map(() => '?').join(', ')
+          const columnList = columns.join(', ')
+          database.run(`INSERT INTO recordings (${columnList}) VALUES (${placeholders})`, values)
+          database.run('DELETE FROM recordings WHERE id = ?', [oldId])
+          migratedCount++
+        }
+      }
+
+      console.log(`[Migration v23] Migrated ${migratedCount} recordings from rec_ to UUID format`)
+    } catch (e) {
+      console.error('[Migration v23] FAILED to migrate legacy rec_ IDs:', e)
+    }
+  },
+
+  24: () => {
+    console.log('Running migration to schema v24: Add cancelled status to download_queue CHECK constraint')
+    const database = getDatabase()
+
+    try {
+      // SQLite cannot ALTER CHECK constraints -- must recreate the table
+      // Check if migration is needed (idempotent)
+      const tableInfoResult = database.exec("SELECT sql FROM sqlite_master WHERE type='table' AND name='download_queue'")
+      if (tableInfoResult.length > 0 && tableInfoResult[0].values.length > 0) {
+        const createSql = String(tableInfoResult[0].values[0][0])
+        if (createSql.includes("'cancelled'")) {
+          console.log('[Migration v24] download_queue already has cancelled status, skipping')
+          return
+        }
+      }
+
+      database.run(`
+        CREATE TABLE IF NOT EXISTS download_queue_new (
+          id TEXT PRIMARY KEY,
+          filename TEXT NOT NULL UNIQUE,
+          file_size INTEGER NOT NULL,
+          progress INTEGER DEFAULT 0,
+          status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'downloading', 'completed', 'failed', 'cancelled')),
+          error TEXT,
+          started_at TEXT,
+          completed_at TEXT,
+          recording_date TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+
+      // Copy existing data
+      database.run(`
+        INSERT OR IGNORE INTO download_queue_new
+        SELECT id, filename, file_size, progress, status, error, started_at, completed_at, recording_date, created_at
+        FROM download_queue
+      `)
+
+      database.run('DROP TABLE IF EXISTS download_queue')
+      database.run('ALTER TABLE download_queue_new RENAME TO download_queue')
+
+      console.log('Migration v24 complete: download_queue CHECK constraint updated')
+    } catch (e) {
+      console.warn('[Migration v24] Failed:', e)
+    }
   }
 
 }
@@ -2956,7 +3104,7 @@ export function selectMeetingForRecordingByUser(recordingId: string, meetingId: 
 
 export function resetStuckTranscriptions(): { recordingsReset: number; queueItemsReset: number } {
   const db = getDatabase()
-  db.run("UPDATE recordings SET status = 'pending' WHERE status = 'transcribing'")
+  db.run("UPDATE recordings SET transcription_status = 'none' WHERE transcription_status IN ('processing', 'pending')")
   const recordingsReset = db.getRowsModified()
   db.run("UPDATE transcription_queue SET status = 'pending' WHERE status = 'processing'")
   const queueItemsReset = db.getRowsModified()
@@ -3121,10 +3269,21 @@ export async function updateRecordingStorageTierAsync(
  */
 export function clearStaleTranscriptionLock(): void {
   const database = getDatabase()
+  const now = new Date().toISOString()
+
+  // Ensure the lock row exists (handles edge case where migration didn't insert it)
+  database.run(
+    `INSERT OR IGNORE INTO transcription_service_lock (id, process_id, acquired_at, updated_at) VALUES (1, NULL, NULL, ?)`,
+    [now]
+  )
+
+  // Unconditionally clear the lock
   database.run(
     `UPDATE transcription_service_lock SET process_id = NULL, acquired_at = NULL, updated_at = ? WHERE id = 1`,
-    [new Date().toISOString()]
+    [now]
   )
+
+  console.log('[Transcription] Stale lock cleared on startup')
 }
 
 /**
@@ -3138,14 +3297,30 @@ export function acquireTranscriptionLock(processId: string): boolean {
   const now = new Date().toISOString()
 
   // Check current lock status before attempting to acquire
-  const currentStatus = database.exec('SELECT process_id FROM transcription_service_lock WHERE id = 1')
+  const currentStatus = database.exec('SELECT process_id, acquired_at FROM transcription_service_lock WHERE id = 1')
   const currentProcessId = currentStatus.length > 0 && currentStatus[0].values.length > 0
     ? currentStatus[0].values[0][0]
     : null
 
-  // If already locked by another process, return false
+  // If already locked by another process, check for stale lock (held > 5 minutes)
   if (currentProcessId !== null) {
-    return false
+    const acquiredAt = currentStatus[0].values[0][1] as string | null
+    const STALE_LOCK_TIMEOUT_MS = 5 * 60 * 1000
+    if (acquiredAt) {
+      const lockAge = Date.now() - new Date(acquiredAt).getTime()
+      if (lockAge > STALE_LOCK_TIMEOUT_MS) {
+        console.warn(`[Transcription] Force-clearing stale lock held by ${currentProcessId} for ${Math.round(lockAge / 1000)}s`)
+        database.run(
+          `UPDATE transcription_service_lock SET process_id = NULL, acquired_at = NULL, updated_at = ? WHERE id = 1`,
+          [now]
+        )
+        // Fall through to acquire
+      } else {
+        return false
+      }
+    } else {
+      return false
+    }
   }
 
   // Atomic check-and-set using UPDATE with WHERE clause
