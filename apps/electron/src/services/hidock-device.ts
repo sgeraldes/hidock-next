@@ -149,6 +149,10 @@ class HiDockDeviceService {
   private listRecordingsLastCompleted: number = 0
   private static readonly LIST_RECORDINGS_DEBOUNCE_MS = 2000
 
+  // Fix 6: Retry backoff counters — reset on success or disconnect
+  private listRecordingsFailureCount: number = 0
+  private listRecordingsLastFailure: number = 0
+
   // Flag to prevent overlapping auto-connect attempts
   private autoConnectInProgress: boolean = false
 
@@ -826,6 +830,25 @@ class HiDockDeviceService {
       }
     }
 
+    // Fix 6: Retry backoff after repeated failures — prevents hammering a broken device
+    if (!forceRefresh && this.listRecordingsFailureCount > 0) {
+      const timeSinceFailure = Date.now() - this.listRecordingsLastFailure
+
+      // After 5+ failures, stop auto-retrying entirely until user forces refresh
+      if (this.listRecordingsFailureCount >= 5) {
+        if (shouldLogQa()) console.log('[HiDockDevice] listRecordings: backoff - 5+ failures, stopped auto-retry')
+        this.logActivity('error', 'File listing failed repeatedly', 'Please disconnect and reconnect your device')
+        return this.cachedRecordings ?? []
+      }
+
+      // After 3+ failures use 60s delay, otherwise 10s delay
+      const backoffMs = this.listRecordingsFailureCount >= 3 ? 60_000 : 10_000
+      if (timeSinceFailure < backoffMs) {
+        if (shouldLogQa()) console.log(`[HiDockDevice] listRecordings: backoff - ${this.listRecordingsFailureCount} failures, waiting ${backoffMs / 1000}s`)
+        return this.cachedRecordings ?? []
+      }
+    }
+
     // FL-01/FL-08: forceRefresh must wait for existing operation to complete,
     // then start a new one — never run concurrently
     if (forceRefresh && (this.listRecordingsLock || this.listRecordingsPromise)) {
@@ -1058,6 +1081,14 @@ class HiDockDeviceService {
         this.cachedRecordings = recordings
         this.cachedRecordingCount = expectedFileCount
 
+        // Fix 6: Reset failure counters on success
+        this.listRecordingsFailureCount = 0
+        this.listRecordingsLastFailure = 0
+
+        // Fix 6: Only stamp debounce timestamp on success (was in finally — prevented failures
+        // from triggering a fresh retry immediately after the backoff window expired)
+        this.listRecordingsLastCompleted = Date.now()
+
         return recordings
       } catch (error) {
         animationCancelled = true
@@ -1066,11 +1097,15 @@ class HiDockDeviceService {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error'
         const cachedCount = this.cachedRecordings?.length ?? 0
         this.logActivity('error', 'Failed to list files', `${errorMsg} (returned ${cachedCount} cached files)`)
+
+        // Fix 6: Track failure for backoff
+        this.listRecordingsFailureCount++
+        this.listRecordingsLastFailure = Date.now()
+
         return this.cachedRecordings ?? []
       } finally {
         this.listRecordingsLock = false
         this.listRecordingsPromise = null
-        this.listRecordingsLastCompleted = Date.now()
         if (this.state.connected && this.initializationComplete) {
           this.updateStatus('ready', 'Device ready', 100)
         }
@@ -1484,6 +1519,10 @@ class HiDockDeviceService {
     // Abort any running initialization immediately
     this.initAborted = true
     this.initializationComplete = false  // Reset initialization flag
+
+    // Fix 6: Reset retry backoff on disconnect so reconnect starts fresh
+    this.listRecordingsFailureCount = 0
+    this.listRecordingsLastFailure = 0
 
     // Persist cache to survive app restart
     this.persistCacheToStorage()

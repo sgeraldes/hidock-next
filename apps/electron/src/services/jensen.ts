@@ -254,6 +254,16 @@ interface QueueEntry {
 
 type CommandHandler = (msg: ResponseMessage | null, device: JensenDevice) => unknown
 
+// Fix 3: Incremental file list parsing state — stored in device.data['filelist']
+// instead of the old Uint8Array[] accumulator, eliminating O(N^2) re-parsing.
+interface FileListState {
+  tailBuffer: Uint8Array // Unparsed tail bytes from last parse (may be partial record)
+  tailLen: number        // Valid bytes in tailBuffer
+  files: FileInfo[]      // Running list of fully-parsed files
+  headerTotal: number    // File count from 0xFF 0xFF header (0 if not yet seen)
+  headerParsed: boolean  // Whether the optional 0xFF 0xFF header has been processed
+}
+
 // ============================================================
 // JensenDevice — event-driven architecture matching jensen.js
 // ============================================================
@@ -1300,7 +1310,8 @@ export class JensenDevice {
    * Matches jensen.js s.prototype.listFiles exactly:
    * - Checks filelist lock
    * - Gets file count for old firmware
-   * - Registers handler that re-parses all accumulated data on each packet
+   * - Fix 3: Uses incremental stateful parser — each packet only parses NEW data,
+   *   eliminating the O(N^2) re-parse-everything behaviour of the old implementation.
    * - Handler returns file array when complete, undefined when waiting
    */
   async listFiles(
@@ -1322,48 +1333,148 @@ export class JensenDevice {
     }
     if (fileCount && fileCount.count === 0) return []
 
-    // Initialize accumulator (jensen.js: this[e] = [])
-    this.data[key] = [] as Uint8Array[]
-    let lastEmittedCount = 0
+    // Fix 3: Initialize incremental state object instead of Uint8Array[] accumulator.
+    const TAIL_BUFFER_SIZE = 4096 // Generous upper bound for a single file entry
+    const state: FileListState = {
+      tailBuffer: new Uint8Array(TAIL_BUFFER_SIZE),
+      tailLen: 0,
+      files: [],
+      headerTotal: 0,
+      headerParsed: false
+    }
+    this.data[key] = state
     const totalExpected = expectedFileCount ?? fileCount?.count ?? 0
     onProgress?.(0, totalExpected)
 
     // Register dynamic handler for GET_FILE_LIST (matches jensen.js handler registration)
     this.handlers.set(CMD.GET_FILE_LIST, (msg, device) => {
+      const st = device.data[key] as FileListState | null
+
       // Empty body = end of file list (jensen.js: if (n.body.length == 0) return (r[e] = null), [])
       if (!msg || msg.body.length === 0) {
-        const acc = device.data[key] as Uint8Array[] | null
         device.data[key] = null
-        if (!acc || acc.length === 0) return []
-        // Parse whatever we accumulated
-        const { files } = device.parseFileListFlat(device.flattenChunks(acc))
-        return files.filter(f => f.time !== null)
+        if (!st) return []
+
+        // Try one final parse of any remaining tail bytes
+        if (st.tailLen > 0) {
+          const finalBuf = st.tailBuffer.slice(0, st.tailLen)
+          const { files: extraFiles } = device.parseFileListFlat(finalBuf)
+          if (extraFiles.length > 0) {
+            st.files.push(...extraFiles)
+          }
+        }
+        return st.files.filter(f => f.time !== null)
       }
 
-      // Accumulate body (jensen.js: r[e].push(n.body))
-      const acc = device.data[key] as Uint8Array[]
-      acc.push(new Uint8Array(msg.body))
+      if (!st) return undefined // Lock released by timeout; absorb late packet
 
-      // Flatten and re-parse all accumulated data (matches jensen.js: flatten + parse loop)
-      const flat = device.flattenChunks(acc)
-      const { files, headerTotal } = device.parseFileListFlat(flat)
+      // Fix 3: Build working buffer = tail bytes from previous packet + current body
+      const bodyLen = msg.body.length
+      const workLen = st.tailLen + bodyLen
+      const work = new Uint8Array(workLen)
+      work.set(st.tailBuffer.subarray(0, st.tailLen), 0)
+      for (let i = 0; i < bodyLen; i++) work[i + st.tailLen] = msg.body[i]
 
-      // Emit new files for streaming display
-      if (onNewFiles && files.length > lastEmittedCount) {
-        onNewFiles(files.slice(lastEmittedCount))
+      // Handle optional 0xFF 0xFF header (only in the very first bytes)
+      let parseStart = 0
+      if (!st.headerParsed) {
+        st.headerParsed = true
+        if (workLen >= 6 && (work[0] & 0xff) === 0xff && (work[1] & 0xff) === 0xff) {
+          st.headerTotal =
+            ((work[2] & 0xff) << 24) |
+            ((work[3] & 0xff) << 16) |
+            ((work[4] & 0xff) << 8) |
+            (work[5] & 0xff)
+          parseStart = 6
+        }
       }
-      lastEmittedCount = files.length
 
-      const effectiveTotal = headerTotal > 0 ? headerTotal : totalExpected
-      onProgress?.(files.length, effectiveTotal > 0 ? effectiveTotal : files.length)
+      // Incrementally parse file entries from the working buffer
+      const prevCount = st.files.length
+      let pos = parseStart
+
+      while (pos < workLen) {
+        const entryStart = pos
+
+        // Each entry: 1 byte version + 3 bytes name-len + name + 4 bytes file-len + 6 bytes padding + 16 bytes sig
+        if (pos + 4 > workLen) break // Need at least version + nameLen bytes
+
+        const fileVersion = work[pos++] & 0xff
+
+        if (pos + 3 > workLen) { pos = entryStart; break }
+        const nameLen =
+          ((work[pos] & 0xff) << 16) |
+          ((work[pos + 1] & 0xff) << 8) |
+          (work[pos + 2] & 0xff)
+        pos += 3
+
+        if (pos + nameLen > workLen) { pos = entryStart; break }
+        const nameChars: string[] = []
+        for (let i = 0; i < nameLen; i++) {
+          const ch = work[pos++] & 0xff
+          if (ch > 0) nameChars.push(String.fromCharCode(ch))
+        }
+
+        if (pos + 4 > workLen) { pos = entryStart; break }
+        const fileLength =
+          ((work[pos] & 0xff) << 24) |
+          ((work[pos + 1] & 0xff) << 16) |
+          ((work[pos + 2] & 0xff) << 8) |
+          (work[pos + 3] & 0xff)
+        pos += 4
+
+        if (pos + 6 > workLen) { pos = entryStart; break }
+        pos += 6 // padding
+
+        if (pos + 16 > workLen) { pos = entryStart; break }
+        const sigParts: string[] = []
+        for (let i = 0; i < 16; i++) {
+          const hex = (work[pos++] & 0xff).toString(16)
+          sigParts.push(hex.length === 1 ? '0' + hex : hex)
+        }
+
+        const filename = nameChars.join('')
+        const { createDate, createTime, time } = device.parseFilenameDateTime(filename)
+        const duration = calculateDurationSeconds(fileLength, fileVersion)
+
+        st.files.push({
+          name: filename,
+          createDate,
+          createTime,
+          time,
+          duration,
+          version: fileVersion,
+          length: fileLength,
+          signature: sigParts.join('')
+        })
+      }
+
+      // Save unparsed tail bytes for the next packet
+      const remaining = workLen - pos
+      if (remaining > 0) {
+        // Grow tail buffer if needed (shouldn't happen with 4KB but be safe)
+        if (remaining > st.tailBuffer.length) {
+          st.tailBuffer = new Uint8Array(remaining * 2)
+        }
+        st.tailBuffer.set(work.subarray(pos), 0)
+      }
+      st.tailLen = remaining
+
+      // Emit only newly-parsed files for streaming display
+      if (onNewFiles && st.files.length > prevCount) {
+        onNewFiles(st.files.slice(prevCount))
+      }
+
+      const effectiveTotal = st.headerTotal > 0 ? st.headerTotal : totalExpected
+      onProgress?.(st.files.length, effectiveTotal > 0 ? effectiveTotal : st.files.length)
 
       // Check if complete (jensen.js: (t && h.length >= t.count) || (a > -1 && h.length >= a))
       // Fix 2: Also resolve when expectedFileCount (totalExpected) is reached — handles firmware
       // > v327722 that doesn't send the 0xFF total header, so headerTotal stays 0.
       const countTarget = fileCount?.count ?? 0
-      if ((countTarget > 0 && files.length >= countTarget) || (headerTotal > 0 && files.length >= headerTotal) || (totalExpected > 0 && files.length >= totalExpected)) {
+      if ((countTarget > 0 && st.files.length >= countTarget) || (st.headerTotal > 0 && st.files.length >= st.headerTotal) || (totalExpected > 0 && st.files.length >= totalExpected)) {
         device.data[key] = null
-        return files.filter(f => f.time !== null)
+        return st.files.filter(f => f.time !== null)
       }
 
       // Not done yet — return undefined to keep waiting
@@ -1383,7 +1494,7 @@ export class JensenDevice {
     const timeoutPromise = new Promise<FileInfo[] | null>((resolve) => {
       timeoutId = setTimeout(() => {
         // Extract partial results before cleanup
-        const acc = this.data[key] as Uint8Array[] | null
+        const st = this.data[key] as FileListState | null
         this.data[key] = null // Release filelist lock
 
         // Replace handler with no-op absorber so late packets don't re-trigger anything
@@ -1402,14 +1513,13 @@ export class JensenDevice {
           this.sendNextCommand()
         }
 
-        // Resolve with whatever was accumulated so far
-        if (acc && acc.length > 0) {
-          const { files } = this.parseFileListFlat(this.flattenChunks(acc))
-          const filtered = files.filter(f => f.time !== null)
-          if (shouldLog()) console.warn(`[Jensen] listFiles timeout after 120s — returning ${filtered.length} partial files`)
+        // Resolve with whatever was parsed so far
+        if (st && st.files.length > 0) {
+          const filtered = st.files.filter(f => f.time !== null)
+          console.warn(`[Jensen] listFiles timeout after 120s — returning ${filtered.length} partial files`)
           resolve(filtered)
         } else {
-          if (shouldLog()) console.warn('[Jensen] listFiles timeout after 120s — no data accumulated')
+          console.warn('[Jensen] listFiles timeout after 120s — no data accumulated')
           resolve([])
         }
       }, LISTFILES_TIMEOUT_MS)
