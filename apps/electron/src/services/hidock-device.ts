@@ -14,7 +14,9 @@ import {
   RealtimeSettings,
   RealtimeData,
   BatteryStatus,
-  BluetoothStatus
+  BluetoothStatus,
+  USB_VENDOR_IDS,
+  USB_PRODUCT_IDS
 } from './jensen'
 import { validateDevicePath } from '../utils/path-validation'
 import { withTimeout, isAbortError } from '../utils/timeout'
@@ -106,7 +108,7 @@ class HiDockDeviceService {
   private stateChangeListeners: Set<StateChangeListener> = new Set()
   private autoConnectInterval: number | null = null
   private connectionStatus: ConnectionStatus = { step: 'idle', message: 'Not connected' }
-  private autoConnectEnabled: boolean = true // Can be disabled by user action
+  private autoConnectEnabled: boolean = false
   private userInitiatedDisconnect: boolean = false // Track if user clicked disconnect
 
   // Persisted activity log - survives page navigation
@@ -415,12 +417,31 @@ class HiDockDeviceService {
     try {
       this.logActivity('info', 'Auto-connect', 'Checking for authorized HiDock devices...')
 
+      const authorizedDevices = await navigator.usb.getDevices()
+      const authorizedHiDock = authorizedDevices.find((device) => {
+        if (!USB_VENDOR_IDS.includes(device.vendorId)) {
+          return false
+        }
+
+        const productName = device.productName?.toLowerCase() ?? ''
+        if (productName.includes('hidock') || productName.includes('jensen')) {
+          return true
+        }
+
+        return Object.values(USB_PRODUCT_IDS).includes(device.productId)
+      })
+
+      if (!authorizedHiDock) {
+        this.logActivity('info', 'Auto-connect', 'No authorized device found. Click Connect to authorize.')
+        return false
+      }
+
       // BUG-005: Add 8s timeout so a non-responsive device doesn't hang auto-connect indefinitely
       const TIMEOUT_MS = 8000
       const timeoutPromise = new Promise<boolean>((resolve) =>
         setTimeout(() => resolve(false), TIMEOUT_MS)
       )
-      const success = await Promise.race([this.jensen.tryConnect(), timeoutPromise])
+      const success = await Promise.race([this.jensen.tryConnect(authorizedHiDock), timeoutPromise])
 
       // Note: handleConnect() is called via the onconnect callback in jensen.ts
       // We should NOT call it here to avoid duplicate initialization
@@ -428,7 +449,7 @@ class HiDockDeviceService {
         this.updateStatus('opening', 'Device found, connecting...', 10)
         this.logActivity('success', 'Auto-connect', 'Device found and connected')
       } else {
-        this.logActivity('info', 'Auto-connect', 'No authorized device found. Click Connect to authorize.')
+        this.logActivity('info', 'Auto-connect', 'Found authorized device but connection failed')
       }
       return success
     } finally {
@@ -968,6 +989,9 @@ class HiDockDeviceService {
     this.logActivity('usb-out', 'CMD: List Files', `Requesting file list (${expectedFileCount} files expected)`)
     if (shouldLogQa()) console.log('[HiDockDevice] >>> listRecordings: CALLING JENSEN.LISTFILES(), expected:', expectedFileCount)
 
+    // BUG-002: Update connection status so UI shows scan progress instead of frozen "ready"
+    this.updateStatus('counting-files', `Scanning files (0/${expectedFileCount})...`, 0)
+
     // Send initial progress immediately so UI shows 0/N
     onProgress?.(0, expectedFileCount)
 
@@ -981,34 +1005,43 @@ class HiDockDeviceService {
 
     // Animate progress from 0% to 100% during the wait period using ease-out curve
     // Real data takes over once it arrives - animation is just placeholder
+    let lastStatusUpdateProgress = -1
     const animationInterval = setInterval(() => {
       if (animationCancelled) return
       const elapsed = Date.now() - animationStartTime
-      // Use ease-out curve: starts fast, slows as it approaches 100%
       const t = Math.min(1, elapsed / estimatedTimeMs)
-      const easeOut = 1 - Math.pow(1 - t, 3) // Cubic ease-out
+      const easeOut = 1 - Math.pow(1 - t, 3)
       animationProgress = Math.floor(easeOut * expectedFileCount)
-      // Removed verbose animation progress logging
       onProgress?.(animationProgress, expectedFileCount)
-    }, 50) // Update every 50ms for smoother animation
+      const pct = expectedFileCount > 0 ? Math.round((animationProgress / expectedFileCount) * 100) : 0
+      if (pct !== lastStatusUpdateProgress && pct % 5 === 0) {
+        lastStatusUpdateProgress = pct
+        this.updateStatus('counting-files', `Scanning files (${animationProgress}/${expectedFileCount})...`, pct)
+      }
+    }, 50)
 
     // Create and store the promise for concurrent request handling
     this.listRecordingsPromise = (async () => {
       try {
         const files = await this.jensen.listFiles((filesFound, expectedFiles) => {
-          // Only cancel animation when real progress arrives (filesFound > animationProgress)
-          // This prevents the initial 0/N callback from killing the animation
           if (filesFound > animationProgress) {
             animationCancelled = true
             clearInterval(animationInterval)
             onProgress?.(filesFound, expectedFiles)
+            const pct = expectedFiles > 0 ? Math.round((filesFound / expectedFiles) * 100) : 0
+            this.updateStatus('counting-files', `Scanning files (${filesFound}/${expectedFiles})...`, pct)
           }
-          // Removed verbose progress logging
         }, expectedFileCount)
 
         // Ensure animation is stopped
         animationCancelled = true
         clearInterval(animationInterval)
+
+        // Fix 1: Guard against null response (disconnect, timeout, decode error)
+        if (!files) {
+          this.logActivity('error', 'Device returned no file data', 'Received null response from listFiles — device may have disconnected')
+          return []
+        }
 
         if (shouldLogQa()) console.log(`[HiDockDevice] listRecordings: Received ${files.length} files`)
         this.logActivity('usb-in', 'File List Received', `${files.length} files found`)
@@ -1033,16 +1066,14 @@ class HiDockDeviceService {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error'
         const cachedCount = this.cachedRecordings?.length ?? 0
         this.logActivity('error', 'Failed to list files', `${errorMsg} (returned ${cachedCount} cached files)`)
-        // Return cached data as fallback instead of empty array
-        // This prevents waiters from receiving empty results on transient USB errors
-        // Note: cached data may be stale if files changed between connects (acceptable tradeoff)
         return this.cachedRecordings ?? []
       } finally {
-        // Clear the lock and promise when done (success or error)
         this.listRecordingsLock = false
         this.listRecordingsPromise = null
-        // FL-02: Update debounce timestamp on completion
         this.listRecordingsLastCompleted = Date.now()
+        if (this.state.connected && this.initializationComplete) {
+          this.updateStatus('ready', 'Device ready', 100)
+        }
       }
     })()
 
@@ -1315,31 +1346,47 @@ class HiDockDeviceService {
     this.logActivity('success', 'USB device connected', `Model: ${this.state.model}`)
     if (shouldLogQa()) console.log(`[HiDockDevice] Connected to ${this.state.model}`)
 
-    // Initialize device - track failures to detect unresponsive device
-    // Each step has a timeout to prevent hanging
-    const INIT_STEP_TIMEOUT = 15000 // 15 seconds per step
+    const INIT_STEP_TIMEOUT = 15000
+    const FIRST_CMD_TIMEOUT = 5000
     let timeoutCount = 0
     let successCount = 0
-    const MAX_TIMEOUTS_BEFORE_FAIL = 2 // Fail initialization if 2+ steps timeout
+    const MAX_TIMEOUTS_BEFORE_FAIL = 2
 
-    // Create AbortController for timeout management
     const controller = new AbortController()
 
-    // Step 1: Get device info (critical - if this times out, device is likely unresponsive)
+    // Step 1: Get device info — use short timeout + retry.
+    // After USB setup (selectConfiguration, claimInterface, clearHalt), the device
+    // firmware may need extra stabilization time. A quick 5s probe + retry handles
+    // this without making the user wait 15s on a truly unresponsive device.
     if (this.initAborted) return
     this.updateStatus('getting-info', 'Reading device information...', 20)
+    let step1Success = false
     try {
-      await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, controller)
+      await withTimeout(this.refreshDeviceInfo(), FIRST_CMD_TIMEOUT, new AbortController())
+      step1Success = true
       successCount++
-    } catch (error) {
-      const isTimeout = isAbortError(error)
-      if (isTimeout) timeoutCount++
-      console.warn('[HiDockDevice] Failed to get device info:', error)
-      this.logActivity('error', 'Failed to get device info', error instanceof Error ? error.message : 'Unknown error')
+    } catch (firstError) {
+      if (isAbortError(firstError) && !this.initAborted) {
+        this.logActivity('info', 'Device not ready', 'Retrying...')
+        this.updateStatus('getting-info', 'Device initializing, retrying...', 20)
+        await new Promise(r => setTimeout(r, 500))
 
-      // If first command times out, device is likely unresponsive - suggest reset
-      if (isTimeout) {
-        this.logActivity('warning', 'Device may be unresponsive', 'Try disconnecting and reconnecting your device')
+        if (!this.initAborted) {
+          try {
+            await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, new AbortController())
+            step1Success = true
+            successCount++
+          } catch (retryError) {
+            if (isAbortError(retryError)) timeoutCount++
+            console.warn('[HiDockDevice] Failed to get device info (retry):', retryError)
+            this.logActivity('error', 'Failed to get device info', retryError instanceof Error ? retryError.message : 'Unknown error')
+            this.logActivity('warning', 'Device may be unresponsive', 'Try disconnecting and reconnecting your device')
+          }
+        }
+      } else {
+        if (isAbortError(firstError)) timeoutCount++
+        console.warn('[HiDockDevice] Failed to get device info:', firstError)
+        this.logActivity('error', 'Failed to get device info', firstError instanceof Error ? firstError.message : 'Unknown error')
       }
     }
 

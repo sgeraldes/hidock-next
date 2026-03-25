@@ -1,15 +1,24 @@
 /**
  * Jensen Protocol Implementation for HiDock devices
- * TypeScript port of the Jensen protocol for USB communication
+ *
+ * Architecture: Event-driven continuous read loop + command queue + handler dispatch
+ * Direct port of the official HiDock HiNotes jensen.js (apps/web/jensen.js)
+ *
+ * Key mechanisms (matching jensen.js):
+ *  1. Continuous read loop: transferIn always pending, data flows into buffer
+ *  2. Command queue: one command at a time, next sent when current resolves
+ *  3. Handler registry: each command type has a handler that decides when done
+ *  4. Debounced parse: 10ms for simple cmds, 1000ms for file transfers
+ *  5. Promise map: tag-keyed, resolved when handler returns truthy value
  */
 
-import { GrowableBuffer } from './growable-buffer'
 import { shouldLogQa } from './qa-monitor'
 
-// Command IDs from the Jensen protocol
-// Source: Official HiDock HiNotes jensen.js (December 2025)
+// ============================================================
+// Constants
+// ============================================================
+
 export const CMD = {
-  // Basic device commands
   GET_DEVICE_INFO: 1,
   GET_DEVICE_TIME: 2,
   SET_DEVICE_TIME: 3,
@@ -27,20 +36,14 @@ export const CMD = {
   GET_RECORDING_FILE: 18,
   RESTORE_FACTORY_SETTINGS: 19,
   SEND_MEETING_SCHEDULE_INFO: 20,
-
-  // New commands from HiNotes
   TRANSFER_FILE_PARTIAL: 21,
   REQUEST_TONE_UPDATE: 22,
   TONE_UPDATE: 23,
   REQUEST_UAC_UPDATE: 24,
   UAC_UPDATE: 25,
-
-  // Realtime streaming commands (ALL devices)
   REALTIME_READ_SETTING: 32,
   REALTIME_CONTROL: 33,
   REALTIME_TRANSFER: 34,
-
-  // Bluetooth commands (P1 devices only)
   BLUETOOTH_SCAN: 4097,
   BLUETOOTH_CMD: 4098,
   BLUETOOTH_STATUS: 4099,
@@ -49,42 +52,35 @@ export const CMD = {
   BT_DEV_LIST: 4102,
   BT_GET_PAIRED_DEV_LIST: 4103,
   BT_REMOVE_PAIRED_DEV: 4104,
-
-  // Factory/debug commands
   FACTORY_RESET: 61451,
   BLUE_B_TIMEOUT: 61457
 } as const
 
-// USB Constants
-// Source: Official HiDock HiNotes jensen.js (December 2025)
-export const USB_VENDOR_ID = 0x10d6 // Actions Semiconductor (default)
-export const USB_ALTERNATE_VENDOR_ID = 0x3887 // HiDock (newer P1 Mini devices)
-
-// All known HiDock Vendor IDs - use this for device filtering
-export const USB_VENDOR_IDS: number[] = [
-  0x10d6, // Actions Semiconductor (older devices)
-  0x3887  // HiDock (newer P1 Mini devices)
-]
+export const USB_VENDOR_ID = 0x10d6
+export const USB_ALTERNATE_VENDOR_ID = 0x3887
+export const USB_VENDOR_IDS: number[] = [0x10d6, 0x3887]
 
 export const USB_PRODUCT_IDS = {
-  // Original product IDs (hex)
-  H1: 0xaf0c,       // 45068 decimal
-  H1E_OLD: 0xaf0d,  // 45069 decimal
+  H1: 0xaf0c,
+  H1E_OLD: 0xaf0d,
   H1E: 0xb00d,
-  P1_OLD: 0xaf0e,   // 45070 decimal
+  P1_OLD: 0xaf0e,
   P1: 0xb00e,
-  P1_MINI: 0xaf0f,  // 45071 decimal
-  // Alternative product IDs
-  H1_ALT1: 0x0100,  // 256 decimal
-  H1E_ALT1: 0x0101, // 257 decimal
-  H1_ALT2: 0x0102,  // 258 decimal
-  H1E_ALT2: 0x0103, // 259 decimal
-  P1_ALT: 0x2040,   // 8256 decimal
-  P1_MINI_ALT: 0x2041 // 8257 decimal
+  P1_MINI: 0xaf0f,
+  H1_ALT1: 0x0100,
+  H1E_ALT1: 0x0101,
+  H1_ALT2: 0x0102,
+  H1E_ALT2: 0x0103,
+  P1_ALT: 0x2040,
+  P1_MINI_ALT: 0x2041
 }
 
 export const EP_OUT = 0x01
 export const EP_IN = 0x82
+
+// ============================================================
+// Types
+// ============================================================
 
 export type DeviceModel = 'hidock-h1' | 'hidock-h1e' | 'hidock-p1' | 'hidock-p1-mini' | 'unknown'
 
@@ -107,78 +103,10 @@ export interface FileInfo {
 }
 
 export interface CardInfo {
-  used: number      // Used space in MiB
-  capacity: number  // Total capacity in MiB
-  free: number      // Free space in MiB
-  status: string    // Status code as hex string
-}
-
-/**
- * Calculate recording duration based on file version and length.
- *
- * IMPORTANT: Matches the Python desktop app's _calculate_file_duration() which applies
- * a 4x correction factor to all calculations. The device reports compressed/encoded
- * file sizes, so the formula must account for the actual audio bitrate.
- *
- * Audio format constants (from Python):
- * - CHANNELS = 2 (stereo)
- * - BYTES_PER_SAMPLE = 1 (8-bit samples)
- * - WAV_HEADER_SIZE = 44
- *
- * Different firmware versions use different audio formats:
- * - Version 1: Custom compressed format: (bytes/32)*2*4 = bytes/4
- * - Version 2: 48kHz stereo 8-bit WAV with 4x correction
- * - Version 3: 24kHz stereo 8-bit WAV with 4x correction
- * - Version 5: 12kHz format with 4x correction
- * - Default: 16kHz stereo 8-bit with 4x correction
- */
-function calculateDurationSeconds(fileLength: number, fileVersion: number): number {
-  if (shouldLogProtocol()) console.log(`[Jensen] calculateDurationSeconds: fileLength=${fileLength}, fileVersion=${fileVersion}`)
-
-  const WAV_HEADER_SIZE = 44
-  const CHANNELS = 2  // Stereo
-  const BYTES_PER_SAMPLE = 1  // 8-bit samples
-  const CORRECTION_FACTOR = 4  // Applied to all versions per Python implementation
-
-  if (fileVersion === 1) {
-    // Version 1: HDA compressed format - verified against real recordings
-    // Example: 15.7MB file = 1959 seconds = 32m39s at 8000 bytes/sec effective rate
-    // Note: Python uses different formula but this was empirically verified
-    const duration = Math.round(fileLength / 8000)
-    if (shouldLogProtocol()) console.log(`[Jensen] Version 1 duration: ${duration} seconds (${Math.floor(duration/60)}m ${duration%60}s)`)
-    return duration
-  } else if (fileVersion === 2) {
-    // Version 2: 48kHz stereo 8-bit WAV with 4x correction
-    // Python: (file_size - 44) / (48000 * 2 * 1) * 4 = (file_size - 44) / 24000
-    const bytesPerSecond = 48000 * CHANNELS * BYTES_PER_SAMPLE  // 96000
-    const effectiveBps = bytesPerSecond / CORRECTION_FACTOR  // 24000
-    const duration = fileLength > WAV_HEADER_SIZE ? Math.round((fileLength - WAV_HEADER_SIZE) / effectiveBps) : 0
-    if (shouldLogProtocol()) console.log(`[Jensen] Version 2 duration: ${duration} seconds`)
-    return duration
-  } else if (fileVersion === 3) {
-    // Version 3: 24kHz stereo 8-bit WAV with 4x correction
-    // Python: (file_size - 44) / (24000 * 2 * 1) * 4 = (file_size - 44) / 12000
-    const bytesPerSecond = 24000 * CHANNELS * BYTES_PER_SAMPLE  // 48000
-    const effectiveBps = bytesPerSecond / CORRECTION_FACTOR  // 12000
-    const duration = fileLength > WAV_HEADER_SIZE ? Math.round((fileLength - WAV_HEADER_SIZE) / effectiveBps) : 0
-    if (shouldLogProtocol()) console.log(`[Jensen] Version 3 duration: ${duration} seconds`)
-    return duration
-  } else if (fileVersion === 5) {
-    // Version 5: 12kHz format with 4x correction
-    // Python: (file_size / 12000) * 4 = file_size / 3000
-    const effectiveBps = 12000 / CORRECTION_FACTOR  // 3000
-    const duration = Math.round(fileLength / effectiveBps)
-    if (shouldLogProtocol()) console.log(`[Jensen] Version 5 duration: ${duration} seconds`)
-    return duration
-  } else {
-    // Default: 16kHz stereo 8-bit with 4x correction
-    // Python: (file_size / (16000 * 2 * 1)) * 4 = file_size / 8000
-    const bytesPerSecond = 16000 * CHANNELS * BYTES_PER_SAMPLE  // 32000
-    const effectiveBps = bytesPerSecond / CORRECTION_FACTOR  // 8000
-    const duration = Math.round(fileLength / effectiveBps)
-    if (shouldLogProtocol()) console.log(`[Jensen] Default (version ${fileVersion}) duration: ${duration} seconds`)
-    return duration
-  }
+  used: number
+  capacity: number
+  free: number
+  status: string
 }
 
 export interface DeviceSettings {
@@ -188,7 +116,6 @@ export interface DeviceSettings {
   bluetoothTone?: boolean
 }
 
-// Realtime streaming interfaces
 export interface RealtimeSettings {
   enabled: boolean
   sampleRate?: number
@@ -201,14 +128,12 @@ export interface RealtimeData {
   data: Uint8Array
 }
 
-// Battery status interface (P1 devices only)
 export interface BatteryStatus {
   status: 'idle' | 'charging' | 'full'
   batteryLevel: number
   voltage?: number
 }
 
-// Bluetooth interfaces (P1 devices only)
 export interface BluetoothDevice {
   name: string
   address: string
@@ -222,7 +147,41 @@ export interface BluetoothStatus {
   deviceAddress?: string
 }
 
-// Message builder for Jensen protocol
+// ============================================================
+// Logging (gated behind QA toggle)
+// ============================================================
+
+const shouldLog = (): boolean => shouldLogQa()
+
+// ============================================================
+// Duration calculation (unchanged from original)
+// ============================================================
+
+function calculateDurationSeconds(fileLength: number, fileVersion: number): number {
+  const WAV_HEADER_SIZE = 44
+  const CHANNELS = 2
+  const BYTES_PER_SAMPLE = 1
+  const CORRECTION_FACTOR = 4
+
+  if (fileVersion === 1) {
+    return Math.round(fileLength / 8000)
+  } else if (fileVersion === 2) {
+    const effectiveBps = (48000 * CHANNELS * BYTES_PER_SAMPLE) / CORRECTION_FACTOR
+    return fileLength > WAV_HEADER_SIZE ? Math.round((fileLength - WAV_HEADER_SIZE) / effectiveBps) : 0
+  } else if (fileVersion === 3) {
+    const effectiveBps = (24000 * CHANNELS * BYTES_PER_SAMPLE) / CORRECTION_FACTOR
+    return fileLength > WAV_HEADER_SIZE ? Math.round((fileLength - WAV_HEADER_SIZE) / effectiveBps) : 0
+  } else if (fileVersion === 5) {
+    return Math.round(fileLength / (12000 / CORRECTION_FACTOR))
+  } else {
+    return Math.round(fileLength / ((16000 * CHANNELS * BYTES_PER_SAMPLE) / CORRECTION_FACTOR))
+  }
+}
+
+// ============================================================
+// Message builder (matches jensen.js `c` constructor)
+// ============================================================
+
 class JensenMessage {
   command: number
   msgBody: number[] = []
@@ -251,579 +210,302 @@ class JensenMessage {
   make(): Uint8Array {
     const buffer = new Uint8Array(12 + this.msgBody.length)
     let pos = 0
-
-    // Header magic
     buffer[pos++] = 0x12
     buffer[pos++] = 0x34
-
-    // Command ID (16-bit big-endian)
     buffer[pos++] = (this.command >> 8) & 0xff
     buffer[pos++] = this.command & 0xff
-
-    // Sequence ID (32-bit big-endian)
     buffer[pos++] = (this.index >> 24) & 0xff
     buffer[pos++] = (this.index >> 16) & 0xff
     buffer[pos++] = (this.index >> 8) & 0xff
     buffer[pos++] = this.index & 0xff
-
-    // Body length (32-bit big-endian)
     const len = this.msgBody.length
     buffer[pos++] = (len >> 24) & 0xff
     buffer[pos++] = (len >> 16) & 0xff
     buffer[pos++] = (len >> 8) & 0xff
     buffer[pos++] = len & 0xff
-
-    // Body
     for (let i = 0; i < this.msgBody.length; i++) {
       buffer[pos++] = this.msgBody[i] & 0xff
     }
-
     return buffer
   }
 }
 
-// Parsed response message
+// ============================================================
+// Internal types
+// ============================================================
+
 interface ResponseMessage {
   id: number
   sequence: number
   body: Uint8Array
 }
 
-// USB-level logging is gated behind shouldLogQa() from qa-monitor
-// Protocol-level logging is also gated behind shouldLogQa()
-const shouldLogUsb = () => shouldLogQa()
-const shouldLogProtocol = () => shouldLogQa()
+interface PendingCommand {
+  tag: string
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+  timeout: ReturnType<typeof setTimeout> | null
+}
 
-// Main Jensen device class
+interface QueueEntry {
+  msg: JensenMessage
+  operationName: string
+}
+
+type CommandHandler = (msg: ResponseMessage | null, device: JensenDevice) => unknown
+
+// ============================================================
+// JensenDevice — event-driven architecture matching jensen.js
+// ============================================================
+
 export class JensenDevice {
+  // === USB device ===
   private device: USBDevice | null = null
   private sequenceId = 0
-  private receiveBuffer = new GrowableBuffer()
 
-  // USB operation mutex - prevents concurrent USB operations that cause InvalidStateError
-  private operationLock: Promise<void> = Promise.resolve()
-  private lockHolder: string | null = null
+  // === Command queue (jensen.js: a[], h, n{}) ===
+  private commandQueue: QueueEntry[] = []
+  private currentCommandTag: string | null = null
+  private currentOperationName: string | null = null
+  private pendingPromises: Map<string, PendingCommand> = new Map()
 
-  // USB disconnect event handler (for detecting device unplug via browser events)
-  private usbDisconnectHandler: ((event: USBConnectionEvent) => void) | null = null
-  // USB connect event handler (for detecting device plug-in, matches official jensen.js)
-  private usbConnectHandler: ((event: USBConnectionEvent) => void) | null = null
-  // Track if USB event listeners are set up
-  private usbListenersActive = false
+  // === Continuous read loop (jensen.js: r[], k, y) ===
+  private receiveChunks: DataView[] = []
+  private readLoopRunning = false
+  private totalBytesReceived = 0
 
-  // Abort flag for cancelling operations (set by disconnect to break out of loops)
-  private abortOperations = false
+  // === Parse timing (jensen.js: decodeTimeout, timewait) ===
+  private decodeTimer: ReturnType<typeof setTimeout> | null = null
+  private parseDelay = 10
 
+  // === Handler registry (jensen.js: s.handlers) ===
+  private handlers: Map<number, CommandHandler> = new Map()
+
+  // === Progress callback (jensen.js: onreceive) ===
+  onreceive: ((bytes: number) => void) | null = null
+
+  // === Device state ===
   versionCode: string | null = null
   versionNumber: number | null = null
   serialNumber: string | null = null
   model: DeviceModel = 'unknown'
 
+  // jensen.js uses this.data = {} for listFiles accumulator
+  data: Record<string, unknown> = {}
+
+  // === Event callbacks ===
   ondisconnect?: () => void
   onconnect?: () => void
-  onprogress?: (bytes: number) => void
 
-  /**
-   * Handle USB disconnect events from the browser.
-   * This is called when the device is physically unplugged.
-   */
-  private handleDisconnect(): void {
-    if (shouldLogProtocol()) console.log('[Jensen] USB device physically disconnected (via event)')
+  // === USB event handlers ===
+  private usbDisconnectHandler: ((event: USBConnectionEvent) => void) | null = null
+  private usbConnectHandler: ((event: USBConnectionEvent) => void) | null = null
+  private usbListenersActive = false
 
-    // Clean up state
-    this.device = null
-    this.sequenceId = 0
-    this.receiveBuffer = new GrowableBuffer() // Release memory on disconnect
-    this.operationLock = Promise.resolve()
-    this.lockHolder = null
-
-    // Notify listeners
-    if (this.ondisconnect) {
-      this.ondisconnect()
-    }
+  constructor() {
+    this.registerDefaultHandlers()
   }
 
-  /**
-   * Set up USB disconnect event listener for instant disconnect detection.
-   * Uses native browser USB disconnect events instead of polling.
-   */
-  private setupUsbDisconnectListener(): void {
-    if (!this.device) return
+  // ================================================================
+  // Static
+  // ================================================================
 
-    // Create handler that triggers handleDisconnect on USB unplug
-    this.usbDisconnectHandler = (event: USBConnectionEvent) => {
-      if (event.device === this.device) {
-        this.handleDisconnect()
-      }
-    }
-
-    navigator.usb.addEventListener('disconnect', this.usbDisconnectHandler)
-    if (shouldLogProtocol()) console.log('[Jensen] USB disconnect listener active')
-  }
-
-  /**
-   * Remove USB disconnect event listener (cleanup).
-   */
-  private removeUsbDisconnectListener(): void {
-    if (this.usbDisconnectHandler) {
-      navigator.usb.removeEventListener('disconnect', this.usbDisconnectHandler)
-      this.usbDisconnectHandler = null
-      if (shouldLogProtocol()) console.log('[Jensen] USB disconnect listener removed')
-    }
-  }
-
-  /**
-   * Set up USB connect event listener for faster device detection.
-   * Matches official jensen.js init() pattern: navigator.usb.onconnect = () => tryconnect()
-   * This allows immediate connection when a device is plugged in.
-   */
-  setupUsbConnectListener(): void {
-    if (this.usbListenersActive) {
-      return // Already active
-    }
-
-    if (!JensenDevice.isSupported()) {
-      console.warn('[Jensen] WebUSB not supported, cannot set up connect listener')
-      return
-    }
-
-    // Create handler that triggers tryConnect on USB plug-in
-    this.usbConnectHandler = (event: USBConnectionEvent) => {
-      const device = event.device
-      // Only react to HiDock devices (check all known vendor IDs)
-      if (USB_VENDOR_IDS.includes(device.vendorId) && device.productName?.toLowerCase().includes('hidock')) {
-        if (shouldLogProtocol()) console.log('[Jensen] USB device connected event detected, triggering tryConnect')
-        this.tryConnect()
-      }
-    }
-
-    navigator.usb.onconnect = this.usbConnectHandler
-    this.usbListenersActive = true
-    if (shouldLogProtocol()) console.log('[Jensen] USB connect listener active')
-  }
-
-  /**
-   * Remove USB connect event listener (cleanup).
-   */
-  removeUsbConnectListener(): void {
-    if (!this.usbListenersActive) {
-      return
-    }
-
-    if (navigator.usb) {
-      navigator.usb.onconnect = null
-    }
-    this.usbConnectHandler = null
-    this.usbListenersActive = false
-    if (shouldLogProtocol()) console.log('[Jensen] USB connect listener removed')
-  }
-
-  /**
-   * Execute a USB operation with exclusive lock.
-   * This prevents concurrent USB operations that cause InvalidStateError.
-   * All USB transferIn/transferOut calls should go through this.
-   */
-  private async withLock<T>(operationName: string, operation: () => Promise<T>): Promise<T> {
-    // Wait for any pending operations to complete
-    const previousLock = this.operationLock
-    let releaseLock: () => void
-
-    // Create a new lock that subsequent operations will wait on
-    this.operationLock = new Promise((resolve) => {
-      releaseLock = resolve
-    })
-
-    try {
-      // Wait for previous operation to complete
-      await previousLock
-
-      // We now hold the lock
-      this.lockHolder = operationName
-      if (shouldLogProtocol()) console.log(`[Jensen] Lock acquired for: ${operationName}`)
-
-      // Execute the operation
-      return await operation()
-    } finally {
-      // Release the lock
-      if (shouldLogProtocol()) console.log(`[Jensen] Lock released for: ${operationName}`)
-      this.lockHolder = null
-      releaseLock!()
-    }
-  }
-
-  // Check if WebUSB is available
   static isSupported(): boolean {
     return typeof navigator !== 'undefined' && 'usb' in navigator
   }
 
-  // Request and connect to a HiDock device
-  // Follows official jensen.js pattern: disconnect first, then connect
+  // ================================================================
+  // Connection — matches jensen.js connect/tryconnect/disconnect/setup
+  // ================================================================
+
   async connect(signal?: AbortSignal): Promise<boolean> {
     if (!JensenDevice.isSupported()) {
       console.error('WebUSB not supported')
       return false
     }
+    if (signal?.aborted) throw new DOMException('Connection aborted', 'AbortError')
 
-    // Check if aborted before starting
-    if (signal?.aborted) {
-      throw new DOMException('Connection aborted', 'AbortError')
+    // jensen.js: if (await g.tryconnect()) return
+    if (await this.tryConnect()) return true
+
+    if (signal?.aborted) throw new DOMException('Connection aborted', 'AbortError')
+
+    // Fall back to device picker
+    let picked: USBDevice
+    try {
+      picked = await navigator.usb.requestDevice({
+        filters: USB_VENDOR_IDS.map(vendorId => ({ vendorId }))
+      })
+    } catch {
+      return false
     }
 
-    // Disconnect first to clean up any stale connections (matches official jensen.js)
-    await this.disconnect()
-
-    // Track device for cleanup on abort
-    let device: USBDevice | null = null
+    if (signal?.aborted) throw new DOMException('Connection aborted', 'AbortError')
 
     try {
-      if (shouldLogProtocol()) console.log('connect: Starting connection process')
-
-      // First try to find already authorized devices
-      const devices = await navigator.usb.getDevices()
-      if (shouldLogProtocol()) console.log('connect: Found', devices.length, 'authorized devices')
-
-      // Check abort after async operation
-      if (signal?.aborted) {
-        throw new DOMException('Connection aborted', 'AbortError')
-      }
-
-      device = devices.find(
-        (d) => USB_VENDOR_IDS.includes(d.vendorId) && d.productName?.toLowerCase().includes('hidock')
-      )
-
-      if (!device) {
-        if (shouldLogProtocol()) console.log('connect: No authorized HiDock found, showing device picker')
-        // Request a new device - include filters for all known vendor IDs
-        device = await navigator.usb.requestDevice({
-          filters: USB_VENDOR_IDS.map((vendorId) => ({ vendorId }))
-        })
-      } else {
-        if (shouldLogProtocol()) console.log('connect: Found authorized HiDock:', device.productName)
-      }
-
-      if (!device) {
-        if (shouldLogProtocol()) console.log('connect: No device selected')
-        return false
-      }
-
-      // Check abort after device selection
-      if (signal?.aborted) {
-        throw new DOMException('Connection aborted', 'AbortError')
-      }
-
-      if (shouldLogProtocol()) console.log('connect: Opening device...')
-
-      // Check if device is already open (stale state from previous session)
-      if (device.opened) {
-        if (shouldLogProtocol()) console.log('connect: Device already open, closing first...')
-        try {
-          await device.close()
-        } catch (e) {
-          console.warn('connect: Error closing already-open device:', e)
-        }
-      }
-
-      await device.open()
-      if (shouldLogProtocol()) console.log('connect: Device opened, selecting configuration...')
-
-      // Check abort after device open
-      if (signal?.aborted) {
-        await device.close()
-        throw new DOMException('Connection aborted', 'AbortError')
-      }
-
-      // Log device state for debugging
-      if (shouldLogUsb()) console.log('connect: Device state after open:', {
-        opened: device.opened,
-        configuration: device.configuration?.configurationValue,
-        configurations: device.configurations?.length
-      })
-
-      await device.selectConfiguration(1)
-      if (shouldLogProtocol()) console.log('connect: Claiming interface...')
-
-      // Check abort after configuration
-      if (signal?.aborted) {
-        await device.close()
-        throw new DOMException('Connection aborted', 'AbortError')
-      }
-
-      // Log interface info before claiming
-      if (device.configuration) {
-        const iface = device.configuration.interfaces[0]
-        if (shouldLogUsb()) console.log('connect: Interface 0 info:', {
-          interfaceNumber: iface?.interfaceNumber,
-          claimed: iface?.claimed,
-          alternates: iface?.alternates?.length
-        })
-      }
-
-      await device.claimInterface(0)
-      if (shouldLogProtocol()) console.log('connect: Selecting alternate interface...')
-      await device.selectAlternateInterface(0, 0)
-      if (shouldLogProtocol()) console.log('connect: Interface claimed successfully')
-
-      // Clear USB endpoint halts to reset any stale state from a previous session.
-      // Without this, the IN endpoint (0x82) may have a pending transferIn from
-      // a previous aborted command, causing getDeviceInfo to hang forever waiting
-      // for a response that never comes.
-      try {
-        await device.clearHalt('out', 1)
-        await device.clearHalt('in', 2)
-        if (shouldLogProtocol()) console.log('connect: Endpoint halts cleared')
-      } catch (haltError) {
-        // clearHalt may fail if endpoints are not halted — that's fine, continue
-        if (shouldLogProtocol()) console.log('connect: clearHalt skipped (endpoints not halted):', haltError)
-      }
-
-      // Check abort after interface claim
-      if (signal?.aborted) {
-        await device.close()
-        throw new DOMException('Connection aborted', 'AbortError')
-      }
-
-      this.device = device
-
-      // Log device configuration for debugging
-      if (shouldLogUsb()) {
-        console.log('[Jensen] Device configuration:', {
-          vendorId: device.vendorId.toString(16),
-          productId: device.productId.toString(16),
-          productName: device.productName,
-          configurations: device.configurations?.length
-        })
-
-        // Log the claimed interface and endpoints
-        if (device.configuration) {
-          const iface = device.configuration.interfaces[0]
-          console.log('[Jensen] Interface 0 alternates:', iface.alternates.length)
-          const alternate = iface.alternates[0]
-          console.log('[Jensen] Endpoints:', alternate.endpoints.map(ep => ({
-            endpointNumber: ep.endpointNumber,
-            direction: ep.direction,
-            type: ep.type,
-            packetSize: ep.packetSize
-          })))
-        }
-      }
-
-      // Determine model from product ID
-      switch (device.productId) {
-        case USB_PRODUCT_IDS.H1:
-        case USB_PRODUCT_IDS.H1_ALT1:
-        case USB_PRODUCT_IDS.H1_ALT2:
-          this.model = 'hidock-h1'
-          break
-        case USB_PRODUCT_IDS.H1E_OLD:
-        case USB_PRODUCT_IDS.H1E:
-        case USB_PRODUCT_IDS.H1E_ALT1:
-        case USB_PRODUCT_IDS.H1E_ALT2:
-          this.model = 'hidock-h1e'
-          break
-        case USB_PRODUCT_IDS.P1_OLD:
-        case USB_PRODUCT_IDS.P1:
-        case USB_PRODUCT_IDS.P1_ALT:
-          this.model = 'hidock-p1'
-          break
-        case USB_PRODUCT_IDS.P1_MINI:
-        case USB_PRODUCT_IDS.P1_MINI_ALT:
-          this.model = 'hidock-p1-mini'
-          break
-        default:
-          this.model = 'unknown'
-      }
-
-      if (shouldLogProtocol()) console.log(`[Jensen] Connected to ${this.model}`)
-
-      // Reset ALL protocol state on new connection (matches official jensen.js setup function)
-      // This is critical for proper sequencing and prevents stale data issues
-      this.sequenceId = 0
-      this.receiveBuffer.clear()
-      this.versionCode = null
-      this.versionNumber = null
-      this.serialNumber = null
-
-      // Set up USB disconnect listener for instant detection
-      this.setupUsbDisconnectListener()
-
-      // Defer onconnect until after connect() returns to the caller.
-      // Firing synchronously here means handleConnect() starts USB commands
-      // while the outer withTimeout() controller is still active. If that
-      // controller aborts (the 5s timeout), it cancels in-flight transferOut
-      // calls causing AbortError, then InvalidStateError on every subsequent
-      // command as the USB device is left in a bad state.
-      setTimeout(() => this.onconnect?.(), 300)  // 300ms: device firmware stabilization window
+      await picked.open()
+      this.device = picked
+      await this.setup()
       return true
     } catch (error) {
-      // Ensure device is closed on abort or error
-      if (device) {
-        try {
-          await device.close()
-        } catch (closeError) {
-          console.warn('[Jensen] Failed to close device after error:', closeError)
-        }
-      }
-
-      // Re-throw abort errors
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        if (shouldLogProtocol()) console.log('[Jensen] Connection aborted')
-        throw error
-      }
-
+      if (error instanceof DOMException && error.name === 'AbortError') throw error
       console.error('[Jensen] Connection failed:', error)
       return false
     }
   }
 
-  // Check if an operation is in progress (for external callers to check)
-  isOperationInProgress(): boolean {
-    return this.lockHolder !== null
-  }
-
-  // Get the name of the current lock holder (for lock-type-aware decisions)
-  getLockHolder(): string | null {
-    return this.lockHolder
-  }
-
-  // Try to auto-connect to previously authorized device
-  // Follows official jensen.js pattern: disconnect first, then connect
-  async tryConnect(): Promise<boolean> {
+  /**
+   * Auto-connect to a previously authorized HiDock device.
+   * Matches jensen.js tryconnect(): disconnect first, find device, open, setup.
+   */
+  async tryConnect(preAuthorizedDevice?: USBDevice): Promise<boolean> {
     if (!JensenDevice.isSupported()) return false
 
-    // Don't reconnect if already connected - prevents race conditions during HMR
+    // Don't reconnect if already connected
     if (this.isConnected()) {
-      if (shouldLogProtocol()) console.log('[Jensen] tryConnect: Already connected, skipping')
+      if (shouldLog()) console.log('[Jensen] tryConnect: already connected')
       return true
     }
 
-    // Don't try to connect if an operation is in progress
+    // Don't try while operation in progress
     if (this.isOperationInProgress()) {
-      if (shouldLogProtocol()) console.log(`[Jensen] tryConnect: Operation in progress (${this.lockHolder}), skipping`)
+      if (shouldLog()) console.log(`[Jensen] tryConnect: operation in progress (${this.currentOperationName})`)
       return false
     }
 
-    // CRITICAL: Always disconnect first to clean up any stale connections
-    // This matches official jensen.js behavior and fixes "device in use" errors
+    // jensen.js: await this.disconnect()
     await this.disconnect()
 
     try {
-      const devices = await navigator.usb.getDevices()
-      const device = devices.find(
-        (d) => USB_VENDOR_IDS.includes(d.vendorId) && d.productName?.toLowerCase().includes('hidock')
-      )
+      let target = preAuthorizedDevice
 
-      if (!device) return false
-
-      await device.open()
-      await device.selectConfiguration(1)
-      await device.claimInterface(0)
-      await device.selectAlternateInterface(0, 0)
-
-      // Clear endpoint halts (same as connect() above)
-      try {
-        await device.clearHalt('out', 1)
-        await device.clearHalt('in', 2)
-      } catch {
-        // Not halted — fine
+      if (target && !this.isHiDockUsbDevice(target)) {
+        if (shouldLog()) console.log('[Jensen] tryConnect: provided device is not HiDock')
+        return false
       }
 
-      this.device = device
-
-      // Determine model
-      switch (device.productId) {
-        case USB_PRODUCT_IDS.H1:
-        case USB_PRODUCT_IDS.H1_ALT1:
-        case USB_PRODUCT_IDS.H1_ALT2:
-          this.model = 'hidock-h1'
-          break
-        case USB_PRODUCT_IDS.H1E_OLD:
-        case USB_PRODUCT_IDS.H1E:
-        case USB_PRODUCT_IDS.H1E_ALT1:
-        case USB_PRODUCT_IDS.H1E_ALT2:
-          this.model = 'hidock-h1e'
-          break
-        case USB_PRODUCT_IDS.P1_OLD:
-        case USB_PRODUCT_IDS.P1:
-        case USB_PRODUCT_IDS.P1_ALT:
-          this.model = 'hidock-p1'
-          break
-        case USB_PRODUCT_IDS.P1_MINI:
-        case USB_PRODUCT_IDS.P1_MINI_ALT:
-          this.model = 'hidock-p1-mini'
-          break
-        default:
-          this.model = 'unknown'
+      if (!target) {
+        const devices = await navigator.usb.getDevices()
+        target = devices.find(d => this.isHiDockUsbDevice(d))
       }
 
-      // Reset ALL protocol state on new connection (matches official jensen.js setup function)
-      // This is critical for proper sequencing and prevents stale data issues
-      this.sequenceId = 0
-      this.receiveBuffer.clear()
-      this.versionCode = null
-      this.versionNumber = null
-      this.serialNumber = null
+      if (!target) return false
 
-      // Set up USB disconnect listener for instant detection
-      this.setupUsbDisconnectListener()
-
-      // Same deferred-callback fix as the user-initiated connect above.
-      setTimeout(() => this.onconnect?.(), 300)  // 300ms: device firmware stabilization window
+      if (shouldLog()) console.log('[Jensen] tryConnect: detected', target.productName)
+      await target.open()
+      this.device = target
+      await this.setup()
       return true
     } catch {
       return false
     }
   }
 
+  /**
+   * Device setup after USB open — matches jensen.js I() function.
+   * Claims interface, detects model, resets state, fires onconnect.
+   */
+  private async setup(): Promise<void> {
+    if (!this.device) return
+
+    // Reset state (jensen.js: g.versionCode = null, g.versionNumber = null, a.length = 0)
+    this.versionCode = null
+    this.versionNumber = null
+    this.commandQueue.length = 0
+
+    try {
+      await this.device.selectConfiguration(1)
+      await this.device.claimInterface(0)
+      await this.device.selectAlternateInterface(0, 0)
+      this.model = this.detectModel(this.device.productId)
+    } catch (error) {
+      console.error('[Jensen] setup error:', error)
+    }
+
+    // Reset protocol state (jensen.js: h = null, k = false)
+    this.currentCommandTag = null
+    this.currentOperationName = null
+    this.readLoopRunning = false
+    this.sequenceId = 0
+    this.receiveChunks.length = 0
+    this.totalBytesReceived = 0
+    this.serialNumber = null
+    this.data = {}
+
+    if (shouldLog()) console.log(`[Jensen] Connected to ${this.model}`)
+
+    // Set up USB disconnect listener
+    this.setupUsbDisconnectListener()
+
+    // Fire onconnect (jensen.js fires synchronously in I())
+    // Use setTimeout(0) so connect() returns before handleConnect starts commands
+    setTimeout(() => this.onconnect?.(), 0)
+  }
+
   isConnected(): boolean {
-    return this.device !== null && this.device.opened
+    return this.device !== null
   }
 
   async disconnect(): Promise<void> {
-    // Remove USB disconnect listener first
     this.removeUsbDisconnectListener()
 
-    // Simple disconnect matching official jensen.js - just close the device
     if (this.device) {
-      try {
-        await this.device.close()
-      } catch (e) {
-        console.warn('[Jensen] Error closing device:', e)
-      }
+      try { await this.device.close() } catch { /* ignore */ }
       this.device = null
-      this.ondisconnect?.()
     }
 
-    // Reset protocol state
+    // Reset all state
+    this.currentCommandTag = null
+    this.currentOperationName = null
+    this.readLoopRunning = false
     this.sequenceId = 0
-    this.receiveBuffer = new GrowableBuffer() // Release memory on disconnect
-    this.operationLock = Promise.resolve()
-    this.lockHolder = null
-    this.abortOperations = false
+    this.receiveChunks.length = 0
+    this.commandQueue.length = 0
+    this.data = {}
+
+    if (this.decodeTimer) {
+      clearTimeout(this.decodeTimer)
+      this.decodeTimer = null
+    }
+
+    // Resolve all pending promises with null
+    for (const [, pending] of this.pendingPromises) {
+      if (pending.timeout) clearTimeout(pending.timeout)
+      pending.resolve(null)
+    }
+    this.pendingPromises.clear()
+
+    this.ondisconnect?.()
   }
 
   /**
-   * Reset the USB device to recover from stuck state.
-   * This clears all pending transfers and re-initializes the connection.
+   * Reset USB device to recover from stuck state.
+   * Not in jensen.js but needed by hidock-device.ts.
    */
   async reset(): Promise<boolean> {
     if (!this.device) return false
 
-    if (shouldLogProtocol()) console.log('[Jensen] Resetting device...')
+    if (shouldLog()) console.log('[Jensen] Resetting device...')
     try {
-      // Clear internal state first
+      // Clear protocol state
       this.sequenceId = 0
-      this.receiveBuffer.clear()
-      this.operationLock = Promise.resolve()
-      this.lockHolder = null
+      this.currentCommandTag = null
+      this.currentOperationName = null
+      this.readLoopRunning = false
+      this.receiveChunks.length = 0
+      this.commandQueue.length = 0
+      this.data = {}
 
-      // Try to reset the USB device (clears pending transfers)
+      for (const [, pending] of this.pendingPromises) {
+        if (pending.timeout) clearTimeout(pending.timeout)
+        pending.resolve(null)
+      }
+      this.pendingPromises.clear()
+
       if (this.device.opened) {
         try {
           await this.device.reset()
-          if (shouldLogProtocol()) console.log('[Jensen] Device reset successful')
-        } catch (e) {
-          console.warn('[Jensen] Device reset failed, trying close/reopen:', e)
-          // Fall back to close and reopen (no releaseInterface - just close)
+        } catch {
           await this.device.close()
           await this.device.open()
           await this.device.selectConfiguration(1)
@@ -831,7 +513,6 @@ export class JensenDevice {
           await this.device.selectAlternateInterface(0, 0)
         }
       }
-
       return true
     } catch (error) {
       console.error('[Jensen] Reset failed:', error)
@@ -839,368 +520,1177 @@ export class JensenDevice {
     }
   }
 
+  // ================================================================
+  // USB helpers
+  // ================================================================
+
+  private isHiDockUsbDevice(device: USBDevice): boolean {
+    if (!USB_VENDOR_IDS.includes(device.vendorId)) return false
+    const name = device.productName?.toLowerCase() ?? ''
+    if (name.includes('hidock') || name.includes('jensen')) return true
+    return Object.values(USB_PRODUCT_IDS).includes(device.productId)
+  }
+
+  private detectModel(productId: number): DeviceModel {
+    switch (productId) {
+      case USB_PRODUCT_IDS.H1:
+      case USB_PRODUCT_IDS.H1_ALT1:
+      case USB_PRODUCT_IDS.H1_ALT2:
+        return 'hidock-h1'
+      case USB_PRODUCT_IDS.H1E_OLD:
+      case USB_PRODUCT_IDS.H1E:
+      case USB_PRODUCT_IDS.H1E_ALT1:
+      case USB_PRODUCT_IDS.H1E_ALT2:
+        return 'hidock-h1e'
+      case USB_PRODUCT_IDS.P1_OLD:
+      case USB_PRODUCT_IDS.P1:
+      case USB_PRODUCT_IDS.P1_ALT:
+        return 'hidock-p1'
+      case USB_PRODUCT_IDS.P1_MINI:
+      case USB_PRODUCT_IDS.P1_MINI_ALT:
+        return 'hidock-p1-mini'
+      default:
+        return 'unknown'
+    }
+  }
+
   getModel(): DeviceModel {
     return this.model
   }
 
-  // Small delay helper
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms))
+  // ================================================================
+  // USB event listeners
+  // ================================================================
+
+  private handleDisconnect(): void {
+    if (shouldLog()) console.log('[Jensen] USB device physically disconnected')
+    this.device = null
+    this.sequenceId = 0
+    this.readLoopRunning = false
+    this.receiveChunks.length = 0
+    this.currentCommandTag = null
+    this.currentOperationName = null
+    this.commandQueue.length = 0
+
+    for (const [, pending] of this.pendingPromises) {
+      if (pending.timeout) clearTimeout(pending.timeout)
+      pending.resolve(null)
+    }
+    this.pendingPromises.clear()
+
+    this.ondisconnect?.()
   }
 
-  // Read data from USB and append to receive buffer
-  // Uses the same pattern as the working web app implementation
-  private async readToBuffer(): Promise<boolean> {
-    if (!this.device || !this.device.opened) return false
+  private setupUsbDisconnectListener(): void {
+    if (!this.device) return
+    this.usbDisconnectHandler = (event: USBConnectionEvent) => {
+      if (event.device === this.device) this.handleDisconnect()
+    }
+    navigator.usb.addEventListener('disconnect', this.usbDisconnectHandler)
+  }
 
-    try {
-      // Read data from device with larger buffer for better performance (same as web app)
-      const readSize = 4096 * 16 // 64KB buffer
-      const result = await this.device.transferIn(2, readSize)
-
-      if (result.status === 'ok' && result.data && result.data.byteLength > 0) {
-        // Append to receive buffer
-        // Important: Use slice() to create a copy, as the underlying buffer may be reused
-        const newData = new Uint8Array(result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength))
-        this.receiveBuffer.append(newData)
-        if (shouldLogUsb()) console.log(`[Jensen] Read ${newData.length} bytes, buffer now ${this.receiveBuffer.length} bytes`)
-        return true
-      }
-      return false
-    } catch (error) {
-      // Handle DOMException errors like the web app does
-      if (error instanceof DOMException) {
-        if (error.name === 'NetworkError') {
-          // Timeout is expected, continue trying
-          return false
-        } else if (error.name === 'InvalidStateError') {
-          console.error('[Jensen] Device connection lost')
-          return false
-        }
-      }
-      console.warn('[Jensen] USB read error:', error)
-      return false
+  private removeUsbDisconnectListener(): void {
+    if (this.usbDisconnectHandler) {
+      navigator.usb.removeEventListener('disconnect', this.usbDisconnectHandler)
+      this.usbDisconnectHandler = null
     }
   }
 
-  // Try to parse a complete message from the receive buffer
-  // Returns the message if found, null otherwise
-  private tryParseMessage(): ResponseMessage | null {
-    if (this.receiveBuffer.length < 12) return null
+  /**
+   * Set up USB connect listener for device plug-in detection.
+   * Matches jensen.js: navigator.usb.onconnect = () => g.tryconnect()
+   */
+  setupUsbConnectListener(): void {
+    if (this.usbListenersActive) return
+    if (!JensenDevice.isSupported()) return
 
-    // Find sync marker
-    let syncPos = -1
-    for (let i = 0; i <= this.receiveBuffer.length - 2; i++) {
-      if (this.receiveBuffer.byteAt(i) === 0x12 && this.receiveBuffer.byteAt(i + 1) === 0x34) {
-        syncPos = i
+    this.usbConnectHandler = (event: USBConnectionEvent) => {
+      if (this.isHiDockUsbDevice(event.device)) {
+        if (shouldLog()) console.log('[Jensen] USB connect event, triggering tryConnect')
+        this.tryConnect(event.device)
+      }
+    }
+    navigator.usb.onconnect = this.usbConnectHandler
+    this.usbListenersActive = true
+  }
+
+  removeUsbConnectListener(): void {
+    if (!this.usbListenersActive) return
+    if (navigator.usb) navigator.usb.onconnect = null
+    this.usbConnectHandler = null
+    this.usbListenersActive = false
+  }
+
+  // ================================================================
+  // CORE: Command queue — matches jensen.js send/sendNext/createPromise
+  // ================================================================
+
+  /**
+   * Queue a command and return a promise for its result.
+   * Matches jensen.js send(): assign seq, push to queue, call sendNext, return promise.
+   */
+  private sendCommand<T>(msg: JensenMessage, timeoutSec?: number, operationName?: string): Promise<T> {
+    msg.sequence(this.sequenceId++)
+    if (timeoutSec) msg.expireAfter(timeoutSec)
+
+    this.commandQueue.push({
+      msg,
+      operationName: operationName ?? `cmd-${msg.command}`
+    })
+
+    // Try to send immediately
+    this.sendNextCommand()
+
+    // Create and return promise
+    return this.createPromise<T>(msg, timeoutSec)
+  }
+
+  /**
+   * Pop next command from queue and send it.
+   * Matches jensen.js j(): if (h) return; pop queue; set h; transferOut; start read loop.
+   */
+  private sendNextCommand(): void {
+    // One command at a time (jensen.js: if (h) return)
+    if (this.currentCommandTag) return
+    if (!this.device) return
+
+    // Pop from queue, skip expired commands
+    const now = Date.now()
+    let entry: QueueEntry | undefined
+    while (this.commandQueue.length > 0) {
+      entry = this.commandQueue.shift()!
+      if (entry.msg.expireTime > 0 && entry.msg.expireTime < now) {
+        if (shouldLog()) console.log(`[Jensen] expired: cmd-${entry.msg.command}-${entry.msg.index}`)
+        this.expireCommand(`cmd-${entry.msg.command}-${entry.msg.index}`)
+        entry = undefined
+        continue
+      }
+      break
+    }
+    if (!entry) return
+
+    const tag = `cmd-${entry.msg.command}-${entry.msg.index}`
+    this.currentCommandTag = tag
+    this.currentOperationName = entry.operationName
+
+    if (shouldLog()) console.log(`[Jensen] sendNext: ${entry.operationName} (${tag})`)
+
+    // Set parse delay based on command type
+    // jensen.js: g.timewait = d.command == 5 || d.command == G ? 1e3 : 10
+    this.parseDelay =
+      (entry.msg.command === CMD.TRANSFER_FILE || entry.msg.command === CMD.GET_FILE_BLOCK)
+        ? 1000 : 10
+
+    // Send command
+    const data = entry.msg.make()
+    this.device.transferOut(1, data as unknown as BufferSource).then(
+      () => {
+        if (entry!.msg.onprogress) entry!.msg.onprogress(1, 1)
+        // Reset byte counter
+        this.totalBytesReceived = 0
+        // Start read loop if not running (jensen.js: k == 0 ? R() : (k = !0))
+        if (!this.readLoopRunning) {
+          this.startReadLoop()
+        }
+      },
+      (error) => {
+        console.error('[Jensen] transferOut failed:', error)
+        this.versionCode = null
+        this.versionNumber = null
+      }
+    )
+  }
+
+  /**
+   * Create a promise for a queued command.
+   * Matches jensen.js B(): tag-keyed promise stored in map, optional timeout.
+   */
+  private createPromise<T>(msg: JensenMessage, timeoutSec?: number): Promise<T> {
+    const tag = `cmd-${msg.command}-${msg.index}`
+    const timer = timeoutSec
+      ? setTimeout(() => this.expireCommand(tag), timeoutSec * 1000)
+      : null
+
+    return new Promise<T>((resolve, reject) => {
+      this.pendingPromises.set(tag, {
+        tag,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timeout: timer
+      })
+    })
+  }
+
+  /**
+   * Expire a command by resolving its promise with null.
+   * Matches jensen.js x(): resolve with null, delete from map.
+   */
+  private expireCommand(tag: string): void {
+    if (shouldLog()) console.log(`[Jensen] timeout: ${tag}`)
+    const pending = this.pendingPromises.get(tag)
+    if (!pending) return
+    pending.resolve(null)
+    this.pendingPromises.delete(tag)
+  }
+
+  // ================================================================
+  // CORE: Continuous read loop — matches jensen.js R/N/E
+  // ================================================================
+
+  /**
+   * Start (or continue) the continuous USB read loop.
+   * Matches jensen.js R(): transferIn(2, 51200).then(N)
+   * The loop is self-sustaining: onDataReceived calls startReadLoop again.
+   * It stops naturally when device is null (disconnected).
+   */
+  private startReadLoop(): void {
+    if (!this.device) return
+    this.readLoopRunning = true
+
+    this.device.transferIn(2, 51200).then(
+      (result) => this.onDataReceived(result),
+      (error) => {
+        // Read failed — loop dies, restarts on next command
+        this.readLoopRunning = false
+        if (error instanceof DOMException && error.name === 'InvalidStateError') {
+          this.handleDisconnect()
+        }
+      }
+    )
+  }
+
+  /**
+   * Handle data received from USB.
+   * Matches jensen.js N(): push data, restart loop, debounce parse, fire onreceive.
+   */
+  private onDataReceived(result: USBInTransferResult): void {
+    if (result.data && result.data.byteLength > 0) {
+      this.totalBytesReceived += result.data.byteLength
+      this.receiveChunks.push(result.data)
+    }
+
+    // Restart read loop immediately (perpetual — matches jensen.js: R() in N())
+    this.startReadLoop()
+
+    // Debounce parse (matches jensen.js: clearTimeout + setTimeout(E, timewait))
+    if (this.decodeTimer) clearTimeout(this.decodeTimer)
+    this.decodeTimer = setTimeout(() => this.processBufferedData(), this.parseDelay)
+
+    // Real-time progress callback (matches jensen.js: g.onreceive(y))
+    if (this.onreceive) {
+      try { this.onreceive(this.totalBytesReceived) } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Parse all buffered data and dispatch to handlers.
+   * Matches jensen.js E(): concatenate chunks, parse packets, call handlers.
+   */
+  private processBufferedData(): void {
+    // 100KB work buffer (matches jensen.js: new ArrayBuffer(102400))
+    const workBuffer = new Uint8Array(102400)
+    let workLen = 0
+    let decodeError = false
+
+    const chunkCount = this.receiveChunks.length
+    for (let qi = 0; qi < chunkCount; qi++) {
+      const chunk = this.receiveChunks.shift()!
+
+      // Copy chunk to flat buffer (jensen.js uses getInt8 — bit pattern preserved in Uint8Array)
+      for (let i = 0; i < chunk.byteLength; i++) {
+        workBuffer[i + workLen] = chunk.getInt8(i)
+      }
+      workLen += chunk.byteLength
+
+      // Parse all complete messages
+      let consumed = 0
+      for (;;) {
+        let parsed: { message: ResponseMessage; length: number } | null = null
+        try {
+          parsed = this.parsePacket(workBuffer, consumed, workLen)
+        } catch {
+          decodeError = true
+          break
+        }
+        if (!parsed) break
+
+        consumed += parsed.length
+        const msg = parsed.message
+
+        if (shouldLog() && msg.id !== CMD.TRANSFER_FILE) {
+          console.log(`[Jensen] recv: cmd=${msg.id}, seq=${msg.sequence}, bodyLen=${msg.body.length}`)
+        }
+
+        // Dispatch to handler (jensen.js: s.handlers[S.id](S, g))
+        try {
+          const handler = this.handlers.get(msg.id)
+          if (handler) {
+            const result = handler(msg, this)
+            // If handler returns truthy → resolve promise (jensen.js: A && m(A, S.id))
+            if (result !== undefined && result !== null) {
+              this.triggerResolve(result, msg.id)
+            }
+          }
+        } catch (error) {
+          // Handler threw — matches jensen.js: m(A) with no cmdId
+          this.triggerResolve(error)
+        }
+
+        // Try to send next command after each message (matches jensen.js: j() in E loop)
+        this.sendNextCommand()
+      }
+
+      // Decode error recovery (matches jensen.js decode error handling in E())
+      if (decodeError) {
+        if (this.currentCommandTag) {
+          const cmdIdMatch = this.currentCommandTag.match(/^cmd-(\d+)-/)
+          const cmdId = cmdIdMatch ? parseInt(cmdIdMatch[1]) : -1
+          if (cmdId >= 0) {
+            try {
+              const handler = this.handlers.get(cmdId)
+              if (handler) handler(null, this)
+            } catch (error) {
+              this.triggerResolve(error)
+            }
+          }
+          this.triggerResolve(null, cmdId >= 0 ? cmdId : undefined)
+        }
+        this.receiveChunks.length = 0
         break
       }
+
+      // Shift consumed data out of work buffer
+      for (let i = 0; i < workLen - consumed; i++) {
+        workBuffer[i] = workBuffer[i + consumed]
+      }
+      workLen -= consumed
+    }
+  }
+
+  // ================================================================
+  // CORE: Packet parser — matches jensen.js Z()
+  // ================================================================
+
+  /**
+   * Parse one Jensen protocol message from buffer at offset.
+   * Returns null if not enough data. Throws on invalid header.
+   * Matches jensen.js Z() exactly.
+   */
+  private parsePacket(
+    buffer: Uint8Array,
+    offset: number,
+    totalLength: number
+  ): { message: ResponseMessage; length: number } | null {
+    const available = totalLength - offset
+    if (available < 12) return null
+
+    // Check sync marker (jensen.js: d[u+0] !== 18 || d[u+1] !== 52)
+    if (buffer[offset] !== 0x12 || buffer[offset + 1] !== 0x34) {
+      throw new Error('invalid header')
     }
 
-    if (syncPos === -1) {
-      // No sync marker found, clear buffer
-      this.receiveBuffer.clear()
-      return null
-    }
+    // Command ID — 16-bit big-endian (jensen.js: F(d[u+C], d[u+C+1]))
+    const cmdId = ((buffer[offset + 2] & 0xff) << 8) | (buffer[offset + 3] & 0xff)
 
-    // Discard any data before sync marker
-    if (syncPos > 0) {
-      if (shouldLogUsb()) console.warn(`[Jensen] Discarding ${syncPos} bytes before sync marker`)
-      this.receiveBuffer.consume(syncPos)
-    }
-
-    if (this.receiveBuffer.length < 12) return null
-
-    // Parse header
-    const cmdId = (this.receiveBuffer.byteAt(2) << 8) | this.receiveBuffer.byteAt(3)
+    // Sequence — 32-bit big-endian
     const seqId =
-      (this.receiveBuffer.byteAt(4) << 24) |
-      (this.receiveBuffer.byteAt(5) << 16) |
-      (this.receiveBuffer.byteAt(6) << 8) |
-      this.receiveBuffer.byteAt(7)
+      ((buffer[offset + 4] & 0xff) << 24) |
+      ((buffer[offset + 5] & 0xff) << 16) |
+      ((buffer[offset + 6] & 0xff) << 8) |
+      (buffer[offset + 7] & 0xff)
 
-    const bodyLenRaw =
-      (this.receiveBuffer.byteAt(8) << 24) |
-      (this.receiveBuffer.byteAt(9) << 16) |
-      (this.receiveBuffer.byteAt(10) << 8) |
-      this.receiveBuffer.byteAt(11)
+    // Body length — bottom 24 bits; top byte is padding (jensen.js: M = ..., L = (M >> 24) & 255, M &= 16777215)
+    const raw =
+      ((buffer[offset + 8] & 0xff) << 24) |
+      ((buffer[offset + 9] & 0xff) << 16) |
+      ((buffer[offset + 10] & 0xff) << 8) |
+      (buffer[offset + 11] & 0xff)
+    const padding = (raw >> 24) & 0xff
+    const bodyLen = raw & 0xffffff
 
-    const padding = (bodyLenRaw >> 24) & 0xff
-    const bodyLen = bodyLenRaw & 0xffffff
-    const totalLen = 12 + bodyLen + padding
+    // Check if full message available
+    if (available < 12 + bodyLen + padding) return null
 
-    if (this.receiveBuffer.length < totalLen) {
-      // Not enough data yet
+    // Extract body (jensen.js: d.slice(u + H, u + H + M))
+    let pos = 12
+    const body = buffer.slice(offset + pos, offset + pos + bodyLen)
+    pos += bodyLen
+    pos += padding
+
+    return { message: { id: cmdId, sequence: seqId, body }, length: pos }
+  }
+
+  // ================================================================
+  // CORE: Promise resolution — matches jensen.js m()
+  // ================================================================
+
+  /**
+   * Resolve the current command's promise.
+   * Matches jensen.js m(d, u): check tag matches cmdId, resolve, clear h.
+   */
+  private triggerResolve(value: unknown, cmdId?: number): void {
+    if (!this.currentCommandTag) return
+
+    if (cmdId !== undefined) {
+      // Check if current command's cmdId matches (jensen.js: h.substring(0, h.lastIndexOf("-")) != "cmd-" + u)
+      const lastDash = this.currentCommandTag.lastIndexOf('-')
+      const prefix = this.currentCommandTag.substring(0, lastDash)
+      if (prefix !== `cmd-${cmdId}`) {
+        // Mismatch — clear current tag (matches jensen.js: return void (h = null))
+        this.currentCommandTag = null
+        this.currentOperationName = null
+        return
+      }
+    } else {
+      // No cmdId provided (handler threw) — always mismatch (matches jensen.js: m(A) with undefined u)
+      this.currentCommandTag = null
+      this.currentOperationName = null
+      return
+    }
+
+    const pending = this.pendingPromises.get(this.currentCommandTag)
+    if (!pending) return
+
+    if (pending.timeout) clearTimeout(pending.timeout)
+    pending.resolve(value)
+    this.pendingPromises.delete(this.currentCommandTag)
+    this.currentCommandTag = null
+    this.currentOperationName = null
+  }
+
+  // ================================================================
+  // Lock compatibility (for hidock-device.ts)
+  // ================================================================
+
+  isOperationInProgress(): boolean {
+    return this.currentCommandTag !== null
+  }
+
+  getLockHolder(): string | null {
+    return this.currentOperationName
+  }
+
+  // ================================================================
+  // Default handlers — matches jensen.js s.registerHandler() calls
+  // ================================================================
+
+  private registerDefaultHandlers(): void {
+    // GET_DEVICE_INFO (1)
+    this.handlers.set(CMD.GET_DEVICE_INFO, (msg, device) => {
+      if (!msg) return null
+      const body = msg.body
+      const versionParts: number[] = []
+      let versionNumber = 0
+      for (let i = 0; i < 4; i++) {
+        const byte = body[i] & 0xff
+        if (i > 0) versionParts.push(byte)
+        versionNumber |= byte << (8 * (3 - i))
+      }
+      const snChars: string[] = []
+      for (let i = 0; i < 16; i++) {
+        const byte = body[i + 4]
+        if (byte > 0) snChars.push(String.fromCharCode(byte))
+      }
+      device.versionCode = versionParts.join('.')
+      device.versionNumber = versionNumber
+      device.serialNumber = snChars.join('')
+      return {
+        versionCode: device.versionCode,
+        versionNumber: device.versionNumber,
+        serialNumber: device.serialNumber,
+        model: device.model
+      }
+    })
+
+    // GET_DEVICE_TIME (2)
+    this.handlers.set(CMD.GET_DEVICE_TIME, (msg, device) => {
+      if (!msg) return null
+      const bcd = device.fromBcd(msg.body[0], msg.body[1], msg.body[2], msg.body[3], msg.body[4], msg.body[5], msg.body[6])
+      return {
+        time: bcd === '00000000000000'
+          ? 'unknown'
+          : bcd.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/gi, '$1-$2-$3 $4:$5:$6')
+      }
+    })
+
+    // GET_FILE_COUNT (6)
+    this.handlers.set(CMD.GET_FILE_COUNT, (msg) => {
+      if (!msg) return null
+      if (msg.body.length === 0) return { count: 0 }
+      const count =
+        ((msg.body[0] & 0xff) << 24) |
+        ((msg.body[1] & 0xff) << 16) |
+        ((msg.body[2] & 0xff) << 8) |
+        (msg.body[3] & 0xff)
+      return { count }
+    })
+
+    // GET_SETTINGS (11)
+    this.handlers.set(CMD.GET_SETTINGS, (msg) => {
+      if (!msg) return null
+      return {
+        autoRecord: msg.body[3] === 1,
+        autoPlay: msg.body[7] === 1,
+        bluetoothTone: msg.body[15] !== 1,
+        notification: msg.body.length >= 12 ? msg.body[11] === 1 : undefined
+      }
+    })
+
+    // GET_CARD_INFO (16)
+    this.handlers.set(CMD.GET_CARD_INFO, (msg) => {
+      if (!msg) return null
+      let pos = 0
+      const freeMiB =
+        ((msg.body[pos++] & 0xff) << 24) |
+        ((msg.body[pos++] & 0xff) << 16) |
+        ((msg.body[pos++] & 0xff) << 8) |
+        (msg.body[pos++] & 0xff)
+      const capacityMiB =
+        ((msg.body[pos++] & 0xff) << 24) |
+        ((msg.body[pos++] & 0xff) << 16) |
+        ((msg.body[pos++] & 0xff) << 8) |
+        (msg.body[pos++] & 0xff)
+      const statusRaw =
+        ((msg.body[pos++] & 0xff) << 24) |
+        ((msg.body[pos++] & 0xff) << 16) |
+        ((msg.body[pos++] & 0xff) << 8) |
+        (msg.body[pos] & 0xff)
+      return {
+        used: capacityMiB - freeMiB,
+        capacity: capacityMiB,
+        free: freeMiB,
+        status: statusRaw.toString(16)
+      }
+    })
+
+    // DELETE_FILE (7)
+    this.handlers.set(CMD.DELETE_FILE, (msg) => {
+      if (!msg) return null
+      let result = 'failed'
+      if (msg.body[0] === 0) result = 'success'
+      else if (msg.body[0] === 1) result = 'not-exists'
+      return { result }
+    })
+
+    // Generic result handler for simple success/fail commands
+    const resultHandler: CommandHandler = (msg) => {
+      if (!msg) return null
+      return { result: msg.body[0] === 0 ? 'success' : 'failed' }
+    }
+
+    this.handlers.set(CMD.SET_DEVICE_TIME, resultHandler)
+    this.handlers.set(CMD.SET_SETTINGS, resultHandler)
+    this.handlers.set(CMD.FORMAT_CARD, resultHandler)
+    this.handlers.set(CMD.RESTORE_FACTORY_SETTINGS, resultHandler)
+    this.handlers.set(CMD.FACTORY_RESET, resultHandler)
+    this.handlers.set(CMD.REALTIME_CONTROL, resultHandler)
+    this.handlers.set(CMD.FIRMWARE_UPLOAD, resultHandler)
+    this.handlers.set(CMD.TONE_UPDATE, resultHandler)
+    this.handlers.set(CMD.UAC_UPDATE, resultHandler)
+    this.handlers.set(CMD.SEND_MEETING_SCHEDULE_INFO, resultHandler)
+    this.handlers.set(CMD.BLUETOOTH_CMD, resultHandler)
+    this.handlers.set(CMD.BLUETOOTH_SCAN, resultHandler)
+    this.handlers.set(CMD.BT_SCAN, resultHandler)
+    this.handlers.set(CMD.BT_REMOVE_PAIRED_DEV, resultHandler)
+    this.handlers.set(CMD.GET_FILE_BLOCK, resultHandler)
+
+    // REALTIME_READ_SETTING (32) — return raw
+    this.handlers.set(CMD.REALTIME_READ_SETTING, (msg) => {
+      if (!msg) return null
+      return msg
+    })
+
+    // REALTIME_TRANSFER (34)
+    this.handlers.set(CMD.REALTIME_TRANSFER, (msg) => {
+      if (!msg) return null
+      const rest =
+        ((msg.body[0] & 0xff) << 24) |
+        ((msg.body[1] & 0xff) << 16) |
+        ((msg.body[2] & 0xff) << 8) |
+        (msg.body[3] & 0xff)
+      return { rest, data: msg.body.slice(4) }
+    })
+
+    // GET_BATTERY_STATUS (4100)
+    this.handlers.set(CMD.GET_BATTERY_STATUS, (msg) => {
+      if (!msg) return null
+      const statusByte = msg.body[0] & 0xff
+      let status: 'idle' | 'charging' | 'full' = 'idle'
+      if (statusByte === 1) status = 'charging'
+      else if (statusByte === 2) status = 'full'
+      const batteryLevel = msg.body[1] & 0xff
+      const voltage = msg.body.length >= 6
+        ? ((msg.body[2] & 0xff) << 24) | ((msg.body[3] & 0xff) << 16) | ((msg.body[4] & 0xff) << 8) | (msg.body[5] & 0xff)
+        : undefined
+      return { status, batteryLevel, voltage }
+    })
+
+    // BLUETOOTH_STATUS (4099)
+    this.handlers.set(CMD.BLUETOOTH_STATUS, (msg) => {
+      if (!msg) return null
+      return { connected: msg.body[0] === 1, raw: msg.body }
+    })
+
+    // BT_DEV_LIST / BT_GET_PAIRED_DEV_LIST — return raw
+    this.handlers.set(CMD.BT_DEV_LIST, (msg) => {
+      if (!msg) return null
+      return { raw: msg.body }
+    })
+    this.handlers.set(CMD.BT_GET_PAIRED_DEV_LIST, (msg) => {
+      if (!msg) return null
+      return { raw: msg.body }
+    })
+
+    // REQUEST_FIRMWARE_UPGRADE (8)
+    this.handlers.set(CMD.REQUEST_FIRMWARE_UPGRADE, (msg) => {
+      if (!msg) return null
+      const code = msg.body[0]
+      let result = 'unknown'
+      if (code === 0) result = 'accepted'
+      else if (code === 1) result = 'wrong-version'
+      else if (code === 2) result = 'busy'
+      else if (code === 3) result = 'card-full'
+      else if (code === 4) result = 'card-error'
+      return { result }
+    })
+
+    // Tone/UAC update request handlers
+    const updateRequestHandler: CommandHandler = (msg) => {
+      if (!msg) return null
+      const code = msg.body[0]
+      let result = 'success'
+      if (code === 1) result = 'length-mismatch'
+      else if (code === 2) result = 'busy'
+      else if (code === 3) result = 'card-full'
+      else if (code === 4) result = 'card-error'
+      else if (code !== 0) result = String(code)
+      return { code, result }
+    }
+    this.handlers.set(CMD.REQUEST_TONE_UPDATE, updateRequestHandler)
+    this.handlers.set(CMD.REQUEST_UAC_UPDATE, updateRequestHandler)
+
+    // TRANSFER_FILE_PARTIAL (21)
+    this.handlers.set(CMD.TRANSFER_FILE_PARTIAL, (msg) => {
+      if (!msg) return null
+      const data = new Uint8Array(msg.body.length)
+      for (let i = 0; i < msg.body.length; i++) data[i] = msg.body[i] & 0xff
+      return data
+    })
+
+    // GET_RECORDING_FILE (18)
+    this.handlers.set(CMD.GET_RECORDING_FILE, (msg) => {
+      if (!msg || !msg.body || msg.body.length === 0) return { recording: null }
+      const chars: string[] = []
+      for (let i = 0; i < msg.body.length; i++) {
+        chars.push(String.fromCharCode(msg.body[i]))
+      }
+      return { recording: chars.join(''), name: chars.join('') }
+    })
+  }
+
+  // ================================================================
+  // Public API — simple commands
+  // ================================================================
+
+  async getDeviceInfo(timeout = 10): Promise<DeviceInfo | null> {
+    try {
+      return await this.sendCommand<DeviceInfo | null>(
+        new JensenMessage(CMD.GET_DEVICE_INFO), timeout, 'getDeviceInfo')
+    } catch {
       return null
     }
-
-    // Extract body and advance buffer atomically using compound method
-    const body = this.receiveBuffer.extractAndConsume(12, 12 + bodyLen, totalLen)
-
-    return { id: cmdId, sequence: seqId, body }
   }
 
-  // Receive a response matching expected sequence ID
-  // Matches the working web app implementation pattern exactly
-  private async receiveResponse(expectedCmdId: number, expectedSeqId: number, timeoutSec: number): Promise<ResponseMessage> {
-    const startTime = Date.now()
-    const timeoutMs = timeoutSec * 1000
-    let readAttempts = 0
+  async getTime(timeout = 5): Promise<{ time: string } | null> {
+    try {
+      return await this.sendCommand<{ time: string } | null>(
+        new JensenMessage(CMD.GET_DEVICE_TIME), timeout, 'getTime')
+    } catch {
+      return null
+    }
+  }
 
-    if (shouldLogProtocol()) console.log(`[Jensen] receiveResponse: waiting for cmd=${expectedCmdId}, seq=${expectedSeqId}, timeout=${timeoutSec}s`)
+  async setTime(date: Date, timeout = 5): Promise<{ result: string } | null> {
+    const dateStr = [
+      date.getFullYear(),
+      String(date.getMonth() + 1).padStart(2, '0'),
+      String(date.getDate()).padStart(2, '0'),
+      String(date.getHours()).padStart(2, '0'),
+      String(date.getMinutes()).padStart(2, '0'),
+      String(date.getSeconds()).padStart(2, '0')
+    ].join('')
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.SET_DEVICE_TIME).body(this.toBcd(dateStr)), timeout, 'setTime')
+    } catch {
+      return null
+    }
+  }
 
-    while (Date.now() - startTime < timeoutMs) {
-      try {
-        readAttempts++
-        // Read data from device with larger buffer for better performance (same as web app)
-        const readSize = 4096 * 16 // 64KB buffer
-        if (shouldLogUsb()) console.log(`[Jensen] receiveResponse: attempt ${readAttempts}, calling transferIn(2, ${readSize})...`)
-        const result = await this.device!.transferIn(2, readSize)
-        if (shouldLogUsb()) console.log(`[Jensen] receiveResponse: transferIn returned, status=${result.status}, bytesRead=${result.data?.byteLength || 0}`)
+  async getFileCount(timeout = 15): Promise<{ count: number } | null> {
+    try {
+      return await this.sendCommand<{ count: number } | null>(
+        new JensenMessage(CMD.GET_FILE_COUNT), timeout, 'getFileCount')
+    } catch {
+      return null
+    }
+  }
 
-        if (result.status === 'ok' && result.data && result.data.byteLength > 0) {
-          // Append to receive buffer
-          // Important: Use slice() to create a copy, as the underlying buffer may be reused
-          const newData = new Uint8Array(result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength))
-          this.receiveBuffer.append(newData)
-          if (shouldLogUsb()) console.log(`[Jensen] Read ${newData.length} bytes, buffer now ${this.receiveBuffer.length} bytes`)
+  async getSettings(timeout = 5): Promise<DeviceSettings | null> {
+    if (this.versionNumber && this.versionNumber < 327714) {
+      return { autoRecord: false, autoPlay: false }
+    }
+    try {
+      return await this.sendCommand<DeviceSettings | null>(
+        new JensenMessage(CMD.GET_SETTINGS), timeout, 'getSettings')
+    } catch {
+      return null
+    }
+  }
 
-          // Try to parse all complete packets in buffer
-          let packetParsed = true
-          while (packetParsed) {
-            const msg = this.tryParseMessage()
-            if (!msg) {
-              packetParsed = false
-              break
-            }
+  async setAutoRecord(enabled: boolean, timeout = 5): Promise<{ result: string } | null> {
+    if (this.versionNumber && this.versionNumber < 327714) {
+      return { result: 'unsupported' }
+    }
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.SET_SETTINGS).body([0, 0, 0, enabled ? 1 : 2]), timeout, 'setAutoRecord')
+    } catch {
+      return null
+    }
+  }
 
-            if (shouldLogProtocol()) console.log(`[Jensen] Received: cmd=${msg.id}, seq=${msg.sequence}, bodyLen=${msg.body.length}`)
+  async getCardInfo(timeout = 10): Promise<CardInfo | null> {
+    if (this.versionNumber !== null && this.versionNumber < 327733) return null
+    try {
+      return await this.sendCommand<CardInfo | null>(
+        new JensenMessage(CMD.GET_CARD_INFO), timeout, 'getCardInfo')
+    } catch {
+      return null
+    }
+  }
 
-            // Check if this is the response we're waiting for (match by sequence ID like web app)
-            if (msg.sequence === expectedSeqId) {
-              return msg
-            }
+  async formatCard(timeout = 30): Promise<{ result: string } | null> {
+    if (this.versionNumber && this.versionNumber < 327733) return null
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.FORMAT_CARD).body([1, 2, 3, 4]), timeout, 'formatCard')
+    } catch {
+      return null
+    }
+  }
 
-            // Unexpected message, log and continue (don't discard - might be for different command)
-            if (shouldLogProtocol()) console.warn(`[Jensen] Unexpected seq: expected seq=${expectedSeqId}, got cmd=${msg.id} seq=${msg.sequence}. Discarding.`)
+  async deleteFile(filename: string, timeout = 10): Promise<{ result: string } | null> {
+    const body: number[] = []
+    for (let i = 0; i < filename.length; i++) body.push(filename.charCodeAt(i))
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.DELETE_FILE).body(body), timeout, `deleteFile:${filename}`)
+    } catch {
+      return null
+    }
+  }
+
+  // ================================================================
+  // Public API — listFiles (handler-based, matching jensen.js)
+  // ================================================================
+
+  /**
+   * List files on device. Uses dynamic handler that accumulates multi-packet response.
+   * Matches jensen.js s.prototype.listFiles exactly:
+   * - Checks filelist lock
+   * - Gets file count for old firmware
+   * - Registers handler that re-parses all accumulated data on each packet
+   * - Handler returns file array when complete, undefined when waiting
+   */
+  async listFiles(
+    onProgress?: (filesFound: number, expectedFiles: number) => void,
+    expectedFileCount?: number,
+    onNewFiles?: (files: FileInfo[]) => void
+  ): Promise<FileInfo[] | null> {
+    const key = 'filelist'
+
+    // Prevent concurrent listing (jensen.js: if (this[e] != null) return null)
+    if (this.data[key] != null) return []
+
+    let fileCount: { count: number } | null = null
+
+    // Get file count for old firmware (jensen.js version check)
+    if (this.versionNumber === undefined || this.versionNumber === null || this.versionNumber <= 327722) {
+      fileCount = await this.getFileCount(5)
+      if (fileCount == null) return []
+    }
+    if (fileCount && fileCount.count === 0) return []
+
+    // Initialize accumulator (jensen.js: this[e] = [])
+    this.data[key] = [] as Uint8Array[]
+    let lastEmittedCount = 0
+    const totalExpected = expectedFileCount ?? fileCount?.count ?? 0
+    onProgress?.(0, totalExpected)
+
+    // Register dynamic handler for GET_FILE_LIST (matches jensen.js handler registration)
+    this.handlers.set(CMD.GET_FILE_LIST, (msg, device) => {
+      // Empty body = end of file list (jensen.js: if (n.body.length == 0) return (r[e] = null), [])
+      if (!msg || msg.body.length === 0) {
+        const acc = device.data[key] as Uint8Array[] | null
+        device.data[key] = null
+        if (!acc || acc.length === 0) return []
+        // Parse whatever we accumulated
+        const { files } = device.parseFileListFlat(device.flattenChunks(acc))
+        return files.filter(f => f.time !== null)
+      }
+
+      // Accumulate body (jensen.js: r[e].push(n.body))
+      const acc = device.data[key] as Uint8Array[]
+      acc.push(new Uint8Array(msg.body))
+
+      // Flatten and re-parse all accumulated data (matches jensen.js: flatten + parse loop)
+      const flat = device.flattenChunks(acc)
+      const { files, headerTotal } = device.parseFileListFlat(flat)
+
+      // Emit new files for streaming display
+      if (onNewFiles && files.length > lastEmittedCount) {
+        onNewFiles(files.slice(lastEmittedCount))
+      }
+      lastEmittedCount = files.length
+
+      const effectiveTotal = headerTotal > 0 ? headerTotal : totalExpected
+      onProgress?.(files.length, effectiveTotal > 0 ? effectiveTotal : files.length)
+
+      // Check if complete (jensen.js: (t && h.length >= t.count) || (a > -1 && h.length >= a))
+      // Fix 2: Also resolve when expectedFileCount (totalExpected) is reached — handles firmware
+      // > v327722 that doesn't send the 0xFF total header, so headerTotal stays 0.
+      const countTarget = fileCount?.count ?? 0
+      if ((countTarget > 0 && files.length >= countTarget) || (headerTotal > 0 && files.length >= headerTotal) || (totalExpected > 0 && files.length >= totalExpected)) {
+        device.data[key] = null
+        return files.filter(f => f.time !== null)
+      }
+
+      // Not done yet — return undefined to keep waiting
+      return undefined
+    })
+
+    // Send command with no per-command timeout; the race below enforces the overall deadline.
+    const commandPromise = this.sendCommand<FileInfo[]>(
+      new JensenMessage(CMD.GET_FILE_LIST), undefined, 'listFiles')
+
+    // Fix 4: Race the command against a 120-second hard timeout.
+    // On timeout, extract partial results, release the filelist lock, force-resolve the
+    // pending sendCommand promise, and unblock the queue — mirrors downloadFile abort pattern.
+    const LISTFILES_TIMEOUT_MS = 120_000
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+
+    const timeoutPromise = new Promise<FileInfo[] | null>((resolve) => {
+      timeoutId = setTimeout(() => {
+        // Extract partial results before cleanup
+        const acc = this.data[key] as Uint8Array[] | null
+        this.data[key] = null // Release filelist lock
+
+        // Replace handler with no-op absorber so late packets don't re-trigger anything
+        this.handlers.set(CMD.GET_FILE_LIST, () => undefined)
+
+        // Force-resolve the pending sendCommand promise and unblock the queue
+        if (this.currentCommandTag) {
+          const pending = this.pendingPromises.get(this.currentCommandTag)
+          if (pending) {
+            if (pending.timeout) clearTimeout(pending.timeout)
+            pending.resolve(null)
+            this.pendingPromises.delete(this.currentCommandTag)
           }
+          this.currentCommandTag = null
+          this.currentOperationName = null
+          this.sendNextCommand()
         }
-      } catch (error) {
-        // Handle DOMException errors like the web app does
-        if (error instanceof DOMException) {
-          if (shouldLogUsb()) console.log(`[Jensen] receiveResponse: DOMException caught: ${error.name} - ${error.message}`)
-          if (error.name === 'NetworkError') {
-            // Timeout is expected, continue trying
-            continue
-          } else if (error.name === 'InvalidStateError') {
-            console.error('[Jensen] Device connection lost')
-            throw new Error('Device connection lost')
-          }
+
+        // Resolve with whatever was accumulated so far
+        if (acc && acc.length > 0) {
+          const { files } = this.parseFileListFlat(this.flattenChunks(acc))
+          const filtered = files.filter(f => f.time !== null)
+          if (shouldLog()) console.warn(`[Jensen] listFiles timeout after 120s — returning ${filtered.length} partial files`)
+          resolve(filtered)
+        } else {
+          if (shouldLog()) console.warn('[Jensen] listFiles timeout after 120s — no data accumulated')
+          resolve([])
         }
-        console.error(`[Jensen] receiveResponse: Unexpected error:`, error)
-        throw error
-      }
+      }, LISTFILES_TIMEOUT_MS)
+    })
 
-      // Small delay to prevent busy waiting (same as web app)
-      await this.delay(10)
-    }
+    const result = await Promise.race([commandPromise, timeoutPromise])
 
-    console.error(`[Jensen] receiveResponse: Timeout after ${readAttempts} attempts`)
-    throw new Error(`Response timeout for cmd=${expectedCmdId} seq=${expectedSeqId}`)
+    // Cancel the timeout if the command completed normally
+    if (timeoutId) clearTimeout(timeoutId)
+
+    return result
   }
 
-  private parseResponse(msg: ResponseMessage): unknown {
-    const body = msg.body
+  // ================================================================
+  // Public API — downloadFile (handler-based, matching jensen.js streaming/getFile)
+  // ================================================================
 
-    switch (msg.id) {
-      case CMD.GET_DEVICE_INFO: {
-        const versionParts: number[] = []
-        let versionNumber = 0
-        for (let i = 0; i < 4; i++) {
-          const byte = body[i] & 0xff
-          if (i > 0) versionParts.push(byte)
-          versionNumber |= byte << (8 * (3 - i))
-        }
+  /**
+   * Download a file from device. Uses dynamic handler that accumulates data.
+   * Matches jensen.js streaming()/getFile():
+   * - Sets onreceive for real-time byte progress
+   * - Registers handler that calls onChunk for each packet
+   * - Handler returns true when received >= fileSize
+   */
+  async downloadFile(
+    filename: string,
+    fileSize: number,
+    onChunk: (data: Uint8Array) => void,
+    onProgress?: (received: number) => void,
+    signal?: AbortSignal
+  ): Promise<boolean> {
+    if (!this.device) return false
+    if (signal?.aborted) return false
 
-        const snChars: string[] = []
-        for (let i = 0; i < 16; i++) {
-          const byte = body[i + 4]
-          if (byte > 0) snChars.push(String.fromCharCode(byte))
-        }
+    let received = 0
+    let aborted = false
 
-        this.versionCode = versionParts.join('.')
-        this.versionNumber = versionNumber
-        this.serialNumber = snChars.join('')
+    // Set real-time progress callback (jensen.js: this.onreceive = r)
+    this.onreceive = onProgress ? () => onProgress(received) : null
 
-        return {
-          versionCode: this.versionCode,
-          versionNumber: this.versionNumber,
-          sn: this.serialNumber
-        }
-      }
-
-      case CMD.GET_DEVICE_TIME: {
-        const bcd = this.fromBcd(body[0], body[1], body[2], body[3], body[4], body[5], body[6])
-        return {
-          time:
-            bcd === '00000000000000'
-              ? 'unknown'
-              : bcd.replace(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/gi, '$1-$2-$3 $4:$5:$6')
-        }
-      }
-
-      case CMD.GET_FILE_COUNT: {
-        if (body.length === 0) return { count: 0 }
-        const count =
-          ((body[0] & 0xff) << 24) |
-          ((body[1] & 0xff) << 16) |
-          ((body[2] & 0xff) << 8) |
-          (body[3] & 0xff)
-        return { count }
-      }
-
-      case CMD.GET_SETTINGS: {
-        return {
-          autoRecord: body[3] === 1,
-          autoPlay: body[7] === 1,
-          bluetoothTone: body[15] !== 1,
-          notification: body.length >= 12 ? body[11] === 1 : undefined
+    // Abort handling
+    const abortHandler = (): void => {
+      aborted = true
+      // Replace handler with no-op absorber for remaining data
+      this.handlers.set(CMD.TRANSFER_FILE, () => undefined)
+      this.onreceive = null
+      // Force-resolve the pending promise with false
+      if (this.currentCommandTag) {
+        const pending = this.pendingPromises.get(this.currentCommandTag)
+        if (pending) {
+          if (pending.timeout) clearTimeout(pending.timeout)
+          pending.resolve(false)
+          this.pendingPromises.delete(this.currentCommandTag)
+          this.currentCommandTag = null
+          this.currentOperationName = null
+          this.sendNextCommand()
         }
       }
-
-      case CMD.GET_CARD_INFO: {
-        // Parse storage info from device
-        // IMPORTANT: Device returns values in MiB (binary megabytes)
-        // Byte order: FREE space first (4 bytes), then CAPACITY (4 bytes), then status (4 bytes)
-        // This matches the web app's working implementation
-        let pos = 0
-        const freeMiB =
-          ((body[pos++] & 0xff) << 24) |
-          ((body[pos++] & 0xff) << 16) |
-          ((body[pos++] & 0xff) << 8) |
-          (body[pos++] & 0xff)
-        const capacityMiB =
-          ((body[pos++] & 0xff) << 24) |
-          ((body[pos++] & 0xff) << 16) |
-          ((body[pos++] & 0xff) << 8) |
-          (body[pos++] & 0xff)
-        const statusRaw =
-          ((body[pos++] & 0xff) << 24) |
-          ((body[pos++] & 0xff) << 16) |
-          ((body[pos++] & 0xff) << 8) |
-          (body[pos] & 0xff)
-
-        // Calculate used space (capacity - free)
-        const usedMiB = capacityMiB - freeMiB
-
-        if (shouldLogProtocol()) {
-          console.log(`[Jensen] Storage: free=${freeMiB} MiB, capacity=${capacityMiB} MiB, used=${usedMiB} MiB, status=0x${statusRaw.toString(16)}`)
-        }
-
-        return {
-          // Return values in MiB for consistency with interface
-          used: usedMiB,
-          capacity: capacityMiB,
-          free: freeMiB,
-          status: statusRaw.toString(16)
-        }
-      }
-
-      case CMD.DELETE_FILE: {
-        let result = 'failed'
-        if (body[0] === 0) result = 'success'
-        else if (body[0] === 1) result = 'not-exists'
-        return { result }
-      }
-
-      case CMD.SET_DEVICE_TIME:
-      case CMD.SET_SETTINGS:
-      case CMD.FORMAT_CARD:
-      case CMD.RESTORE_FACTORY_SETTINGS:
-      case CMD.FACTORY_RESET:
-      case CMD.REALTIME_CONTROL:
-        return { result: body[0] === 0 ? 'success' : 'failed' }
-
-      case CMD.REALTIME_READ_SETTING:
-        // Returns raw settings data - device-specific format
-        return { raw: body }
-
-      case CMD.REALTIME_TRANSFER: {
-        // Format: 4 bytes rest count + audio data
-        const rest =
-          ((body[0] & 0xff) << 24) |
-          ((body[1] & 0xff) << 16) |
-          ((body[2] & 0xff) << 8) |
-          (body[3] & 0xff)
-        return {
-          rest,
-          data: body.slice(4)
-        }
-      }
-
-      case CMD.GET_BATTERY_STATUS: {
-        // Format: status byte, battery level, voltage bytes
-        const statusByte = body[0] & 0xff
-        let status: 'idle' | 'charging' | 'full' = 'idle'
-        if (statusByte === 1) status = 'charging'
-        else if (statusByte === 2) status = 'full'
-
-        const batteryLevel = body[1] & 0xff
-        const voltage =
-          body.length >= 6
-            ? ((body[2] & 0xff) << 24) |
-              ((body[3] & 0xff) << 16) |
-              ((body[4] & 0xff) << 8) |
-              (body[5] & 0xff)
-            : undefined
-
-        return { status, batteryLevel, voltage }
-      }
-
-      case CMD.BLUETOOTH_STATUS: {
-        return {
-          connected: body[0] === 1,
-          raw: body
-        }
-      }
-
-      default:
-        return { raw: body }
     }
-  }
+    signal?.addEventListener('abort', abortHandler, { once: true })
 
-  // Send a command and wait for response (synchronous request-response)
-  private async send<T>(msg: JensenMessage, timeoutSec?: number): Promise<T> {
-    if (!this.device) {
-      throw new Error('Device not connected')
-    }
+    if (shouldLog()) console.log(`[Jensen] downloadFile: ${filename}, size=${fileSize}`)
 
-    if (!this.device.opened) {
-      throw new Error('Device not opened')
-    }
+    // Register handler for TRANSFER_FILE (matches jensen.js: s.registerHandler(5, ...))
+    this.handlers.set(CMD.TRANSFER_FILE, (msg) => {
+      if (aborted) return undefined // Absorb stale data after abort
 
-    const seqId = this.sequenceId++
-    msg.sequence(seqId)
+      // null msg = transfer fail (jensen.js: if (b == null) ... return "fail")
+      if (!msg) {
+        if (shouldLog()) console.log('[Jensen] downloadFile: transfer fail (null msg)')
+        signal?.removeEventListener('abort', abortHandler)
+        this.onreceive = null
+        return false
+      }
 
-    const timeout = timeoutSec ?? 10
-    if (shouldLogProtocol()) console.log(`[Jensen] Sending: cmd=${msg.command}, seq=${seqId}`)
+      // Accumulate data (jensen.js: a += b.body.length, n(b.body))
+      received += msg.body.length
+      onChunk(new Uint8Array(msg.body))
 
-    const data = msg.make()
+      // Check if complete (jensen.js: if (h >= t) return "OK")
+      if (received >= fileSize) {
+        if (shouldLog()) console.log(`[Jensen] downloadFile: complete, ${received}/${fileSize}`)
+        signal?.removeEventListener('abort', abortHandler)
+        this.onreceive = null
+        return true
+      }
+
+      return undefined // Keep waiting
+    })
+
+    // Build command body (jensen.js: filename as char codes)
+    const body: number[] = []
+    for (let i = 0; i < filename.length; i++) body.push(filename.charCodeAt(i))
 
     try {
-      await this.device.transferOut(1, data as unknown as BufferSource)
-      if (shouldLogProtocol()) console.log(`[Jensen] Command sent: cmd=${msg.command}, seq=${seqId}`)
-    } catch (error) {
-      console.error(`[Jensen] Failed to send cmd=${msg.command}:`, error)
-      throw new Error(`Failed to send USB command: ${error instanceof Error ? error.message : String(error)}`)
+      const result = await this.sendCommand<boolean>(
+        new JensenMessage(CMD.TRANSFER_FILE).body(body), undefined, `downloadFile:${filename}`)
+      this.onreceive = null
+      signal?.removeEventListener('abort', abortHandler)
+      return result ?? false
+    } catch {
+      this.onreceive = null
+      signal?.removeEventListener('abort', abortHandler)
+      return false
     }
-
-    // Wait for response
-    const response = await this.receiveResponse(msg.command, seqId, timeout)
-    return this.parseResponse(response) as T
   }
 
-  // BCD encoding/decoding
+  // ================================================================
+  // Public API — Realtime streaming
+  // ================================================================
+
+  async getRealtimeSettings(timeout = 5): Promise<RealtimeSettings | null> {
+    try {
+      const result = await this.sendCommand<ResponseMessage | null>(
+        new JensenMessage(CMD.REALTIME_READ_SETTING), timeout, 'getRealtimeSettings')
+      if (!result) return null
+      return {
+        enabled: result.body && result.body.length > 0 ? result.body[0] === 1 : false,
+        sampleRate: 16000,
+        channels: 1,
+        bitDepth: 16
+      }
+    } catch {
+      return null
+    }
+  }
+
+  async startRealtime(timeout = 5): Promise<{ result: string } | null> {
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 0, 0, 0, 0, 1]), timeout, 'startRealtime')
+    } catch {
+      return null
+    }
+  }
+
+  async pauseRealtime(timeout = 5): Promise<{ result: string } | null> {
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 1, 0, 0, 0, 1]), timeout, 'pauseRealtime')
+    } catch {
+      return null
+    }
+  }
+
+  async stopRealtime(timeout = 5): Promise<{ result: string } | null> {
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 2, 0, 0, 0, 1]), timeout, 'stopRealtime')
+    } catch {
+      return null
+    }
+  }
+
+  async getRealtimeData(offset: number, timeout = 5): Promise<RealtimeData | null> {
+    try {
+      return await this.sendCommand<RealtimeData | null>(
+        new JensenMessage(CMD.REALTIME_TRANSFER).body([
+          (offset >> 24) & 0xff, (offset >> 16) & 0xff, (offset >> 8) & 0xff, offset & 0xff
+        ]), timeout, 'getRealtimeData')
+    } catch {
+      return null
+    }
+  }
+
+  // ================================================================
+  // Public API — Battery (P1 only)
+  // ================================================================
+
+  isP1Device(): boolean {
+    return this.model === 'hidock-p1' || this.model === 'hidock-p1-mini'
+  }
+
+  async getBatteryStatus(timeout = 5): Promise<BatteryStatus | null> {
+    if (!this.isP1Device()) return null
+    try {
+      return await this.sendCommand<BatteryStatus | null>(
+        new JensenMessage(CMD.GET_BATTERY_STATUS), timeout, 'getBatteryStatus')
+    } catch {
+      return null
+    }
+  }
+
+  // ================================================================
+  // Public API — Bluetooth (P1 only)
+  // ================================================================
+
+  async scanBluetoothDevices(timeout = 35): Promise<{ result: string } | null> {
+    if (!this.isP1Device()) return null
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.BLUETOOTH_SCAN), timeout, 'scanBluetoothDevices')
+    } catch {
+      return null
+    }
+  }
+
+  async startBluetoothScan(duration = 30, timeout = 35): Promise<{ result: string } | null> {
+    if (!this.isP1Device()) return null
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.BT_SCAN).body([1, duration & 0xff]), timeout, 'startBluetoothScan')
+    } catch {
+      return null
+    }
+  }
+
+  async stopBluetoothScan(timeout = 5): Promise<{ result: string } | null> {
+    if (!this.isP1Device()) return null
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.BT_SCAN).body([0]), timeout, 'stopBluetoothScan')
+    } catch {
+      return null
+    }
+  }
+
+  async getBluetoothDeviceList(timeout = 10): Promise<{ raw: Uint8Array } | null> {
+    if (!this.isP1Device()) return null
+    try {
+      return await this.sendCommand<{ raw: Uint8Array } | null>(
+        new JensenMessage(CMD.BT_DEV_LIST), timeout, 'getBluetoothDeviceList')
+    } catch {
+      return null
+    }
+  }
+
+  async getPairedDevices(timeout = 10): Promise<{ raw: Uint8Array } | null> {
+    if (!this.isP1Device()) return null
+    try {
+      return await this.sendCommand<{ raw: Uint8Array } | null>(
+        new JensenMessage(CMD.BT_GET_PAIRED_DEV_LIST), timeout, 'getPairedDevices')
+    } catch {
+      return null
+    }
+  }
+
+  async removePairedDevices(timeout = 10): Promise<{ result: string } | null> {
+    if (!this.isP1Device()) return null
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.BT_REMOVE_PAIRED_DEV).body([0]), timeout, 'removePairedDevices')
+    } catch {
+      return null
+    }
+  }
+
+  async connectBluetoothDevice(timeout = 10): Promise<{ result: string } | null> {
+    if (!this.isP1Device()) return null
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.BLUETOOTH_CMD).body([1]), timeout, 'connectBluetoothDevice')
+    } catch {
+      return null
+    }
+  }
+
+  async disconnectBluetoothDevice(timeout = 10): Promise<{ result: string } | null> {
+    if (!this.isP1Device()) return null
+    try {
+      return await this.sendCommand<{ result: string } | null>(
+        new JensenMessage(CMD.BLUETOOTH_CMD).body([0]), timeout, 'disconnectBluetoothDevice')
+    } catch {
+      return null
+    }
+  }
+
+  async getBluetoothStatus(timeout = 5): Promise<BluetoothStatus | null> {
+    if (!this.isP1Device()) return null
+    try {
+      return await this.sendCommand<BluetoothStatus | null>(
+        new JensenMessage(CMD.BLUETOOTH_STATUS), timeout, 'getBluetoothStatus')
+    } catch {
+      return null
+    }
+  }
+
+  // ================================================================
+  // Helpers — BCD, file parsing
+  // ================================================================
+
   private toBcd(str: string): number[] {
     const result: number[] = []
     for (let i = 0; i < str.length; i += 2) {
@@ -1211,7 +1701,7 @@ export class JensenDevice {
     return result
   }
 
-  private fromBcd(...bytes: number[]): string {
+  fromBcd(...bytes: number[]): string {
     let result = ''
     for (const byte of bytes) {
       result += ((byte >> 4) & 0xf).toString()
@@ -1220,416 +1710,108 @@ export class JensenDevice {
     return result
   }
 
-  // API Methods
-
-  async getDeviceInfo(timeout = 10): Promise<DeviceInfo | null> {
-    return this.withLock('getDeviceInfo', async () => {
-      try {
-        if (shouldLogProtocol()) console.log('getDeviceInfo: Sending CMD_GET_DEVICE_INFO')
-        const result = await this.send<{ versionCode: string; versionNumber: number; sn: string }>(
-          new JensenMessage(CMD.GET_DEVICE_INFO),
-          timeout
-        )
-        if (shouldLogProtocol()) console.log('getDeviceInfo: Received result:', result)
-        return {
-          versionCode: result.versionCode,
-          versionNumber: result.versionNumber,
-          serialNumber: result.sn,
-          model: this.model
-        }
-      } catch (error) {
-        console.error('[Jensen] getDeviceInfo error:', error)
-        return null
-      }
-    })
-  }
-
-  async getTime(timeout = 5): Promise<{ time: string } | null> {
-    try {
-      return await this.send<{ time: string }>(new JensenMessage(CMD.GET_DEVICE_TIME), timeout)
-    } catch {
-      return null
+  /** Flatten array of Uint8Arrays into single Uint8Array */
+  private flattenChunks(chunks: Uint8Array[]): Uint8Array {
+    let totalLen = 0
+    for (const chunk of chunks) totalLen += chunk.length
+    const flat = new Uint8Array(totalLen)
+    let pos = 0
+    for (const chunk of chunks) {
+      flat.set(chunk, pos)
+      pos += chunk.length
     }
+    return flat
   }
 
-  // DV-05: Wrapped with USB lock guard to prevent concurrent USB operations
-  async setTime(date: Date, timeout = 5): Promise<{ result: string } | null> {
-    return this.withLock('setTime', async () => {
-      const dateStr = [
-        date.getFullYear(),
-        String(date.getMonth() + 1).padStart(2, '0'),
-        String(date.getDate()).padStart(2, '0'),
-        String(date.getHours()).padStart(2, '0'),
-        String(date.getMinutes()).padStart(2, '0'),
-        String(date.getSeconds()).padStart(2, '0')
-      ].join('')
-
-      try {
-        return await this.send<{ result: string }>(
-          new JensenMessage(CMD.SET_DEVICE_TIME).body(this.toBcd(dateStr)),
-          timeout
-        )
-      } catch {
-        return null
-      }
-    })
-  }
-
-  async getFileCount(timeout = 15): Promise<{ count: number } | null> {
-    return this.withLock('getFileCount', async () => {
-      try {
-        return await this.send<{ count: number }>(new JensenMessage(CMD.GET_FILE_COUNT), timeout)
-      } catch {
-        return null
-      }
-    })
-  }
-
-  // DV-05: Wrapped with USB lock guard to prevent concurrent USB operations
-  async getSettings(timeout = 5): Promise<DeviceSettings | null> {
-    if (this.versionNumber && this.versionNumber < 327714) {
-      return { autoRecord: false, autoPlay: false }
-    }
-    return this.withLock('getSettings', async () => {
-      try {
-        return await this.send<DeviceSettings>(new JensenMessage(CMD.GET_SETTINGS), timeout)
-      } catch {
-        return null
-      }
-    })
-  }
-
-  // DV-05: Wrapped with USB lock guard to prevent concurrent USB operations
-  async setAutoRecord(enabled: boolean, timeout = 5): Promise<{ result: string } | null> {
-    if (this.versionNumber && this.versionNumber < 327714) {
-      return { result: 'unsupported' }
-    }
-    return this.withLock('setAutoRecord', async () => {
-      try {
-        return await this.send<{ result: string }>(
-          new JensenMessage(CMD.SET_SETTINGS).body([0, 0, 0, enabled ? 1 : 2]),
-          timeout
-        )
-      } catch {
-        return null
-      }
-    })
-  }
-
-  async getCardInfo(timeout = 10): Promise<CardInfo | null> {
-    // Version check: firmware below 5.0.37 (327733) doesn't support this command
-    // But if versionNumber is not yet set (e.g., getDeviceInfo hasn't completed),
-    // we should still try since it might succeed
-    if (this.versionNumber !== null && this.versionNumber < 327733) {
-      if (shouldLogProtocol()) console.log('getCardInfo: Firmware too old, returning null')
-      return null
-    }
-    return this.withLock('getCardInfo', async () => {
-      try {
-        if (shouldLogProtocol()) console.log('getCardInfo: Sending CMD_GET_CARD_INFO')
-        const result = await this.send<CardInfo>(new JensenMessage(CMD.GET_CARD_INFO), timeout)
-        if (shouldLogProtocol()) console.log('getCardInfo: Received result:', result)
-        return result
-      } catch (error) {
-        console.error('[Jensen] getCardInfo error:', error)
-        return null
-      }
-    })
-  }
-
-  // DV-05: Wrapped with USB lock guard to prevent concurrent USB operations
-  async formatCard(timeout = 30): Promise<{ result: string } | null> {
-    if (this.versionNumber && this.versionNumber < 327733) {
-      return null
-    }
-    return this.withLock('formatCard', async () => {
-      try {
-        return await this.send<{ result: string }>(
-          new JensenMessage(CMD.FORMAT_CARD).body([1, 2, 3, 4]),
-          timeout
-        )
-      } catch {
-        return null
-      }
-    })
-  }
-
-  async deleteFile(filename: string, timeout = 10): Promise<{ result: string } | null> {
-    return this.withLock(`deleteFile:${filename}`, async () => {
-      const body: number[] = []
-      for (let i = 0; i < filename.length; i++) {
-        body.push(filename.charCodeAt(i))
-      }
-      try {
-        return await this.send<{ result: string }>(new JensenMessage(CMD.DELETE_FILE).body(body), timeout)
-      } catch {
-        return null
-      }
-    })
-  }
-
-  // List files - streams data from device with incremental updates
-  // onProgress: called with (filesFound, expectedFiles) for progress tracking
-  // onNewFiles: called with batches of newly parsed files for streaming display (like web app)
-  // expectedFileCount: optional hint for expected total files
-  async listFiles(
-    onProgress?: (filesFound: number, expectedFiles: number) => void,
-    expectedFileCount?: number,
-    onNewFiles?: (files: FileInfo[]) => void
-  ): Promise<FileInfo[]> {
-    return this.withLock('listFiles', async () => {
-      if (!this.device) {
-        throw new Error('Device not connected')
-      }
-
-      if (!this.device.opened) {
-        throw new Error('Device not opened')
-      }
-
-      // CRITICAL: Clear receive buffer before file list operation
-      // This prevents leftover data from previous commands being misinterpreted
-      // as file list responses (which could cause immediate return with 0 files)
-      this.receiveBuffer.clear()
-
-      let expectedFiles = expectedFileCount || 0
-      onProgress?.(0, expectedFiles)
-
-      // Send GET_FILE_LIST command
-      const seqId = this.sequenceId++
-      const msg = new JensenMessage(CMD.GET_FILE_LIST)
-      msg.sequence(seqId)
-      if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Sending command, seq=${seqId}, expected=${expectedFiles}`)
-      await this.device.transferOut(1, msg.make() as unknown as BufferSource)
-
-      // Incremental parsing state
-      const allFiles: FileInfo[] = []
-      let partialBuffer: Uint8Array = new Uint8Array(0)
-      let totalFilesFromHeader = 0
-      let packetsReceived = 0
-      const startTime = Date.now()
-      const overallTimeout = 120000 // 2 minutes max
-      let lastDataTime = startTime
-      const BATCH_SIZE = 20 // Emit files in batches of 20 for streaming display
-
-      while (Date.now() - startTime < overallTimeout && !this.abortOperations) {
-        if (this.abortOperations) {
-          if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Aborted`)
-          return allFiles
-        }
-
-        try {
-          const readSize = 4096 * 16 // 64KB buffer
-          const result = await this.device.transferIn(2, readSize)
-
-          if (result.status === 'ok' && result.data && result.data.byteLength > 0) {
-            lastDataTime = Date.now()
-
-            // Append to receive buffer
-            const newData = new Uint8Array(result.data.buffer.slice(result.data.byteOffset, result.data.byteOffset + result.data.byteLength))
-            this.receiveBuffer.append(newData)
-
-            // Parse all available packets
-            let packetParsed = true
-            while (packetParsed) {
-              const parsedMsg = this.tryParseMessage()
-              if (!parsedMsg) {
-                packetParsed = false
-                break
-              }
-
-              // Accept packets that match our command OR sequence
-              if (parsedMsg.id === CMD.GET_FILE_LIST || parsedMsg.sequence === seqId) {
-                if (parsedMsg.body.length === 0) {
-                  // Empty body = end of transmission (if we have data)
-                  if (allFiles.length > 0 || packetsReceived > 0) {
-                    if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Complete, ${allFiles.length} files`)
-                    return allFiles
-                  }
-                  continue // First empty packet might be ACK
-                }
-
-                packetsReceived++
-
-                // Combine with partial buffer
-                const currentData = new Uint8Array(partialBuffer.length + parsedMsg.body.length)
-                currentData.set(partialBuffer)
-                currentData.set(parsedMsg.body, partialBuffer.length)
-
-                // Parse files incrementally
-                const { parsedFiles, remainingBuffer, headerTotal } = this.parsePartialFileList(currentData, totalFilesFromHeader)
-
-                if (headerTotal > 0 && totalFilesFromHeader === 0) {
-                  totalFilesFromHeader = headerTotal
-                  expectedFiles = headerTotal
-                }
-
-                // Add newly parsed files
-                allFiles.push(...parsedFiles)
-                partialBuffer = remainingBuffer
-
-                // Emit new files in batches for streaming display (like web app)
-                if (onNewFiles && parsedFiles.length > 0) {
-                  for (let i = 0; i < parsedFiles.length; i += BATCH_SIZE) {
-                    const batch = parsedFiles.slice(i, i + BATCH_SIZE)
-                    onNewFiles(batch)
-                    // Small delay between batches to make streaming visible
-                    if (i + BATCH_SIZE < parsedFiles.length) {
-                      await this.delay(50)
-                    }
-                  }
-                }
-
-                // Report progress
-                onProgress?.(allFiles.length, expectedFiles)
-
-                // Yield to event loop for UI updates
-                await new Promise(resolve => setTimeout(resolve, 0))
-              }
-            }
-
-            // Stop if we have all expected files
-            const effectiveExpected = expectedFiles > 0 ? expectedFiles : totalFilesFromHeader
-            if (effectiveExpected > 0 && allFiles.length >= effectiveExpected) {
-              if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Got all ${allFiles.length}/${effectiveExpected} files`)
-              break
-            }
-          }
-        } catch (error) {
-          if (error instanceof DOMException) {
-            if (error.name === 'NetworkError') {
-              // USB timeout - check if we should stop (5 second idle timeout)
-              if (allFiles.length > 0 && Date.now() - lastDataTime > 5000) {
-                if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Idle timeout after 5s with ${allFiles.length} files`)
-                break
-              }
-              // Timeout is expected when waiting for more data, continue
-              continue
-            } else if (error.name === 'InvalidStateError') {
-              console.error('[Jensen] listFiles: Device connection lost')
-              throw new Error('Device connection lost')
-            }
-          }
-          throw error
-        }
-      }
-
-      if (shouldLogProtocol()) console.log(`[Jensen] listFiles: Complete - ${allFiles.length} files from ${packetsReceived} packets, elapsed: ${Date.now() - startTime}ms`)
-      return allFiles
-    })
-  }
-
-  // Parse partial file list data, returning parsed files and remaining unparsed buffer
-  private parsePartialFileList(
-    buffer: Uint8Array,
-    knownTotal: number
-  ): { parsedFiles: FileInfo[]; remainingBuffer: Uint8Array; headerTotal: number } {
+  /**
+   * Parse file list from flat byte buffer.
+   * Matches jensen.js file parsing in the GET_FILE_LIST handler.
+   */
+  private parseFileListFlat(buffer: Uint8Array): { files: FileInfo[]; headerTotal: number } {
     const files: FileInfo[] = []
     let pos = 0
-    let totalFilesFromHeader = knownTotal
+    let headerTotal = 0
 
-    // Check for header (0xFF 0xFF + 4 byte count) only if we haven't seen it yet
-    if (totalFilesFromHeader === 0 && buffer.length >= 6 && buffer[0] === 0xff && buffer[1] === 0xff) {
-      totalFilesFromHeader =
+    // Check for header (0xFF 0xFF + 4 byte count)
+    if (buffer.length >= 6 && (buffer[0] & 0xff) === 0xff && (buffer[1] & 0xff) === 0xff) {
+      headerTotal =
         ((buffer[2] & 0xff) << 24) |
         ((buffer[3] & 0xff) << 16) |
         ((buffer[4] & 0xff) << 8) |
         (buffer[5] & 0xff)
       pos = 6
-      if (shouldLogProtocol()) console.log(`[Jensen] Found total files in header: ${totalFilesFromHeader}`)
     }
 
-    // Parse file entries until we run out of complete records
+    // Parse file entries (matches jensen.js parse loop)
     while (pos < buffer.length) {
       const startPos = pos
 
-      try {
-        // Minimum entry size check
-        if (pos + 4 > buffer.length) {
-          pos = startPos
-          break
-        }
+      if (pos + 4 > buffer.length) break
 
-        // File version (1 byte)
-        const fileVersion = buffer[pos++]
+      // File version (1 byte)
+      const fileVersion = buffer[pos++] & 0xff
 
-        // Filename length (3 bytes, big-endian)
-        if (pos + 3 > buffer.length) {
-          pos = startPos
-          break
-        }
-        const nameLen =
-          ((buffer[pos] & 0xff) << 16) |
-          ((buffer[pos + 1] & 0xff) << 8) |
-          (buffer[pos + 2] & 0xff)
-        pos += 3
+      // Filename length (3 bytes big-endian)
+      if (pos + 3 > buffer.length) { pos = startPos; break }
+      const nameLen =
+        ((buffer[pos] & 0xff) << 16) |
+        ((buffer[pos + 1] & 0xff) << 8) |
+        (buffer[pos + 2] & 0xff)
+      pos += 3
 
-        // Filename
-        if (pos + nameLen > buffer.length) {
-          pos = startPos
-          break
-        }
-        const filenameBytes = buffer.subarray(pos, pos + nameLen)
-        const filename = new TextDecoder().decode(filenameBytes).replace(/\0/g, '')
-        pos += nameLen
-
-        // File length (4 bytes, big-endian)
-        if (pos + 4 > buffer.length) {
-          pos = startPos
-          break
-        }
-        const fileLength =
-          ((buffer[pos] & 0xff) << 24) |
-          ((buffer[pos + 1] & 0xff) << 16) |
-          ((buffer[pos + 2] & 0xff) << 8) |
-          (buffer[pos + 3] & 0xff)
-        pos += 4
-
-        // Skip 6 bytes
-        if (pos + 6 > buffer.length) {
-          pos = startPos
-          break
-        }
-        pos += 6
-
-        // Signature (16 bytes)
-        if (pos + 16 > buffer.length) {
-          pos = startPos
-          break
-        }
-        const sigBytes = buffer.subarray(pos, pos + 16)
-        const signature = Array.from(sigBytes, b => b.toString(16).padStart(2, '0')).join('')
-        pos += 16
-
-        // Parse filename for date/time
-        const { createDate, createTime, time } = this.parseFilenameDateTime(filename)
-
-        // Calculate duration based on file version (different audio formats)
-        const duration = calculateDurationSeconds(fileLength, fileVersion)
-
-        files.push({
-          name: filename,
-          createDate,
-          createTime,
-          time,
-          duration,
-          version: fileVersion,
-          length: fileLength,
-          signature
-        })
-      } catch {
-        pos = startPos
-        break
+      // Filename
+      if (pos + nameLen > buffer.length) { pos = startPos; break }
+      const nameChars: string[] = []
+      for (let i = 0; i < nameLen; i++) {
+        const ch = buffer[pos++] & 0xff
+        if (ch > 0) nameChars.push(String.fromCharCode(ch))
       }
+
+      // File length (4 bytes big-endian)
+      if (pos + 4 > buffer.length) { pos = startPos; break }
+      const fileLength =
+        ((buffer[pos] & 0xff) << 24) |
+        ((buffer[pos + 1] & 0xff) << 16) |
+        ((buffer[pos + 2] & 0xff) << 8) |
+        (buffer[pos + 3] & 0xff)
+      pos += 4
+
+      // Skip 6 bytes padding
+      if (pos + 6 > buffer.length) { pos = startPos; break }
+      pos += 6
+
+      // Signature (16 bytes)
+      if (pos + 16 > buffer.length) { pos = startPos; break }
+      const sigParts: string[] = []
+      for (let i = 0; i < 16; i++) {
+        const hex = (buffer[pos++] & 0xff).toString(16)
+        sigParts.push(hex.length === 1 ? '0' + hex : hex)
+      }
+
+      const filename = nameChars.join('')
+      const { createDate, createTime, time } = this.parseFilenameDateTime(filename)
+      const duration = calculateDurationSeconds(fileLength, fileVersion)
+
+      files.push({
+        name: filename,
+        createDate,
+        createTime,
+        time,
+        duration,
+        version: fileVersion,
+        length: fileLength,
+        signature: sigParts.join('')
+      })
     }
 
-    // Return parsed files and the remaining unparsed buffer
-    const remainingBuffer = buffer.slice(pos)
-    return { parsedFiles: files, remainingBuffer, headerTotal: totalFilesFromHeader }
+    return { files, headerTotal }
   }
 
-  // Parse date/time from HiDock filename
+  /**
+   * Parse date/time from HiDock recording filename.
+   * Handles all known formats from H1, H1E, P1 devices.
+   */
   private parseFilenameDateTime(filename: string): { createDate: string; createTime: string; time: Date | null } {
-    // Month name mapping
     const monthNames: Record<string, number> = {
       'Jan': 0, 'Feb': 1, 'Mar': 2, 'Apr': 3, 'May': 4, 'Jun': 5,
       'Jul': 6, 'Aug': 7, 'Sep': 8, 'Oct': 9, 'Nov': 10, 'Dec': 11
@@ -1642,384 +1824,43 @@ export class JensenDevice {
       const month = monthNames[monthName]
       const createDate = `${year}-${String(month + 1).padStart(2, '0')}-${day.padStart(2, '0')}`
       const createTime = `${hour}:${minute}:${second}`
-      const time = new Date(
-        parseInt(year),
-        month,
-        parseInt(day),
-        parseInt(hour),
-        parseInt(minute),
-        parseInt(second)
-      )
+      const time = new Date(parseInt(year), month, parseInt(day), parseInt(hour), parseInt(minute), parseInt(second))
       return { createDate, createTime, time }
     }
 
-    // Format 2: HDA_YYYYMMDD_HHMMSS.hda or 2025-12-08_0044.hda
+    // Format 2: YYYYMMDDHHMMSS pattern (e.g., 20250513160405REC001.wav)
+    const oldWavMatch = filename.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})REC/)
+    if (oldWavMatch) {
+      const [, year, month, day, hour, minute, second] = oldWavMatch
+      const createDate = `${year}-${month}-${day}`
+      const createTime = `${hour}:${minute}:${second}`
+      const time = new Date(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour), parseInt(minute), parseInt(second))
+      return { createDate, createTime, time }
+    }
+
+    // Format 3: HDA_YYYYMMDD_HHMMSS or generic numeric
     const numericMatch = filename.match(/(\d{4})[-_]?(\d{2})[-_]?(\d{2})[-_](\d{2})(\d{2})(\d{2})?/)
     if (numericMatch) {
       const [, year, month, day, hour, minute, second = '00'] = numericMatch
       const createDate = `${year}-${month}-${day}`
       const createTime = `${hour}:${minute}:${second}`
-      const time = new Date(
-        parseInt(year),
-        parseInt(month) - 1,
-        parseInt(day),
-        parseInt(hour),
-        parseInt(minute),
-        parseInt(second)
-      )
+      const time = new Date(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour), parseInt(minute), parseInt(second))
       return { createDate, createTime, time }
     }
 
     return { createDate: '', createTime: '', time: null }
   }
-
-  // Download a file - streams data
-  async downloadFile(
-    filename: string,
-    fileSize: number,
-    onChunk: (data: Uint8Array) => void,
-    onProgress?: (received: number) => void,
-    signal?: AbortSignal
-  ): Promise<boolean> {
-    return this.withLock(`downloadFile:${filename}`, async () => {
-      if (!this.device || !this.device.opened) return false
-
-      // Check if already aborted before starting
-      if (signal?.aborted) {
-        if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Already aborted before start`)
-        return false
-      }
-
-      // Clear receive buffer before download to prevent stale data issues
-      this.receiveBuffer.clear()
-
-      if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Starting download of ${filename}, size=${fileSize}`)
-
-      // Set up abort listener to set the abort flag
-      const abortHandler = () => {
-        if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Abort signal received for ${filename}`)
-        this.abortOperations = true
-      }
-      signal?.addEventListener('abort', abortHandler)
-
-      const body: number[] = []
-      for (let i = 0; i < filename.length; i++) {
-        body.push(filename.charCodeAt(i))
-      }
-
-      // Send transfer file command
-      const seqId = this.sequenceId++
-      const msg = new JensenMessage(CMD.TRANSFER_FILE).body(body)
-      msg.sequence(seqId)
-      await this.device.transferOut(1, msg.make() as unknown as BufferSource)
-      if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Sent TRANSFER_FILE command, seq=${seqId}`)
-
-      // Receive file data
-      let received = 0
-      let consecutiveTimeouts = 0
-      const maxTimeouts = 100 // More tolerance for slow USB
-      const startTime = Date.now()
-      const overallTimeout = 300000 // 5 minutes max for large files
-
-      let lastProgressLog = 0
-      while (received < fileSize && consecutiveTimeouts < maxTimeouts && Date.now() - startTime < overallTimeout && !this.abortOperations) {
-        // Check for abort request (from disconnect or AbortSignal)
-        if (this.abortOperations || signal?.aborted) {
-          signal?.removeEventListener('abort', abortHandler)
-          if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Aborted (flag=${this.abortOperations}, signal=${signal?.aborted})`)
-          return false
-        }
-
-        // Read more data from USB
-        const gotData = await this.readToBuffer()
-
-        if (!gotData) {
-          consecutiveTimeouts++
-          // Small delay to prevent busy-waiting and give USB time to buffer data
-          await this.delay(20)
-          continue
-        }
-        consecutiveTimeouts = 0
-
-        // Try to extract file data messages from buffer
-        while (received < fileSize) {
-          const msg = this.tryParseMessage()
-          if (!msg) break
-
-          if (msg.id === CMD.TRANSFER_FILE && msg.body.length > 0) {
-            onChunk(msg.body)
-            received += msg.body.length
-            onProgress?.(received)
-
-            // Log progress every 10%
-            const percent = Math.floor((received / fileSize) * 100)
-            if (percent >= lastProgressLog + 10) {
-              if (shouldLogProtocol()) console.log(`[Jensen] Download progress: ${percent}% (${received}/${fileSize} bytes)`)
-              lastProgressLog = percent
-            }
-          }
-        }
-      }
-
-      // Cleanup abort listener
-      signal?.removeEventListener('abort', abortHandler)
-
-      const success = received >= fileSize
-      if (!success) {
-        if (this.abortOperations || signal?.aborted) {
-          if (shouldLogProtocol()) console.log(`[Jensen] downloadFile: Cancelled after receiving ${received}/${fileSize} bytes`)
-        } else {
-          console.error(`[Jensen] downloadFile FAILED: received=${received}/${fileSize}, consecutiveTimeouts=${consecutiveTimeouts}, elapsed=${Date.now() - startTime}ms`)
-        }
-      } else if (shouldLogProtocol()) {
-        console.log(`[Jensen] downloadFile: Complete, received=${received}/${fileSize} in ${Date.now() - startTime}ms`)
-      }
-      return success
-    })
-  }
-
-  // ==========================================
-  // REALTIME STREAMING METHODS (All devices)
-  // ==========================================
-
-  async getRealtimeSettings(timeout = 5): Promise<RealtimeSettings | null> {
-    try {
-      const result = await this.send<{ raw: Uint8Array }>(
-        new JensenMessage(CMD.REALTIME_READ_SETTING),
-        timeout
-      )
-      // Parse raw settings - format is device-specific
-      return {
-        enabled: result.raw && result.raw.length > 0 ? result.raw[0] === 1 : false,
-        sampleRate: 16000, // Default HiDock sample rate
-        channels: 1,
-        bitDepth: 16
-      }
-    } catch {
-      return null
-    }
-  }
-
-  async startRealtime(timeout = 5): Promise<{ result: string } | null> {
-    try {
-      // Body: [0,0,0,0,0,0,0,1] - Start realtime
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 0, 0, 0, 0, 1]),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async pauseRealtime(timeout = 5): Promise<{ result: string } | null> {
-    try {
-      // Body: [0,0,0,1,0,0,0,1] - Pause realtime
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 1, 0, 0, 0, 1]),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async stopRealtime(timeout = 5): Promise<{ result: string } | null> {
-    try {
-      // Body: [0,0,0,2,0,0,0,1] - Stop realtime
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.REALTIME_CONTROL).body([0, 0, 0, 2, 0, 0, 0, 1]),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async getRealtimeData(offset: number, timeout = 5): Promise<RealtimeData | null> {
-    try {
-      // Body: 4-byte offset (big-endian)
-      const body = [
-        (offset >> 24) & 0xff,
-        (offset >> 16) & 0xff,
-        (offset >> 8) & 0xff,
-        offset & 0xff
-      ]
-      return await this.send<RealtimeData>(
-        new JensenMessage(CMD.REALTIME_TRANSFER).body(body),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  // ==========================================
-  // BATTERY STATUS (P1 devices only)
-  // ==========================================
-
-  isP1Device(): boolean {
-    return this.model === 'hidock-p1' || this.model === 'hidock-p1-mini'
-  }
-
-  async getBatteryStatus(timeout = 5): Promise<BatteryStatus | null> {
-    if (!this.isP1Device()) {
-      console.warn('getBatteryStatus is only supported on P1 devices')
-      return null
-    }
-    try {
-      return await this.send<BatteryStatus>(
-        new JensenMessage(CMD.GET_BATTERY_STATUS),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  // ==========================================
-  // BLUETOOTH METHODS (P1 devices only)
-  // ==========================================
-
-  async scanBluetoothDevices(timeout = 35): Promise<{ result: string } | null> {
-    if (!this.isP1Device()) {
-      console.warn('Bluetooth scanning is only supported on P1 devices')
-      return null
-    }
-    try {
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.BLUETOOTH_SCAN),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async startBluetoothScan(duration: number = 30, timeout = 35): Promise<{ result: string } | null> {
-    if (!this.isP1Device()) {
-      console.warn('Bluetooth scanning is only supported on P1 devices')
-      return null
-    }
-    try {
-      // Body: [1, duration] - Start scan with duration
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.BT_SCAN).body([1, duration & 0xff]),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async stopBluetoothScan(timeout = 5): Promise<{ result: string } | null> {
-    if (!this.isP1Device()) {
-      return null
-    }
-    try {
-      // Body: [0] - Stop scan
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.BT_SCAN).body([0]),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async getBluetoothDeviceList(timeout = 10): Promise<{ raw: Uint8Array } | null> {
-    if (!this.isP1Device()) {
-      return null
-    }
-    try {
-      return await this.send<{ raw: Uint8Array }>(
-        new JensenMessage(CMD.BT_DEV_LIST),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async getPairedDevices(timeout = 10): Promise<{ raw: Uint8Array } | null> {
-    if (!this.isP1Device()) {
-      return null
-    }
-    try {
-      return await this.send<{ raw: Uint8Array }>(
-        new JensenMessage(CMD.BT_GET_PAIRED_DEV_LIST),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async removePairedDevices(timeout = 10): Promise<{ result: string } | null> {
-    if (!this.isP1Device()) {
-      return null
-    }
-    try {
-      // Body: [0] - Remove all paired devices
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.BT_REMOVE_PAIRED_DEV).body([0]),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async connectBluetoothDevice(timeout = 10): Promise<{ result: string } | null> {
-    if (!this.isP1Device()) {
-      return null
-    }
-    try {
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.BLUETOOTH_CMD).body([1]),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async disconnectBluetoothDevice(timeout = 10): Promise<{ result: string } | null> {
-    if (!this.isP1Device()) {
-      return null
-    }
-    try {
-      return await this.send<{ result: string }>(
-        new JensenMessage(CMD.BLUETOOTH_CMD).body([0]),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
-
-  async getBluetoothStatus(timeout = 5): Promise<BluetoothStatus | null> {
-    if (!this.isP1Device()) {
-      return null
-    }
-    try {
-      return await this.send<BluetoothStatus>(
-        new JensenMessage(CMD.BLUETOOTH_STATUS),
-        timeout
-      )
-    } catch {
-      return null
-    }
-  }
 }
 
-// Singleton instance
+// ============================================================
+// Singleton
+// ============================================================
+
 let deviceInstance: JensenDevice | null = null
 
 export function getJensenDevice(): JensenDevice {
   if (!deviceInstance) {
     deviceInstance = new JensenDevice()
-    // Set up USB connect listener for faster device detection (matches official jensen.js init())
     deviceInstance.setupUsbConnectListener()
   }
   return deviceInstance
