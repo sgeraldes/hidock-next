@@ -1493,9 +1493,43 @@ class HiDockDeviceService {
 
     // Check final state - if we got at least some data, consider it a partial success
     if (successCount === 0) {
-      this.logActivity('error', 'Device initialization failed', 'Could not communicate with device. Please disconnect and reconnect.')
-      this.updateStatus('error', 'Device not responding', 0)
+      // Try USB reset before giving up — device firmware may need a hard reset after first open
+      this.logActivity('warning', 'Device not responding — attempting USB reset...')
+      this.updateStatus('getting-info', 'Resetting device...', 10)
+      let resetAndReconnected = false
+      try {
+        const resetOk = await this.jensen.reset()
+        if (resetOk && !this.initAborted) {
+          this.logActivity('info', 'USB reset successful, retrying connection...')
+          await this.jensen.disconnect()
+          await new Promise(r => setTimeout(r, 1000))
+          if (!this.initAborted) {
+            const reconnected = await this.jensen.tryConnect()
+            if (reconnected) {
+              // handleConnect will be called via the onconnect callback — return cleanly
+              resetAndReconnected = true
+            }
+          }
+        }
+      } catch (resetError) {
+        console.warn('[HiDockDevice] USB reset failed:', resetError)
+      }
+
+      if (resetAndReconnected) {
+        return
+      }
+
+      // Reset failed or reconnect failed — disconnect cleanly so user isn't stuck in limbo
+      this.logActivity('error', 'Device initialization failed', 'Could not communicate with device after USB reset. Please unplug and reconnect your device.')
+      this.updateStatus('error', 'Device not responding — please reconnect', 0)
       this.initializationComplete = false
+      this.state.connected = false
+      this.state.serialNumber = null
+      this.state.firmwareVersion = null
+      this.state.storage = null
+      this.state.settings = null
+      this.notifyStateChange()
+      this.notifyConnectionChange(false)
       return
     }
 

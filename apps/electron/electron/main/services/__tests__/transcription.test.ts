@@ -38,6 +38,7 @@ vi.mock('../database', () => ({
   acquireTranscriptionLock: vi.fn().mockReturnValue(true),
   releaseTranscriptionLock: vi.fn().mockReturnValue(true),
   clearStaleTranscriptionLock: vi.fn(), // Called on startTranscriptionProcessor()
+  resetStuckTranscriptions: vi.fn().mockReturnValue({ recordingsReset: 0, queueItemsReset: 0 }), // Called on startTranscriptionProcessor()
   run: vi.fn(),
   queryOne: vi.fn()
 }))
