@@ -589,6 +589,7 @@ export class JensenDevice {
     this.sequenceId = 0
     this.readLoopRunning = false
     this.receiveChunks.length = 0
+    this.carryLen = 0
     this.currentCommandTag = null
     this.currentOperationName = null
     this.commandQueue.length = 0
