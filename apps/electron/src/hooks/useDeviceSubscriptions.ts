@@ -88,11 +88,29 @@ export function useDeviceSubscriptions() {
 
       // spec-007: Debounce sync by 2 seconds
       syncDebounceTimerRef.current = setTimeout(async () => {
+        // Lock IMMEDIATELY to prevent re-entry from status changes during listRecordings
+        autoSyncTriggeredRef.current = true
+
         try {
-          autoSyncTriggeredRef.current = true
           if (shouldLogQa()) console.log('[useDeviceSubscriptions] Auto-sync triggered after 2s debounce')
 
-          const recordings = deviceService.getCachedRecordings()
+          // BUG-007 FIX: File list may not be cached yet after handleConnect (it only
+          // gets device info/storage/settings/time). Fetch it now so auto-sync has data.
+          let recordings = deviceService.getCachedRecordings()
+          if (recordings.length === 0 && deviceService.getState().recordingCount > 0) {
+            if (shouldLogQa()) console.log('[useDeviceSubscriptions] No cached recordings, fetching file list first...')
+            deviceService.log('info', 'Fetching file list', `${deviceService.getState().recordingCount} files expected`)
+            try {
+              recordings = await deviceService.listRecordings()
+            } catch (listError) {
+              console.error('[useDeviceSubscriptions] Failed to fetch file list:', listError)
+              deviceService.log('error', 'File list fetch failed', listError instanceof Error ? listError.message : 'Unknown error')
+              // Reset flag to allow retry on next connect
+              autoSyncTriggeredRef.current = false
+              return
+            }
+          }
+
           if (recordings.length > 0) {
             // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
             const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
@@ -198,10 +216,23 @@ export function useDeviceSubscriptions() {
 
       if (autoSyncTriggeredRef.current) return
 
-      autoSyncTriggeredRef.current = true
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial auto-sync check (device pre-connected)')
 
-      const recordings = deviceService.getCachedRecordings()
+      autoSyncTriggeredRef.current = true
+
+      let recordings = deviceService.getCachedRecordings()
+      if (recordings.length === 0 && deviceService.getState().recordingCount > 0) {
+        if (shouldLogQa()) console.log('[useDeviceSubscriptions] No cached recordings for initial sync, fetching file list...')
+        deviceService.log('info', 'Fetching file list', `${deviceService.getState().recordingCount} files expected`)
+        try {
+          recordings = await deviceService.listRecordings()
+        } catch (listError) {
+          console.error('[useDeviceSubscriptions] Initial file list fetch failed:', listError)
+          autoSyncTriggeredRef.current = false
+          return
+        }
+      }
+
       if (recordings.length > 0) {
         // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
         const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(

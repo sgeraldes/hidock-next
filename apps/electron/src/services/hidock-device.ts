@@ -1106,9 +1106,6 @@ class HiDockDeviceService {
       } finally {
         this.listRecordingsLock = false
         this.listRecordingsPromise = null
-        if (this.state.connected && this.initializationComplete) {
-          this.updateStatus('ready', 'Device ready', 100)
-        }
       }
     })()
 
