@@ -190,7 +190,6 @@ export function useDownloadOrchestrator() {
     downloadAbortControllerRef.current = new AbortController()
     // DL-14: Sync module-level ref so cancelDownloads() can abort from outside
     _downloadAbortControllerRef = downloadAbortControllerRef.current
-    const signal = downloadAbortControllerRef.current.signal
 
     if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Processing ${pendingItems.length} downloads`)
 
@@ -216,10 +215,10 @@ export function useDownloadOrchestrator() {
     let aborted = false
     let bytesDownloaded = 0
 
-    // TODO: DL-10: Consider pipelining: start reading next file while writing current file to disk.
     for (const item of pendingItems) {
-      if (signal.aborted) {
-        if (shouldLogQa()) console.log('[useDownloadOrchestrator] Download aborted by user')
+      // User-initiated cancel via cancelDownloads() — abort entire queue
+      if (_cancelInProgress) {
+        if (shouldLogQa()) console.log('[useDownloadOrchestrator] Download cancelled by user')
         aborted = true
         break
       }
@@ -237,18 +236,22 @@ export function useDownloadOrchestrator() {
         break
       }
 
-      // DL-13: Only count completed (not failed) in progress numerator
-      // so the progress bar accurately reflects successful downloads
+      // If the abort controller was triggered by stall detection (not user cancel),
+      // create a fresh one so the next download can proceed
+      if (downloadAbortControllerRef.current.signal.aborted && !_cancelInProgress) {
+        if (shouldLogQa()) console.log('[useDownloadOrchestrator] Resetting AbortController after stall-detected abort')
+        downloadAbortControllerRef.current = new AbortController()
+        _downloadAbortControllerRef = downloadAbortControllerRef.current
+      }
+
       setDeviceSyncState({
         deviceFileDownloading: item.filename,
         deviceSyncProgress: { current: completed, total: pendingItems.length },
         deviceFileProgress: 0
       })
 
-      // DL-STALL: Track the currently downloading file so onStateUpdate can abort
-      // if the main process marks it failed (e.g., stall detection)
       currentlyDownloadingRef.current = item.filename
-      const success = await processDownload(item, signal)
+      const success = await processDownload(item, downloadAbortControllerRef.current.signal)
       currentlyDownloadingRef.current = null
       if (success) {
         completed++
@@ -258,7 +261,7 @@ export function useDownloadOrchestrator() {
       }
 
       // C-004: Compute ETA based on elapsed time and bytes completed
-      const elapsed = (Date.now() - syncStartTime) / 1000 // seconds
+      const elapsed = (Date.now() - syncStartTime) / 1000
       if (elapsed > 0 && bytesDownloaded > 0 && totalBytes > 0) {
         const bytesPerSecond = bytesDownloaded / elapsed
         const remainingBytes = totalBytes - bytesDownloaded
@@ -387,17 +390,28 @@ export function useDownloadOrchestrator() {
       })
     }
 
-    // Resume downloads on device reconnect
-    const unsubDevice = deviceService.onStateChange(async (deviceState) => {
-      if (deviceState.connected && !isProcessingDownloads.current && isElectron) {
+    // Resume downloads on device reconnect — retry failed items then process queue
+    // CRITICAL: Must wait for 'ready' status (init complete), not just 'connected'.
+    // Starting downloads during init causes USB command interleaving which corrupts
+    // responses (e.g., file count returns 0, downloads stall).
+    const unsubDevice = deviceService.onStatusChange((status) => {
+      const deviceState = deviceService.getState()
+      if (status.step === 'ready' && deviceState.connected && !isProcessingDownloads.current && isElectron) {
         window.electronAPI.downloadService.getState().then((state) => {
           const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
-          if (hasPending) {
-            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device connected, resuming downloads')
+          const hasFailed = state.queue.some((item: DownloadQueueItem) => item.status === 'failed')
+
+          if (hasFailed) {
+            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device reconnected, retrying failed downloads')
+            window.electronAPI.downloadService.retryFailed(true)
+          }
+
+          if (hasPending || hasFailed) {
+            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device reconnected, resuming download queue')
             processDownloadQueueRef.current()
           }
         })
-      } else if (!deviceState.connected) {
+      } else if (status.step === 'idle' && !deviceService.isConnected()) {
         if (isProcessingDownloads.current) {
           if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device disconnected, aborting downloads')
           downloadAbortControllerRef.current?.abort()
