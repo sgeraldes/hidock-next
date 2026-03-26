@@ -380,35 +380,26 @@ export function useDownloadOrchestrator() {
         })
       : () => {}
 
-    // Check initial download state
-    if (isElectron) {
-      window.electronAPI.downloadService.getState().then((state) => {
-        const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
-        if (hasPending && deviceService.isConnected()) {
-          processDownloadQueueRef.current()
-        }
-      })
-    }
+    // NOTE: Do NOT auto-process persisted pending downloads on mount.
+    // Downloads are triggered by auto-sync (startSession → onStateUpdate → processDownloadQueue).
+    // Processing persisted items here would race with the file list scan on the USB bus.
 
-    // Resume downloads on device reconnect — retry failed items then process queue
-    // CRITICAL: Must wait for 'ready' status (init complete), not just 'connected'.
-    // Starting downloads during init causes USB command interleaving which corrupts
-    // responses (e.g., file count returns 0, downloads stall).
+    // Handle device status changes — DO NOT start downloads here.
+    // Downloads are triggered by auto-sync (useDeviceSubscriptions) which:
+    //   1. Waits for file list scan to complete
+    //   2. Reconciles files
+    //   3. Calls startSession → emits state update → processDownloadQueue
+    // Starting downloads independently on 'ready' would race with the file list scan
+    // on the USB bus, causing stalls and corrupted responses.
     const unsubDevice = deviceService.onStatusChange((status) => {
-      const deviceState = deviceService.getState()
-      if (status.step === 'ready' && deviceState.connected && !isProcessingDownloads.current && isElectron) {
+      if (status.step === 'ready' && isElectron && !isProcessingDownloads.current) {
+        // Only retry FAILED items on reconnect — don't process the full pending queue.
+        // Pending items will be processed when auto-sync calls startSession.
         window.electronAPI.downloadService.getState().then((state) => {
-          const hasPending = state.queue.some((item: DownloadQueueItem) => item.status === 'pending')
           const hasFailed = state.queue.some((item: DownloadQueueItem) => item.status === 'failed')
-
           if (hasFailed) {
-            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device reconnected, retrying failed downloads')
+            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device ready, retrying failed downloads')
             window.electronAPI.downloadService.retryFailed(true)
-          }
-
-          if (hasPending || hasFailed) {
-            if (shouldLogQa()) console.log('[useDownloadOrchestrator] Device reconnected, resuming download queue')
-            processDownloadQueueRef.current()
           }
         })
       } else if (status.step === 'idle' && !deviceService.isConnected()) {
