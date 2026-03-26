@@ -56,6 +56,7 @@
     "sql.js": "^1.11.0",
     "tailwind-merge": "^2.5.4",
     "tailwindcss-animate": "^1.0.7",
+    "usb": "^2.17.0",
     "uuid": "^11.0.3",
     "zod": "^4.1.13",
     "zustand": "^5.0.1"
