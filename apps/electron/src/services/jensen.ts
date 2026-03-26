@@ -284,6 +284,10 @@ export class JensenDevice {
   private readLoopRunning = false
   private totalBytesReceived = 0
 
+  // Carry buffer for partial Jensen messages between processBufferedData() calls
+  private carryBuffer: Uint8Array = new Uint8Array(0)
+  private carryLen: number = 0
+
   // === Parse timing (jensen.js: decodeTimeout, timewait) ===
   private decodeTimer: ReturnType<typeof setTimeout> | null = null
   private parseDelay = 10
@@ -438,6 +442,7 @@ export class JensenDevice {
     this.readLoopRunning = false
     this.sequenceId = 0
     this.receiveChunks.length = 0
+    this.carryLen = 0
     this.totalBytesReceived = 0
     this.serialNumber = null
     this.data = {}
@@ -474,6 +479,7 @@ export class JensenDevice {
     this.readLoopRunning = false
     this.sequenceId = 0
     this.receiveChunks.length = 0
+    this.carryLen = 0
     this.commandQueue.length = 0
     this.data = {}
 
@@ -507,6 +513,7 @@ export class JensenDevice {
       this.currentOperationName = null
       this.readLoopRunning = false
       this.receiveChunks.length = 0
+      this.carryLen = 0
       this.commandQueue.length = 0
       this.data = {}
 
@@ -711,6 +718,10 @@ export class JensenDevice {
         console.error('[Jensen] transferOut failed:', error)
         this.versionCode = null
         this.versionNumber = null
+        // Clear command tag to unblock queue (was missing — caused permanent stall)
+        this.currentCommandTag = null
+        this.currentOperationName = null
+        this.sendNextCommand()
       }
     )
   }
@@ -764,10 +775,12 @@ export class JensenDevice {
     this.device.transferIn(2, 51200).then(
       (result) => this.onDataReceived(result),
       (error) => {
-        // Read failed — loop dies, restarts on next command
         this.readLoopRunning = false
         if (error instanceof DOMException && error.name === 'InvalidStateError') {
           this.handleDisconnect()
+        } else {
+          // Log non-disconnect USB errors (previously swallowed silently)
+          console.warn('[Jensen] USB read error (non-disconnect):', error instanceof Error ? error.message : error)
         }
       }
     )
@@ -805,6 +818,13 @@ export class JensenDevice {
     const workBuffer = new Uint8Array(102400)
     let workLen = 0
     let decodeError = false
+
+    // Prepend carry bytes from previous call (partial Jensen messages)
+    if (this.carryLen > 0) {
+      workBuffer.set(this.carryBuffer.subarray(0, this.carryLen), 0)
+      workLen = this.carryLen
+      this.carryLen = 0
+    }
 
     const chunkCount = this.receiveChunks.length
     for (let qi = 0; qi < chunkCount; qi++) {
@@ -859,17 +879,31 @@ export class JensenDevice {
         if (this.currentCommandTag) {
           const cmdIdMatch = this.currentCommandTag.match(/^cmd-(\d+)-/)
           const cmdId = cmdIdMatch ? parseInt(cmdIdMatch[1]) : -1
+          let resolved = false
           if (cmdId >= 0) {
             try {
               const handler = this.handlers.get(cmdId)
-              if (handler) handler(null, this)
+              if (handler) {
+                const partialResult = handler(null, this)
+                // Use partial results if handler returned them (e.g., partially parsed file list)
+                if (partialResult !== undefined && partialResult !== null) {
+                  this.triggerResolve(partialResult, cmdId)
+                  resolved = true
+                }
+              }
             } catch (error) {
               this.triggerResolve(error)
+              resolved = true
             }
           }
-          this.triggerResolve(null, cmdId >= 0 ? cmdId : undefined)
+          if (!resolved) {
+            this.triggerResolve(null, cmdId >= 0 ? cmdId : undefined)
+          }
+          // Unblock the command queue (was missing — caused permanent stall after decode error)
+          this.sendNextCommand()
         }
         this.receiveChunks.length = 0
+        this.carryLen = 0
         break
       }
 
@@ -878,6 +912,15 @@ export class JensenDevice {
         workBuffer[i] = workBuffer[i + consumed]
       }
       workLen -= consumed
+    }
+
+    // Save any remaining unparsed bytes for the next call
+    if (workLen > 0 && !decodeError) {
+      if (this.carryBuffer.length < workLen) {
+        this.carryBuffer = new Uint8Array(workLen * 2)
+      }
+      this.carryBuffer.set(workBuffer.subarray(0, workLen), 0)
+      this.carryLen = workLen
     }
   }
 
