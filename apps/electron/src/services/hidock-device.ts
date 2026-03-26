@@ -938,20 +938,20 @@ class HiDockDeviceService {
     // Use already-known recording count from device init
     const expectedFileCount = this.state.recordingCount || 0
 
-    // Check cache - if recording count hasn't changed AND not forcing refresh, return cached recordings
-    const cacheValid = !forceRefresh &&
+    // Check cache — if recording count hasn't changed, ALWAYS return cache (even with forceRefresh).
+    // The only reason to re-scan USB is if the device has NEW recordings (count changed).
+    // forceRefresh only bypasses the time-based debounce, not the count-based cache.
+    const cacheValid =
       this.cachedRecordings !== null &&
       this.cachedRecordingCount === expectedFileCount &&
       expectedFileCount > 0
 
     if (cacheValid) {
-      if (shouldLogQa()) console.log(`[HiDockDevice] >>> listRecordings: CACHE HIT, returning ${this.cachedRecordings!.length} files`)
-      // Don't log cache hits - they're too noisy when multiple components request data
-      // Report instant progress
+      if (shouldLogQa()) console.log(`[HiDockDevice] >>> listRecordings: CACHE HIT (count unchanged at ${expectedFileCount}), returning ${this.cachedRecordings!.length} files`)
       onProgress?.(expectedFileCount, expectedFileCount)
       return this.cachedRecordings!
     }
-    if (shouldLogQa()) console.log(`[HiDockDevice] >>> listRecordings: CACHE MISS, forceRefresh=${forceRefresh}, cached=${this.cachedRecordings?.length ?? 'null'}, cachedCount=${this.cachedRecordingCount}, expected=${expectedFileCount}`)
+    if (shouldLogQa()) console.log(`[HiDockDevice] >>> listRecordings: CACHE MISS (cached=${this.cachedRecordingCount}, device=${expectedFileCount}), scanning device`)
 
     // Prevent concurrent requests - use synchronous lock to prevent TOCTOU race
     // Check both the lock flag (set synchronously) and promise (set after lock)
@@ -1002,14 +1002,14 @@ class HiDockDeviceService {
     this.listRecordingsLock = true
 
     // User-visible scan start entry in Activity Log
-    this.logActivity('info', 'Scanning device files...', `Requesting file list (${expectedFileCount} expected)`)
+    this.logActivity('info', 'Scanning device files...', `Requesting file list (${expectedFileCount} total on device)`)
 
     // Only log to console (DEBUG), not activity log - cache invalidation is internal detail
     if (!forceRefresh && this.cachedRecordings !== null && shouldLogQa()) {
       console.log(`[HiDockDevice] Cache invalid: cached=${this.cachedRecordingCount}, device=${expectedFileCount}`)
     }
 
-    this.logActivity('usb-out', 'CMD: List Files', `Requesting file list (${expectedFileCount} files expected)`)
+    this.logActivity('usb-out', 'CMD: List Files', `Requesting list of ${expectedFileCount} total files on device`)
     if (shouldLogQa()) console.log('[HiDockDevice] >>> listRecordings: CALLING JENSEN.LISTFILES(), expected:', expectedFileCount)
 
     // BUG-002: Update connection status so UI shows scan progress instead of frozen "ready"
