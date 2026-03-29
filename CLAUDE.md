@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## ⛔ CRITICAL: USB Device Safety — READ FIRST
 
-**HiDock USB devices are FRAGILE. Improper USB access CORRUPTS the device, requiring physical power cycle (unplug/replug). This has happened multiple times and is UNACCEPTABLE.**
+**HiDock USB devices lock up when improperly accessed. The device is NOT corrupted — the USB interface gets stuck in "active" state, rejecting new connections until drained or physically restarted. This has happened multiple times and is UNACCEPTABLE.**
 
 ### NEVER DO:
 - **Multiple `open()`/`close()` cycles** in rapid succession
@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Retrying failed connections** — if `LIBUSB_ERROR_ACCESS` appears, STOP IMMEDIATELY
 - **Switching between USB APIs** (WebUSB vs native `usb` vs PyUSB) on the same device
 - **Any USB code that isn't the final, tested implementation**
-- **Setting short timeouts on `transferIn`** — the device takes 2+ minutes to prepare file lists. Use `timeout = 0` (no timeout) on the IN endpoint and manage timeouts at the operation level only.
+- **Setting timeout=0 on `transferIn`** — a pending transfer with no timeout can never be cancelled, which blocks `release()`/`close()` and locks the device. Use `timeout = 5000` (5s) so the read loop can yield and disconnect cleanly. The loop re-posts immediately, so no data is lost despite the timeout.
 
 ### ALWAYS DO:
 - **Test ALL USB code with mocks first** — unit tests, never real hardware
@@ -37,10 +37,12 @@ This clears any pending USB transfers and often recovers the device without powe
 
 ### Jensen Protocol — File List Behavior:
 1. Send `CMD_GET_FILE_LIST` (cmd=4)
-2. Device takes **2+ minutes** to prepare (for 1300+ files) — no data during this time
-3. Device sends multiple Jensen messages (cmd=4) with file entry bodies
-4. Final message has `bodyLength=0` = end of list
-5. **A `transferIn` must be pending at all times** or the device won't send the next packet
+2. Device takes **~53 seconds** to prepare (for 1300+ files) — no data during this time
+3. First response: Jensen message (cmd=4) with body starting `0xFF 0xFF` + 4-byte total count + file entries
+4. Subsequent data: may arrive as **raw USB bulk data WITHOUT Jensen headers** — must accumulate all bytes and parse Jensen frames from the accumulated buffer
+5. Final message has `bodyLength=0` = end of list
+6. **A `transferIn` must be pending at all times** or the device won't send the next packet
+7. **UNSOLVED:** After first successful list, subsequent lists receive incomplete data. Only the Python desktop app (PyUSB) can do repeated lists without restart. See `packages/storage-controller/USB_PROTOCOL_FINDINGS.md` for details.
 
 ### Why:
 The HiDock USB controller enters a locked state (interface still marked "active") when subjected to rapid open/close cycles or concurrent access attempts from different USB stacks. Once in this state, ALL programs (browser, Python, Node.js, even the official HiNotes site) fail with "Access denied" until drain or physical power cycle. The user has used HiDock for over a year without this issue — every occurrence was caused by AI agents doing USB probing.
