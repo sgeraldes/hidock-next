@@ -167,13 +167,16 @@ export class StorageController {
     }
     const entries = await this.device.listFiles()
     const recordings = entries.map((e) => this.entryToRecording(e))
-    const cacheData: CacheData = {
-      deviceSerial: serial,
-      fileCount: currentCount,
-      lastScanDate: new Date().toISOString(),
-      recordings: recordings.map((r) => this.recordingToCached(r))
+    // Only cache if we actually got recordings — never cache empty results
+    if (recordings.length > 0) {
+      const cacheData: CacheData = {
+        deviceSerial: serial,
+        fileCount: currentCount,
+        lastScanDate: new Date().toISOString(),
+        recordings: recordings.map((r) => this.recordingToCached(r))
+      }
+      this.cache.save(cacheData)
     }
-    this.cache.save(cacheData)
     return this.mergeWithLocal(recordings)
   }
 

@@ -2,6 +2,51 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## ⛔ CRITICAL: USB Device Safety — READ FIRST
+
+**HiDock USB devices are FRAGILE. Improper USB access CORRUPTS the device, requiring physical power cycle (unplug/replug). This has happened multiple times and is UNACCEPTABLE.**
+
+### NEVER DO:
+- **Multiple `open()`/`close()` cycles** in rapid succession
+- **Exploratory USB scripts** ("let me try `findByIds()` and see what happens")
+- **Diagnostic probing** (testing different USB APIs, checking endpoints, dumping descriptors)
+- **Retrying failed connections** — if `LIBUSB_ERROR_ACCESS` appears, STOP IMMEDIATELY
+- **Switching between USB APIs** (WebUSB vs native `usb` vs PyUSB) on the same device
+- **Any USB code that isn't the final, tested implementation**
+- **Setting short timeouts on `transferIn`** — the device takes 2+ minutes to prepare file lists. Use `timeout = 0` (no timeout) on the IN endpoint and manage timeouts at the operation level only.
+
+### ALWAYS DO:
+- **Test ALL USB code with mocks first** — unit tests, never real hardware
+- **ONE clean connection attempt** when code is ready
+- **ONE proper cleanup** (close interface, close device)
+- **If `LIBUSB_ERROR_ACCESS`: try drain first** (see recovery below), then ask user to power-cycle only if drain fails
+- **Keep a `transferIn` always pending** — the device needs an active read request as "ACK" before it sends the next data packet. This is not a free stream; without a pending read, the device won't send.
+- **Use a perpetual read loop** — `transferIn` → callback → immediately issue next `transferIn` → process data. Never do sequential request-response reads.
+
+### Recovery — USB Drain:
+If the device enters `LIBUSB_ERROR_ACCESS` state, attempt this drain before asking for physical restart:
+```javascript
+dev.open();
+iface.claim();
+epIn.timeout = 1000;
+// Read until timeout error (queue empty)
+epIn.transfer(51200, callback); // repeat until err
+iface.release(() => dev.close());
+```
+This clears any pending USB transfers and often recovers the device without power cycle.
+
+### Jensen Protocol — File List Behavior:
+1. Send `CMD_GET_FILE_LIST` (cmd=4)
+2. Device takes **2+ minutes** to prepare (for 1300+ files) — no data during this time
+3. Device sends multiple Jensen messages (cmd=4) with file entry bodies
+4. Final message has `bodyLength=0` = end of list
+5. **A `transferIn` must be pending at all times** or the device won't send the next packet
+
+### Why:
+The HiDock USB controller enters a locked state (interface still marked "active") when subjected to rapid open/close cycles or concurrent access attempts from different USB stacks. Once in this state, ALL programs (browser, Python, Node.js, even the official HiNotes site) fail with "Access denied" until drain or physical power cycle. The user has used HiDock for over a year without this issue — every occurrence was caused by AI agents doing USB probing.
+
+---
+
 ## Project Overview
 
 **HiDock Next** is a **universal knowledge hub** - an integrated suite of applications that extracts insights, manages information, and produces results from ANY knowledge source (recordings, PDFs, PPTX, DOCX, MD, notes, calendar, email, Slack, and more).

@@ -214,7 +214,12 @@ export class JensenDevice {
 
       // Register handler for GET_FILE_LIST — accumulates data packets
       this.handlers.set(CMD.GET_FILE_LIST, (body) => {
+        console.error(`[Jensen] FILE_LIST handler: bodyLen=${body.length}, packets=${allData.length}`)
+        if (body.length > 0 && allData.length === 0) {
+          console.error(`[Jensen] FILE_LIST first bytes: ${Array.from(body.subarray(0, Math.min(20, body.length))).map(b => b.toString(16).padStart(2, '0')).join(' ')}`)
+        }
         if (body.length === 0) {
+          console.error(`[Jensen] FILE_LIST END — ${allData.length} packets, total ${allData.reduce((s, b) => s + b.length, 0)} bytes`)
           const combined = Buffer.concat(allData)
           return parseFileListBuffer(new Uint8Array(combined.buffer, combined.byteOffset, combined.length))
         }
@@ -344,8 +349,10 @@ export class JensenDevice {
 
       // Now process the data we received
       if (err) {
+        // Timeout errors are expected — the device may take minutes to respond
         return
       }
+      console.error(`[Jensen] read: ${data?.length ?? 0} bytes`)
       if (!data || data.length === 0) return
 
       this.processIncomingData(data)
