@@ -126,9 +126,39 @@ other: fileLength / ((16000 * 2 * 1) / 4)
 ### Audio Format
 Files are stored as `.hda` on the device but are **standard WAV format**. No conversion needed — just rename extension to `.wav` on download.
 
+## Key Finding: Python Protocol Implementation
+
+The Python desktop app (`hidock_device.py`) handles file listing with these critical differences:
+
+### Python receives multi-packet file list via sequential reads:
+1. Clears `receive_buffer` before sending `GET_FILE_LIST`
+2. Calls `_receive_response` in a loop with `streaming_cmd_id=CMD_GET_FILE_LIST`
+3. Each `_receive_response` call does **short USB reads** (200ms timeout, `wMaxPacketSize * 64` bytes)
+4. Appends each USB read to a persistent `receive_buffer`
+5. Parses Jensen headers from the accumulated buffer (NOT per-USB-transfer)
+6. Accepts ANY cmd=4 response regardless of sequence ID (streaming mode)
+7. Completion: empty body (bodyLen=0) OR 10 consecutive timeouts
+
+### Both Python and Electron REQUIRE Jensen headers on every response:
+- Python: `if not (self.receive_buffer[0] == 0x12 and self.receive_buffer[1] == 0x34)` → protocol error
+- Electron: `parsePacket` throws "invalid header" if sync bytes missing
+- Raw data without Jensen headers is NOT expected by either implementation
+
+### Critical difference from our CLI:
+The Python app does NOT use a perpetual read loop. It does **sequential reads** with short timeouts (200ms) in a while loop. Each read appends to a buffer. The buffer is parsed for Jensen messages. This is fundamentally different from our callback-based perpetual read loop.
+
+## Unsolved: Mid-Stream Data on Subsequent Calls
+
+After the first successful file list, subsequent calls to `listFiles` receive a Jensen message (cmd=4) whose body starts with `68 64 61` ("hda") — clearly mid-stream file entry data (end of a filename), not the start of a file list (`0xFF 0xFF` header).
+
+**Possible explanations:**
+1. Device retains file list stream state and resumes from where it was interrupted
+2. Our disconnect doesn't fully reset the device's internal file list iterator
+3. The Python app avoids this by using `receive_buffer.clear()` before each command
+
 ## Next Steps
 
-1. **Study the Python desktop app's file list handling** — specifically how `hidock_device.py` accumulates multi-packet file list data with `_send_and_receive` + `_receive_response` loop
-2. **Determine if raw (non-Jensen) data is expected** — the Python app may concatenate all USB reads as raw bytes and parse Jensen headers afterwards, rather than expecting each USB transfer to be a complete Jensen message
-3. **Implement bulk data accumulation** — instead of parsing each USB transfer for Jensen headers individually, accumulate all bytes in a buffer and parse Jensen messages from the accumulated buffer (with carry buffer for split messages)
-4. **Test if `GET_FILE_COUNT` before `GET_FILE_LIST` affects behavior** — the Electron app always calls `getFileCount` first, which may prime the firmware
+1. **Match the Python pattern exactly** — use sequential reads with short timeouts and a persistent buffer, not a perpetual callback-based read loop
+2. **Clear the receive buffer before each command** — the Python app explicitly does `self.receive_buffer.clear()` before sending `GET_FILE_LIST`
+3. **Use streaming_cmd_id mode** — accept any cmd=4 regardless of sequence ID
+4. **Handle completion by consecutive timeouts** — Python uses 10 consecutive 200ms timeouts as completion signal, not just empty body
