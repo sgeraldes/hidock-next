@@ -1,0 +1,39 @@
+{
+  "name": "@hidock/ai-providers",
+  "version": "0.1.0",
+  "description": "HiDock AI provider factory — unified interface for 5 LLM providers via Vercel AI SDK",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "ai": "^6.0.99",
+    "@ai-sdk/google": "^3.0.36",
+    "@ai-sdk/openai": "^3.0.33",
+    "@ai-sdk/anthropic": "^3.0.47",
+    "@ai-sdk/amazon-bedrock": "^4.0.64",
+    "ollama-ai-provider": "^1.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.6.3",
+    "vitest": "^4.0.16"
+  }
+}
