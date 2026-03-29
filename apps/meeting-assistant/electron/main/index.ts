@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell } from "electron";
 import { electronApp, optimizer } from "@electron-toolkit/utils";
 import { createMainWindow, destroyAllWindows } from "./windows";
 import { initializeTray, destroyTray } from "./services/tray-manager";
+import { registerIpcHandlers } from "./ipc/handlers";
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId("com.hidock.meeting-assistant");
@@ -11,6 +12,8 @@ app.whenReady().then(() => {
   });
 
   const mainWindow = createMainWindow();
+
+  registerIpcHandlers();
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url);
