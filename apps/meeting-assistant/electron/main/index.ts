@@ -3,13 +3,35 @@ import { electronApp, optimizer } from "@electron-toolkit/utils";
 import { createMainWindow, destroyAllWindows } from "./windows";
 import { initializeTray, destroyTray } from "./services/tray-manager";
 import { registerIpcHandlers } from "./ipc/handlers";
+import { initializeDatabase } from "./services/database";
+import { getSetting } from "./services/database-settings";
+import { hydrate } from "./services/credential-store";
+import { SENSITIVE_SETTING_KEYS } from "./services/sensitive-keys";
 
-app.whenReady().then(() => {
+/**
+ * Load any encrypted credential values from the DB into the in-memory
+ * credential store cache so the main process can use them without re-querying.
+ */
+function hydrateCredentials(): void {
+  for (const key of SENSITIVE_SETTING_KEYS) {
+    const row = getSetting(key);
+    if (row && row.value) {
+      hydrate(key, row.value);
+    }
+  }
+  console.log("[CredentialStore] Credentials hydrated from DB");
+}
+
+app.whenReady().then(async () => {
   electronApp.setAppUserModelId("com.hidock.meeting-assistant");
 
   app.on("browser-window-created", (_, window) => {
     optimizer.watchWindowShortcuts(window);
   });
+
+  await initializeDatabase();
+
+  hydrateCredentials();
 
   const mainWindow = createMainWindow();
 
