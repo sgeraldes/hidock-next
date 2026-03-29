@@ -30,11 +30,11 @@ export async function startMcpServer(): Promise<void> {
       }
     },
     async (args) => {
-      if (args.refresh) {
-        try {
-          await controller.connect()
-          await controller.refresh()
-        } catch { /* continue with cached data */ }
+      if (!controller.isConnected()) {
+        try { await controller.connect() } catch { /* continue with cached data */ }
+      }
+      if (args.refresh && controller.isConnected()) {
+        try { await controller.refresh() } catch { /* continue */ }
       }
       const filters: { from?: Date; to?: Date } = {}
       if (args.from) filters.from = new Date(args.from)
@@ -58,6 +58,9 @@ export async function startMcpServer(): Promise<void> {
       }
     },
     async (args) => {
+      if (!controller.isConnected()) {
+        try { await controller.connect() } catch { /* continue */ }
+      }
       const query: { date?: Date; around?: string } = {}
       if (args.date) query.date = new Date(args.date)
       if (args.around) query.around = args.around
@@ -78,6 +81,9 @@ export async function startMcpServer(): Promise<void> {
       }
     },
     async (args) => {
+      if (!controller.isConnected()) {
+        try { await controller.connect() } catch { /* continue */ }
+      }
       const recording = await controller.get(args.filename)
       if (!recording) return text({ error: `Recording not found: ${args.filename}` })
       return text(recording)

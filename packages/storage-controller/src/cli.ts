@@ -21,13 +21,10 @@ program
   .option('--json', 'Output as JSON')
   .action(async (opts) => {
     const ctrl = new StorageController()
-    if (opts.refresh) {
-      const connected = await ctrl.connect()
-      if (!connected) {
-        console.error('No HiDock device found. Showing cached/local recordings.')
-      } else {
-        await ctrl.refresh()
-      }
+    await ctrl.connect() // auto-connect if device available
+
+    if (opts.refresh && ctrl.isConnected()) {
+      await ctrl.refresh()
     }
 
     const filters: { from?: Date; to?: Date } = {}
@@ -53,6 +50,7 @@ program
   .option('--json', 'Output as JSON')
   .action(async (opts) => {
     const ctrl = new StorageController()
+    await ctrl.connect() // auto-connect if device available
     const query: { date?: Date; around?: string } = {}
     if (opts.date) query.date = new Date(opts.date)
     if (opts.around) query.around = opts.around
