@@ -1,6 +1,7 @@
 import { app, BrowserWindow, shell } from "electron";
 import { electronApp, optimizer } from "@electron-toolkit/utils";
 import { createMainWindow, destroyAllWindows } from "./windows";
+import { initializeTray, destroyTray } from "./services/tray-manager";
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId("com.hidock.meeting-assistant");
@@ -16,6 +17,8 @@ app.whenReady().then(() => {
     return { action: "deny" };
   });
 
+  initializeTray();
+
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createMainWindow();
@@ -24,6 +27,7 @@ app.whenReady().then(() => {
 });
 
 app.on("before-quit", () => {
+  destroyTray();
   destroyAllWindows();
 });
 
