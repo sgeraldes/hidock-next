@@ -19,4 +19,5 @@ export interface TranscriptionEngine {
   transcribe(audio: Buffer, options: TranscribeOptions): AsyncIterable<TranscriptSegment>
   readonly isStreaming: boolean
   readonly isLocal: boolean
+  isAvailable?(): Promise<boolean>
 }

@@ -1,8 +1,13 @@
 import type { TranscriptSegment } from './engines/engine-interface.js'
 
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 /**
  * VocabularyCorrector applies domain-specific vocabulary corrections to transcript text.
- * Stub implementation: returns segments unchanged until a correction table is provided.
+ * Single-word corrections use case-insensitive word-boundary regex.
+ * Multi-word corrections use exact string replacement.
  */
 export class VocabularyCorrector {
   private readonly corrections: Map<string, string>
@@ -18,7 +23,15 @@ export class VocabularyCorrector {
 
     let { text } = segment
     for (const [from, to] of this.corrections) {
-      text = text.replaceAll(from, to)
+      if (from.length === 0) continue
+
+      const isSingleWord = !from.includes(' ')
+      if (isSingleWord) {
+        const pattern = new RegExp(`\\b${escapeRegex(from)}\\b`, 'gi')
+        text = text.replace(pattern, to)
+      } else {
+        text = text.replaceAll(from, to)
+      }
     }
 
     return { ...segment, text }
@@ -28,3 +41,5 @@ export class VocabularyCorrector {
     return segments.map((s) => this.correct(s))
   }
 }
+
+export { escapeRegex }
