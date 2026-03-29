@@ -66,6 +66,12 @@ export function parseFileListEntry(data: Uint8Array, offset: number): ParseResul
 export function parseFileListBuffer(data: Uint8Array): FileEntry[] {
   const entries: FileEntry[] = []
   let pos = 0
+
+  // Handle optional 0xFF 0xFF header (total file count — skip it)
+  if (data.length >= 6 && data[0] === 0xff && data[1] === 0xff) {
+    pos = 6  // Skip 2-byte marker + 4-byte count
+  }
+
   while (pos < data.length) {
     const result = parseFileListEntry(data, pos)
     if (!result) break
