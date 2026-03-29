@@ -1,4 +1,5 @@
 import type { CalendarEvent, CalendarWatcherOptions } from './types.js'
+import { parseICS } from './ics-parser.js'
 
 type EventsListener = (events: CalendarEvent[]) => void
 type ErrorListener = (error: Error) => void
@@ -64,9 +65,16 @@ export class CalendarWatcher {
 
   private async poll(): Promise<void> {
     try {
-      // Stub: actual ICS fetch + parse would happen here.
-      // Emit an empty list for now so the watcher is fully functional.
-      const events: CalendarEvent[] = []
+      let icsContent: string
+      if (this.source.startsWith('http://') || this.source.startsWith('https://')) {
+        const response = await fetch(this.source)
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+        icsContent = await response.text()
+      } else {
+        const { readFile } = await import('node:fs/promises')
+        icsContent = await readFile(this.source, 'utf-8')
+      }
+      const events = parseICS(icsContent)
       for (const listener of this.eventsListeners) {
         listener(events)
       }

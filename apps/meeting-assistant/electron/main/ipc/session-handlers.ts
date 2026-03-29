@@ -8,14 +8,16 @@ import {
   SessionDeleteInput,
   SessionLinkMeetingInput,
 } from "./validation";
+import { getSessionManager } from "../services/session-manager";
 
 export function registerSessionHandlers(): void {
   createHandler({
     channel: CHANNELS.session.list,
     schema: SessionListInput,
     handler: async () => {
-      // TODO: wire to SessionService
-      return [];
+      // TODO: query from database once persistence is wired (Phase 5)
+      const current = getSessionManager().getCurrentSession();
+      return current ? [current] : [];
     },
   });
 
@@ -23,17 +25,16 @@ export function registerSessionHandlers(): void {
     channel: CHANNELS.session.create,
     schema: SessionCreateInput,
     handler: async () => {
-      // TODO: wire to SessionService
-      return null;
+      return getSessionManager().startSession();
     },
   });
 
   createHandler({
     channel: CHANNELS.session.get,
     schema: SessionGetInput,
-    handler: async (_input) => {
-      // TODO: wire to SessionService
-      return null;
+    handler: async (input) => {
+      const current = getSessionManager().getCurrentSession();
+      return current?.id === input.sessionId ? current : null;
     },
   });
 
@@ -41,8 +42,7 @@ export function registerSessionHandlers(): void {
     channel: CHANNELS.session.end,
     schema: SessionEndInput,
     handler: async (_input) => {
-      // TODO: wire to SessionService
-      return null;
+      return getSessionManager().endSession();
     },
   });
 
@@ -50,7 +50,7 @@ export function registerSessionHandlers(): void {
     channel: CHANNELS.session.delete,
     schema: SessionDeleteInput,
     handler: async (_input) => {
-      // TODO: wire to SessionService
+      // TODO: wire to database deletion once persistence is added
       return null;
     },
   });
@@ -58,9 +58,9 @@ export function registerSessionHandlers(): void {
   createHandler({
     channel: CHANNELS.session.linkMeeting,
     schema: SessionLinkMeetingInput,
-    handler: async (_input) => {
-      // TODO: wire to SessionService
-      return null;
+    handler: async (input) => {
+      getSessionManager().linkMeeting(input.sessionId, input.meetingId);
+      return getSessionManager().getCurrentSession();
     },
   });
 

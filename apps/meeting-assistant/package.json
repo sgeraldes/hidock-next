@@ -53,6 +53,7 @@
     "tailwind-merge": "^2.5.4",
     "tailwindcss-animate": "^1.0.7",
     "uuid": "^11.0.3",
+    "@hidock/calendar-sync": "file:../../packages/calendar-sync",
     "zod": "^3.25.76",
     "zustand": "^5.0.1"
   },
