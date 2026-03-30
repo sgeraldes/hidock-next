@@ -30,14 +30,8 @@ export function useTheme(): UseThemeReturn {
   const theme = useAppStore((s) => s.theme as Theme)
   const setThemeInStore = useAppStore((s) => s.setTheme)
 
-  // On mount: load the persisted preference and apply it.
+  // On mount: apply whatever the store already has (hydrated from main process or default).
   useEffect(() => {
-    window.electronAPI.settings.get('ai.provider').then(() => {
-      // We re-use the generic settings API.  The theme key isn't in SettingsMap
-      // so we fall back to the store value that was already hydrated (or dark).
-    })
-
-    // Apply whatever the store already has (hydrated from main process or default).
     applyThemeToDocument(theme)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

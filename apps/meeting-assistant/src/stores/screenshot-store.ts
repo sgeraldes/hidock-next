@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Screenshot } from '../types/models'
+import { getElectronAPI } from '../lib/electron-api'
 
 interface ScreenshotState {
   screenshots: Screenshot[]
@@ -16,7 +17,9 @@ export const useScreenshotStore = create<ScreenshotState>((set) => ({
   fetchForSession: async (sessionId) => {
     set({ loading: true })
     try {
-      const screenshots = await window.electronAPI.screenshot.listForSession(sessionId)
+      const api = getElectronAPI()
+      if (!api) return set({ loading: false })
+      const screenshots = await api.screenshot.listForSession(sessionId)
       set({ screenshots, loading: false })
     } catch (error) {
       console.error('[ScreenshotStore] Failed to fetch screenshots:', error)
@@ -26,7 +29,9 @@ export const useScreenshotStore = create<ScreenshotState>((set) => ({
 
   capture: async (sessionId) => {
     try {
-      const screenshot = await window.electronAPI.screenshot.capture(sessionId)
+      const api = getElectronAPI()
+      if (!api) return null
+      const screenshot = await api.screenshot.capture(sessionId)
       if (screenshot) {
         set((state) => ({ screenshots: [...state.screenshots, screenshot] }))
       }
@@ -39,7 +44,10 @@ export const useScreenshotStore = create<ScreenshotState>((set) => ({
 }))
 
 export function initScreenshotStore(): () => void {
-  const unsub1 = window.electronAPI.screenshot.onCaptured((data) => {
+  const api = getElectronAPI()
+  if (!api) return () => {}
+
+  const unsub1 = api.screenshot.onCaptured((data) => {
     useScreenshotStore.setState((state) => {
       const exists = state.screenshots.some((s) => s.id === data.id)
       if (exists) return state
@@ -47,7 +55,7 @@ export function initScreenshotStore(): () => void {
     })
   })
 
-  const unsub2 = window.electronAPI.screenshot.onAnalysisReady((data) => {
+  const unsub2 = api.screenshot.onAnalysisReady((data) => {
     useScreenshotStore.setState((state) => ({
       screenshots: state.screenshots.map((s) =>
         s.id === data.screenshotId ? { ...s, analysis: data.analysis } : s

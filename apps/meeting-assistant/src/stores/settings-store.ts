@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { SettingsKey, SettingsMap } from '../types/models'
+import { getElectronAPI } from '../lib/electron-api'
 
 interface SettingsState {
   settings: Partial<SettingsMap>
@@ -19,7 +20,9 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   fetchAll: async () => {
     set({ loading: true })
     try {
-      const settings = await window.electronAPI.settings.getAll()
+      const api = getElectronAPI()
+      if (!api) return set({ loading: false })
+      const settings = await api.settings.getAll()
       set({ settings, loading: false })
     } catch (error) {
       console.error('[SettingsStore] Failed to fetch all settings:', error)
@@ -29,7 +32,9 @@ export const useSettingsStore = create<SettingsState>((set) => ({
 
   get: async (key) => {
     try {
-      const value = await window.electronAPI.settings.get(key)
+      const api = getElectronAPI()
+      if (!api) return null
+      const value = await api.settings.get(key)
       if (value !== null) {
         set((state) => ({ settings: { ...state.settings, [key]: value } }))
       }
@@ -42,7 +47,9 @@ export const useSettingsStore = create<SettingsState>((set) => ({
 
   set: async (key, value) => {
     try {
-      await window.electronAPI.settings.set(key, value)
+      const api = getElectronAPI()
+      if (!api) return
+      await api.settings.set(key, value)
       set((state) => ({ settings: { ...state.settings, [key]: value } }))
     } catch (error) {
       console.error('[SettingsStore] Failed to set setting:', key, error)
@@ -51,7 +58,9 @@ export const useSettingsStore = create<SettingsState>((set) => ({
 
   fetchCategory: async (category) => {
     try {
-      const group = await window.electronAPI.settings.getCategory(category)
+      const api = getElectronAPI()
+      if (!api) return
+      const group = await api.settings.getCategory(category)
       if (group) {
         const patch: Partial<SettingsMap> = {}
         for (const entry of group.settings) {
@@ -66,7 +75,9 @@ export const useSettingsStore = create<SettingsState>((set) => ({
 
   testConnection: async () => {
     try {
-      return await window.electronAPI.settings.testConnection()
+      const api = getElectronAPI()
+      if (!api) return { success: false, error: 'Electron API not available' }
+      return await api.settings.testConnection()
     } catch (error) {
       console.error('[SettingsStore] Failed to test connection:', error)
       return { success: false, error: String(error) }
@@ -75,7 +86,10 @@ export const useSettingsStore = create<SettingsState>((set) => ({
 }))
 
 export function initSettingsStore(): () => void {
-  const unsub1 = window.electronAPI.settings.onChanged((data) => {
+  const api = getElectronAPI()
+  if (!api) return () => {}
+
+  const unsub1 = api.settings.onChanged((data) => {
     useSettingsStore.setState((state) => ({
       settings: { ...state.settings, [data.key]: data.value },
     }))

@@ -4,6 +4,7 @@ import { useTranscriptStore } from '../../stores/transcript-store'
 import { useSuggestionStore } from '../../stores/suggestion-store'
 import { Button } from '../ui/button'
 import { cn } from '../../lib/utils'
+import { getElectronAPI } from '../../lib/electron-api'
 import type { TranscriptSegment } from '../../types/models'
 import type { Suggestion } from '../../types/models'
 
@@ -107,7 +108,9 @@ export function OverlayContent() {
   }, [segments, interimText])
 
   const handleClose = () => {
-    window.electronAPI.window.close()
+    const api = getElectronAPI()
+    if (!api) return
+    api.window.close()
   }
 
   return (

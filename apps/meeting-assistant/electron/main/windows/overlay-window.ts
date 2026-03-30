@@ -32,7 +32,7 @@ export function createOverlayWindow(): BrowserWindow {
     resizable: false,
     show: false,
     webPreferences: {
-      preload: join(__dirname, "../../preload/index.js"),
+      preload: join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -47,7 +47,7 @@ export function createOverlayWindow(): BrowserWindow {
   if (is.dev && process.env["ELECTRON_RENDERER_URL"]) {
     win.loadURL(process.env["ELECTRON_RENDERER_URL"] + "/overlay.html");
   } else {
-    win.loadFile(join(__dirname, "../../renderer/overlay.html"));
+    win.loadFile(join(__dirname, "../renderer/overlay.html"));
   }
 
   overlayWindow = win;

@@ -186,7 +186,8 @@ export default function Notes() {
   async function handleGenerate() {
     if (!selectedSessionId) return
     setGenerating(true)
-    await generate(selectedSessionId, selectedTemplateId || undefined)
+    const templateId = selectedTemplateId && selectedTemplateId !== '__default__' ? selectedTemplateId : undefined
+    await generate(selectedSessionId, templateId)
     setGenerating(false)
   }
 
@@ -236,9 +237,9 @@ export default function Notes() {
               <SelectValue placeholder="Default template" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="">Default template</SelectItem>
+              <SelectItem value="__default__">Default template</SelectItem>
               {templates.map((t) => (
-                <SelectItem key={t.id} value={t.id}>
+                <SelectItem key={t.id} value={t.id || `template-${t.name}`}>
                   {t.name}
                 </SelectItem>
               ))}

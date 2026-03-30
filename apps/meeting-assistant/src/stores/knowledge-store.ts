@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { KnowledgeSearchResult } from '../types/models'
+import { getElectronAPI } from '../lib/electron-api'
 
 interface KnowledgeState {
   searchResults: KnowledgeSearchResult[]
@@ -19,7 +20,9 @@ export const useKnowledgeStore = create<KnowledgeState>((set) => ({
 
   addSource: async (path) => {
     try {
-      await window.electronAPI.knowledge.addSource(path)
+      const api = getElectronAPI()
+      if (!api) return
+      await api.knowledge.addSource(path)
     } catch (error) {
       console.error('[KnowledgeStore] Failed to add source:', error)
     }
@@ -27,7 +30,9 @@ export const useKnowledgeStore = create<KnowledgeState>((set) => ({
 
   removeSource: async (path) => {
     try {
-      await window.electronAPI.knowledge.removeSource(path)
+      const api = getElectronAPI()
+      if (!api) return
+      await api.knowledge.removeSource(path)
     } catch (error) {
       console.error('[KnowledgeStore] Failed to remove source:', error)
     }
@@ -35,7 +40,9 @@ export const useKnowledgeStore = create<KnowledgeState>((set) => ({
 
   search: async (query, topK) => {
     try {
-      const searchResults = await window.electronAPI.knowledge.search(query, topK)
+      const api = getElectronAPI()
+      if (!api) return
+      const searchResults = await api.knowledge.search(query, topK)
       set({ searchResults })
     } catch (error) {
       console.error('[KnowledgeStore] Failed to search knowledge base:', error)
@@ -45,7 +52,9 @@ export const useKnowledgeStore = create<KnowledgeState>((set) => ({
   reindex: async () => {
     set({ indexing: true, indexProgress: null })
     try {
-      await window.electronAPI.knowledge.reindex()
+      const api = getElectronAPI()
+      if (!api) return set({ indexing: false })
+      await api.knowledge.reindex()
     } catch (error) {
       console.error('[KnowledgeStore] Failed to reindex:', error)
       set({ indexing: false })
@@ -54,14 +63,17 @@ export const useKnowledgeStore = create<KnowledgeState>((set) => ({
 }))
 
 export function initKnowledgeStore(): () => void {
-  const unsub1 = window.electronAPI.knowledge.onIndexProgress((data) => {
+  const api = getElectronAPI()
+  if (!api) return () => {}
+
+  const unsub1 = api.knowledge.onIndexProgress((data) => {
     useKnowledgeStore.setState({
       indexing: true,
       indexProgress: { current: data.chunksProcessed, total: data.totalChunks },
     })
   })
 
-  const unsub2 = window.electronAPI.knowledge.onIndexComplete((_data) => {
+  const unsub2 = api.knowledge.onIndexComplete((_data) => {
     useKnowledgeStore.setState({ indexing: false, indexProgress: null })
   })
 

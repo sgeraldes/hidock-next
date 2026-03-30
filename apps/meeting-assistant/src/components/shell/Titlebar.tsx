@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { cn } from '../../lib/utils'
+import { getElectronAPI } from '../../lib/electron-api'
 
 interface TitlebarProps {
   pageName: string
@@ -9,17 +10,23 @@ export function Titlebar({ pageName }: TitlebarProps) {
   const [isMaximized, setIsMaximized] = useState(false)
 
   const handleMinimize = () => {
-    window.electronAPI.window.minimize()
+    const api = getElectronAPI()
+    if (!api) return
+    api.window.minimize()
   }
 
   const handleMaximize = async () => {
-    await window.electronAPI.window.maximize()
-    const maximized = await window.electronAPI.window.isMaximized()
+    const api = getElectronAPI()
+    if (!api) return
+    await api.window.maximize()
+    const maximized = await api.window.isMaximized()
     setIsMaximized(maximized)
   }
 
   const handleClose = () => {
-    window.electronAPI.window.close()
+    const api = getElectronAPI()
+    if (!api) return
+    api.window.close()
   }
 
   return (

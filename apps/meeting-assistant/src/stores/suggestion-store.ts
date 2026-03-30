@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Suggestion } from '../types/models'
+import { getElectronAPI } from '../lib/electron-api'
 
 interface SuggestionState {
   suggestions: Suggestion[]
@@ -16,7 +17,9 @@ export const useSuggestionStore = create<SuggestionState>((set) => ({
   fetchActive: async (sessionId) => {
     set({ loading: true })
     try {
-      const suggestions = await window.electronAPI.suggestion.getActive(sessionId)
+      const api = getElectronAPI()
+      if (!api) return set({ loading: false })
+      const suggestions = await api.suggestion.getActive(sessionId)
       set({ suggestions, loading: false })
     } catch (error) {
       console.error('[SuggestionStore] Failed to fetch active suggestions:', error)
@@ -26,7 +29,9 @@ export const useSuggestionStore = create<SuggestionState>((set) => ({
 
   dismiss: async (suggestionId) => {
     try {
-      await window.electronAPI.suggestion.dismiss(suggestionId)
+      const api = getElectronAPI()
+      if (!api) return
+      await api.suggestion.dismiss(suggestionId)
       set((state) => ({
         suggestions: state.suggestions.map((s) =>
           s.id === suggestionId ? { ...s, dismissed: true } : s
@@ -39,11 +44,14 @@ export const useSuggestionStore = create<SuggestionState>((set) => ({
 }))
 
 export function initSuggestionStore(): () => void {
-  const unsub1 = window.electronAPI.suggestion.onUpdated((data) => {
+  const api = getElectronAPI()
+  if (!api) return () => {}
+
+  const unsub1 = api.suggestion.onUpdated((data) => {
     useSuggestionStore.setState({ suggestions: data })
   })
 
-  const unsub2 = window.electronAPI.suggestion.onCleared((_data) => {
+  const unsub2 = api.suggestion.onCleared((_data) => {
     useSuggestionStore.setState({ suggestions: [] })
   })
 

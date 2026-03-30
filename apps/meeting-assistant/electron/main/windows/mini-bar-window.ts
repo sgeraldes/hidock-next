@@ -69,7 +69,7 @@ export function createMiniBarWindow(): BrowserWindow {
     skipTaskbar: true,
     show: false,
     webPreferences: {
-      preload: join(__dirname, "../../preload/index.js"),
+      preload: join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false, // Disabled to enable getUserMedia for audio recording
@@ -90,7 +90,7 @@ export function createMiniBarWindow(): BrowserWindow {
   if (is.dev && process.env["ELECTRON_RENDERER_URL"]) {
     win.loadURL(process.env["ELECTRON_RENDERER_URL"] + "/mini-bar.html");
   } else {
-    win.loadFile(join(__dirname, "../../renderer/mini-bar.html"));
+    win.loadFile(join(__dirname, "../renderer/mini-bar.html"));
   }
 
   miniBarWindow = win;

@@ -22,6 +22,11 @@ function hydrateCredentials(): void {
   console.log("[CredentialStore] Credentials hydrated from DB");
 }
 
+// Enable remote debugging in dev mode for Electron MCP testing
+if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
+  app.commandLine.appendSwitch('remote-debugging-port', '9222')
+}
+
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId("com.hidock.meeting-assistant");
 

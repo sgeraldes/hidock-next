@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Session } from '../types/models'
+import { getElectronAPI } from '../lib/electron-api'
 
 interface SessionState {
   sessions: Session[]
@@ -19,7 +20,9 @@ export const useSessionStore = create<SessionState>((set) => ({
   fetchSessions: async () => {
     set({ loading: true })
     try {
-      const sessions = await window.electronAPI.session.list()
+      const api = getElectronAPI()
+      if (!api) return set({ loading: false })
+      const sessions = await api.session.list()
       set({ sessions, loading: false })
     } catch (error) {
       console.error('[SessionStore] Failed to fetch sessions:', error)
@@ -29,7 +32,9 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   createSession: async () => {
     try {
-      const session = await window.electronAPI.session.create()
+      const api = getElectronAPI()
+      if (!api) return null
+      const session = await api.session.create()
       set((state) => ({ sessions: [session, ...state.sessions] }))
       return session
     } catch (error) {
@@ -40,7 +45,9 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   endSession: async (id) => {
     try {
-      const updated = await window.electronAPI.session.end(id)
+      const api = getElectronAPI()
+      if (!api) return
+      const updated = await api.session.end(id)
       if (updated) {
         set((state) => ({
           sessions: state.sessions.map((s) => (s.id === id ? updated : s)),
@@ -53,7 +60,9 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   deleteSession: async (id) => {
     try {
-      await window.electronAPI.session.delete(id)
+      const api = getElectronAPI()
+      if (!api) return
+      await api.session.delete(id)
       set((state) => ({
         sessions: state.sessions.filter((s) => s.id !== id),
       }))
@@ -64,7 +73,9 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   linkMeeting: async (sessionId, meetingId) => {
     try {
-      const updated = await window.electronAPI.session.linkMeeting(sessionId, meetingId)
+      const api = getElectronAPI()
+      if (!api) return
+      const updated = await api.session.linkMeeting(sessionId, meetingId)
       if (updated) {
         set((state) => ({
           sessions: state.sessions.map((s) => (s.id === sessionId ? updated : s)),
@@ -77,7 +88,10 @@ export const useSessionStore = create<SessionState>((set) => ({
 }))
 
 export function initSessionStore(): () => void {
-  const unsub1 = window.electronAPI.session.onCreated((data) => {
+  const api = getElectronAPI()
+  if (!api) return () => {}
+
+  const unsub1 = api.session.onCreated((data) => {
     useSessionStore.setState((state) => {
       const exists = state.sessions.some((s) => s.id === data.id)
       if (exists) return state
@@ -85,19 +99,19 @@ export function initSessionStore(): () => void {
     })
   })
 
-  const unsub2 = window.electronAPI.session.onUpdated((data) => {
+  const unsub2 = api.session.onUpdated((data) => {
     useSessionStore.setState((state) => ({
       sessions: state.sessions.map((s) => (s.id === data.id ? data : s)),
     }))
   })
 
-  const unsub3 = window.electronAPI.session.onDeleted((data) => {
+  const unsub3 = api.session.onDeleted((data) => {
     useSessionStore.setState((state) => ({
       sessions: state.sessions.filter((s) => s.id !== data.sessionId),
     }))
   })
 
-  const unsub4 = window.electronAPI.session.onStatusChanged((data) => {
+  const unsub4 = api.session.onStatusChanged((data) => {
     useSessionStore.setState((state) => ({
       sessions: state.sessions.map((s) => (s.id === data.id ? data : s)),
     }))

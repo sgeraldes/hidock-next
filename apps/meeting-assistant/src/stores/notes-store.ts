@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { Note, NoteTemplate } from '../types/models'
+import { getElectronAPI } from '../lib/electron-api'
 
 interface NotesState {
   notes: Note[]
@@ -19,7 +20,9 @@ export const useNotesStore = create<NotesState>((set) => ({
 
   fetchForSession: async (sessionId) => {
     try {
-      const note = await window.electronAPI.notes.getForSession(sessionId)
+      const api = getElectronAPI()
+      if (!api) return
+      const note = await api.notes.getForSession(sessionId)
       set((state) => {
         if (!note) return state
         const exists = state.notes.some((n) => n.id === note.id)
@@ -35,7 +38,9 @@ export const useNotesStore = create<NotesState>((set) => ({
 
   generate: async (sessionId, templateId) => {
     try {
-      const note = await window.electronAPI.notes.generate(sessionId, templateId)
+      const api = getElectronAPI()
+      if (!api) return null
+      const note = await api.notes.generate(sessionId, templateId)
       if (note) {
         set((state) => {
           const exists = state.notes.some((n) => n.id === note.id)
@@ -54,7 +59,9 @@ export const useNotesStore = create<NotesState>((set) => ({
 
   update: async (noteId, content) => {
     try {
-      await window.electronAPI.notes.update(noteId, content)
+      const api = getElectronAPI()
+      if (!api) return
+      await api.notes.update(noteId, content)
       set((state) => ({
         notes: state.notes.map((n) =>
           n.id === noteId ? { ...n, content, updated_at: Date.now() } : n
@@ -67,7 +74,9 @@ export const useNotesStore = create<NotesState>((set) => ({
 
   fetchTemplates: async () => {
     try {
-      const templates = await window.electronAPI.notes.listTemplates()
+      const api = getElectronAPI()
+      if (!api) return
+      const templates = await api.notes.listTemplates()
       set({ templates })
     } catch (error) {
       console.error('[NotesStore] Failed to fetch templates:', error)
@@ -76,7 +85,10 @@ export const useNotesStore = create<NotesState>((set) => ({
 }))
 
 export function initNotesStore(): () => void {
-  const unsub1 = window.electronAPI.notes.onGenerationProgress((data) => {
+  const api = getElectronAPI()
+  if (!api) return () => {}
+
+  const unsub1 = api.notes.onGenerationProgress((data) => {
     useNotesStore.setState({ generationProgress: data.progress })
   })
 

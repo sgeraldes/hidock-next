@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { TranscriptSegment } from '../types/models'
+import { getElectronAPI } from '../lib/electron-api'
 
 const MAX_SEGMENTS = 10000
 
@@ -20,7 +21,9 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
 
   fetchSegments: async (sessionId, offset, limit) => {
     try {
-      const segments = await window.electronAPI.transcript.getSegments(sessionId, offset, limit)
+      const api = getElectronAPI()
+      if (!api) return
+      const segments = await api.transcript.getSegments(sessionId, offset, limit)
       set({ segments })
     } catch (error) {
       console.error('[TranscriptStore] Failed to fetch segments:', error)
@@ -29,7 +32,9 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
 
   fetchRecent: async (sessionId, maxAgeSecs, maxCount) => {
     try {
-      const segments = await window.electronAPI.transcript.getRecent(sessionId, maxAgeSecs, maxCount)
+      const api = getElectronAPI()
+      if (!api) return
+      const segments = await api.transcript.getRecent(sessionId, maxAgeSecs, maxCount)
       set({ segments })
     } catch (error) {
       console.error('[TranscriptStore] Failed to fetch recent segments:', error)
@@ -40,7 +45,10 @@ export const useTranscriptStore = create<TranscriptState>((set) => ({
 }))
 
 export function initTranscriptStore(): () => void {
-  const unsub1 = window.electronAPI.transcript.onNewSegments((data) => {
+  const api = getElectronAPI()
+  if (!api) return () => {}
+
+  const unsub1 = api.transcript.onNewSegments((data) => {
     useTranscriptStore.setState((state) => {
       const combined = [...state.segments, ...data]
       const trimmed =
@@ -49,15 +57,15 @@ export function initTranscriptStore(): () => void {
     })
   })
 
-  const unsub2 = window.electronAPI.transcript.onInterimResult((data) => {
+  const unsub2 = api.transcript.onInterimResult((data) => {
     useTranscriptStore.setState({ interimText: data.isFinal ? '' : data.text })
   })
 
-  const unsub3 = window.electronAPI.transcript.onStatus((status) => {
+  const unsub3 = api.transcript.onStatus((status) => {
     useTranscriptStore.setState({ status: status.recording ? 'recording' : 'idle' })
   })
 
-  const unsub4 = window.electronAPI.transcript.onError((error) => {
+  const unsub4 = api.transcript.onError((error) => {
     console.error('[TranscriptStore] Transcript error:', error.message)
     useTranscriptStore.setState({ status: 'error' })
   })

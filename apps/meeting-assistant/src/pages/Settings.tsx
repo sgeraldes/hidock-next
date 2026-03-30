@@ -14,6 +14,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { ScrollArea } from '../components/ui/scroll-area'
 import { cn } from '../lib/utils'
+import { getElectronAPI } from '../lib/electron-api'
 
 // ── Toggle component ───────────────────────────────────────────────────────────
 
@@ -259,7 +260,8 @@ export default function Settings() {
         try {
           // fetchCategory updates the store; we read back via the API
           await fetchCategory(cat)
-          const group = await window.electronAPI.settings.getCategory(cat)
+          const api = getElectronAPI()
+          const group = api ? await api.settings.getCategory(cat) : null
           if (group) loaded.push(group)
         } catch {
           // ignore individual category errors
