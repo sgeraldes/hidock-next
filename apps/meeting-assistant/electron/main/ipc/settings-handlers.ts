@@ -118,7 +118,7 @@ export function registerSettingsHandlers(): void {
 
         const { generateText } = await import("ai");
         const result = createProvider(config);
-        await generateText({ model: result.model, prompt: 'Reply with "ok"', maxTokens: 5 });
+        await generateText({ model: result.model, prompt: 'Reply with "ok"' });
         return { success: true };
       } catch (error) {
         return { success: false, error: (error as Error).message };

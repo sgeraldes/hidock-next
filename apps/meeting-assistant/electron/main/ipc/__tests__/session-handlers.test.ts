@@ -151,7 +151,7 @@ describe('Session Handlers', () => {
       id: 'current-only',
       title: 'Current',
       startedAt: Date.now(),
-    })
+    } as unknown as null)
     const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
     const handler = handlers.get(CHANNELS.session.list)
 
@@ -176,7 +176,7 @@ describe('Session Handlers', () => {
   })
 
   it('session:get returns null when session not found', async () => {
-    mockGetSession.mockReturnValueOnce(null)
+    mockGetSession.mockReturnValueOnce(null as unknown as ReturnType<typeof mockGetSession>)
     const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
     const handler = handlers.get(CHANNELS.session.get)
 
