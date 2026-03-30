@@ -13,15 +13,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Retrying failed connections** — if `LIBUSB_ERROR_ACCESS` appears, STOP IMMEDIATELY
 - **Switching between USB APIs** (WebUSB vs native `usb` vs PyUSB) on the same device
 - **Any USB code that isn't the final, tested implementation**
-- **Setting timeout=0 on `transferIn`** — a pending transfer with no timeout can never be cancelled, which blocks `release()`/`close()` and locks the device. Use `timeout = 5000` (5s) so the read loop can yield and disconnect cleanly. The loop re-posts immediately, so no data is lost despite the timeout.
+- **Using `endpoint.transfer()` in a manual read loop** — causes data loss on Windows due to `BlockingCall` gap in the USB event thread. Use `endpoint.startPoll()` instead (see below).
 
 ### ALWAYS DO:
 - **Test ALL USB code with mocks first** — unit tests, never real hardware
 - **ONE clean connection attempt** when code is ready
-- **ONE proper cleanup** (close interface, close device)
+- **ONE proper cleanup** (`stopPoll()` → wait for `'end'` → `release(true)` → `close()`)
 - **If `LIBUSB_ERROR_ACCESS`: try drain first** (see recovery below), then ask user to power-cycle only if drain fails
-- **Keep a `transferIn` always pending** — the device needs an active read request as "ACK" before it sends the next data packet. This is not a free stream; without a pending read, the device won't send.
-- **Use a perpetual read loop** — `transferIn` → callback → immediately issue next `transferIn` → process data. Never do sequential request-response reads.
+- **Use `startPoll(3, 32768)` for reading** — keeps 3 transfers pending in the kernel. This is the ONLY correct way to do continuous USB reads with the npm `usb` package on Windows. The `3` means 3 simultaneous transfers; `32768` = `wMaxPacketSize * 64`.
+- **Use `stopPoll()` for disconnect** — cancels all pending transfers cleanly. Listen for the `'end'` event before calling `release()`/`close()`.
 
 ### Recovery — USB Drain:
 If the device enters `LIBUSB_ERROR_ACCESS` state, attempt this drain before asking for physical restart:
@@ -31,18 +31,19 @@ iface.claim();
 epIn.timeout = 1000;
 // Read until timeout error (queue empty)
 epIn.transfer(51200, callback); // repeat until err
-iface.release(() => dev.close());
+iface.release(true, () => dev.close());
 ```
 This clears any pending USB transfers and often recovers the device without power cycle.
 
 ### Jensen Protocol — File List Behavior:
 1. Send `CMD_GET_FILE_LIST` (cmd=4)
-2. Device takes **~53 seconds** to prepare (for 1300+ files) — no data during this time
+2. Device takes **~90 seconds** to prepare and send all data (for 1400 files)
 3. First response: Jensen message (cmd=4) with body starting `0xFF 0xFF` + 4-byte total count + file entries
-4. Subsequent data: may arrive as **raw USB bulk data WITHOUT Jensen headers** — must accumulate all bytes and parse Jensen frames from the accumulated buffer
-5. Final message has `bodyLength=0` = end of list
-6. **A `transferIn` must be pending at all times** or the device won't send the next packet
-7. **UNSOLVED:** After first successful list, subsequent lists receive incomplete data. Only the Python desktop app (PyUSB) can do repeated lists without restart. See `packages/storage-controller/USB_PROTOCOL_FINDINGS.md` for details.
+4. Subsequent responses: Jensen messages (cmd=4) with more file entries
+5. All responses have valid Jensen headers (`0x12 0x34`)
+6. Final message has `bodyLength=0` = end of list
+7. **Multiple transfers MUST be pending** — use `startPoll(3, 32768)`, not `transfer()`
+8. **Header length field is 24-bit** — upper byte of the 4-byte length field is checksum length, lower 3 bytes are body length. `bodyLen = rawLen & 0x00FFFFFF`
 
 ### Why:
 The HiDock USB controller enters a locked state (interface still marked "active") when subjected to rapid open/close cycles or concurrent access attempts from different USB stacks. Once in this state, ALL programs (browser, Python, Node.js, even the official HiNotes site) fail with "Access denied" until drain or physical power cycle. The user has used HiDock for over a year without this issue — every occurrence was caused by AI agents doing USB probing.
