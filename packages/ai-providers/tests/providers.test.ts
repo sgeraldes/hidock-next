@@ -84,7 +84,7 @@ describe('createBedrockModel', () => {
       model: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
       region: 'eu-west-1',
       accessKeyId: 'AKIA123',
-      secretAccessKey: 'secret'
+      secretAccessKey: 'secret' // pragma: allowlist secret
     })
     expect(model).toBeDefined()
   })

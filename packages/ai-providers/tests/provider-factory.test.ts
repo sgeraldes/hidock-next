@@ -63,8 +63,8 @@ describe('createProvider', () => {
         provider: 'bedrock',
         model: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
         region: 'us-east-1',
-        accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
-        secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+        accessKeyId: 'AKIAIOSFODNN7EXAMPLE', // pragma: allowlist secret
+        secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' // pragma: allowlist secret // nosemgrep
       }
       const result = createProvider(config)
       expect(result.provider).toBe('bedrock')
