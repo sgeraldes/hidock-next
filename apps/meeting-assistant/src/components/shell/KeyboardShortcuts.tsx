@@ -57,19 +57,9 @@ export function KeyboardShortcuts() {
     return () => window.removeEventListener('keydown', handler)
   }, [navigate])
 
-  // Escape — Close overlay window (only when electronAPI.window.close is available)
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        const win = window as unknown as { electronAPI?: { window?: { close?: () => void } } }
-        if (win.electronAPI?.window?.close) {
-          win.electronAPI.window.close()
-        }
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [])
+  // Escape — Close overlay window (deferred: overlay windows not yet implemented)
+  // DO NOT close the main window on Escape. This shortcut will be re-enabled
+  // once overlay window support is added to the codebase.
 
   return null
 }

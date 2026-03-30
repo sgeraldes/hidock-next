@@ -64,6 +64,7 @@ export function useKeyboardShortcut(
 
     const handler = (event: KeyboardEvent) => {
       if (matchesCombo(event, combo)) {
+        event.preventDefault()
         callbackRef.current()
       }
     }
