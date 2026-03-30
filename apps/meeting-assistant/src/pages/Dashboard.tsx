@@ -22,10 +22,6 @@ type SessionStats = {
   notesCount: number
 }
 
-type ElectronSessionAPI = {
-  stats?: () => Promise<SessionStats>
-}
-
 // ── Quick-stat metric card ────────────────────────────────────────────────────
 
 interface MetricCardProps {
@@ -263,9 +259,8 @@ export default function Dashboard() {
 
   // Fetch stats on mount
   useEffect(() => {
-    const api = (window as unknown as { electronAPI?: { session?: ElectronSessionAPI } }).electronAPI
-    api?.session?.stats?.()
-      .then((s) => { if (s) setStats(s) })
+    window.electronAPI?.session?.stats?.()
+      .then((s: SessionStats) => { if (s) setStats(s) })
       .catch(console.error)
   }, [])
 

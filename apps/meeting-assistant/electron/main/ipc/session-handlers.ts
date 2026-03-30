@@ -18,13 +18,42 @@ import {
   getNotesCount,
 } from "../services/database-queries";
 import { saveDatabase } from "../services/database";
+import type { Session as DbSession } from "../services/database-types";
+
+/** Renderer-side camelCase Session shape (mirrors src/types/models.ts). */
+interface RendererSession {
+  id: string;
+  title: string;
+  startedAt: number;
+  endedAt: number | null;
+  status: "recording" | "processing" | "completed";
+  meetingId: string | null;
+  audioPath: string | null;
+  transcriptPath: string | null;
+}
+
+/**
+ * Map a snake_case DB Session to the camelCase Session shape expected by the renderer.
+ */
+function mapDbSession(s: DbSession): RendererSession {
+  return {
+    id: s.id,
+    title: s.title ?? "",
+    startedAt: s.started_at,
+    endedAt: s.ended_at,
+    status: s.status as RendererSession["status"],
+    meetingId: s.meeting_id,
+    audioPath: s.audio_path,
+    transcriptPath: s.transcript_path,
+  };
+}
 
 export function registerSessionHandlers(): void {
   createHandler({
     channel: CHANNELS.session.list,
     schema: SessionListInput,
     handler: async () => {
-      return getAllSessions();
+      return getAllSessions().map(mapDbSession);
     },
   });
 
@@ -35,7 +64,8 @@ export function registerSessionHandlers(): void {
       const orchestrator = getOrchestrator();
       if (orchestrator) {
         await orchestrator.startSession();
-        return null;
+        const sessions = getAllSessions();
+        return sessions[0] ? mapDbSession(sessions[0]) : null;
       }
       return getSessionManager().startSession();
     },
@@ -45,7 +75,8 @@ export function registerSessionHandlers(): void {
     channel: CHANNELS.session.get,
     schema: SessionGetInput,
     handler: async (input) => {
-      return getSession(input.sessionId);
+      const s = getSession(input.sessionId);
+      return s ? mapDbSession(s) : null;
     },
   });
 
