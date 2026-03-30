@@ -1,22 +1,21 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
-import "./globals.css";
-import { ThemeProvider } from "./components/providers/ThemeProvider";
-import { ToastProvider } from "./components/providers/ToastProvider";
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { ThemeProvider } from './components/providers/ThemeProvider'
+import { ToastProvider } from './components/providers/ToastProvider'
+import { MiniBarContent } from './components/mini-bar/MiniBarContent'
+import './globals.css'
 
-function MiniBar() {
-  return (
-    <div className="flex items-center justify-center h-full w-full bg-sidebar text-sidebar-foreground text-sm px-3 py-2 rounded-lg">
-      <span>Meeting Assistant</span>
-    </div>
-  );
-}
+import { initSessionStore, initTranscriptStore } from './stores'
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
+const cleanups = [initSessionStore(), initTranscriptStore()]
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
     <ThemeProvider>
+      <MiniBarContent />
       <ToastProvider />
-      <MiniBar />
     </ThemeProvider>
-  </React.StrictMode>,
-);
+  </StrictMode>,
+)
+
+window.addEventListener('beforeunload', () => cleanups.forEach((fn) => fn()))

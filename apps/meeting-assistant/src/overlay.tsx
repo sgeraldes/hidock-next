@@ -1,22 +1,19 @@
-import React from "react";
-import ReactDOM from "react-dom/client";
-import "./globals.css";
-import { ThemeProvider } from "./components/providers/ThemeProvider";
-import { ToastProvider } from "./components/providers/ToastProvider";
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { ThemeProvider } from './components/providers/ThemeProvider'
+import { OverlayContent } from './components/overlay/OverlayContent'
+import './globals.css'
 
-function Overlay() {
-  return (
-    <div className="flex items-center justify-center h-full w-full text-foreground text-sm p-4">
-      <span>Overlay</span>
-    </div>
-  );
-}
+import { initTranscriptStore, initSuggestionStore } from './stores'
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
+const cleanups = [initTranscriptStore(), initSuggestionStore()]
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
     <ThemeProvider>
-      <ToastProvider />
-      <Overlay />
+      <OverlayContent />
     </ThemeProvider>
-  </React.StrictMode>,
-);
+  </StrictMode>,
+)
+
+window.addEventListener('beforeunload', () => cleanups.forEach((fn) => fn()))

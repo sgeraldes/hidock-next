@@ -7,6 +7,7 @@ import KnowledgeBase from './pages/KnowledgeBase'
 import Settings from './pages/Settings'
 import { Sidebar } from './components/shell/Sidebar'
 import { Titlebar } from './components/shell/Titlebar'
+import { KeyboardShortcuts } from './components/shell/KeyboardShortcuts'
 import {
   initSessionStore,
   initTranscriptStore,
@@ -51,6 +52,7 @@ function ShellLayout() {
           <Outlet />
         </main>
       </div>
+      <KeyboardShortcuts />
     </div>
   )
 }
