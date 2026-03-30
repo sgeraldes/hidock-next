@@ -15,6 +15,15 @@ import type {
   SettingsCategoryGroup,
 } from "./models";
 
+export interface KbSourceRecord {
+  id: number;
+  path: string;
+  status: 'pending' | 'indexing' | 'indexed' | 'error';
+  chunk_count: number;
+  added_at: number;
+  indexed_at: number | null;
+}
+
 type Unsubscribe = () => void;
 
 export interface ElectronAPI {
@@ -94,8 +103,17 @@ export interface ElectronAPI {
     removeSource: (sourcePath: string) => Promise<null>;
     search: (query: string, topK?: number) => Promise<KnowledgeSearchResult[]>;
     reindex: () => Promise<null>;
+    listSources: () => Promise<KbSourceRecord[]>;
     onIndexProgress: (callback: (data: KnowledgeIndexProgress) => void) => Unsubscribe;
     onIndexComplete: (callback: (data: KnowledgeIndexComplete) => void) => Unsubscribe;
+  };
+
+  dialog: {
+    openFile: (opts?: {
+      title?: string;
+      properties?: string[];
+      filters?: Array<{ name: string; extensions: string[] }>;
+    }) => Promise<string[] | null>;
   };
 }
 

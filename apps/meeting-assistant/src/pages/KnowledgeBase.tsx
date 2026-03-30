@@ -144,7 +144,7 @@ export default function KnowledgeBase() {
 
     setAddingSource(true)
     try {
-      const paths = await (api as unknown as { dialog: { openFile: (opts?: unknown) => Promise<string[] | null> } }).dialog.openFile({
+      const paths = await api.dialog.openFile({
         title: 'Select files or folders for Knowledge Base',
         properties: ['openFile', 'openDirectory', 'multiSelections'],
         filters: [

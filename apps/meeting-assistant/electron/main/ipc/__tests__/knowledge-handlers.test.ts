@@ -211,6 +211,19 @@ describe('Knowledge Handlers', () => {
 
       expect(mockSaveDatabase).toHaveBeenCalled()
     })
+
+    it('returns null when no service is set', async () => {
+      setKnowledgeBaseService(null as unknown as Parameters<typeof setKnowledgeBaseService>[0])
+      const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+      handlers.clear()
+      registerKnowledgeHandlers()
+      const handler = handlers.get(CHANNELS.knowledge.removeSource)
+
+      const result = await handler?.({}, { sourcePath: '/file.txt' })
+
+      expect(result).toBeNull()
+      expect(mockRemoveKbSource).not.toHaveBeenCalled()
+    })
   })
 
   // ── Channel name consistency ──────────────────────────────────────────────

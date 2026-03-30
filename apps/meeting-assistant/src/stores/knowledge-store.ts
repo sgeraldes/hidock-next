@@ -1,15 +1,9 @@
 import { create } from 'zustand'
 import type { KnowledgeSearchResult } from '../types/models'
+import type { KbSourceRecord } from '../types/electron-api'
 import { getElectronAPI } from '../lib/electron-api'
 
-export interface KbSourceRecord {
-  id: number
-  path: string
-  status: 'pending' | 'indexing' | 'indexed' | 'error'
-  chunk_count: number
-  added_at: number
-  indexed_at: number | null
-}
+export type { KbSourceRecord }
 
 interface KnowledgeState {
   searchResults: KnowledgeSearchResult[]
@@ -34,7 +28,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set) => ({
     try {
       const api = getElectronAPI()
       if (!api) return
-      const dbSources = await (api.knowledge as unknown as { listSources: () => Promise<KbSourceRecord[]> }).listSources()
+      const dbSources = await api.knowledge.listSources()
       if (dbSources) {
         set({ sources: dbSources })
       }
@@ -50,7 +44,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set) => ({
       if (!api) return
       await api.knowledge.addSource(path)
       // Refresh sources list from DB after successful add
-      const dbSources = await (api.knowledge as unknown as { listSources: () => Promise<KbSourceRecord[]> }).listSources()
+      const dbSources = await api.knowledge.listSources()
       if (dbSources) {
         set({ sources: dbSources })
       }
@@ -67,7 +61,7 @@ export const useKnowledgeStore = create<KnowledgeState>((set) => ({
       if (!api) return
       await api.knowledge.removeSource(path)
       // Refresh sources list from DB after successful remove
-      const dbSources = await (api.knowledge as unknown as { listSources: () => Promise<KbSourceRecord[]> }).listSources()
+      const dbSources = await api.knowledge.listSources()
       if (dbSources) {
         set({ sources: dbSources })
       }
