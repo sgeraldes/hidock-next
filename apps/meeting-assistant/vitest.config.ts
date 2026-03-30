@@ -7,7 +7,6 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     include: ["**/__tests__/**/*.test.ts", "**/__tests__/**/*.test.tsx"],
-    environmentMatchGlobs: [["electron/**/__tests__/**", "node"]],
     pool: "threads",
     maxWorkers: 4,
     coverage: {
