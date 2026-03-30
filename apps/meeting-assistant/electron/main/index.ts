@@ -7,7 +7,7 @@ import { initializeDatabase } from "./services/database";
 import { getSetting } from "./services/database-settings";
 import { hydrate } from "./services/credential-store";
 import { SENSITIVE_SETTING_KEYS } from "./services/sensitive-keys";
-import { SessionOrchestrator } from "./services/session-orchestrator";
+import { SessionOrchestrator, setOrchestratorInstance } from "./services/session-orchestrator";
 
 /**
  * Load any encrypted credential values from the DB into the in-memory
@@ -44,6 +44,7 @@ app.whenReady().then(async () => {
   // Initialize the session orchestrator (wires all services)
   orchestrator = new SessionOrchestrator();
   await orchestrator.initialize();
+  setOrchestratorInstance(orchestrator);
 
   const mainWindow = createMainWindow();
 

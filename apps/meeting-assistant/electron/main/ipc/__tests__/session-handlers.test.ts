@@ -88,6 +88,16 @@ vi.mock('../../services/database', () => ({
   mapRows: vi.fn(() => []),
 }))
 
+// ── Mock session-orchestrator ─────────────────────────────────────────────
+const mockOrchestratorStartSession = vi.fn(async () => undefined)
+const mockOrchestratorStopSession = vi.fn(async () => null)
+let mockOrchestratorInstance: { startSession: typeof mockOrchestratorStartSession; stopSession: typeof mockOrchestratorStopSession } | null = null
+
+vi.mock('../../services/session-orchestrator', () => ({
+  getOrchestrator: vi.fn(() => mockOrchestratorInstance),
+  setOrchestratorInstance: vi.fn(),
+}))
+
 // ── Mock session-manager ──────────────────────────────────────────────────
 const mockGetCurrentSession = vi.fn(() => null)
 const mockStartSession = vi.fn(() => ({
@@ -149,6 +159,23 @@ describe('Session Handlers', () => {
     expect(result[1].id).toBe('s2')
   })
 
+  it('session:list maps snake_case DB fields to camelCase for renderer', async () => {
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.list)
+
+    const result = await handler?.({}, undefined)
+
+    // Renderer expects camelCase fields
+    expect(result[0].startedAt).toBe(1000)
+    expect(result[0].endedAt).toBe(2000)
+    expect(result[0].meetingId).toBeNull()
+    expect(result[0].audioPath).toBeNull()
+    expect(result[0].transcriptPath).toBeNull()
+    // No snake_case fields should leak through
+    expect(result[0].started_at).toBeUndefined()
+    expect(result[0].ended_at).toBeUndefined()
+  })
+
   it('session:list does NOT rely on session manager current session', async () => {
     // Even if session manager returns a current session, list should use DB
     mockGetCurrentSession.mockReturnValueOnce({
@@ -177,6 +204,19 @@ describe('Session Handlers', () => {
     expect(mockGetSession).toHaveBeenCalledWith('test-id')
     expect(result).toBeDefined()
     expect(result.id).toBe('test-id')
+  })
+
+  it('session:get maps snake_case DB fields to camelCase for renderer', async () => {
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.get)
+
+    const result = await handler?.({}, { sessionId: 'test-id' })
+
+    expect(result.startedAt).toBe(1000)
+    expect(result.endedAt).toBe(2000)
+    expect(result.meetingId).toBeNull()
+    expect(result.started_at).toBeUndefined()
+    expect(result.ended_at).toBeUndefined()
   })
 
   it('session:get returns null when session not found', async () => {
@@ -227,5 +267,85 @@ describe('Session Handlers', () => {
 
     // 1000ms total = 0 rounded minutes
     expect(result.totalRecordingMinutes).toBe(0)
+  })
+
+  // ── Orchestrator routing ────────────────────────────────────────────────
+
+  it('session:create routes through orchestrator when available', async () => {
+    mockOrchestratorInstance = {
+      startSession: mockOrchestratorStartSession,
+      stopSession: mockOrchestratorStopSession,
+    }
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.create)
+
+    await handler?.({}, undefined)
+
+    expect(mockOrchestratorStartSession).toHaveBeenCalled()
+    expect(mockStartSession).not.toHaveBeenCalled()
+
+    // Reset
+    mockOrchestratorInstance = null
+  })
+
+  it('session:create via orchestrator returns the created session (not null)', async () => {
+    mockOrchestratorInstance = {
+      startSession: mockOrchestratorStartSession,
+      stopSession: mockOrchestratorStopSession,
+    }
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.create)
+
+    const result = await handler?.({}, undefined)
+
+    // Must not return null — renderer depends on the session object
+    expect(result).not.toBeNull()
+    expect(result).toBeDefined()
+    expect(result.id).toBe('s1') // first session from getAllSessions mock
+    // Must be camelCase
+    expect(result.startedAt).toBeDefined()
+    expect(result.started_at).toBeUndefined()
+
+    // Reset
+    mockOrchestratorInstance = null
+  })
+
+  it('session:create falls back to session manager when orchestrator is null', async () => {
+    mockOrchestratorInstance = null
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.create)
+
+    await handler?.({}, undefined)
+
+    expect(mockOrchestratorStartSession).not.toHaveBeenCalled()
+    expect(mockStartSession).toHaveBeenCalled()
+  })
+
+  it('session:end routes through orchestrator when available', async () => {
+    mockOrchestratorInstance = {
+      startSession: mockOrchestratorStartSession,
+      stopSession: mockOrchestratorStopSession,
+    }
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.end)
+
+    await handler?.({}, { sessionId: 's1' })
+
+    expect(mockOrchestratorStopSession).toHaveBeenCalled()
+    expect(mockEndSession).not.toHaveBeenCalled()
+
+    // Reset
+    mockOrchestratorInstance = null
+  })
+
+  it('session:end falls back to session manager when orchestrator is null', async () => {
+    mockOrchestratorInstance = null
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.end)
+
+    await handler?.({}, { sessionId: 's1' })
+
+    expect(mockOrchestratorStopSession).not.toHaveBeenCalled()
+    expect(mockEndSession).toHaveBeenCalled()
   })
 })

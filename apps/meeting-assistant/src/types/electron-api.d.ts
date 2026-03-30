@@ -45,6 +45,7 @@ export interface ElectronAPI {
     end: (sessionId: string) => Promise<Session | null>;
     delete: (sessionId: string) => Promise<null>;
     linkMeeting: (sessionId: string, meetingId: string) => Promise<Session | null>;
+    stats: () => Promise<{ totalSessions: number; totalRecordingMinutes: number; notesCount: number }>;
     onCreated: (callback: (data: Session) => void) => Unsubscribe;
     onUpdated: (callback: (data: Session) => void) => Unsubscribe;
     onDeleted: (callback: (data: { sessionId: string }) => void) => Unsubscribe;

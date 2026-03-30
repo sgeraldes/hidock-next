@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Mic, MicOff, Camera, Square, LayoutDashboard } from 'lucide-react'
+import { Mic, MicOff, Camera, Square, LayoutDashboard, Clock, ChevronRight } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { useAppStore } from '../stores/app-store'
 import { useSessionStore } from '../stores/session-store'
 import { useTranscriptStore } from '../stores/transcript-store'
 import { useSuggestionStore } from '../stores/suggestion-store'
 import { useScreenshotStore } from '../stores/screenshot-store'
+import type { Session } from '../types/models'
 import { useActiveSession } from '../hooks/use-active-session'
 import { useRecordingTimer } from '../hooks/use-recording-timer'
 import { Button } from '../components/ui/button'
@@ -18,10 +20,6 @@ type SessionStats = {
   totalSessions: number
   totalRecordingMinutes: number
   notesCount: number
-}
-
-type ElectronSessionAPI = {
-  stats?: () => Promise<SessionStats>
 }
 
 // ── Quick-stat metric card ────────────────────────────────────────────────────
@@ -64,14 +62,31 @@ function formatTotalDuration(sessions: { startedAt: number; endedAt: number | nu
 // ── Welcome State ─────────────────────────────────────────────────────────────
 
 interface WelcomeStateProps {
-  sessions: { startedAt: number; endedAt: number | null }[]
+  sessions: Session[]
   stats: SessionStats | null
   onStart: () => void
   isCreating: boolean
 }
 
+function formatSessionDate(ts: number): string {
+  const d = new Date(ts)
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function formatSessionDuration(s: Session): string {
+  if (!s.endedAt) return 'In progress'
+  const ms = s.endedAt - s.startedAt
+  const secs = Math.floor(ms / 1000)
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+
 function WelcomeState({ sessions, stats, onStart, isCreating }: WelcomeStateProps) {
+  const navigate = useNavigate()
   const completedSessions = sessions.filter((s) => s.endedAt !== null)
+  const recentSessions = sessions.slice(0, 5)
 
   return (
     <div className="flex flex-col items-center justify-center flex-1 gap-8 min-h-0 py-12">
@@ -102,6 +117,41 @@ function WelcomeState({ sessions, stats, onStart, isCreating }: WelcomeStateProp
           {stats && stats.notesCount > 0 && (
             <MetricCard label="Notes" value={stats.notesCount} />
           )}
+        </div>
+      )}
+
+      {/* Recent sessions */}
+      {recentSessions.length > 0 && (
+        <div className="w-full max-w-sm">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[11px] font-medium font-sans uppercase tracking-wider text-muted-foreground">
+              Recent Sessions
+            </span>
+            <button
+              onClick={() => navigate('/sessions')}
+              className="flex items-center gap-0.5 text-[11px] text-primary hover:text-primary/80 transition-colors"
+            >
+              View all
+              <ChevronRight className="w-3 h-3" />
+            </button>
+          </div>
+          <div className="flex flex-col gap-1">
+            {recentSessions.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => navigate('/sessions')}
+                className="flex items-center gap-3 px-3 py-2 rounded-lg bg-card border border-border hover:bg-accent transition-colors text-left w-full"
+              >
+                <Clock className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                <span className="flex-1 truncate text-sm text-foreground">
+                  {s.title || `Session ${formatSessionDate(s.startedAt)}`}
+                </span>
+                <span className="text-[11px] text-muted-foreground shrink-0 tabular-nums">
+                  {formatSessionDuration(s)}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -209,9 +259,8 @@ export default function Dashboard() {
 
   // Fetch stats on mount
   useEffect(() => {
-    const api = (window as unknown as { electronAPI?: { session?: ElectronSessionAPI } }).electronAPI
-    api?.session?.stats?.()
-      .then((s) => { if (s) setStats(s) })
+    window.electronAPI?.session?.stats?.()
+      .then((s: SessionStats) => { if (s) setStats(s) })
       .catch(console.error)
   }, [])
 
