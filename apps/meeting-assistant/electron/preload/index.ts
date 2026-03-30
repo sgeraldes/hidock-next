@@ -165,6 +165,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
     search: (query: string, topK?: number) =>
       ipcRenderer.invoke("kb:search", { query, topK }),
     reindex: () => ipcRenderer.invoke("kb:reindex"),
+    listSources: () => ipcRenderer.invoke("kb:listSources"),
     onIndexProgress: (callback: (data: unknown) => void): Unsubscribe => {
       const handler = (_: unknown, data: unknown) => callback(data);
       ipcRenderer.on("kb:indexProgress", handler);
