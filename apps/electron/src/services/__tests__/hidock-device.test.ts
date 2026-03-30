@@ -1402,7 +1402,8 @@ describe('HiDockDeviceService - Auto-Connect Configuration', () => {
     const service = new HiDockDeviceService()
     const serviceAny = service as any
 
-    expect(serviceAny.autoConnectEnabled).toBe(true)
+    // BUG-001 fix: autoConnectEnabled initializes to false, set to true after config loads
+    expect(serviceAny.autoConnectEnabled).toBe(false)
   })
 
   it('should track user initiated disconnect', () => {

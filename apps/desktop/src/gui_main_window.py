@@ -37,10 +37,6 @@ from tkinter import messagebox, ttk  # Removed filedialog - not used
 
 import customtkinter as ctk
 import numpy as np
-
-# import usb.core  # Commented out - not used in current implementation
-from PIL import Image, ImageTk, UnidentifiedImageError
-
 from async_calendar_mixin import AsyncCalendarMixin
 from audio_metadata_mixin import AudioMetadataMixin
 from audio_player_enhanced import EnhancedAudioPlayer
@@ -65,6 +61,9 @@ from gui_actions_file import FileActionsMixin
 from gui_auxiliary import AuxiliaryMixin
 from gui_event_handlers import EventHandlersMixin
 from gui_treeview import TreeViewMixin
+
+# import usb.core  # Commented out - not used in current implementation
+from PIL import Image, ImageTk, UnidentifiedImageError
 from status_filter_widget import StatusFilterWidget
 from toast_notification import ToastManager
 

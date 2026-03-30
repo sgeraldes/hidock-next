@@ -15,25 +15,20 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
-import pytest
-
 
 @contextmanager
 def mock_all_messageboxes():
     """Context manager to mock all messagebox calls to prevent tkinter issues in tests."""
-    with patch("tkinter.messagebox.showinfo") as mock_info, patch(
-        "tkinter.messagebox.showwarning"
-    ) as mock_warning, patch("tkinter.messagebox.showerror") as mock_error, patch(
-        "tkinter.messagebox.askyesno"
-    ) as mock_askyesno, patch(
-        "gui_actions_file.messagebox.showinfo"
-    ) as mock_gui_info, patch(
-        "gui_actions_file.messagebox.showwarning"
-    ) as mock_gui_warning, patch(
-        "gui_actions_file.messagebox.showerror"
-    ) as mock_gui_error, patch(
-        "gui_actions_file.messagebox.askyesno"
-    ) as mock_gui_askyesno:
+    with (
+        patch("tkinter.messagebox.showinfo") as mock_info,
+        patch("tkinter.messagebox.showwarning") as mock_warning,
+        patch("tkinter.messagebox.showerror") as mock_error,
+        patch("tkinter.messagebox.askyesno") as mock_askyesno,
+        patch("gui_actions_file.messagebox.showinfo") as mock_gui_info,
+        patch("gui_actions_file.messagebox.showwarning") as mock_gui_warning,
+        patch("gui_actions_file.messagebox.showerror") as mock_gui_error,
+        patch("gui_actions_file.messagebox.askyesno") as mock_gui_askyesno,
+    ):
         mock_askyesno.return_value = True  # Default to confirming actions
         mock_gui_askyesno.return_value = True  # Default to confirming actions
         yield {
@@ -77,9 +72,11 @@ class TestOpenFileLocally(unittest.TestCase):
         test_gui = IsolatedTestGUI()
 
         # Mock file exists and os.startfile
-        with patch("os.path.exists", return_value=True), patch("sys.platform", "win32"), patch(
-            "os.startfile"
-        ) as mock_startfile:
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("sys.platform", "win32"),
+            patch("os.startfile") as mock_startfile,
+        ):
             test_gui._open_file_locally("test_file.wav")
             mock_startfile.assert_called_once_with("/path/to/test_file.wav")
 
@@ -117,16 +114,20 @@ class TestOpenFileLocally(unittest.TestCase):
         test_gui = IsolatedTestGUI()
 
         # Test macOS
-        with patch("os.path.exists", return_value=True), patch("sys.platform", "darwin"), patch(
-            "subprocess.call"
-        ) as mock_call:
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("sys.platform", "darwin"),
+            patch("subprocess.call") as mock_call,
+        ):
             test_gui._open_file_locally("test_file.wav")
             mock_call.assert_called_once_with(["open", "/path/to/test_file.wav"])
 
         # Test Linux
-        with patch("os.path.exists", return_value=True), patch("sys.platform", "linux"), patch(
-            "subprocess.call"
-        ) as mock_call:
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("sys.platform", "linux"),
+            patch("subprocess.call") as mock_call,
+        ):
             test_gui._open_file_locally("test_file.wav")
             mock_call.assert_called_once_with(["xdg-open", "/path/to/test_file.wav"])
 
@@ -258,14 +259,14 @@ class TestDeleteFunctionality(unittest.TestCase):
         test_gui.file_operations_manager.is_file_operation_active.return_value = False
 
         # Mock file exists and user confirms
-        with patch("os.path.exists", return_value=True), patch("os.chmod"), patch(
-            "os.remove"
-        ) as mock_remove, mock_all_messageboxes() as mbox, patch.object(
-            test_gui, "_is_file_locked", return_value=False
-        ), patch.object(
-            test_gui, "_is_file_in_transcription", return_value=False
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("os.chmod"),
+            patch("os.remove") as mock_remove,
+            mock_all_messageboxes() as mbox,
+            patch.object(test_gui, "_is_file_locked", return_value=False),
+            patch.object(test_gui, "_is_file_in_transcription", return_value=False),
         ):
-
             test_gui._delete_local_copy(["test.wav"])
 
             # Verify file was removed
@@ -313,15 +314,18 @@ class TestDeleteFunctionality(unittest.TestCase):
         test_gui = IsolatedTestGUI()
 
         # Mock file exists and user confirms
-        with patch("os.path.exists", return_value=True), patch(
-            "os.remove",
-            side_effect=PermissionError(
-                "[WinError 32] The process cannot access the file because it is being used by another process"
+        with (
+            patch("os.path.exists", return_value=True),
+            patch(
+                "os.remove",
+                side_effect=PermissionError(
+                    "[WinError 32] The process cannot access the file because it is being used by another process"
+                ),
             ),
-        ), patch.object(messagebox, "askyesno", return_value=True), patch.object(messagebox, "showerror"), patch.object(
-            messagebox, "showwarning"
-        ) as mock_warning:
-
+            patch.object(messagebox, "askyesno", return_value=True),
+            patch.object(messagebox, "showerror"),
+            patch.object(messagebox, "showwarning") as mock_warning,
+        ):
             test_gui._delete_local_copy(["locked_file.wav"])
 
             # Verify warning message was shown for locked files
@@ -363,10 +367,11 @@ class TestDeleteFunctionality(unittest.TestCase):
         test_gui.file_operations_manager.is_file_operation_active.return_value = False
 
         # Mock messagebox to auto-confirm deletion
-        with mock_all_messageboxes() as mbox, patch.object(
-            test_gui, "_is_file_locked", return_value=False
-        ), patch.object(test_gui, "_is_file_in_transcription", return_value=False):
-
+        with (
+            mock_all_messageboxes() as mbox,
+            patch.object(test_gui, "_is_file_locked", return_value=False),
+            patch.object(test_gui, "_is_file_in_transcription", return_value=False),
+        ):
             mbox["gui_askyesno"].return_value = True
             test_gui._delete_local_copy([filename])
 
@@ -413,10 +418,11 @@ class TestDeleteFunctionality(unittest.TestCase):
         test_gui.file_operations_manager.is_file_operation_active.return_value = False
 
         # Mock messagebox to auto-confirm deletion
-        with mock_all_messageboxes() as mbox, patch.object(
-            test_gui, "_is_file_locked", return_value=False
-        ), patch.object(test_gui, "_is_file_in_transcription", return_value=False):
-
+        with (
+            mock_all_messageboxes() as mbox,
+            patch.object(test_gui, "_is_file_locked", return_value=False),
+            patch.object(test_gui, "_is_file_in_transcription", return_value=False),
+        ):
             mbox["askyesno"].return_value = True
             test_gui._delete_local_copy([filename])
 
@@ -463,7 +469,6 @@ class TestDeleteFunctionality(unittest.TestCase):
 
         # Mock messagebox to auto-confirm deletion
         with patch("os.path.exists", return_value=True), patch("os.remove"), mock_all_messageboxes() as mbox:
-
             mbox["askyesno"].return_value = True
             test_gui._delete_local_copy([filename])
 
@@ -513,10 +518,11 @@ class TestDeleteFunctionality(unittest.TestCase):
         test_gui.file_operations_manager.is_file_operation_active.return_value = False
 
         # Mock messagebox to auto-confirm deletion
-        with mock_all_messageboxes() as mbox, patch.object(
-            test_gui, "_is_file_locked", return_value=False
-        ), patch.object(test_gui, "_is_file_in_transcription", return_value=False):
-
+        with (
+            mock_all_messageboxes() as mbox,
+            patch.object(test_gui, "_is_file_locked", return_value=False),
+            patch.object(test_gui, "_is_file_in_transcription", return_value=False),
+        ):
             mbox["askyesno"].return_value = True
             test_gui._delete_local_copy([filename])
 
@@ -560,12 +566,14 @@ class TestDeleteFunctionality(unittest.TestCase):
         test_gui.file_operations_manager.is_file_operation_active.return_value = False
 
         # Mock messagebox to auto-confirm deletion
-        with patch("os.path.exists", return_value=True), patch("os.chmod"), patch(
-            "os.remove"
-        ), mock_all_messageboxes() as mbox, patch.object(test_gui, "_is_file_locked", return_value=False), patch.object(
-            test_gui, "_is_file_in_transcription", return_value=False
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("os.chmod"),
+            patch("os.remove"),
+            mock_all_messageboxes() as mbox,
+            patch.object(test_gui, "_is_file_locked", return_value=False),
+            patch.object(test_gui, "_is_file_in_transcription", return_value=False),
         ):
-
             mbox["askyesno"].return_value = True
             test_gui._delete_local_copy([filename])
 
@@ -582,7 +590,6 @@ class TestDeleteFunctionality(unittest.TestCase):
 
     def test_file_lock_detection_comprehensive(self):
         """Test comprehensive file lock detection including edge cases."""
-        import stat
         import tempfile
 
         from gui_actions_file import FileActionsMixin
@@ -659,12 +666,14 @@ class TestDeleteFunctionality(unittest.TestCase):
         test_gui.file_operations_manager.is_file_operation_active.return_value = False
 
         # Mock messagebox to auto-confirm deletion
-        with patch("os.path.exists", return_value=True), patch("os.chmod"), patch(
-            "os.remove"
-        ), mock_all_messageboxes() as mbox, patch.object(test_gui, "_is_file_locked", return_value=False), patch.object(
-            test_gui, "_is_file_in_transcription", return_value=False
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("os.chmod"),
+            patch("os.remove"),
+            mock_all_messageboxes() as mbox,
+            patch.object(test_gui, "_is_file_locked", return_value=False),
+            patch.object(test_gui, "_is_file_in_transcription", return_value=False),
         ):
-
             mbox["askyesno"].return_value = True
             test_gui._delete_local_copy(filenames)
 
@@ -738,12 +747,12 @@ class TestDeleteFunctionality(unittest.TestCase):
                 return original_remove(path)
 
         # Mock messagebox to auto-confirm deletion
-        with patch.object(messagebox, "askyesno", return_value=True), patch.object(
-            messagebox, "showwarning"
-        ) as mock_warning, patch("os.remove", side_effect=mock_remove), patch.object(
-            test_gui, "_is_file_locked", return_value=False
+        with (
+            patch.object(messagebox, "askyesno", return_value=True),
+            patch.object(messagebox, "showwarning") as mock_warning,
+            patch("os.remove", side_effect=mock_remove),
+            patch.object(test_gui, "_is_file_locked", return_value=False),
         ):
-
             test_gui._delete_local_copy(filenames)
 
             # Verify partial success warning was shown

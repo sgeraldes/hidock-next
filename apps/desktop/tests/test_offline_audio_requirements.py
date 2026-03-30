@@ -13,9 +13,6 @@ Following TDD: Red -> Green -> Refactor
 
 import os
 import tempfile
-from unittest.mock import Mock, patch
-
-import pytest
 
 
 class TestOfflineAudioRequirements:

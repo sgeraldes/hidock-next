@@ -2,13 +2,14 @@
 
 Separated from monolithic `setup.py` to allow reuse by scripts/tests.
 """
+
 from __future__ import annotations
 
 import os
 import platform
 import shutil
-import sys
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -47,10 +48,7 @@ def resolve_desktop_venv_dir() -> Path:
     if tagged.exists():
         return tagged
     if legacy.exists():
-        print(
-            f"⚠️  Using legacy virtual environment at {legacy}. "
-            f"Consider migrating to {tag} (see docs/VENV.md)"
-        )
+        print(f"⚠️  Using legacy virtual environment at {legacy}. " f"Consider migrating to {tag} (see docs/VENV.md)")
         return legacy
     return tagged
 
@@ -102,18 +100,13 @@ def maybe_offer_legacy_migration(auto: Optional[str] = None) -> None:
         return
 
     print("\n🔄 Legacy virtual environment detected: .venv")
-    print(
-        f"You can migrate to the platform-tagged environment '{target_tag}' "
-        "for cleaner multi-OS isolation."
-    )
+    print(f"You can migrate to the platform-tagged environment '{target_tag}' " "for cleaner multi-OS isolation.")
 
     if auto is None:
         auto = os.environ.get("HIDOCK_AUTO_MIGRATE")
     if auto is None:
         try:
-            auto = input(
-                "Migrate now? [c]opy packages / [r]ebuild / [s]kip: "
-            ).strip().lower()
+            auto = input("Migrate now? [c]opy packages / [r]ebuild / [s]kip: ").strip().lower()
         except EOFError:
             auto = "s"
     if auto not in {"c", "r", "s"}:
@@ -121,22 +114,15 @@ def maybe_offer_legacy_migration(auto: Optional[str] = None) -> None:
         return
 
     if auto == "c":
-        print(
-            f"📦 Copying legacy environment to {target_tag} "
-            "(this may take a moment)..."
-        )
+        print(f"📦 Copying legacy environment to {target_tag} " "(this may take a moment)...")
         try:
             shutil.copytree(legacy, tagged)
-            print(
-                "✅ Copy complete. Future commands will use the tagged env."
-            )
+            print("✅ Copy complete. Future commands will use the tagged env.")
         except (OSError, shutil.Error) as e:  # best-effort copy failures
             print(f"❌ Copy failed: {e}. You can retry or choose rebuild later.")
     elif auto == "r":
         print(f"🛠️  Rebuilding environment at {target_tag} ...")
-        result = subprocess.run(
-            [sys.executable, "-m", "venv", target_tag], cwd=base, check=False
-        )
+        result = subprocess.run([sys.executable, "-m", "venv", target_tag], cwd=base, check=False)
         if result.returncode != 0:
             print("❌ Rebuild failed. You can retry later.")
             return
@@ -145,15 +131,8 @@ def maybe_offer_legacy_migration(auto: Optional[str] = None) -> None:
             / ("Scripts" if platform.system() == "Windows" else "bin")
             / ("python.exe" if platform.system() == "Windows" else "python")
         )
-        os.system(
-            f"{py} -m pip install --upgrade pip setuptools wheel >NUL 2>&1"
-        )  # quick bootstrap
+        os.system(f"{py} -m pip install --upgrade pip setuptools wheel >NUL 2>&1")  # quick bootstrap
         os.system(f"{py} -m pip install -e apps/desktop >NUL 2>&1")
-        print(
-            "✅ Rebuild complete. You can remove the old '.venv' when "
-            "satisfied."
-        )
+        print("✅ Rebuild complete. You can remove the old '.venv' when " "satisfied.")
     else:
-        print(
-            "⏭️  Skipping migration for now. You can migrate later manually."
-        )
+        print("⏭️  Skipping migration for now. You can migrate later manually.")

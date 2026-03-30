@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { Search, Plus, Trash2, RefreshCw, FolderOpen, Database } from 'lucide-react'
+import { Search, Trash2, RefreshCw, FolderOpen, Database, FolderPlus } from 'lucide-react'
 import { useKnowledgeStore } from '../stores/knowledge-store'
+import { getElectronAPI } from '../lib/electron-api'
 import { useDebounce } from '../hooks/use-debounce'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
@@ -139,8 +140,7 @@ export default function KnowledgeBase() {
 
   const [query, setQuery] = useState('')
   const [sources, setSources] = useState<string[]>(loadSources)
-  const [newSourcePath, setNewSourcePath] = useState('')
-  const [showAddInput, setShowAddInput] = useState(false)
+  const [addingSource, setAddingSource] = useState(false)
 
   const debouncedQuery = useDebounce(query, 400)
 
@@ -152,14 +152,33 @@ export default function KnowledgeBase() {
   }, [debouncedQuery, search])
 
   async function handleAddSource() {
-    const path = newSourcePath.trim()
-    if (!path) return
-    await addSource(path)
-    const updated = [...sources, path]
-    setSources(updated)
-    saveSources(updated)
-    setNewSourcePath('')
-    setShowAddInput(false)
+    const api = getElectronAPI()
+    if (!api) return
+
+    setAddingSource(true)
+    try {
+      const paths = await (api as unknown as { dialog: { openFile: (opts?: unknown) => Promise<string[] | null> } }).dialog.openFile({
+        title: 'Select files or folders for Knowledge Base',
+        properties: ['openFile', 'openDirectory', 'multiSelections'],
+        filters: [
+          { name: 'Text files', extensions: ['txt', 'md'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      })
+      if (!paths || paths.length === 0) return
+
+      for (const path of paths) {
+        await addSource(path)
+        if (!sources.includes(path)) {
+          sources.push(path)
+        }
+      }
+      const updated = [...sources]
+      setSources(updated)
+      saveSources(updated)
+    } finally {
+      setAddingSource(false)
+    }
   }
 
   async function handleRemoveSource(path: string) {
@@ -232,32 +251,14 @@ export default function KnowledgeBase() {
               <Button
                 variant="primary"
                 size="sm"
-                onClick={() => setShowAddInput((v) => !v)}
+                onClick={handleAddSource}
+                disabled={addingSource}
               >
-                <Plus className="w-3.5 h-3.5" />
-                Add Source
+                <FolderPlus className="w-3.5 h-3.5" />
+                {addingSource ? 'Adding…' : 'Add Source'}
               </Button>
             </div>
           </div>
-
-          {/* Add source input */}
-          {showAddInput && (
-            <div className="flex gap-2">
-              <Input
-                placeholder="Enter file or folder path…"
-                value={newSourcePath}
-                onChange={(e) => setNewSourcePath(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleAddSource() }}
-                autoFocus
-              />
-              <Button variant="primary" size="default" onClick={handleAddSource} disabled={!newSourcePath.trim()}>
-                Add
-              </Button>
-              <Button variant="ghost" size="default" onClick={() => { setShowAddInput(false); setNewSourcePath('') }}>
-                Cancel
-              </Button>
-            </div>
-          )}
 
           {/* Sources list */}
           {sources.length > 0 ? (
@@ -267,7 +268,7 @@ export default function KnowledgeBase() {
               ))}
             </div>
           ) : (
-            !showAddInput && <EmptyState />
+            <EmptyState />
           )}
         </div>
 

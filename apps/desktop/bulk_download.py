@@ -9,13 +9,13 @@ Usage:
     python bulk_download.py [--output-dir PATH] [--retry-count N]
 """
 
+import argparse
 import os
+import platform
 import sys
 import time
-import argparse
-import platform
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # Add src directory to path for imports
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -23,8 +23,8 @@ src_dir = os.path.join(script_dir, "src")
 sys.path.insert(0, src_dir)
 
 import usb.backend.libusb1
-from hidock_device import HiDockJensen
 from constants import DEFAULT_VENDOR_ID, HIDOCK_PRODUCT_IDS
+from hidock_device import HiDockJensen
 
 
 def init_usb_backend():
@@ -70,13 +70,14 @@ def init_usb_backend():
 
     return backend_instance
 
+
 # Default download directory (same as Electron app)
 DEFAULT_DOWNLOAD_DIR = r"C:\Users\Sebastian\HiDock\recordings"
 
 
 def format_size(bytes_val: int) -> str:
     """Format bytes as human-readable string."""
-    for unit in ['B', 'KB', 'MB', 'GB']:
+    for unit in ["B", "KB", "MB", "GB"]:
         if bytes_val < 1024:
             return f"{bytes_val:.1f} {unit}"
         bytes_val /= 1024
@@ -118,7 +119,8 @@ def download_file(device: HiDockJensen, file_info: dict, output_dir: Path, retry
             last_progress = [0]
 
             # Open file for writing
-            with open(output_path, 'wb') as f:
+            with open(output_path, "wb") as f:
+
                 def data_callback(chunk: bytes):
                     f.write(chunk)
                     bytes_received[0] += len(chunk)
@@ -178,12 +180,13 @@ def download_file(device: HiDockJensen, file_info: dict, output_dir: Path, retry
 
 def main():
     parser = argparse.ArgumentParser(description="Download all recordings from HiDock device")
-    parser.add_argument("--output-dir", "-o", default=DEFAULT_DOWNLOAD_DIR,
-                        help=f"Output directory (default: {DEFAULT_DOWNLOAD_DIR})")
-    parser.add_argument("--retry-count", "-r", type=int, default=3,
-                        help="Number of retries per file (default: 3)")
-    parser.add_argument("--skip-existing", "-s", action="store_true",
-                        help="Skip files that already exist with correct size")
+    parser.add_argument(
+        "--output-dir", "-o", default=DEFAULT_DOWNLOAD_DIR, help=f"Output directory (default: {DEFAULT_DOWNLOAD_DIR})"
+    )
+    parser.add_argument("--retry-count", "-r", type=int, default=3, help="Number of retries per file (default: 3)")
+    parser.add_argument(
+        "--skip-existing", "-s", action="store_true", help="Skip files that already exist with correct size"
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -213,11 +216,7 @@ def main():
     for pid in HIDOCK_PRODUCT_IDS:
         print(f"  Trying PID 0x{pid:04X}...")
         success, error = device.connect(
-            target_interface_number=0,
-            vid=DEFAULT_VENDOR_ID,
-            pid=pid,
-            auto_retry=True,
-            force_reset=False
+            target_interface_number=0, vid=DEFAULT_VENDOR_ID, pid=pid, auto_retry=True, force_reset=False
         )
         if success:
             print(f"  Connected! (PID: 0x{pid:04X})")
@@ -269,7 +268,7 @@ def main():
     print(f"Total recording time: {format_duration(total_duration)}")
 
     # Filter to .wav and .hda files
-    wav_files = [f for f in files if f["name"].lower().endswith(('.wav', '.hda'))]
+    wav_files = [f for f in files if f["name"].lower().endswith((".wav", ".hda"))]
     print(f"Audio files to download: {len(wav_files)}")
 
     # Check what already exists
@@ -312,10 +311,10 @@ def main():
 
         if success:
             if error == "already_exists":
-                print(f"    SKIPPED (already exists)")
+                print("    SKIPPED (already exists)")
                 skipped += 1
             else:
-                print(f"    DONE")
+                print("    DONE")
                 downloaded += 1
         else:
             print(f"    FAILED: {error}")
@@ -338,7 +337,7 @@ def main():
 
         # Write failed files to a log
         failed_log = output_dir / "failed_downloads.txt"
-        with open(failed_log, 'w') as f:
+        with open(failed_log, "w") as f:
             f.write(f"Failed downloads - {datetime.now().isoformat()}\n")
             f.write("-" * 40 + "\n")
             for filename, error in failed:

@@ -151,7 +151,7 @@ class ContaminationAuditor:
             return "\n".join(report)
 
         # Summary
-        report.append(f"📊 SUMMARY:")
+        report.append("📊 SUMMARY:")
         report.append(f"   🔴 Risky files: {len(self.risky_files)}")
         report.append(f"   ✅ Safe files: {len(self.safe_files)}")
         report.append(f"   📝 Total risks found: {sum(len(risks) for risks in self.risks.values())}")

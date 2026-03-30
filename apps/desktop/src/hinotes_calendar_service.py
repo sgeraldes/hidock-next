@@ -40,7 +40,6 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import requests
-
 from config_and_logger import logger
 
 # HiNotes Backend API Configuration

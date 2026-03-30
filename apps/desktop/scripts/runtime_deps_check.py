@@ -8,19 +8,12 @@ import os
 import platform
 import subprocess
 import sys
-from pathlib import Path
 
 
 def run_command(command, check=False):
     """Run a command and return the result."""
     try:
-        result = subprocess.run(
-            command, 
-            shell=True, 
-            check=check, 
-            capture_output=True, 
-            text=True
-        )
+        result = subprocess.run(command, shell=True, check=check, capture_output=True, text=True)
         return result
     except subprocess.CalledProcessError as e:
         return e
@@ -41,12 +34,12 @@ def check_ffmpeg():
 def check_system_dependencies():
     """Check critical system dependencies."""
     missing_deps = []
-    
+
     # Check FFmpeg
     ffmpeg_available, ffmpeg_path = check_ffmpeg()
     if not ffmpeg_available:
         missing_deps.append("ffmpeg")
-    
+
     return missing_deps, ffmpeg_available
 
 
@@ -94,7 +87,7 @@ def check_flatpak_available():
 def try_install_ffmpeg_without_sudo():
     """Try to install FFmpeg without sudo privileges."""
     print("\n🚀 Attempting to install FFmpeg without admin rights...")
-    
+
     # Try snap first
     if check_snap_available():
         print("\n📦 Trying snap installation...")
@@ -104,7 +97,7 @@ def try_install_ffmpeg_without_sudo():
             return True
         else:
             print("❌ Snap installation failed (may require admin rights)")
-    
+
     # Try flatpak
     if check_flatpak_available():
         print("\n🏠 Trying Flatpak installation...")
@@ -116,7 +109,7 @@ def try_install_ffmpeg_without_sudo():
             return True
         else:
             print("❌ Flatpak installation failed")
-    
+
     print("\n⚠️  Automatic installation not possible without admin rights.")
     return False
 
@@ -125,25 +118,25 @@ def handle_missing_dependencies(missing_deps):
     """Handle missing dependencies interactively."""
     if not missing_deps:
         return True
-    
+
     print("\n⚠️  Missing Dependencies Detected")
     print("=" * 40)
     print("The following required dependencies are missing:")
     for dep in missing_deps:
         print(f"   • {dep}")
-    
+
     if "ffmpeg" in missing_deps:
         print("\n🎵 FFmpeg is required for:")
         print("   • Audio format conversion")
-        print("   • Audio processing features") 
+        print("   • Audio processing features")
         print("   • Importing various audio formats")
-        
+
         print("\n📝 What would you like to do?")
         print("1. 🚀 Try automatic installation (no admin rights)")
         print("2. 📋 Show manual installation options")
         print("3. ⏭️  Continue anyway (limited functionality)")
         print("4. ❌ Exit application")
-        
+
         while True:
             try:
                 choice = input("\nChoose an option (1-4): ").strip()
@@ -153,7 +146,7 @@ def handle_missing_dependencies(missing_deps):
             except KeyboardInterrupt:
                 print("\nExiting...")
                 return False
-        
+
         if choice == "1":
             success = try_install_ffmpeg_without_sudo()
             if success:
@@ -169,20 +162,20 @@ def handle_missing_dependencies(missing_deps):
             else:
                 suggest_ffmpeg_install_without_sudo()
                 return False
-        
+
         elif choice == "2":
             suggest_ffmpeg_install_without_sudo()
             return False
-        
+
         elif choice == "3":
             print("\n⚠️  Continuing with limited functionality...")
             print("   Audio conversion features will be disabled")
             return True
-        
+
         elif choice == "4":
             print("Exiting application...")
             return False
-    
+
     return True
 
 
@@ -190,9 +183,9 @@ def check_and_handle_runtime_deps():
     """Main function to check and handle runtime dependencies."""
     if platform.system() != "Linux":
         return True  # Only handle Linux for now
-    
+
     missing_deps, ffmpeg_available = check_system_dependencies()
-    
+
     if missing_deps:
         return handle_missing_dependencies(missing_deps)
     else:

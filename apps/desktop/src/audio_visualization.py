@@ -20,13 +20,12 @@ import matplotlib.animation as animation
 
 # import matplotlib.pyplot as plt  # Commented out - not used, using Figure directly
 import numpy as np
+from audio_player_enhanced import AudioProcessor, PlaybackPosition
+from config_and_logger import logger
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from scipy import signal
 from scipy.fft import fftfreq
-
-from audio_player_enhanced import AudioProcessor, PlaybackPosition
-from config_and_logger import logger
 
 
 class WaveformVisualizer:

@@ -75,6 +75,7 @@ interface LibraryActions {
   clearFilters: () => void
 
   // Selection
+  selectSingle: (id: string) => void
   toggleSelection: (id: string) => void
   selectAll: (ids: string[]) => void
   selectRange: (ids: string[], startId: string, endId: string) => void
@@ -161,6 +162,9 @@ export const useLibraryStore = create<LibraryStore>()(
         }),
 
       // Selection
+      selectSingle: (id) =>
+        set({ selectedIds: new Set([id]), selectedSourceId: id }),
+
       toggleSelection: (id) =>
         set((state) => {
           const newSelected = new Set(state.selectedIds)

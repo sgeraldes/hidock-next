@@ -6,34 +6,10 @@ targeting specific uncovered lines and critical functionality.
 """
 
 import struct
-import threading
-import time
-from datetime import datetime
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
-import usb.core
-import usb.util
-
-from constants import (
-    CMD_DELETE_FILE,
-    CMD_FORMAT_CARD,
-    CMD_GET_CARD_INFO,
-    CMD_GET_DEVICE_INFO,
-    CMD_GET_DEVICE_TIME,
-    CMD_GET_FILE_BLOCK,
-    CMD_GET_FILE_COUNT,
-    CMD_GET_FILE_LIST,
-    CMD_GET_RECORDING_FILE,
-    CMD_GET_SETTINGS,
-    CMD_SET_DEVICE_TIME,
-    CMD_SET_SETTINGS,
-    CMD_TRANSFER_FILE,
-    DEFAULT_PRODUCT_ID,
-    DEFAULT_VENDOR_ID,
-    EP_IN_ADDR,
-    EP_OUT_ADDR,
-)
+from constants import CMD_DELETE_FILE, CMD_GET_CARD_INFO, CMD_GET_DEVICE_INFO, CMD_GET_FILE_LIST, CMD_TRANSFER_FILE
 from hidock_device import HiDockJensen
 
 

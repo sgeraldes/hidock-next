@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8-sig -*-
 """
 Command 10 Systematic Discovery Script
@@ -19,15 +19,15 @@ Version: 1.0.0
 Date: 2025-08-31
 """
 
-import sys
+import argparse
 import os
 import time
-import argparse
 from datetime import datetime
+
+from parameter_generators import ParameterGenerator
 
 # Import our research modules
 from safe_testing_framework import SafeCommandTester
-from parameter_generators import ParameterGenerator
 
 
 def print_banner():

@@ -1,4 +1,4 @@
-export type SessionStatus = "recording" | "processing" | "completed";
+export type SessionStatus = "recording" | "processing" | "completed" | "interrupted";
 export type TranscriptSource = "mic" | "system";
 export type SettingType = "string" | "number" | "boolean" | "json";
 

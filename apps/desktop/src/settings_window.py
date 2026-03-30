@@ -1644,7 +1644,6 @@ class SettingsDialog(ctk.CTkToplevel):
     def _on_appearance_change(self, value):
         """Handle appearance mode change with immediate save and apply."""
         import customtkinter as ctk
-
         from config_and_logger import update_config_settings
 
         # Save current window state
@@ -1683,7 +1682,6 @@ class SettingsDialog(ctk.CTkToplevel):
     def _on_theme_change(self, value):
         """Handle color theme change with immediate save and apply."""
         import customtkinter as ctk
-
         from config_and_logger import update_config_settings
 
         # Save current window state

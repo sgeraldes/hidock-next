@@ -1,12 +1,15 @@
 import { watch, existsSync, statSync, readdirSync } from 'fs'
 import { join, extname, basename } from 'path'
+import { randomUUID } from 'crypto'
 import { getRecordingsPath } from './file-storage'
 import {
   getRecordingById,
+  getRecordingByFilename,
   insertRecording,
   getMeetings,
   linkRecordingToMeeting,
   addToQueue,
+  updateRecordingLifecycle,
   Recording
 } from './database'
 import { BrowserWindow } from 'electron'
@@ -89,10 +92,13 @@ async function scanExistingRecordings(): Promise<void> {
 
   for (const file of audioFiles) {
     const filePath = join(recordingsPath, file)
-    const recordingId = generateRecordingId(filePath)
 
-    // Check if already in database
-    const existing = getRecordingById(recordingId)
+    // Check if already in database by filename (or .hda/.wav variant)
+    let existing = getRecordingByFilename(file)
+    if (!existing) {
+      const hdaVariant = file.replace(/\.mp3$/i, '.hda')
+      if (hdaVariant !== file) existing = getRecordingByFilename(hdaVariant)
+    }
     if (!existing) {
       filesToProcess.push(filePath)
     }
@@ -121,50 +127,43 @@ async function scanExistingRecordings(): Promise<void> {
   console.log(`[RecordingWatcher] Finished scanning ${filesToProcess.length} recordings`)
 }
 
-function generateRecordingId(filePath: string): string {
-  const filename = basename(filePath)
-  // Use filename as base for ID (removes path variations)
-  return `rec_${filename.replace(/[^a-zA-Z0-9]/g, '_')}`
+function generateRecordingId(_filePath: string): string {
+  return randomUUID()
 }
 
 async function processNewRecording(filePath: string): Promise<void> {
   try {
     const filename = basename(filePath)
     const stats = statSync(filePath)
-    const recordingId = generateRecordingId(filePath)
 
-    // Check if already in database (by ID or filename)
-    // This prevents duplicates when files are downloaded (which have UUIDs) vs external files
-    let existing = getRecordingById(recordingId)
-    
-    // If not found by generated ID, check by filename (how device files are stored)
+    let existing = getRecordingByFilename(filename)
+
+    // Also check .hda variant — device records use .hda, downloads normalize to .mp3
     if (!existing) {
-      // Import here to avoid circular dependencies if possible, or use the imported one
-      const { getRecordingByFilename, updateRecordingLifecycle } = await import('./database')
-      existing = getRecordingByFilename(filename)
-      
-      // If found by filename, it might be a device-only record becoming local
-      if (existing) {
-        // Individual recording logs disabled for performance
-        
-        // If it doesn't have a file path yet, update it
-        if (!existing.file_path) {
-          updateRecordingLifecycle(existing.id, {
-            file_path: filePath,
-            on_local: 1,
-            // If it was device-only, now it's both. If it was deleted/unknown, now local-only.
-            location: existing.on_device ? 'both' : 'local-only'
-          })
-          // Individual recording logs disabled for performance
-        }
-        return
+      const hdaVariant = filename.replace(/\.mp3$/i, '.hda')
+      if (hdaVariant !== filename) {
+        existing = getRecordingByFilename(hdaVariant)
       }
-    } else {
-      // Individual recording logs disabled for performance
-      return
     }
 
-    // Individual recording logs disabled for performance
+    // Also check .wav variant (legacy format)
+    if (!existing) {
+      const wavVariant = filename.replace(/\.(mp3|hda)$/i, '.wav')
+      if (wavVariant !== filename) {
+        existing = getRecordingByFilename(wavVariant)
+      }
+    }
+
+    if (existing) {
+      if (!existing.file_path) {
+        updateRecordingLifecycle(existing.id, {
+          file_path: filePath,
+          on_local: 1,
+          location: existing.on_device ? 'both' : 'local-only'
+        })
+      }
+      return
+    }
 
     // Parse date from filename if possible (format: YYYY-MM-DD_HHMM-description.ext)
     const dateMatch = filename.match(/^(\d{4}-\d{2}-\d{2})_(\d{4})/)
@@ -176,53 +175,45 @@ async function processNewRecording(filePath: string): Promise<void> {
       const minutes = time.slice(2, 4)
       dateRecorded = `${date}T${hours}:${minutes}:00`
     } else {
-      // Use file modification time
       dateRecorded = stats.mtime.toISOString()
     }
 
-    // Insert recording into database
+    const recordingId = generateRecordingId(filePath)
+
     const recording: Omit<Recording, 'created_at'> = {
       id: recordingId,
       filename: filename,
       original_filename: filename,
       file_path: filePath,
       file_size: stats.size,
-      duration_seconds: undefined, // Will be updated after processing
+      duration_seconds: undefined,
       date_recorded: dateRecorded,
       meeting_id: undefined,
       correlation_confidence: undefined,
       correlation_method: undefined,
-      status: 'pending',
+      status: 'none',
       location: 'local-only',
       on_device: 0,
       on_local: 1,
-      transcription_status: 'pending',
+      transcription_status: 'none',
       source: 'hidock',
       is_imported: 0
     }
 
     insertRecording(recording)
-    // Individual recording logs disabled for performance
 
-    // Try to correlate with a meeting
     correlateWithMeeting(recordingId, new Date(dateRecorded))
 
-    // Only add to transcription queue if auto-transcribe is enabled
     const config = getConfig()
     if (config.transcription.autoTranscribe) {
       addToQueue(recordingId)
-      // spec-005: Start processor after adding to queue
-      // Use dynamic import to avoid circular dependency
       import('./transcription').then(({ processQueueManually }) => {
         processQueueManually()
       }).catch(err => {
         console.error('[RecordingWatcher] Failed to import transcription service:', err)
       })
-    } else {
-      // Individual recording logs disabled for performance
     }
 
-    // Notify renderer
     notifyRenderer('recording:new', { recording })
   } catch (error) {
     console.error('Error processing recording:', error)

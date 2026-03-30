@@ -2,7 +2,6 @@ import { embed as aiEmbed } from 'ai'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock'
-import { createOllama } from 'ollama-ai-provider'
 import type { EmbeddingProviderConfig, EmbeddingResult } from './types.js'
 
 export async function embed(text: string, config: EmbeddingProviderConfig): Promise<EmbeddingResult> {
@@ -29,12 +28,25 @@ export async function embed(text: string, config: EmbeddingProviderConfig): Prom
       return { embedding: result.embedding, usage: { tokens: result.usage.tokens } }
     }
     case 'ollama': {
-      const ollama = createOllama({ baseURL: config.baseURL ?? 'http://localhost:11434/api' })
-      // ollama-ai-provider returns EmbeddingModelV1 which predates EmbeddingModelV2/V3;
-      // cast to maintain compatibility (same pattern as createOllamaModel in providers/ollama.ts)
-      const model = ollama.embedding(config.model) as unknown as Parameters<typeof aiEmbed>[0]['model']
-      const result = await aiEmbed({ model, value: text })
-      return { embedding: result.embedding, usage: { tokens: result.usage.tokens } }
+      // ollama-ai-provider uses EmbeddingModelV1 which AI SDK v6 rejects at runtime.
+      // Call Ollama REST API directly to avoid the version mismatch.
+      const baseURL = (config.baseURL ?? 'http://localhost:11434/api').replace(/\/+$/, '')
+      const response = await fetch(`${baseURL}/embed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: config.model, input: text }),
+      })
+      if (!response.ok) {
+        throw new Error(`Ollama embedding request failed: ${response.status} ${response.statusText}`)
+      }
+      const data = await response.json() as { embeddings: number[][]; prompt_eval_count?: number }
+      if (!data.embeddings || data.embeddings.length === 0) {
+        throw new Error('Ollama returned no embeddings')
+      }
+      return {
+        embedding: data.embeddings[0],
+        usage: { tokens: data.prompt_eval_count ?? 0 },
+      }
     }
     default: {
       const exhaustiveCheck: never = config.provider

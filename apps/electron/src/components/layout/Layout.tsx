@@ -205,6 +205,7 @@ export function Layout({ children }: LayoutProps) {
   // Determine device status display
   const isConnected = deviceState.connected
   const isConnecting = connectionStatus.step !== 'idle' && connectionStatus.step !== 'ready' && connectionStatus.step !== 'error'
+  const isScanning = connectionStatus.step === 'counting-files'
   const deviceModel = deviceState.model?.replace('hidock-', '').toUpperCase() || 'Device'
 
   return (
@@ -246,7 +247,9 @@ export function Layout({ children }: LayoutProps) {
                 : 'bg-slate-800/50 border border-slate-700/50 hover:bg-slate-800'
           )}
         >
-          {isConnected ? (
+          {isConnected && isScanning ? (
+            <Loader2 className="h-4 w-4 flex-shrink-0 text-emerald-400 animate-spin" />
+          ) : isConnected ? (
             <CheckCircle2 className="h-4 w-4 flex-shrink-0 text-emerald-400" />
           ) : isConnecting ? (
             <Loader2 className="h-4 w-4 flex-shrink-0 text-amber-400 animate-spin" />
@@ -261,7 +264,12 @@ export function Layout({ children }: LayoutProps) {
               )}>
                 {isConnected ? deviceModel : isConnecting ? 'Connecting...' : 'Disconnected'}
               </span>
-              {isConnected && deviceState.recordingCount > 0 && (
+              {isConnected && isScanning && (
+                <span className="text-[10px] text-amber-400 truncate">
+                  {connectionStatus.message}
+                </span>
+              )}
+              {isConnected && !isScanning && deviceState.recordingCount > 0 && (
                 <span className="text-[10px] text-slate-500">
                   {deviceState.recordingCount} recordings
                 </span>

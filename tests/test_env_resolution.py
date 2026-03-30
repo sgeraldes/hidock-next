@@ -1,8 +1,8 @@
 import importlib
+import shutil
+import sys
 import types
 from pathlib import Path
-import sys
-import shutil
 
 # Dynamically reload env module each test (cleared from sys.modules)
 

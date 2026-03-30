@@ -198,6 +198,9 @@ export class SettingsStore {
    */
   getByCategory(): CategoryGroup[] {
     const categoryOrder: SettingCategory[] = [
+      "ai",
+      "kb",
+      "suggestions",
       "screenshots",
       "calendar",
       "mic",

@@ -17,7 +17,6 @@ import threading
 from typing import Callable, Optional
 
 import customtkinter as ctk
-
 from config_and_logger import logger
 from hidock_auth_service import HiDockAuthService
 

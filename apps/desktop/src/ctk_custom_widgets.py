@@ -12,9 +12,8 @@ import sys  # For platform-specific transparency
 import tkinter  # ADDED: For tkinter.TclError
 
 import customtkinter as ctk
-from PIL import Image
-
 from config_and_logger import logger
+from PIL import Image
 
 # --- Constants for CTkBanner ---
 CURRENT_PATH = os.path.dirname(os.path.realpath(__file__))

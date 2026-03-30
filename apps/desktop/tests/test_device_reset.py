@@ -10,14 +10,15 @@ import sys
 import time
 
 import pytest
+
 from tests.helpers.optional import require
+
 require("usb", marker="integration")
 
 import usb.backend.libusb1
 
 pytestmark = [pytest.mark.integration]
 
-from config_and_logger import logger
 from desktop_device_adapter import DesktopDeviceAdapter
 from hidock_device import HiDockJensen
 

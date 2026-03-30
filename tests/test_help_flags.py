@@ -21,15 +21,10 @@ def test_help_includes_auto_install_flag():
         env=env,
     )
     assert result.returncode == 0, (
-        "setup.py --help failed: stdout="
-        + result.stdout[:400]
-        + " stderr="
-        + result.stderr[:400]
+        "setup.py --help failed: stdout=" + result.stdout[:400] + " stderr=" + result.stderr[:400]
     )
     help_text = result.stdout
-    assert "--auto-install-missing" in help_text, (
-        "--auto-install-missing flag not found in help output"
-    )
+    assert "--auto-install-missing" in help_text, "--auto-install-missing flag not found in help output"
     # Sanity check a few existing flags to ensure help structure still intact
     expected_flags = [
         "--non-interactive",
@@ -38,6 +33,4 @@ def test_help_includes_auto_install_flag():
         "--diagnose-venv",
     ]
     for flag in expected_flags:
-        assert flag in help_text, (
-            f"Expected flag {flag} missing from help output"
-        )
+        assert flag in help_text, f"Expected flag {flag} missing from help output"

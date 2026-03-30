@@ -73,21 +73,21 @@ class OfflineModeManager:
         cached_metadata = self.file_operations_manager.metadata_cache.get_metadata(filename)
         if cached_metadata and cached_metadata.local_path and os.path.exists(cached_metadata.local_path):
             return cached_metadata.local_path
-        
+
         # If not found in cache, check download directory directly
         # Use the same filename sanitization as _get_local_filepath
         safe_filename = filename.replace(":", "-").replace(" ", "_").replace("\\", "_").replace("/", "_")
-        
+
         # Check for .wav file (converted from .hda)
         wav_path = os.path.join(self.download_directory, safe_filename.replace(".hda", ".wav"))
         if os.path.exists(wav_path):
             return wav_path
-            
+
         # Check for original .hda file
         hda_path = os.path.join(self.download_directory, safe_filename)
         if os.path.exists(hda_path):
             return hda_path
-            
+
         return None
 
     def update_offline_status_indicators(self, files_dict: List[dict]) -> List[dict]:

@@ -148,6 +148,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
   },
 
+  dialog: {
+    openFile: (options?: {
+      title?: string;
+      filters?: Array<{ name: string; extensions: string[] }>;
+      properties?: Array<'openFile' | 'openDirectory' | 'multiSelections'>;
+    }) => ipcRenderer.invoke("dialog:openFile", options),
+  },
+
   knowledge: {
     addSource: (path: string) =>
       ipcRenderer.invoke("kb:addSource", { path }),

@@ -6,15 +6,13 @@ It runs actual operations that would be dangerous in production and verifies the
 """
 
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import Mock
 
-import pytest
-
 import config_and_logger
 import file_operations_manager
+import pytest
 
 
 class TestFinalContaminationProof:

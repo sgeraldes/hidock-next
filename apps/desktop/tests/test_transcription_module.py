@@ -7,11 +7,9 @@ Following TDD principles to achieve 80% test coverage as mandated by .amazonq/ru
 import json
 import os
 import tempfile
-import unittest.mock as mock
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
-
 import transcription_module
 from transcription_module import (
     TRANSCRIPTION_FAILED_DEFAULT_MSG,
@@ -491,9 +489,11 @@ class TestProcessAudioFileForInsights:
         mock_exists.return_value = True
         mock_convert_hta.return_value = "/temp/converted.wav"
 
-        with patch("transcription_module.transcribe_audio") as mock_transcribe, patch(
-            "transcription_module.extract_meeting_insights"
-        ) as mock_extract_insights, patch("transcription_module.os.remove") as mock_remove:
+        with (
+            patch("transcription_module.transcribe_audio") as mock_transcribe,
+            patch("transcription_module.extract_meeting_insights") as mock_extract_insights,
+            patch("transcription_module.os.remove") as mock_remove,
+        ):
             mock_transcribe.return_value = {"transcription": "HTA transcription"}
             mock_extract_insights.return_value = {"summary": "HTA summary"}
 
@@ -606,8 +606,9 @@ class TestExceptionHandling:
         # Make os.remove raise an exception during cleanup
         mock_remove.side_effect = Exception("Permission denied")
 
-        with patch("transcription_module.logger") as mock_logger, patch(
-            "hta_converter.convert_hta_to_wav", return_value="/temp/test_speed_adjusted.wav"
+        with (
+            patch("transcription_module.logger") as mock_logger,
+            patch("hta_converter.convert_hta_to_wav", return_value="/temp/test_speed_adjusted.wav"),
         ):
             result = await process_audio_file_for_insights("/test/audio.hta", "gemini", "test_key")
 
@@ -695,10 +696,11 @@ class TestTranscriptionModuleUtilities:
     @pytest.mark.asyncio
     async def test_process_audio_file_with_mp3_extension(self):
         """Test process_audio_file_for_insights with non-HTA extension."""
-        with patch("transcription_module.os.path.exists", return_value=True), patch(
-            "transcription_module.transcribe_audio"
-        ) as mock_transcribe, patch("transcription_module.extract_meeting_insights") as mock_extract_insights, patch(
-            "transcription_module._get_audio_duration", return_value=3
+        with (
+            patch("transcription_module.os.path.exists", return_value=True),
+            patch("transcription_module.transcribe_audio") as mock_transcribe,
+            patch("transcription_module.extract_meeting_insights") as mock_extract_insights,
+            patch("transcription_module._get_audio_duration", return_value=3),
         ):
             mock_transcribe.return_value = {"transcription": "MP3 transcription"}
             mock_extract_insights.return_value = {
@@ -716,17 +718,15 @@ class TestTranscriptionModuleUtilities:
     @pytest.mark.asyncio
     async def test_process_audio_file_hta_cleanup_error_but_success(self):
         """Test process_audio_file_for_insights with HTA cleanup error but successful processing."""
-        with patch("transcription_module.os.path.exists", return_value=True), patch(
-            "transcription_module.os.path.splitext", return_value=("/test/audio", ".hta")
-        ), patch("hta_converter.convert_hta_to_wav", return_value="/temp/converted.wav"), patch(
-            "transcription_module.transcribe_audio"
-        ) as mock_transcribe, patch(
-            "transcription_module.extract_meeting_insights"
-        ) as mock_extract_insights, patch(
-            "transcription_module.os.remove", side_effect=Exception("Cleanup failed")
-        ), patch(
-            "transcription_module.logger"
-        ) as mock_logger:
+        with (
+            patch("transcription_module.os.path.exists", return_value=True),
+            patch("transcription_module.os.path.splitext", return_value=("/test/audio", ".hta")),
+            patch("hta_converter.convert_hta_to_wav", return_value="/temp/converted.wav"),
+            patch("transcription_module.transcribe_audio") as mock_transcribe,
+            patch("transcription_module.extract_meeting_insights") as mock_extract_insights,
+            patch("transcription_module.os.remove", side_effect=Exception("Cleanup failed")),
+            patch("transcription_module.logger") as mock_logger,
+        ):
             mock_transcribe.return_value = {"transcription": "HTA transcription"}
             mock_extract_insights.return_value = {"summary": "HTA summary"}
 
@@ -837,14 +837,13 @@ class TestTranscriptionModuleUtilities:
     @pytest.mark.asyncio
     async def test_main_test_function_execution_path(self):
         """Test main_test function execution with mocked environment."""
-        with patch("transcription_module.os.path.exists", return_value=True), patch(
-            "transcription_module.os.environ.get", return_value="mock_key"
-        ), patch("transcription_module.process_audio_file_for_insights") as mock_process, patch(
-            "transcription_module.logger"
-        ) as mock_logger, patch(
-            "builtins.print"
-        ) as mock_print, patch(
-            "transcription_module.json.dumps", return_value='{"mock": "output"}'
+        with (
+            patch("transcription_module.os.path.exists", return_value=True),
+            patch("transcription_module.os.environ.get", return_value="mock_key"),
+            patch("transcription_module.process_audio_file_for_insights") as mock_process,
+            patch("transcription_module.logger") as mock_logger,
+            patch("builtins.print") as mock_print,
+            patch("transcription_module.json.dumps", return_value='{"mock": "output"}'),
         ):
             mock_process.return_value = {"transcription": "test", "insights": {"summary": "test"}}
 
@@ -858,9 +857,11 @@ class TestTranscriptionModuleUtilities:
     @pytest.mark.asyncio
     async def test_process_audio_file_transcription_starts_with_failed(self):
         """Test process_audio_file when transcription result starts with 'Transcription failed'."""
-        with patch("transcription_module.os.path.exists", return_value=True), patch(
-            "transcription_module.transcribe_audio"
-        ) as mock_transcribe, patch("transcription_module.extract_meeting_insights") as mock_extract_insights:
+        with (
+            patch("transcription_module.os.path.exists", return_value=True),
+            patch("transcription_module.transcribe_audio") as mock_transcribe,
+            patch("transcription_module.extract_meeting_insights") as mock_extract_insights,
+        ):
             mock_transcribe.return_value = {"transcription": "Transcription failed: some error"}
 
             result = await process_audio_file_for_insights("/test/audio.wav", "gemini", "test_key")

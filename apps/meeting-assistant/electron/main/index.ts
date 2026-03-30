@@ -1,12 +1,13 @@
 import { app, BrowserWindow, shell } from "electron";
 import { electronApp, optimizer } from "@electron-toolkit/utils";
 import { createMainWindow, destroyAllWindows } from "./windows";
-import { initializeTray, destroyTray } from "./services/tray-manager";
+import { initializeTray, destroyTray, setTrayCallbacks } from "./services/tray-manager";
 import { registerIpcHandlers } from "./ipc/handlers";
 import { initializeDatabase } from "./services/database";
 import { getSetting } from "./services/database-settings";
 import { hydrate } from "./services/credential-store";
 import { SENSITIVE_SETTING_KEYS } from "./services/sensitive-keys";
+import { SessionOrchestrator } from "./services/session-orchestrator";
 
 /**
  * Load any encrypted credential values from the DB into the in-memory
@@ -27,6 +28,8 @@ if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
   app.commandLine.appendSwitch('remote-debugging-port', '9222')
 }
 
+let orchestrator: SessionOrchestrator | null = null;
+
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId("com.hidock.meeting-assistant");
 
@@ -38,6 +41,10 @@ app.whenReady().then(async () => {
 
   hydrateCredentials();
 
+  // Initialize the session orchestrator (wires all services)
+  orchestrator = new SessionOrchestrator();
+  await orchestrator.initialize();
+
   const mainWindow = createMainWindow();
 
   registerIpcHandlers();
@@ -45,6 +52,12 @@ app.whenReady().then(async () => {
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url);
     return { action: "deny" };
+  });
+
+  // Wire tray callbacks to orchestrator
+  setTrayCallbacks({
+    onStartRecording: () => orchestrator?.startSession(),
+    onStopRecording: () => orchestrator?.stopSession(),
   });
 
   initializeTray();
@@ -57,6 +70,7 @@ app.whenReady().then(async () => {
 });
 
 app.on("before-quit", () => {
+  orchestrator?.shutdown();
   destroyTray();
   destroyAllWindows();
 });

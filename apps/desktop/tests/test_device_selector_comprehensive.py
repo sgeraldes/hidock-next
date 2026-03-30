@@ -66,9 +66,11 @@ class TestDeviceSelectorComprehensive:
     def test_enhanced_device_selector_has_set_enabled_method(self):
         """EnhancedDeviceSelector should have set_enabled method."""
         # Mock the entire widget creation process and threading
-        with patch("enhanced_device_selector.ctk.CTkFrame.__init__", return_value=None), patch.object(
-            enhanced_device_selector.EnhancedDeviceSelector, "_create_widgets", return_value=None
-        ), patch("enhanced_device_selector.threading.Thread"):
+        with (
+            patch("enhanced_device_selector.ctk.CTkFrame.__init__", return_value=None),
+            patch.object(enhanced_device_selector.EnhancedDeviceSelector, "_create_widgets", return_value=None),
+            patch("enhanced_device_selector.threading.Thread"),
+        ):
             mock_parent = Mock()
             mock_parent._w = "mock_parent"
 
@@ -83,9 +85,11 @@ class TestDeviceSelectorComprehensive:
     def test_set_enabled_method_works(self):
         """set_enabled method should work without errors."""
         # Mock the entire widget creation process and threading
-        with patch("enhanced_device_selector.ctk.CTkFrame.__init__", return_value=None), patch.object(
-            enhanced_device_selector.EnhancedDeviceSelector, "_create_widgets", return_value=None
-        ), patch("enhanced_device_selector.threading.Thread"):
+        with (
+            patch("enhanced_device_selector.ctk.CTkFrame.__init__", return_value=None),
+            patch.object(enhanced_device_selector.EnhancedDeviceSelector, "_create_widgets", return_value=None),
+            patch("enhanced_device_selector.threading.Thread"),
+        ):
             mock_parent = Mock()
             mock_parent._w = "mock_parent"
 
@@ -109,9 +113,11 @@ class TestDeviceSelectorComprehensive:
     def test_set_enabled_false_disables_components(self):
         """set_enabled(False) should disable scan button and show warning."""
         # Mock the entire widget creation process and threading
-        with patch("enhanced_device_selector.ctk.CTkFrame.__init__", return_value=None), patch.object(
-            enhanced_device_selector.EnhancedDeviceSelector, "_create_widgets", return_value=None
-        ), patch("enhanced_device_selector.threading.Thread"):
+        with (
+            patch("enhanced_device_selector.ctk.CTkFrame.__init__", return_value=None),
+            patch.object(enhanced_device_selector.EnhancedDeviceSelector, "_create_widgets", return_value=None),
+            patch("enhanced_device_selector.threading.Thread"),
+        ):
             mock_parent = Mock()
             mock_parent._w = "mock_parent"
 
@@ -138,9 +144,11 @@ class TestDeviceSelectorComprehensive:
     def test_set_enabled_true_enables_components(self):
         """set_enabled(True) should enable scan button."""
         # Mock the entire widget creation process and threading
-        with patch("enhanced_device_selector.ctk.CTkFrame.__init__", return_value=None), patch.object(
-            enhanced_device_selector.EnhancedDeviceSelector, "_create_widgets", return_value=None
-        ), patch("enhanced_device_selector.threading.Thread"):
+        with (
+            patch("enhanced_device_selector.ctk.CTkFrame.__init__", return_value=None),
+            patch.object(enhanced_device_selector.EnhancedDeviceSelector, "_create_widgets", return_value=None),
+            patch("enhanced_device_selector.threading.Thread"),
+        ):
             mock_parent = Mock()
             mock_parent._w = "mock_parent"
 
@@ -180,16 +188,15 @@ class TestDeviceSelectorComprehensive:
         mock_device_selector.set_enabled = Mock()
 
         # Mock all GUI components to avoid tkinter initialization
-        with patch("enhanced_device_selector.EnhancedDeviceSelector", return_value=mock_device_selector), patch(
-            "settings_window.ctk.CTkScrollableFrame"
-        ) as mock_scrollable_frame, patch("settings_window.ctk.CTkLabel"), patch("settings_window.ctk.CTkFrame"), patch(
-            "settings_window.ctk.CTkFont"
-        ) as mock_font, patch(
-            "settings_window.ctk.CTkCheckBox"
-        ), patch(
-            "settings_window.ctk.CTkEntry"
-        ), patch(
-            "threading.Thread"
+        with (
+            patch("enhanced_device_selector.EnhancedDeviceSelector", return_value=mock_device_selector),
+            patch("settings_window.ctk.CTkScrollableFrame") as mock_scrollable_frame,
+            patch("settings_window.ctk.CTkLabel"),
+            patch("settings_window.ctk.CTkFrame"),
+            patch("settings_window.ctk.CTkFont") as mock_font,
+            patch("settings_window.ctk.CTkCheckBox"),
+            patch("settings_window.ctk.CTkEntry"),
+            patch("threading.Thread"),
         ):
             # Mock font creation
             mock_font.return_value = Mock()

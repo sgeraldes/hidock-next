@@ -31,11 +31,11 @@ os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 import customtkinter as ctk  # For CTkInputDialog in settings, and CTk itself
-
 from config_and_logger import logger  # For the top-level exception handler
 
 # Import the main GUI class and the logger
 from gui_main_window import HiDockToolGUI
+
 from scripts.runtime_deps_check import check_and_handle_runtime_deps  # Runtime dependency checker
 
 

@@ -3,10 +3,9 @@
 import os
 import tempfile
 from datetime import datetime
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
-
 from file_operations_manager import FileMetadata, FileOperationsManager
 from offline_mode_manager import OfflineModeManager
 

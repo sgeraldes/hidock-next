@@ -7,13 +7,13 @@ Usage pattern (place at very top of a test module BEFORE importing the optional 
 
 If the import fails the test module is skipped cleanly (instead of causing a collection error).
 """
+
 from __future__ import annotations
 
 import importlib
 import typing as _t
 
 import pytest
-
 
 _DEFAULT_REASON = "optional dependency missing"
 

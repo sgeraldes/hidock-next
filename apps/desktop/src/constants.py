@@ -1,4 +1,4 @@
-﻿"""
+"""
 Global Constants for the HiDock Tool Application.
 
 
@@ -67,42 +67,42 @@ CMD_GET_FILE_LIST = 4
 CMD_TRANSFER_FILE = 5  # Streaming
 CMD_GET_FILE_COUNT = 6
 CMD_DELETE_FILE = 7
-CMD_REQUEST_FIRMWARE_UPGRADE = 8    # Firmware update preparation
-CMD_FIRMWARE_UPLOAD = 9             # Firmware binary upload  
-CMD_GET_SETTINGS = 11               # For autoRecord, autoPlay, etc.
-CMD_SET_SETTINGS = 12               # For autoRecord, autoPlay, etc.
-CMD_GET_FILE_BLOCK = 13             # Read file in blocks
-CMD_GET_CARD_INFO = 16              # Storage information
-CMD_FORMAT_CARD = 17                # Format storage
-CMD_GET_RECORDING_FILE = 18         # Recording metadata
-CMD_RESTORE_FACTORY_SETTINGS = 19   # Factory reset
-CMD_SEND_MEETING_SCHEDULE_INFO = 20 # Calendar integration
+CMD_REQUEST_FIRMWARE_UPGRADE = 8  # Firmware update preparation
+CMD_FIRMWARE_UPLOAD = 9  # Firmware binary upload
+CMD_GET_SETTINGS = 11  # For autoRecord, autoPlay, etc.
+CMD_SET_SETTINGS = 12  # For autoRecord, autoPlay, etc.
+CMD_GET_FILE_BLOCK = 13  # Read file in blocks
+CMD_GET_CARD_INFO = 16  # Storage information
+CMD_FORMAT_CARD = 17  # Format storage
+CMD_GET_RECORDING_FILE = 18  # Recording metadata
+CMD_RESTORE_FACTORY_SETTINGS = 19  # Factory reset
+CMD_SEND_MEETING_SCHEDULE_INFO = 20  # Calendar integration
 
 # --- New Commands from Official HiNotes (December 2025) ---
-CMD_TRANSFER_FILE_PARTIAL = 21      # Partial file transfer
-CMD_REQUEST_TONE_UPDATE = 22        # Request tone update
-CMD_TONE_UPDATE = 23                # Apply tone update
-CMD_REQUEST_UAC_UPDATE = 24         # Request UAC (USB Audio Class) update
-CMD_UAC_UPDATE = 25                 # Apply UAC update
+CMD_TRANSFER_FILE_PARTIAL = 21  # Partial file transfer
+CMD_REQUEST_TONE_UPDATE = 22  # Request tone update
+CMD_TONE_UPDATE = 23  # Apply tone update
+CMD_REQUEST_UAC_UPDATE = 24  # Request UAC (USB Audio Class) update
+CMD_UAC_UPDATE = 25  # Apply UAC update
 
 # --- Realtime Commands (All devices - no device restrictions) ---
-CMD_REALTIME_READ_SETTING = 32      # Get realtime streaming settings
-CMD_REALTIME_CONTROL = 33           # Start/pause/stop realtime streaming
-CMD_REALTIME_TRANSFER = 34          # Get realtime audio data
+CMD_REALTIME_READ_SETTING = 32  # Get realtime streaming settings
+CMD_REALTIME_CONTROL = 33  # Start/pause/stop realtime streaming
+CMD_REALTIME_TRANSFER = 34  # Get realtime audio data
 
 # --- Bluetooth Commands (P1 devices only: hidock-p1 and hidock-p1-mini) ---
-CMD_BLUETOOTH_SCAN = 4097           # Scan for Bluetooth devices
-CMD_BLUETOOTH_CMD = 4098            # Bluetooth command (connect/disconnect)
-CMD_BLUETOOTH_STATUS = 4099         # Get Bluetooth status
-CMD_GET_BATTERY_STATUS = 4100       # Get battery status (P1 only)
-CMD_BT_SCAN = 4101                  # Enhanced Bluetooth scan
-CMD_BT_DEV_LIST = 4102              # Get discovered device list
-CMD_BT_GET_PAIRED_DEV_LIST = 4103   # Get paired devices list
-CMD_BT_REMOVE_PAIRED_DEV = 4104     # Remove paired device
+CMD_BLUETOOTH_SCAN = 4097  # Scan for Bluetooth devices
+CMD_BLUETOOTH_CMD = 4098  # Bluetooth command (connect/disconnect)
+CMD_BLUETOOTH_STATUS = 4099  # Get Bluetooth status
+CMD_GET_BATTERY_STATUS = 4100  # Get battery status (P1 only)
+CMD_BT_SCAN = 4101  # Enhanced Bluetooth scan
+CMD_BT_DEV_LIST = 4102  # Get discovered device list
+CMD_BT_GET_PAIRED_DEV_LIST = 4103  # Get paired devices list
+CMD_BT_REMOVE_PAIRED_DEV = 4104  # Remove paired device
 
 # --- Factory/Debug Commands ---
-CMD_FACTORY_RESET = 61451           # Full factory reset
-CMD_BLUE_B_TIMEOUT = 61457          # Bluetooth timeout setting
+CMD_FACTORY_RESET = 61451  # Full factory reset
+CMD_BLUE_B_TIMEOUT = 61457  # Bluetooth timeout setting
 
 # Command 10 - Status: DOES NOT EXIST (causes device failure)
 # Command 14 - Status: SUPPORTED (returns empty response)

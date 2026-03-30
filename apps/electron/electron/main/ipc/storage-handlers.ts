@@ -1,4 +1,6 @@
 import { ipcMain, shell } from 'electron'
+import { randomUUID } from 'crypto'
+import { existsSync } from 'fs'
 import {
   getStorageInfo,
   getRecordingsPath,
@@ -124,7 +126,41 @@ export function registerStorageHandlers(): void {
     }
   })
 
-  // Read recording file as base64 (for audio playback)
+  ipcMain.handle('storage:open-file', async (_, filePath: unknown) => {
+    try {
+      if (typeof filePath !== 'string' || !filePath) {
+        return { success: false, error: 'Invalid file path' }
+      }
+      if (!existsSync(filePath)) {
+        return { success: false, error: 'File not found' }
+      }
+      const errorMessage = await shell.openPath(filePath)
+      if (errorMessage) {
+        return { success: false, error: errorMessage }
+      }
+      return { success: true, data: true }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      return { success: false, error: message }
+    }
+  })
+
+  ipcMain.handle('storage:reveal-in-folder', async (_, filePath: unknown) => {
+    try {
+      if (typeof filePath !== 'string' || !filePath) {
+        return { success: false, error: 'Invalid file path' }
+      }
+      if (!existsSync(filePath)) {
+        return { success: false, error: 'File not found' }
+      }
+      shell.showItemInFolder(filePath)
+      return { success: true, data: true }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      return { success: false, error: message }
+    }
+  })
+
   ipcMain.handle('storage:read-recording', async (_, filePath: unknown) => {
     try {
       const result = ReadRecordingFileSchema.safeParse({ filePath })
@@ -189,8 +225,7 @@ export function registerStorageHandlers(): void {
       // Use the parsed date or fall back to current time
       const dateRecorded = originalDate?.toISOString() || new Date().toISOString()
 
-      // Generate ID from filename
-      const recordingId = `rec_${result.data.filename.replace(/[^a-zA-Z0-9]/g, '_')}`
+      const recordingId = randomUUID()
 
       // Insert into database
       const recording: Omit<Recording, 'created_at'> = {

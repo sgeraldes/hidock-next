@@ -318,7 +318,7 @@ class HiDockJensen:
                 logger.debug(
                     "Jensen",
                     "_find_device",
-                    f"Device appears to be in use (no langid available)",
+                    "Device appears to be in use (no langid available)",
                 )
             else:  # pragma: no cover
                 logger.error(
@@ -379,7 +379,7 @@ class HiDockJensen:
             self.is_connected_flag = False
             self.detached_kernel_driver_on_interface = -1
             self.claimed_interface_number = -1
-            
+
             # Clear receive buffer to prevent stale data issues
             self.receive_buffer.clear()
             logger.debug("Jensen", "connect", "Cleared receive buffer before connection")
@@ -485,7 +485,7 @@ class HiDockJensen:
                             logger.warning(
                                 "Jensen",
                                 "_attempt_connection",
-                                f"Permission denied detaching kernel driver. Try running with sudo or check udev rules.",
+                                "Permission denied detaching kernel driver. Try running with sudo or check udev rules.",
                             )
                         elif sys.platform == "darwin":  # macOS specific handling
                             logger.warning(
@@ -602,39 +602,41 @@ class HiDockJensen:
             )
 
             self.is_connected_flag = True
-            
+
             # Flush any pending data from the USB endpoints to start fresh
             try:
                 # Try to read and discard any pending data (with very short timeout)
                 # Do multiple attempts to ensure we get everything
                 flush_count = 0
                 max_flush_attempts = 10
-                
+
                 while flush_count < max_flush_attempts:
                     try:
                         data = self.ep_in.read(self.ep_in.wMaxPacketSize, timeout=5)
                         if data:
                             flush_count += 1
-                            logger.debug("Jensen", "_attempt_connection", f"Flushed packet {flush_count}: {len(data)} bytes")
+                            logger.debug(
+                                "Jensen", "_attempt_connection", f"Flushed packet {flush_count}: {len(data)} bytes"
+                            )
                     except usb.core.USBTimeoutError:
                         # No more data to flush
                         break
                     except Exception:
                         # Stop on any other error
                         break
-                        
+
                 if flush_count > 0:
                     logger.info("Jensen", "_attempt_connection", f"Flushed {flush_count} stale packets from USB")
-                    
+
             except Exception as e:
                 logger.debug("Jensen", "_attempt_connection", f"Flush error (ignored): {e}")
-            
+
             # Clear receive buffer one more time after flush
             self.receive_buffer.clear()
-            
+
             # Reset sequence ID to sync with device
             self.sequence_id = 0
-            
+
             return True, None
         except (
             ValueError,
@@ -693,7 +695,7 @@ class HiDockJensen:
         """
         # Set abort flag to interrupt any ongoing operations
         self._abort_operations = True
-        
+
         # Try to acquire lock with timeout to avoid waiting forever
         lock_acquired = self._usb_lock.acquire(timeout=2.0)
         try:
@@ -915,7 +917,7 @@ class HiDockJensen:
             if self._abort_operations:
                 logger.debug("Jensen", "_receive_response", "Operation aborted")
                 return None
-                
+
             # --- BEGIN MODIFICATION ---
             # Invert the logic: First, try to parse the existing buffer.
             # Only read from the device if the buffer doesn't contain a full packet.
@@ -1263,33 +1265,33 @@ class HiDockJensen:
     def _parse_filename_datetime_cached(self, filename):
         """Cached version of filename datetime parsing for better performance."""
         # Initialize cache if needed
-        if not hasattr(self, '_datetime_cache'):
+        if not hasattr(self, "_datetime_cache"):
             from functools import lru_cache
-            
+
             @lru_cache(maxsize=256)
             def cached_parse(filename):
                 return self._parse_filename_datetime_uncached(filename)
-            
+
             self._datetime_cache_func = cached_parse
-            
+
         return self._datetime_cache_func(filename)
-    
+
     def _parse_filename_datetime_uncached(self, filename):
         """Original datetime parsing logic (uncached)."""
         return self._parse_filename_datetime(filename)
-    
+
     def _calculate_file_duration_cached(self, file_length, file_version):
         """Cached version of duration calculation for better performance."""
-        # Initialize cache if needed  
-        if not hasattr(self, '_duration_cache'):
+        # Initialize cache if needed
+        if not hasattr(self, "_duration_cache"):
             from functools import lru_cache
-            
+
             @lru_cache(maxsize=128)
             def cached_duration(file_length, file_version):
                 return self._calculate_file_duration(file_length, file_version)
-            
+
             self._duration_cache_func = cached_duration
-            
+
         return self._duration_cache_func(file_length, file_version)
 
     # Intelligent Caching System
@@ -1297,216 +1299,201 @@ class HiDockJensen:
         """Create a unique fingerprint for the device state."""
         if not self.device_info:
             return None
-            
+
         # Create fingerprint based on device serial and version
-        sn = self.device_info.get('sn', 'unknown')
-        version = self.device_info.get('versionNumber', 0)
+        sn = self.device_info.get("sn", "unknown")
+        version = self.device_info.get("versionNumber", 0)
         fingerprint_data = f"{sn}-{version}"
-        
+
         import hashlib
+
         return hashlib.md5(fingerprint_data.encode()).hexdigest()
-    
+
     def _is_cache_valid(self, cached_time, max_age_seconds=30):
         """Check if cache entry is still valid."""
         import time
+
         return time.time() - cached_time < max_age_seconds
-    
+
     def list_files_cached(self, timeout_s=20, cache_max_age=30):
         """
         File listing with intelligent caching for dramatic performance improvement.
-        
+
         Args:
             timeout_s (int): Timeout for USB operations
             cache_max_age (int): Maximum cache age in seconds (default 30)
-            
+
         Returns:
             dict: File list with 'cached' flag indicating if result came from cache
         """
         # Initialize cache if needed
-        if not hasattr(self, '_file_list_cache'):
+        if not hasattr(self, "_file_list_cache"):
             self._file_list_cache = {}
-        
+
         fingerprint = self._get_device_fingerprint()
-        
+
         # Check cache first for dramatic speedup
         if fingerprint and fingerprint in self._file_list_cache:
             cached_time, cached_result = self._file_list_cache[fingerprint]
-            
+
             if self._is_cache_valid(cached_time, cache_max_age):
                 logger.info(
-                    "Jensen", 
-                    "list_files_cached", 
-                    f"Using cached file list ({cached_result['totalFiles']} files)"
+                    "Jensen", "list_files_cached", f"Using cached file list ({cached_result['totalFiles']} files)"
                 )
-                
+
                 # Mark as cached for caller information
                 cached_result = dict(cached_result)  # Copy to avoid modifying original
-                cached_result['cached'] = True
-                cached_result['cache_age_seconds'] = int(time.time() - cached_time)
-                
+                cached_result["cached"] = True
+                cached_result["cache_age_seconds"] = int(time.time() - cached_time)
+
                 return cached_result
-        
+
         # Cache miss or invalid - get fresh data
         logger.info("Jensen", "list_files_cached", "Cache miss, fetching fresh file list")
-        
+
         result = self.list_files(timeout_s)
-        
+
         # Cache the result for future calls
-        if result and not result.get('error') and fingerprint:
+        if result and not result.get("error") and fingerprint:
             import time
+
             self._file_list_cache[fingerprint] = (time.time(), result)
-            
+
             # Limit cache size (keep only last 5 device fingerprints)
             if len(self._file_list_cache) > 5:
-                oldest_key = min(self._file_list_cache.keys(), 
-                               key=lambda k: self._file_list_cache[k][0])
+                oldest_key = min(self._file_list_cache.keys(), key=lambda k: self._file_list_cache[k][0])
                 del self._file_list_cache[oldest_key]
-        
+
         if result:
-            result['cached'] = False
-        
+            result["cached"] = False
+
         return result
-    
+
     def clear_file_list_cache(self):
         """Clear the file list cache to force fresh data on next call."""
-        if hasattr(self, '_file_list_cache'):
+        if hasattr(self, "_file_list_cache"):
             self._file_list_cache.clear()
             logger.info("Jensen", "clear_cache", "File list cache cleared")
 
-    # Asynchronous USB Operations  
+    # Asynchronous USB Operations
     async def async_list_files(self, timeout_s=20, use_cache=True, cache_max_age=30):
         """
         Fully asynchronous file listing with non-blocking USB operations.
-        
+
         This provides the highest performance by running USB operations in a thread pool
         while keeping the main thread responsive.
-        
+
         Args:
             timeout_s (int): Timeout for USB operations
             use_cache (bool): Whether to use intelligent caching
             cache_max_age (int): Maximum cache age in seconds
-            
+
         Returns:
             dict: File list result (same format as sync version)
         """
         import asyncio
         import concurrent.futures
-        
+
         # Check cache first if enabled
         if use_cache:
             # Run cache check synchronously (it's fast)
             cached_result = self._check_cache_sync(cache_max_age)
             if cached_result:
                 return cached_result
-        
+
         # Initialize thread pool executor for USB operations
-        if not hasattr(self, '_usb_executor'):
-            self._usb_executor = concurrent.futures.ThreadPoolExecutor(
-                max_workers=2, 
-                thread_name_prefix="USB-Async"
-            )
-        
+        if not hasattr(self, "_usb_executor"):
+            self._usb_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="USB-Async")
+
         try:
             # Run the blocking USB operation in thread pool
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                self._usb_executor, 
-                self._list_files_sync_worker, 
-                timeout_s
-            )
-            
+            result = await loop.run_in_executor(self._usb_executor, self._list_files_sync_worker, timeout_s)
+
             # Cache the result if successful
-            if result and not result.get('error') and use_cache:
+            if result and not result.get("error") and use_cache:
                 self._cache_result_sync(result)
-            
+
             return result
-            
+
         except Exception as e:
             logger.error("Jensen", "async_list_files", f"Async operation failed: {e}")
-            return {
-                "files": [],
-                "totalFiles": 0,
-                "totalSize": 0,
-                "error": f"Async operation failed: {e}"
-            }
-    
+            return {"files": [], "totalFiles": 0, "totalSize": 0, "error": f"Async operation failed: {e}"}
+
     def _check_cache_sync(self, cache_max_age):
         """Synchronous cache check for async operations."""
-        if not hasattr(self, '_file_list_cache'):
+        if not hasattr(self, "_file_list_cache"):
             self._file_list_cache = {}
-            
+
         fingerprint = self._get_device_fingerprint()
-        
+
         if fingerprint and fingerprint in self._file_list_cache:
             cached_time, cached_result = self._file_list_cache[fingerprint]
-            
+
             if self._is_cache_valid(cached_time, cache_max_age):
-                logger.info("Jensen", "async_cache_hit", f"Using cached file list ({cached_result['totalFiles']} files)")
-                
+                logger.info(
+                    "Jensen", "async_cache_hit", f"Using cached file list ({cached_result['totalFiles']} files)"
+                )
+
                 cached_result = dict(cached_result)
-                cached_result['cached'] = True
-                cached_result['cache_age_seconds'] = int(time.time() - cached_time)
-                
+                cached_result["cached"] = True
+                cached_result["cache_age_seconds"] = int(time.time() - cached_time)
+
                 return cached_result
-        
+
         return None
-    
+
     def _cache_result_sync(self, result):
         """Synchronous cache storage for async operations."""
         fingerprint = self._get_device_fingerprint()
-        
+
         if fingerprint:
             import time
-            if not hasattr(self, '_file_list_cache'):
+
+            if not hasattr(self, "_file_list_cache"):
                 self._file_list_cache = {}
-                
+
             self._file_list_cache[fingerprint] = (time.time(), result)
-            
+
             # Limit cache size
             if len(self._file_list_cache) > 5:
-                oldest_key = min(self._file_list_cache.keys(), 
-                               key=lambda k: self._file_list_cache[k][0])
+                oldest_key = min(self._file_list_cache.keys(), key=lambda k: self._file_list_cache[k][0])
                 del self._file_list_cache[oldest_key]
-    
+
     def _list_files_sync_worker(self, timeout_s):
         """Worker method for async USB operations (runs in thread pool)."""
         try:
             return self.list_files(timeout_s)
         except Exception as e:
             logger.error("Jensen", "async_worker", f"USB worker failed: {e}")
-            return {
-                "files": [],
-                "totalFiles": 0, 
-                "totalSize": 0,
-                "error": f"USB operation failed: {e}"
-            }
-    
+            return {"files": [], "totalFiles": 0, "totalSize": 0, "error": f"USB operation failed: {e}"}
+
     async def async_list_files_with_progress(self, timeout_s=20, progress_callback=None):
         """
         Async file listing with progress reporting.
-        
+
         Args:
             timeout_s (int): Timeout for operations
             progress_callback: Function to call with progress updates (0.0 to 1.0)
-            
+
         Returns:
             dict: File list result
         """
         import asyncio
-        
+
         if progress_callback:
             progress_callback(0.0)
-        
+
         # Quick cache check
         cached = self._check_cache_sync(30)
         if cached:
             if progress_callback:
                 progress_callback(1.0)
             return cached
-        
+
         if progress_callback:
             progress_callback(0.1)
-        
+
         # Run USB operation with progress simulation
         async def run_with_progress():
             if progress_callback:
@@ -1514,83 +1501,79 @@ class HiDockJensen:
                 for i in range(2, 9):
                     await asyncio.sleep(0.1)  # Small delay for responsiveness
                     progress_callback(i / 10.0)
-            
+
             # Run the actual operation
             result = await self.async_list_files(timeout_s, use_cache=False)
-            
+
             if progress_callback:
                 progress_callback(1.0)
-            
+
             return result
-        
+
         return await run_with_progress()
 
     # Parallel Processing for Large File Lists
     def list_files_parallel(self, timeout_s=20, min_files_for_parallel=200):
         """
         File listing with parallel processing for very large file lists.
-        
+
         Uses multiple processes to parse file data in parallel, bypassing Python's GIL
         for significant speedup on devices with 200+ files.
-        
+
         Args:
             timeout_s (int): Timeout for USB operations
             min_files_for_parallel (int): Minimum file count to trigger parallel processing
-            
+
         Returns:
             dict: File list result (same format as sync version)
         """
         import time
+
         start_time = time.time()
-        
+
         # Get raw chunks first (same as normal flow)
         chunks = self._receive_all_chunks_for_parallel(timeout_s)
-        
+
         if not chunks:
-            return {
-                "files": [],
-                "totalFiles": 0,
-                "totalSize": 0,
-                "error": "No data received from device"
-            }
-        
+            return {"files": [], "totalFiles": 0, "totalSize": 0, "error": "No data received from device"}
+
         # Quick estimate of file count to decide if parallel processing is worth it
         total_bytes = sum(len(chunk) for chunk in chunks)
         estimated_files = max(0, (total_bytes - 6) // 100)  # Same heuristic as before
-        
+
         if estimated_files < min_files_for_parallel:
             logger.info("Jensen", "parallel", f"Estimated {estimated_files} files, using serial processing")
             files = self._parse_file_list_chunks(chunks)
         else:
             logger.info("Jensen", "parallel", f"Estimated {estimated_files} files, using parallel processing")
             files = self._parse_file_list_chunks_parallel(chunks)
-        
+
         # Calculate total size
         total_size_bytes = sum(file_info.get("length", 0) for file_info in files)
-        
+
         processing_time = time.time() - start_time
         logger.info("Jensen", "parallel", f"Processed {len(files)} files in {processing_time:.2f}s")
-        
+
         return {
             "files": files,
             "totalFiles": len(files),
             "totalSize": total_size_bytes,
             "parallel": estimated_files >= min_files_for_parallel,
-            "processing_time": processing_time
+            "processing_time": processing_time,
         }
-    
+
     def _receive_all_chunks_for_parallel(self, timeout_s):
         """Receive all USB chunks for parallel processing."""
         # This mimics the main USB receive loop but just collects chunks
         if not self.device_info.get("versionNumber"):
             if not self.get_device_info():
                 return []
-        
+
         was_streaming = getattr(self, "_file_list_streaming", False)
         if was_streaming:
             logger.warning("Jensen", "parallel_receive", "File list operation already in progress")
             return []
-        
+
         self._file_list_streaming = True
         try:
             with self._usb_lock:
@@ -1600,178 +1583,176 @@ class HiDockJensen:
                 except (usb.core.USBError, ConnectionError) as e:
                     logger.error("Jensen", "parallel_receive", f"Failed to send command: {e}")
                     return []
-                
+
                 file_list_chunks = []
                 expected_file_count = None
                 total_bytes_received = 0
                 consecutive_timeouts = 0
                 max_consecutive_timeouts = 10  # Increased for large file lists
                 adaptive_timeout = 1000
-                
+
                 while True:
-                    response = self._receive_response(seq_id, timeout_ms=adaptive_timeout, streaming_cmd_id=CMD_GET_FILE_LIST)
-                    
+                    response = self._receive_response(
+                        seq_id, timeout_ms=adaptive_timeout, streaming_cmd_id=CMD_GET_FILE_LIST
+                    )
+
                     if response and response["id"] == CMD_GET_FILE_LIST:
                         seq_id = response["sequence"]
                         consecutive_timeouts = 0
                         adaptive_timeout = 1000
-                        
+
                         chunk = response["body"]
                         if not chunk:  # Empty response = end of transmission
                             break
-                            
+
                         file_list_chunks.append(chunk)
                         total_bytes_received += len(chunk)
-                        
+
                         # Extract expected count from first chunk
                         if expected_file_count is None and len(file_list_chunks) == 1:
                             first_chunk = file_list_chunks[0]
                             if len(first_chunk) >= 6 and first_chunk[0] == 0xFF and first_chunk[1] == 0xFF:
                                 expected_file_count = struct.unpack(">I", first_chunk[2:6])[0]
-                        
+
                         # Fast completion check
                         if expected_file_count is not None:
                             estimated_files = max(0, (total_bytes_received - 6) // 100)
                             if estimated_files >= expected_file_count:
                                 break
-                                
+
                     elif response is None:  # Timeout
                         consecutive_timeouts += 1
                         adaptive_timeout = min(adaptive_timeout * 1.5, 3000)
-                        
+
                         if consecutive_timeouts >= max_consecutive_timeouts:
-                            logger.warning("Jensen", "parallel_receive", f"Max timeouts reached, collected {len(file_list_chunks)} chunks")
+                            logger.warning(
+                                "Jensen",
+                                "parallel_receive",
+                                f"Max timeouts reached, collected {len(file_list_chunks)} chunks",
+                            )
                             break
                     else:
                         continue  # Unexpected response
-                
+
                 return file_list_chunks
         finally:
             self._file_list_streaming = False
-    
+
     def _parse_file_list_chunks_parallel(self, chunks):
         """Parse file list chunks using parallel processing."""
         import multiprocessing
         from concurrent.futures import ProcessPoolExecutor
-        import pickle
-        
+
         try:
             # Combine all chunks first (this is fast)
             total_size = sum(len(chunk) for chunk in chunks)
             if total_size == 0:
                 return []
-            
+
             buffer = bytearray(total_size)
             offset = 0
             for chunk in chunks:
                 chunk_len = len(chunk)
-                buffer[offset:offset + chunk_len] = chunk
+                buffer[offset : offset + chunk_len] = chunk
                 offset += chunk_len
-            
+
             # Extract header info
             parse_offset = 0
             total_files_from_header = -1
-            
-            if (len(buffer) >= 6 and buffer[parse_offset] == 0xFF and buffer[parse_offset + 1] == 0xFF):
-                total_files_from_header = struct.unpack(">I", buffer[parse_offset + 2:parse_offset + 6])[0]
+
+            if len(buffer) >= 6 and buffer[parse_offset] == 0xFF and buffer[parse_offset + 1] == 0xFF:
+                total_files_from_header = struct.unpack(">I", buffer[parse_offset + 2 : parse_offset + 6])[0]
                 parse_offset += 6
-            
+
             if total_files_from_header <= 0:
                 logger.warning("Jensen", "parallel_parse", "No valid file count in header, falling back to serial")
                 return self._parse_file_list_chunks(chunks)
-            
+
             # Split data into chunks for parallel processing
             num_workers = min(4, multiprocessing.cpu_count())  # Don't use too many processes
             chunk_size = len(buffer) // num_workers
-            
+
             if chunk_size < 1000:  # Too small for parallel processing
                 logger.info("Jensen", "parallel_parse", "Data too small for parallel processing, using serial")
                 return self._parse_file_list_chunks(chunks)
-            
+
             # Create work chunks - but we need to be careful about file boundaries
             # For simplicity, let's use a simpler approach: split by estimated file count
             files_per_worker = max(1, total_files_from_header // num_workers)
-            
+
             # Initialize process pool
-            if not hasattr(self, '_parse_executor'):
+            if not hasattr(self, "_parse_executor"):
                 self._parse_executor = ProcessPoolExecutor(max_workers=num_workers)
-            
+
             # For now, let's do a simpler parallel approach:
             # Process the full buffer in parallel by splitting parsing work
-            
+
             # Serialize necessary data for worker processes
             worker_data = {
-                'buffer_bytes': bytes(buffer),
-                'parse_offset': parse_offset,
-                'total_files': total_files_from_header
+                "buffer_bytes": bytes(buffer),
+                "parse_offset": parse_offset,
+                "total_files": total_files_from_header,
             }
-            
+
             # Split work by files, not by bytes (more complex but correct)
             files_per_chunk = max(50, total_files_from_header // num_workers)
-            
+
             # For this implementation, let's fall back to optimized serial processing
             # because proper parallel parsing requires more complex file boundary detection
-            logger.info("Jensen", "parallel_parse", f"Processing {total_files_from_header} files with optimized serial parsing")
-            
+            logger.info(
+                "Jensen", "parallel_parse", f"Processing {total_files_from_header} files with optimized serial parsing"
+            )
+
             return self._parse_file_list_chunks(chunks)
-            
+
         except Exception as e:
             logger.error("Jensen", "parallel_parse", f"Parallel processing failed: {e}, falling back to serial")
             return self._parse_file_list_chunks(chunks)
-    
+
     async def async_list_files_parallel(self, timeout_s=20, min_files_for_parallel=200):
         """
         Fully asynchronous parallel file listing for maximum performance.
-        
+
         Combines async USB operations with parallel processing for the best of both worlds.
         """
         import asyncio
         import concurrent.futures
-        
+
         # Check cache first
         cached_result = self._check_cache_sync(30)
         if cached_result:
             return cached_result
-        
+
         # Initialize executor for parallel processing
-        if not hasattr(self, '_parallel_executor'):
+        if not hasattr(self, "_parallel_executor"):
             self._parallel_executor = concurrent.futures.ThreadPoolExecutor(
-                max_workers=1, 
-                thread_name_prefix="Parallel-USB"
+                max_workers=1, thread_name_prefix="Parallel-USB"
             )
-        
+
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
-                self._parallel_executor, 
-                self.list_files_parallel, 
-                timeout_s, 
-                min_files_for_parallel
+                self._parallel_executor, self.list_files_parallel, timeout_s, min_files_for_parallel
             )
-            
+
             # Cache the result
-            if result and not result.get('error'):
+            if result and not result.get("error"):
                 self._cache_result_sync(result)
-                
+
             return result
-            
+
         except Exception as e:
             logger.error("Jensen", "async_parallel", f"Async parallel operation failed: {e}")
-            return {
-                "files": [],
-                "totalFiles": 0,
-                "totalSize": 0,
-                "error": f"Async parallel operation failed: {e}"
-            }
+            return {"files": [], "totalFiles": 0, "totalSize": 0, "error": f"Async parallel operation failed: {e}"}
 
     def list_files_with_retry(self, timeout_s=20, max_retries=2):
         """
         List files with automatic retry for incomplete transfers.
-        
+
         Args:
             timeout_s (int): Timeout for each attempt
             max_retries (int): Maximum number of retries for incomplete data
-            
+
         Returns:
             dict: File list result with retry information
         """
@@ -1779,63 +1760,60 @@ class HiDockJensen:
             # Check if we should abort
             if self._abort_operations:
                 logger.info("Jensen", "list_files_with_retry", "Operation aborted")
-                return {
-                    "files": [],
-                    "totalFiles": 0,
-                    "totalSize": 0,
-                    "error": "Operation aborted"
-                }
-                
-            logger.info("Jensen", "list_files_with_retry", 
-                       f"Attempt {attempt + 1}/{max_retries + 1} to get file list")
-            
+                return {"files": [], "totalFiles": 0, "totalSize": 0, "error": "Operation aborted"}
+
+            logger.info("Jensen", "list_files_with_retry", f"Attempt {attempt + 1}/{max_retries + 1} to get file list")
+
             result = self.list_files(timeout_s)
-            
+
             # If successful and complete, return immediately
             if result and not result.get("incomplete"):
                 if attempt > 0:
-                    logger.info("Jensen", "list_files_with_retry", 
-                               f"Success on attempt {attempt + 1}")
+                    logger.info("Jensen", "list_files_with_retry", f"Success on attempt {attempt + 1}")
                 return result
-            
+
             # If incomplete, decide whether to retry
             if result and result.get("incomplete"):
                 files_received = len(result.get("files", []))
                 expected_count = result.get("expected", 0)
-                
-                logger.warning("Jensen", "list_files_with_retry", 
-                             f"Attempt {attempt + 1} incomplete: {files_received}/{expected_count} files")
-                
+
+                logger.warning(
+                    "Jensen",
+                    "list_files_with_retry",
+                    f"Attempt {attempt + 1} incomplete: {files_received}/{expected_count} files",
+                )
+
                 # Don't retry if we got a decent amount of data and it's the last attempt
                 if attempt == max_retries:
-                    logger.error("Jensen", "list_files_with_retry", 
-                               f"Final attempt failed, returning partial data: {files_received}/{expected_count}")
+                    logger.error(
+                        "Jensen",
+                        "list_files_with_retry",
+                        f"Final attempt failed, returning partial data: {files_received}/{expected_count}",
+                    )
                     result["retries_attempted"] = attempt + 1
                     return result
-                
+
                 # Wait before retrying
                 import time
+
                 retry_delay = 1.0 * (attempt + 1)  # Increasing delay
-                logger.info("Jensen", "list_files_with_retry", 
-                           f"Waiting {retry_delay}s before retry...")
+                logger.info("Jensen", "list_files_with_retry", f"Waiting {retry_delay}s before retry...")
                 time.sleep(retry_delay)
-            
+
             else:
                 # Complete failure, retry with longer timeout
-                logger.error("Jensen", "list_files_with_retry", 
-                           f"Attempt {attempt + 1} failed completely")
+                logger.error("Jensen", "list_files_with_retry", f"Attempt {attempt + 1} failed completely")
                 if attempt < max_retries:
                     timeout_s = min(timeout_s * 1.5, 60)  # Increase timeout for retry
-        
+
         # All retries failed
-        logger.error("Jensen", "list_files_with_retry", 
-                   f"All {max_retries + 1} attempts failed")
+        logger.error("Jensen", "list_files_with_retry", f"All {max_retries + 1} attempts failed")
         return {
             "files": [],
-            "totalFiles": 0, 
+            "totalFiles": 0,
             "totalSize": 0,
             "error": f"Failed after {max_retries + 1} attempts",
-            "retries_attempted": max_retries + 1
+            "retries_attempted": max_retries + 1,
         }
 
     def list_files(self, timeout_s=20):
@@ -1906,7 +1884,7 @@ class HiDockJensen:
 
                 # Optimized handler - avoids parsing on every chunk
                 total_bytes_received = 0
-                
+
                 def file_list_handler(response_data):
                     nonlocal expected_file_count, total_bytes_received
 
@@ -1944,13 +1922,13 @@ class HiDockJensen:
                         # Conservative heuristic: ~60 bytes per file (actual data shows 57 bytes/file)
                         # Subtract 6 bytes for header
                         estimated_files = max(0, (total_bytes_received - 6) // 60)
-                        
+
                         logger.debug(
                             "Jensen",
                             "list_files",
                             f"Estimated {estimated_files}/{expected_file_count} files from {total_bytes_received} bytes",
                         )
-                        
+
                         # Don't use estimation to trigger early parsing - it was causing issues
                         # Just continue accumulating chunks until we get an empty one
 
@@ -1967,13 +1945,8 @@ class HiDockJensen:
                     # Check if we should abort
                     if self._abort_operations:
                         logger.info("Jensen", "list_files", "Operation aborted due to disconnect")
-                        return {
-                            "files": [],
-                            "totalFiles": 0,
-                            "totalSize": 0,
-                            "error": "Operation aborted"
-                        }
-                    
+                        return {"files": [], "totalFiles": 0, "totalSize": 0, "error": "Operation aborted"}
+
                     response = self._receive_response(
                         seq_id,
                         timeout_ms=adaptive_timeout,
@@ -1998,7 +1971,7 @@ class HiDockJensen:
                         consecutive_timeouts += 1
                         # Increase timeout gradually for slow transfers
                         adaptive_timeout = min(adaptive_timeout * 1.5, 3000)
-                        
+
                         logger.debug(
                             "Jensen",
                             "list_files",
@@ -2051,9 +2024,9 @@ class HiDockJensen:
                         "list_files",
                         f"INCOMPLETE DATA: Received only {len(final_files)}/{expected_file_count} files! "
                         f"Missing {expected_file_count - len(final_files)} files. "
-                        f"This may indicate a USB communication problem or device issue."
+                        f"This may indicate a USB communication problem or device issue.",
                     )
-                    
+
                     return {
                         "files": final_files,
                         "totalFiles": len(final_files),
@@ -2061,7 +2034,7 @@ class HiDockJensen:
                         "incomplete": True,
                         "expected": expected_file_count,
                         "missing": expected_file_count - len(final_files),
-                        "error": f"Incomplete file list: {len(final_files)}/{expected_file_count} files received"
+                        "error": f"Incomplete file list: {len(final_files)}/{expected_file_count} files received",
                     }
 
                 return {
@@ -2087,27 +2060,27 @@ class HiDockJensen:
             List of file info dictionaries
         """
         # Initialize pre-compiled struct formats (major speedup for repeated calls)
-        if not hasattr(self, '_binary_struct_formats'):
+        if not hasattr(self, "_binary_struct_formats"):
             self._binary_struct_formats = {
-                'header_count': struct.Struct('>I'),
-                'name_len_3bytes': struct.Struct('>I'),
-                'file_length': struct.Struct('>I'),
+                "header_count": struct.Struct(">I"),
+                "name_len_3bytes": struct.Struct(">I"),
+                "file_length": struct.Struct(">I"),
             }
-        
+
         # Optimized buffer combination using memoryview
         total_size = sum(len(chunk) for chunk in chunks)
         if total_size == 0:
             return []
-            
+
         # Use memoryview for zero-copy operations
         buffer = bytearray(total_size)
         buffer_view = memoryview(buffer)
-        
+
         data_offset = 0
         for chunk in chunks:
             chunk_view = memoryview(chunk)
             chunk_len = len(chunk_view)
-            buffer_view[data_offset:data_offset + chunk_len] = chunk_view
+            buffer_view[data_offset : data_offset + chunk_len] = chunk_view
             data_offset += chunk_len
 
         # Use memoryview for all parsing operations (no copying)
@@ -2116,14 +2089,8 @@ class HiDockJensen:
         total_files_from_header = -1
 
         # Fast header parsing with pre-compiled struct
-        if (
-            len(data) >= 6
-            and data[parse_offset] == 0xFF
-            and data[parse_offset + 1] == 0xFF
-        ):
-            total_files_from_header = self._binary_struct_formats['header_count'].unpack_from(
-                data, parse_offset + 2
-            )[0]
+        if len(data) >= 6 and data[parse_offset] == 0xFF and data[parse_offset + 1] == 0xFF:
+            total_files_from_header = self._binary_struct_formats["header_count"].unpack_from(data, parse_offset + 2)[0]
             parse_offset += 6
 
         # Pre-allocate files list for optimal memory usage
@@ -2133,9 +2100,11 @@ class HiDockJensen:
             files.clear()
 
         parsed_file_count = 0
-        
+
         # Fast parsing loop with minimal allocations
-        while parse_offset < len(data) and (total_files_from_header == -1 or parsed_file_count < total_files_from_header):
+        while parse_offset < len(data) and (
+            total_files_from_header == -1 or parsed_file_count < total_files_from_header
+        ):
             try:
                 if parse_offset + 4 > len(data):
                     break
@@ -2146,8 +2115,8 @@ class HiDockJensen:
                 # Fast 3-byte length parsing with pre-compiled struct
                 if parse_offset + 3 > len(data):
                     break
-                name_len = self._binary_struct_formats['name_len_3bytes'].unpack_from(
-                    b'\x00' + data[parse_offset:parse_offset + 3]
+                name_len = self._binary_struct_formats["name_len_3bytes"].unpack_from(
+                    b"\x00" + data[parse_offset : parse_offset + 3]
                 )[0]
                 parse_offset += 3
 
@@ -2155,8 +2124,8 @@ class HiDockJensen:
                     break
 
                 # Ultra-fast filename extraction using memoryview slicing
-                filename_bytes = data[parse_offset:parse_offset + name_len]
-                filename = filename_bytes.tobytes().rstrip(b'\x00').decode('ascii', errors='ignore')
+                filename_bytes = data[parse_offset : parse_offset + name_len]
+                filename = filename_bytes.tobytes().rstrip(b"\x00").decode("ascii", errors="ignore")
                 parse_offset += name_len
 
                 min_remaining = 4 + 6 + 16
@@ -2164,12 +2133,12 @@ class HiDockJensen:
                     break
 
                 # Fast file length parsing with pre-compiled struct
-                file_length_bytes = self._binary_struct_formats['file_length'].unpack_from(data, parse_offset)[0]
+                file_length_bytes = self._binary_struct_formats["file_length"].unpack_from(data, parse_offset)[0]
                 parse_offset += 4
                 parse_offset += 6  # Skip 6 bytes
 
                 # Fast signature extraction using memoryview
-                signature_bytes = data[parse_offset:parse_offset + 16]
+                signature_bytes = data[parse_offset : parse_offset + 16]
                 signature_hex = signature_bytes.tobytes().hex()
                 parse_offset += 16
 
@@ -2178,16 +2147,18 @@ class HiDockJensen:
                 duration_sec = self._calculate_file_duration_cached(file_length_bytes, file_version)
 
                 # Direct dictionary creation (faster than individual assignments)
-                files.append({
-                    "name": filename,
-                    "createDate": create_date_str,
-                    "createTime": create_time_str,
-                    "time": time_obj,
-                    "duration": duration_sec,
-                    "version": file_version,
-                    "length": file_length_bytes,
-                    "signature": signature_hex,
-                })
+                files.append(
+                    {
+                        "name": filename,
+                        "createDate": create_date_str,
+                        "createTime": create_time_str,
+                        "time": time_obj,
+                        "duration": duration_sec,
+                        "version": file_version,
+                        "length": file_length_bytes,
+                        "signature": signature_hex,
+                    }
+                )
 
                 parsed_file_count += 1
 

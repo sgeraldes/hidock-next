@@ -6,7 +6,6 @@ Test script to verify the fixes for the reported issues.
 import os
 import sys
 import threading
-import time
 
 import pytest
 
@@ -68,7 +67,6 @@ def test_settings_dialog_fix():
                 return False
 
         # This should not cause an AttributeError now
-        from settings_window import SettingsDialog
 
         parent = MockParentGUI()
         device = MockDevice()

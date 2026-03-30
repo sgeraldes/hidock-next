@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
 
 /**
  * Register handlers for window control and app-level IPC channels.
@@ -34,6 +34,21 @@ export function registerAppHandlers(): void {
 
   ipcMain.handle("window:isMaximized", (event) => {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
+  });
+
+  ipcMain.handle("dialog:openFile", async (event, options?: {
+    title?: string;
+    filters?: Array<{ name: string; extensions: string[] }>;
+    properties?: Array<'openFile' | 'openDirectory' | 'multiSelections'>;
+  }) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showOpenDialog(win!, {
+      title: options?.title ?? "Select file or folder",
+      filters: options?.filters,
+      properties: options?.properties ?? ['openFile', 'openDirectory'],
+    });
+    if (result.canceled) return null;
+    return result.filePaths;
   });
 
   console.log("[IPC] App/window handlers registered");

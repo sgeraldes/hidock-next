@@ -10,11 +10,12 @@ from datetime import datetime
 from unittest.mock import Mock, patch
 
 import pytest
+
 from tests.helpers.optional import require
+
 require("usb", marker="integration")
 
 import usb.core
-
 from constants import CMD_GET_DEVICE_INFO, CMD_GET_DEVICE_TIME, CMD_SET_DEVICE_TIME, CMD_TRANSFER_FILE
 from hidock_device import HiDockJensen
 
@@ -487,7 +488,7 @@ class TestHiDockJensenSendReceiveOperations:
         jensen_device.ep_in.wMaxPacketSize = 64  # Set proper packet size
         # Reset error counts to ensure test isolation
         jensen_device._error_counts["usb_timeout"] = 0
-        
+
         with patch.object(jensen_device.device, "read", side_effect=usb.core.USBTimeoutError("Timeout")):
             with patch.object(jensen_device, "is_connected", return_value=True):
                 response = jensen_device._receive_response(1, timeout_ms=100)
@@ -498,7 +499,7 @@ class TestHiDockJensenSendReceiveOperations:
     def test_receive_response_timeout_streaming(self, jensen_device):
         """Test receive_response timeout for streaming command - no error increment."""
         jensen_device.ep_in.wMaxPacketSize = 64  # Set proper packet size
-        
+
         with patch.object(jensen_device.device, "read", side_effect=usb.core.USBTimeoutError("Timeout")):
             with patch.object(jensen_device, "is_connected", return_value=True):
                 response = jensen_device._receive_response(1, timeout_ms=100, streaming_cmd_id=CMD_TRANSFER_FILE)
@@ -563,7 +564,7 @@ class TestHiDockJensenSendReceiveOperations:
     def test_receive_response_streaming_timeout_debug_log(self, jensen_device):
         """Test receive_response streaming timeout uses debug log - covering lines 981-987."""
         jensen_device.ep_in.wMaxPacketSize = 64  # Set proper packet size
-        
+
         with patch.object(jensen_device.device, "read", side_effect=usb.core.USBTimeoutError("Timeout")):
             with patch.object(jensen_device, "is_connected", return_value=True):
                 response = jensen_device._receive_response(1, timeout_ms=100, streaming_cmd_id=CMD_TRANSFER_FILE)
@@ -573,7 +574,7 @@ class TestHiDockJensenSendReceiveOperations:
     def test_receive_response_non_streaming_timeout_warning_log(self, jensen_device):
         """Test receive_response non-streaming timeout uses warning log - covering lines 988-994."""
         jensen_device.ep_in.wMaxPacketSize = 64  # Set proper packet size
-        
+
         with patch.object(jensen_device.device, "read", side_effect=usb.core.USBTimeoutError("Timeout")):
             with patch.object(jensen_device, "is_connected", return_value=True):
                 response = jensen_device._receive_response(1, timeout_ms=100)

@@ -4,8 +4,6 @@ Test version module.
 Simple tests for the version module.
 """
 
-import pytest
-
 
 class TestVersion:
     """Test version module."""

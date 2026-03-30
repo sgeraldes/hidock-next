@@ -10,7 +10,6 @@ from tkinter import ttk
 from typing import Any, Dict, List
 
 import customtkinter as ctk
-
 from config_and_logger import logger
 
 

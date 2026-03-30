@@ -8,7 +8,7 @@ covered by the main test suite, targeting the remaining uncovered lines.
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, Mock, PropertyMock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -110,8 +110,6 @@ class MockNumpyEdgeCase:
 
     @staticmethod
     def logspace(start, stop, num):
-        import math
-
         if num <= 0:
             return MockNumpyArrayEdgeCase([])
         return MockNumpyArrayEdgeCase([pow(10, start + i * (stop - start) / (num - 1)) for i in range(num)])
@@ -184,7 +182,6 @@ with patch.dict(
     },
 ):
     # Import the module under test
-    import audio_visualization
     from audio_visualization import AudioVisualizationWidget, SpectrumAnalyzer, WaveformVisualizer
 
 
@@ -204,10 +201,11 @@ class TestWaveformVisualizerEdgeCases(unittest.TestCase):
         """Test update_position with error in zoom logic (edge case for lines 296-299)"""
         mock_parent = Mock()
 
-        with patch("audio_visualization.Figure") as mock_fig_class, patch(
-            "audio_visualization.FigureCanvasTkAgg"
-        ) as mock_canvas_class, patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
-            WaveformVisualizer, "_initialize_plot"
+        with (
+            patch("audio_visualization.Figure") as mock_fig_class,
+            patch("audio_visualization.FigureCanvasTkAgg") as mock_canvas_class,
+            patch.object(WaveformVisualizer, "_setup_styling"),
+            patch.object(WaveformVisualizer, "_initialize_plot"),
         ):
             mock_fig = Mock()
             mock_ax = Mock()
@@ -232,12 +230,12 @@ class TestWaveformVisualizerEdgeCases(unittest.TestCase):
         """Test load_audio with zero-length waveform data"""
         mock_parent = Mock()
 
-        with patch("audio_visualization.AudioProcessor.extract_waveform_data") as mock_extract, patch(
-            "audio_visualization.Figure"
-        ) as mock_fig_class, patch("audio_visualization.FigureCanvasTkAgg") as mock_canvas_class, patch.object(
-            WaveformVisualizer, "_setup_styling"
-        ), patch.object(
-            WaveformVisualizer, "_initialize_plot"
+        with (
+            patch("audio_visualization.AudioProcessor.extract_waveform_data") as mock_extract,
+            patch("audio_visualization.Figure") as mock_fig_class,
+            patch("audio_visualization.FigureCanvasTkAgg") as mock_canvas_class,
+            patch.object(WaveformVisualizer, "_setup_styling"),
+            patch.object(WaveformVisualizer, "_initialize_plot"),
         ):
             # Return empty waveform data
             mock_extract.return_value = (MockNumpyArrayEdgeCase([]), 44100)
@@ -264,10 +262,11 @@ class TestSpectrumAnalyzerEdgeCases(unittest.TestCase):
         """Test start_analysis with empty audio data (lines 451-453)"""
         mock_parent = Mock()
 
-        with patch("audio_visualization.Figure") as mock_fig_class, patch(
-            "audio_visualization.FigureCanvasTkAgg"
-        ) as mock_canvas_class, patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(
-            SpectrumAnalyzer, "_initialize_plot"
+        with (
+            patch("audio_visualization.Figure") as mock_fig_class,
+            patch("audio_visualization.FigureCanvasTkAgg") as mock_canvas_class,
+            patch.object(SpectrumAnalyzer, "_setup_styling"),
+            patch.object(SpectrumAnalyzer, "_initialize_plot"),
         ):
             mock_fig = Mock()
             mock_ax = Mock()
@@ -288,10 +287,11 @@ class TestSpectrumAnalyzerEdgeCases(unittest.TestCase):
         """Test _update_spectrum with insufficient data (lines 529-533)"""
         mock_parent = Mock()
 
-        with patch("audio_visualization.Figure") as mock_fig_class, patch(
-            "audio_visualization.FigureCanvasTkAgg"
-        ) as mock_canvas_class, patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(
-            SpectrumAnalyzer, "_initialize_plot"
+        with (
+            patch("audio_visualization.Figure") as mock_fig_class,
+            patch("audio_visualization.FigureCanvasTkAgg") as mock_canvas_class,
+            patch.object(SpectrumAnalyzer, "_setup_styling"),
+            patch.object(SpectrumAnalyzer, "_initialize_plot"),
         ):
             mock_fig = Mock()
             mock_ax = Mock()
@@ -318,10 +318,11 @@ class TestSpectrumAnalyzerEdgeCases(unittest.TestCase):
         """Test _update_spectrum with canvas draw error (lines 582-587)"""
         mock_parent = Mock()
 
-        with patch("audio_visualization.Figure") as mock_fig_class, patch(
-            "audio_visualization.FigureCanvasTkAgg"
-        ) as mock_canvas_class, patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(
-            SpectrumAnalyzer, "_initialize_plot"
+        with (
+            patch("audio_visualization.Figure") as mock_fig_class,
+            patch("audio_visualization.FigureCanvasTkAgg") as mock_canvas_class,
+            patch.object(SpectrumAnalyzer, "_setup_styling"),
+            patch.object(SpectrumAnalyzer, "_initialize_plot"),
         ):
             mock_fig = Mock()
             mock_ax = Mock()
@@ -356,9 +357,11 @@ class TestAudioVisualizationWidgetEdgeCases(unittest.TestCase):
         """Test _load_theme_icons when PIL import fails"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, "_create_speed_controls"), patch.object(
-            AudioVisualizationWidget, "_update_tab_state"
-        ), patch("builtins.__import__", side_effect=ImportError("PIL not available")):
+        with (
+            patch.object(AudioVisualizationWidget, "_create_speed_controls"),
+            patch.object(AudioVisualizationWidget, "_update_tab_state"),
+            patch("builtins.__import__", side_effect=ImportError("PIL not available")),
+        ):
             widget = Mock(spec=AudioVisualizationWidget)
             widget._load_theme_icons = AudioVisualizationWidget._load_theme_icons.__get__(widget)
 
@@ -401,9 +404,11 @@ class TestAudioVisualizationWidgetEdgeCases(unittest.TestCase):
         """Test _on_tab_changed when AudioProcessor raises error"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
-            AudioVisualizationWidget, "_create_speed_controls"
-        ), patch.object(AudioVisualizationWidget, "_update_tab_state"):
+        with (
+            patch.object(AudioVisualizationWidget, "_load_theme_icons"),
+            patch.object(AudioVisualizationWidget, "_create_speed_controls"),
+            patch.object(AudioVisualizationWidget, "_update_tab_state"),
+        ):
             widget = Mock(spec=AudioVisualizationWidget)
             widget._on_tab_changed = AudioVisualizationWidget._on_tab_changed.__get__(widget)
             widget.notebook = Mock()
@@ -417,9 +422,12 @@ class TestAudioVisualizationWidgetEdgeCases(unittest.TestCase):
             mock_audio_player.get_current_track.return_value = mock_track
             mock_main_window.audio_player = mock_audio_player
 
-            with patch.object(widget, "_get_main_window", return_value=mock_main_window), patch(
-                "audio_visualization.AudioProcessor.extract_waveform_data",
-                side_effect=Exception("Audio processor error"),
+            with (
+                patch.object(widget, "_get_main_window", return_value=mock_main_window),
+                patch(
+                    "audio_visualization.AudioProcessor.extract_waveform_data",
+                    side_effect=Exception("Audio processor error"),
+                ),
             ):
                 # This should trigger the exception handling in lines 898-899
                 widget._on_tab_changed()
@@ -430,9 +438,11 @@ class TestAudioVisualizationWidgetEdgeCases(unittest.TestCase):
         """Test _update_speed_display when speed_label doesn't exist"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
-            AudioVisualizationWidget, "_create_speed_controls"
-        ), patch.object(AudioVisualizationWidget, "_update_tab_state"):
+        with (
+            patch.object(AudioVisualizationWidget, "_load_theme_icons"),
+            patch.object(AudioVisualizationWidget, "_create_speed_controls"),
+            patch.object(AudioVisualizationWidget, "_update_tab_state"),
+        ):
             widget = Mock(spec=AudioVisualizationWidget)
             widget._update_speed_display = AudioVisualizationWidget._update_speed_display.__get__(widget)
             widget.current_speed = 1.5
@@ -450,9 +460,11 @@ class TestAudioVisualizationWidgetEdgeCases(unittest.TestCase):
         """Test _toggle_theme when waveform_visualizer methods raise errors"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
-            AudioVisualizationWidget, "_create_speed_controls"
-        ), patch.object(AudioVisualizationWidget, "_update_tab_state"):
+        with (
+            patch.object(AudioVisualizationWidget, "_load_theme_icons"),
+            patch.object(AudioVisualizationWidget, "_create_speed_controls"),
+            patch.object(AudioVisualizationWidget, "_update_tab_state"),
+        ):
             widget = Mock(spec=AudioVisualizationWidget)
             widget._toggle_theme = AudioVisualizationWidget._toggle_theme.__get__(widget)
             widget.is_dark_theme = True
@@ -482,12 +494,12 @@ class TestMiscellaneousEdgeCases(unittest.TestCase):
         """Test WaveformVisualizer.clear when some attributes are missing"""
         mock_parent = Mock()
 
-        with patch("audio_visualization.Figure") as mock_fig_class, patch(
-            "audio_visualization.FigureCanvasTkAgg"
-        ) as mock_canvas_class, patch.object(WaveformVisualizer, "_setup_styling"), patch.object(
-            WaveformVisualizer, "_initialize_plot"
-        ) as mock_init, patch.object(
-            WaveformVisualizer, "_update_zoom_display"
+        with (
+            patch("audio_visualization.Figure") as mock_fig_class,
+            patch("audio_visualization.FigureCanvasTkAgg") as mock_canvas_class,
+            patch.object(WaveformVisualizer, "_setup_styling"),
+            patch.object(WaveformVisualizer, "_initialize_plot") as mock_init,
+            patch.object(WaveformVisualizer, "_update_zoom_display"),
         ):
             mock_fig = Mock()
             mock_ax = Mock()
@@ -522,10 +534,11 @@ class TestMiscellaneousEdgeCases(unittest.TestCase):
         """Test SpectrumAnalyzer.stop_analysis when animation is None"""
         mock_parent = Mock()
 
-        with patch("audio_visualization.Figure") as mock_fig_class, patch(
-            "audio_visualization.FigureCanvasTkAgg"
-        ) as mock_canvas_class, patch.object(SpectrumAnalyzer, "_setup_styling"), patch.object(
-            SpectrumAnalyzer, "_initialize_plot"
+        with (
+            patch("audio_visualization.Figure") as mock_fig_class,
+            patch("audio_visualization.FigureCanvasTkAgg") as mock_canvas_class,
+            patch.object(SpectrumAnalyzer, "_setup_styling"),
+            patch.object(SpectrumAnalyzer, "_initialize_plot"),
         ):
             mock_fig = Mock()
             mock_ax = Mock()
@@ -547,9 +560,11 @@ class TestMiscellaneousEdgeCases(unittest.TestCase):
         """Test AudioVisualizationWidget.set_audio_player with None"""
         mock_parent = Mock()
 
-        with patch.object(AudioVisualizationWidget, "_load_theme_icons"), patch.object(
-            AudioVisualizationWidget, "_create_speed_controls"
-        ), patch.object(AudioVisualizationWidget, "_update_tab_state"):
+        with (
+            patch.object(AudioVisualizationWidget, "_load_theme_icons"),
+            patch.object(AudioVisualizationWidget, "_create_speed_controls"),
+            patch.object(AudioVisualizationWidget, "_update_tab_state"),
+        ):
             widget = Mock(spec=AudioVisualizationWidget)
             widget.set_audio_player = AudioVisualizationWidget.set_audio_player.__get__(widget)
 

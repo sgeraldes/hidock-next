@@ -9,13 +9,11 @@ import io
 import os
 import tempfile
 import wave
-from pathlib import Path
-from unittest.mock import MagicMock, Mock, mock_open, patch
-
-import pytest
+from unittest.mock import Mock, mock_open, patch
 
 # Import the module under test
 import hta_converter
+import pytest
 from hta_converter import HTAConverter, convert_hta_to_wav, get_hta_converter
 
 

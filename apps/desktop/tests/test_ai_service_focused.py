@@ -5,12 +5,11 @@ This test suite covers the core functionality that can be reliably tested,
 focusing on provider availability, basic initialization, and error handling.
 """
 
-from unittest.mock import Mock, patch
-
-import pytest
+from unittest.mock import patch
 
 # Import the module under test
 import ai_service
+import pytest
 from ai_service import AIProvider, AIServiceManager, GeminiProvider, OpenAIProvider
 
 

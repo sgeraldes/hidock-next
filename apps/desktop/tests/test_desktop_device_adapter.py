@@ -5,27 +5,15 @@ This test suite covers the desktop implementation of the unified device interfac
 including device discovery, connection management, data operations, and error handling.
 """
 
-import asyncio
 import time
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, Mock, mock_open, patch
-
-import pytest
+from unittest.mock import Mock, mock_open, patch
 
 # Import the module under test
 import desktop_device_adapter
+import pytest
 from desktop_device_adapter import DesktopDeviceAdapter
-from device_interface import (
-    AudioRecording,
-    ConnectionStats,
-    DeviceCapability,
-    DeviceHealth,
-    DeviceInfo,
-    DeviceModel,
-    OperationProgress,
-    OperationStatus,
-    StorageInfo,
-)
+from device_interface import ConnectionStats, DeviceCapability, DeviceHealth, DeviceInfo, DeviceModel, StorageInfo
 
 
 class TestDesktopDeviceAdapterInitialization:
@@ -70,9 +58,10 @@ class TestDeviceDiscovery:
     @pytest.mark.asyncio
     async def test_discover_devices_success(self):
         """Test successful device discovery."""
-        with patch("desktop_device_adapter.detect_device_model") as mock_detect, patch(
-            "desktop_device_adapter.HiDockJensen"
-        ) as mock_jensen_class:
+        with (
+            patch("desktop_device_adapter.detect_device_model") as mock_detect,
+            patch("desktop_device_adapter.HiDockJensen") as mock_jensen_class,
+        ):
             mock_detect.return_value = DeviceModel.H1E
 
             # Mock only first 2 product IDs to return devices

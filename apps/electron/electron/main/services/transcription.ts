@@ -24,6 +24,7 @@ import {
   acquireTranscriptionLock,
   releaseTranscriptionLock,
   clearStaleTranscriptionLock,
+  resetStuckTranscriptions,
   type Transcript
 } from './database'
 import { BrowserWindow } from 'electron'
@@ -44,10 +45,8 @@ export function startTranscriptionProcessor(): void {
     return
   }
 
-  // Clear any lock left by a previous app instance that crashed or was killed
-  // before releasing it. The lock is identified by a unique process+timestamp ID,
-  // so any lock present at startup belongs to a dead process.
   clearStaleTranscriptionLock()
+  resetStuckTranscriptions()
 
   console.log('Starting transcription processor')
 
@@ -104,34 +103,32 @@ async function processQueue(): Promise<void> {
     return
   }
 
-  const config = getConfig()
-  if (!config.transcription.geminiApiKey) {
-    console.error('[Transcription] Cannot process queue: Gemini API key not configured')
-
-    // Mark all pending items as failed with clear error message
-    const pendingItems = getQueueItems('pending')
-    const processingItems = getQueueItems('processing')
-
-    const allStuckItems = [...pendingItems, ...processingItems]
-    if (allStuckItems.length > 0) {
-      console.log(`[Transcription] Marking ${allStuckItems.length} stuck items as failed (no API key)`)
-
-      for (const item of allStuckItems) {
-        updateQueueItem(item.id, 'failed', 'Gemini API key not configured. Please add your API key in Settings.')
-        updateRecordingTranscriptionStatus(item.recording_id, 'error')
-        notifyRenderer('transcription:failed', {
-          queueItemId: item.id,
-          recordingId: item.recording_id,
-          error: 'Gemini API key not configured. Please add your API key in Settings.'
-        })
-      }
-    }
-
-    releaseTranscriptionLock(processId)
-    return
-  }
-
   try {
+    const config = getConfig()
+    if (!config.transcription.geminiApiKey) {
+      console.error('[Transcription] Cannot process queue: Gemini API key not configured')
+
+      // Mark all pending items as failed with clear error message
+      const pendingItems = getQueueItems('pending')
+      const processingItems = getQueueItems('processing')
+
+      const allStuckItems = [...pendingItems, ...processingItems]
+      if (allStuckItems.length > 0) {
+        console.log(`[Transcription] Marking ${allStuckItems.length} stuck items as failed (no API key)`)
+
+        for (const item of allStuckItems) {
+          updateQueueItem(item.id, 'failed', 'Gemini API key not configured. Please add your API key in Settings.')
+          updateRecordingTranscriptionStatus(item.recording_id, 'error')
+          notifyRenderer('transcription:failed', {
+            queueItemId: item.id,
+            recordingId: item.recording_id,
+            error: 'Gemini API key not configured. Please add your API key in Settings.'
+          })
+        }
+      }
+
+      return
+    }
     // spec-014: Retry failed items with max attempts
     // B-TXN-001: Exponential backoff before retrying failed items
     // C-005: Skip non-retryable errors (missing files, missing API key)
@@ -465,11 +462,15 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
    "selection_reason": "why you selected this meeting"`
   } else if (candidateMeetings.length === 1) {
     meetingSelectionSection = `
-5. Meeting Match: This recording appears to be from the meeting "${candidateMeetings[0].subject}".
-   Verify this makes sense based on the content.
-   "selected_meeting_id": "${candidateMeetings[0].id}",
+5. Meeting Selection: There is one candidate meeting near this recording's time:
+   1. "${candidateMeetings[0].subject}" (ID: ${candidateMeetings[0].id})
+
+   Determine if this recording actually belongs to this meeting based on topics, people, and context.
+   If the content does NOT match the meeting subject, set meeting_confidence to 0.0 and selected_meeting_id to "none".
+
+   "selected_meeting_id": "the meeting ID if it matches, or \\"none\\" if it doesn't",
    "meeting_confidence": 0.0 to 1.0,
-   "selection_reason": "your reasoning"`
+   "selection_reason": "why you selected or rejected this meeting"`
   }
 
   // Now analyze the transcription for summary, action items, etc.
@@ -483,6 +484,8 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
    - Questions should be SPECIFIC to the content (e.g., "What was decided about the Q3 marketing budget?")
    - Avoid generic questions (e.g., "What was discussed?" or "Tell me more")
    - Questions should help users quickly understand key decisions, action items, and outcomes
+
+IMPORTANT: Respond in the SAME LANGUAGE as the transcript. If the transcript is in Spanish, write the summary, action items, topics, key points, title, and questions in Spanish. If English, respond in English.
 ${meetingSelectionSection}
 
 Transcript:
@@ -541,17 +544,21 @@ Respond in JSON format:
       addRecordingMeetingCandidate(recordingId, meeting.id, confidence, reason, isSelected)
     }
 
-    // If AI selected a meeting, link it
-    if (analysis.selected_meeting_id) {
+    // If AI selected a meeting with sufficient confidence, link it
+    const MIN_LINK_CONFIDENCE = 0.4
+    if (analysis.selected_meeting_id && analysis.selected_meeting_id !== 'none') {
       const selectedMeeting = candidateMeetings.find(m => m.id === analysis.selected_meeting_id)
-      if (selectedMeeting) {
+      const confidence = analysis.meeting_confidence || 0
+      if (selectedMeeting && confidence >= MIN_LINK_CONFIDENCE) {
         linkRecordingToMeeting(
           recordingId,
           selectedMeeting.id,
-          analysis.meeting_confidence || 0.5,
+          confidence,
           'ai_transcript_match'
         )
-        console.log(`AI matched recording to meeting: "${selectedMeeting.subject}" (confidence: ${analysis.meeting_confidence})`)
+        console.log(`AI matched recording to meeting: "${selectedMeeting.subject}" (confidence: ${confidence})`)
+      } else if (selectedMeeting && confidence < MIN_LINK_CONFIDENCE) {
+        console.log(`AI match rejected (low confidence ${confidence}): "${selectedMeeting.subject}"`)
       }
     }
   }

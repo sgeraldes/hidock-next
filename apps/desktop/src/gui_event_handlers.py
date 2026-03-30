@@ -16,7 +16,6 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-
 from config_and_logger import logger
 
 

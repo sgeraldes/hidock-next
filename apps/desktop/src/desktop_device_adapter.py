@@ -244,7 +244,7 @@ class DesktopDeviceAdapter(IDeviceInterface):
                     status_raw = card_info.get("status_raw", 0)
                     total_capacity = card_info.get("capacity", 0) * 1024 * 1024  # Convert MB to bytes
                     # Note: Device firmware reports FREE space in "used" field (firmware bug/naming issue)
-                    free_space = card_info.get("used", 0) * 1024 * 1024  # Actually free space 
+                    free_space = card_info.get("used", 0) * 1024 * 1024  # Actually free space
                     used_space = total_capacity - free_space  # Calculate actual used space
                 else:
                     # Fallback values
@@ -289,27 +289,21 @@ class DesktopDeviceAdapter(IDeviceInterface):
             # Check for errors in the response
             if "error" in files_info:
                 error_msg = files_info["error"]
-                
+
                 # Operation aborted is expected during disconnect - not an error
                 if "aborted" in error_msg.lower():
                     logger.debug(
-                        "DesktopDeviceAdapter",
-                        "get_recordings", 
-                        f"File list operation cancelled: {error_msg}"
+                        "DesktopDeviceAdapter", "get_recordings", f"File list operation cancelled: {error_msg}"
                     )
                 else:
-                    logger.error(
-                        "DesktopDeviceAdapter",
-                        "get_recordings", 
-                        f"Device returned error: {error_msg}"
-                    )
-                
+                    logger.error("DesktopDeviceAdapter", "get_recordings", f"Device returned error: {error_msg}")
+
                 # For incomplete data, log warning but still return available files
                 if files_info.get("incomplete") and files_info.get("files"):
                     logger.warning(
                         "DesktopDeviceAdapter",
-                        "get_recordings", 
-                        f"Using incomplete file list: {len(files_info['files'])}/{files_info.get('expected', '?')} files"
+                        "get_recordings",
+                        f"Using incomplete file list: {len(files_info['files'])}/{files_info.get('expected', '?')} files",
                     )
                     return files_info["files"]
                 else:
@@ -319,17 +313,17 @@ class DesktopDeviceAdapter(IDeviceInterface):
             # Log retry information if available
             if files_info.get("retries_attempted", 0) > 1:
                 logger.info(
-                    "DesktopDeviceAdapter", 
+                    "DesktopDeviceAdapter",
                     "get_recordings",
-                    f"File list obtained after {files_info['retries_attempted']} attempts"
+                    f"File list obtained after {files_info['retries_attempted']} attempts",
                 )
-            
+
             # Log incomplete data warning if present (but no error field)
             if files_info.get("incomplete"):
                 logger.warning(
                     "DesktopDeviceAdapter",
-                    "get_recordings", 
-                    f"Incomplete file list: {len(files_info['files'])}/{files_info.get('expected', '?')} files"
+                    "get_recordings",
+                    f"Incomplete file list: {len(files_info['files'])}/{files_info.get('expected', '?')} files",
                 )
 
             # Return the raw file info dictionaries directly, as the GUI expects this format.
@@ -408,11 +402,11 @@ class DesktopDeviceAdapter(IDeviceInterface):
                     f"No cached size available, fetching file list for {recording_id}",
                 )
                 recordings = await self.get_recordings()
-                recording = next((r for r in recordings if r.get('name') == recording_id), None)
+                recording = next((r for r in recordings if r.get("name") == recording_id), None)
                 if not recording:
                     raise FileNotFoundError(f"Recording {recording_id} not found")
-                recording_filename = recording['name']
-                recording_size = recording['length']
+                recording_filename = recording["name"]
+                recording_size = recording["length"]
 
             # Set up progress tracking
             if progress_callback:

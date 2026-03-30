@@ -2,10 +2,7 @@
 Tests for gui_main_window.py HiDockToolGUI main window functionality.
 """
 
-import json
-import os
-import sys
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import Mock, patch
 
 import pytest
 

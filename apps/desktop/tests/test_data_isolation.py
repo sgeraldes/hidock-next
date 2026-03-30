@@ -6,14 +6,12 @@ from production configuration files, cache directories, and data storage.
 """
 
 import os
-import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import pytest
-
 import config_and_logger
 import file_operations_manager
+import pytest
 
 
 class TestDataIsolation:
