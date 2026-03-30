@@ -14,8 +14,9 @@ import {
   getAllSessions,
   getSession,
   deleteSession,
+  getNotesCount,
 } from "../services/database-queries";
-import { getDatabase, saveDatabase } from "../services/database";
+import { saveDatabase } from "../services/database";
 
 export function registerSessionHandlers(): void {
   createHandler({
@@ -80,10 +81,7 @@ export function registerSessionHandlers(): void {
         return sum;
       }, 0);
       const totalRecordingMinutes = Math.round(totalRecordingMs / 60000);
-      const db = getDatabase();
-      const notesResult = db.exec("SELECT COUNT(*) FROM notes");
-      const notesCount =
-        notesResult.length > 0 ? (notesResult[0].values[0][0] as number) : 0;
+      const notesCount = getNotesCount();
       return { totalSessions, totalRecordingMinutes, notesCount };
     },
   });

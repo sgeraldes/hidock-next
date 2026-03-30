@@ -64,12 +64,15 @@ const mockCreateSession = vi.fn(() => ({
 }))
 const mockUpdateSession = vi.fn()
 
+const mockGetNotesCount = vi.fn(() => 0)
+
 vi.mock('../../services/database-queries', () => ({
   getAllSessions: () => mockGetAllSessions(),
   getSession: (id: unknown) => mockGetSession(id as string),
   deleteSession: (id: unknown) => mockDeleteSession(id),
   createSession: () => mockCreateSession(),
   updateSession: (id: unknown, updates: unknown) => mockUpdateSession(id, updates),
+  getNotesCount: () => mockGetNotesCount(),
 }))
 
 // ── Mock database ─────────────────────────────────────────────────────────
@@ -129,6 +132,7 @@ describe('Session Handlers', () => {
     expect(ipcMain.handle).toHaveBeenCalledWith(CHANNELS.session.end, expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith(CHANNELS.session.delete, expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith(CHANNELS.session.linkMeeting, expect.any(Function))
+    expect(ipcMain.handle).toHaveBeenCalledWith(CHANNELS.session.stats, expect.any(Function))
   })
 
   // ── session:list ────────────────────────────────────────────────────────
