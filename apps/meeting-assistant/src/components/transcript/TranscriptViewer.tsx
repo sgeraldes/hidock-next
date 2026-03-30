@@ -28,8 +28,8 @@ export function TranscriptViewer({ sessionId: _sessionId, sessionStartedAt }: Tr
 
   // Auto-scroll to bottom when new segments arrive and user is near the bottom
   useEffect(() => {
-    if (isNearBottom && parentRef.current && filteredSegments.length > 0) {
-      parentRef.current.scrollTop = parentRef.current.scrollHeight
+    if (isNearBottom && filteredSegments.length > 0) {
+      virtualizer.scrollToIndex(filteredSegments.length - 1, { align: 'end' })
     }
   }, [segments.length, isNearBottom, filteredSegments.length])
 
