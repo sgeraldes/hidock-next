@@ -46,3 +46,16 @@ export interface ProviderResult {
   model: LanguageModel
   provider: AIProviderKey
 }
+
+export interface EmbeddingProviderConfig {
+  provider: AIProviderKey
+  model: string
+  apiKey?: string
+  baseURL?: string
+  region?: string
+}
+
+export interface EmbeddingResult {
+  embedding: number[]
+  usage?: { tokens: number }
+}

@@ -9,6 +9,7 @@ import { registerSuggestionHandlers } from "./suggestion-handlers";
 import { registerNotesHandlers } from "./notes-handlers";
 import { registerScreenshotHandlers } from "./screenshot-handlers";
 import { registerSettingsHandlers } from "./settings-handlers";
+import { registerKnowledgeHandlers } from "./knowledge-handlers";
 
 export function registerIpcHandlers(): void {
   registerSessionHandlers();
@@ -17,5 +18,6 @@ export function registerIpcHandlers(): void {
   registerNotesHandlers();
   registerScreenshotHandlers();
   registerSettingsHandlers();
+  registerKnowledgeHandlers();
   console.log("[IPC] All handlers registered");
 }

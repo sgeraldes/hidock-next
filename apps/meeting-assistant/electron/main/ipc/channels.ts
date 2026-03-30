@@ -71,4 +71,15 @@ export const CHANNELS = {
     // Push events
     onChanged: "settings:changed",
   },
+
+  knowledge: {
+    // Invoke channels
+    addSource: "kb:addSource",
+    removeSource: "kb:removeSource",
+    search: "kb:search",
+    reindex: "kb:reindex",
+    // Push events
+    onIndexProgress: "kb:indexProgress",
+    onIndexComplete: "kb:indexComplete",
+  },
 } as const;

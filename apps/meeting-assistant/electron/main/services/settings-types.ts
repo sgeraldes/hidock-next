@@ -26,16 +26,35 @@ export type SettingsKey =
   | "notes.autoCategorize"
   | "notes.showPostSessionPrompt"
   | "notes.defaultLanguage"
-  | "notes.customTemplatesPath";
+  | "notes.customTemplatesPath"
+  // AI Provider
+  | "ai.provider"
+  | "ai.model"
+  | "ai.apiKey"
+  | "ai.embeddingProvider"
+  | "ai.embeddingModel"
+  // Knowledge Base
+  | "kb.sourcePath"
+  | "kb.chunkSize"
+  | "kb.chunkOverlap"
+  | "kb.autoReindex"
+  // Suggestions
+  | "suggestions.enabled"
+  | "suggestions.triggerIntervalSeconds"
+  | "suggestions.maxSuggestions"
+  | "suggestions.contextWindowSeconds";
 
-export type SettingType = "boolean" | "number" | "string" | "enum";
+export type SettingType = "boolean" | "number" | "string" | "enum" | "path";
 
 export type SettingCategory =
   | "screenshots"
   | "calendar"
   | "mic"
   | "correlation"
-  | "notes";
+  | "notes"
+  | "ai"
+  | "kb"
+  | "suggestions";
 
 export interface SettingDefinition<K extends SettingsKey = SettingsKey> {
   key: K;
@@ -84,4 +103,22 @@ export interface SettingsMap {
   "notes.showPostSessionPrompt": boolean;
   "notes.defaultLanguage": string;
   "notes.customTemplatesPath": string | null;
+  // AI Provider
+  // NOTE: ai.apiKey should use credential-store.ts in production for secure storage.
+  // It is included here as a plain setting for development convenience only.
+  "ai.provider": "google" | "openai" | "anthropic" | "bedrock" | "ollama";
+  "ai.model": string;
+  "ai.apiKey": string;
+  "ai.embeddingProvider": "google" | "openai" | "bedrock" | "ollama";
+  "ai.embeddingModel": string;
+  // Knowledge Base
+  "kb.sourcePath": string;
+  "kb.chunkSize": number;
+  "kb.chunkOverlap": number;
+  "kb.autoReindex": boolean;
+  // Suggestions
+  "suggestions.enabled": boolean;
+  "suggestions.triggerIntervalSeconds": number;
+  "suggestions.maxSuggestions": number;
+  "suggestions.contextWindowSeconds": number;
 }

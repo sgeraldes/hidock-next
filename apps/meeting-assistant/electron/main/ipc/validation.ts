@@ -90,6 +90,23 @@ export const ScreenshotConfigureInput = z.object({
   analyzeWithLLM: z.boolean().optional(),
 });
 
+// ── Knowledge Base ────────────────────────────────────────────────────────────
+
+export const KnowledgeAddSourceInput = z.object({
+  path: z.string(),
+});
+
+export const KnowledgeRemoveSourceInput = z.object({
+  sourcePath: z.string(),
+});
+
+export const KnowledgeSearchInput = z.object({
+  query: z.string(),
+  topK: z.number().int().positive().optional(),
+});
+
+export const KnowledgeReindexInput = z.void();
+
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 export const SettingsGetInput = z.object({

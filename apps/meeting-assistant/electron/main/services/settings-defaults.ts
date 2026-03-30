@@ -158,6 +158,105 @@ export const SETTING_DEFINITIONS: SettingDefinition<any>[] = [
     default: null,
     nullable: true,
   },
+
+  // ── AI Provider ───────────────────────────────────────────────────────────
+  {
+    key: "ai.provider",
+    type: "enum",
+    category: "ai",
+    default: "ollama",
+    enumValues: ["google", "openai", "anthropic", "bedrock", "ollama"],
+  },
+  {
+    key: "ai.model",
+    type: "string",
+    category: "ai",
+    default: "llama3.2",
+  },
+  {
+    // NOTE: For production, ai.apiKey should be stored via credential-store.ts,
+    // not in the SQLite settings database. Included here for development convenience.
+    key: "ai.apiKey",
+    type: "string",
+    category: "ai",
+    default: "",
+    nullable: true,
+  },
+  {
+    key: "ai.embeddingProvider",
+    type: "enum",
+    category: "ai",
+    default: "ollama",
+    enumValues: ["google", "openai", "bedrock", "ollama"],
+  },
+  {
+    key: "ai.embeddingModel",
+    type: "string",
+    category: "ai",
+    default: "nomic-embed-text",
+  },
+
+  // ── Knowledge Base ────────────────────────────────────────────────────────
+  {
+    key: "kb.sourcePath",
+    type: "string",
+    category: "kb",
+    default: "",
+  },
+  {
+    key: "kb.chunkSize",
+    type: "number",
+    category: "kb",
+    default: 2000,
+    min: 500,
+    max: 10000,
+  },
+  {
+    key: "kb.chunkOverlap",
+    type: "number",
+    category: "kb",
+    default: 200,
+    min: 0,
+    max: 2000,
+  },
+  {
+    key: "kb.autoReindex",
+    type: "boolean",
+    category: "kb",
+    default: true,
+  },
+
+  // ── Suggestions ───────────────────────────────────────────────────────────
+  {
+    key: "suggestions.enabled",
+    type: "boolean",
+    category: "suggestions",
+    default: true,
+  },
+  {
+    key: "suggestions.triggerIntervalSeconds",
+    type: "number",
+    category: "suggestions",
+    default: 90,
+    min: 30,
+    max: 600,
+  },
+  {
+    key: "suggestions.maxSuggestions",
+    type: "number",
+    category: "suggestions",
+    default: 3,
+    min: 1,
+    max: 10,
+  },
+  {
+    key: "suggestions.contextWindowSeconds",
+    type: "number",
+    category: "suggestions",
+    default: 120,
+    min: 30,
+    max: 600,
+  },
 ] satisfies SettingDefinition<SettingsKey>[];
 
 /** Fast key → definition lookup */
@@ -176,4 +275,7 @@ export const CATEGORY_LABELS: Record<SettingCategory, string> = {
   mic: "Microphone",
   correlation: "Correlation",
   notes: "Notes",
+  ai: "AI Provider",
+  kb: "Knowledge Base",
+  suggestions: "Suggestions",
 };
