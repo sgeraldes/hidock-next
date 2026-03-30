@@ -2,6 +2,7 @@ export interface ResponseHeader {
   command: number
   sequence: number
   bodyLength: number
+  checksumLength: number
 }
 
 export class JensenMessage {
@@ -56,11 +57,15 @@ export function parseResponseHeader(data: Uint8Array): ResponseHeader | null {
     ((data[5] & 0xff) << 16) |
     ((data[6] & 0xff) << 8) |
     (data[7] & 0xff)
-  const bodyLength =
+  // Length field: upper byte = checksum length, lower 3 bytes = body length
+  // Matches Python: checksum_len = (val >> 24) & 0xFF; body_len = val & 0x00FFFFFF
+  const rawLength =
     ((data[8] & 0xff) << 24) |
     ((data[9] & 0xff) << 16) |
     ((data[10] & 0xff) << 8) |
     (data[11] & 0xff)
+  const checksumLength = (rawLength >>> 24) & 0xff
+  const bodyLength = rawLength & 0x00ffffff
 
-  return { command, sequence, bodyLength }
+  return { command, sequence, bodyLength, checksumLength }
 }

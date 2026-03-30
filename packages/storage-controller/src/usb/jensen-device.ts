@@ -209,17 +209,16 @@ export class JensenDevice {
   async listFiles(timeout = 300000): Promise<FileEntry[]> {
     if (!this.epOut || !this.epIn) return []
 
+    // Clear carry buffer before starting — prevents residual data from previous commands
+    this.carryBuffer = Buffer.alloc(0)
+
     return new Promise<FileEntry[]>((resolve) => {
       const allData: Buffer[] = []
 
       // Register handler for GET_FILE_LIST — accumulates data packets
       this.handlers.set(CMD.GET_FILE_LIST, (body) => {
-        console.error(`[Jensen] FILE_LIST handler: bodyLen=${body.length}, packets=${allData.length}`)
-        if (body.length > 0 && allData.length === 0) {
-          console.error(`[Jensen] FILE_LIST first bytes: ${Array.from(body.subarray(0, Math.min(20, body.length))).map(b => b.toString(16).padStart(2, '0')).join(' ')}`)
-        }
         if (body.length === 0) {
-          console.error(`[Jensen] FILE_LIST END — ${allData.length} packets, total ${allData.reduce((s, b) => s + b.length, 0)} bytes`)
+          // End of file list
           const combined = Buffer.concat(allData)
           return parseFileListBuffer(new Uint8Array(combined.buffer, combined.byteOffset, combined.length))
         }
@@ -227,7 +226,7 @@ export class JensenDevice {
         return undefined // Keep waiting for more packets
       })
 
-      // Send command and wait for handler to resolve
+      // Send command
       const msg = new JensenMessage(CMD.GET_FILE_LIST).sequence(this.sequenceId++)
       this.epOut!.transfer(Buffer.from(msg.make()), (err) => {
         if (err) {
@@ -352,8 +351,10 @@ export class JensenDevice {
         // Timeout errors are expected — the device may take minutes to respond
         return
       }
-      console.error(`[Jensen] read: ${data?.length ?? 0} bytes`)
       if (!data || data.length === 0) return
+      // Log raw header for debugging
+      const hdr = Array.from(data.subarray(0, Math.min(24, data.length))).map(b => b.toString(16).padStart(2, '0')).join(' ')
+      console.error(`[Jensen] read: ${data.length} bytes — ${hdr}`)
 
       this.processIncomingData(data)
     })
@@ -381,15 +382,15 @@ export class JensenDevice {
       const header = parseResponseHeader(new Uint8Array(work.buffer, work.byteOffset + pos, work.length - pos))
       if (!header) { pos++; continue }
 
-      const totalLen = 12 + header.bodyLength
+      const totalLen = 12 + header.bodyLength + header.checksumLength
       if (pos + totalLen > work.length) {
         // Incomplete message — save as carry buffer for next packet
         this.carryBuffer = Buffer.from(work.subarray(pos))
         return
       }
 
-      // Extract body and dispatch to handler
-      const body = Buffer.from(work.subarray(pos + 12, pos + totalLen))
+      // Extract body (exclude checksum bytes at the end)
+      const body = Buffer.from(work.subarray(pos + 12, pos + 12 + header.bodyLength))
       const cmd = header.command
 
       const handler = this.handlers.get(cmd)

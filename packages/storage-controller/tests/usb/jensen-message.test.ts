@@ -57,6 +57,16 @@ describe('parseResponseHeader', () => {
     expect(header!.command).toBe(1)
     expect(header!.sequence).toBe(5)
     expect(header!.bodyLength).toBe(3)
+    expect(header!.checksumLength).toBe(0)
+  })
+
+  it('parses body length with checksum byte', () => {
+    // Length field: 0x02001F74 → checksumLength=2, bodyLength=0x1F74=8052
+    const data = new Uint8Array([0x12, 0x34, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x1F, 0x74])
+    const header = parseResponseHeader(data)
+    expect(header).not.toBeNull()
+    expect(header!.bodyLength).toBe(0x1F74)
+    expect(header!.checksumLength).toBe(2)
   })
 
   it('returns null for invalid sync markers', () => {

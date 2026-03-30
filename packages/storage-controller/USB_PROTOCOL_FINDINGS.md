@@ -156,9 +156,43 @@ After the first successful file list, subsequent calls to `listFiles` receive a 
 2. Our disconnect doesn't fully reset the device's internal file list iterator
 3. The Python app avoids this by using `receive_buffer.clear()` before each command
 
-## Next Steps
+## ROOT CAUSE: node-usb vs PyUSB on Windows
 
-1. **Match the Python pattern exactly** — use sequential reads with short timeouts and a persistent buffer, not a perpetual callback-based read loop
-2. **Clear the receive buffer before each command** — the Python app explicitly does `self.receive_buffer.clear()` before sending `GET_FILE_LIST`
-3. **Use streaming_cmd_id mode** — accept any cmd=4 regardless of sequence ID
-4. **Handle completion by consecutive timeouts** — Python uses 10 consecutive 200ms timeouts as completion signal, not just empty body
+**Date confirmed:** 2026-03-29
+
+### Definitive test: same device, same command, same libusb DLL
+
+| | node-usb (npm `usb`) | PyUSB (python `pyusb`) |
+|---|---|---|
+| **Response time** | 90+ seconds | 1.6 seconds |
+| **Data size** | 6,027 bytes (1 packet) | 80,267 bytes (10 packets) |
+| **Body starts with** | `68 64 61` (mid-stream garbage) | `ff ff 00 00 05 75` (correct header) |
+| **Sequence ID** | 9 (stale state) | 0 (fresh) |
+| **Filenames parsed** | 107 (partial) | 1,419 (all 1,397 + false positives) |
+| **Works correctly** | NO | YES |
+
+### What this means
+
+The HiDock USB protocol works correctly when accessed via PyUSB + libusb-1.0 on Windows. The `usb` npm package (node-usb) on Windows returns stale/wrong data from the device, receives only 1 packet instead of 10, and takes 90 seconds instead of 1.6 seconds.
+
+Both use the same `libusb-1.0.dll`. The difference is in how the Node.js binding wraps libusb vs how Python wraps it. Possible causes:
+- node-usb may use WinUSB directly instead of going through libusb
+- node-usb's async callback model may miss bulk transfer packets
+- node-usb may have a different default pipe policy or transfer configuration on Windows
+
+### PyUSB file list behavior (confirmed working)
+
+1. Send GET_FILE_LIST (cmd=4, empty body)
+2. First chunk arrives in ~1.6 seconds (8,704 bytes)
+3. Subsequent chunks arrive every 3-6 seconds (~8,192 bytes each)
+4. 10 chunks total = 80,267 bytes for 1,397 files
+5. Each chunk is a complete Jensen message (0x12 0x34 header)
+6. First body starts with `0xFF 0xFF` + 4-byte file count
+7. Entries are ~57 bytes each (version + nameLen + name + fileLen + padding + signature)
+
+### Solution options
+
+1. **Use PyUSB as bridge** — spawn a Python subprocess for USB operations, communicate via stdio/JSON
+2. **Use a different Node.js USB library** — try `webusb` polyfill or direct WinUSB FFI
+3. **Fix node-usb** — investigate and patch the Windows-specific issue
+4. **Use the desktop app's Python implementation directly** — call `hidock_device.py` list_files from Node.js via child process
