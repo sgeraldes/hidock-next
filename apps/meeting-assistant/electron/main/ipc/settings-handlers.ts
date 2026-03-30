@@ -87,8 +87,42 @@ export function registerSettingsHandlers(): void {
   createHandler({
     channel: CHANNELS.settings.testConnection,
     schema: SettingsTestConnectionInput,
-    handler: () => {
-      return { success: false, error: "Not implemented" };
+    handler: async () => {
+      try {
+        const provider = settingsStore.get("ai.provider") as string ?? "ollama";
+        const model = settingsStore.get("ai.model") as string ?? "llama3.2";
+        const apiKey = getDecryptedSetting("ai.apiKey") ?? undefined;
+
+        const { createProvider } = await import("@hidock/ai-providers");
+
+        type ProviderConfig = Parameters<typeof createProvider>[0];
+        let config: ProviderConfig;
+        switch (provider) {
+          case "openai":
+            config = { provider: "openai", model, apiKey: apiKey ?? "" };
+            break;
+          case "anthropic":
+            config = { provider: "anthropic", model, apiKey: apiKey ?? "" };
+            break;
+          case "google":
+            config = { provider: "google", model, apiKey: apiKey ?? "" };
+            break;
+          case "bedrock":
+            config = { provider: "bedrock", model };
+            break;
+          case "ollama":
+          default:
+            config = { provider: "ollama", model };
+            break;
+        }
+
+        const { generateText } = await import("ai");
+        const result = createProvider(config);
+        await generateText({ model: result.model, prompt: 'Reply with "ok"', maxTokens: 5 });
+        return { success: true };
+      } catch (error) {
+        return { success: false, error: (error as Error).message };
+      }
     },
   });
 
