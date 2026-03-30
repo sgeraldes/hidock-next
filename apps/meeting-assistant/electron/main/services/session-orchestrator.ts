@@ -153,6 +153,9 @@ export class SessionOrchestrator {
     // Broadcast session created
     broadcastToAllWindows('session:created', session)
 
+    // Broadcast recording state for mini-bar and other UI
+    broadcastToAllWindows('app:recordingState', { isRecording: true, sessionId: session.id })
+
     saveDatabase()
   }
 
@@ -194,6 +197,9 @@ export class SessionOrchestrator {
     this.activeSessionId = null
     this.activeSessionDir = null
     updateTrayState('idle')
+
+    // Broadcast recording state stopped
+    broadcastToAllWindows('app:recordingState', { isRecording: false, sessionId: null })
 
     return { sessionId }
   }
@@ -387,4 +393,16 @@ export class SessionOrchestrator {
       console.error('[SessionOrchestrator] Error recovering sessions:', error)
     }
   }
+}
+
+// ── Module-level singleton helpers ────────────────────────────────────────────
+
+let _orchestratorInstance: SessionOrchestrator | null = null
+
+export function getOrchestrator(): SessionOrchestrator | null {
+  return _orchestratorInstance
+}
+
+export function setOrchestratorInstance(orchestrator: SessionOrchestrator): void {
+  _orchestratorInstance = orchestrator
 }

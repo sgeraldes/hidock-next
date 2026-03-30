@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Mic, MicOff, Camera, Square, LayoutDashboard } from 'lucide-react'
 import { useAppStore } from '../stores/app-store'
 import { useSessionStore } from '../stores/session-store'
@@ -13,6 +13,16 @@ import { Card, CardContent } from '../components/ui/card'
 import { TranscriptViewer } from '../components/transcript/TranscriptViewer'
 import { SuggestionList } from '../components/suggestions/SuggestionList'
 import { ScreenshotGallery } from '../components/screenshots/ScreenshotGallery'
+
+type SessionStats = {
+  totalSessions: number
+  totalRecordingMinutes: number
+  notesCount: number
+}
+
+type ElectronSessionAPI = {
+  stats?: () => Promise<SessionStats>
+}
 
 // ── Quick-stat metric card ────────────────────────────────────────────────────
 
@@ -55,11 +65,12 @@ function formatTotalDuration(sessions: { startedAt: number; endedAt: number | nu
 
 interface WelcomeStateProps {
   sessions: { startedAt: number; endedAt: number | null }[]
+  stats: SessionStats | null
   onStart: () => void
   isCreating: boolean
 }
 
-function WelcomeState({ sessions, onStart, isCreating }: WelcomeStateProps) {
+function WelcomeState({ sessions, stats, onStart, isCreating }: WelcomeStateProps) {
   const completedSessions = sessions.filter((s) => s.endedAt !== null)
 
   return (
@@ -86,8 +97,11 @@ function WelcomeState({ sessions, onStart, isCreating }: WelcomeStateProps) {
       {/* Quick stats */}
       {sessions.length > 0 && (
         <div className="flex gap-3 w-full max-w-sm mt-2">
-          <MetricCard label="Sessions" value={sessions.length} />
+          <MetricCard label="Sessions" value={stats?.totalSessions ?? sessions.length} />
           <MetricCard label="Total time" value={completedSessions.length > 0 ? formatTotalDuration(completedSessions) : '—'} mono />
+          {stats && stats.notesCount > 0 && (
+            <MetricCard label="Notes" value={stats.notesCount} />
+          )}
         </div>
       )}
     </div>
@@ -186,10 +200,20 @@ export default function Dashboard() {
   const fetchSegments = useTranscriptStore((s) => s.fetchSegments)
   const fetchActiveSuggestions = useSuggestionStore((s) => s.fetchActive)
 
+  const [stats, setStats] = useState<SessionStats | null>(null)
+
   // Fetch sessions on mount
   useEffect(() => {
     fetchSessions()
   }, [fetchSessions])
+
+  // Fetch stats on mount
+  useEffect(() => {
+    const api = (window as unknown as { electronAPI?: { session?: ElectronSessionAPI } }).electronAPI
+    api?.session?.stats?.()
+      .then((s) => { if (s) setStats(s) })
+      .catch(console.error)
+  }, [])
 
   // When there's an active session, load its transcript and suggestions
   useEffect(() => {
@@ -237,6 +261,7 @@ export default function Dashboard() {
       ) : (
         <WelcomeState
           sessions={sessions}
+          stats={stats}
           onStart={handleStartRecording}
           isCreating={loading}
         />

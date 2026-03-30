@@ -481,3 +481,12 @@ export function createNoteTemplate(params: {
     is_default: isDefault,
   };
 }
+
+export function getNotesCount(): number {
+  const db = getDatabase();
+  const result = db.exec("SELECT COUNT(*) FROM notes");
+  if (result.length > 0 && result[0].values.length > 0) {
+    return result[0].values[0][0] as number;
+  }
+  return 0;
+}

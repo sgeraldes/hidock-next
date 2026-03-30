@@ -12,6 +12,7 @@ export const CHANNELS = {
     end: "session:end",
     delete: "session:delete",
     linkMeeting: "session:linkMeeting",
+    stats: "session:stats",
     // Push events (main -> renderer)
     onCreated: "session:created",
     onUpdated: "session:updated",

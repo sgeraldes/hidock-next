@@ -24,3 +24,26 @@ export const useAppStore = create<AppState>((set) => ({
   setIsRecording: (recording) => set({ isRecording: recording }),
   setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
 }))
+
+type RecordingStateData = { isRecording: boolean; sessionId: string | null }
+type ElectronWithRecordingState = {
+  onRecordingState?: (cb: (data: RecordingStateData) => void) => () => void
+}
+
+/**
+ * Initialise the app store IPC listeners. Call once on app startup.
+ * Returns an unsubscribe function to clean up.
+ */
+export function initAppStore(): () => void {
+  const api = (window as unknown as { electronAPI?: ElectronWithRecordingState }).electronAPI
+  if (!api?.onRecordingState) return () => {}
+
+  const unsub = api.onRecordingState((data) => {
+    useAppStore.setState({
+      isRecording: data.isRecording,
+      activeSessionId: data.sessionId,
+    })
+  })
+
+  return unsub
+}
