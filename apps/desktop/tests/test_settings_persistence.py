@@ -14,11 +14,10 @@ import tempfile
 from pathlib import Path
 from unittest.mock import Mock, mock_open, patch
 
-import pytest
-
 import config_and_logger
 import gui_event_handlers
 import gui_main_window
+import pytest
 import settings_window
 
 
@@ -185,7 +184,7 @@ class TestSettingsPersistence:
             # Should call save_config (may be called multiple times for different settings)
             mock_save_config.assert_called()
             assert mock_save_config.call_count >= 1
-            
+
             # Verify that save_config was called with treeview settings
             calls = mock_save_config.call_args_list
             treeview_settings_saved = False
@@ -197,7 +196,7 @@ class TestSettingsPersistence:
                     assert saved_config["treeview_sort_col_id"] == "name"
                     assert saved_config["treeview_sort_descending"] is False
                     break
-            
+
             assert treeview_settings_saved, "Treeview settings should have been saved"
 
     @pytest.mark.unit
@@ -239,9 +238,11 @@ class TestSettingsPersistence:
 
         # Mock the file operations - save_config reads existing config first
         mock_file_handle = mock_open(read_data=json.dumps({}))
-        with patch("config_and_logger.open", mock_file_handle) as mock_file, patch(
-            "config_and_logger.json.dump"
-        ) as mock_json_dump, patch("config_and_logger.logger") as mock_logger:
+        with (
+            patch("config_and_logger.open", mock_file_handle) as mock_file,
+            patch("config_and_logger.json.dump") as mock_json_dump,
+            patch("config_and_logger.logger") as mock_logger,
+        ):
             config_and_logger.save_config(self.test_config)
 
             # Should open file twice - once for reading, once for writing
@@ -353,9 +354,10 @@ class TestSettingsPersistence:
         # Test with corrupted JSON
         corrupted_json = '{"autoconnect": true, "invalid": }'
 
-        with patch("config_and_logger.open", mock_open(read_data=corrupted_json)), patch(
-            "builtins.print"
-        ) as mock_print:
+        with (
+            patch("config_and_logger.open", mock_open(read_data=corrupted_json)),
+            patch("builtins.print") as mock_print,
+        ):
             loaded_config = config_and_logger.load_config()
 
             # Should fall back to defaults

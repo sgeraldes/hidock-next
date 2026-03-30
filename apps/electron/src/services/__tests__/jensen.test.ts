@@ -393,13 +393,18 @@ describe('JensenDevice', () => {
       expect(device.getModel()).toBe('unknown')
     })
 
-    it('closes already-open device before reconnecting', async () => {
-      const mockDevice = createMockUSBDevice({ opened: true } as any)
+    it('returns true without re-opening when already connected', async () => {
+      const mockDevice = createMockUSBDevice()
       setupNavigatorUSB([mockDevice])
 
       await device.connect()
-      // close should be called to clean up the stale connection (at least once for disconnect + once for open device)
-      expect(mockDevice.close).toHaveBeenCalled()
+      expect(device.isConnected()).toBe(true)
+
+      const openCallCount = (mockDevice.open as ReturnType<typeof vi.fn>).mock.calls.length
+
+      const result = await device.connect()
+      expect(result).toBe(true)
+      expect((mockDevice.open as ReturnType<typeof vi.fn>).mock.calls.length).toBe(openCallCount)
     })
 
     it('fires onconnect callback after successful connection', async () => {
@@ -518,10 +523,11 @@ describe('JensenDevice', () => {
       const mockDevice = createMockUSBDevice()
       setupNavigatorUSB([mockDevice])
 
+      await device.connect()
+
       const ondisconnectSpy = vi.fn()
       device.ondisconnect = ondisconnectSpy
 
-      await device.connect()
       await device.disconnect()
 
       expect(ondisconnectSpy).toHaveBeenCalledTimes(1)

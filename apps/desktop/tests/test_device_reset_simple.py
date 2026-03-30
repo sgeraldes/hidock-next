@@ -5,7 +5,9 @@ import os
 import sys
 
 import pytest
+
 from tests.helpers.optional import require
+
 require("usb", marker="integration")
 
 import usb.backend.libusb1

@@ -12,6 +12,7 @@ Legacy flags are preserved only so that ``python setup.py --help`` still shows
 expected options for older docs/tests. Behaviour is implemented in
 ``hidock_bootstrap``.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,6 +42,7 @@ def _is_backend_invocation(argv: list[str]) -> bool:
 if _is_backend_invocation(sys.argv):  # pragma: no cover
     try:
         from setuptools import setup  # type: ignore
+
         setup()
     except Exception as exc:  # noqa: BLE001
         print(f"[setup.py] Metadata fallback failed: {exc}")

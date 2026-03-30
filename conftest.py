@@ -6,6 +6,7 @@ are excluded from default discovery via `pytest.ini` testpaths. They can be invo
 
 Also registers custom markers to silence warnings.
 """
+
 from __future__ import annotations
 
 import pytest

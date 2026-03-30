@@ -9,7 +9,6 @@ import struct
 from unittest.mock import Mock, patch
 
 import pytest
-
 from constants import CMD_FORMAT_CARD, CMD_GET_CARD_INFO, CMD_GET_RECORDING_FILE, CMD_GET_SETTINGS, CMD_SET_SETTINGS
 from hidock_device import HiDockJensen
 

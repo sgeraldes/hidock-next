@@ -3,8 +3,7 @@ Tests for gui_event_handlers.py EventHandlersMixin functionality.
 """
 
 import os
-import sys
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 

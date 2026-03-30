@@ -2,13 +2,11 @@
 Tests for device interface functionality.
 """
 
-from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
-
-import pytest
+from unittest.mock import AsyncMock, Mock, patch
 
 # Import module and its components to avoid race conditions
 import device_interface
+import pytest
 from device_interface import (
     ConnectionStats,
     DeviceCapability,
@@ -625,7 +623,11 @@ class TestDeviceManager:
     def test_get_storage_recommendations_empty(self, device_manager):
         """Test storage recommendations for good storage state."""
         storage_info = StorageInfo(
-            total_capacity=100, used_space=20, free_space=80, file_count=50, health_status="good"  # 20% full
+            total_capacity=100,
+            used_space=20,
+            free_space=80,
+            file_count=50,
+            health_status="good",  # 20% full
         )
 
         recommendations = device_manager.get_storage_recommendations(storage_info)

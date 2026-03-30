@@ -2,8 +2,6 @@
 Safe tests for GUI components logic without actual GUI imports.
 """
 
-from unittest.mock import Mock, patch
-
 import pytest
 
 # Mark as GUI test for architectural separation

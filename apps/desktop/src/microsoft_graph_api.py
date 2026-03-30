@@ -19,7 +19,6 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import requests
-
 from config_and_logger import logger
 
 

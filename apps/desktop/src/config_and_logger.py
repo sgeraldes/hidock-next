@@ -271,13 +271,13 @@ class Logger:
     def add_gui_callback(self, callback):
         """
         Adds a GUI callback function for processing log messages.
-        
+
         This allows multiple GUI components to receive log messages,
         enabling features like auto-show for critical messages.
 
         Args:
             callback (callable): A function that accepts five arguments:
-                log_level (str), module (str), function (str), 
+                log_level (str), module (str), function (str),
                 message (str), formatted_message (str).
         """
         if callback not in self.gui_callbacks:
@@ -322,16 +322,16 @@ class Logger:
         Falls back to the global log_level if individual levels are not set.
         """
         fallback_level = self.config.get("log_level", "INFO")
-        
+
         # Set individual levels, falling back to global level
         console_level_str = self.config.get("console_log_level", fallback_level)
         gui_level_str = self.config.get("gui_log_level", fallback_level)
         file_level_str = self.config.get("file_log_level", fallback_level)
-        
+
         self.console_level = self.LEVELS.get(console_level_str.upper(), self.LEVELS["INFO"])
         self.gui_level = self.LEVELS.get(gui_level_str.upper(), self.LEVELS["INFO"])
         self.file_level = self.LEVELS.get(file_level_str.upper(), self.LEVELS["INFO"])
-        
+
         # Log the configured levels
         self._log(
             "info",
@@ -352,14 +352,14 @@ class Logger:
             return
 
         log_file_path = self.config.get("log_file_path", "test_hidock.log")
-        
+
         # Make path absolute if relative - place logs in the logs/ directory
         if not os.path.isabs(log_file_path):
             log_file_path = os.path.join(_APP_ROOT_DIR, "logs", log_file_path)
-        
+
         # Rotate log file if it exists and exceeds max size
         self._rotate_log_file_if_needed(log_file_path)
-        
+
         try:
             self.log_file = open(log_file_path, "a", encoding="utf-8")
             # Write a startup marker
@@ -374,23 +374,23 @@ class Logger:
     def _rotate_log_file_if_needed(self, log_file_path):
         """
         Rotates log file if it exceeds maximum size.
-        
+
         Args:
             log_file_path (str): Path to the log file
         """
         try:
             if not os.path.exists(log_file_path):
                 return
-            
+
             max_size_bytes = self.config.get("log_file_max_size_mb", 10) * 1024 * 1024
             backup_count = self.config.get("log_file_backup_count", 5)
-            
+
             if os.path.getsize(log_file_path) >= max_size_bytes:
                 # Close existing file handle if open
                 if self.log_file:
                     self.log_file.close()
                     self.log_file = None
-                
+
                 # Rotate existing backup files
                 for i in range(backup_count - 1, 0, -1):
                     old_file = f"{log_file_path}.{i}"
@@ -399,7 +399,7 @@ class Logger:
                         if os.path.exists(new_file):
                             os.remove(new_file)
                         os.rename(old_file, new_file)
-                
+
                 # Move current log to .1
                 backup_file = f"{log_file_path}.1"
                 if os.path.exists(backup_file):
@@ -420,31 +420,39 @@ class Logger:
         # Ensure that the logger's internal config is updated carefully
         old_file_logging_enabled = self.config.get("enable_file_logging", False)
         self.config.update(new_config_dict)
-        
+
         # Re-evaluate log levels if any level setting changed
-        level_settings_changed = any(key in new_config_dict for key in [
-            "log_level", "console_log_level", "gui_log_level", "file_log_level",
-            "enable_console_logging", "enable_gui_logging"
-        ])
-        
+        level_settings_changed = any(
+            key in new_config_dict
+            for key in [
+                "log_level",
+                "console_log_level",
+                "gui_log_level",
+                "file_log_level",
+                "enable_console_logging",
+                "enable_gui_logging",
+            ]
+        )
+
         if level_settings_changed:
             if "log_level" in new_config_dict:
                 self.set_level(new_config_dict["log_level"])
             self._setup_independent_levels()
-            
+
         # Re-setup file logging if file logging settings changed
         new_file_logging_enabled = self.config.get("enable_file_logging", False)
-        file_logging_settings_changed = any(key in new_config_dict for key in [
-            "enable_file_logging", "log_file_path", "log_file_max_size_mb", "log_file_backup_count"
-        ])
-        
+        file_logging_settings_changed = any(
+            key in new_config_dict
+            for key in ["enable_file_logging", "log_file_path", "log_file_max_size_mb", "log_file_backup_count"]
+        )
+
         if file_logging_settings_changed or old_file_logging_enabled != new_file_logging_enabled:
             self._setup_file_logging()
 
     def _log(self, level_str, module, procedure, message, force_level=None):
         """
         Internal logging method that handles message formatting and output.
-        
+
         Now supports independent log levels for console, GUI, and file outputs.
         Each output type has its own threshold level that is checked independently.
 
@@ -464,8 +472,10 @@ class Logger:
         base_log_message = f"[{timestamp}][{level_str.upper()}] {str(module)}::{str(procedure)} - {message}"
 
         # Console output - check if enabled and meets level threshold
-        console_threshold = force_level if force_level is not None else getattr(self, 'console_level', self.level)
-        console_enabled = self.config.get("enable_console_logging", not self.config.get("suppress_console_output", False))
+        console_threshold = force_level if force_level is not None else getattr(self, "console_level", self.level)
+        console_enabled = self.config.get(
+            "enable_console_logging", not self.config.get("suppress_console_output", False)
+        )
         if console_enabled and msg_level_val >= console_threshold:
             level_upper = level_str.upper()
             color_map = {
@@ -484,13 +494,13 @@ class Logger:
                 print(console_message)
 
         # GUI output - check if enabled and meets level threshold
-        gui_threshold = force_level if force_level is not None else getattr(self, 'gui_level', self.level)
+        gui_threshold = force_level if force_level is not None else getattr(self, "gui_level", self.level)
         gui_enabled = self.config.get("enable_gui_logging", not self.config.get("suppress_gui_log_output", False))
         if gui_enabled and msg_level_val >= gui_threshold:
             # Call the original GUI callback if set
             if self.gui_log_callback:
                 self.gui_log_callback(base_log_message + "\n", level_str.upper())
-            
+
             # Call all additional GUI callbacks (for auto-show functionality, etc.)
             for callback in self.gui_callbacks:
                 try:
@@ -498,12 +508,10 @@ class Logger:
                 except Exception as e:
                     # Avoid recursive logging issues by using print for callback errors
                     print(f"[WARNING] Logger::_log - Error in GUI callback: {e}")
-        
+
         # File output - check individual file level or force_level
-        file_threshold = force_level if force_level is not None else getattr(self, 'file_level', self.level)
-        if (self.log_file and 
-            self.config.get("enable_file_logging", False) and 
-            msg_level_val >= file_threshold):
+        file_threshold = force_level if force_level is not None else getattr(self, "file_level", self.level)
+        if self.log_file and self.config.get("enable_file_logging", False) and msg_level_val >= file_threshold:
             try:
                 self.log_file.write(base_log_message + "\n")
                 self.log_file.flush()
@@ -613,7 +621,7 @@ def save_config(config_data_to_save):
 def update_config_settings(settings_to_update):
     """
     Updates specific settings in the configuration file without overwriting other settings.
-    
+
     This function saves the settings to the config file and also updates the global
     logger instance with the new configuration.
 

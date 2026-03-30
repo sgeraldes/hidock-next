@@ -7,12 +7,10 @@ targeting uncovered lines in file handling logic.
 
 import struct
 import threading
-import time
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import Mock, patch
 
 import pytest
 import usb.core
-
 from constants import CMD_DELETE_FILE, CMD_GET_FILE_BLOCK, CMD_GET_FILE_COUNT, CMD_GET_FILE_LIST, CMD_TRANSFER_FILE
 from hidock_device import HiDockJensen
 
@@ -125,7 +123,7 @@ class TestHiDockJensenFileListOperations:
     def test_list_files_unexpected_response(self, jensen_device):
         """Test list_files with unexpected response - covering lines 1342-1350."""
         import itertools
-        
+
         with patch.object(jensen_device, "_send_command", return_value=1):
             with patch.object(jensen_device, "_receive_response") as mock_receive:
                 # Mock unexpected response first, then infinite None responses

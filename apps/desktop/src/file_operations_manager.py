@@ -438,7 +438,7 @@ class FileOperationsManager:
                     f"Download of {filename} cancelled during progress update",
                 )
                 return
-                
+
             operation.progress = op_progress.progress * 100.0
             if operation.operation_id in self.progress_callbacks:
                 # The GUI's callback expects a FileOperation object.
@@ -468,7 +468,7 @@ class FileOperationsManager:
                 # If file exists and is being played, don't overwrite
                 try:
                     # Try to open file exclusively to check if it's locked
-                    with open(local_path, 'r+b') as test_file:
+                    with open(local_path, "r+b") as test_file:
                         pass  # File is not locked
                 except (PermissionError, OSError):
                     logger.warning(
@@ -839,6 +839,7 @@ class FileOperationsManager:
                         except (PermissionError, OSError) as e:
                             if attempt < 2:  # Not the last attempt
                                 import time
+
                                 time.sleep(0.5)  # Wait before retry
                                 continue
                             else:

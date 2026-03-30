@@ -4,7 +4,6 @@ Tests for the test utilities module.
 Meta-testing to ensure our test helpers work correctly.
 """
 
-import tempfile
 from pathlib import Path
 from unittest.mock import Mock
 

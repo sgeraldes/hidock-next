@@ -43,7 +43,7 @@ const callIPC = async (channel: string, ...args: any[]) => {
     return result;
   } catch (error) {
     if (!isPolling && isQaLogsEnabled()) {
-        console.error(`[QA-MONITOR][IPC-ERR] ${channel}:`, error);
+        console.error('[QA-MONITOR][IPC-ERR]', channel, error);
     }
     throw error;
   }
@@ -224,6 +224,8 @@ export interface ElectronAPI {
   storage: {
     getInfo: () => Promise<any>
     openFolder: (folder: 'recordings' | 'transcripts' | 'data') => Promise<boolean>
+    openFile: (filePath: string) => Promise<{ success: boolean; error?: string }>
+    revealInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>
     readRecording: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>
     deleteRecording: (filePath: string) => Promise<boolean>
     saveRecording: (filename: string, data: number[], recordingDateIso?: string) => Promise<string>
@@ -442,6 +444,49 @@ export interface ElectronAPI {
   migration: MigrationAPI
 
 
+  // Jensen Device API — IPC bridge to main-process JensenDevice singleton
+  jensen: {
+    // Core
+    connect: () => Promise<boolean>
+    tryConnect: () => Promise<boolean>
+    disconnect: () => Promise<void>
+    reset: () => Promise<boolean>
+    isConnected: () => Promise<boolean>
+    getModel: () => Promise<string | null>
+    isP1Device: () => Promise<boolean>
+    // Device info & settings
+    getDeviceInfo: () => Promise<any>
+    getCardInfo: () => Promise<any>
+    getFileCount: () => Promise<{ count: number } | null>
+    getSettings: () => Promise<any>
+    setTime: () => Promise<any>
+    setAutoRecord: (enabled: boolean) => Promise<any>
+    // File operations
+    listFiles: () => Promise<any[] | null>
+    downloadFile: (filename: string, fileSize: number) => Promise<boolean | null>
+    cancelDownload: () => Promise<void>
+    deleteFile: (filename: string) => Promise<any>
+    formatCard: () => Promise<any>
+    // Realtime
+    getRealtimeSettings: () => Promise<any>
+    startRealtime: () => Promise<any>
+    pauseRealtime: () => Promise<any>
+    stopRealtime: () => Promise<any>
+    getRealtimeData: (offset: number) => Promise<any>
+    // Battery & Bluetooth
+    getBatteryStatus: () => Promise<any>
+    startBluetoothScan: (duration?: number) => Promise<any>
+    stopBluetoothScan: () => Promise<any>
+    getBluetoothStatus: () => Promise<any>
+    // Push event subscriptions
+    onStateChanged: (callback: (state: { connected: boolean; model: string | null; serialNumber: string | null; versionCode: string | null; versionNumber: number | null }) => void) => () => void
+    onConnect: (callback: () => void) => () => void
+    onDisconnect: (callback: () => void) => () => void
+    onDownloadProgress: (callback: (data: { filename: string; bytesReceived: number; totalBytes: number }) => void) => () => void
+    onDownloadChunk: (callback: (data: { filename: string; data: Uint8Array }) => void) => () => void
+    onScanProgress: (callback: (data: { current: number; total: number }) => void) => () => void
+  }
+
   // Domain Events - Event-driven architecture
   onDomainEvent: (callback: (event: any) => void) => () => void
 
@@ -588,6 +633,8 @@ const electronAPI: ElectronAPI = {
   storage: {
     getInfo: () => callIPC('storage:get-info'),
     openFolder: (folder) => callIPC('storage:open-folder', folder),
+    openFile: (filePath) => callIPC('storage:open-file', filePath),
+    revealInFolder: (filePath) => callIPC('storage:reveal-in-folder', filePath),
     readRecording: (filePath) => callIPC('storage:read-recording', filePath),
     deleteRecording: (filePath) => callIPC('storage:delete-recording', filePath),
     saveRecording: (filename, data, recordingDateIso) => callIPC('storage:save-recording', filename, data, recordingDateIso)
@@ -720,6 +767,73 @@ const electronAPI: ElectronAPI = {
         ipcRenderer.removeListener('integrity:progress', handler)
       }
     }
+  },
+
+  // Jensen Device API — IPC bridge to main-process JensenDevice singleton
+  jensen: {
+    // Core
+    connect: () => callIPC('jensen:connect'),
+    tryConnect: () => callIPC('jensen:tryConnect'),
+    disconnect: () => callIPC('jensen:disconnect'),
+    reset: () => callIPC('jensen:reset'),
+    isConnected: () => callIPC('jensen:isConnected'),
+    getModel: () => callIPC('jensen:getModel'),
+    isP1Device: () => callIPC('jensen:isP1Device'),
+    // Device info & settings
+    getDeviceInfo: () => callIPC('jensen:getDeviceInfo'),
+    getCardInfo: () => callIPC('jensen:getCardInfo'),
+    getFileCount: () => callIPC('jensen:getFileCount'),
+    getSettings: () => callIPC('jensen:getSettings'),
+    setTime: () => callIPC('jensen:setTime'),
+    setAutoRecord: (enabled: boolean) => callIPC('jensen:setAutoRecord', { enabled }),
+    // File operations
+    listFiles: () => callIPC('jensen:listFiles'),
+    downloadFile: (filename: string, fileSize: number) => callIPC('jensen:downloadFile', { filename, fileSize }),
+    cancelDownload: () => callIPC('jensen:cancelDownload'),
+    deleteFile: (filename: string) => callIPC('jensen:deleteFile', { filename }),
+    formatCard: () => callIPC('jensen:formatCard'),
+    // Realtime
+    getRealtimeSettings: () => callIPC('jensen:getRealtimeSettings'),
+    startRealtime: () => callIPC('jensen:startRealtime'),
+    pauseRealtime: () => callIPC('jensen:pauseRealtime'),
+    stopRealtime: () => callIPC('jensen:stopRealtime'),
+    getRealtimeData: (offset: number) => callIPC('jensen:getRealtimeData', { offset }),
+    // Battery & Bluetooth
+    getBatteryStatus: () => callIPC('jensen:getBatteryStatus'),
+    startBluetoothScan: (duration?: number) => callIPC('jensen:startBluetoothScan', { duration }),
+    stopBluetoothScan: () => callIPC('jensen:stopBluetoothScan'),
+    getBluetoothStatus: () => callIPC('jensen:getBluetoothStatus'),
+    // Push event subscriptions
+    onStateChanged: (callback: (state: { connected: boolean; model: string | null; serialNumber: string | null; versionCode: string | null; versionNumber: number | null }) => void) => {
+      const handler = (_event: any, state: any) => callback(state)
+      ipcRenderer.on('jensen:state-changed', handler)
+      return () => ipcRenderer.removeListener('jensen:state-changed', handler)
+    },
+    onConnect: (callback: () => void) => {
+      const handler = () => callback()
+      ipcRenderer.on('jensen:connect-event', handler)
+      return () => ipcRenderer.removeListener('jensen:connect-event', handler)
+    },
+    onDisconnect: (callback: () => void) => {
+      const handler = () => callback()
+      ipcRenderer.on('jensen:disconnect-event', handler)
+      return () => ipcRenderer.removeListener('jensen:disconnect-event', handler)
+    },
+    onDownloadProgress: (callback: (data: { filename: string; bytesReceived: number; totalBytes: number }) => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('jensen:download-progress', handler)
+      return () => ipcRenderer.removeListener('jensen:download-progress', handler)
+    },
+    onDownloadChunk: (callback: (data: { filename: string; data: Uint8Array }) => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('jensen:download-chunk', handler)
+      return () => ipcRenderer.removeListener('jensen:download-chunk', handler)
+    },
+    onScanProgress: (callback: (data: { current: number; total: number }) => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('jensen:scan-progress', handler)
+      return () => ipcRenderer.removeListener('jensen:scan-progress', handler)
+    },
   },
 
   // Domain Event Listener

@@ -14,17 +14,15 @@ Test categories:
 
 import hashlib
 import os
-import queue
 import sqlite3
 import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
-
 from file_operations_manager import (
     FileMetadata,
     FileMetadataCache,
@@ -2287,10 +2285,10 @@ class TestFileLockingFixes:
         temp_dir = tempfile.mkdtemp()
         try:
             manager = FileOperationsManager(
-                device_interface=mock_device_interface, 
-                download_dir=temp_dir, 
+                device_interface=mock_device_interface,
+                download_dir=temp_dir,
                 cache_dir=temp_dir,
-                device_lock=threading.Lock()
+                device_lock=threading.Lock(),
             )
             manager.cancel_event.set()
             for thread in manager.worker_threads:
@@ -2305,6 +2303,7 @@ class TestFileLockingFixes:
                     pass
             import shutil
             import time
+
             time.sleep(0.1)
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -2317,34 +2316,32 @@ class TestFileLockingFixes:
         mock_gui = MagicMock()
         mock_gui.is_audio_playing = True
         mock_gui.is_long_operation_active = False
-        mock_gui.file_tree.selection.return_value = ['test_file.hda']
+        mock_gui.file_tree.selection.return_value = ["test_file.hda"]
         mock_gui.device_manager.device_interface.is_connected.return_value = True
-        
+
         # Simulate menu state update logic (fixed version)
         is_connected = mock_gui.device_manager.device_interface.is_connected()
         has_selection = bool(mock_gui.file_tree.selection())
         is_audio_playing = mock_gui.is_audio_playing
         is_long_operation_active = mock_gui.is_long_operation_active
-        
+
         # Downloads should be allowed even during playback (this is the fix)
         download_should_be_enabled = (
-            is_connected and 
-            has_selection and 
-            not is_long_operation_active
+            is_connected and has_selection and not is_long_operation_active
             # Removed: and not is_audio_playing  # This was the bug
         )
-        
+
         assert download_should_be_enabled, "Downloads should be enabled during playback"
 
     def test_queue_operations_cancellation(self, mock_manager):
         """Test that queued operations can be cancelled."""
         # Queue a download
         operation_id = mock_manager.queue_download("test_file.hda")
-        
+
         # Cancel the operation
         cancelled = mock_manager.cancel_operation(operation_id)
         assert cancelled, "Should be able to cancel queued operation"
-        
+
         # Check operation status
         operation = mock_manager.get_operation_status(operation_id)
         if operation:
@@ -2354,19 +2351,19 @@ class TestFileLockingFixes:
         """Test that download checks for file locks before overwriting."""
         filename = "test_file.hda"
         local_path = mock_manager.download_dir / filename
-        
+
         # Create a file and simulate it being locked
         local_path.write_text("existing content")
-        
+
         operation = FileOperation(
             operation_id="lock_test",
             operation_type=FileOperationType.DOWNLOAD,
             filename=filename,
             status=FileOperationStatus.PENDING,
         )
-        
+
         # Mock the file being locked
-        with patch('builtins.open', side_effect=PermissionError("File is locked")):
+        with patch("builtins.open", side_effect=PermissionError("File is locked")):
             with pytest.raises(IOError, match="Download failed for test_file.hda"):
                 mock_manager._execute_download(operation)
 
@@ -2375,7 +2372,7 @@ class TestFileLockingFixes:
         filename = "test_file.hda"
         partial_file = mock_manager.download_dir / filename
         partial_file.write_text("partial content")
-        
+
         operation = FileOperation(
             operation_id="retry_cleanup_test",
             operation_type=FileOperationType.DOWNLOAD,
@@ -2383,19 +2380,20 @@ class TestFileLockingFixes:
             status=FileOperationStatus.IN_PROGRESS,
         )
         mock_manager.active_operations["retry_cleanup_test"] = operation
-        
+
         # Mock the first attempt to fail, second to succeed
         call_count = 0
+
         def mock_unlink():
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise PermissionError("File locked")
             # Second attempt succeeds (no exception)
-        
-        with patch.object(Path, 'unlink', side_effect=mock_unlink):
+
+        with patch.object(Path, "unlink", side_effect=mock_unlink):
             result = mock_manager.cancel_operation("retry_cleanup_test")
-        
+
         assert result is True
         assert operation.status == FileOperationStatus.CANCELLED
         assert call_count == 2  # Should have retried
@@ -2408,12 +2406,12 @@ class TestFileLockingFixes:
             filename="test_file.hda",
             status=FileOperationStatus.PENDING,
         )
-        
+
         progress_calls = []
-        
+
         async def mock_download_recording(recording_id, output_path, progress_callback, file_size=None):
             from device_interface import OperationProgress
-            
+
             # Simulate progress updates
             for progress in [0.25, 0.5]:
                 op_progress = OperationProgress(
@@ -2424,18 +2422,18 @@ class TestFileLockingFixes:
                 )
                 progress_callback(op_progress)
                 progress_calls.append(progress)
-                
+
                 # Cancel after first progress update
                 if progress == 0.25:
                     operation.status = FileOperationStatus.CANCELLED
-            
+
             output_path.write_text("mock audio data")
-        
+
         mock_manager.device_interface.device_interface.download_recording = mock_download_recording
-        
+
         # Execute download (should handle cancellation gracefully)
         mock_manager._execute_download(operation)
-        
+
         # Should have processed at least one progress update before cancellation
         assert len(progress_calls) >= 1
         assert operation.status == FileOperationStatus.CANCELLED
@@ -2445,7 +2443,7 @@ class TestFileLockingFixes:
         filename = "test_file.hda"
         partial_file = mock_manager.download_dir / filename
         partial_file.write_text("partial content")
-        
+
         operation = FileOperation(
             operation_id="handle_cleanup_test",
             operation_type=FileOperationType.DOWNLOAD,
@@ -2453,10 +2451,10 @@ class TestFileLockingFixes:
             status=FileOperationStatus.IN_PROGRESS,
         )
         mock_manager.active_operations["handle_cleanup_test"] = operation
-        
+
         # Cancel the operation
         result = mock_manager.cancel_operation("handle_cleanup_test")
-        
+
         assert result is True
         assert operation.status == FileOperationStatus.CANCELLED
         # File should be cleaned up

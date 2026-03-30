@@ -234,7 +234,7 @@ export function TranscriptViewer({
           )}
         </button>
         {transcriptExpanded && (
-          <div ref={containerRef} className="p-3 mt-2 bg-muted rounded-lg max-h-96 overflow-y-auto">
+          <div ref={containerRef} className="p-3 mt-2 bg-muted rounded-lg max-h-[60vh] overflow-y-auto">
             {hasTimestamps ? (
               <div className="space-y-4">
                 {segments.map((segment, i) => (

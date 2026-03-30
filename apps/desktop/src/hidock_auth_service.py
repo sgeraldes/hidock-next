@@ -24,7 +24,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
 import requests
-
 from config_and_logger import load_config, logger, save_config
 
 try:

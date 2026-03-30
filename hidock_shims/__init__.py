@@ -4,6 +4,7 @@ On import, this adjusts sys.path so that top-level desktop source modules become
 importable (e.g. `config_and_logger`, `hidock_device`). This is a transitional
 layer until a conventional src/ layout is adopted.
 """
+
 from __future__ import annotations
 
 import os

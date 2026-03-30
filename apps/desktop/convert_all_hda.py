@@ -24,17 +24,17 @@ def main():
     converter = HTAConverter()
 
     # Find all .hda files
-    hda_files = [f for f in os.listdir(RECORDINGS_DIR) if f.endswith('.hda')]
+    hda_files = [f for f in os.listdir(RECORDINGS_DIR) if f.endswith(".hda")]
     print(f"\nFound {len(hda_files)} .hda files to convert")
 
     # Find existing .wav files
-    wav_files = set(f.replace('.wav', '') for f in os.listdir(RECORDINGS_DIR) if f.endswith('.wav'))
+    wav_files = set(f.replace(".wav", "") for f in os.listdir(RECORDINGS_DIR) if f.endswith(".wav"))
     print(f"Found {len(wav_files)} existing .wav files")
 
     # Filter to only convert files that don't already have .wav versions
     to_convert = []
     for hda in hda_files:
-        base_name = hda.replace('.hda', '')
+        base_name = hda.replace(".hda", "")
         if base_name not in wav_files:
             to_convert.append(hda)
 
@@ -50,7 +50,7 @@ def main():
 
     for i, hda_file in enumerate(to_convert, 1):
         hda_path = os.path.join(RECORDINGS_DIR, hda_file)
-        wav_path = hda_path.replace('.hda', '.wav')
+        wav_path = hda_path.replace(".hda", ".wav")
 
         print(f"\n[{i}/{len(to_convert)}] Converting: {hda_file}")
 
@@ -61,13 +61,13 @@ def main():
                 print(f"  OK: {wav_path}")
             else:
                 fail_count += 1
-                print(f"  FAILED: Conversion returned None")
+                print("  FAILED: Conversion returned None")
         except Exception as e:
             fail_count += 1
             print(f"  ERROR: {e}")
 
     print("\n" + "=" * 60)
-    print(f"Conversion complete:")
+    print("Conversion complete:")
     print(f"  Success: {success_count}")
     print(f"  Failed: {fail_count}")
     print("=" * 60)

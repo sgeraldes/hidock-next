@@ -6,27 +6,15 @@ and edge cases in the desktop device adapter implementation, including error
 handling, protocol violations, device communication failures, and recovery scenarios.
 """
 
-import asyncio
 import time
-from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, Mock, call, mock_open, patch
+from datetime import datetime
+from unittest.mock import Mock, mock_open, patch
 
 import pytest
 
 # Import the module under test
-import desktop_device_adapter
 from desktop_device_adapter import DesktopDeviceAdapter, create_desktop_device_adapter
-from device_interface import (
-    AudioRecording,
-    ConnectionStats,
-    DeviceCapability,
-    DeviceHealth,
-    DeviceInfo,
-    DeviceModel,
-    OperationProgress,
-    OperationStatus,
-    StorageInfo,
-)
+from device_interface import DeviceHealth, DeviceInfo, DeviceModel, OperationProgress, OperationStatus, StorageInfo
 
 
 class TestDeviceDiscoveryErrorHandling:
@@ -697,9 +685,11 @@ class TestErrorRecovery:
         # Then need to disconnect and reconnect
         self.mock_jensen.is_connected.side_effect = [True, False]  # Connected, then disconnected
 
-        with patch.object(self.adapter, "test_connection", return_value=False), patch.object(
-            self.adapter, "disconnect"
-        ), patch.object(self.adapter, "connect") as mock_connect:
+        with (
+            patch.object(self.adapter, "test_connection", return_value=False),
+            patch.object(self.adapter, "disconnect"),
+            patch.object(self.adapter, "connect") as mock_connect,
+        ):
             # Mock successful reconnect
             mock_device_info = DeviceInfo(
                 id="recovered",
@@ -723,9 +713,11 @@ class TestErrorRecovery:
         """Test error recovery ignores disconnect exceptions (lines 666-667)."""
         self.mock_jensen.is_connected.side_effect = [True, False]
 
-        with patch.object(self.adapter, "test_connection", return_value=False), patch.object(
-            self.adapter, "disconnect", side_effect=Exception("Disconnect error")
-        ), patch.object(self.adapter, "connect") as mock_connect:
+        with (
+            patch.object(self.adapter, "test_connection", return_value=False),
+            patch.object(self.adapter, "disconnect", side_effect=Exception("Disconnect error")),
+            patch.object(self.adapter, "connect") as mock_connect,
+        ):
             mock_device_info = DeviceInfo(
                 id="recovered",
                 name="HiDock H1E",
@@ -748,9 +740,11 @@ class TestErrorRecovery:
         """Test error recovery when reconnect fails (line 674)."""
         self.mock_jensen.is_connected.side_effect = [True, False]
 
-        with patch.object(self.adapter, "test_connection", return_value=False), patch.object(
-            self.adapter, "disconnect"
-        ), patch.object(self.adapter, "connect", return_value=None):
+        with (
+            patch.object(self.adapter, "test_connection", return_value=False),
+            patch.object(self.adapter, "disconnect"),
+            patch.object(self.adapter, "connect", return_value=None),
+        ):
             result = await self.adapter.recover_from_error()
 
             assert result is False
@@ -763,9 +757,11 @@ class TestErrorRecovery:
         # Make is_connected return True but test_connection fail
         self.mock_jensen.is_connected.return_value = True
 
-        with patch.object(self.adapter, "test_connection", return_value=False), patch.object(
-            self.adapter, "disconnect"
-        ), patch.object(self.adapter, "connect", side_effect=Exception("Connection failed")):
+        with (
+            patch.object(self.adapter, "test_connection", return_value=False),
+            patch.object(self.adapter, "disconnect"),
+            patch.object(self.adapter, "connect", side_effect=Exception("Connection failed")),
+        ):
             result = await self.adapter.recover_from_error()
 
             assert result is False

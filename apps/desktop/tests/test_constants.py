@@ -4,8 +4,6 @@ Test constants module.
 Tests for USB device constants, command IDs, and configuration constants.
 """
 
-import pytest
-
 import constants
 
 

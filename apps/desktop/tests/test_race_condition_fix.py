@@ -11,7 +11,6 @@ import asyncio
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
-from typing import Optional
 
 import pytest
 

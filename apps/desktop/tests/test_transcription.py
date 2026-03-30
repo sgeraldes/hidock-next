@@ -4,7 +4,6 @@ Tests for transcription functionality.
 
 import os
 import sys
-from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 

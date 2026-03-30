@@ -7,7 +7,9 @@ import sys
 import time
 
 import pytest
+
 from tests.helpers.optional import require
+
 require("usb", marker="integration")
 
 import usb.backend.libusb1

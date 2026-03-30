@@ -11,7 +11,7 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 asarUnpack:
   - '**/*.node'
-  - '**/better-sqlite3/**'
+  - '**/usb/**'
 win:
   target:
     - target: nsis

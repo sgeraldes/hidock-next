@@ -5,23 +5,12 @@ This test module focuses on connection establishment, error recovery,
 and communication protocols, targeting uncovered lines in connection logic.
 """
 
-import struct
-import sys
-import time
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 import usb.core
 import usb.util
-
-from constants import (
-    CMD_GET_DEVICE_INFO,
-    CMD_TRANSFER_FILE,
-    DEFAULT_PRODUCT_ID,
-    DEFAULT_VENDOR_ID,
-    EP_IN_ADDR,
-    EP_OUT_ADDR,
-)
+from constants import DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID, EP_IN_ADDR, EP_OUT_ADDR
 from hidock_device import HiDockJensen
 
 

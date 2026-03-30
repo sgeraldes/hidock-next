@@ -1,0 +1,48 @@
+appId: com.hidock.meeting-assistant
+productName: Meeting Assistant
+directories:
+  buildResources: resources
+  output: dist
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.*'
+  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+asarUnpack:
+  - '**/*.node'
+  - '**/sql.js/**'
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  executableName: Meeting Assistant
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+  extendInfo:
+    - NSMicrophoneUsageDescription: Meeting Assistant requires microphone access to record meetings.
+    - NSDocumentsFolderUsageDescription: Meeting Assistant saves recordings and notes to your Documents folder.
+    - NSScreenCaptureUsageDescription: Meeting Assistant can capture screenshots during meetings for context.
+  notarize: false
+dmg:
+  artifactName: ${name}-${version}.${ext}
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+  maintainer: hidock.com
+  category: Utility
+appImage:
+  artifactName: ${name}-${version}.${ext}
+extraResources:
+  - from: python-asr/
+    to: asr-engine/
+    filter:
+      - '**/*'

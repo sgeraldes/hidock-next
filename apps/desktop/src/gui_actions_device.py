@@ -6,6 +6,7 @@ This module provides the `DeviceActionsMixin` class, which contains methods
 for handling direct device communication actions like connecting, disconnecting,
 refreshing file lists, and other device-specific commands.
 """
+
 import asyncio
 import os
 import platform
@@ -16,7 +17,6 @@ from datetime import datetime
 from tkinter import messagebox
 
 import usb.core
-
 from config_and_logger import logger
 from ctk_custom_widgets import CTkBanner
 from file_operations_manager import FileMetadata
@@ -27,34 +27,33 @@ class DeviceActionsMixin:
 
     def _initialize_backend_early(self):
         """Initialize libusb backend with cross-platform support.
-        
+
         Handles macOS (Apple Silicon and Intel), Linux, and Windows with
         comprehensive path detection and fallback mechanisms.
         """
-        import platform
-        
+
         error_to_report, local_backend_instance = None, None
         try:
             script_dir = os.path.dirname(os.path.abspath(__file__))
             # Get the root directory (parent of src/)
             root_dir = os.path.dirname(script_dir)
             system = platform.system()
-            
+
             # Build platform-specific library paths
             if system == "Darwin":  # macOS
                 lib_paths_to_try = [
                     "/opt/homebrew/lib/libusb-1.0.dylib",  # Apple Silicon Homebrew
-                    "/usr/local/lib/libusb-1.0.dylib",     # Intel Mac Homebrew
-                    "/opt/local/lib/libusb-1.0.dylib",     # MacPorts
-                    "/usr/lib/libusb-1.0.dylib",           # System location
+                    "/usr/local/lib/libusb-1.0.dylib",  # Intel Mac Homebrew
+                    "/opt/local/lib/libusb-1.0.dylib",  # MacPorts
+                    "/usr/lib/libusb-1.0.dylib",  # System location
                 ]
             elif system == "Linux":
                 lib_paths_to_try = [
                     "/usr/lib/x86_64-linux-gnu/libusb-1.0.so",  # Ubuntu/Debian x64
-                    "/usr/lib/aarch64-linux-gnu/libusb-1.0.so", # Ubuntu/Debian ARM64
-                    "/usr/lib64/libusb-1.0.so",                  # RHEL/CentOS/Fedora x64
-                    "/usr/lib/libusb-1.0.so",                    # Generic location
-                    "/usr/local/lib/libusb-1.0.so",              # Compiled from source
+                    "/usr/lib/aarch64-linux-gnu/libusb-1.0.so",  # Ubuntu/Debian ARM64
+                    "/usr/lib64/libusb-1.0.so",  # RHEL/CentOS/Fedora x64
+                    "/usr/lib/libusb-1.0.so",  # Generic location
+                    "/usr/local/lib/libusb-1.0.so",  # Compiled from source
                 ]
             elif system == "Windows":
                 lib_paths_to_try = (
@@ -71,10 +70,10 @@ class DeviceActionsMixin:
                     "_initialize_backend_early",
                     f"Unknown system '{system}', will try system paths only.",
                 )
-            
+
             # Try to find the library in the specified paths
             lib_path = next((p for p in lib_paths_to_try if os.path.exists(p)), None)
-            
+
             if not lib_path:
                 logger.warning(
                     "GUI",
@@ -94,19 +93,21 @@ class DeviceActionsMixin:
                 # Use the found library path
                 local_backend_instance = usb.backend.libusb1.get_backend(find_library=lambda x: lib_path)
                 if not local_backend_instance:
-                    error_to_report = f"Failed to initialize backend with library: {lib_path}. Check architecture compatibility."
-            
+                    error_to_report = (
+                        f"Failed to initialize backend with library: {lib_path}. Check architecture compatibility."
+                    )
+
             if error_to_report:
                 logger.error("GUI", "_initialize_backend_early", error_to_report)
                 return False, error_to_report, None
-                
+
             logger.info(
                 "GUI",
                 "_initialize_backend_early",
                 f"Backend initialized successfully: {local_backend_instance}",
             )
             return True, None, local_backend_instance
-            
+
         except (
             OSError,
             usb.core.USBError,
@@ -127,7 +128,7 @@ class DeviceActionsMixin:
         if not self.backend_initialized_successfully:
             logger.warning("GUI", "attempt_autoconnect", "Skipping autoconnect, USB backend error.")
             return
-        
+
         # Always try to discover devices first, even if not auto-connecting
         # This helps set the correct PID for the connected device
         try:
@@ -144,11 +145,11 @@ class DeviceActionsMixin:
                 # Update the selected VID/PID to match the discovered device
                 self.selected_vid_var.set(first_device.vendor_id)
                 self.selected_pid_var.set(first_device.product_id)
-                
+
                 # Save the discovered PID to config for next time
                 self.config["selected_pid"] = first_device.product_id
                 self.config["selected_vid"] = first_device.vendor_id
-                
+
                 # If autoconnect is enabled, connect to the discovered device
                 if self.autoconnect_var.get() and not self.device_manager.device_interface.jensen_device.is_connected():
                     logger.info("GUI", "attempt_autoconnect", "Auto-connecting to discovered device...")
@@ -186,11 +187,11 @@ class DeviceActionsMixin:
         if not self.winfo_exists():
             logger.warning("GUI", "connect_device", "Master window gone, aborting.")
             return
-        
+
         # Immediately update button to show it's working
-        if hasattr(self, 'toolbar_connect_button') and self.toolbar_connect_button.winfo_exists():
+        if hasattr(self, "toolbar_connect_button") and self.toolbar_connect_button.winfo_exists():
             self.toolbar_connect_button.configure(text="Connecting...", state="disabled")
-        
+
         self.update_status_bar(connection_status="Status: Connecting...")
         self._update_menu_states()
         threading.Thread(target=self._connect_device_thread, daemon=True).start()
@@ -218,13 +219,20 @@ class DeviceActionsMixin:
                     # Use debug level for device busy errors
                     error_str = str(first_error).lower()
                     if "access denied" in error_str or "device busy" in error_str or "in use" in error_str:
-                        logger.debug("GUI", "_connect_device_thread", f"Device busy on first attempt")
+                        logger.debug("GUI", "_connect_device_thread", "Device busy on first attempt")
                     else:
-                        logger.warning("GUI", "_connect_device_thread", f"First connection attempt failed: {first_error}")
+                        logger.warning(
+                            "GUI", "_connect_device_thread", f"First connection attempt failed: {first_error}"
+                        )
 
                     # If first attempt failed with recoverable issues, try with device reset or retry
                     error_str = str(first_error).lower()
-                    if ("timeout" in error_str or "health check" in error_str or "device may be in use" in error_str or "access denied" in error_str) and connection_attempts < max_attempts:
+                    if (
+                        "timeout" in error_str
+                        or "health check" in error_str
+                        or "device may be in use" in error_str
+                        or "access denied" in error_str
+                    ) and connection_attempts < max_attempts:
                         logger.info("GUI", "_connect_device_thread", "Retrying connection with device reset")
                         try:
                             # Try connection with force reset
@@ -237,10 +245,12 @@ class DeviceActionsMixin:
                             # Use debug level for device busy errors on retry
                             error_str2 = str(second_error).lower()
                             if "access denied" in error_str2 or "device busy" in error_str2 or "in use" in error_str2:
-                                logger.debug("GUI", "_connect_device_thread", f"Device still busy after reset attempt")
+                                logger.debug("GUI", "_connect_device_thread", "Device still busy after reset attempt")
                             else:
                                 logger.error(
-                                    "GUI", "_connect_device_thread", f"Connection with reset also failed: {second_error}"
+                                    "GUI",
+                                    "_connect_device_thread",
+                                    f"Connection with reset also failed: {second_error}",
                                 )
                             # Re-raise the second error as it's the final attempt
                             raise second_error
@@ -266,14 +276,17 @@ class DeviceActionsMixin:
                 self.after(0, self._update_menu_states)
                 # Exit offline mode since we're now connected
                 self.offline_mode_manager.exit_offline_mode()
-                
+
                 # Show success toast notification
-                self.after(0, lambda: self.toast_manager.show_success(
-                    message=f"Connected to {getattr(device_info, 'model', 'HiDock')} device successfully.",
-                    title="Device Connected",
-                    duration=3000  # 3 seconds for success message
-                ))
-                
+                self.after(
+                    0,
+                    lambda: self.toast_manager.show_success(
+                        message=f"Connected to {getattr(device_info, 'model', 'HiDock')} device successfully.",
+                        title="Device Connected",
+                        duration=3000,  # 3 seconds for success message
+                    ),
+                )
+
                 # Update UI to show connected state immediately
                 self.after(0, self._show_connected_state)
                 # Show cached files immediately if available, then refresh
@@ -311,9 +324,9 @@ class DeviceActionsMixin:
 
                     # Use a clearer error message for common connection issues
                     banner_message = (
-                        f"Cannot connect to HiDock device. Common causes: "
-                        f"device not connected, device in use by another app, "
-                        f"or permission issues. Try closing other HiDock apps or running as administrator."
+                        "Cannot connect to HiDock device. Common causes: "
+                        "device not connected, device in use by another app, "
+                        "or permission issues. Try closing other HiDock apps or running as administrator."
                     )
 
                     self._connection_error_banner = CTkBanner(
@@ -326,14 +339,17 @@ class DeviceActionsMixin:
                         width=550,  # Adjusted width
                     )
                     self._connection_error_banner.show()
-                
+
                 # Show prominent toast notification instead of status bar message
-                self.after(0, lambda: self.toast_manager.show_error(
-                    message="Device may be busy or need permissions. Try closing other HiDock apps or running as administrator.",
-                    title="Connection Failed",
-                    duration=8000  # 8 seconds for error visibility
-                ))
-                
+                self.after(
+                    0,
+                    lambda: self.toast_manager.show_error(
+                        message="Device may be busy or need permissions. Try closing other HiDock apps or running as administrator.",
+                        title="Connection Failed",
+                        duration=8000,  # 8 seconds for error visibility
+                    ),
+                )
+
                 # For connection failures, don't enter offline mode - stay in "connection failed" state
                 # Only show cached files if we were previously connected and lost connection
                 # This prevents the confusing behavior of showing "disconnected" for failed connection attempts
@@ -382,12 +398,15 @@ class DeviceActionsMixin:
                 error_msg = str(e).strip()
                 # Keep only the first 100 characters of the error and remove problematic characters
                 import re
-                error_msg = re.sub(r'[^\w\s\-\.,!?;:()\[\]{}"/\\\'+=<>@#$%^&*~`|_]', ' ', error_msg)
-                error_msg = re.sub(r'\s+', ' ', error_msg).strip()
+
+                error_msg = re.sub(r'[^\w\s\-\.,!?;:()\[\]{}"/\\\'+=<>@#$%^&*~`|_]', " ", error_msg)
+                error_msg = re.sub(r"\s+", " ", error_msg).strip()
                 if len(error_msg) > 100:
                     error_msg = error_msg[:100] + "..."
-                
-                user_message = f"Connection failed: {error_msg}" if error_msg else "Connection failed with unknown error."
+
+                user_message = (
+                    f"Connection failed: {error_msg}" if error_msg else "Connection failed with unknown error."
+                )
                 status_message = "Status: Connection Error"
 
             if self.winfo_exists():
@@ -399,27 +418,38 @@ class DeviceActionsMixin:
                 # Show appropriate toast notification based on error type
                 if "device busy" in error_str or "in use" in error_str or "resource busy" in error_str:
                     # Device busy - show warning toast
-                    self.after(0, lambda: self.toast_manager.show_warning(
-                        message="Device is currently in use by another application. Please close any other apps using the HiDock device and try again.",
-                        title="Device Busy",
-                        duration=6000
-                    ))
+                    self.after(
+                        0,
+                        lambda: self.toast_manager.show_warning(
+                            message="Device is currently in use by another application. Please close any other apps using the HiDock device and try again.",
+                            title="Device Busy",
+                            duration=6000,
+                        ),
+                    )
                 elif "access denied" in error_str or "permission" in error_str or "admin permissions" in error_str:
                     # Access denied - show error toast
-                    self.after(0, lambda: self.toast_manager.show_error(
-                        message="Access denied: Device may be in use by another application or need administrator permissions. Please close other apps or try running as administrator.",
-                        title="Access Denied", 
-                        duration=8000
-                    ))
+                    self.after(
+                        0,
+                        lambda: self.toast_manager.show_error(
+                            message="Access denied: Device may be in use by another application or need administrator permissions. Please close other apps or try running as administrator.",
+                            title="Access Denied",
+                            duration=8000,
+                        ),
+                    )
                 else:
                     # Other connection errors - show error toast
-                    self.after(0, lambda: self.toast_manager.show_error(
-                        message=recovery_message,
-                        title="Connection Error",
-                        duration=7000
-                    ))
-                    
-                logger.info("GUI", "_connect_device_thread", f"Showing toast notification for connection error: {error_str[:50]}...")
+                    self.after(
+                        0,
+                        lambda: self.toast_manager.show_error(
+                            message=recovery_message, title="Connection Error", duration=7000
+                        ),
+                    )
+
+                logger.info(
+                    "GUI",
+                    "_connect_device_thread",
+                    f"Showing toast notification for connection error: {error_str[:50]}...",
+                )
                 self.after(
                     0,
                     lambda: self.update_status_bar(connection_status=status_message),
@@ -438,29 +468,45 @@ class DeviceActionsMixin:
         try:
             # Ensure we're in offline mode
             self.offline_mode_manager.enter_offline_mode()
-            
+
             cached_files = self.file_operations_manager.metadata_cache.get_all_metadata()
             if cached_files:
                 files_dict = self._convert_cached_files_to_gui_format(cached_files)
-                
+
                 # Enhance files with meeting metadata from calendar integration (synchronous for cached files)
                 try:
                     files_dict = self.enhance_files_with_meeting_data_sync(files_dict)
-                    logger.debug("GUI", "_show_cached_files_after_disconnect", f"Enhanced {len(files_dict)} cached files with meeting data")
+                    logger.debug(
+                        "GUI",
+                        "_show_cached_files_after_disconnect",
+                        f"Enhanced {len(files_dict)} cached files with meeting data",
+                    )
                 except Exception as e:
-                    logger.warning("GUI", "_show_cached_files_after_disconnect", f"Failed to enhance cached files with meeting data: {e}")
-                
+                    logger.warning(
+                        "GUI",
+                        "_show_cached_files_after_disconnect",
+                        f"Failed to enhance cached files with meeting data: {e}",
+                    )
+
                 # Enhance files with audio metadata (transcription, AI analysis, user edits)
                 try:
                     files_dict = self.enhance_files_with_audio_metadata(files_dict)
-                    logger.debug("GUI", "_show_cached_files_after_disconnect", f"Enhanced {len(files_dict)} cached files with audio metadata")
+                    logger.debug(
+                        "GUI",
+                        "_show_cached_files_after_disconnect",
+                        f"Enhanced {len(files_dict)} cached files with audio metadata",
+                    )
                 except Exception as e:
-                    logger.warning("GUI", "_show_cached_files_after_disconnect", f"Failed to enhance cached files with audio metadata: {e}")
-                
+                    logger.warning(
+                        "GUI",
+                        "_show_cached_files_after_disconnect",
+                        f"Failed to enhance cached files with audio metadata: {e}",
+                    )
+
                 sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
-                
+
                 # Use filtering-aware update method if available
-                if hasattr(self, 'update_files_data_for_filtering'):
+                if hasattr(self, "update_files_data_for_filtering"):
                     self.update_files_data_for_filtering(sorted_files)
                 else:
                     self._populate_treeview_from_data(sorted_files)
@@ -469,7 +515,7 @@ class DeviceActionsMixin:
                 offline_stats = self.offline_mode_manager.get_offline_statistics()
                 downloaded_count = offline_stats["downloaded_files"]
                 availability_percent = offline_stats["offline_availability_percent"]
-                
+
                 self.update_status_bar(
                     connection_status="Status: Disconnected",
                     progress_text=f"Showing {len(cached_files)} cached files ({downloaded_count} playable, {availability_percent:.0f}% available offline)",
@@ -515,18 +561,18 @@ class DeviceActionsMixin:
         # Check if connected first without holding lock
         if not self.device_manager.device_interface.is_connected():
             return
-            
+
         # Set flag to abort any ongoing operations
         self._abort_file_operations = True
-        
+
         # Cancel any ongoing operations first
         self.stop_auto_file_refresh_periodic_check()
         self.stop_recording_status_check()
-        
+
         # Update button immediately to show disconnect is in progress
-        if hasattr(self, 'toolbar_connect_button') and self.toolbar_connect_button.winfo_exists():
+        if hasattr(self, "toolbar_connect_button") and self.toolbar_connect_button.winfo_exists():
             self.toolbar_connect_button.configure(text="Disconnecting...", state="disabled")
-        
+
         # Run disconnect in a thread to avoid blocking UI
         def disconnect_thread():
             try:
@@ -535,7 +581,7 @@ class DeviceActionsMixin:
                 try:
                     # Try to get lock but don't wait if it's busy
                     lock_acquired = self.device_lock.acquire(blocking=False)
-                    
+
                     if lock_acquired:
                         if self.device_manager.device_interface.is_connected():
                             # Reset device state before disconnecting to ensure clean state
@@ -548,36 +594,38 @@ class DeviceActionsMixin:
                             asyncio.run(self.device_manager.device_interface.disconnect())
                     else:
                         # Force disconnect even without lock - the abort flag should stop operations
-                        logger.info("GUI", "disconnect_device", "Fast disconnect initiated (file operation in progress)")
+                        logger.info(
+                            "GUI", "disconnect_device", "Fast disconnect initiated (file operation in progress)"
+                        )
                         if self.device_manager.device_interface.is_connected():
                             # Set the abort flag in the device directly
-                            if hasattr(self.device_manager.device_interface, 'jensen_device'):
+                            if hasattr(self.device_manager.device_interface, "jensen_device"):
                                 self.device_manager.device_interface.jensen_device._abort_operations = True
-                            
+
                             # Force disconnect anyway
                             asyncio.run(self.device_manager.device_interface.disconnect())
                 finally:
                     if lock_acquired:
                         self.device_lock.release()
-                
+
                 # Update UI on main thread
                 self.after(0, self._finish_disconnect)
             except Exception as e:
                 logger.error("GUI", "disconnect_device", f"Error during disconnect: {e}")
                 self.after(0, self._finish_disconnect)
-        
+
         # Start disconnect in background thread
         threading.Thread(target=disconnect_thread, daemon=True).start()
-    
+
     def _finish_disconnect(self):
         """Complete disconnect process on main thread."""
         # Reset abort flag
         self._abort_file_operations = False
-        
+
         # Enter offline mode and show cached files after disconnect
         self.offline_mode_manager.enter_offline_mode()
         self._show_cached_files_after_disconnect()
-        
+
         self.update_all_status_info()
         self._update_menu_states()
 
@@ -754,26 +802,42 @@ class DeviceActionsMixin:
                 # Enhance files with meeting metadata from calendar integration (synchronous for cached files)
                 try:
                     files_dict = self.enhance_files_with_meeting_data_sync(files_dict)
-                    logger.debug("GUI", "_show_cached_files_if_available", f"Enhanced {len(files_dict)} cached files with meeting data")
+                    logger.debug(
+                        "GUI",
+                        "_show_cached_files_if_available",
+                        f"Enhanced {len(files_dict)} cached files with meeting data",
+                    )
                 except Exception as e:
-                    logger.warning("GUI", "_show_cached_files_if_available", f"Failed to enhance cached files with meeting data: {e}")
-                
+                    logger.warning(
+                        "GUI",
+                        "_show_cached_files_if_available",
+                        f"Failed to enhance cached files with meeting data: {e}",
+                    )
+
                 # Enhance files with audio metadata (transcription, AI analysis, user edits)
                 try:
                     files_dict = self.enhance_files_with_audio_metadata(files_dict)
-                    logger.debug("GUI", "_show_cached_files_if_available", f"Enhanced {len(files_dict)} cached files with audio metadata")
+                    logger.debug(
+                        "GUI",
+                        "_show_cached_files_if_available",
+                        f"Enhanced {len(files_dict)} cached files with audio metadata",
+                    )
                 except Exception as e:
-                    logger.warning("GUI", "_show_cached_files_if_available", f"Failed to enhance cached files with audio metadata: {e}")
+                    logger.warning(
+                        "GUI",
+                        "_show_cached_files_if_available",
+                        f"Failed to enhance cached files with audio metadata: {e}",
+                    )
 
                 # Update GUI with cached data
                 sorted_files = self._apply_saved_sort_state_to_tree_and_ui(files_dict)
-                
+
                 # Use filtering-aware update method if available
-                if hasattr(self, 'update_files_data_for_filtering'):
+                if hasattr(self, "update_files_data_for_filtering"):
                     self.update_files_data_for_filtering(sorted_files)
                 else:
                     self._populate_treeview_from_data(sorted_files)
-                    
+
                 self.update_status_bar(
                     connection_status="Status: Connected",
                     progress_text=f"Showing {len(cached_files)} cached files, refreshing...",
@@ -791,15 +855,15 @@ class DeviceActionsMixin:
             files = None
             recording_info = None
             all_files_to_display = []
-            
+
             # Check if we should abort before acquiring lock
-            if hasattr(self, '_abort_file_operations') and self._abort_file_operations:
+            if hasattr(self, "_abort_file_operations") and self._abort_file_operations:
                 logger.info("GUI", "_refresh_file_list_thread", "File refresh aborted due to disconnect")
                 return
 
             with self.device_lock:
                 # Check again after acquiring lock
-                if hasattr(self, '_abort_file_operations') and self._abort_file_operations:
+                if hasattr(self, "_abort_file_operations") and self._abort_file_operations:
                     logger.info("GUI", "_refresh_file_list_thread", "File refresh aborted due to disconnect")
                     return
                 # Always fetch fresh data from device to ensure we have the latest files
@@ -821,11 +885,11 @@ class DeviceActionsMixin:
                     # 2. Or it has more files than cache (new recordings)
                     # 3. Or it has at least 10 files (reasonable minimum for complete data)
                     is_complete = (
-                        len(recording_info) >= cached_count * 0.95 or
-                        len(recording_info) >= cached_count or
-                        len(recording_info) >= 10
+                        len(recording_info) >= cached_count * 0.95
+                        or len(recording_info) >= cached_count
+                        or len(recording_info) >= 10
                     )
-                    
+
                     if is_complete:
                         # Device returned complete data, update cache fully
                         logger.info(
@@ -1009,28 +1073,38 @@ class DeviceActionsMixin:
                 )
 
             # Enhance files with meeting metadata from calendar cache (synchronous to preserve cached data)
-            if hasattr(self, 'enhance_files_with_meeting_data_sync'):
+            if hasattr(self, "enhance_files_with_meeting_data_sync"):
                 try:
                     files_dict = self.enhance_files_with_meeting_data_sync(files_dict)
-                    logger.debug("GUI", "_refresh_file_list_thread", f"Enhanced {len(files_dict)} files with meeting data")
+                    logger.debug(
+                        "GUI", "_refresh_file_list_thread", f"Enhanced {len(files_dict)} files with meeting data"
+                    )
                 except Exception as e:
-                    logger.warning("GUI", "_refresh_file_list_thread", f"Failed to enhance files with meeting data: {e}")
-            
+                    logger.warning(
+                        "GUI", "_refresh_file_list_thread", f"Failed to enhance files with meeting data: {e}"
+                    )
+
             # Queue async calendar enhancement for background updates (if calendar system available)
-            if hasattr(self, 'enhance_files_with_meeting_data_async'):
+            if hasattr(self, "enhance_files_with_meeting_data_async"):
                 try:
                     # Start async enhancement in background without replacing current data
-                    self.enhance_files_with_meeting_data_async(files_dict, callback=self._on_async_calendar_update_complete)
+                    self.enhance_files_with_meeting_data_async(
+                        files_dict, callback=self._on_async_calendar_update_complete
+                    )
                 except Exception as e:
                     logger.debug("GUI", "_refresh_file_list_thread", f"Failed to start async calendar enhancement: {e}")
-            
+
             # Enhance files with audio metadata (transcription, AI analysis, user edits)
-            if hasattr(self, 'enhance_files_with_audio_metadata'):
+            if hasattr(self, "enhance_files_with_audio_metadata"):
                 try:
                     files_dict = self.enhance_files_with_audio_metadata(files_dict)
-                    logger.debug("GUI", "_refresh_file_list_thread", f"Enhanced {len(files_dict)} files with audio metadata")
+                    logger.debug(
+                        "GUI", "_refresh_file_list_thread", f"Enhanced {len(files_dict)} files with audio metadata"
+                    )
                 except Exception as e:
-                    logger.warning("GUI", "_refresh_file_list_thread", f"Failed to enhance files with audio metadata: {e}")
+                    logger.warning(
+                        "GUI", "_refresh_file_list_thread", f"Failed to enhance files with audio metadata: {e}"
+                    )
 
             # Use robust recording detection instead of assuming first item is recording
             current_recording_filename = None
@@ -1071,16 +1145,22 @@ class DeviceActionsMixin:
                         }
                     )
             all_files_to_display = list(files_dict)
-            
+
             # Enhance files with download status information for proper TreeView coloring
-            if all_files_to_display and hasattr(self, 'offline_mode_manager'):
+            if all_files_to_display and hasattr(self, "offline_mode_manager"):
                 try:
-                    all_files_to_display = self.offline_mode_manager.update_offline_status_indicators(all_files_to_display)
+                    all_files_to_display = self.offline_mode_manager.update_offline_status_indicators(
+                        all_files_to_display
+                    )
                     # When connected, adjust offline status indicators for connected mode
                     for file_dict in all_files_to_display:
                         if file_dict.get("gui_status") == "On Device (Offline)":
                             file_dict["gui_status"] = "On Device"
-                    logger.debug("GUI", "refresh_file_list_gui", f"Enhanced {len(all_files_to_display)} files with download status indicators")
+                    logger.debug(
+                        "GUI",
+                        "refresh_file_list_gui",
+                        f"Enhanced {len(all_files_to_display)} files with download status indicators",
+                    )
                 except Exception as e:
                     logger.warning("GUI", "refresh_file_list_gui", f"Failed to enhance files with offline status: {e}")
 
@@ -1094,7 +1174,7 @@ class DeviceActionsMixin:
                         self.treeview_sort_reverse,
                     )
                 # Use filtering-aware update method if available
-                if hasattr(self, 'update_files_data_for_filtering'):
+                if hasattr(self, "update_files_data_for_filtering"):
                     self.after(0, self.update_files_data_for_filtering, all_files_to_display)
                 else:
                     self.after(0, self._populate_treeview_from_data, all_files_to_display)

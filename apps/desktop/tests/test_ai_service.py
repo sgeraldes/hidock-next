@@ -7,10 +7,9 @@ focusing on core functionality, error handling, and provider availability.
 
 from unittest.mock import Mock, mock_open, patch
 
-import pytest
-
 # Import the module under test
 import ai_service
+import pytest
 from ai_service import AIProvider, AIServiceManager, AnthropicProvider, GeminiProvider, OpenAIProvider
 
 

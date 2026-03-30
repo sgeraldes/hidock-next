@@ -4,10 +4,8 @@ Comprehensive unit tests for device connection fallback functionality.
 Tests all HiDock device types with mocked connections and offline scenarios.
 """
 
-import asyncio
 from datetime import datetime
-from typing import List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 

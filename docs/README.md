@@ -1,62 +1,27 @@
 # Documentation
 
-Complete documentation for the HiDock Next project.
+Documentation for the HiDock Next project.
 
-## 📚 Documentation Structure
+## Directories
 
-### Getting Started
-- [Quick Start Guide](getting-started/QUICK_START.md) - Get up and running quickly
-- [Setup Guide](SETUP.md) - Detailed installation instructions
-- [Troubleshooting](TROUBLESHOOTING.md) - Common issues and solutions
+| Directory | Contents |
+|-----------|----------|
+| [conductor/](conductor/) | AI workflow configuration, code styleguides, product guidelines |
+| [desktop/](desktop/) | Desktop app (Python/CustomTkinter) — development, testing, features |
+| [development/](development/) | Developer guides — setup, API, testing, security, IDE config |
+| [hardware/](hardware/) | Hardware and firmware analysis — protocol research, device specs |
+| [implementation-guides/](implementation-guides/) | Technical implementation guides — Jensen protocol, USB access |
+| [planning/](planning/) | Roadmap, acceptance criteria, backlog, completed plans |
+| [qa/](qa/) | QA protocols, test plans, accessibility and performance audits |
+| [specs/](specs/) | Product specifications — Library, Assistant, Calendar, Sync, etc. |
+| [superpowers/](superpowers/) | Active development specs and plans |
+| [transcription-feature/](transcription-feature/) | Calendar integration, OAuth flows, HiNotes authentication |
 
-### Application Documentation
-- [Desktop App](desktop/) - Desktop application documentation
-  - [Architecture](desktop/architecture/) - System design
-  - [Features](desktop/features/) - Feature documentation
-  - [Implementation](desktop/implementation/) - Implementation guides
-- [Web App](../apps/web/README.md) - Web application guide
-- [Audio Insights](../apps/audio-insights/README.md) - Audio analysis tool
+## Quick Links
 
-### Development
-- [Development Guide](development/) - Developer documentation
-- [API Documentation](api/) - API references
-- [Planning Documents](planning/) - Project planning
-
-### Technical Documentation
-- [Firmware Analysis](firmware-analysis/) - Firmware research
-- [Hardware Analysis](hardware-analysis/) - Hardware documentation
-- [Implementation Guides](implementation-guides/) - Technical guides
-
-### Other Documentation
-- [Session Logs](session-logs/) - Development session logs
-- [Cleanup Documentation](cleanup/) - Repository organization
-- [Analysis Reports](analysis-reports/) - Technical analyses
-
-## 📖 Key Documents
-
-1. **[INDEX.md](INDEX.md)** - Complete documentation index
-2. **[SETUP.md](SETUP.md)** - Comprehensive setup guide
-3. **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Problem solving guide
-
-## 🔍 Finding Information
-
-- **New Users**: Start with [Quick Start](getting-started/QUICK_START.md)
-- **Developers**: See [Development Guide](development/)
-- **Issues**: Check [Troubleshooting](TROUBLESHOOTING.md)
-- **Contributing**: Read [Contributing Guide](../CONTRIBUTING.md)
-
-## 📝 Documentation Standards
-
-All documentation follows:
-- Markdown formatting
-- Clear section headers
-- Code examples where relevant
-- Screenshots for UI features
-- Version-specific notes
-
-## 🔄 Keeping Updated
-
-Documentation is maintained alongside code changes. For the latest:
-- Check commit history
-- Review recent pull requests
-- See release notes
+- [Troubleshooting](TROUBLESHOOTING.md) — common issues and solutions
+- [Quick Start](development/QUICK_START.md) — get up and running
+- [Setup Guide](development/SETUP.md) — detailed installation
+- [Development Guide](development/DEVELOPMENT.md) — developer workflow
+- [Testing Guide](development/TESTING.md) — test framework and markers
+- [Contributing](../CONTRIBUTING.md) — contribution guidelines

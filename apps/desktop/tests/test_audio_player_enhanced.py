@@ -4,20 +4,17 @@ Comprehensive tests for audio_player_enhanced.py
 Following TDD principles to achieve 80% test coverage as mandated by .amazonq/rules/PYTHON.md
 """
 
-import os
-import tempfile
-import unittest.mock as mock
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 # Mark as GUI test for architectural separation
 pytestmark = pytest.mark.gui
 from tests.helpers.optional import require
+
 require("numpy", marker="gui")
 
 import numpy as np
-
 from audio_player_enhanced import (
     PYDUB_AVAILABLE,
     PYGAME_AVAILABLE,
@@ -139,9 +136,10 @@ class TestAudioProcessor:
         mock_getsize.return_value = 1024000
         mock_splitext.return_value = ("/test/file", ".wav")
 
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment"
-        ) as mock_audio_segment:
+        with (
+            patch("audio_player_enhanced.PYDUB_AVAILABLE", True),
+            patch("audio_player_enhanced.AudioSegment") as mock_audio_segment,
+        ):
             mock_from_file = mock_audio_segment.from_file
 
             mock_audio = Mock()
@@ -167,9 +165,11 @@ class TestAudioProcessor:
         mock_getsize.return_value = 1024000
         mock_splitext.return_value = ("/test/file", ".wav")
 
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment"
-        ) as mock_audio_segment, patch("audio_player_enhanced.wave.open") as mock_wave_open:
+        with (
+            patch("audio_player_enhanced.PYDUB_AVAILABLE", True),
+            patch("audio_player_enhanced.AudioSegment") as mock_audio_segment,
+            patch("audio_player_enhanced.wave.open") as mock_wave_open,
+        ):
             mock_audio_segment.from_file.side_effect = Exception("Pydub failed")
 
             mock_wav_file = Mock()
@@ -194,9 +194,10 @@ class TestAudioProcessor:
 
     def test_convert_audio_format_success(self):
         """Test successful audio format conversion"""
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment"
-        ) as mock_audio_segment:
+        with (
+            patch("audio_player_enhanced.PYDUB_AVAILABLE", True),
+            patch("audio_player_enhanced.AudioSegment") as mock_audio_segment,
+        ):
             mock_from_file = mock_audio_segment.from_file
 
             mock_audio = Mock()
@@ -210,9 +211,10 @@ class TestAudioProcessor:
 
     def test_convert_audio_format_error(self):
         """Test audio format conversion with error"""
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment"
-        ) as mock_audio_segment:
+        with (
+            patch("audio_player_enhanced.PYDUB_AVAILABLE", True),
+            patch("audio_player_enhanced.AudioSegment") as mock_audio_segment,
+        ):
             mock_audio_segment.from_file.side_effect = Exception("Conversion failed")
 
             result = AudioProcessor.convert_audio_format("/input.wav", "/output.mp3", "mp3")
@@ -228,9 +230,10 @@ class TestAudioProcessor:
 
     def test_normalize_audio_success(self):
         """Test successful audio normalization"""
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment"
-        ) as mock_audio_segment:
+        with (
+            patch("audio_player_enhanced.PYDUB_AVAILABLE", True),
+            patch("audio_player_enhanced.AudioSegment") as mock_audio_segment,
+        ):
             mock_from_file = mock_audio_segment.from_file
 
             mock_audio = Mock()
@@ -250,9 +253,10 @@ class TestAudioProcessor:
 
     def test_normalize_audio_error(self):
         """Test audio normalization with error"""
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment"
-        ) as mock_audio_segment:
+        with (
+            patch("audio_player_enhanced.PYDUB_AVAILABLE", True),
+            patch("audio_player_enhanced.AudioSegment") as mock_audio_segment,
+        ):
             mock_audio_segment.from_file.side_effect = Exception("Normalization failed")
 
             result = AudioProcessor.normalize_audio("/input.wav", "/output.wav", -20.0)
@@ -293,9 +297,10 @@ class TestAudioProcessor:
 
     def test_extract_waveform_data_with_pydub(self):
         """Test extract_waveform_data with pydub for non-WAV files"""
-        with patch("audio_player_enhanced.PYDUB_AVAILABLE", True), patch(
-            "audio_player_enhanced.AudioSegment"
-        ) as mock_audio_segment:
+        with (
+            patch("audio_player_enhanced.PYDUB_AVAILABLE", True),
+            patch("audio_player_enhanced.AudioSegment") as mock_audio_segment,
+        ):
             mock_from_file = mock_audio_segment.from_file
 
             mock_audio = Mock()
@@ -720,9 +725,10 @@ class TestEnhancedAudioPlayer:
         """Test set_volume method"""
         player = EnhancedAudioPlayer()
 
-        with patch("audio_player_enhanced.PYGAME_AVAILABLE", True), patch(
-            "audio_player_enhanced.pygame"
-        ) as mock_pygame:
+        with (
+            patch("audio_player_enhanced.PYGAME_AVAILABLE", True),
+            patch("audio_player_enhanced.pygame") as mock_pygame,
+        ):
             mock_pygame.mixer.get_init.return_value = (44100, -16, 2)
 
             result = player.set_volume(0.8)
@@ -752,9 +758,10 @@ class TestEnhancedAudioPlayer:
         player = EnhancedAudioPlayer()
         player.volume = 0.7
 
-        with patch("audio_player_enhanced.PYGAME_AVAILABLE", True), patch(
-            "audio_player_enhanced.pygame"
-        ) as mock_pygame:
+        with (
+            patch("audio_player_enhanced.PYGAME_AVAILABLE", True),
+            patch("audio_player_enhanced.pygame") as mock_pygame,
+        ):
             mock_pygame.mixer.get_init.return_value = (44100, -16, 2)
 
             # Test muting
@@ -831,11 +838,12 @@ class TestEnhancedAudioPlayer:
         """Test cleanup method"""
         player = EnhancedAudioPlayer()
 
-        with patch.object(player, "stop") as mock_stop, patch.object(
-            player, "_stop_position_thread"
-        ) as mock_stop_thread, patch("audio_player_enhanced.PYGAME_AVAILABLE", True), patch(
-            "audio_player_enhanced.pygame"
-        ) as mock_pygame:
+        with (
+            patch.object(player, "stop") as mock_stop,
+            patch.object(player, "_stop_position_thread") as mock_stop_thread,
+            patch("audio_player_enhanced.PYGAME_AVAILABLE", True),
+            patch("audio_player_enhanced.pygame") as mock_pygame,
+        ):
             mock_pygame.mixer.get_init.return_value = (44100, -16, 2)
 
             player.cleanup()

@@ -117,10 +117,7 @@ class GeminiProvider(AIProvider):
 
             logger.info("GeminiProvider", "validate_api_key", f"Validating API key with model: {model_name}")
 
-            response = self.client.models.generate_content(
-                model=model_name,
-                contents="Test validation message"
-            )
+            response = self.client.models.generate_content(model=model_name, contents="Test validation message")
             return bool(response and response.text)
         except Exception as e:
             logger.error("GeminiProvider", "validate_api_key", f"API validation failed: {e}")
@@ -228,10 +225,7 @@ Provide structured meeting insights in strict JSON format:
             """
 
             # Generate content with the uploaded audio file
-            response = self.client.models.generate_content(
-                model=model_name,
-                contents=[prompt, audio_file]
-            )
+            response = self.client.models.generate_content(model=model_name, contents=[prompt, audio_file])
 
             # Get response text
             response_text = response.text.strip()
@@ -333,10 +327,7 @@ Do NOT include any JSON formatting or explanatory text.
             """
 
             # Generate content with the uploaded audio file
-            response = self.client.models.generate_content(
-                model=model_name,
-                contents=[prompt, audio_file]
-            )
+            response = self.client.models.generate_content(model=model_name, contents=[prompt, audio_file])
 
             # Get transcription text
             transcription_text = response.text.strip()
@@ -394,10 +385,7 @@ Analyze this meeting transcription and extract actionable insights.
 Return ONLY valid JSON, no markdown formatting or explanatory text.
             """
 
-            response = self.client.models.generate_content(
-                model=model_name,
-                contents=prompt
-            )
+            response = self.client.models.generate_content(model=model_name, contents=prompt)
             response_text = response.text.strip()
 
             if response_text.startswith("```json"):

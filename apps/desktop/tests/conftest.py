@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, Mock
+from unittest.mock import Mock
 
 import pytest
 
@@ -220,7 +220,7 @@ def setup_test_environment(monkeypatch, tmp_path):
         # Ensure test cache directory is being used
         if str(real_home) in str(test_cache_dir):
             warnings.warn(
-                f"TEST ISOLATION FAILURE: Cache directory appears to use real home directory. "
+                "TEST ISOLATION FAILURE: Cache directory appears to use real home directory. "
                 "This could contaminate production data!",
                 UserWarning,
                 stacklevel=2,
@@ -292,7 +292,7 @@ def verify_no_production_contamination():
 
     if contaminated_files:
         raise AssertionError(
-            f"Production data contamination detected:\n"
+            "Production data contamination detected:\n"
             + "\n".join(contaminated_files)
             + "\n\nTests must not modify production files!"
         )
@@ -308,8 +308,6 @@ def mock_tkinter_root():
     """Create a mock tkinter root for CTk variable creation."""
     import tkinter as tk
     from unittest.mock import Mock
-
-    import customtkinter as ctk
 
     # Create a mock root instead of real Tkinter window to avoid GUI resource contention
     root = Mock()
@@ -337,7 +335,6 @@ def mock_tkinter_root():
 def database_cleanup():
     """Ensure database connections are properly closed after tests."""
     import gc
-    import sqlite3
 
     # Store original connections
     original_connections = []

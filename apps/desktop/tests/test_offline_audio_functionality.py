@@ -7,9 +7,8 @@ Following TDD principles to ensure offline audio operations work correctly.
 
 import os
 import tempfile
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
-import customtkinter as ctk
 import pytest
 
 # Mark all tests in this file as GUI tests - incompatible with parallel execution
@@ -38,9 +37,12 @@ class TestOfflineAudioFunctionality:
         """Test that downloaded audio files can be played when device is disconnected."""
 
         # Mock the GUI components and dependencies
-        with patch("gui_main_window.ctk.CTk"), patch("gui_main_window.EnhancedAudioPlayer") as mock_audio_player, patch(
-            "gui_main_window.DesktopDeviceAdapter"
-        ) as mock_adapter, patch("gui_main_window.DeviceManager") as mock_device_manager:
+        with (
+            patch("gui_main_window.ctk.CTk"),
+            patch("gui_main_window.EnhancedAudioPlayer") as mock_audio_player,
+            patch("gui_main_window.DesktopDeviceAdapter") as mock_adapter,
+            patch("gui_main_window.DeviceManager") as mock_device_manager,
+        ):
             # Set up mocks
             mock_device_interface = Mock()
             mock_device_interface.is_connected.return_value = False  # Device is disconnected
@@ -83,11 +85,13 @@ class TestOfflineAudioFunctionality:
         """Test that insights can be extracted from downloaded audio files when disconnected."""
 
         # Mock the GUI components and dependencies
-        with patch("gui_main_window.ctk.CTk"), patch("gui_main_window.EnhancedAudioPlayer"), patch(
-            "gui_main_window.DesktopDeviceAdapter"
-        ) as mock_adapter, patch("gui_main_window.DeviceManager") as mock_device_manager, patch(
-            "gui_main_window.process_audio_file_for_insights"
-        ) as mock_insights:
+        with (
+            patch("gui_main_window.ctk.CTk"),
+            patch("gui_main_window.EnhancedAudioPlayer"),
+            patch("gui_main_window.DesktopDeviceAdapter") as mock_adapter,
+            patch("gui_main_window.DeviceManager") as mock_device_manager,
+            patch("gui_main_window.process_audio_file_for_insights") as mock_insights,
+        ):
             # Set up mocks
             mock_device_interface = Mock()
             mock_device_interface.is_connected.return_value = False  # Device is disconnected
@@ -153,9 +157,12 @@ class TestOfflineAudioFunctionality:
         """Test that menu states correctly enable offline operations for downloaded files."""
 
         # Mock the GUI components and dependencies
-        with patch("gui_main_window.ctk.CTk"), patch("gui_main_window.EnhancedAudioPlayer"), patch(
-            "gui_main_window.DesktopDeviceAdapter"
-        ) as mock_adapter, patch("gui_main_window.DeviceManager") as mock_device_manager:
+        with (
+            patch("gui_main_window.ctk.CTk"),
+            patch("gui_main_window.EnhancedAudioPlayer"),
+            patch("gui_main_window.DesktopDeviceAdapter") as mock_adapter,
+            patch("gui_main_window.DeviceManager") as mock_device_manager,
+        ):
             # Set up mocks
             mock_device_interface = Mock()
             mock_device_interface.is_connected.return_value = False  # Device is disconnected
@@ -208,9 +215,12 @@ class TestOfflineAudioFunctionality:
         """Test that non-downloaded audio files cannot be played when disconnected."""
 
         # Mock the GUI components and dependencies
-        with patch("gui_main_window.ctk.CTk"), patch("gui_main_window.EnhancedAudioPlayer") as mock_audio_player, patch(
-            "gui_main_window.DesktopDeviceAdapter"
-        ) as mock_adapter, patch("gui_main_window.DeviceManager") as mock_device_manager:
+        with (
+            patch("gui_main_window.ctk.CTk"),
+            patch("gui_main_window.EnhancedAudioPlayer") as mock_audio_player,
+            patch("gui_main_window.DesktopDeviceAdapter") as mock_adapter,
+            patch("gui_main_window.DeviceManager") as mock_device_manager,
+        ):
             # Set up mocks
             mock_device_interface = Mock()
             mock_device_interface.is_connected.return_value = False  # Device is disconnected

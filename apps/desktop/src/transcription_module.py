@@ -91,9 +91,7 @@ def _call_gemini_api(payload: Dict[str, Any], api_key: str = "") -> Optional[Dic
         # Use model from payload config if provided, otherwise use gemini-2.0-flash-exp
         model_name = payload.get("model", "gemini-2.0-flash-exp")
         response = client.models.generate_content(
-            model=model_name,
-            contents=payload.get("contents"),
-            config=payload.get("generationConfig")
+            model=model_name, contents=payload.get("contents"), config=payload.get("generationConfig")
         )
         return response.to_dict()
     except Exception as e:

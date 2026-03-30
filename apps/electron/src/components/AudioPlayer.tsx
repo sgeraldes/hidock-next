@@ -53,8 +53,7 @@ export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
 
   const handleStop = useCallback(() => {
     audioControls.stop()
-    onClose?.()
-  }, [audioControls, onClose])
+  }, [audioControls])
 
   const seekAudio = useCallback(
     (time: number) => {

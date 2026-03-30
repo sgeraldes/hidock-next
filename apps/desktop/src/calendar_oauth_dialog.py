@@ -19,7 +19,6 @@ from datetime import datetime
 from typing import Callable, Optional, Tuple
 
 import customtkinter as ctk
-
 from config_and_logger import logger
 from hinotes_calendar_service import HiNotesCalendarService
 

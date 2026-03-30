@@ -8,9 +8,7 @@ import json
 import os
 import tempfile
 
-import pytest
-
-from config_and_logger import get_default_config, load_config, save_config
+from config_and_logger import get_default_config
 
 
 class TestSpecificSettingsFix:

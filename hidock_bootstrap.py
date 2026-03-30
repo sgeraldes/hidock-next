@@ -22,16 +22,14 @@ avoid regressions; future refactors can modularize further.
 # build-trigger guard block. Only minimal cosmetic edits (docstring above)
 # were added; functional code remains identical for safety.
 
+import argparse
 import os
 import platform
+import shutil
 import subprocess
 import sys
-import argparse
-import builtins
-import shutil
 from pathlib import Path
-from shutil import which
-from typing import Iterable, Any, Optional
+from typing import Any, Iterable
 
 # ---------------------------------------------------------------------------
 # Utilities & Output Control
@@ -77,9 +75,7 @@ class OutputController:
     def __init__(self):
         self.mode = os.environ.get("HIDOCK_OUTPUT_MODE", "normal").lower()
         try:
-            self.LOG_PATH.write_text(
-                "# HiDock setup log (full verbose output)\n", encoding="utf-8"
-            )
+            self.LOG_PATH.write_text("# HiDock setup log (full verbose output)\n", encoding="utf-8")
         except Exception:
             pass
         self._buffered = []
@@ -159,16 +155,14 @@ class PhaseTracker:
         self.phases.append(self._active)
         if OUTPUT.mode != "concise":
             dur = self._active["t1"] - self._active["t0"]
-            OUTPUT.print(
-                f"✅ Phase complete: {self._active['name']} ({dur:.1f}s) status={status}"
-            )
+            OUTPUT.print(f"✅ Phase complete: {self._active['name']} ({dur:.1f}s) status={status}")
         self._active = None
 
     def summary(self):
         lines = []
         for p in self.phases:
             dur = (p["t1"] - p["t0"]) if p["t1"] else 0.0
-            note = f" - {p['notes']}" if p['notes'] else ""
+            note = f" - {p['notes']}" if p["notes"] else ""
             lines.append(f"{p['name']}: {p['status']} ({dur:.1f}s){note}")
         return lines
 
@@ -201,9 +195,7 @@ def resolve_desktop_venv_dir() -> Path:
     if tagged.exists():
         return tagged
     if legacy.exists():
-        print(
-            f"⚠️  Using legacy virtual environment at {legacy}. Consider migrating to {tag} (see docs/VENV.md)"
-        )
+        print(f"⚠️  Using legacy virtual environment at {legacy}. Consider migrating to {tag} (see docs/VENV.md)")
         return legacy
     return tagged
 
@@ -250,7 +242,9 @@ def maybe_offer_legacy_migration():
                     / ("Scripts" if platform.system() == "Windows" else "bin")
                     / ("python.exe" if platform.system() == "Windows" else "python")
                 )
-                run_command([str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], cwd=base, check=False)
+                run_command(
+                    [str(py), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], cwd=base, check=False
+                )
                 run_command([str(py), "-m", "pip", "install", "-e", "."], cwd=base, check=False)
                 print("✅ Rebuild complete. Remove old '.venv' when ready.")
             else:
@@ -289,7 +283,9 @@ def run_command(command, cwd=None, check=True, env=None, print_on_error=True, al
     shell = isinstance(command, str)
     display_cmd = command if isinstance(command, str) else " ".join(map(str, command))
     lowered_display = display_cmd.lower()
-    noisy = any(kw in lowered_display for kw in [" pip install ", "npm install", "apt install", "apt update", "nala install"])
+    noisy = any(
+        kw in lowered_display for kw in [" pip install ", "npm install", "apt install", "apt update", "nala install"]
+    )
     if OUTPUT.mode == "concise" and noisy:
         truncated = display_cmd[:60] + "..." if len(display_cmd) > 63 else display_cmd
         OUTPUT.print(f"Running (suppressed): {truncated}")
@@ -299,11 +295,13 @@ def run_command(command, cwd=None, check=True, env=None, print_on_error=True, al
     if is_fast and not shell and isinstance(command, (list, tuple)):
         lowered = [str(c).lower() for c in command]
         if any(x.endswith("pip") or x == "pip" for x in lowered) or "npm" in lowered:
+
             class _FastOK:
                 returncode = 0
                 skipped = " ".join(map(str, command))
                 stdout = f"[fast-mode] skipped: {skipped}"
                 stderr = ""
+
             OUTPUT.print(_FastOK().stdout)
             return _FastOK()
     try:
@@ -322,10 +320,12 @@ def run_command(command, cwd=None, check=True, env=None, print_on_error=True, al
         OUTPUT.print(f"❌ Failed to execute command: {display_cmd}\n   Reason: {e}")
         if check:
             sys.exit(1)
+
         class _Failure:
             returncode = 1
             stdout = ""
             stderr = str(e)
+
         return _Failure()
     if result.stdout:
         if OUTPUT.mode == "concise" and noisy:
@@ -345,6 +345,7 @@ def run_command(command, cwd=None, check=True, env=None, print_on_error=True, al
         sys.exit(result.returncode)
     return result
 
+
 # (Remaining logic preserved verbatim to end-of-file in original setup.py)
 # For brevity in this bootstrap extraction, we continue including all
 # functional definitions without modification.
@@ -363,6 +364,7 @@ def run_command(command, cwd=None, check=True, env=None, print_on_error=True, al
 # help/flag surface is the critical path for tests.
 
 # Minimal argparse replication for tests -------------------------------------------------
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="HiDock unified setup (bootstrap)")

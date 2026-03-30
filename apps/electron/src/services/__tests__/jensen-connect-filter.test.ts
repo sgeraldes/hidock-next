@@ -52,19 +52,11 @@ describe('FIX-015: USB connect device filter', () => {
     const sourceFile = path.join(__dirname, '..', 'jensen.ts')
     const source = fs.readFileSync(sourceFile, 'utf-8')
 
-    // Find ALL productName filter lines
-    const lines = source.split('\n')
-    const productNameFilterLines = lines.filter(line =>
-      line.includes('productName') && line.includes('includes')
-    )
+    const hasProductNameLowerCase = source.includes('productName?.toLowerCase()')
+      || source.includes('productName?.toLowerCase()')
+    expect(hasProductNameLowerCase, 'jensen.ts must lowercase productName before matching').toBe(true)
 
-    // There should be multiple lines checking productName
-    expect(productNameFilterLines.length).toBeGreaterThan(0)
-
-    // ALL of them must use case-insensitive matching
-    for (const line of productNameFilterLines) {
-      const usesCaseInsensitive = line.includes('toLowerCase()')
-      expect(usesCaseInsensitive, `Line should use toLowerCase: "${line.trim()}"`).toBe(true)
-    }
+    const hasCaseSensitiveCheck = /productName\??\.(includes|match)\(/g.test(source)
+    expect(hasCaseSensitiveCheck, 'No direct case-sensitive productName.includes() should exist').toBe(false)
   })
 })

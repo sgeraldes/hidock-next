@@ -26,7 +26,6 @@ from typing import Dict, Optional
 from urllib.parse import urlencode
 
 import requests
-
 from config_and_logger import logger
 from oauth2_pkce import generate_pkce_pair
 from oauth2_providers import get_provider_config

@@ -3,10 +3,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { registerAssistantHandlers } from '../assistant-handlers'
 import { ipcMain } from 'electron'
 
-// Mock electron ipcMain
+// Mock electron
 vi.mock('electron', () => ({
   ipcMain: {
     handle: vi.fn()
+  },
+  app: {
+    getPath: vi.fn(() => '/tmp/test-hidock')
+  },
+  safeStorage: {
+    isEncryptionAvailable: vi.fn(() => false),
+    encryptString: vi.fn(),
+    decryptString: vi.fn()
   }
 }))
 

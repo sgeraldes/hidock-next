@@ -590,7 +590,6 @@ class TestMain(unittest.TestCase):
         import traceback
 
         import customtkinter as ctk
-
         from config_and_logger import logger
         from gui_main_window import HiDockToolGUI
 

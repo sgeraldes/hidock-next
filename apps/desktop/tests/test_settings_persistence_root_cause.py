@@ -15,7 +15,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock, Mock, PropertyMock, patch
+from unittest.mock import MagicMock, Mock
 
 # Mock GUI modules to prevent hanging
 sys.modules["tkinter.messagebox"] = Mock()

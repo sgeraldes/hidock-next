@@ -16,7 +16,6 @@ from tkinter import filedialog, messagebox
 from typing import Optional
 
 import customtkinter as ctk
-
 from audio_player_enhanced import (
     AudioProcessor,
     AudioTrack,

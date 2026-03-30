@@ -17,6 +17,7 @@ import { BrowserWindow, ipcMain, Notification } from 'electron'
 import {
   markRecordingDownloaded,
   addSyncedFile,
+  addToQueue,
   isFileSynced,
   getRecordingByFilename,
   getSyncedFilenames,
@@ -27,6 +28,7 @@ import {
 } from './database'
 import { saveRecording, getRecordingsPath } from './file-storage'
 import { emitActivityLog } from './activity-log'
+import { getConfig } from './config'
 import { existsSync } from 'fs'
 import { join, basename } from 'path'
 
@@ -170,8 +172,29 @@ class DownloadService {
         this.state.queue.set(item.filename, queueItem)
       }
 
+      // Clear stale pending items (> 24h old) — these can never complete if the device
+      // was disconnected between sessions and left downloads in a perpetual pending state.
+      const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000
+      const now = Date.now()
+      const staleKeys: string[] = []
+      for (const [key, item] of this.state.queue) {
+        if (item.status === 'pending' && item.startedAt) {
+          const age = now - item.startedAt.getTime()
+          if (age > STALE_THRESHOLD_MS) {
+            staleKeys.push(key)
+          }
+        }
+      }
+      if (staleKeys.length > 0) {
+        for (const key of staleKeys) {
+          this.state.queue.delete(key)
+          this.removeFromDatabase(key)
+        }
+        console.log(`[DownloadService] Cleared ${staleKeys.length} stale pending item(s) older than 24h`)
+      }
+
       this.markDirty()
-      console.log(`[DownloadService] Loaded ${items.length} items from database`)
+      console.log(`[DownloadService] Loaded ${items.length - staleKeys.length} items from database (${staleKeys.length} stale cleared)`)
     } catch (e) {
       console.error('[DownloadService] Failed to load queue from database:', e)
     }
@@ -273,15 +296,20 @@ class DownloadService {
    */
   getFilesToSync(deviceFiles: Array<{ filename: string; size: number; duration: number; dateCreated: Date }>): Array<{ filename: string; size: number; duration: number; dateCreated: Date; skipReason?: string }> {
     const results: Array<{ filename: string; size: number; duration: number; dateCreated: Date; skipReason?: string }> = []
+    let skippedCount = 0
+    let queuedCount = 0
 
     for (const file of deviceFiles) {
       const { synced, reason } = this.isFileAlreadySynced(file.filename)
       if (synced) {
-        console.log(`[DownloadService] Skipping ${file.filename}: ${reason}`)
+        skippedCount++
+      } else {
+        queuedCount++
       }
       results.push({ ...file, skipReason: synced ? reason : undefined })
     }
 
+    console.log(`[DownloadService] Reconciliation: ${skippedCount} files skipped (already synced), ${queuedCount} files queued`)
     return results
   }
 
@@ -457,6 +485,22 @@ class DownloadService {
 
       this.markDirty()
       this.emitStateUpdate(true) // C-004: immediate emit for completion
+
+      const config = getConfig()
+      if (config.transcription.autoTranscribe) {
+        const recording = getRecordingByFilename(filename)
+          ?? (wavFilename !== filename ? getRecordingByFilename(wavFilename) : undefined)
+          ?? getRecordingByFilename(basename(filePath))
+
+        if (recording) {
+          addToQueue(recording.id)
+          import('./transcription').then(({ processQueueManually }) => {
+            processQueueManually()
+          }).catch(err => {
+            console.error('[DownloadService] Failed to import transcription service:', err)
+          })
+        }
+      }
 
       // DL-07: Clean up completed items from queue after emitting final state.
       // Keep them briefly so the renderer sees the 100% state, then remove.
@@ -653,13 +697,15 @@ class DownloadService {
   }
 
   /**
-   * spec-007: Cancel all active downloads (e.g., on device disconnect)
+   * spec-007: Cancel active downloads (e.g., on device disconnect).
+   * Only marks 'downloading' items as failed — 'pending' items are preserved
+   * so they can be retried when the device reconnects.
    */
   cancelActiveDownloads(reason: string = 'Cancelled'): number {
     let cancelledCount = 0
 
     for (const item of this.state.queue.values()) {
-      if (item.status === 'downloading' || item.status === 'pending') {
+      if (item.status === 'downloading') {
         item.status = 'failed'
         item.error = reason
         this.persistQueueItem(item)
@@ -669,13 +715,13 @@ class DownloadService {
         }
 
         cancelledCount++
-        console.log(`[DownloadService] Cancelled: ${item.filename} - ${reason}`)
+        console.log(`[DownloadService] Cancelled active download: ${item.filename} - ${reason}`)
       }
     }
 
     if (cancelledCount > 0) {
       this.markDirty()
-      this.emitStateUpdate(true) // C-004: immediate emit for cancel-active
+      this.emitStateUpdate(true)
     }
 
     return cancelledCount

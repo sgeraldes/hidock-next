@@ -6,9 +6,9 @@ Handles installation of system-level packages required for the HiDock Desktop Ap
 
 import os
 import platform
+import shutil
 import subprocess
 import sys
-import shutil
 from pathlib import Path
 
 # Optional Linux-only modules (grp may not exist on non-Unix platforms)
@@ -51,9 +51,7 @@ def _has_ffmpeg() -> bool:
 def _has_libusb() -> bool:
     """Detect libusb via pkg-config or header presence."""
     try:
-        pc = subprocess.run(
-            "pkg-config --exists libusb-1.0", shell=True, check=False
-        )
+        pc = subprocess.run("pkg-config --exists libusb-1.0", shell=True, check=False)
         if pc.returncode == 0:
             return True
     except (OSError, subprocess.SubprocessError):
@@ -67,12 +65,8 @@ def _has_build_tools() -> bool:
 
 def _has_gui_bits() -> bool:
     """Detect core GUI libs (cairo, gtk3) via pkg-config."""
-    cairo = subprocess.run(
-        "pkg-config --exists cairo", shell=True, check=False
-    )
-    gtk = subprocess.run(
-        "pkg-config --exists gtk+-3.0", shell=True, check=False
-    )
+    cairo = subprocess.run("pkg-config --exists cairo", shell=True, check=False)
+    gtk = subprocess.run("pkg-config --exists gtk+-3.0", shell=True, check=False)
     return cairo.returncode == 0 and gtk.returncode == 0
 
 
@@ -104,11 +98,7 @@ def run_command(command, check=True, capture_output=True):
             capture_output=capture_output,
             text=True,
         )
-        if (
-            result.stdout
-            and capture_output
-            and not (concise and noisy and result.returncode == 0)
-        ):
+        if result.stdout and capture_output and not (concise and noisy and result.returncode == 0):
             print(result.stdout)
         return result
     except subprocess.CalledProcessError as e:  # pragma: no cover - defensive
@@ -154,14 +144,8 @@ def check_linux_distribution():
         print("✓ Detected Debian-based Linux distribution")
         return True
     else:
-        print(
-            "⚠️  This script is optimized for Debian-based distributions "
-            "(Ubuntu, Debian, Mint, etc.)"
-        )
-        print(
-            "   System dependencies may need to be installed manually on "
-            "other distributions"
-        )
+        print("⚠️  This script is optimized for Debian-based distributions " "(Ubuntu, Debian, Mint, etc.)")
+        print("   System dependencies may need to be installed manually on " "other distributions")
         return False
 
 
@@ -289,10 +273,7 @@ def install_audio_dependencies(pkg_manager, skip=False):
             return True
         else:
             print("❌ Failed to install some audio dependencies")
-            print(
-                "   The application might still work with basic audio "
-                "functionality"
-            )
+            print("   The application might still work with basic audio " "functionality")
             return False
     except (OSError, subprocess.SubprocessError) as e:
         print(f"❌ Error installing audio dependencies: {e}")
@@ -460,10 +441,7 @@ def setup_usb_permissions():
         getgrall = getattr(grp, "getgrall", lambda: [])  # type: ignore[attr-defined]
         user_groups = [g.gr_name for g in getgrall() if username in getattr(g, "gr_mem", [])]
         if "dialout" not in user_groups:
-            print(
-                f"Adding user '{username}' to 'dialout' group "
-                "for USB access..."
-            )
+            print(f"Adding user '{username}' to 'dialout' group " "for USB access...")
             result = run_command(
                 f"sudo usermod -a -G dialout {username}",
                 capture_output=False,
@@ -511,9 +489,7 @@ def setup_usb_permissions():
                 return False
 
         print("Installing HiDock udev rule to system...")
-        result = run_command(
-            f"sudo cp {udev_rule_path} /etc/udev/rules.d/", capture_output=False
-        )
+        result = run_command(f"sudo cp {udev_rule_path} /etc/udev/rules.d/", capture_output=False)
         if result.returncode != 0:
             print("⚠️  Failed to install udev rule")
             print("   Manual install:")
@@ -599,9 +575,7 @@ def verify_installation():
 
     # Check ffmpeg
     try:
-        result = run_command(
-            "ffmpeg -version", check=False, capture_output=False
-        )
+        result = run_command("ffmpeg -version", check=False, capture_output=False)
         if result.returncode == 0:
             print("✓ FFmpeg installed")
             checks.append(True)
@@ -627,9 +601,7 @@ def verify_installation():
 
     # Check build tools
     try:
-        result = run_command(
-            "gcc --version", check=False, capture_output=False
-        )
+        result = run_command("gcc --version", check=False, capture_output=False)
         if result.returncode == 0:
             print("✓ GCC compiler available")
             checks.append(True)
@@ -648,10 +620,7 @@ def verify_installation():
         return True
     else:
         print("⚠️  Some dependencies may not be properly installed")
-        print(
-            "   The application might still work, but you may encounter "
-            "issues"
-        )
+        print("   The application might still work, but you may encounter " "issues")
         return False
 
 
@@ -734,10 +703,7 @@ def main():
         sys.exit(1)
 
     try:
-        print(
-            f"\n🚀 Starting system dependencies installation using "
-            f"{pkg_manager}..."
-        )
+        print(f"\n🚀 Starting system dependencies installation using " f"{pkg_manager}...")
 
         detected = {
             "build": _has_build_tools(),
@@ -755,21 +721,12 @@ def main():
         if not all(detected.values()):
             update_package_lists(pkg_manager)
         else:
-            print(
-                "All categories appear satisfied; proceeding to "
-                "verification."
-            )
+            print("All categories appear satisfied; proceeding to " "verification.")
 
         success = True
-        success &= install_build_dependencies(
-            pkg_manager, skip=detected["build"]
-        )
-        success &= install_python_tkinter(
-            pkg_manager, skip=detected["python_tk"]
-        )
-        success &= install_audio_dependencies(
-            pkg_manager, skip=detected["audio"]
-        )
+        success &= install_build_dependencies(pkg_manager, skip=detected["build"])
+        success &= install_python_tkinter(pkg_manager, skip=detected["python_tk"])
+        success &= install_audio_dependencies(pkg_manager, skip=detected["audio"])
         success &= install_usb_dependencies(pkg_manager, skip=detected["usb"])
         success &= install_gui_dependencies(pkg_manager, skip=detected["gui"])
 
@@ -778,9 +735,7 @@ def main():
 
         # Install optional dependencies (don't fail if these don't work)
         try:
-            install_optional_dependencies(
-                pkg_manager, skip=detected["optional"]
-            )
+            install_optional_dependencies(pkg_manager, skip=detected["optional"])
         except (OSError, subprocess.SubprocessError) as e:
             # Non-fatal: capture and continue
             print(f"⚠️  Optional dependencies installation issue: {e}")

@@ -14,7 +14,7 @@ import { TranscriptViewer } from './TranscriptViewer'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, parseJsonArray } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X } from 'lucide-react'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -236,8 +236,8 @@ export function SourceReader({
               </div>
             ) : (
               <div className="group flex items-center gap-2">
-                <h2 className="text-xl font-semibold truncate" title={recording.filename}>
-                  {recording.title || recording.filename}
+                <h2 className="text-xl font-semibold truncate" title={recording.title || meeting?.subject || recording.filename}>
+                  {recording.title || meeting?.subject || recording.filename}
                 </h2>
                 {recording.knowledgeCaptureId && (
                   <button
@@ -311,12 +311,10 @@ export function SourceReader({
               <p className="text-xs font-medium text-muted-foreground mb-1">Transcription</p>
               <p className="capitalize">{recording.transcriptionStatus}</p>
             </div>
-            {recording.title && recording.filename !== recording.title && (
-              <div>
-                <p className="text-xs font-medium text-muted-foreground mb-1">Filename</p>
-                <p className="truncate" title={recording.filename}>{recording.filename}</p>
-              </div>
-            )}
+            <div>
+              <p className="text-xs font-medium text-muted-foreground mb-1">Filename</p>
+              <p className="truncate" title={recording.filename}>{recording.filename}</p>
+            </div>
           </div>
 
           {/* Linked Meeting */}
@@ -350,14 +348,6 @@ export function SourceReader({
               >
                 <X className="h-3.5 w-3.5" />
               </Button>
-            </div>
-          )}
-
-          {/* Transcript Summary */}
-          {transcript?.summary && (
-            <div className="mt-4 p-3 bg-muted/30 border rounded-lg">
-              <p className="text-xs font-medium text-muted-foreground mb-2">Summary</p>
-              <p className="text-sm leading-relaxed">{transcript.summary}</p>
             </div>
           )}
 
@@ -399,8 +389,32 @@ export function SourceReader({
           )
         )}
 
-        {/* Link Meeting Button - only when no meeting linked */}
-        {!meeting && (
+        {hasLocalPath(recording) && (
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => window.electronAPI?.storage.openFile(recording.localPath)}
+              className="gap-2"
+              title="Open in default application"
+            >
+              <ExternalLink className="h-4 w-4" />
+              Open
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => window.electronAPI?.storage.revealInFolder(recording.localPath)}
+              className="gap-2"
+              title="Show in file explorer"
+            >
+              <FolderOpen className="h-4 w-4" />
+              Reveal
+            </Button>
+          </>
+        )}
+
+        {!meeting && !isDeviceOnly(recording) && (
           <Button
             variant="outline"
             size="sm"
@@ -494,8 +508,8 @@ export function SourceReader({
         )}
       </div>
 
-      {/* Audio Player — only shown after playback has been initiated */}
-      {canPlay && isPlaying && (
+      {/* Audio Player — shown whenever recording has local file */}
+      {canPlay && (
         <div className="sticky top-0 bg-background z-10 border-b">
           <AudioPlayer key={recording.id} filename={recording.filename} onClose={onStop} />
         </div>

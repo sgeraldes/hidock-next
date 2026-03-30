@@ -6,12 +6,7 @@ Following TDD principles to achieve 80% test coverage as mandated by .amazonq/ru
 
 import json
 import os
-import sys
-import tempfile
-import unittest.mock as mock
 from unittest.mock import Mock, mock_open, patch
-
-import pytest
 
 import config_and_logger
 from config_and_logger import Logger, get_default_config, load_config, save_config
@@ -568,9 +563,12 @@ class TestSaveConfigFileNotFound:
         """Test save_config fallback when existing config file not found"""
         config_data = {"new_setting": "new_value"}
 
-        with patch("builtins.open", mock_open()) as mock_file, patch(
-            "json.load", side_effect=FileNotFoundError()
-        ), patch("json.dump") as mock_dump, patch("config_and_logger.get_default_config") as mock_default:
+        with (
+            patch("builtins.open", mock_open()) as mock_file,
+            patch("json.load", side_effect=FileNotFoundError()),
+            patch("json.dump") as mock_dump,
+            patch("config_and_logger.get_default_config") as mock_default,
+        ):
             mock_default.return_value = {"default_key": "default_value"}
 
             config_and_logger.save_config(config_data)

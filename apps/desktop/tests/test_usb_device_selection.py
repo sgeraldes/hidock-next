@@ -5,11 +5,9 @@ This module tests the enhanced device selector, device detection,
 and settings persistence for USB device selection.
 """
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
-import usb.core
-
 from enhanced_device_selector import DeviceInfo, EnhancedDeviceSelector
 
 

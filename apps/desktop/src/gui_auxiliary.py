@@ -5,12 +5,12 @@ Auxiliary Mixin for the HiDock Explorer Tool GUI.
 This module provides the `AuxiliaryMixin` class, which contains methods
 for handling the settings dialog, GUI logging, and other helper functions.
 """
+
 import tkinter
 import traceback
 from tkinter import filedialog, messagebox
 
 import usb.core
-
 from config_and_logger import Logger, logger
 from settings_window import SettingsDialog
 
@@ -177,9 +177,7 @@ class AuxiliaryMixin:
 
     # scan_usb_devices_for_settings is called by SettingsDialog,
     # but defined here as it relates to main app's available_usb_devices
-    def scan_usb_devices_for_settings(
-        self, parent_window_for_dialogs, initial_load=False, change_callback=None
-    ):  # pylint: disable=too-many-locals, too-many-branches, too-many-statements
+    def scan_usb_devices_for_settings(self, parent_window_for_dialogs, initial_load=False, change_callback=None):  # pylint: disable=too-many-locals, too-many-branches, too-many-statements
         """This method is called by the SettingsDialog. It updates self.available_usb_devices
         and then configures the combobox *in the SettingsDialog*.
         The parent_window_for_dialogs will be the SettingsDialog instance."""
@@ -243,9 +241,7 @@ class AuxiliaryMixin:
                     hasattr(parent_window_for_dialogs, "settings_device_combobox")
                     and parent_window_for_dialogs.settings_device_combobox.winfo_exists()
                 ):
-                    parent_window_for_dialogs.settings_device_combobox.configure(
-                        values=["USB Backend Error"]
-                    )  # type: ignore
+                    parent_window_for_dialogs.settings_device_combobox.configure(values=["USB Backend Error"])  # type: ignore
                     parent_window_for_dialogs.settings_device_combobox.set("USB Backend Error")
                 return
 
@@ -277,9 +273,7 @@ class AuxiliaryMixin:
                         hasattr(parent_window_for_dialogs, "settings_device_combobox")
                         and parent_window_for_dialogs.settings_device_combobox.winfo_exists()
                     ):
-                        parent_window_for_dialogs.settings_device_combobox.configure(
-                            values=["No devices found"]
-                        )  # type: ignore
+                        parent_window_for_dialogs.settings_device_combobox.configure(values=["No devices found"])  # type: ignore
                         parent_window_for_dialogs.settings_device_combobox.set("No devices found")
                     return
 

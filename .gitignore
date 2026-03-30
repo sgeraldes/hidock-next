@@ -68,7 +68,16 @@ audio/
 # Temporary fix/utility scripts
 fix_*.py
 temp_*.py
+spec_writer.*
 *.sqlite3
+
+# Development session artifacts (CHANGES logs, phase reports, verification docs)
+/CHANGES*.md
+/PHASE*.md
+/VERIFICATION*.md
+/IMPLEMENTATION*.md
+/MANUAL-VERIFICATION*.md
+/WAVE2*.md
 
 # ===================================================================
 # General Development
@@ -101,6 +110,7 @@ dist/
 build/
 *.egg-info/
 *.egg
+*.tsbuildinfo
 apps/desktop/*.egg-info/
 apps/desktop/build/
 apps/desktop/dist/
@@ -173,6 +183,7 @@ NUL
 # QA & Automation Artifacts
 # ===================================================================
 qa-artifacts/
+/*.png
 *.png.encrypted
 /docs/qa/screenshots/*.encrypted
 

@@ -15,9 +15,8 @@ import threading
 from typing import Callable, List, Optional  # Removed Dict - not used
 
 import customtkinter as ctk
-from PIL import Image
-
 from config_and_logger import logger
+from PIL import Image
 
 
 class DeviceInfo:

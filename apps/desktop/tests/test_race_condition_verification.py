@@ -8,7 +8,7 @@ they don't interfere with each other.
 
 import asyncio
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
