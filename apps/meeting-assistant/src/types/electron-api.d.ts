@@ -1,8 +1,25 @@
+import type {
+  AppInfo,
+  Session,
+  TranscriptSegment,
+  TranscriptStatus,
+  Suggestion,
+  Note,
+  NoteTemplate,
+  Screenshot,
+  KnowledgeSearchResult,
+  KnowledgeIndexProgress,
+  KnowledgeIndexComplete,
+  SettingsKey,
+  SettingsMap,
+  SettingsCategoryGroup,
+} from "./models";
+
 type Unsubscribe = () => void;
 
 export interface ElectronAPI {
   app: {
-    info: () => Promise<unknown>;
+    info: () => Promise<AppInfo>;
   };
 
   window: {
@@ -13,63 +30,72 @@ export interface ElectronAPI {
   };
 
   session: {
-    list: () => Promise<unknown[]>;
-    create: () => Promise<unknown>;
-    get: (sessionId: string) => Promise<unknown>;
-    end: (sessionId: string) => Promise<unknown>;
-    delete: (sessionId: string) => Promise<unknown>;
-    linkMeeting: (sessionId: string, meetingId: string) => Promise<unknown>;
-    onCreated: (callback: (data: unknown) => void) => Unsubscribe;
-    onUpdated: (callback: (data: unknown) => void) => Unsubscribe;
-    onDeleted: (callback: (data: unknown) => void) => Unsubscribe;
-    onStatusChanged: (callback: (data: unknown) => void) => Unsubscribe;
+    list: () => Promise<Session[]>;
+    create: () => Promise<Session>;
+    get: (sessionId: string) => Promise<Session | null>;
+    end: (sessionId: string) => Promise<Session | null>;
+    delete: (sessionId: string) => Promise<null>;
+    linkMeeting: (sessionId: string, meetingId: string) => Promise<Session | null>;
+    onCreated: (callback: (data: Session) => void) => Unsubscribe;
+    onUpdated: (callback: (data: Session) => void) => Unsubscribe;
+    onDeleted: (callback: (data: { sessionId: string }) => void) => Unsubscribe;
+    onStatusChanged: (callback: (data: Session) => void) => Unsubscribe;
   };
 
   transcript: {
-    getSegments: (sessionId: string, offset?: number, limit?: number) => Promise<unknown[]>;
-    getRecent: (sessionId: string, maxAgeSecs?: number, maxCount?: number) => Promise<unknown[]>;
-    onNewSegments: (callback: (data: unknown) => void) => Unsubscribe;
-    onInterimResult: (callback: (data: unknown) => void) => Unsubscribe;
-    onError: (callback: (error: unknown) => void) => Unsubscribe;
-    onStatus: (callback: (status: unknown) => void) => Unsubscribe;
+    getSegments: (sessionId: string, offset?: number, limit?: number) => Promise<TranscriptSegment[]>;
+    getRecent: (sessionId: string, maxAgeSecs?: number, maxCount?: number) => Promise<TranscriptSegment[]>;
+    onNewSegments: (callback: (data: TranscriptSegment[]) => void) => Unsubscribe;
+    onInterimResult: (callback: (data: { text: string; isFinal: boolean }) => void) => Unsubscribe;
+    onError: (callback: (error: { message: string }) => void) => Unsubscribe;
+    onStatus: (callback: (status: TranscriptStatus) => void) => Unsubscribe;
   };
 
   suggestion: {
-    getActive: (sessionId: string) => Promise<unknown[]>;
-    dismiss: (suggestionId: string) => Promise<unknown>;
-    onUpdated: (callback: (data: unknown) => void) => Unsubscribe;
-    onCleared: (callback: (data: unknown) => void) => Unsubscribe;
+    getActive: (sessionId: string) => Promise<Suggestion[]>;
+    dismiss: (suggestionId: string) => Promise<null>;
+    onUpdated: (callback: (data: Suggestion[]) => void) => Unsubscribe;
+    onCleared: (callback: (data: { sessionId: string }) => void) => Unsubscribe;
   };
 
   notes: {
-    generate: (sessionId: string, templateId?: string) => Promise<unknown>;
-    getForSession: (sessionId: string) => Promise<unknown>;
-    update: (notesId: string, content: string) => Promise<unknown>;
-    listTemplates: () => Promise<unknown[]>;
-    categorize: (notesId: string, category: string) => Promise<unknown>;
-    onGenerationProgress: (callback: (data: unknown) => void) => Unsubscribe;
+    generate: (sessionId: string, templateId?: string) => Promise<Note | null>;
+    getForSession: (sessionId: string) => Promise<Note | null>;
+    update: (notesId: string, content: string) => Promise<null>;
+    listTemplates: () => Promise<NoteTemplate[]>;
+    categorize: (notesId: string, category: string) => Promise<null>;
+    onGenerationProgress: (callback: (data: { sessionId: string; progress: number; stage: string }) => void) => Unsubscribe;
   };
 
   screenshot: {
-    capture: (sessionId: string) => Promise<unknown>;
-    listForSession: (sessionId: string) => Promise<unknown[]>;
-    getAnalysis: (screenshotId: string) => Promise<unknown>;
+    capture: (sessionId: string) => Promise<Screenshot | null>;
+    listForSession: (sessionId: string) => Promise<Screenshot[]>;
+    getAnalysis: (screenshotId: string) => Promise<{ analysis: string | null } | null>;
     configure: (config: {
       autoCapture?: boolean;
       intervalSeconds?: number;
       analyzeWithLLM?: boolean;
-    }) => Promise<unknown>;
-    onCaptured: (callback: (data: unknown) => void) => Unsubscribe;
-    onAnalysisReady: (callback: (data: unknown) => void) => Unsubscribe;
+    }) => Promise<null>;
+    onCaptured: (callback: (data: Screenshot) => void) => Unsubscribe;
+    onAnalysisReady: (callback: (data: { screenshotId: number; analysis: string }) => void) => Unsubscribe;
   };
 
   settings: {
-    get: (key: string) => Promise<unknown>;
-    set: (key: string, value: unknown) => Promise<unknown>;
-    getAll: () => Promise<Record<string, unknown>>;
-    getCategory: (category: string) => Promise<unknown>;
+    get: <K extends SettingsKey>(key: K) => Promise<SettingsMap[K] | null>;
+    set: <K extends SettingsKey>(key: K, value: SettingsMap[K]) => Promise<null>;
+    getAll: () => Promise<Partial<SettingsMap>>;
+    getCategory: (category: string) => Promise<SettingsCategoryGroup | null>;
     testConnection: () => Promise<{ success: boolean; error?: string }>;
-    onChanged: (callback: (data: unknown) => void) => Unsubscribe;
+    onChanged: (callback: (data: { key: SettingsKey; value: SettingsMap[SettingsKey] }) => void) => Unsubscribe;
+  };
+
+  knowledge: {
+    addSource: (path: string) => Promise<null>;
+    removeSource: (sourcePath: string) => Promise<null>;
+    search: (query: string, topK?: number) => Promise<KnowledgeSearchResult[]>;
+    reindex: () => Promise<null>;
+    onIndexProgress: (callback: (data: KnowledgeIndexProgress) => void) => Unsubscribe;
+    onIndexComplete: (callback: (data: KnowledgeIndexComplete) => void) => Unsubscribe;
   };
 }
 

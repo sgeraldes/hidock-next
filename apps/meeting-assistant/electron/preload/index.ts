@@ -147,4 +147,24 @@ contextBridge.exposeInMainWorld("electronAPI", {
       return () => ipcRenderer.removeListener("settings:changed", handler);
     },
   },
+
+  knowledge: {
+    addSource: (path: string) =>
+      ipcRenderer.invoke("kb:addSource", { path }),
+    removeSource: (sourcePath: string) =>
+      ipcRenderer.invoke("kb:removeSource", { sourcePath }),
+    search: (query: string, topK?: number) =>
+      ipcRenderer.invoke("kb:search", { query, topK }),
+    reindex: () => ipcRenderer.invoke("kb:reindex"),
+    onIndexProgress: (callback: (data: unknown) => void): Unsubscribe => {
+      const handler = (_: unknown, data: unknown) => callback(data);
+      ipcRenderer.on("kb:indexProgress", handler);
+      return () => ipcRenderer.removeListener("kb:indexProgress", handler);
+    },
+    onIndexComplete: (callback: (data: unknown) => void): Unsubscribe => {
+      const handler = (_: unknown, data: unknown) => callback(data);
+      ipcRenderer.on("kb:indexComplete", handler);
+      return () => ipcRenderer.removeListener("kb:indexComplete", handler);
+    },
+  },
 });

@@ -174,7 +174,7 @@ export class SettingsStore {
     setSetting(
       key,
       serialize(value),
-      definition.type === "enum" ? "string" : definition.type,
+      definition.type === "enum" || definition.type === "path" ? "string" : definition.type,
       definition.category,
     );
   }

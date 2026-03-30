@@ -3,6 +3,7 @@
  * Call registerIpcHandlers() once at app startup to wire all domains.
  */
 
+import { registerAppHandlers } from "./app-handlers";
 import { registerSessionHandlers } from "./session-handlers";
 import { registerTranscriptHandlers } from "./transcript-handlers";
 import { registerSuggestionHandlers } from "./suggestion-handlers";
@@ -12,6 +13,7 @@ import { registerSettingsHandlers } from "./settings-handlers";
 import { registerKnowledgeHandlers } from "./knowledge-handlers";
 
 export function registerIpcHandlers(): void {
+  registerAppHandlers();
   registerSessionHandlers();
   registerTranscriptHandlers();
   registerSuggestionHandlers();
