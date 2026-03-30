@@ -1,6 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./globals.css";
+import { ThemeProvider } from "./components/providers/ThemeProvider";
+import { ToastProvider } from "./components/providers/ToastProvider";
 
 function MiniBar() {
   return (
@@ -12,6 +14,9 @@ function MiniBar() {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <MiniBar />
+    <ThemeProvider>
+      <ToastProvider />
+      <MiniBar />
+    </ThemeProvider>
   </React.StrictMode>,
 );

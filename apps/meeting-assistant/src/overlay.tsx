@@ -1,6 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./globals.css";
+import { ThemeProvider } from "./components/providers/ThemeProvider";
+import { ToastProvider } from "./components/providers/ToastProvider";
 
 function Overlay() {
   return (
@@ -12,6 +14,9 @@ function Overlay() {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <Overlay />
+    <ThemeProvider>
+      <ToastProvider />
+      <Overlay />
+    </ThemeProvider>
   </React.StrictMode>,
 );
