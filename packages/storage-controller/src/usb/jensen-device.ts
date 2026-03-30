@@ -118,10 +118,25 @@ export class JensenDevice {
     if (this.rawDevice) {
       const dev = this.rawDevice
 
-      // Wait for the pending transferIn to complete/timeout.
-      // The read loop uses 5s timeout, so we wait up to 6s.
-      // Once readLoopRunning=false, the callback won't re-post.
-      await new Promise<void>((resolve) => setTimeout(resolve, 6000))
+      // Stop the polling loop — cancels all pending transfers
+      if (this.epIn) {
+        try {
+          this.epIn.stopPoll(() => {
+            // All transfers cancelled — safe to release
+          })
+        } catch { /* may not be polling */ }
+      }
+
+      // Wait for stopPoll 'end' event (transfers cancelled)
+      await new Promise<void>((resolve) => {
+        if (this.epIn) {
+          this.epIn.once('end', resolve)
+          // Fallback timeout in case 'end' never fires
+          setTimeout(resolve, 3000)
+        } else {
+          resolve()
+        }
+      })
 
       try {
         const iface = dev.interface(0)
@@ -331,32 +346,19 @@ export class JensenDevice {
   private startReadLoop(): void {
     if (this.readLoopRunning || !this.epIn) return
     this.readLoopRunning = true
-    this.readNext()
-  }
 
-  private readNext(): void {
-    if (!this.readLoopRunning || !this.epIn) return
-
-    this.epIn.transfer(51200, (err, data) => {
-      if (!this.readLoopRunning) {
-        return
-      }
-
-      // IMMEDIATELY post next read — before processing data.
-      // This ensures a transferIn is always pending (device ACK).
-      this.readNext()
-
-      // Now process the data we received
-      if (err) {
-        // Timeout errors are expected — the device may take minutes to respond
-        return
-      }
-      if (!data || data.length === 0) return
-      // Log raw header for debugging
-      const hdr = Array.from(data.subarray(0, Math.min(24, data.length))).map(b => b.toString(16).padStart(2, '0')).join(' ')
-      console.error(`[Jensen] read: ${data.length} bytes — ${hdr}`)
-
+    // Use startPoll instead of manual transfer loop.
+    // startPoll keeps N transfers pending in the kernel simultaneously,
+    // eliminating the gap between completion callback and next submit.
+    // This gap is the root cause of data loss on Windows — the USB event
+    // thread blocks on BlockingCall while the device sends the next packet.
+    this.epIn.startPoll(3, 32768)
+    this.epIn.on('data', (data: Buffer) => {
+      if (!this.readLoopRunning) return
       this.processIncomingData(data)
+    })
+    this.epIn.on('error', (_err: Error) => {
+      // Timeout/cancel errors are expected during disconnect
     })
   }
 
@@ -487,10 +489,9 @@ export class JensenDevice {
         return false
       }
 
-      // Timeout on IN endpoint — allows the read loop to yield periodically.
-      // The loop immediately re-posts a transferIn, so no data is lost.
-      // This timeout is essential for clean disconnect (pending transfer must complete).
-      this.epIn.timeout = 5000
+      // No timeout needed — startPoll manages multiple transfers and
+      // stopPoll cancels them cleanly on disconnect.
+      this.epIn.timeout = 0
 
       this.rawDevice = dev
       this._model = model
