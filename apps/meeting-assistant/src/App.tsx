@@ -9,6 +9,7 @@ import { Sidebar } from './components/shell/Sidebar'
 import { Titlebar } from './components/shell/Titlebar'
 import { KeyboardShortcuts } from './components/shell/KeyboardShortcuts'
 import {
+  initAppStore,
   initSessionStore,
   initTranscriptStore,
   initSuggestionStore,
@@ -17,6 +18,7 @@ import {
   initKnowledgeStore,
   initScreenshotStore,
 } from './stores'
+import { useMainNavigation } from './hooks'
 
 const PAGE_NAMES: Record<string, string> = {
   '/': 'Dashboard',
@@ -30,8 +32,12 @@ function ShellLayout() {
   const location = useLocation()
   const pageName = PAGE_NAMES[location.pathname] ?? 'Meeting Assistant'
 
+  // Listen for navigation requests from the main process (e.g. tray Settings click)
+  useMainNavigation()
+
   useEffect(() => {
     const cleanups = [
+      initAppStore(),
       initSessionStore(),
       initTranscriptStore(),
       initSuggestionStore(),

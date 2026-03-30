@@ -1,4 +1,4 @@
-export { useAppStore } from './app-store'
+export { useAppStore, initAppStore } from './app-store'
 export { useSessionStore, initSessionStore } from './session-store'
 export { useTranscriptStore, initTranscriptStore } from './transcript-store'
 export { useSuggestionStore, initSuggestionStore } from './suggestion-store'
