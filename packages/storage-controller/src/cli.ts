@@ -1,6 +1,8 @@
 import { Command } from 'commander'
+import { platform } from 'node:process'
 import { StorageController } from './core/storage-controller.js'
 import { FileCache } from './cache/file-cache.js'
+import { pyusbListFiles } from './usb/pyusb-bridge.js'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import type { Recording } from './core/types.js'
@@ -20,26 +22,38 @@ program
   .option('--refresh', 'Force USB re-scan (ignore cache)')
   .option('--json', 'Output as JSON')
   .action(async (opts) => {
-    const ctrl = new StorageController()
-    await ctrl.connect() // auto-connect if device available
+    let recordings: Recording[]
 
-    if (opts.refresh && ctrl.isConnected()) {
-      await ctrl.refresh()
+    if (platform === 'win32') {
+      // On Windows, use PyUSB bridge — node-usb has issues with file list
+      const entries = await pyusbListFiles()
+      recordings = entries.map((e) => ({
+        filename: e.name,
+        date: e.time,
+        duration: e.duration,
+        size: e.length,
+        source: 'device' as const,
+        version: e.version,
+        signature: e.signature,
+      }))
+    } else {
+      const ctrl = new StorageController()
+      await ctrl.connect()
+      if (opts.refresh && ctrl.isConnected()) {
+        await ctrl.refresh()
+      }
+      const filters: { from?: Date; to?: Date } = {}
+      if (opts.from) filters.from = new Date(opts.from)
+      if (opts.to) filters.to = new Date(opts.to)
+      recordings = await ctrl.list(filters)
+      await ctrl.disconnect()
     }
-
-    const filters: { from?: Date; to?: Date } = {}
-    if (opts.from) filters.from = new Date(opts.from)
-    if (opts.to) filters.to = new Date(opts.to)
-
-    const recordings = await ctrl.list(filters)
 
     if (opts.json) {
       console.log(JSON.stringify(recordings, null, 2))
     } else {
       printRecordingsTable(recordings)
     }
-
-    await ctrl.disconnect()
   })
 
 program
