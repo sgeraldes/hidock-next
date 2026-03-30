@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { createHandler } from "./create-handler";
 import { CHANNELS } from "./channels";
 import {
@@ -9,15 +10,19 @@ import {
   SessionLinkMeetingInput,
 } from "./validation";
 import { getSessionManager } from "../services/session-manager";
+import {
+  getAllSessions,
+  getSession,
+  deleteSession,
+} from "../services/database-queries";
+import { getDatabase, saveDatabase } from "../services/database";
 
 export function registerSessionHandlers(): void {
   createHandler({
     channel: CHANNELS.session.list,
     schema: SessionListInput,
     handler: async () => {
-      // TODO: query from database once persistence is wired (Phase 5)
-      const current = getSessionManager().getCurrentSession();
-      return current ? [current] : [];
+      return getAllSessions();
     },
   });
 
@@ -33,8 +38,7 @@ export function registerSessionHandlers(): void {
     channel: CHANNELS.session.get,
     schema: SessionGetInput,
     handler: async (input) => {
-      const current = getSessionManager().getCurrentSession();
-      return current?.id === input.sessionId ? current : null;
+      return getSession(input.sessionId);
     },
   });
 
@@ -49,8 +53,9 @@ export function registerSessionHandlers(): void {
   createHandler({
     channel: CHANNELS.session.delete,
     schema: SessionDeleteInput,
-    handler: async (_input) => {
-      // TODO: wire to database deletion once persistence is added
+    handler: async (input) => {
+      deleteSession(input.sessionId);
+      saveDatabase();
       return null;
     },
   });
@@ -61,6 +66,25 @@ export function registerSessionHandlers(): void {
     handler: async (input) => {
       getSessionManager().linkMeeting(input.sessionId, input.meetingId);
       return getSessionManager().getCurrentSession();
+    },
+  });
+
+  createHandler({
+    channel: CHANNELS.session.stats,
+    schema: z.void(),
+    handler: async () => {
+      const sessions = getAllSessions();
+      const totalSessions = sessions.length;
+      const totalRecordingMs = sessions.reduce((sum, s) => {
+        if (s.ended_at && s.started_at) return sum + (s.ended_at - s.started_at);
+        return sum;
+      }, 0);
+      const totalRecordingMinutes = Math.round(totalRecordingMs / 60000);
+      const db = getDatabase();
+      const notesResult = db.exec("SELECT COUNT(*) FROM notes");
+      const notesCount =
+        notesResult.length > 0 ? (notesResult[0].values[0][0] as number) : 0;
+      return { totalSessions, totalRecordingMinutes, notesCount };
     },
   });
 
