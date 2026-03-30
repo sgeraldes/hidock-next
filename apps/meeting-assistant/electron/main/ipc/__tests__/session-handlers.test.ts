@@ -88,6 +88,16 @@ vi.mock('../../services/database', () => ({
   mapRows: vi.fn(() => []),
 }))
 
+// ── Mock session-orchestrator ─────────────────────────────────────────────
+const mockOrchestratorStartSession = vi.fn(async () => undefined)
+const mockOrchestratorStopSession = vi.fn(async () => null)
+let mockOrchestratorInstance: { startSession: typeof mockOrchestratorStartSession; stopSession: typeof mockOrchestratorStopSession } | null = null
+
+vi.mock('../../services/session-orchestrator', () => ({
+  getOrchestrator: vi.fn(() => mockOrchestratorInstance),
+  setOrchestratorInstance: vi.fn(),
+}))
+
 // ── Mock session-manager ──────────────────────────────────────────────────
 const mockGetCurrentSession = vi.fn(() => null)
 const mockStartSession = vi.fn(() => ({
@@ -227,5 +237,63 @@ describe('Session Handlers', () => {
 
     // 1000ms total = 0 rounded minutes
     expect(result.totalRecordingMinutes).toBe(0)
+  })
+
+  // ── Orchestrator routing ────────────────────────────────────────────────
+
+  it('session:create routes through orchestrator when available', async () => {
+    mockOrchestratorInstance = {
+      startSession: mockOrchestratorStartSession,
+      stopSession: mockOrchestratorStopSession,
+    }
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.create)
+
+    await handler?.({}, undefined)
+
+    expect(mockOrchestratorStartSession).toHaveBeenCalled()
+    expect(mockStartSession).not.toHaveBeenCalled()
+
+    // Reset
+    mockOrchestratorInstance = null
+  })
+
+  it('session:create falls back to session manager when orchestrator is null', async () => {
+    mockOrchestratorInstance = null
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.create)
+
+    await handler?.({}, undefined)
+
+    expect(mockOrchestratorStartSession).not.toHaveBeenCalled()
+    expect(mockStartSession).toHaveBeenCalled()
+  })
+
+  it('session:end routes through orchestrator when available', async () => {
+    mockOrchestratorInstance = {
+      startSession: mockOrchestratorStartSession,
+      stopSession: mockOrchestratorStopSession,
+    }
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.end)
+
+    await handler?.({}, { sessionId: 's1' })
+
+    expect(mockOrchestratorStopSession).toHaveBeenCalled()
+    expect(mockEndSession).not.toHaveBeenCalled()
+
+    // Reset
+    mockOrchestratorInstance = null
+  })
+
+  it('session:end falls back to session manager when orchestrator is null', async () => {
+    mockOrchestratorInstance = null
+    const handlers = (ipcMain as unknown as { _handlers: Map<string, Function> })._handlers
+    const handler = handlers.get(CHANNELS.session.end)
+
+    await handler?.({}, { sessionId: 's1' })
+
+    expect(mockOrchestratorStopSession).not.toHaveBeenCalled()
+    expect(mockEndSession).toHaveBeenCalled()
   })
 })

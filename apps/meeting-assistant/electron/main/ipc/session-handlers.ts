@@ -10,6 +10,7 @@ import {
   SessionLinkMeetingInput,
 } from "./validation";
 import { getSessionManager } from "../services/session-manager";
+import { getOrchestrator } from "../services/session-orchestrator";
 import {
   getAllSessions,
   getSession,
@@ -31,6 +32,11 @@ export function registerSessionHandlers(): void {
     channel: CHANNELS.session.create,
     schema: SessionCreateInput,
     handler: async () => {
+      const orchestrator = getOrchestrator();
+      if (orchestrator) {
+        await orchestrator.startSession();
+        return null;
+      }
       return getSessionManager().startSession();
     },
   });
@@ -47,6 +53,11 @@ export function registerSessionHandlers(): void {
     channel: CHANNELS.session.end,
     schema: SessionEndInput,
     handler: async (_input) => {
+      const orchestrator = getOrchestrator();
+      if (orchestrator) {
+        await orchestrator.stopSession();
+        return null;
+      }
       return getSessionManager().endSession();
     },
   });
