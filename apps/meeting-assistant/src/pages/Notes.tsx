@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { format } from 'date-fns'
+import { format, isToday, isYesterday } from 'date-fns'
 import { FileText, Sparkles, Save, Eye, Code2, RefreshCw } from 'lucide-react'
 import { useNotesStore } from '../stores/notes-store'
 import { useSessionStore } from '../stores/session-store'
@@ -14,26 +14,26 @@ import {
   SelectItem,
 } from '../components/ui/select'
 import { ScrollArea } from '../components/ui/scroll-area'
+import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { cn } from '../lib/utils'
 
-// ── Empty state ────────────────────────────────────────────────────────────────
+// ── Date grouping ──────────────────────────────────────────────────────────────
 
-function EmptyState({ hasSession }: { hasSession: boolean }) {
-  return (
-    <div className="flex flex-col items-center justify-center flex-1 gap-3 py-20 text-center">
-      <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-muted/60 border border-border mb-1">
-        <FileText className="w-7 h-7 text-muted-foreground" />
-      </div>
-      <p className="font-display text-base font-semibold text-foreground">
-        {hasSession ? 'No notes yet for this session' : 'Select a session to view or generate notes'}
-      </p>
-      <p className="font-sans text-sm text-muted-foreground max-w-xs leading-relaxed">
-        {hasSession
-          ? 'Choose a template and click "Generate Notes" to create AI-powered notes.'
-          : 'Pick a recorded session from the dropdown above to get started.'}
-      </p>
-    </div>
-  )
+function formatDateGroup(timestamp: number): string {
+  const date = new Date(timestamp)
+  if (isToday(date)) return 'Today'
+  if (isYesterday(date)) return 'Yesterday'
+  return format(date, 'MMM d, yyyy')
+}
+
+function groupByDate(notes: Note[]): [string, Note[]][] {
+  const groups = new Map<string, Note[]>()
+  for (const note of notes) {
+    const label = formatDateGroup(note.created_at)
+    if (!groups.has(label)) groups.set(label, [])
+    groups.get(label)!.push(note)
+  }
+  return [...groups.entries()]
 }
 
 // ── Generation progress ────────────────────────────────────────────────────────
@@ -58,14 +58,14 @@ function GenerationProgress({ progress }: { progress: number }) {
   )
 }
 
-// ── Notes editor ──────────────────────────────────────────────────────────────
+// ── Note Editor ────────────────────────────────────────────────────────────────
 
-interface NotesEditorProps {
+interface NoteEditorProps {
   note: Note
   onSave: (noteId: string, content: string) => Promise<void>
 }
 
-function NotesEditor({ note, onSave }: NotesEditorProps) {
+function NoteEditor({ note, onSave }: NoteEditorProps) {
   const [content, setContent] = useState(note.content)
   const [previewMode, setPreviewMode] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -83,7 +83,7 @@ function NotesEditor({ note, onSave }: NotesEditorProps) {
   }
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 gap-2">
+    <div className="flex flex-col h-full min-h-0 gap-2 p-4">
       {/* Toolbar */}
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center gap-1">
@@ -156,13 +156,17 @@ function NotesEditor({ note, onSave }: NotesEditorProps) {
 
 // ── Notes Page ────────────────────────────────────────────────────────────────
 
+type CategoryFilter = 'all' | 'meeting' | 'action'
+
 export default function Notes() {
   const { notes, templates, generationProgress, fetchForSession, generate, update, fetchTemplates } =
     useNotesStore()
   const { sessions, fetchSessions } = useSessionStore()
 
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null)
   const [selectedSessionId, setSelectedSessionId] = useState<string>('')
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all')
   const [generating, setGenerating] = useState(false)
 
   // Fetch data on mount
@@ -181,38 +185,100 @@ export default function Notes() {
   // Sort sessions newest first for the dropdown
   const sortedSessions = [...sessions].sort((a, b) => b.startedAt - a.startedAt)
 
-  const activeNote: Note | undefined = notes.find((n) => n.session_id === selectedSessionId)
+  // All notes sorted newest-first
+  const sortedNotes = [...notes].sort((a, b) => b.created_at - a.created_at)
+
+  // Category filter (session_id lookup for 'meeting' vs standalone for 'action')
+  const filteredNotes = sortedNotes.filter((note) => {
+    if (categoryFilter === 'meeting') return !!note.session_id
+    if (categoryFilter === 'action') return !note.session_id
+    return true
+  })
+
+  const groupedNotes = groupByDate(filteredNotes)
+
+  const selectedNote = notes.find((n) => n.id === selectedNoteId) ?? null
+
+  // Auto-select first note when list loads/changes
+  useEffect(() => {
+    if (!selectedNoteId && filteredNotes.length > 0) {
+      setSelectedNoteId(filteredNotes[0].id)
+    }
+  }, [filteredNotes.length, selectedNoteId])
 
   async function handleGenerate() {
     if (!selectedSessionId) return
     setGenerating(true)
     const templateId = selectedTemplateId && selectedTemplateId !== '__default__' ? selectedTemplateId : undefined
-    await generate(selectedSessionId, templateId)
+    const note = await generate(selectedSessionId, templateId)
+    if (note) setSelectedNoteId(note.id)
     setGenerating(false)
   }
 
   const isGenerating = generating || generationProgress !== null
 
   return (
-    <div className="flex flex-col h-full p-6 gap-5 min-h-0">
-      {/* Page header */}
-      <div className="flex items-center justify-between shrink-0">
-        <h1 className="font-display text-2xl font-bold text-foreground tracking-tight">Notes</h1>
-        {activeNote && (
-          <Badge variant="accent">
-            <FileText className="w-3 h-3" />
-            {format(new Date(activeNote.created_at), 'MMM d, yyyy')}
-          </Badge>
-        )}
-      </div>
+    <div className="flex h-full min-h-0 gap-0">
+      {/* Left: Notes List */}
+      <div className="w-72 shrink-0 flex flex-col border-r border-border min-h-0">
+        {/* Header */}
+        <div className="px-4 pt-5 pb-3 shrink-0">
+          <h1 className="font-display text-lg font-bold text-foreground tracking-tight mb-3">Notes</h1>
 
-      {/* Controls row */}
-      <div className="flex items-center gap-3 shrink-0">
-        {/* Session selector */}
-        <div className="flex-1 min-w-0 max-w-xs">
+          {/* Category filter tabs */}
+          <Tabs value={categoryFilter} onValueChange={(v) => setCategoryFilter(v as CategoryFilter)}>
+            <TabsList className="w-full">
+              <TabsTrigger value="all" className="flex-1 text-[11px]">All</TabsTrigger>
+              <TabsTrigger value="meeting" className="flex-1 text-[11px]">Meetings</TabsTrigger>
+              <TabsTrigger value="action" className="flex-1 text-[11px]">Actions</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
+
+        {/* Notes grouped by date */}
+        <ScrollArea className="flex-1 min-h-0">
+          <div className="pb-4">
+            {filteredNotes.length === 0 ? (
+              <p className="text-center text-[12px] text-muted-foreground py-8 px-4">
+                No notes yet
+              </p>
+            ) : (
+              groupedNotes.map(([dateLabel, dateNotes]) => (
+                <div key={dateLabel}>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-4 py-2 sticky top-0 bg-background/95 backdrop-blur-sm">
+                    {dateLabel}
+                  </div>
+                  {dateNotes.map((note) => (
+                    <button
+                      key={note.id}
+                      type="button"
+                      onClick={() => setSelectedNoteId(note.id)}
+                      className={cn(
+                        'w-full text-left px-4 py-2 transition-colors duration-micro',
+                        'hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset',
+                        selectedNoteId === note.id ? 'bg-muted' : '',
+                      )}
+                    >
+                      <div className="font-medium text-[13px] text-foreground truncate">
+                        {sessions.find((s) => s.id === note.session_id)?.title ?? 'Untitled'}
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {format(new Date(note.created_at), 'HH:mm')}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ))
+            )}
+          </div>
+        </ScrollArea>
+
+        {/* Generate controls at bottom of left panel */}
+        <div className="px-4 py-3 border-t border-border/50 shrink-0 flex flex-col gap-2">
+          {/* Session selector */}
           <Select value={selectedSessionId} onValueChange={setSelectedSessionId}>
-            <SelectTrigger>
-              <SelectValue placeholder="Select a session…" />
+            <SelectTrigger className="h-8 text-[12px]">
+              <SelectValue placeholder="Select session…" />
             </SelectTrigger>
             <SelectContent>
               {sortedSessions.length === 0 ? (
@@ -228,12 +294,10 @@ export default function Notes() {
               )}
             </SelectContent>
           </Select>
-        </div>
 
-        {/* Template selector */}
-        <div className="w-48">
+          {/* Template selector */}
           <Select value={selectedTemplateId} onValueChange={setSelectedTemplateId}>
-            <SelectTrigger>
+            <SelectTrigger className="h-8 text-[12px]">
               <SelectValue placeholder="Default template" />
             </SelectTrigger>
             <SelectContent>
@@ -245,34 +309,54 @@ export default function Notes() {
               ))}
             </SelectContent>
           </Select>
-        </div>
 
-        {/* Generate button */}
-        <Button
-          variant="primary"
-          onClick={handleGenerate}
-          disabled={!selectedSessionId || isGenerating}
-        >
-          <Sparkles className="w-3.5 h-3.5" />
-          {isGenerating ? 'Generating…' : 'Generate Notes'}
-        </Button>
+          {/* Generation progress */}
+          {generationProgress !== null && (
+            <GenerationProgress progress={generationProgress} />
+          )}
+
+          {/* Generate button */}
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={handleGenerate}
+            disabled={!selectedSessionId || isGenerating}
+            className="w-full"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            {isGenerating ? 'Generating…' : 'Generate Notes'}
+          </Button>
+        </div>
       </div>
 
-      {/* Generation progress */}
-      {generationProgress !== null && (
-        <div className="shrink-0">
-          <GenerationProgress progress={generationProgress} />
-        </div>
-      )}
-
-      {/* Content area */}
-      {!selectedSessionId ? (
-        <EmptyState hasSession={false} />
-      ) : !activeNote ? (
-        <EmptyState hasSession={true} />
-      ) : (
-        <NotesEditor note={activeNote} onSave={update} />
-      )}
+      {/* Right: Note Editor */}
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+        {selectedNote ? (
+          <>
+            {/* Note header */}
+            <div className="px-5 pt-4 pb-2 shrink-0 border-b border-border/50 flex items-center justify-between">
+              <div>
+                <h2 className="font-display text-base font-semibold text-foreground">
+                  {sessions.find((s) => s.id === selectedNote.session_id)?.title ?? 'Untitled'}
+                </h2>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <Badge variant="accent">
+                    <FileText className="w-3 h-3" />
+                    {format(new Date(selectedNote.created_at), 'MMM d, yyyy')}
+                  </Badge>
+                </div>
+              </div>
+            </div>
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <NoteEditor note={selectedNote} onSave={update} />
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
+            Select a note to view
+          </div>
+        )}
+      </div>
     </div>
   )
 }
