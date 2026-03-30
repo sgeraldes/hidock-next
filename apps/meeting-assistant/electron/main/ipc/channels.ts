@@ -79,6 +79,7 @@ export const CHANNELS = {
     removeSource: "kb:removeSource",
     search: "kb:search",
     reindex: "kb:reindex",
+    listSources: "kb:listSources",
     // Push events
     onIndexProgress: "kb:indexProgress",
     onIndexComplete: "kb:indexComplete",

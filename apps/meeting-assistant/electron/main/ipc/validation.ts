@@ -107,6 +107,8 @@ export const KnowledgeSearchInput = z.object({
 
 export const KnowledgeReindexInput = z.void();
 
+export const KnowledgeListSourcesInput = z.void();
+
 // ── Settings ─────────────────────────────────────────────────────────────────
 
 export const SettingsGetInput = z.object({

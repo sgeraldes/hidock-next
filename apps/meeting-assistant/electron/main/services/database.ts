@@ -97,6 +97,26 @@ export async function initializeDatabase(): Promise<void> {
       console.log(
         `[Database] Schema at v${currentVersion}, target v${SCHEMA_VERSION}`,
       );
+
+      // Migration v2: add kb_sources table
+      if (currentVersion < 2) {
+        console.log("[Database] Migration v2: adding kb_sources table");
+        try {
+          database.run(`CREATE TABLE IF NOT EXISTS kb_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            chunk_count INTEGER NOT NULL DEFAULT 0,
+            added_at INTEGER NOT NULL,
+            indexed_at INTEGER
+          )`);
+          console.log("[Database] Migration v2 complete");
+        } catch (e) {
+          console.warn("[Database] Migration v2 warning:", e);
+        }
+      }
+
+      database.run("UPDATE schema_version SET version = ?", [SCHEMA_VERSION]);
     }
 
     console.log("[Database] Phase 4: Seeding default note templates...");

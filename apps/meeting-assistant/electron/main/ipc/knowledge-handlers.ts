@@ -5,7 +5,14 @@ import {
   KnowledgeRemoveSourceInput,
   KnowledgeSearchInput,
   KnowledgeReindexInput,
+  KnowledgeListSourcesInput,
 } from "./validation";
+import {
+  addKbSource,
+  getAllKbSources,
+  removeKbSource,
+} from "../services/database-queries";
+import { saveDatabase } from "../services/database";
 
 // ── Service interface ─────────────────────────────────────────────────────────
 
@@ -32,6 +39,8 @@ export function registerKnowledgeHandlers(): void {
     handler: async (input) => {
       if (!_service) return null;
       await _service.addSource(input.path);
+      addKbSource(input.path);
+      saveDatabase();
       return null;
     },
   });
@@ -42,7 +51,17 @@ export function registerKnowledgeHandlers(): void {
     handler: async (input) => {
       if (!_service) return null;
       await _service.removeSource(input.sourcePath);
+      removeKbSource(input.sourcePath);
+      saveDatabase();
       return null;
+    },
+  });
+
+  createHandler({
+    channel: CHANNELS.knowledge.listSources,
+    schema: KnowledgeListSourcesInput,
+    handler: async () => {
+      return getAllKbSources();
     },
   });
 

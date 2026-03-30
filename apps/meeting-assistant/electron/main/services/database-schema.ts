@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (
@@ -80,6 +80,15 @@ CREATE TABLE IF NOT EXISTS note_templates (
     is_default INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS kb_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    added_at INTEGER NOT NULL,
+    indexed_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
@@ -97,6 +106,8 @@ CREATE INDEX IF NOT EXISTS idx_notes_session ON notes(session_id);
 CREATE INDEX IF NOT EXISTS idx_notes_template ON notes(template_id);
 CREATE INDEX IF NOT EXISTS idx_meetings_time ON meetings(start_time);
 CREATE INDEX IF NOT EXISTS idx_settings_category ON settings(category);
+CREATE INDEX IF NOT EXISTS idx_kb_sources_path ON kb_sources(path);
+CREATE INDEX IF NOT EXISTS idx_kb_sources_status ON kb_sources(status);
 `;
 
 export const DEFAULT_NOTE_TEMPLATES = [
