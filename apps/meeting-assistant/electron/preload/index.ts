@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.invoke("session:delete", { sessionId }),
     linkMeeting: (sessionId: string, meetingId: string) =>
       ipcRenderer.invoke("session:linkMeeting", { sessionId, meetingId }),
+    stats: () => ipcRenderer.invoke("session:stats"),
     onCreated: (callback: (data: unknown) => void): Unsubscribe => {
       const handler = (_: unknown, data: unknown) => callback(data);
       ipcRenderer.on("session:created", handler);
@@ -174,5 +175,22 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.on("kb:indexComplete", handler);
       return () => ipcRenderer.removeListener("kb:indexComplete", handler);
     },
+  },
+
+  onNavigate: (callback: (path: string) => void): Unsubscribe => {
+    const handler = (_: unknown, path: string) => callback(path);
+    ipcRenderer.on("navigate", handler);
+    return () => ipcRenderer.removeListener("navigate", handler);
+  },
+
+  onRecordingState: (
+    callback: (data: { isRecording: boolean; sessionId: string | null }) => void,
+  ): Unsubscribe => {
+    const handler = (
+      _: unknown,
+      data: { isRecording: boolean; sessionId: string | null },
+    ) => callback(data);
+    ipcRenderer.on("app:recordingState", handler);
+    return () => ipcRenderer.removeListener("app:recordingState", handler);
   },
 });
