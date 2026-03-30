@@ -6,10 +6,7 @@ import { useRecordingTimer } from '../../hooks/use-recording-timer'
 import { useActiveSession } from '../../hooks/use-active-session'
 import { Button } from '../ui/button'
 import { cn } from '../../lib/utils'
-
-type ElectronSessionAPI = {
-  create?: () => Promise<unknown>
-}
+import { getElectronAPI } from '../../lib/electron-api'
 
 export function MiniBarContent() {
   const activeSessionId = useAppStore((s) => s.activeSessionId)
@@ -19,7 +16,7 @@ export function MiniBarContent() {
   const elapsed = useRecordingTimer(isRecording && session ? session.startedAt : null)
 
   const handleStartSession = async () => {
-    const api = (window as unknown as { electronAPI?: { session?: ElectronSessionAPI } }).electronAPI
+    const api = getElectronAPI()
     if (api?.session?.create) {
       await api.session.create()
     } else {
