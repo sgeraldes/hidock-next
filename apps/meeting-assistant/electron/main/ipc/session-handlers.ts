@@ -26,7 +26,7 @@ interface RendererSession {
   title: string;
   startedAt: number;
   endedAt: number | null;
-  status: "recording" | "processing" | "completed";
+  status: "recording" | "processing" | "completed" | "interrupted";
   meetingId: string | null;
   audioPath: string | null;
   transcriptPath: string | null;

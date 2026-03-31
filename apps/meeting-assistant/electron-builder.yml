@@ -41,8 +41,3 @@ linux:
   category: Utility
 appImage:
   artifactName: ${name}-${version}.${ext}
-extraResources:
-  - from: python-asr/
-    to: asr-engine/
-    filter:
-      - '**/*'

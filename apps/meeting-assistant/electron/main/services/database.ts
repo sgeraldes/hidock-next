@@ -116,6 +116,32 @@ export async function initializeDatabase(): Promise<void> {
         }
       }
 
+      // Migration v3: add 'interrupted' to sessions status CHECK constraint
+      if (currentVersion < 3) {
+        console.log("[Database] Migration v3: adding 'interrupted' to sessions status CHECK")
+        try {
+          database.run(`CREATE TABLE IF NOT EXISTS sessions_new (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            started_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            status TEXT NOT NULL DEFAULT 'recording' CHECK(status IN ('recording', 'processing', 'completed', 'interrupted')),
+            meeting_id TEXT,
+            audio_path TEXT,
+            transcript_path TEXT
+          )`)
+          database.run(`INSERT OR IGNORE INTO sessions_new SELECT * FROM sessions`)
+          database.run(`DROP TABLE IF EXISTS sessions`)
+          database.run(`ALTER TABLE sessions_new RENAME TO sessions`)
+          database.run(`CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)`)
+          database.run(`CREATE INDEX IF NOT EXISTS idx_sessions_meeting ON sessions(meeting_id)`)
+          database.run(`CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at)`)
+          console.log("[Database] Migration v3 complete")
+        } catch (e) {
+          console.warn("[Database] Migration v3 warning:", e)
+        }
+      }
+
       database.run("UPDATE schema_version SET version = ?", [SCHEMA_VERSION]);
     }
 

@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (
@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     title TEXT,
     started_at INTEGER NOT NULL,
     ended_at INTEGER,
-    status TEXT NOT NULL DEFAULT 'recording' CHECK(status IN ('recording', 'processing', 'completed')),
+    status TEXT NOT NULL DEFAULT 'recording' CHECK(status IN ('recording', 'processing', 'completed', 'interrupted')),
     meeting_id TEXT,
     audio_path TEXT,
     transcript_path TEXT

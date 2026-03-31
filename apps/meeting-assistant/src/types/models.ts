@@ -6,7 +6,7 @@
 
 // ── Session ───────────────────────────────────────────────────────────────────
 
-export type SessionStatus = "recording" | "processing" | "completed";
+export type SessionStatus = "recording" | "processing" | "completed" | "interrupted";
 
 /**
  * A recording session. The shape returned by the session IPC handlers
