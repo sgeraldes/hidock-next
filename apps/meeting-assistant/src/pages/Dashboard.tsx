@@ -27,14 +27,13 @@ type SessionStats = {
 interface MetricCardProps {
   label: string
   value: string | number
-  mono?: boolean
 }
 
-function MetricCard({ label, value, mono }: MetricCardProps) {
+function MetricCard({ label, value }: MetricCardProps) {
   return (
     <Card className="flex-1 min-w-0">
       <CardContent className="py-3 flex flex-col items-center gap-0.5">
-        <span className={mono ? 'font-mono text-2xl font-bold text-foreground' : 'font-mono text-2xl font-bold text-foreground'}>
+        <span className="font-mono text-2xl font-bold text-foreground">
           {value}
         </span>
         <span className="text-[11px] font-sans text-muted-foreground uppercase tracking-wider">
@@ -113,7 +112,7 @@ function WelcomeState({ sessions, stats, onStart, isCreating }: WelcomeStateProp
       {sessions.length > 0 && (
         <div className="flex gap-3 w-full max-w-sm mt-2">
           <MetricCard label="Sessions" value={stats?.totalSessions ?? sessions.length} />
-          <MetricCard label="Total time" value={completedSessions.length > 0 ? formatTotalDuration(completedSessions) : '—'} mono />
+          <MetricCard label="Total time" value={completedSessions.length > 0 ? formatTotalDuration(completedSessions) : '—'} />
           {stats && stats.notesCount > 0 && (
             <MetricCard label="Notes" value={stats.notesCount} />
           )}

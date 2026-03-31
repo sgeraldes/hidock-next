@@ -89,7 +89,7 @@ vi.mock('../../services/database', () => ({
 }))
 
 // ── Mock session-orchestrator ─────────────────────────────────────────────
-const mockOrchestratorStartSession = vi.fn(async () => undefined)
+const mockOrchestratorStartSession = vi.fn(async () => 's1')
 const mockOrchestratorStopSession = vi.fn(async () => null)
 let mockOrchestratorInstance: { startSession: typeof mockOrchestratorStartSession; stopSession: typeof mockOrchestratorStopSession } | null = null
 

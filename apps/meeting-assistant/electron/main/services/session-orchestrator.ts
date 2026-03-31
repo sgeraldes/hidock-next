@@ -63,9 +63,7 @@ export class SessionOrchestrator {
       chunkSize: settingsStore.get('kb.chunkSize'),
       chunkOverlap: settingsStore.get('kb.chunkOverlap'),
     })
-    if (embedFn) {
-      this.knowledgeBase.setEmbedFunction(embedFn)
-    }
+    this.knowledgeBase.setEmbedFunction(embedFn)
 
     this.suggestionEngine = new SuggestionEngine({
       triggerIntervalMs: settingsStore.get('suggestions.triggerIntervalSeconds') * 1000,
@@ -119,7 +117,7 @@ export class SessionOrchestrator {
     console.log('[SessionOrchestrator] Initialized')
   }
 
-  async startSession(title?: string): Promise<void> {
+  async startSession(title?: string): Promise<string> {
     if (this.activeSessionId) {
       throw new Error('A session is already active')
     }
@@ -157,6 +155,8 @@ export class SessionOrchestrator {
     broadcastToAllWindows('app:recordingState', { isRecording: true, sessionId: session.id })
 
     saveDatabase()
+
+    return session.id
   }
 
   async stopSession(): Promise<unknown> {
@@ -173,26 +173,15 @@ export class SessionOrchestrator {
     this.suggestionEngine?.stop()
     this.screenCapture?.stopAutoCapture()
 
-    // Update database
+    // Update database — mark completed with end timestamp
     updateSession(sessionId, {
       ended_at: Date.now(),
-      status: 'processing',
+      status: 'completed',
     })
     saveDatabase()
 
     // Update UI
     hideMiniBar()
-    updateTrayState('processing')
-
-    // Broadcast status change
-    broadcastToAllWindows('session:statusChanged', {
-      sessionId,
-      status: 'processing',
-    })
-
-    // Complete session
-    updateSession(sessionId, { status: 'completed' })
-    saveDatabase()
 
     this.activeSessionId = null
     this.activeSessionDir = null
@@ -211,11 +200,9 @@ export class SessionOrchestrator {
     }
 
     if (key.startsWith('ai.embedding')) {
-      const embedFn = this.createEmbedFunction()
-      if (embedFn && this.knowledgeBase) {
-        this.knowledgeBase.setEmbedFunction(embedFn)
+      if (this.knowledgeBase) {
+        this.knowledgeBase.setEmbedFunction(this.createEmbedFunction())
       }
-      // Re-wire KB service
       this.wireKnowledgeBaseService()
     }
   }
@@ -282,7 +269,7 @@ export class SessionOrchestrator {
     }
   }
 
-  private createEmbedFunction(): ((text: string) => Promise<number[]>) | null {
+  private createEmbedFunction(): (text: string) => Promise<number[]> {
     const provider = settingsStore.get('ai.embeddingProvider')
     const model = settingsStore.get('ai.embeddingModel')
 

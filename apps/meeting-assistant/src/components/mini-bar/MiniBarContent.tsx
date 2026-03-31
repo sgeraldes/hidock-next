@@ -15,23 +15,22 @@ export function MiniBarContent() {
 
   const elapsed = useRecordingTimer(isRecording && session ? session.startedAt : null)
 
-  const handleStartSession = async () => {
+  async function handleStartSession() {
     const api = getElectronAPI()
     if (api?.session?.create) {
       await api.session.create()
     } else {
-      // Fallback: use session store directly
-      useSessionStore.getState().createSession()
+      await useSessionStore.getState().createSession()
     }
   }
 
-  const handleScreenshot = () => {
+  function handleScreenshot() {
     if (activeSessionId) {
       useScreenshotStore.getState().capture(activeSessionId)
     }
   }
 
-  const handleEnd = () => {
+  function handleEnd() {
     if (activeSessionId) {
       useSessionStore.getState().endSession(activeSessionId)
     }

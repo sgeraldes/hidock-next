@@ -23,6 +23,8 @@ export const SessionLinkMeetingInput = z.object({
   meetingId: z.string(),
 });
 
+export const SessionStatsInput = z.void();
+
 // ── Transcript ───────────────────────────────────────────────────────────────
 
 export const TranscriptGetSegmentsInput = z.object({

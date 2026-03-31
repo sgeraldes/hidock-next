@@ -106,7 +106,7 @@ export function initKnowledgeStore(): () => void {
     })
   })
 
-  const unsub2 = api.knowledge.onIndexComplete((_data) => {
+  const unsub2 = api.knowledge.onIndexComplete(() => {
     useKnowledgeStore.setState({ indexing: false, indexProgress: null })
   })
 

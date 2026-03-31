@@ -31,7 +31,7 @@ export function TranscriptViewer({ sessionId: _sessionId, sessionStartedAt }: Tr
     if (isNearBottom && filteredSegments.length > 0) {
       virtualizer.scrollToIndex(filteredSegments.length - 1, { align: 'end' })
     }
-  }, [segments.length, isNearBottom, filteredSegments.length])
+  }, [segments.length, isNearBottom, filteredSegments.length, virtualizer])
 
   const handleScroll = useCallback(() => {
     const el = parentRef.current

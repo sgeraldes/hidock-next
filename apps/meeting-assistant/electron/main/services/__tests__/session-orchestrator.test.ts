@@ -382,7 +382,7 @@ describe('SessionOrchestrator', () => {
       vi.clearAllMocks()
     })
 
-    it('updates session in database with ended_at and processing status', async () => {
+    it('updates session in database with ended_at and completed status', async () => {
       const { updateSession } = await import('../database-queries')
 
       await orchestrator.stopSession()
@@ -390,7 +390,7 @@ describe('SessionOrchestrator', () => {
       expect(updateSession).toHaveBeenCalledWith(
         'test-session-id',
         expect.objectContaining({
-          status: 'processing',
+          status: 'completed',
           ended_at: expect.any(Number),
         }),
       )
@@ -410,21 +410,10 @@ describe('SessionOrchestrator', () => {
       expect(hideMiniBar).toHaveBeenCalled()
     })
 
-    it('updates tray state to processing then idle', async () => {
+    it('updates tray state to idle after stop', async () => {
       await orchestrator.stopSession()
 
-      expect(mockUpdateTrayState).toHaveBeenCalledWith('processing')
-      // Eventually returns to idle
       expect(mockUpdateTrayState).toHaveBeenCalledWith('idle')
-    })
-
-    it('broadcasts session:statusChanged', async () => {
-      await orchestrator.stopSession()
-
-      expect(mockBroadcast).toHaveBeenCalledWith(
-        'session:statusChanged',
-        expect.objectContaining({ status: 'processing' }),
-      )
     })
 
     it('returns null if no active session', async () => {

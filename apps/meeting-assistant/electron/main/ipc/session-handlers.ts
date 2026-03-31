@@ -1,4 +1,3 @@
-import { z } from "zod";
 import { createHandler } from "./create-handler";
 import { CHANNELS } from "./channels";
 import {
@@ -8,6 +7,7 @@ import {
   SessionEndInput,
   SessionDeleteInput,
   SessionLinkMeetingInput,
+  SessionStatsInput,
 } from "./validation";
 import { getSessionManager } from "../services/session-manager";
 import { getOrchestrator } from "../services/session-orchestrator";
@@ -63,9 +63,9 @@ export function registerSessionHandlers(): void {
     handler: async () => {
       const orchestrator = getOrchestrator();
       if (orchestrator) {
-        await orchestrator.startSession();
-        const sessions = getAllSessions();
-        return sessions[0] ? mapDbSession(sessions[0]) : null;
+        const sessionId = await orchestrator.startSession();
+        const session = getSession(sessionId);
+        return session ? mapDbSession(session) : null;
       }
       return getSessionManager().startSession();
     },
@@ -114,7 +114,7 @@ export function registerSessionHandlers(): void {
 
   createHandler({
     channel: CHANNELS.session.stats,
-    schema: z.void(),
+    schema: SessionStatsInput,
     handler: async () => {
       const sessions = getAllSessions();
       const totalSessions = sessions.length;
