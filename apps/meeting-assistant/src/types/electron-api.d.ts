@@ -109,6 +109,12 @@ export interface ElectronAPI {
     onIndexComplete: (callback: (data: KnowledgeIndexComplete) => void) => Unsubscribe;
   };
 
+  audio: {
+    sendChunk: (data: Uint8Array, timestamp: number, index: number) => Promise<{ ok: boolean; reason?: string }>;
+    onStartCapture: (cb: (data: { sessionId: string }) => void) => Unsubscribe;
+    onStopCapture: (cb: () => void) => Unsubscribe;
+  };
+
   dialog: {
     openFile: (opts?: {
       title?: string;

@@ -19,6 +19,7 @@ import {
   initScreenshotStore,
 } from './stores'
 import { useMainNavigation } from './hooks'
+import { useAudioCapture } from './hooks/use-audio-capture'
 
 const PAGE_NAMES: Record<string, string> = {
   '/': 'Dashboard',
@@ -64,6 +65,9 @@ function ShellLayout() {
 }
 
 export default function App() {
+  // Mount audio capture hook at root so it is always active regardless of route
+  useAudioCapture()
+
   return (
     <Routes>
       <Route element={<ShellLayout />}>

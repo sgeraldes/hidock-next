@@ -129,3 +129,14 @@ export const SettingsGetCategoryInput = z.object({
 });
 
 export const SettingsTestConnectionInput = z.void();
+
+// ── Audio ─────────────────────────────────────────────────────────────────────
+
+export const AudioChunkInput = z.object({
+  data: z.any().refine(
+    (v) => ArrayBuffer.isView(v) || Buffer.isBuffer(v),
+    { message: 'Expected Uint8Array or Buffer' },
+  ),
+  timestamp: z.number(),
+  index: z.number().int().nonnegative(),
+});

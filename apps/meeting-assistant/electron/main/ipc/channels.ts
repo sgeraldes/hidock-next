@@ -84,4 +84,12 @@ export const CHANNELS = {
     onIndexProgress: "kb:indexProgress",
     onIndexComplete: "kb:indexComplete",
   },
+
+  audio: {
+    // Invoke channels
+    chunk: "audio:chunk",
+    // Push events (main -> renderer)
+    onStartCapture: "audio:startCapture",
+    onStopCapture: "audio:stopCapture",
+  },
 } as const;

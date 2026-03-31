@@ -178,6 +178,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
   },
 
+  audio: {
+    sendChunk: (data: Uint8Array, timestamp: number, index: number) =>
+      ipcRenderer.invoke("audio:chunk", { data, timestamp, index }),
+    onStartCapture: (cb: (data: { sessionId: string }) => void): Unsubscribe => {
+      const h = (_: unknown, d: { sessionId: string }) => cb(d);
+      ipcRenderer.on("audio:startCapture", h);
+      return () => ipcRenderer.removeListener("audio:startCapture", h);
+    },
+    onStopCapture: (cb: () => void): Unsubscribe => {
+      const h = () => cb();
+      ipcRenderer.on("audio:stopCapture", h);
+      return () => ipcRenderer.removeListener("audio:stopCapture", h);
+    },
+  },
+
   onNavigate: (callback: (path: string) => void): Unsubscribe => {
     const handler = (_: unknown, path: string) => callback(path);
     ipcRenderer.on("navigate", handler);

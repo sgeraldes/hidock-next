@@ -2,6 +2,7 @@ import { app, desktopCapturer } from 'electron'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { createProvider, embed } from '@hidock/ai-providers'
+import { TranscriptionPipeline } from '@hidock/transcription'
 import type { LanguageModel } from 'ai'
 import type { AIProviderKey, EmbeddingProviderConfig } from '@hidock/ai-providers'
 import { settingsStore } from './settings-store'
@@ -20,10 +21,12 @@ import { NotesGenerator } from './notes-generator'
 import { KnowledgeBase } from './knowledge-base'
 import { MeetingDetector } from './meeting-detector'
 import { MicMonitor } from './mic-monitor'
+import { AudioTranscriptionBridge } from './audio-transcription-bridge'
 import { setSuggestionService } from '../ipc/suggestion-handlers'
 import { setScreenshotService } from '../ipc/screenshot-handlers'
 import { setNotesService } from '../ipc/notes-handlers'
 import { setKnowledgeBaseService } from '../ipc/knowledge-handlers'
+import { setAudioBridge } from '../ipc/audio-handlers'
 import { broadcastToAllWindows } from '../ipc/broadcast'
 import { showMiniBar, hideMiniBar } from '../windows'
 import { updateTrayState } from './tray-manager'
@@ -40,6 +43,7 @@ export class SessionOrchestrator {
   private knowledgeBase: KnowledgeBase | null = null
   private meetingDetector: MeetingDetector | null = null
   private micMonitor: MicMonitor | null = null
+  private audioBridge: AudioTranscriptionBridge | null = null
 
   private activeSessionId: string | null = null
   private activeSessionDir: string | null = null
@@ -111,7 +115,10 @@ export class SessionOrchestrator {
       this.notesGenerator.setModel(this.currentModel)
     }
 
-    // 5. Wire IPC handler services
+    // 5. Instantiate audio transcription bridge
+    this.createAudioBridge()
+
+    // 6. Wire IPC handler services
     this.wireIpcHandlers()
 
     console.log('[SessionOrchestrator] Initialized')
@@ -133,6 +140,9 @@ export class SessionOrchestrator {
 
     // Signal renderer to start audio capture
     broadcastToAllWindows('audio:startCapture', { sessionId: session.id })
+
+    // Activate audio transcription bridge
+    this.audioBridge?.start(session.id, this._sessionStartTime)
 
     // Start suggestion engine
     if (this.suggestionEngine && settingsStore.get('suggestions.enabled')) {
@@ -172,6 +182,9 @@ export class SessionOrchestrator {
     // Stop services
     this.suggestionEngine?.stop()
     this.screenCapture?.stopAutoCapture()
+
+    // Flush and stop audio bridge (must come after suggestion/screen, before DB update)
+    await this.audioBridge?.stop()
 
     // Update database — mark completed with end timestamp
     updateSession(sessionId, {
@@ -227,6 +240,7 @@ export class SessionOrchestrator {
     this.screenCapture?.stopAutoCapture()
     this.meetingDetector?.stop()
     this.micMonitor?.stop()
+    this.audioBridge?.dispose()
   }
 
   // ── Private methods ─────────────────────────────────────────────────────
@@ -361,6 +375,30 @@ export class SessionOrchestrator {
         await this.knowledgeBase?.reindex()
       },
     })
+  }
+
+  private createAudioBridge(): void {
+    try {
+      // Build a pipeline with zero engines — acts as a passthrough that throws on transcription,
+      // which is safe since flush() catches errors and broadcasts transcript:error.
+      // Callers may inject real engines if API keys are available.
+      const apiKey = credentialStore.retrieve('ai.apiKey', settingsStore.get('ai.apiKey'))
+        ?? settingsStore.get('ai.apiKey')
+
+      // TranscriptionPipeline requires at least one engine; instantiate with empty array
+      // only if no key is available (pipeline will throw on collect, caught by bridge flush).
+      const engines: import('@hidock/transcription').TranscriptionEngine[] = []
+      const pipeline = engines.length > 0
+        ? new TranscriptionPipeline(engines)
+        : (apiKey ? new TranscriptionPipeline([]) : null)
+
+      this.audioBridge = new AudioTranscriptionBridge(pipeline)
+      setAudioBridge(this.audioBridge)
+      console.log('[SessionOrchestrator] Audio transcription bridge created')
+    } catch (error) {
+      console.error('[SessionOrchestrator] Failed to create audio bridge:', error)
+      this.audioBridge = null
+    }
   }
 
   private recoverInterruptedSessions(): void {
