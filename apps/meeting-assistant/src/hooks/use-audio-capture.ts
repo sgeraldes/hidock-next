@@ -87,6 +87,7 @@ export function useAudioCapture(): UseAudioCaptureReturn {
 
         // Start recording with 5-second timeslices
         recorder.start(5000)
+        console.log('[useAudioCapture] MediaRecorder started, mimeType:', mimeType)
         setIsCapturing(true)
       } catch (err) {
         const domError = err as DOMException

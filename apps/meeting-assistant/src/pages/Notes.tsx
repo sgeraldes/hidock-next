@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { format, isToday, isYesterday } from 'date-fns'
+import { isToday, isYesterday, isValid } from 'date-fns'
 import { FileText, Sparkles, Save, Eye, Code2, RefreshCw } from 'lucide-react'
 import { useNotesStore } from '../stores/notes-store'
 import { useSessionStore } from '../stores/session-store'
@@ -16,14 +16,17 @@ import {
 import { ScrollArea } from '../components/ui/scroll-area'
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { cn } from '../lib/utils'
+import { safeFormat } from '../lib/date-format'
 
 // ── Date grouping ──────────────────────────────────────────────────────────────
 
 function formatDateGroup(timestamp: number): string {
+  if (timestamp == null || isNaN(timestamp)) return '--'
   const date = new Date(timestamp)
+  if (!isValid(date)) return '--'
   if (isToday(date)) return 'Today'
   if (isYesterday(date)) return 'Yesterday'
-  return format(date, 'MMM d, yyyy')
+  return safeFormat(timestamp, 'MMM d, yyyy')
 }
 
 function groupByDate(notes: Note[]): [string, Note[]][] {
@@ -107,7 +110,7 @@ function NoteEditor({ note, onSave }: NoteEditorProps) {
 
         <div className="flex items-center gap-2">
           <span className="font-sans text-[11px] text-muted-foreground">
-            Updated {format(new Date(note.updated_at), 'MMM d, HH:mm')}
+            Updated {safeFormat(note.updated_at, 'MMM d, HH:mm')}
           </span>
           {isDirty && (
             <Button variant="primary" size="sm" onClick={handleSave} disabled={saving}>
@@ -263,7 +266,7 @@ export default function Notes() {
                         {sessions.find((s) => s.id === note.session_id)?.title ?? 'Untitled'}
                       </div>
                       <div className="text-[11px] text-muted-foreground">
-                        {format(new Date(note.created_at), 'HH:mm')}
+                        {safeFormat(note.created_at, 'HH:mm')}
                       </div>
                     </button>
                   ))}
@@ -288,7 +291,7 @@ export default function Notes() {
               ) : (
                 sortedSessions.map((s) => (
                   <SelectItem key={s.id} value={s.id}>
-                    {s.title} — {format(new Date(s.startedAt), 'MMM d, yyyy')}
+                    {s.title} — {safeFormat(s.startedAt, 'MMM d, yyyy')}
                   </SelectItem>
                 ))
               )}
@@ -342,7 +345,7 @@ export default function Notes() {
                 <div className="flex items-center gap-2 mt-0.5">
                   <Badge variant="accent">
                     <FileText className="w-3 h-3" />
-                    {format(new Date(selectedNote.created_at), 'MMM d, yyyy')}
+                    {safeFormat(selectedNote.created_at, 'MMM d, yyyy')}
                   </Badge>
                 </div>
               </div>

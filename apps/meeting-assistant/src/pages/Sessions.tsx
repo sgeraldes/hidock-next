@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { format } from 'date-fns'
 import { Trash2, Clock, CalendarDays, Search } from 'lucide-react'
+import { safeFormat } from '../lib/date-format'
 import { useSessionStore } from '../stores/session-store'
 import { useNotesStore } from '../stores/notes-store'
 import { useTranscriptStore } from '../stores/transcript-store'
@@ -150,7 +150,7 @@ function SessionDetail({ session, onDelete }: SessionDetailProps) {
           <div className="flex items-center gap-3 mt-1 text-[12px] text-muted-foreground">
             <span className="flex items-center gap-1">
               <CalendarDays className="w-3 h-3" />
-              {format(new Date(session.startedAt), 'MMM d, yyyy · HH:mm')}
+              {safeFormat(session.startedAt, 'MMM d, yyyy · HH:mm')}
             </span>
             <span className="flex items-center gap-1">
               <Clock className="w-3 h-3" />
@@ -328,7 +328,7 @@ export default function Sessions() {
                   </div>
                   <div className="flex items-center justify-between mt-0.5">
                     <span className="text-[11px] text-muted-foreground">
-                      {format(new Date(session.startedAt), 'MMM d, yyyy · HH:mm')}
+                      {safeFormat(session.startedAt, 'MMM d, yyyy · HH:mm')}
                     </span>
                     <span className="font-mono text-[11px] text-muted-foreground">
                       {formatDuration(session.startedAt, session.endedAt)}
@@ -362,7 +362,7 @@ export default function Sessions() {
             <DialogTitle>Delete session?</DialogTitle>
             <DialogDescription>
               {deleteTarget
-                ? `"${deleteTarget.title}" recorded on ${format(new Date(deleteTarget.startedAt), 'MMM d, yyyy')} will be permanently deleted along with its transcript, notes, and screenshots.`
+                ? `"${deleteTarget.title}" recorded on ${safeFormat(deleteTarget.startedAt, 'MMM d, yyyy')} will be permanently deleted along with its transcript, notes, and screenshots.`
                 : 'This session will be permanently deleted.'}
             </DialogDescription>
           </DialogHeader>

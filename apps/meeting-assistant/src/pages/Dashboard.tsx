@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Mic, MicOff, Camera, Square, LayoutDashboard, Clock, ChevronRight } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { safeDateString } from '../lib/date-format'
 import { useAppStore } from '../stores/app-store'
 import { useSessionStore } from '../stores/session-store'
 import { useTranscriptStore } from '../stores/transcript-store'
@@ -68,8 +69,7 @@ interface WelcomeStateProps {
 }
 
 function formatSessionDate(ts: number): string {
-  const d = new Date(ts)
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  return safeDateString(ts, { month: 'short', day: 'numeric' })
 }
 
 function formatSessionDuration(s: Session): string {
@@ -251,17 +251,21 @@ export default function Dashboard() {
 
   const [stats, setStats] = useState<SessionStats | null>(null)
 
+  function refreshStats() {
+    window.electronAPI?.session?.stats?.()
+      .then((s: SessionStats) => { if (s) setStats(s) })
+      .catch(console.error)
+  }
+
   // Fetch sessions on mount
   useEffect(() => {
     fetchSessions()
   }, [fetchSessions])
 
-  // Fetch stats on mount
+  // Fetch stats whenever session count changes
   useEffect(() => {
-    window.electronAPI?.session?.stats?.()
-      .then((s: SessionStats) => { if (s) setStats(s) })
-      .catch(console.error)
-  }, [])
+    refreshStats()
+  }, [sessions.length])
 
   // When there's an active session, load its transcript and suggestions
   useEffect(() => {
@@ -282,6 +286,7 @@ export default function Dashboard() {
     if (session) {
       await endSession(session.id)
       setActiveSession(null)
+      refreshStats()
     }
   }
 

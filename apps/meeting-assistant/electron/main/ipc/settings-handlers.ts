@@ -13,6 +13,7 @@ import * as credentialStore from "../services/credential-store";
 import { SENSITIVE_SETTING_KEYS } from "../services/sensitive-keys";
 import { getSetting, setSetting } from "../services/database-settings";
 import { getOrchestrator } from "../services/session-orchestrator";
+import { broadcastToAllWindows } from "./broadcast";
 
 /**
  * Return the real (decrypted) value of a sensitive setting for use within the
@@ -73,6 +74,8 @@ export function registerSettingsHandlers(): void {
         return null;
       }
       settingsStore.set(key as SettingsKey, value as never);
+      console.log(`[Settings] Updated: ${key} = ${JSON.stringify(value)}`)
+      broadcastToAllWindows('settings:changed', { key, value: SENSITIVE_SETTING_KEYS.has(key) ? '***' : value })
 
       // Cascade settings change to orchestrator services (AI provider, MeetingDetector, etc.)
       const orchestrator = getOrchestrator();

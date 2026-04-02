@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, shell, session } from "electron";
 import { electronApp, optimizer } from "@electron-toolkit/utils";
 import { createMainWindow, destroyAllWindows } from "./windows";
 import { initializeTray, destroyTray, setTrayCallbacks } from "./services/tray-manager";
@@ -36,6 +36,13 @@ app.whenReady().then(async () => {
   app.on("browser-window-created", (_, window) => {
     optimizer.watchWindowShortcuts(window);
   });
+
+  // Grant microphone and display-capture permissions automatically
+  session.defaultSession.setPermissionRequestHandler(
+    (_webContents, permission, callback) => {
+      callback(['media', 'display-capture'].includes(permission))
+    }
+  );
 
   await initializeDatabase();
 
