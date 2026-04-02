@@ -11,6 +11,7 @@ import {
   createSession,
   updateSession,
   getAllSessions,
+  getSession,
   getRecentTranscriptSegments,
   getScreenshotsBySession,
 } from './database-queries'
@@ -28,6 +29,7 @@ import { setNotesService } from '../ipc/notes-handlers'
 import { setKnowledgeBaseService } from '../ipc/knowledge-handlers'
 import { setAudioBridge } from '../ipc/audio-handlers'
 import { broadcastToAllWindows } from '../ipc/broadcast'
+import { mapDbSession } from '../ipc/map-db-session'
 import { showMiniBar, hideMiniBar } from '../windows'
 import { updateTrayState } from './tray-manager'
 
@@ -169,8 +171,8 @@ export class SessionOrchestrator {
     showMiniBar()
     updateTrayState('recording')
 
-    // Broadcast session created
-    broadcastToAllWindows('session:created', session)
+    // Broadcast session created (mapped to camelCase for renderer)
+    broadcastToAllWindows('session:created', mapDbSession(session))
 
     // Broadcast recording state for mini-bar and other UI
     broadcastToAllWindows('app:recordingState', { isRecording: true, sessionId: session.id })
@@ -204,6 +206,12 @@ export class SessionOrchestrator {
     })
     saveDatabase()
 
+    // Broadcast session updated with mapped camelCase data
+    const updatedSession = getSession(sessionId)
+    if (updatedSession) {
+      broadcastToAllWindows('session:updated', mapDbSession(updatedSession))
+    }
+
     // Update UI
     hideMiniBar()
 
@@ -218,6 +226,7 @@ export class SessionOrchestrator {
   }
 
   async onSettingsChanged(key: string): Promise<void> {
+    console.log(`[SessionOrchestrator] Settings changed: ${key}`)
     if (key.startsWith('ai.provider') || key.startsWith('ai.model') || key.startsWith('ai.apiKey')) {
       this.configureAIProvider()
       this.setModelOnServices()
@@ -234,6 +243,10 @@ export class SessionOrchestrator {
       this.meetingDetector?.stop()
       this.createAndStartMeetingDetector()
     }
+  }
+
+  isSessionActive(id: string): boolean {
+    return this.activeSessionId === id
   }
 
   shutdown(): void {
@@ -326,6 +339,7 @@ export class SessionOrchestrator {
       const result = createProvider(config)
       this.currentModel = result.model
       this._provider = result.provider
+      console.log(`[SessionOrchestrator] AI provider configured: ${result.provider}/${model}`)
     } catch (error) {
       console.error('[SessionOrchestrator] Failed to configure AI provider:', error)
       this.currentModel = null

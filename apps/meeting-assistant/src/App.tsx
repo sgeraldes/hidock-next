@@ -9,7 +9,6 @@ import { Sidebar } from './components/shell/Sidebar'
 import { Titlebar } from './components/shell/Titlebar'
 import { KeyboardShortcuts } from './components/shell/KeyboardShortcuts'
 import {
-  initAppStore,
   initSessionStore,
   initTranscriptStore,
   initSuggestionStore,
@@ -20,6 +19,7 @@ import {
 } from './stores'
 import { useMainNavigation } from './hooks'
 import { useAudioCapture } from './hooks/use-audio-capture'
+import { toast } from './hooks/use-toast'
 
 const PAGE_NAMES: Record<string, string> = {
   '/': 'Dashboard',
@@ -38,7 +38,6 @@ function ShellLayout() {
 
   useEffect(() => {
     const cleanups = [
-      initAppStore(),
       initSessionStore(),
       initTranscriptStore(),
       initSuggestionStore(),
@@ -66,7 +65,13 @@ function ShellLayout() {
 
 export default function App() {
   // Mount audio capture hook at root so it is always active regardless of route
-  useAudioCapture()
+  const { error: audioError } = useAudioCapture()
+
+  useEffect(() => {
+    if (audioError) {
+      toast({ title: 'Audio Capture Error', description: audioError, variant: 'destructive' })
+    }
+  }, [audioError])
 
   return (
     <Routes>

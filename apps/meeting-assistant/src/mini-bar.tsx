@@ -5,9 +5,9 @@ import { ToastProvider } from './components/providers/ToastProvider'
 import { MiniBarContent } from './components/mini-bar/MiniBarContent'
 import './globals.css'
 
-import { initSessionStore, initTranscriptStore } from './stores'
+import { initAppStore, initSessionStore, initTranscriptStore } from './stores'
 
-const cleanups = [initSessionStore(), initTranscriptStore()]
+const cleanups = [initAppStore(), initSessionStore(), initTranscriptStore()]
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
