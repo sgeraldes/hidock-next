@@ -193,6 +193,24 @@ contextBridge.exposeInMainWorld("electronAPI", {
     },
   },
 
+  meeting: {
+    onUpcoming: (callback: (data: unknown) => void): Unsubscribe => {
+      const handler = (_: unknown, data: unknown) => callback(data);
+      ipcRenderer.on("meeting:upcoming", handler);
+      return () => ipcRenderer.removeListener("meeting:upcoming", handler);
+    },
+    onMicDetected: (callback: (data: unknown) => void): Unsubscribe => {
+      const handler = (_: unknown, data: unknown) => callback(data);
+      ipcRenderer.on("meeting:micDetected", handler);
+      return () => ipcRenderer.removeListener("meeting:micDetected", handler);
+    },
+    onCorrelation: (callback: (data: unknown) => void): Unsubscribe => {
+      const handler = (_: unknown, data: unknown) => callback(data);
+      ipcRenderer.on("meeting:correlation", handler);
+      return () => ipcRenderer.removeListener("meeting:correlation", handler);
+    },
+  },
+
   onNavigate: (callback: (path: string) => void): Unsubscribe => {
     const handler = (_: unknown, path: string) => callback(path);
     ipcRenderer.on("navigate", handler);

@@ -92,4 +92,11 @@ export const CHANNELS = {
     onStartCapture: "audio:startCapture",
     onStopCapture: "audio:stopCapture",
   },
+
+  meeting: {
+    // Push events (main -> renderer)
+    upcoming: "meeting:upcoming",
+    micDetected: "meeting:micDetected",
+    correlation: "meeting:correlation",
+  },
 } as const;

@@ -115,10 +115,21 @@ export class SessionOrchestrator {
       this.notesGenerator.setModel(this.currentModel)
     }
 
-    // 5. Instantiate audio transcription bridge
+    // 5. Instantiate MeetingDetector and MicMonitor
+    this.createAndStartMeetingDetector()
+
+    this.micMonitor = new MicMonitor(3000)
+    this.micMonitor.on((status) => {
+      if (status === 'active' && settingsStore.get('mic.enabled')) {
+        this.meetingDetector?.onMicActivity()
+      }
+    })
+    this.micMonitor.start()
+
+    // 6. Instantiate audio transcription bridge
     this.createAudioBridge()
 
-    // 6. Wire IPC handler services
+    // 7. Wire IPC handler services
     this.wireIpcHandlers()
 
     console.log('[SessionOrchestrator] Initialized')
@@ -218,6 +229,11 @@ export class SessionOrchestrator {
       }
       this.wireKnowledgeBaseService()
     }
+
+    if (key.startsWith('calendar.') || key.startsWith('mic.') || key.startsWith('correlation.')) {
+      this.meetingDetector?.stop()
+      this.createAndStartMeetingDetector()
+    }
   }
 
   shutdown(): void {
@@ -244,6 +260,61 @@ export class SessionOrchestrator {
   }
 
   // ── Private methods ─────────────────────────────────────────────────────
+
+  private createAndStartMeetingDetector(): void {
+    this.meetingDetector = new MeetingDetector({
+      calendarSource: settingsStore.get('calendar.source'),
+      calendarPollMinutes: settingsStore.get('calendar.pollIntervalMinutes'),
+      calendarEnabled: settingsStore.get('calendar.enabled'),
+      micEnabled: settingsStore.get('mic.enabled'),
+      micDefaultAction: settingsStore.get('mic.defaultAction'),
+      autoRecordWithCalendar: settingsStore.get('mic.autoRecordWithCalendar'),
+      autoRecordOnMeeting: settingsStore.get('calendar.autoRecordOnMeeting'),
+      correlationAutoLinkMinutes: settingsStore.get('correlation.autoLinkMinutes'),
+      correlationSuggestLinkMinutes: settingsStore.get('correlation.suggestLinkMinutes'),
+      correlationSuggestEnabled: settingsStore.get('correlation.suggestEnabled'),
+      preNotificationSeconds: settingsStore.get('calendar.preNotificationSeconds'),
+    })
+
+    this.meetingDetector.on(async (event) => {
+      switch (event.type) {
+        case 'meeting-started': {
+          const meeting = event.event
+          if (settingsStore.get('calendar.autoRecordOnMeeting')) {
+            await this.autoStartSession(meeting?.title)
+          }
+          break
+        }
+        case 'meeting-upcoming':
+          broadcastToAllWindows('meeting:upcoming', event)
+          break
+        case 'mic-detected':
+          if (event.action === 'auto-record') {
+            await this.autoStartSession()
+          } else if (event.action === 'ask') {
+            broadcastToAllWindows('meeting:micDetected', event)
+          }
+          break
+        case 'correlation':
+          broadcastToAllWindows('meeting:correlation', event)
+          break
+        case 'error':
+          console.error('[SessionOrchestrator] MeetingDetector error:', event.error)
+          break
+      }
+    })
+
+    this.meetingDetector.start()
+  }
+
+  private async autoStartSession(title?: string): Promise<void> {
+    if (this.activeSessionId) return
+    try {
+      await this.startSession(title)
+    } catch (error) {
+      console.error('[SessionOrchestrator] Auto-start failed:', error)
+    }
+  }
 
   private configureAIProvider(): void {
     const provider = settingsStore.get('ai.provider')

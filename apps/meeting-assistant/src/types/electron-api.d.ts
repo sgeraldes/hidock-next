@@ -115,6 +115,12 @@ export interface ElectronAPI {
     onStopCapture: (cb: () => void) => Unsubscribe;
   };
 
+  meeting: {
+    onUpcoming: (callback: (data: unknown) => void) => Unsubscribe;
+    onMicDetected: (callback: (data: unknown) => void) => Unsubscribe;
+    onCorrelation: (callback: (data: unknown) => void) => Unsubscribe;
+  };
+
   dialog: {
     openFile: (opts?: {
       title?: string;
