@@ -35,7 +35,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       const api = getElectronAPI()
       if (!api) return null
       const session = await api.session.create()
-      set((state) => ({ sessions: [session, ...state.sessions] }))
+      // Do NOT optimistically add here — the session:created broadcast listener
+      // (initSessionStore) is the single source of truth to avoid duplicates.
       return session
     } catch (error) {
       console.error('[SessionStore] Failed to create session:', error)
