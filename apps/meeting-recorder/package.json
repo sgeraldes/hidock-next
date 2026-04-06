@@ -79,15 +79,15 @@
     "@vitejs/plugin-react": "^4.3.3",
     "@vitest/ui": "^4.0.16",
     "autoprefixer": "^10.4.20",
-    "electron": "^39.2.7",
-    "electron-builder": "^25.1.8",
+    "electron": "^39.8.6",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "eslint": "^9.39.2",
     "jsdom": "^27.4.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.3",
-    "vite": "^7.3.1",
+    "vite": "^7.3.2",
     "vitest": "^4.0.16"
   }
 }
