@@ -1,4 +1,5 @@
 import { app, BrowserWindow, shell, session } from "electron";
+app.commandLine.appendSwitch('remote-debugging-port', '9444');
 import { electronApp, optimizer } from "@electron-toolkit/utils";
 import { createMainWindow, destroyAllWindows } from "./windows";
 import { initializeTray, destroyTray, setTrayCallbacks } from "./services/tray-manager";
