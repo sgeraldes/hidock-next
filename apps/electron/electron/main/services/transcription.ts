@@ -1,25 +1,86 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { readFile, existsSync } from 'fs'
 import { promisify } from 'util'
-import { execFile } from 'child_process'
+import { spawn } from 'child_process'
 import { extname, join, isAbsolute } from 'path'
 
 const readFileAsync = promisify(readFile)
-function execFileBuffered(
+
+/**
+ * Spawn a long-running CLI and stream its stderr to the parent's console as
+ * lines arrive (so the user sees progress live) while collecting stdout into
+ * a buffer for the caller. Used for the VibeVoice/local-asr backends, where
+ * the Python CLI logs model load, chunk progress, and generation status to
+ * stderr over minutes — execFileBuffered would hide all of that until exit.
+ *
+ * The optional onStderrLine callback lets callers translate recognised log
+ * lines into progress events (e.g. "Chunk 2/3" -> setProgress).
+ */
+function spawnStreaming(
   command: string,
   args: string[],
-  options: Parameters<typeof execFile>[2]
+  options: {
+    cwd?: string
+    env?: NodeJS.ProcessEnv
+    maxStdoutBytes?: number
+    logPrefix?: string
+    onStderrLine?: (line: string) => void
+  } = {}
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFile(command, args, options, (error, stdout, stderr) => {
-      if (error) {
-        reject(error)
-        return
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+
+    const prefix = options.logPrefix ?? `[${command}]`
+    const cap = options.maxStdoutBytes ?? 50 * 1024 * 1024
+
+    const stdoutChunks: Buffer[] = []
+    let stdoutBytes = 0
+    let stderrBuf = ''
+    const stderrLines: string[] = []
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length
+      if (stdoutBytes <= cap) stdoutChunks.push(chunk)
+    })
+
+    child.stderr.setEncoding('utf-8')
+    child.stderr.on('data', (chunk: string) => {
+      stderrBuf += chunk
+      // Emit every complete line live so the user sees progress.
+      let nl: number
+      while ((nl = stderrBuf.indexOf('\n')) !== -1) {
+        const line = stderrBuf.slice(0, nl).replace(/\r$/, '')
+        stderrBuf = stderrBuf.slice(nl + 1)
+        if (line) {
+          console.log(`${prefix} ${line}`)
+          stderrLines.push(line)
+          try { options.onStderrLine?.(line) } catch { /* ignore callback errors */ }
+        }
       }
-      resolve({
-        stdout: typeof stdout === 'string' ? stdout : stdout.toString('utf-8'),
-        stderr: typeof stderr === 'string' ? stderr : stderr.toString('utf-8')
-      })
+    })
+
+    child.on('error', (err) => reject(new Error(`Failed to spawn ${command}: ${err.message}`)))
+
+    child.on('close', (code) => {
+      // Flush any trailing stderr without newline.
+      if (stderrBuf) {
+        console.log(`${prefix} ${stderrBuf}`)
+        stderrLines.push(stderrBuf)
+        stderrBuf = ''
+      }
+      const stdout = Buffer.concat(stdoutChunks).toString('utf-8')
+      const stderr = stderrLines.join('\n')
+      if (code !== 0) {
+        const tail = stderr.split('\n').slice(-30).join('\n')
+        reject(new Error(`${command} exited with code ${code}\n${tail}`))
+      } else {
+        resolve({ stdout, stderr })
+      }
     })
   })
 }
@@ -545,23 +606,25 @@ async function transcribeWithLocalAsr(
     args.push('--vocabulary', vocabularyPath)
   }
 
-  progressCallback?.('local_asr_starting', 10)
-  const { stdout, stderr } = await execFileBuffered(pythonCommand(), args, {
+  progressCallback?.('local_asr_starting', 5)
+  const { stdout } = await spawnStreaming(pythonCommand(), args, {
     cwd: asrPath,
-    windowsHide: true,
-    maxBuffer: 50 * 1024 * 1024,
     env: {
       ...process.env,
       HF_TOKEN: config.transcription.localAsrHfToken || process.env.HF_TOKEN || '',
       ASR_VOCABULARY_FILE: vocabularyPath || process.env.ASR_VOCABULARY_FILE || ''
+    },
+    logPrefix: '[Local ASR]',
+    onStderrLine: (line) => {
+      if (line.includes('Model loaded')) progressCallback?.('local_asr_model_loaded', 20)
+      else if (line.includes('Diarization:')) progressCallback?.('local_asr_diarized', 40)
+      else if (line.match(/Transcribed (\d+)\/(\d+)/)) {
+        const m = line.match(/Transcribed (\d+)\/(\d+)/)!
+        const pct = Math.min(85, Math.round(40 + (parseInt(m[1], 10) / parseInt(m[2], 10)) * 45))
+        progressCallback?.('local_asr_segments', pct)
+      } else if (line.includes('Pipeline complete')) progressCallback?.('local_asr_done', 95)
     }
   })
-
-  if (stderr) {
-    console.log(`[Local ASR] ${stderr.trim()}`)
-  }
-
-  progressCallback?.('local_asr_parsing', 45)
 
   let parsed: {
     text?: string
@@ -643,11 +706,9 @@ async function transcribeWithVibeVoice(
     args.push('--vocabulary', vocabularyPath)
   }
 
-  progressCallback?.('vibevoice_starting', 10)
-  const { stdout, stderr } = await execFileBuffered(pythonCommand(), args, {
+  progressCallback?.('vibevoice_starting', 5)
+  const { stdout } = await spawnStreaming(pythonCommand(), args, {
     cwd: asrPath,
-    windowsHide: true,
-    maxBuffer: 50 * 1024 * 1024,
     env: {
       ...process.env,
       ASR_BACKEND: 'vibevoice',
@@ -656,14 +717,30 @@ async function transcribeWithVibeVoice(
       VIBEVOICE_MODEL_ID: config.transcription.vibevoiceModelId || process.env.VIBEVOICE_MODEL_ID || 'microsoft/VibeVoice-ASR',
       ASR_DEVICE: config.transcription.vibevoiceDevice || process.env.ASR_DEVICE || 'cuda:0',
       VIBEVOICE_ATTN: config.transcription.vibevoiceAttn || process.env.VIBEVOICE_ATTN || 'flash_attention_2'
+    },
+    logPrefix: '[VibeVoice]',
+    onStderrLine: (line) => {
+      // Map known log lines from vibevoice_model.py to UI progress events.
+      if (line.includes('VibeVoice loaded')) {
+        progressCallback?.('vibevoice_model_loaded', 15)
+      } else if (line.includes('Long-form:')) {
+        progressCallback?.('vibevoice_chunking', 18)
+      } else {
+        const chunkMatch = line.match(/Chunk (\d+)\/(\d+):/)
+        if (chunkMatch) {
+          const i = parseInt(chunkMatch[1], 10)
+          const n = parseInt(chunkMatch[2], 10)
+          // 20% .. 80% allocated to chunks
+          const pct = Math.min(80, Math.round(20 + ((i - 1) / n) * 60))
+          progressCallback?.(`vibevoice_chunk_${i}_of_${n}`, pct)
+        } else if (line.includes('VibeVoice generated')) {
+          progressCallback?.('vibevoice_parsing', 85)
+        } else if (line.includes('VibeVoice complete')) {
+          progressCallback?.('vibevoice_done', 95)
+        }
+      }
     }
   })
-
-  if (stderr) {
-    console.log(`[VibeVoice] ${stderr.trim()}`)
-  }
-
-  progressCallback?.('vibevoice_parsing', 45)
 
   let parsed: {
     text?: string
