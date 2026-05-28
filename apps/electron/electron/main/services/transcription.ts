@@ -196,7 +196,12 @@ async function processQueue(): Promise<void> {
       if (retryCount < MAX_RETRY_ATTEMPTS) {
         // B-TXN-001: Calculate backoff delay: 30s * 2^retryCount, capped at 120s
         const backoffMs = Math.min(30000 * Math.pow(2, retryCount), 120000)
-        const completedAt = item.completed_at ? new Date(item.completed_at).getTime() : 0
+        // SQLite CURRENT_TIMESTAMP writes UTC without a `Z` suffix; appending Z
+        // forces JS to parse it as UTC instead of local time (which previously
+        // produced negative timeSinceFailure and multi-hour fake backoffs).
+        const completedAt = item.completed_at
+          ? new Date(item.completed_at.endsWith('Z') ? item.completed_at : item.completed_at.replace(' ', 'T') + 'Z').getTime()
+          : 0
         const timeSinceFailure = now - completedAt
 
         if (timeSinceFailure < backoffMs) {
