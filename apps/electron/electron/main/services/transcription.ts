@@ -611,6 +611,7 @@ async function transcribeWithLocalAsr(
     cwd: asrPath,
     env: {
       ...process.env,
+      PYTHONUNBUFFERED: '1',
       HF_TOKEN: config.transcription.localAsrHfToken || process.env.HF_TOKEN || '',
       ASR_VOCABULARY_FILE: vocabularyPath || process.env.ASR_VOCABULARY_FILE || ''
     },
@@ -711,6 +712,10 @@ async function transcribeWithVibeVoice(
     cwd: asrPath,
     env: {
       ...process.env,
+      // Force the child Python (and the Python subprocess mcp_runner.py
+      // spawns under .venv) to flush stdout/stderr immediately so the
+      // per-token streamer heartbeat actually reaches us.
+      PYTHONUNBUFFERED: '1',
       ASR_BACKEND: 'vibevoice',
       HF_TOKEN: config.transcription.localAsrHfToken || process.env.HF_TOKEN || '',
       ASR_VOCABULARY_FILE: vocabularyPath || process.env.ASR_VOCABULARY_FILE || '',
