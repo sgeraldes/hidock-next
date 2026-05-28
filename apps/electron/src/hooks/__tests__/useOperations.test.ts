@@ -63,7 +63,7 @@ global.window.electronAPI = {
       data: {
         transcription: {
           provider: 'gemini',
-          geminiApiKey: 'test-api-key',
+          geminiApiKey: 'test-api-key', // pragma: allowlist secret
           geminiModel: 'gemini-3-pro-preview',
           localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
           localAsrHfToken: '',
@@ -87,7 +87,7 @@ describe('useOperations', () => {
       data: {
         transcription: {
           provider: 'gemini',
-          geminiApiKey: 'test-api-key',
+          geminiApiKey: 'test-api-key', // pragma: allowlist secret
           geminiModel: 'gemini-3-pro-preview',
           localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
           localAsrHfToken: '',
