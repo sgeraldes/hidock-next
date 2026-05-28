@@ -22,7 +22,7 @@ import {
   DeleteContactRequestSchema
 } from '../validation/contacts'
 import type { Person } from '@/types/knowledge'
-import type { Meeting } from '@/types'
+import type { Meeting } from '../services/database'
 
 export function registerContactsHandlers(): void {
   /**

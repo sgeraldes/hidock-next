@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect } from 'vitest'
 
 /**
  * Tests for B-DEV-008 (per-file stall detection) and B-DEV-009 (memory cleanup)

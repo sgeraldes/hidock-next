@@ -45,7 +45,7 @@ export function Settings() {
   const [icsUrl, setIcsUrl] = useState('')
   const [syncEnabled, setSyncEnabled] = useState(true)
   const [syncInterval, setSyncInterval] = useState(15)
-  const [transcriptionProvider, setTranscriptionProvider] = useState<'gemini' | 'local-asr'>('gemini')
+  const [transcriptionProvider, setTranscriptionProvider] = useState<'gemini' | 'local-asr' | 'vibevoice'>('gemini')
   const [geminiApiKey, setGeminiApiKey] = useState('')
   const [geminiModel, setGeminiModel] = useState('gemini-3-pro-preview')
   const [localAsrPath, setLocalAsrPath] = useState('G:\\Code\\claude-plugins\\plugins\\mcp-asr')
@@ -92,8 +92,11 @@ export function Settings() {
   const validateConfig = useCallback((updates: Partial<AppConfig>): string | null => {
     // Transcription settings validation
     if (updates.transcription) {
-      if (updates.transcription.provider === 'local-asr' && !updates.transcription.localAsrPath?.trim()) {
-        return 'Local ASR path is required'
+      if (
+        (updates.transcription.provider === 'local-asr' || updates.transcription.provider === 'vibevoice') &&
+        !updates.transcription.localAsrPath?.trim()
+      ) {
+        return 'ASR MCP path is required'
       }
       if (
         updates.transcription.provider === 'local-asr' &&
@@ -639,7 +642,23 @@ export function Settings() {
                   >
                     Local ASR
                   </Button>
+                  <Button
+                    variant={transcriptionProvider === 'vibevoice' ? 'default' : 'outline'}
+                    onClick={() => setTranscriptionProvider('vibevoice')}
+                    disabled={saving}
+                    aria-label="Use VibeVoice transcription provider"
+                    aria-pressed={transcriptionProvider === 'vibevoice'}
+                  >
+                    VibeVoice
+                  </Button>
                 </div>
+                {transcriptionProvider === 'vibevoice' && (
+                  <p className="text-xs text-muted-foreground mt-2">
+                    VibeVoice (microsoft/VibeVoice-ASR) runs locally for full-file / re-processing:
+                    joint transcription, speaker diarization and timestamps in one pass. Auto-detects
+                    language. Requires the optional <code>vibevoice</code> install in the ASR MCP project.
+                  </p>
+                )}
               </div>
 
               {transcriptionProvider === 'gemini' ? (

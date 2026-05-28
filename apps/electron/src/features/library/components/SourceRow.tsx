@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Play, X, AlertCircle, Download, Trash2, Wand2, Mic, FileText, RefreshCw } from 'lucide-react'
+import { Play, X, AlertCircle, Download, Trash2, Wand2, Mic, FileText, RefreshCw, AudioLines } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -28,6 +28,7 @@ interface SourceRowProps {
   onDownload?: () => void
   onDelete?: () => void
   onTranscribe?: () => void
+  onReprocessVibeVoice?: () => void
   onAskAssistant?: () => void
   onGenerateOutput?: () => void
   // Download state for device-only recordings
@@ -51,6 +52,7 @@ export const SourceRow = memo(function SourceRow({
   onDownload,
   onDelete,
   onTranscribe,
+  onReprocessVibeVoice,
   onAskAssistant,
   onGenerateOutput,
   isDownloading = false,
@@ -183,6 +185,19 @@ export const SourceRow = memo(function SourceRow({
             ) : (
               <Wand2 className="h-3.5 w-3.5" />
             )}
+          </Button>
+        )}
+
+        {/* Re-transcribe with VibeVoice (local full-file / re-processing) */}
+        {hasLocalPath(recording) && onReprocessVibeVoice && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={(e) => { e.stopPropagation(); onReprocessVibeVoice(); }}
+            disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
+            title="Re-transcribe with VibeVoice (local, speaker-diarized)"
+          >
+            <AudioLines className="h-3.5 w-3.5" />
           </Button>
         )}
 

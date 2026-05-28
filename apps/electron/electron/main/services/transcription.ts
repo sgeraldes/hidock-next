@@ -148,7 +148,7 @@ async function processQueue(): Promise<void> {
       }
 
       return
-    } else if (provider === 'local-asr') {
+    } else if (provider === 'local-asr' || provider === 'vibevoice') {
       const asrPath = config.transcription.localAsrPath
       const runnerPath = asrPath ? join(asrPath, 'mcp_runner.py') : ''
       if (!asrPath || !existsSync(runnerPath)) {
@@ -265,7 +265,7 @@ async function processQueue(): Promise<void> {
         }
 
         try {
-          await transcribeRecording(item.recording_id, progressCallback)
+          await transcribeRecording(item.recording_id, progressCallback, item.provider)
         } finally {
           clearInterval(progressTicker) // Always clean up the ticker
         }
@@ -412,7 +412,7 @@ interface LocalAsrSegment {
 
 interface RawTranscriptionResult {
   fullText: string
-  provider: 'gemini' | 'local-asr'
+  provider: 'gemini' | 'local-asr' | 'vibevoice'
   model: string
   language: string
   speakers?: string
@@ -592,6 +592,108 @@ async function transcribeWithLocalAsr(
   }
 }
 
+async function transcribeWithVibeVoice(
+  filePath: string,
+  progressCallback?: (stage: string, progress: number) => void
+): Promise<RawTranscriptionResult> {
+  const config = getConfig()
+  const asrPath = config.transcription.localAsrPath || process.env.ASR_MCP_PATH
+  if (!asrPath) {
+    throw new Error('Local ASR path not configured')
+  }
+
+  const runnerPath = join(asrPath, 'mcp_runner.py')
+  if (!existsSync(runnerPath)) {
+    throw new Error(`Local ASR runner not found: ${runnerPath}`)
+  }
+
+  // VibeVoice auto-detects language and code-switches; "auto" unless overridden.
+  const language = (config.transcription.language || 'auto').toLowerCase()
+  const vocabularyPath = config.transcription.localAsrVocabularyFile
+    ? (isAbsolute(config.transcription.localAsrVocabularyFile)
+        ? config.transcription.localAsrVocabularyFile
+        : join(asrPath, config.transcription.localAsrVocabularyFile))
+    : ''
+
+  const args = [
+    runnerPath,
+    'asr_mcp.cli',
+    filePath,
+    '--backend',
+    'vibevoice',
+    '--language',
+    language,
+    '--format',
+    'json'
+  ]
+
+  if (vocabularyPath && existsSync(vocabularyPath)) {
+    args.push('--vocabulary', vocabularyPath)
+  }
+
+  progressCallback?.('vibevoice_starting', 10)
+  const { stdout, stderr } = await execFileBuffered(pythonCommand(), args, {
+    cwd: asrPath,
+    windowsHide: true,
+    maxBuffer: 50 * 1024 * 1024,
+    env: {
+      ...process.env,
+      ASR_BACKEND: 'vibevoice',
+      HF_TOKEN: config.transcription.localAsrHfToken || process.env.HF_TOKEN || '',
+      ASR_VOCABULARY_FILE: vocabularyPath || process.env.ASR_VOCABULARY_FILE || '',
+      VIBEVOICE_MODEL_ID: config.transcription.vibevoiceModelId || process.env.VIBEVOICE_MODEL_ID || 'microsoft/VibeVoice-ASR',
+      ASR_DEVICE: config.transcription.vibevoiceDevice || process.env.ASR_DEVICE || 'cuda:0',
+      VIBEVOICE_ATTN: config.transcription.vibevoiceAttn || process.env.VIBEVOICE_ATTN || 'flash_attention_2'
+    }
+  })
+
+  if (stderr) {
+    console.log(`[VibeVoice] ${stderr.trim()}`)
+  }
+
+  progressCallback?.('vibevoice_parsing', 45)
+
+  let parsed: {
+    text?: string
+    language?: string
+    segments?: LocalAsrSegment[]
+    error?: boolean
+    message?: string
+  }
+  try {
+    parsed = JSON.parse(stdout)
+  } catch (error) {
+    throw new Error(`VibeVoice returned invalid JSON: ${error instanceof Error ? error.message : 'parse failed'}`)
+  }
+
+  if (parsed.error) {
+    throw new Error(parsed.message || 'VibeVoice transcription failed')
+  }
+
+  const segments = Array.isArray(parsed.segments) ? parsed.segments : []
+  const fullText = segments.length > 0
+    ? segments
+        .filter((segment) => segment.text?.trim())
+        .map((segment) => {
+          const speaker = segment.speaker || 'Speaker'
+          return `${speaker}: ${segment.text.trim()}`
+        })
+        .join('\n')
+    : (parsed.text || '').trim()
+
+  if (!fullText) {
+    throw new Error('VibeVoice returned an empty transcript')
+  }
+
+  return {
+    fullText,
+    provider: 'vibevoice',
+    model: 'microsoft/VibeVoice-ASR',
+    language: parsed.language || language,
+    speakers: segments.length > 0 ? JSON.stringify(segments) : undefined
+  }
+}
+
 async function analyzeTranscriptWithGemini(
   fullText: string,
   candidateMeetings: ReturnType<typeof findCandidateMeetingsForRecording>
@@ -681,7 +783,8 @@ Respond in JSON format:
 
 async function transcribeRecording(
   recordingId: string,
-  progressCallback?: (stage: string, progress: number) => void
+  progressCallback?: (stage: string, progress: number) => void,
+  providerOverride?: string
 ): Promise<void> {
   const recording = getRecordingById(recordingId)
   if (!recording || !recording.file_path) {
@@ -714,10 +817,12 @@ Meeting ${i + 1}: "${m.subject}"
   }
 
   const config = getConfig()
-  const transcriptionProvider = config.transcription.provider || 'gemini'
-  const rawTranscript = transcriptionProvider === 'local-asr'
-    ? await transcribeWithLocalAsr(recording.file_path, progressCallback)
-    : await transcribeWithGemini(recording.file_path, meetingContext, progressCallback)
+  const transcriptionProvider = providerOverride || config.transcription.provider || 'gemini'
+  const rawTranscript = transcriptionProvider === 'vibevoice'
+    ? await transcribeWithVibeVoice(recording.file_path, progressCallback)
+    : transcriptionProvider === 'local-asr'
+      ? await transcribeWithLocalAsr(recording.file_path, progressCallback)
+      : await transcribeWithGemini(recording.file_path, meetingContext, progressCallback)
   const fullText = rawTranscript.fullText
 
   progressCallback?.('analyzing', 50) // spec-014: progress reporting

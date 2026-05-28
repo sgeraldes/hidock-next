@@ -5,7 +5,8 @@
     "src/**/*.tsx",
     "electron/preload/*.ts",
     "electron/preload/*.d.ts",
-    "electron/main/types/*.ts"
+    "electron/main/types/*.ts",
+    "electron/main/services/jensen.ts"
   ],
   "compilerOptions": {
     "composite": true,

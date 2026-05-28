@@ -490,7 +490,7 @@ export function Chat() {
       if (result.success) {
         toast.success('Conversation exported', result.data)
       } else {
-        toast.error('Export failed', result.error || 'Unknown error')
+        toast.error('Export failed', result.error?.message || 'Unknown error')
       }
     } catch (error) {
       console.error('Export error:', error)

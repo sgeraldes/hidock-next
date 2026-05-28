@@ -24,7 +24,7 @@ interface ContactsState {
     name?: string
     email?: string | null
     notes?: string
-    type?: string
+    type?: 'team' | 'candidate' | 'customer' | 'external' | 'unknown'
     role?: string
     company?: string
     tags?: string[]

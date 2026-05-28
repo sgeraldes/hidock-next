@@ -540,8 +540,8 @@ ${transcript.substring(0, 8000)}`
         columns: string[],
         selectCols: string,
         limitVal: number
-      ): { sql: string; params: unknown[] } => {
-        const params: unknown[] = []
+      ): { sql: string; params: (string | number)[] } => {
+        const params: (string | number)[] = []
         const termClauses: string[] = []
         const matchCountParts: string[] = []
 

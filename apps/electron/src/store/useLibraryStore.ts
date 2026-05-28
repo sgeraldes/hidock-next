@@ -128,7 +128,7 @@ const initialState: LibraryState = {
 
 export const useLibraryStore = create<LibraryStore>()(
   persist(
-    (set, get) => ({
+    (set, _get) => ({
       ...initialState,
 
       // View mode

@@ -283,6 +283,7 @@ CREATE TABLE IF NOT EXISTS transcription_queue (
     retry_count INTEGER DEFAULT 0,
     progress INTEGER DEFAULT 0,
     error_message TEXT,
+    provider TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     started_at TEXT,
     completed_at TEXT,
@@ -1467,7 +1468,8 @@ export async function initializeDatabase(): Promise<void> {
       const queueCols = queueInfo[0].values.map(col => col[1])
       const queueRepairs = [
         { name: 'retry_count', def: 'INTEGER DEFAULT 0' },
-        { name: 'progress', def: 'INTEGER DEFAULT 0' }
+        { name: 'progress', def: 'INTEGER DEFAULT 0' },
+        { name: 'provider', def: 'TEXT' }
       ]
       for (const col of queueRepairs) {
         if (!queueCols.includes(col.name)) {
@@ -1715,11 +1717,11 @@ export interface Meeting {
   subject: string
   start_time: string
   end_time: string
-  location?: string
+  location?: string | null
   organizer_name?: string
   organizer_email?: string
   attendees?: string
-  description?: string
+  description?: string | null
   is_recurring: number
   recurrence_rule?: string
   meeting_url?: string
@@ -2294,14 +2296,18 @@ export interface QueueItem {
   retry_count: number
   progress: number
   error_message?: string
+  provider?: string
   created_at: string
   started_at?: string
   completed_at?: string
 }
 
-export function addToQueue(recordingId: string): string {
+export function addToQueue(recordingId: string, provider?: string): string {
   const id = crypto.randomUUID()
-  run('INSERT INTO transcription_queue (id, recording_id) VALUES (?, ?)', [id, recordingId])
+  run(
+    'INSERT INTO transcription_queue (id, recording_id, provider) VALUES (?, ?, ?)',
+    [id, recordingId, provider ?? null]
+  )
   return id
 }
 

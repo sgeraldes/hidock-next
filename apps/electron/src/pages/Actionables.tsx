@@ -513,7 +513,7 @@ export function Actionables() {
                                   }
                                   setGenerating(false)
                                 } else {
-                                  toast.error('Failed to load output', result.error?.message || 'Unknown error')
+                                  toast.error('Failed to load output', (!result.success && result.error?.message) || 'Unknown error')
                                 }
                               } catch (error: any) {
                                 toast.error('Failed to load output', error?.message || 'An unexpected error occurred')

@@ -225,4 +225,131 @@ describe('Transcription Service', () => {
       expect(mockUpdateRecordingStatus).toHaveBeenCalledWith('rec-local', 'complete')
     })
   })
+
+  describe('vibevoice provider', () => {
+    it('transcribes via the vibevoice backend and stores speaker-labelled segments', async () => {
+      mockConfig = {
+        transcription: {
+          provider: 'vibevoice',
+          geminiApiKey: '',
+          geminiModel: 'gemini-2.0-flash',
+          language: 'auto',
+          localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
+          localAsrVocabularyFile: 'vocabulary.json',
+          localAsrDiarize: true,
+          localAsrNumBeams: 5
+        }
+      } as typeof mockConfig
+      mockGetQueueItems.mockImplementation((status?: string) => {
+        if (status === 'pending') {
+          return [{
+            id: 'queue-vv',
+            recording_id: 'rec-vv',
+            filename: 'vv.wav',
+            status: 'pending',
+            attempts: 0
+          }]
+        }
+        return []
+      })
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-vv',
+        filename: 'vv.wav',
+        file_path: 'G:\\Recordings\\vv.wav',
+        status: 'complete'
+      })
+      let capturedArgs: string[] = []
+      mockExecFile.mockImplementation((...args: any[]) => {
+        capturedArgs = args[1] as string[]
+        const callback = args[args.length - 1]
+        callback(
+          null,
+          JSON.stringify({
+            segments: [
+              { speaker: 'Speaker 0', start: 0, end: 2.5, text: 'Hola equipo.' },
+              { speaker: 'Speaker 1', start: 2.5, end: 5, text: 'Revisamos el plan.' }
+            ],
+            language: 'es',
+            num_speakers: 2,
+            duration_seconds: 5,
+            processing_time_seconds: 2
+          }),
+          ''
+        )
+      })
+
+      const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
+
+      startTranscriptionProcessor()
+      await new Promise(resolve => setTimeout(resolve, 500))
+      stopTranscriptionProcessor()
+
+      expect(mockExecFile).toHaveBeenCalled()
+      expect(capturedArgs).toContain('--backend')
+      expect(capturedArgs).toContain('vibevoice')
+      expect(mockInsertTranscript).toHaveBeenCalledWith(expect.objectContaining({
+        recording_id: 'rec-vv',
+        full_text: 'Speaker 0: Hola equipo.\nSpeaker 1: Revisamos el plan.',
+        transcription_provider: 'vibevoice',
+        transcription_model: 'microsoft/VibeVoice-ASR'
+      }))
+      expect(mockUpdateRecordingStatus).toHaveBeenCalledWith('rec-vv', 'complete')
+    })
+
+    it('honours a per-queue-item provider override over the global default', async () => {
+      // Global default is local-asr, but the queue item requests vibevoice.
+      mockConfig = {
+        transcription: {
+          provider: 'local-asr',
+          geminiApiKey: '',
+          geminiModel: 'gemini-2.0-flash',
+          language: 'auto',
+          localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
+          localAsrVocabularyFile: 'vocabulary.json',
+          localAsrDiarize: true,
+          localAsrNumBeams: 5
+        }
+      } as typeof mockConfig
+      mockGetQueueItems.mockImplementation((status?: string) => {
+        if (status === 'pending') {
+          return [{
+            id: 'queue-ovr',
+            recording_id: 'rec-ovr',
+            filename: 'ovr.wav',
+            status: 'pending',
+            attempts: 0,
+            provider: 'vibevoice'
+          }]
+        }
+        return []
+      })
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-ovr',
+        filename: 'ovr.wav',
+        file_path: 'G:\\Recordings\\ovr.wav',
+        status: 'complete'
+      })
+      let capturedArgs: string[] = []
+      mockExecFile.mockImplementation((...args: any[]) => {
+        capturedArgs = args[1] as string[]
+        const callback = args[args.length - 1]
+        callback(null, JSON.stringify({
+          segments: [{ speaker: 'Speaker 0', start: 0, end: 1, text: 'Bonjour' }],
+          language: 'fr'
+        }), '')
+      })
+
+      const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
+      startTranscriptionProcessor()
+      await new Promise(resolve => setTimeout(resolve, 500))
+      stopTranscriptionProcessor()
+
+      expect(capturedArgs).toContain('--backend')
+      expect(capturedArgs).toContain('vibevoice')
+      expect(mockInsertTranscript).toHaveBeenCalledWith(expect.objectContaining({
+        recording_id: 'rec-ovr',
+        transcription_provider: 'vibevoice'
+      }))
+    })
+  })
 })

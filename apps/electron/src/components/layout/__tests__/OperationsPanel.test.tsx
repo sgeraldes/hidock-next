@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react'
 import { OperationsPanel } from '../OperationsPanel'
 
 // Mock stores
-import { useAppStore, useDownloadQueue, useDeviceSyncProgress, useDeviceSyncEta } from '@/store/useAppStore'
+import { useAppStore, useDownloadQueue } from '@/store/useAppStore'
 import { useTranscriptionStore, useTranscriptionStats } from '@/store/features/useTranscriptionStore'
 
 vi.mock('@/store/useAppStore', () => ({

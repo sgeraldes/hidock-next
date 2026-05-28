@@ -10,7 +10,8 @@ import {
   Trash2,
   ChevronDown,
   ChevronUp,
-  Wand2
+  Wand2,
+  AudioLines
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -41,6 +42,7 @@ interface SourceCardProps {
   onDownload: () => void
   onDelete: () => void
   onTranscribe?: () => void
+  onReprocessVibeVoice?: () => void
   onAskAssistant: () => void
   onGenerateOutput: () => void
   onToggleTranscript: () => void
@@ -65,6 +67,7 @@ export const SourceCard = memo(function SourceCard({
   onDownload,
   onDelete,
   onTranscribe,
+  onReprocessVibeVoice,
   onAskAssistant,
   onGenerateOutput,
   onToggleTranscript,
@@ -159,6 +162,19 @@ export const SourceCard = memo(function SourceCard({
                 ) : (
                   <Wand2 className="h-4 w-4" />
                 )}
+              </Button>
+            )}
+
+            {/* Re-transcribe with VibeVoice (local full-file / re-processing) */}
+            {hasLocalPath(recording) && onReprocessVibeVoice && (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onReprocessVibeVoice}
+                disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
+                title="Re-transcribe with VibeVoice (local, speaker-diarized)"
+              >
+                <AudioLines className="h-4 w-4" />
               </Button>
             )}
 

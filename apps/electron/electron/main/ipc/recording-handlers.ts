@@ -566,6 +566,49 @@ export function registerRecordingHandlers(): void {
     }
   })
 
+  // Re-transcribe a recording with a specific provider (e.g. VibeVoice),
+  // without changing the global default provider. Used for re-processing.
+  ipcMain.handle(
+    'recordings:reprocessWith',
+    async (_, payload: { recordingId?: string; provider?: string }) => {
+      try {
+        const recordingId = payload?.recordingId
+        const provider = payload?.provider
+        if (!recordingId || typeof recordingId !== 'string') {
+          return { success: false, error: 'recordingId is required' }
+        }
+        if (provider !== 'gemini' && provider !== 'local-asr' && provider !== 'vibevoice') {
+          return { success: false, error: `Unsupported provider: ${provider}` }
+        }
+
+        const config = getConfig()
+        if (provider === 'gemini' && !config.transcription.geminiApiKey) {
+          return {
+            success: false,
+            error: 'Gemini API key not configured. Please add your API key in Settings.'
+          }
+        }
+        if (provider === 'local-asr' || provider === 'vibevoice') {
+          const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
+          if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
+            return {
+              success: false,
+              error: 'Local ASR runner not found. Check the ASR MCP path in Settings.'
+            }
+          }
+        }
+
+        const queueItemId = addToQueue(recordingId, provider)
+        updateRecordingTranscriptionStatus(recordingId, 'queued')
+        processQueueManually()
+        return { success: true, queueItemId }
+      } catch (error) {
+        console.error('recordings:reprocessWith error:', error)
+        return { success: false, error: (error as Error).message }
+      }
+    }
+  )
+
   // Start processing the transcription queue
   ipcMain.handle('recordings:processQueue', async () => {
     try {

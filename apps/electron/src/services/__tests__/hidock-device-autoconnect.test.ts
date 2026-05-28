@@ -329,7 +329,7 @@ describe('HiDockDeviceService - auto-connect contract (real service)', () => {
 
   it('after restart: userInitiatedDisconnect=false so auto-connect can fire', async () => {
     const service = new HiDockDeviceService()
-    const startSpy = vi.spyOn(service as any, 'startAutoConnect').mockImplementation(() => {})
+    vi.spyOn(service as any, 'startAutoConnect').mockImplementation(() => {})
 
     // Simulate: previous session user disconnected
     service.disableAutoConnect()

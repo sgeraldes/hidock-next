@@ -100,7 +100,7 @@ describe('Contacts IPC Handlers', () => {
 
     registerContactsHandlers()
     const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:update')?.[1]
-    const result = await handler?.({} as any, {
+    await handler?.({} as any, {
       id: '550e8400-e29b-41d4-a716-446655440000',
       name: 'New Name',
       email: 'new@example.com'

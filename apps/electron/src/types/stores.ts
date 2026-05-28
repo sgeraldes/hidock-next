@@ -305,7 +305,7 @@ export interface AppConfig {
     lastSyncAt: string | null
   }
   transcription: {
-    provider: 'gemini' | 'local-asr'
+    provider: 'gemini' | 'local-asr' | 'vibevoice'
     geminiApiKey: string
     geminiModel: string
     localAsrPath: string

@@ -48,6 +48,7 @@ export function Library() {
   // Centralized operations (downloads + transcriptions)
   const {
     queueTranscription,
+    reprocessWithVibeVoice,
     queueBulkTranscriptions,
     queueDownload,
     queueBulkDownloads,
@@ -722,11 +723,6 @@ export function Library() {
     audioControls.stop()
   }, [audioControls])
 
-  const handleClosePlayer = useCallback(() => {
-    audioControls.stop()
-    setSelectedSourceId(null)
-  }, [audioControls, setSelectedSourceId])
-
   const handleNavigateToMeeting = useCallback(
     (meetingId: string) => {
       navigate(`/meeting/${meetingId}`)
@@ -1029,6 +1025,7 @@ export function Library() {
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
                           onTranscribe={() => queueTranscription(recording)}
+                          onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
                           onGenerateOutput={() => handleGenerateOutputCallback(recording)}
                           isDownloading={isDeviceOnly(recording) && isDownloading(recording.deviceFilename)}
@@ -1093,6 +1090,7 @@ export function Library() {
                           onDownload={() => handleDownloadCallback(recording)}
                           onDelete={() => handleDeleteCallback(recording)}
                           onTranscribe={() => queueTranscription(recording)}
+                          onReprocessVibeVoice={() => reprocessWithVibeVoice(recording)}
                           onAskAssistant={() => handleAskAssistantCallback(recording)}
                           onGenerateOutput={() => handleGenerateOutputCallback(recording)}
                           onToggleTranscript={() => handleToggleTranscriptCallback(recording.id)}
@@ -1133,6 +1131,9 @@ export function Library() {
               }}
               onTranscribe={() => {
                 if (selectedRecording) queueTranscription(selectedRecording)
+              }}
+              onReprocessVibeVoice={() => {
+                if (selectedRecording) reprocessWithVibeVoice(selectedRecording)
               }}
               onDelete={() => {
                 if (selectedRecording) handleDeleteCallback(selectedRecording)

@@ -14,7 +14,7 @@ import { TranscriptViewer } from './TranscriptViewer'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, parseJsonArray } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen } from 'lucide-react'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, AudioLines } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -46,6 +46,7 @@ interface SourceReaderProps {
   // Action button callbacks
   onDownload?: () => void
   onTranscribe?: () => void
+  onReprocessVibeVoice?: () => void
   onDelete?: () => void
   // State for button enabling/disabling
   deviceConnected?: boolean
@@ -69,6 +70,7 @@ export function SourceReader({
   onSeek,
   onDownload,
   onTranscribe,
+  onReprocessVibeVoice,
   onDelete,
   deviceConnected = false,
   isDownloading = false,
@@ -481,6 +483,21 @@ export function SourceReader({
                 Transcribe
               </>
             )}
+          </Button>
+        )}
+
+        {/* Re-transcribe with VibeVoice (local full-file / re-processing) */}
+        {hasLocalPath(recording) && onReprocessVibeVoice && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onReprocessVibeVoice}
+            disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
+            className="gap-2"
+            title="Re-transcribe with VibeVoice (local, speaker-diarized)"
+          >
+            <AudioLines className="h-4 w-4" />
+            VibeVoice
           </Button>
         )}
 

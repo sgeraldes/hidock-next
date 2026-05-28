@@ -3,7 +3,6 @@ import { join, extname, basename } from 'path'
 import { randomUUID } from 'crypto'
 import { getRecordingsPath } from './file-storage'
 import {
-  getRecordingById,
   getRecordingByFilename,
   insertRecording,
   getMeetings,

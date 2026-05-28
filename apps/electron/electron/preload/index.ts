@@ -153,6 +153,7 @@ export interface ElectronAPI {
     // Transcription
     transcribe: (recordingId: string) => Promise<void>
     addToQueue: (recordingId: string) => Promise<string | false>
+    reprocessWith: (recordingId: string, provider: 'gemini' | 'local-asr' | 'vibevoice') => Promise<{ success: boolean; queueItemId?: string; error?: string }>
     processQueue: () => Promise<boolean>
     getTranscriptionStatus: () => Promise<{ isProcessing: boolean; pendingCount: number; processingCount: number }>
     getTranscriptionQueue: () => Promise<any[]>
@@ -360,6 +361,7 @@ export interface ElectronAPI {
     getStats: () => Promise<{ totalSynced: number; pendingInQueue: number; failedInQueue: number }>
     checkStalled: () => Promise<number>
     cancelActive: (reason?: string) => Promise<number>
+    notifyCompletion: (stats: { completed: number; failed: number; aborted: boolean }) => Promise<unknown>
     onStateUpdate: (callback: (state: any) => void) => () => void
   }
 
@@ -571,6 +573,7 @@ const electronAPI: ElectronAPI = {
     // Transcription
     transcribe: (recordingId) => callIPC('recordings:transcribe', recordingId),
     addToQueue: (recordingId) => callIPC('recordings:addToQueue', recordingId),
+    reprocessWith: (recordingId, provider) => callIPC('recordings:reprocessWith', { recordingId, provider }),
     processQueue: () => callIPC('recordings:processQueue'),
     getTranscriptionStatus: () => callIPC('recordings:getTranscriptionStatus'),
     getTranscriptionQueue: () => callIPC('transcription:getQueue'),

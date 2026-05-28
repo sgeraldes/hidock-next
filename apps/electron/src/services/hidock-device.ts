@@ -1395,10 +1395,8 @@ class HiDockDeviceService {
     // this without making the user wait 15s on a truly unresponsive device.
     if (this.initAborted) return
     this.updateStatus('getting-info', 'Reading device information...', 20)
-    let step1Success = false
     try {
       await withTimeout(this.refreshDeviceInfo(), FIRST_CMD_TIMEOUT, new AbortController())
-      step1Success = true
       successCount++
     } catch (firstError) {
       if (isAbortError(firstError) && !this.initAborted) {
@@ -1409,7 +1407,6 @@ class HiDockDeviceService {
         if (!this.initAborted) {
           try {
             await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, new AbortController())
-            step1Success = true
             successCount++
           } catch (retryError) {
             if (isAbortError(retryError)) timeoutCount++

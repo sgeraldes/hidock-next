@@ -36,7 +36,7 @@ export interface AppConfig {
     lastSyncAt: string | null
   }
   transcription: {
-    provider: 'gemini' | 'local-asr'
+    provider: 'gemini' | 'local-asr' | 'vibevoice'
     geminiApiKey: string
     geminiModel: string
     localAsrPath: string
@@ -44,6 +44,10 @@ export interface AppConfig {
     localAsrVocabularyFile: string
     localAsrDiarize: boolean
     localAsrNumBeams: number
+    // VibeVoice backend (microsoft/VibeVoice-ASR) — reuses localAsrPath/mcp_runner.py.
+    vibevoiceModelId: string
+    vibevoiceDevice: string
+    vibevoiceAttn: string
     autoTranscribe: boolean
     language: string
   }
@@ -95,6 +99,9 @@ const DEFAULT_CONFIG: AppConfig = {
     localAsrVocabularyFile: 'vocabulary.json',
     localAsrDiarize: true,
     localAsrNumBeams: 5,
+    vibevoiceModelId: process.env.VIBEVOICE_MODEL_ID || 'microsoft/VibeVoice-ASR',
+    vibevoiceDevice: process.env.ASR_DEVICE || 'cuda:0',
+    vibevoiceAttn: process.env.VIBEVOICE_ATTN || 'flash_attention_2',
     autoTranscribe: true,
     language: 'es'
   },

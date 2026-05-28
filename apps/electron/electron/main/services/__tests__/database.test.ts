@@ -640,10 +640,10 @@ describe('Database Service', () => {
 
       expect(result).toEqual({ recordingsReset: 3, queueItemsReset: 2 })
 
-      // Should update recordings with status = 'transcribing' to 'pending'
+      // Should reset stuck recordings (transcription_status processing/pending -> none)
       const runCalls = mockDatabase.run.mock.calls
       const recordingsUpdate = runCalls.find(
-        (call: any[]) => typeof call[0] === 'string' && (call[0] as string).includes("UPDATE recordings SET status = 'pending' WHERE status = 'transcribing'")
+        (call: any[]) => typeof call[0] === 'string' && (call[0] as string).includes("UPDATE recordings SET transcription_status = 'none' WHERE transcription_status IN ('processing', 'pending')")
       )
       expect(recordingsUpdate).toBeDefined()
 

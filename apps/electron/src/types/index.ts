@@ -29,6 +29,7 @@
 
 export * from './stores'
 export type { Actionable } from './knowledge'
+import type { Actionable } from './knowledge'
 
 // =============================================================================
 // Existing Types
@@ -162,7 +163,7 @@ export interface AppConfig {
   }
   calendar: CalendarSettings
   transcription: {
-    provider: 'gemini' | 'local-asr'
+    provider: 'gemini' | 'local-asr' | 'vibevoice'
     geminiApiKey: string
     geminiModel: string
     localAsrPath: string

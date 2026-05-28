@@ -12,6 +12,7 @@ import type {
   Project,
   ProjectWithMeetings
 } from './database'
+import type { Person } from '@/types/knowledge'
 
 // =============================================================================
 // Result Wrapper Pattern
@@ -138,15 +139,16 @@ export interface RAGSource {
  */
 export interface GetContactsRequest {
   search?: string
+  type?: 'team' | 'candidate' | 'customer' | 'external' | 'unknown' | 'all'
   limit?: number
   offset?: number
 }
 
 /**
- * Response with paginated contacts
+ * Response with paginated contacts (server maps rows to Person before returning)
  */
 export interface GetContactsResponse {
-  contacts: Contact[]
+  contacts: Person[]
   total: number
 }
 
@@ -214,7 +216,7 @@ export interface CreateProjectRequest {
 export interface UpdateProjectRequest {
   id: string
   name?: string
-  description?: string
+  description?: string | null
   status?: 'active' | 'archived'
 }
 

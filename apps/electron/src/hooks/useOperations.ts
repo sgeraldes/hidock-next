@@ -100,6 +100,34 @@ export function useOperations() {
     }
   }, [addToQueue, validateTranscriptionConfig])
 
+  const reprocessWithVibeVoice = useCallback(async (recording: UnifiedRecording) => {
+    if (!hasLocalPath(recording)) {
+      toast({ title: 'Cannot re-transcribe', description: 'File not available locally. Download first.', variant: 'error' })
+      return false
+    }
+    if (recording.transcriptionStatus === 'processing') {
+      toast({ title: 'Already in progress', description: recording.filename })
+      return false
+    }
+
+    try {
+      const result = await window.electronAPI.recordings.reprocessWith(recording.id, 'vibevoice')
+      if (!result?.success) {
+        toast({ title: 'Failed to re-transcribe', description: result?.error || 'Could not queue VibeVoice', variant: 'error' })
+        return false
+      }
+      if (result.queueItemId) {
+        addToQueue(result.queueItemId, recording.id, recording.filename)
+      }
+      toast({ title: 'Re-transcribing with VibeVoice', description: recording.filename })
+      return true
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Unknown error'
+      toast({ title: 'Failed to re-transcribe', description: msg, variant: 'error' })
+      return false
+    }
+  }, [addToQueue])
+
   const queueBulkTranscriptions = useCallback(async (recordings: UnifiedRecording[]) => {
     const eligible = recordings.filter(
       (r) => hasLocalPath(r) && r.transcriptionStatus !== 'processing' && r.transcriptionStatus !== 'complete'
@@ -213,6 +241,7 @@ export function useOperations() {
   return {
     // Transcription
     queueTranscription,
+    reprocessWithVibeVoice,
     queueBulkTranscriptions,
     cancelTranscription,
     cancelAllTranscriptions,
