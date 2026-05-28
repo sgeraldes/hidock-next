@@ -178,7 +178,14 @@ async function processQueue(): Promise<void> {
       'Recording file not found',
       'Gemini API key not configured',
       'Local ASR runner not found',
-      'no local file'
+      'no local file',
+      // Deterministic input-side failures — retrying loads the model again for nothing.
+      'Audio too long',
+      'No speech detected',
+      'AudioLoadError',
+      'unsupported language',
+      'VibeVoice returned an empty transcript',
+      'requires the optional `vibevoice`'
     ]
     const failedItems = getQueueItems('failed')
     const now = Date.now()
