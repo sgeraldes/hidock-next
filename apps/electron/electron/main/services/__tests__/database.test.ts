@@ -212,6 +212,23 @@ describe('Database Service', () => {
       expect(migrationInserts.length).toBeGreaterThanOrEqual(1)
     })
 
+    it('should not crash structural repair when PRAGMA table_info returns no rows', async () => {
+      const fs = await import('fs')
+      ;(fs.existsSync as any).mockReturnValue(false)
+      ;(mockDatabase.exec as any).mockImplementation((sql: string) => {
+        if (sql.includes('PRAGMA table_info')) {
+          return []
+        }
+        if (sql.includes('schema_version')) {
+          return [{ values: [[24]] }]
+        }
+        return []
+      })
+
+      const dbModule = await import('../database')
+      await expect(dbModule.initializeDatabase()).resolves.not.toThrow()
+    })
+
     it('should throw on fatal initialization error', async () => {
       const initSqlJs = (await import('sql.js')).default
       ;(initSqlJs as any).mockRejectedValueOnce(new Error('WASM load failed'))

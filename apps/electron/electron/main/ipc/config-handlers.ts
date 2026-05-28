@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron'
 import { getConfig, saveConfig, updateConfig, AppConfig } from '../services/config'
+import { initializeFileStorage } from '../services/file-storage'
 import { success, error as errorResult } from '../types/api'
 import { emitActivityLog } from '../services/activity-log'
 
@@ -41,6 +42,9 @@ export function registerConfigHandlers(): void {
     async <K extends keyof AppConfig>(_, section: K, values: Partial<AppConfig[K]>) => {
       try {
         await updateConfig(section, values)
+        if (section === 'storage') {
+          await initializeFileStorage()
+        }
         emitActivityLog('info', `Settings updated: ${String(section)}`)
         return success(getConfig())
       } catch (err) {

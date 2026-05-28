@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, type KeyboardEvent } from 'react'
 import { Save, FolderOpen, RefreshCw, AlertCircle, Eye, EyeOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -17,6 +17,20 @@ const RAG_DEFAULTS = {
   MAX_CONTEXT_CHUNKS_LIMIT: 20
 } as const
 
+type StorageFolder = 'recordings' | 'transcripts' | 'data'
+
+const STORAGE_CONFIG_KEYS: Record<StorageFolder, 'recordingsPath' | 'transcriptsPath' | 'dataPath'> = {
+  recordings: 'recordingsPath',
+  transcripts: 'transcriptsPath',
+  data: 'dataPath'
+}
+
+const STORAGE_LABELS: Record<StorageFolder, string> = {
+  recordings: 'Recordings',
+  transcripts: 'Transcripts',
+  data: 'Data'
+}
+
 export function Settings() {
   // SM-09 fix: Use granular selectors
   const syncCalendar = useAppStore((s) => s.syncCalendar)
@@ -31,14 +45,26 @@ export function Settings() {
   const [icsUrl, setIcsUrl] = useState('')
   const [syncEnabled, setSyncEnabled] = useState(true)
   const [syncInterval, setSyncInterval] = useState(15)
+  const [transcriptionProvider, setTranscriptionProvider] = useState<'gemini' | 'local-asr'>('gemini')
   const [geminiApiKey, setGeminiApiKey] = useState('')
   const [geminiModel, setGeminiModel] = useState('gemini-3-pro-preview')
+  const [localAsrPath, setLocalAsrPath] = useState('G:\\Code\\claude-plugins\\plugins\\mcp-asr')
+  const [localAsrHfToken, setLocalAsrHfToken] = useState('')
+  const [localAsrVocabularyFile, setLocalAsrVocabularyFile] = useState('vocabulary.json')
+  const [localAsrDiarize, setLocalAsrDiarize] = useState(true)
+  const [localAsrNumBeams, setLocalAsrNumBeams] = useState(5)
   const [chatProvider, setChatProvider] = useState<'gemini' | 'ollama'>('gemini')
   const [ollamaUrl, setOllamaUrl] = useState('http://localhost:11434')
   const [showApiKey, setShowApiKey] = useState(false)
   const [storageLoading, setStorageLoading] = useState(false)
+  const [storagePaths, setStoragePaths] = useState<Record<StorageFolder, string>>({
+    recordings: '',
+    transcripts: '',
+    data: ''
+  })
+  const [savingStorageFolder, setSavingStorageFolder] = useState<StorageFolder | null>(null)
   // C-CHAT: RAG context window — default matches config.ts (10)
-  const [ragContextSize, setRagContextSize] = useState(RAG_DEFAULTS.MAX_CONTEXT_CHUNKS)
+  const [ragContextSize, setRagContextSize] = useState<number>(RAG_DEFAULTS.MAX_CONTEXT_CHUNKS)
 
   // Available Gemini models for transcription (audio-capable)
   // From: https://ai.google.dev/gemini-api/docs/models
@@ -66,6 +92,22 @@ export function Settings() {
   const validateConfig = useCallback((updates: Partial<AppConfig>): string | null => {
     // Transcription settings validation
     if (updates.transcription) {
+      if (updates.transcription.provider === 'local-asr' && !updates.transcription.localAsrPath?.trim()) {
+        return 'Local ASR path is required'
+      }
+      if (
+        updates.transcription.provider === 'local-asr' &&
+        updates.transcription.localAsrDiarize !== false &&
+        !updates.transcription.localAsrHfToken?.trim()
+      ) {
+        return 'Hugging Face token is required for Local ASR speaker diarization'
+      }
+      if (
+        updates.transcription.localAsrNumBeams !== undefined &&
+        (updates.transcription.localAsrNumBeams < 1 || updates.transcription.localAsrNumBeams > 10)
+      ) {
+        return 'Local ASR beam search must be between 1 and 10'
+      }
       if (updates.transcription.geminiApiKey !== undefined) {
         const apiKey = updates.transcription.geminiApiKey.trim()
         if (apiKey && apiKey.length < 10) {
@@ -119,10 +161,16 @@ export function Settings() {
   const isTranscriptionDirty = useMemo(() => {
     if (!config) return false
     return (
+      transcriptionProvider !== (config.transcription.provider || 'gemini') ||
       geminiApiKey !== config.transcription.geminiApiKey ||
-      geminiModel !== (config.transcription.geminiModel || 'gemini-3-pro-preview')
+      geminiModel !== (config.transcription.geminiModel || 'gemini-3-pro-preview') ||
+      localAsrPath !== (config.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr') ||
+      localAsrHfToken !== (config.transcription.localAsrHfToken || '') ||
+      localAsrVocabularyFile !== (config.transcription.localAsrVocabularyFile || 'vocabulary.json') ||
+      localAsrDiarize !== (config.transcription.localAsrDiarize ?? true) ||
+      localAsrNumBeams !== (config.transcription.localAsrNumBeams || 5)
     )
-  }, [config, geminiApiKey, geminiModel])
+  }, [config, transcriptionProvider, geminiApiKey, geminiModel, localAsrPath, localAsrHfToken, localAsrVocabularyFile, localAsrDiarize, localAsrNumBeams])
 
   const isChatDirty = useMemo(() => {
     if (!config) return false
@@ -155,14 +203,30 @@ export function Settings() {
       setIcsUrl(config.calendar.icsUrl)
       setSyncEnabled(config.calendar.syncEnabled)
       setSyncInterval(config.calendar.syncIntervalMinutes)
+      setTranscriptionProvider(config.transcription.provider || 'gemini')
       setGeminiApiKey(config.transcription.geminiApiKey)
       setGeminiModel(config.transcription.geminiModel || 'gemini-3-pro-preview')
+      setLocalAsrPath(config.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr')
+      setLocalAsrHfToken(config.transcription.localAsrHfToken || '')
+      setLocalAsrVocabularyFile(config.transcription.localAsrVocabularyFile || 'vocabulary.json')
+      setLocalAsrDiarize(config.transcription.localAsrDiarize ?? true)
+      setLocalAsrNumBeams(config.transcription.localAsrNumBeams || 5)
       setChatProvider(config.chat.provider)
       setOllamaUrl(config.embeddings.ollamaBaseUrl)
       // C-CHAT: Load RAG context window size
       setRagContextSize(config.chat.maxContextChunks)
     }
   }, [config])
+
+  useEffect(() => {
+    if (storageInfo) {
+      setStoragePaths({
+        recordings: config?.storage?.recordingsPath || storageInfo.recordingsPath || '',
+        transcripts: config?.storage?.transcriptsPath || storageInfo.transcriptsPath || '',
+        data: config?.storage?.dataPath || storageInfo.dataPath || ''
+      })
+    }
+  }, [config?.storage?.dataPath, config?.storage?.recordingsPath, config?.storage?.transcriptsPath, storageInfo])
 
   const loadStorageInfo = async () => {
     try {
@@ -239,10 +303,22 @@ export function Settings() {
     // Store previous values for rollback
     const previousApiKey = config?.transcription.geminiApiKey || ''
     const previousModel = config?.transcription.geminiModel || 'gemini-3-pro-preview'
+    const previousProvider = config?.transcription.provider || 'gemini'
+    const previousLocalAsrPath = config?.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr'
+    const previousLocalAsrHfToken = config?.transcription.localAsrHfToken || ''
+    const previousLocalAsrVocabularyFile = config?.transcription.localAsrVocabularyFile || 'vocabulary.json'
+    const previousLocalAsrDiarize = config?.transcription.localAsrDiarize ?? true
+    const previousLocalAsrNumBeams = config?.transcription.localAsrNumBeams || 5
 
     const updates = {
+      provider: transcriptionProvider,
       geminiApiKey,
-      geminiModel
+      geminiModel,
+      localAsrPath,
+      localAsrHfToken,
+      localAsrVocabularyFile,
+      localAsrDiarize,
+      localAsrNumBeams
     }
 
     // Validate before save
@@ -256,11 +332,22 @@ export function Settings() {
     try {
       await updateConfig('transcription', updates)
 
-      toast.success('Settings Saved', `Transcription provider set to ${geminiModel}`)
+      toast.success(
+        'Settings Saved',
+        transcriptionProvider === 'local-asr'
+          ? 'Transcription provider set to Local ASR'
+          : `Transcription provider set to ${geminiModel}`
+      )
     } catch (error) {
       // Rollback on error
+      setTranscriptionProvider(previousProvider)
       setGeminiApiKey(previousApiKey)
       setGeminiModel(previousModel)
+      setLocalAsrPath(previousLocalAsrPath)
+      setLocalAsrHfToken(previousLocalAsrHfToken)
+      setLocalAsrVocabularyFile(previousLocalAsrVocabularyFile)
+      setLocalAsrDiarize(previousLocalAsrDiarize)
+      setLocalAsrNumBeams(previousLocalAsrNumBeams)
 
       const message = error instanceof Error ? error.message : 'Failed to save transcription settings'
       toast.error('Save Failed', message)
@@ -325,8 +412,78 @@ export function Settings() {
     }
   }
 
-  const handleOpenFolder = async (folder: 'recordings' | 'transcripts' | 'data') => {
-    await window.electronAPI.storage.openFolder(folder)
+  const handleStoragePathChange = (folder: StorageFolder, value: string) => {
+    setStoragePaths((prev) => ({ ...prev, [folder]: value }))
+  }
+
+  const getCurrentStoragePath = (folder: StorageFolder): string => {
+    if (folder === 'recordings') {
+      return config?.storage?.recordingsPath || storageInfo?.recordingsPath || ''
+    }
+    if (folder === 'transcripts') {
+      return config?.storage?.transcriptsPath || storageInfo?.transcriptsPath || ''
+    }
+    return config?.storage?.dataPath || storageInfo?.dataPath || ''
+  }
+
+  const saveStoragePath = async (folder: StorageFolder, rawPath: string) => {
+    if (!config) return
+
+    const nextPath = rawPath.trim()
+    if (!nextPath) {
+      toast.error('Invalid Folder', 'Folder path cannot be empty')
+      setStoragePaths((prev) => ({ ...prev, [folder]: getCurrentStoragePath(folder) }))
+      return
+    }
+
+    if (nextPath === getCurrentStoragePath(folder)) return
+
+    setSavingStorageFolder(folder)
+    try {
+      await updateConfig('storage', {
+        [STORAGE_CONFIG_KEYS[folder]]: nextPath
+      } as Partial<AppConfig['storage']>)
+      setStoragePaths((prev) => ({ ...prev, [folder]: nextPath }))
+      await loadStorageInfo()
+      toast.success('Storage Folder Saved', `${STORAGE_LABELS[folder]} folder updated`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save storage folder'
+      toast.error('Save Failed', message)
+      setStoragePaths((prev) => ({ ...prev, [folder]: getCurrentStoragePath(folder) }))
+    } finally {
+      setSavingStorageFolder(null)
+    }
+  }
+
+  const handleSelectStorageFolder = async (folder: StorageFolder) => {
+    if (!window.electronAPI.storage.selectFolder) {
+      toast.error(
+        'Restart Required',
+        'The folder picker was added to the Electron preload API. Restart the app once to use Browse.'
+      )
+      return
+    }
+
+    try {
+      const result = await window.electronAPI.storage.selectFolder(storagePaths[folder] || getCurrentStoragePath(folder))
+      if (!result.success) {
+        toast.error('Folder Selection Failed', result.error || 'Could not open folder picker')
+        return
+      }
+      if (!result.data) return
+
+      setStoragePaths((prev) => ({ ...prev, [folder]: result.data! }))
+      await saveStoragePath(folder, result.data)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not open folder picker'
+      toast.error('Folder Selection Failed', message)
+    }
+  }
+
+  const handleStoragePathKeyDown = (_folder: StorageFolder, event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.currentTarget.blur()
+    }
   }
 
   // Loading state
@@ -458,71 +615,203 @@ export function Settings() {
           <Card>
             <CardHeader>
               <CardTitle>Transcription</CardTitle>
-              <CardDescription>Configure Gemini API for transcription</CardDescription>
+              <CardDescription>Choose cloud Gemini or local ASR for meeting transcripts</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <label htmlFor="geminiApiKey" className="text-sm font-medium">Gemini API Key</label>
-                <div className="relative mt-1">
-                  <Input
-                    id="geminiApiKey"
-                    type={showApiKey ? 'text' : 'password'}
-                    placeholder="Enter your Gemini API key"
-                    value={geminiApiKey}
-                    onChange={(e) => setGeminiApiKey(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
-                    disabled={saving}
-                    aria-label="Gemini API Key"
-                    aria-describedby="geminiApiKey-description"
-                    className="pr-10"
-                  />
+                <label id="transcriptionProvider-label" className="text-sm font-medium">Provider</label>
+                <div className="flex gap-2 mt-2" role="group" aria-labelledby="transcriptionProvider-label">
                   <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
-                    onClick={() => setShowApiKey(!showApiKey)}
-                    aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
-                    tabIndex={-1}
+                    variant={transcriptionProvider === 'gemini' ? 'default' : 'outline'}
+                    onClick={() => setTranscriptionProvider('gemini')}
+                    disabled={saving}
+                    aria-label="Use Gemini transcription provider"
+                    aria-pressed={transcriptionProvider === 'gemini'}
                   >
-                    {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    Gemini
+                  </Button>
+                  <Button
+                    variant={transcriptionProvider === 'local-asr' ? 'default' : 'outline'}
+                    onClick={() => setTranscriptionProvider('local-asr')}
+                    disabled={saving}
+                    aria-label="Use local ASR transcription provider"
+                    aria-pressed={transcriptionProvider === 'local-asr'}
+                  >
+                    Local ASR
                   </Button>
                 </div>
-                <p id="geminiApiKey-description" className="text-xs text-muted-foreground mt-1">
-                  Get your API key from{' '}
-                  <a
-                    href="https://aistudio.google.com/app/apikey"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-primary hover:underline"
-                  >
-                    Google AI Studio
-                  </a>
-                </p>
               </div>
 
-              <div>
-                <label htmlFor="geminiModel" className="text-sm font-medium">Transcription Model</label>
-                <select
-                  id="geminiModel"
-                  value={geminiModel}
-                  onChange={(e) => setGeminiModel(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
-                  disabled={saving}
-                  aria-label="Transcription Model"
-                  aria-describedby="geminiModel-description"
-                  className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-                >
-                  {GEMINI_MODELS.map((model) => (
-                    <option key={model.value} value={model.value}>
-                      {model.label}
-                    </option>
-                  ))}
-                </select>
-                <p id="geminiModel-description" className="text-xs text-muted-foreground mt-1">
-                  Gemini 3 Pro provides the best transcription accuracy
-                </p>
-              </div>
+              {transcriptionProvider === 'gemini' ? (
+                <>
+                  <div>
+                    <label htmlFor="geminiApiKey" className="text-sm font-medium">Gemini API Key</label>
+                    <div className="relative mt-1">
+                      <Input
+                        id="geminiApiKey"
+                        type={showApiKey ? 'text' : 'password'}
+                        placeholder="Enter your Gemini API key"
+                        value={geminiApiKey}
+                        onChange={(e) => setGeminiApiKey(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                        disabled={saving}
+                        aria-label="Gemini API Key"
+                        aria-describedby="geminiApiKey-description"
+                        className="pr-10"
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
+                        onClick={() => setShowApiKey(!showApiKey)}
+                        aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
+                        tabIndex={-1}
+                      >
+                        {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </Button>
+                    </div>
+                    <p id="geminiApiKey-description" className="text-xs text-muted-foreground mt-1">
+                      Get your API key from{' '}
+                      <a
+                        href="https://aistudio.google.com/app/apikey"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-primary hover:underline"
+                      >
+                        Google AI Studio
+                      </a>
+                    </p>
+                  </div>
+
+                  <div>
+                    <label htmlFor="geminiModel" className="text-sm font-medium">Transcription Model</label>
+                    <select
+                      id="geminiModel"
+                      value={geminiModel}
+                      onChange={(e) => setGeminiModel(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                      disabled={saving}
+                      aria-label="Transcription Model"
+                      aria-describedby="geminiModel-description"
+                      className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                    >
+                      {GEMINI_MODELS.map((model) => (
+                        <option key={model.value} value={model.value}>
+                          {model.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p id="geminiModel-description" className="text-xs text-muted-foreground mt-1">
+                      Gemini 3 Pro provides the best transcription accuracy
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label htmlFor="localAsrHfToken" className="text-sm font-medium">Hugging Face Token</label>
+                    <div className="relative mt-1">
+                      <Input
+                        id="localAsrHfToken"
+                        type={showApiKey ? 'text' : 'password'}
+                        placeholder="hf_xxxxxxxxxxxxxxxxxxxx"
+                        value={localAsrHfToken}
+                        onChange={(e) => setLocalAsrHfToken(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                        disabled={saving}
+                        aria-label="Hugging Face token for Local ASR"
+                        aria-describedby="localAsrHfToken-description"
+                        className="pr-10"
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
+                        onClick={() => setShowApiKey(!showApiKey)}
+                        aria-label={showApiKey ? 'Hide token' : 'Show token'}
+                        tabIndex={-1}
+                      >
+                        {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </Button>
+                    </div>
+                    <p id="localAsrHfToken-description" className="text-xs text-muted-foreground mt-1">
+                      Required by the local ASR diarization models. You must accept the model terms in Hugging Face first.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label htmlFor="localAsrPath" className="text-sm font-medium">ASR MCP Path</label>
+                    <Input
+                      id="localAsrPath"
+                      value={localAsrPath}
+                      onChange={(e) => setLocalAsrPath(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                      disabled={saving}
+                      aria-label="ASR MCP project path"
+                      aria-describedby="localAsrPath-description"
+                      className="mt-1 font-mono text-xs"
+                    />
+                    <p id="localAsrPath-description" className="text-xs text-muted-foreground mt-1">
+                      Folder containing mcp_runner.py from the ASR MCP project
+                    </p>
+                  </div>
+
+                  <div>
+                    <label htmlFor="localAsrVocabularyFile" className="text-sm font-medium">Vocabulary File</label>
+                    <Input
+                      id="localAsrVocabularyFile"
+                      value={localAsrVocabularyFile}
+                      onChange={(e) => setLocalAsrVocabularyFile(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                      disabled={saving}
+                      aria-label="Local ASR vocabulary file"
+                      aria-describedby="localAsrVocabularyFile-description"
+                      className="mt-1 font-mono text-xs"
+                    />
+                    <p id="localAsrVocabularyFile-description" className="text-xs text-muted-foreground mt-1">
+                      Relative or absolute JSON correction file. Leave empty to disable corrections.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="localAsrDiarize"
+                        checked={localAsrDiarize}
+                        onChange={(e) => setLocalAsrDiarize(e.target.checked)}
+                        disabled={saving}
+                        aria-label="Enable speaker diarization"
+                        className="rounded"
+                      />
+                      <label htmlFor="localAsrDiarize" className="text-sm">
+                        Speaker diarization
+                      </label>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <label htmlFor="localAsrNumBeams" className="text-sm">Beams</label>
+                      <Input
+                        id="localAsrNumBeams"
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={localAsrNumBeams}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value, 10)
+                          if (!isNaN(val)) setLocalAsrNumBeams(Math.min(10, Math.max(1, val)))
+                        }}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSaveTranscription()}
+                        disabled={saving}
+                        aria-label="Local ASR beam search width"
+                        className="w-20"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
 
               <Button
                 onClick={handleSaveTranscription}
@@ -667,39 +956,44 @@ export function Settings() {
                   </div>
 
                   <div className="space-y-3 text-sm">
-                    <div className="flex items-center justify-between p-2 bg-muted/50 rounded">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-muted-foreground text-xs">Recordings</p>
-                        <p className="font-mono text-xs truncate" title={storageInfo.recordingsPath}>
-                          {storageInfo.recordingsPath}
-                        </p>
+                    {([
+                      ['recordings', 'Recordings'],
+                      ['transcripts', 'Transcripts'],
+                      ['data', 'Data']
+                    ] as const).map(([folder, label]) => (
+                      <div key={folder} className="flex items-center gap-2 p-2 bg-muted/50 rounded">
+                        <div className="flex-1 min-w-0">
+                          <label htmlFor={`${folder}Path`} className="text-muted-foreground text-xs">
+                            {label}
+                          </label>
+                          <Input
+                            id={`${folder}Path`}
+                            value={storagePaths[folder]}
+                            onChange={(e) => handleStoragePathChange(folder, e.target.value)}
+                            onBlur={(e) => saveStoragePath(folder, e.target.value)}
+                            onKeyDown={(e) => handleStoragePathKeyDown(folder, e)}
+                            disabled={savingStorageFolder === folder}
+                            className="mt-1 h-8 font-mono text-xs"
+                            title={storagePaths[folder]}
+                            aria-label={`${label} folder path`}
+                          />
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleSelectStorageFolder(folder)}
+                          disabled={savingStorageFolder === folder}
+                          aria-label={`Select ${label.toLowerCase()} folder`}
+                        >
+                          {savingStorageFolder === folder ? (
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <FolderOpen className="h-4 w-4" />
+                          )}
+                        </Button>
                       </div>
-                      <Button variant="ghost" size="sm" onClick={() => handleOpenFolder('recordings')}>
-                        <FolderOpen className="h-4 w-4" />
-                      </Button>
-                    </div>
-                    <div className="flex items-center justify-between p-2 bg-muted/50 rounded">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-muted-foreground text-xs">Transcripts</p>
-                        <p className="font-mono text-xs truncate" title={storageInfo.transcriptsPath}>
-                          {storageInfo.transcriptsPath}
-                        </p>
-                      </div>
-                      <Button variant="ghost" size="sm" onClick={() => handleOpenFolder('transcripts')}>
-                        <FolderOpen className="h-4 w-4" />
-                      </Button>
-                    </div>
-                    <div className="flex items-center justify-between p-2 bg-muted/50 rounded">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-muted-foreground text-xs">Data</p>
-                        <p className="font-mono text-xs truncate" title={storageInfo.dataPath}>
-                          {storageInfo.dataPath}
-                        </p>
-                      </div>
-                      <Button variant="ghost" size="sm" onClick={() => handleOpenFolder('data')}>
-                        <FolderOpen className="h-4 w-4" />
-                      </Button>
-                    </div>
+                    ))}
                   </div>
                 </>
               )}

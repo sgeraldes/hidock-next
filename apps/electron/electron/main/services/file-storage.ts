@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, utimesSync } from 'fs'
 import { join, basename, extname, resolve, normalize } from 'path'
-import { getDataPath } from './config'
+import { getConfig, getDataPath } from './config'
 
 /**
  * Validate that a path stays within the allowed base directory.
@@ -59,8 +59,8 @@ export async function initializeFileStorage(): Promise<void> {
   const directories = [
     dataPath,
     join(dataPath, 'data'),
-    join(dataPath, 'recordings'),
-    join(dataPath, 'transcripts'),
+    getRecordingsPath(),
+    getTranscriptsPath(),
     join(dataPath, 'cache')
   ]
 
@@ -73,11 +73,13 @@ export async function initializeFileStorage(): Promise<void> {
 }
 
 export function getRecordingsPath(): string {
-  return join(getDataPath(), 'recordings')
+  const storage = getConfig().storage
+  return storage.recordingsPath || join(getDataPath(), 'recordings')
 }
 
 export function getTranscriptsPath(): string {
-  return join(getDataPath(), 'transcripts')
+  const storage = getConfig().storage
+  return storage.transcriptsPath || join(getDataPath(), 'transcripts')
 }
 
 export function getCachePath(): string {

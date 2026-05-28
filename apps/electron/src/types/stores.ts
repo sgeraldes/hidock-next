@@ -294,6 +294,8 @@ export interface AppConfig {
   version: string
   storage: {
     dataPath: string
+    recordingsPath?: string
+    transcriptsPath?: string
     maxRecordingsGB: number
   }
   calendar: {
@@ -303,9 +305,14 @@ export interface AppConfig {
     lastSyncAt: string | null
   }
   transcription: {
-    provider: 'gemini'
+    provider: 'gemini' | 'local-asr'
     geminiApiKey: string
     geminiModel: string
+    localAsrPath: string
+    localAsrHfToken: string
+    localAsrVocabularyFile: string
+    localAsrDiarize: boolean
+    localAsrNumBeams: number
     autoTranscribe: boolean
     language: string
   }

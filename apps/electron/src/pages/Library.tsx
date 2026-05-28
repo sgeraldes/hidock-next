@@ -263,6 +263,52 @@ export function Library() {
   const [transcripts, setTranscripts] = useState<Map<string, Transcript>>(new Map())
   const [meetings, setMeetings] = useState<Map<string, Meeting>>(new Map())
 
+  const refreshCompletedTranscription = useCallback(async (recordingId: string) => {
+    try {
+      await refresh(false)
+
+      const transcriptsObj = await window.electronAPI.transcripts.getByRecordingIds([recordingId])
+      const transcript = transcriptsObj?.[recordingId]
+      if (!transcript) return
+
+      setTranscripts((previous) => {
+        const next = new Map(previous)
+        next.set(recordingId, transcript)
+        return next
+      })
+    } catch (e) {
+      console.error('[Library] Failed to refresh completed transcription:', e)
+    }
+  }, [refresh])
+
+  useEffect(() => {
+    const unsubscribers: Array<() => void> = []
+
+    if (window.electronAPI.onTranscriptionCompleted) {
+      unsubscribers.push(window.electronAPI.onTranscriptionCompleted((data) => {
+        void refreshCompletedTranscription(data.recordingId)
+      }))
+    }
+
+    if (window.electronAPI.onTranscriptionFailed) {
+      unsubscribers.push(window.electronAPI.onTranscriptionFailed(() => {
+        void refresh(false)
+      }))
+    }
+
+    if (window.electronAPI.onTranscriptionCancelled) {
+      unsubscribers.push(window.electronAPI.onTranscriptionCancelled(() => {
+        void refresh(false)
+      }))
+    }
+
+    return () => {
+      for (const unsubscribe of unsubscribers) {
+        unsubscribe()
+      }
+    }
+  }, [refresh, refreshCompletedTranscription])
+
   // Memoize recording IDs that need enrichment to avoid unnecessary re-fetches
   const enrichmentKey = useMemo(() => {
     const localRecordingIds = recordings

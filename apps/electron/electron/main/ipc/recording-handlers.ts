@@ -537,12 +537,21 @@ export function registerRecordingHandlers(): void {
   // Add a recording to the transcription queue
   ipcMain.handle('recordings:addToQueue', async (_, recordingId: string) => {
     try {
-      // Validate API key is configured before queueing
+      // Validate provider prerequisites before queueing
       const config = getConfig()
-      if (!config.transcription.geminiApiKey) {
+      if ((config.transcription.provider || 'gemini') === 'gemini' && !config.transcription.geminiApiKey) {
         return {
           success: false,
           error: 'Transcription API key not configured. Please add your API key in Settings.'
+        }
+      }
+      if (config.transcription.provider === 'local-asr') {
+        const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
+        if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
+          return {
+            success: false,
+            error: `Local ASR runner not found. Check the ASR MCP path in Settings.`
+          }
         }
       }
 

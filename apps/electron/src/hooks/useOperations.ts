@@ -4,6 +4,7 @@ import { useTranscriptionStore } from '@/store/features/useTranscriptionStore'
 import { cancelDownloads, cancelDownloadsComplete } from '@/hooks/useDownloadOrchestrator'
 import type { UnifiedRecording } from '@/types/unified-recording'
 import { hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
+import type { AppConfig } from '@/types'
 
 /**
  * Centralized hook for all download and transcription operations.
@@ -18,6 +19,55 @@ import { hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 export function useOperations() {
   const addToQueue = useTranscriptionStore((s) => s.addToQueue)
 
+  const validateTranscriptionConfig = useCallback(async (): Promise<boolean> => {
+    try {
+      const result = await window.electronAPI.config.get()
+      const config = result?.success ? (result.data as AppConfig) : null
+      const provider = config?.transcription?.provider || 'gemini'
+
+      if (provider === 'gemini') {
+        const apiKey = config?.transcription?.geminiApiKey
+        if (!apiKey || apiKey.trim() === '') {
+          toast({
+            title: 'API key required',
+            description: 'Please configure your Gemini API key in Settings before transcribing.',
+            variant: 'error'
+          })
+          return false
+        }
+      }
+
+      if (provider === 'local-asr') {
+        const asrPath = config?.transcription?.localAsrPath
+        if (!asrPath || asrPath.trim() === '') {
+          toast({
+            title: 'ASR path required',
+            description: 'Please configure the Local ASR MCP path in Settings before transcribing.',
+            variant: 'error'
+          })
+          return false
+        }
+
+        const diarize = config?.transcription?.localAsrDiarize !== false
+        const hfToken = config?.transcription?.localAsrHfToken
+        if (diarize && (!hfToken || hfToken.trim() === '')) {
+          toast({
+            title: 'Hugging Face token required',
+            description: 'Please configure your Hugging Face token in Settings or disable speaker diarization.',
+            variant: 'error'
+          })
+          return false
+        }
+      }
+
+      return true
+    } catch (e) {
+      console.error('Failed to check transcription configuration:', e)
+      toast({ title: 'Configuration error', description: 'Could not verify transcription configuration', variant: 'error' })
+      return false
+    }
+  }, [])
+
   // ── Transcription ──────────────────────────────────────
 
   const queueTranscription = useCallback(async (recording: UnifiedRecording) => {
@@ -29,21 +79,7 @@ export function useOperations() {
       return false
     }
 
-    // Check if API key is configured before queuing
-    try {
-      const result = await window.electronAPI.config.getValue('transcription.geminiApiKey')
-      const apiKey = result?.success ? result.data : null
-      if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
-        toast({
-          title: 'API key required',
-          description: 'Please configure your Gemini API key in Settings before transcribing.',
-          variant: 'error'
-        })
-        return false
-      }
-    } catch (e) {
-      console.error('Failed to check API key:', e)
-      toast({ title: 'Configuration error', description: 'Could not verify API key configuration', variant: 'error' })
+    if (!(await validateTranscriptionConfig())) {
       return false
     }
 
@@ -62,7 +98,7 @@ export function useOperations() {
       toast({ title: 'Failed to queue transcription', description: msg, variant: 'error' })
       return false
     }
-  }, [addToQueue])
+  }, [addToQueue, validateTranscriptionConfig])
 
   const queueBulkTranscriptions = useCallback(async (recordings: UnifiedRecording[]) => {
     const eligible = recordings.filter(
@@ -73,21 +109,7 @@ export function useOperations() {
       return 0
     }
 
-    // Check if API key is configured before queuing
-    try {
-      const result = await window.electronAPI.config.getValue('transcription.geminiApiKey')
-      const apiKey = result?.success ? result.data : null
-      if (!apiKey || (typeof apiKey === 'string' && apiKey.trim() === '')) {
-        toast({
-          title: 'API key required',
-          description: 'Please configure your Gemini API key in Settings before transcribing.',
-          variant: 'error'
-        })
-        return 0
-      }
-    } catch (e) {
-      console.error('Failed to check API key:', e)
-      toast({ title: 'Configuration error', description: 'Could not verify API key configuration', variant: 'error' })
+    if (!(await validateTranscriptionConfig())) {
       return 0
     }
 
@@ -107,7 +129,7 @@ export function useOperations() {
 
     toast({ title: `${queued} transcription${queued > 1 ? 's' : ''} queued`, description: 'Processing will begin shortly.' })
     return queued
-  }, [addToQueue])
+  }, [addToQueue, validateTranscriptionConfig])
 
   const cancelTranscription = useCallback(async (recordingId: string) => {
     try {

@@ -18,13 +18,27 @@ const mockUpdateRecordingStatus = vi.fn()
 const mockUpdateQueueItem = vi.fn()
 const mockGetQueueItems = vi.fn()
 const mockGetRecordingById = vi.fn()
+const mockInsertTranscript = vi.fn()
+const mockExecFile = vi.fn()
+let mockConfig = {
+  transcription: {
+    provider: 'gemini',
+    geminiApiKey: 'test-api-key',
+    geminiModel: 'gemini-2.0-flash',
+    language: 'es',
+    localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
+    localAsrVocabularyFile: 'vocabulary.json',
+    localAsrDiarize: true,
+    localAsrNumBeams: 5
+  }
+}
 
 // Mock database
 vi.mock('../database', () => ({
   getRecordingById: (...args: any[]) => mockGetRecordingById(...args),
   updateRecordingStatus: (...args: any[]) => mockUpdateRecordingStatus(...args),
   updateRecordingTranscriptionStatus: (...args: any[]) => mockUpdateRecordingStatus(...args),
-  insertTranscript: vi.fn(),
+  insertTranscript: (...args: any[]) => mockInsertTranscript(...args),
   getQueueItems: (...args: any[]) => mockGetQueueItems(...args),
   updateQueueItem: (...args: any[]) => mockUpdateQueueItem(...args),
   updateQueueProgress: vi.fn(),
@@ -53,12 +67,7 @@ vi.mock('electron', () => ({
 
 // Mock config
 vi.mock('../config', () => ({
-  getConfig: vi.fn(() => ({
-    transcription: {
-      geminiApiKey: 'test-api-key',
-      geminiModel: 'gemini-2.0-flash'
-    }
-  }))
+  getConfig: vi.fn(() => mockConfig)
 }))
 
 // Mock google generative AI - make it fail
@@ -87,9 +96,25 @@ vi.mock('../vector-store', () => ({
   getVectorStore: vi.fn(() => null)
 }))
 
+vi.mock('child_process', () => ({
+  execFile: (...args: any[]) => mockExecFile(...args)
+}))
+
 describe('Transcription Service', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockConfig = {
+      transcription: {
+        provider: 'gemini',
+        geminiApiKey: 'test-api-key',
+        geminiModel: 'gemini-2.0-flash',
+        language: 'es',
+        localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
+        localAsrVocabularyFile: 'vocabulary.json',
+        localAsrDiarize: true,
+        localAsrNumBeams: 5
+      }
+    }
   })
 
   describe('BUG-TX-001: recordings.status stuck at transcribing after failure', () => {
@@ -135,6 +160,69 @@ describe('Transcription Service', () => {
 
       expect(hasQueueFailure).toBe(true)
       expect(hasFailureCall).toBe(true)
+    })
+  })
+
+  describe('local ASR provider', () => {
+    it('should process local ASR transcripts without requiring a Gemini API key', async () => {
+      mockConfig = {
+        transcription: {
+          provider: 'local-asr',
+          geminiApiKey: '',
+          geminiModel: 'gemini-2.0-flash',
+          language: 'es',
+          localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
+          localAsrVocabularyFile: 'vocabulary.json',
+          localAsrDiarize: true,
+          localAsrNumBeams: 5
+        }
+      }
+      mockGetQueueItems.mockImplementation((status?: string) => {
+        if (status === 'pending') {
+          return [{
+            id: 'queue-local',
+            recording_id: 'rec-local',
+            filename: 'local.wav',
+            status: 'pending',
+            attempts: 0
+          }]
+        }
+        return []
+      })
+      mockGetRecordingById.mockReturnValue({
+        id: 'rec-local',
+        filename: 'local.wav',
+        file_path: 'G:\\Recordings\\local.wav',
+        status: 'complete'
+      })
+      mockExecFile.mockImplementation((...args: any[]) => {
+        const callback = args[args.length - 1]
+        callback(
+          null,
+          JSON.stringify({
+            text: 'Speaker 1: Hola equipo. Revisamos el plan.',
+            language: 'es',
+            duration_seconds: 12,
+            processing_time_seconds: 1
+          }),
+          ''
+        )
+      })
+
+      const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
+
+      startTranscriptionProcessor()
+      await new Promise(resolve => setTimeout(resolve, 500))
+      stopTranscriptionProcessor()
+
+      expect(mockExecFile).toHaveBeenCalled()
+      expect(mockInsertTranscript).toHaveBeenCalledWith(expect.objectContaining({
+        recording_id: 'rec-local',
+        full_text: 'Speaker 1: Hola equipo. Revisamos el plan.',
+        transcription_provider: 'local-asr',
+        transcription_model: 'CohereLabs/cohere-transcribe-03-2026'
+      }))
+      expect(mockUpdateRecordingStatus).toHaveBeenCalledWith('rec-local', 'complete')
     })
   })
 })

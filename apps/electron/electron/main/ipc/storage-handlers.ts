@@ -1,4 +1,4 @@
-import { ipcMain, shell } from 'electron'
+import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { randomUUID } from 'crypto'
 import { existsSync } from 'fs'
 import {
@@ -120,6 +120,30 @@ export function registerStorageHandlers(): void {
 
       await shell.openPath(path)
       return { success: true, data: true }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      return { success: false, error: message }
+    }
+  })
+
+  ipcMain.handle('storage:select-folder', async (_, currentPath: unknown) => {
+    try {
+      const focusedWindow = BrowserWindow.getFocusedWindow()
+      const options = {
+        title: 'Select storage folder',
+        properties: ['openDirectory', 'createDirectory'] as Electron.OpenDialogOptions['properties'],
+        defaultPath: typeof currentPath === 'string' && currentPath.trim() ? currentPath : undefined
+      }
+
+      const result = focusedWindow
+        ? await dialog.showOpenDialog(focusedWindow, options)
+        : await dialog.showOpenDialog(options)
+
+      if (result.canceled || result.filePaths.length === 0) {
+        return { success: true, data: null }
+      }
+
+      return { success: true, data: result.filePaths[0] }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
       return { success: false, error: message }

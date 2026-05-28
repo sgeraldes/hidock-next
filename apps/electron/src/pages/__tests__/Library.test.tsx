@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { Library } from '../Library'
@@ -156,6 +156,11 @@ vi.mock('@/features/library/hooks', () => ({
   }))
 }))
 
+const mockRefresh = vi.fn()
+const transcriptionCompletedListeners: Array<(data: { recordingId: string }) => void> = []
+const transcriptionFailedListeners: Array<() => void> = []
+const transcriptionCancelledListeners: Array<() => void> = []
+
 // Mock electronAPI
 global.window.electronAPI = {
   transcripts: { getByRecordingIds: vi.fn().mockResolvedValue({}) },
@@ -168,7 +173,19 @@ global.window.electronAPI = {
   },
   downloadService: {
     queueDownloads: vi.fn()
-  }
+  },
+  onTranscriptionCompleted: vi.fn((callback) => {
+    transcriptionCompletedListeners.push(callback)
+    return vi.fn()
+  }),
+  onTranscriptionFailed: vi.fn((callback) => {
+    transcriptionFailedListeners.push(callback)
+    return vi.fn()
+  }),
+  onTranscriptionCancelled: vi.fn((callback) => {
+    transcriptionCancelledListeners.push(callback)
+    return vi.fn()
+  })
 } as any
 
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
@@ -190,11 +207,17 @@ const mockRecording = {
 describe('Library', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockRefresh.mockReset()
+    transcriptionCompletedListeners.length = 0
+    transcriptionFailedListeners.length = 0
+    transcriptionCancelledListeners.length = 0
+    vi.mocked(window.electronAPI.transcripts.getByRecordingIds).mockResolvedValue({})
+    vi.mocked(window.electronAPI.meetings.getByIds).mockResolvedValue({})
     vi.mocked(useUnifiedRecordings).mockReturnValue({
       recordings: [],
       loading: false,
       error: null,
-      refresh: vi.fn(),
+      refresh: mockRefresh,
       deviceConnected: false,
       stats: { total: 0, deviceOnly: 0, localOnly: 0, both: 0, synced: 0, unsynced: 0, onSource: 0, locallyAvailable: 0 }
     })
@@ -345,6 +368,46 @@ describe('Library', () => {
         expect(screen.getByText(/add capture/i)).toBeInTheDocument()
         expect(screen.getByText(/open folder/i)).toBeInTheDocument()
         expect(screen.getByText(/refresh/i)).toBeInTheDocument()
+      })
+    })
+  })
+
+  describe('Transcription Events', () => {
+    it('refreshes recording metadata and loads the finished transcript after completion', async () => {
+      vi.mocked(useUnifiedRecordings).mockReturnValue({
+        recordings: [{ ...mockRecording, transcriptionStatus: 'processing' }],
+        loading: false,
+        error: null,
+        refresh: mockRefresh,
+        deviceConnected: false,
+        stats: { total: 1, deviceOnly: 0, localOnly: 1, both: 0, synced: 1, unsynced: 0, onSource: 0, locallyAvailable: 1 }
+      })
+      vi.mocked(window.electronAPI.transcripts.getByRecordingIds).mockResolvedValue({
+        'test-123': {
+          id: 'transcript-1',
+          recordingId: 'test-123',
+          text: 'Completed local ASR transcript',
+          segments: [],
+          speakers: [],
+          summary: 'Summary',
+          actionables: [],
+          createdAt: new Date()
+        }
+      })
+
+      renderLibrary()
+
+      await waitFor(() => {
+        expect(window.electronAPI.onTranscriptionCompleted).toHaveBeenCalled()
+      })
+
+      await act(async () => {
+        transcriptionCompletedListeners[0]({ recordingId: 'test-123' })
+      })
+
+      await waitFor(() => {
+        expect(mockRefresh).toHaveBeenCalledWith(false)
+        expect(window.electronAPI.transcripts.getByRecordingIds).toHaveBeenCalledWith(['test-123'])
       })
     })
   })

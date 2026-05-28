@@ -1,9 +1,28 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { readFile, existsSync } from 'fs'
 import { promisify } from 'util'
-import { extname } from 'path'
+import { execFile } from 'child_process'
+import { extname, join, isAbsolute } from 'path'
 
 const readFileAsync = promisify(readFile)
+function execFileBuffered(
+  command: string,
+  args: string[],
+  options: Parameters<typeof execFile>[2]
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout, stderr) => {
+      if (error) {
+        reject(error)
+        return
+      }
+      resolve({
+        stdout: typeof stdout === 'string' ? stdout : stdout.toString('utf-8'),
+        stderr: typeof stderr === 'string' ? stderr : stderr.toString('utf-8')
+      })
+    })
+  })
+}
 import { getConfig } from './config'
 import {
   getRecordingById,
@@ -105,7 +124,8 @@ async function processQueue(): Promise<void> {
 
   try {
     const config = getConfig()
-    if (!config.transcription.geminiApiKey) {
+    const provider = config.transcription.provider || 'gemini'
+    if (provider === 'gemini' && !config.transcription.geminiApiKey) {
       console.error('[Transcription] Cannot process queue: Gemini API key not configured')
 
       // Mark all pending items as failed with clear error message
@@ -128,6 +148,27 @@ async function processQueue(): Promise<void> {
       }
 
       return
+    } else if (provider === 'local-asr') {
+      const asrPath = config.transcription.localAsrPath
+      const runnerPath = asrPath ? join(asrPath, 'mcp_runner.py') : ''
+      if (!asrPath || !existsSync(runnerPath)) {
+        const error = `Local ASR runner not found: ${runnerPath || 'not configured'}`
+        console.error(`[Transcription] Cannot process queue: ${error}`)
+
+        const pendingItems = getQueueItems('pending')
+        const processingItems = getQueueItems('processing')
+        for (const item of [...pendingItems, ...processingItems]) {
+          updateQueueItem(item.id, 'failed', error)
+          updateRecordingTranscriptionStatus(item.recording_id, 'error')
+          notifyRenderer('transcription:failed', {
+            queueItemId: item.id,
+            recordingId: item.recording_id,
+            error
+          })
+        }
+
+        return
+      }
     }
     // spec-014: Retry failed items with max attempts
     // B-TXN-001: Exponential backoff before retrying failed items
@@ -136,6 +177,7 @@ async function processQueue(): Promise<void> {
       'Recording not found',
       'Recording file not found',
       'Gemini API key not configured',
+      'Local ASR runner not found',
       'no local file'
     ]
     const failedItems = getQueueItems('failed')
@@ -361,70 +403,65 @@ Only include detections with confidence >= 0.6.`
   }
 }
 
-async function transcribeRecording(
-  recordingId: string,
+interface LocalAsrSegment {
+  speaker?: string
+  start?: number
+  end?: number
+  text: string
+}
+
+interface RawTranscriptionResult {
+  fullText: string
+  provider: 'gemini' | 'local-asr'
+  model: string
+  language: string
+  speakers?: string
+}
+
+interface TranscriptAnalysis {
+  summary?: string
+  action_items?: string[]
+  topics?: string[]
+  key_points?: string[]
+  title_suggestion?: string
+  question_suggestions?: string[]
+  language?: string
+  selected_meeting_id?: string
+  meeting_confidence?: number
+  selection_reason?: string
+}
+
+async function transcribeWithGemini(
+  filePath: string,
+  meetingContext: string,
   progressCallback?: (stage: string, progress: number) => void
-): Promise<void> {
-  const recording = getRecordingById(recordingId)
-  if (!recording || !recording.file_path) {
-    throw new Error(`Recording not found or no local file: ${recordingId}`)
-  }
-
-  if (!existsSync(recording.file_path)) {
-    throw new Error(`Recording file not found: ${recording.file_path}`)
-  }
-
+): Promise<RawTranscriptionResult> {
   const config = getConfig()
   if (!config.transcription.geminiApiKey) {
     throw new Error('Gemini API key not configured')
   }
 
-  console.log(`Transcribing: ${recording.filename}`)
-  // AI-13: Use standard enum values matching Recording.transcription_status
-  updateRecordingTranscriptionStatus(recordingId, 'processing')
-
-  progressCallback?.('reading_file', 5) // spec-014: progress reporting
-
-  // Read the audio file asynchronously to avoid blocking the main process
-  const audioBuffer = await readFileAsync(recording.file_path)
+  progressCallback?.('reading_file', 5)
+  const audioBuffer = await readFileAsync(filePath)
   const base64Audio = audioBuffer.toString('base64')
 
-  // Determine MIME type
-  const ext = extname(recording.file_path).toLowerCase()
+  const ext = extname(filePath).toLowerCase()
   const mimeTypes: Record<string, string> = {
     '.wav': 'audio/wav',
     '.mp3': 'audio/mp3',
     '.m4a': 'audio/mp4',
     '.ogg': 'audio/ogg',
     '.webm': 'audio/webm',
-    '.hda': 'audio/mp3' // HiDock H1E outputs MPEG MP3 format
+    '.hda': 'audio/mp3'
   }
   const mimeType = mimeTypes[ext] || 'audio/wav'
 
-  // Initialize Gemini
   const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
-  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.0-flash-exp' })
+  const modelName = config.transcription.geminiModel || 'gemini-2.0-flash-exp'
+  const model = genAI.getGenerativeModel({ model: modelName })
 
-  // Find candidate meetings for this recording's time window
-  const candidateMeetings = findCandidateMeetingsForRecording(recordingId)
-  console.log(`Found ${candidateMeetings.length} candidate meetings for recording ${recordingId}`)
+  progressCallback?.('transcribing', 20)
 
-  // Build meeting context for better transcription
-  let meetingContext = ''
-  if (candidateMeetings.length > 0) {
-    meetingContext = `\n\nPOSSIBLE MEETING CONTEXT (use this to improve transcription accuracy):
-${candidateMeetings.map((m, i) => `
-Meeting ${i + 1}: "${m.subject}"
-  Time: ${new Date(m.start_time).toLocaleString()} - ${new Date(m.end_time).toLocaleString()}
-  ${m.organizer_name ? `Organizer: ${m.organizer_name}` : ''}
-  ${m.location ? `Location: ${m.location}` : ''}
-  ${m.description ? `Description: ${m.description.slice(0, 200)}...` : ''}
-`).join('\n')}`
-  }
-
-  progressCallback?.('transcribing', 20) // spec-014: progress reporting
-
-  // First, transcribe the audio with meeting context
   const transcriptionPrompt = `Transcribe this audio recording.
 The audio may be in Spanish or English - transcribe in the original language.
 Provide a clean, accurate transcription of all speech.
@@ -442,11 +479,137 @@ Return ONLY the transcription, no additional commentary.`
     { text: transcriptionPrompt }
   ])
 
-  const fullText = transcriptionResult.response.text()
+  return {
+    fullText: transcriptionResult.response.text(),
+    provider: 'gemini',
+    model: modelName,
+    language: config.transcription.language || 'unknown'
+  }
+}
 
-  progressCallback?.('analyzing', 50) // spec-014: progress reporting
+function pythonCommand(): string {
+  return process.platform === 'win32' ? 'python' : 'python3'
+}
 
-  // Build meeting selection prompt if there are multiple candidates
+async function transcribeWithLocalAsr(
+  filePath: string,
+  progressCallback?: (stage: string, progress: number) => void
+): Promise<RawTranscriptionResult> {
+  const config = getConfig()
+  const asrPath = config.transcription.localAsrPath || process.env.ASR_MCP_PATH
+  if (!asrPath) {
+    throw new Error('Local ASR path not configured')
+  }
+
+  const runnerPath = join(asrPath, 'mcp_runner.py')
+  if (!existsSync(runnerPath)) {
+    throw new Error(`Local ASR runner not found: ${runnerPath}`)
+  }
+
+  const language = (config.transcription.language || 'es').slice(0, 2).toLowerCase()
+  const vocabularyPath = config.transcription.localAsrVocabularyFile
+    ? (isAbsolute(config.transcription.localAsrVocabularyFile)
+        ? config.transcription.localAsrVocabularyFile
+        : join(asrPath, config.transcription.localAsrVocabularyFile))
+    : ''
+
+  const args = [
+    runnerPath,
+    'asr_mcp.cli',
+    filePath,
+    '--language',
+    language,
+    '--format',
+    'json',
+    '--num-beams',
+    String(config.transcription.localAsrNumBeams || 5)
+  ]
+
+  if (config.transcription.localAsrDiarize !== false) {
+    args.push('--diarize')
+  }
+
+  if (vocabularyPath && existsSync(vocabularyPath)) {
+    args.push('--vocabulary', vocabularyPath)
+  }
+
+  progressCallback?.('local_asr_starting', 10)
+  const { stdout, stderr } = await execFileBuffered(pythonCommand(), args, {
+    cwd: asrPath,
+    windowsHide: true,
+    maxBuffer: 50 * 1024 * 1024,
+    env: {
+      ...process.env,
+      HF_TOKEN: config.transcription.localAsrHfToken || process.env.HF_TOKEN || '',
+      ASR_VOCABULARY_FILE: vocabularyPath || process.env.ASR_VOCABULARY_FILE || ''
+    }
+  })
+
+  if (stderr) {
+    console.log(`[Local ASR] ${stderr.trim()}`)
+  }
+
+  progressCallback?.('local_asr_parsing', 45)
+
+  let parsed: {
+    text?: string
+    language?: string
+    segments?: LocalAsrSegment[]
+    error?: boolean
+    message?: string
+  }
+  try {
+    parsed = JSON.parse(stdout)
+  } catch (error) {
+    throw new Error(`Local ASR returned invalid JSON: ${error instanceof Error ? error.message : 'parse failed'}`)
+  }
+
+  if (parsed.error) {
+    throw new Error(parsed.message || 'Local ASR transcription failed')
+  }
+
+  const segments = Array.isArray(parsed.segments) ? parsed.segments : []
+  const fullText = segments.length > 0
+    ? segments
+        .filter((segment) => segment.text?.trim())
+        .map((segment) => {
+          const speaker = segment.speaker || 'Speaker'
+          return `${speaker}: ${segment.text.trim()}`
+        })
+        .join('\n')
+    : (parsed.text || '').trim()
+
+  if (!fullText) {
+    throw new Error('Local ASR returned an empty transcript')
+  }
+
+  return {
+    fullText,
+    provider: 'local-asr',
+    model: 'CohereLabs/cohere-transcribe-03-2026',
+    language: parsed.language || language,
+    speakers: segments.length > 0 ? JSON.stringify(segments) : undefined
+  }
+}
+
+async function analyzeTranscriptWithGemini(
+  fullText: string,
+  candidateMeetings: ReturnType<typeof findCandidateMeetingsForRecording>
+): Promise<TranscriptAnalysis> {
+  const config = getConfig()
+  if (!config.transcription.geminiApiKey) {
+    return {
+      summary: 'Local ASR transcript created. Configure Gemini to generate AI summary, action items, and meeting matching.',
+      action_items: [],
+      topics: [],
+      key_points: [],
+      language: config.transcription.language || 'unknown'
+    }
+  }
+
+  const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
+  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.0-flash-exp' })
+
   let meetingSelectionSection = ''
   if (candidateMeetings.length > 1) {
     meetingSelectionSection = `
@@ -459,7 +622,7 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
    Include in your response:
    "selected_meeting_id": "the meeting ID that best matches",
    "meeting_confidence": 0.0 to 1.0 (how confident you are),
-   "selection_reason": "why you selected this meeting"`
+   "selection_reason": "why you selected the meeting"`
   } else if (candidateMeetings.length === 1) {
     meetingSelectionSection = `
 5. Meeting Selection: There is one candidate meeting near this recording's time:
@@ -473,7 +636,6 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
    "selection_reason": "why you selected or rejected this meeting"`
   }
 
-  // Now analyze the transcription for summary, action items, etc.
   const analysisPrompt = `Analyze this meeting transcript and provide:
 1. A brief summary (2-3 sentences)
 2. A list of action items mentioned (as a JSON array of strings)
@@ -508,30 +670,58 @@ Respond in JSON format:
   const analysisResult = await model.generateContent(analysisPrompt)
   const analysisText = analysisResult.response.text()
 
-  // Parse the analysis JSON
-  let analysis: {
-    summary?: string
-    action_items?: string[]
-    topics?: string[]
-    key_points?: string[]
-    title_suggestion?: string
-    question_suggestions?: string[]
-    language?: string
-    selected_meeting_id?: string
-    meeting_confidence?: number
-    selection_reason?: string
-  } = {}
-
   try {
-    // Extract JSON from the response (might be wrapped in markdown code blocks)
     const jsonMatch = analysisText.match(/\{[\s\S]*\}/)
-    if (jsonMatch) {
-      analysis = JSON.parse(jsonMatch[0])
-    }
+    return jsonMatch ? JSON.parse(jsonMatch[0]) : {}
   } catch (e) {
     console.warn('Failed to parse analysis JSON:', e)
-    analysis = { summary: 'Analysis failed', language: 'unknown' }
+    return { summary: 'Analysis failed', language: 'unknown' }
   }
+}
+
+async function transcribeRecording(
+  recordingId: string,
+  progressCallback?: (stage: string, progress: number) => void
+): Promise<void> {
+  const recording = getRecordingById(recordingId)
+  if (!recording || !recording.file_path) {
+    throw new Error(`Recording not found or no local file: ${recordingId}`)
+  }
+
+  if (!existsSync(recording.file_path)) {
+    throw new Error(`Recording file not found: ${recording.file_path}`)
+  }
+
+  console.log(`Transcribing: ${recording.filename}`)
+  // AI-13: Use standard enum values matching Recording.transcription_status
+  updateRecordingTranscriptionStatus(recordingId, 'processing')
+
+  // Find candidate meetings for this recording's time window
+  const candidateMeetings = findCandidateMeetingsForRecording(recordingId)
+  console.log(`Found ${candidateMeetings.length} candidate meetings for recording ${recordingId}`)
+
+  // Build meeting context for better transcription
+  let meetingContext = ''
+  if (candidateMeetings.length > 0) {
+    meetingContext = `\n\nPOSSIBLE MEETING CONTEXT (use this to improve transcription accuracy):
+${candidateMeetings.map((m, i) => `
+Meeting ${i + 1}: "${m.subject}"
+  Time: ${new Date(m.start_time).toLocaleString()} - ${new Date(m.end_time).toLocaleString()}
+  ${m.organizer_name ? `Organizer: ${m.organizer_name}` : ''}
+  ${m.location ? `Location: ${m.location}` : ''}
+  ${m.description ? `Description: ${m.description.slice(0, 200)}...` : ''}
+`).join('\n')}`
+  }
+
+  const config = getConfig()
+  const transcriptionProvider = config.transcription.provider || 'gemini'
+  const rawTranscript = transcriptionProvider === 'local-asr'
+    ? await transcribeWithLocalAsr(recording.file_path, progressCallback)
+    : await transcribeWithGemini(recording.file_path, meetingContext, progressCallback)
+  const fullText = rawTranscript.fullText
+
+  progressCallback?.('analyzing', 50) // spec-014: progress reporting
+  const analysis = await analyzeTranscriptWithGemini(fullText, candidateMeetings)
 
   // Process AI meeting selection
   if (candidateMeetings.length > 0) {
@@ -571,16 +761,16 @@ Respond in JSON format:
     id: `trans_${recordingId}`,
     recording_id: recordingId,
     full_text: fullText,
-    language: analysis.language || 'unknown',
+    language: analysis.language || rawTranscript.language || 'unknown',
     summary: analysis.summary,
     action_items: analysis.action_items ? JSON.stringify(analysis.action_items) : undefined,
     topics: analysis.topics ? JSON.stringify(analysis.topics) : undefined,
     key_points: analysis.key_points ? JSON.stringify(analysis.key_points) : undefined,
     sentiment: undefined,
-    speakers: undefined,
+    speakers: rawTranscript.speakers,
     word_count: wordCount,
-    transcription_provider: 'gemini',
-    transcription_model: config.transcription.geminiModel,
+    transcription_provider: rawTranscript.provider,
+    transcription_model: rawTranscript.model,
     title_suggestion: analysis.title_suggestion,
     question_suggestions: analysis.question_suggestions ? JSON.stringify(analysis.question_suggestions) : undefined
   }

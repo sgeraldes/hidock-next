@@ -25,6 +25,8 @@ export interface AppConfig {
   version: string
   storage: {
     dataPath: string
+    recordingsPath?: string
+    transcriptsPath?: string
     maxRecordingsGB: number
   }
   calendar: {
@@ -34,9 +36,14 @@ export interface AppConfig {
     lastSyncAt: string | null
   }
   transcription: {
-    provider: 'gemini'
+    provider: 'gemini' | 'local-asr'
     geminiApiKey: string
     geminiModel: string
+    localAsrPath: string
+    localAsrHfToken: string
+    localAsrVocabularyFile: string
+    localAsrDiarize: boolean
+    localAsrNumBeams: number
     autoTranscribe: boolean
     language: string
   }
@@ -83,6 +90,11 @@ const DEFAULT_CONFIG: AppConfig = {
     provider: 'gemini',
     geminiApiKey: '',
     geminiModel: 'gemini-3-pro-preview', // Best model for audio transcription
+    localAsrPath: process.env.ASR_MCP_PATH || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
+    localAsrHfToken: process.env.HF_TOKEN || '',
+    localAsrVocabularyFile: 'vocabulary.json',
+    localAsrDiarize: true,
+    localAsrNumBeams: 5,
     autoTranscribe: true,
     language: 'es'
   },

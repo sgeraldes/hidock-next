@@ -1394,6 +1394,49 @@ export class JensenDevice {
     const totalExpected = expectedFileCount ?? fileCount?.count ?? 0
     onProgress?.(0, totalExpected)
 
+    const LISTFILES_STALL_TIMEOUT_MS = 10 * 60_000
+    let stallTimeoutId: ReturnType<typeof setTimeout> | null = null
+
+    const settlePartialFileList = (): void => {
+      const st = this.data[key] as FileListState | null
+      this.data[key] = null
+
+      // Replace handler with no-op absorber so late packets do not re-trigger anything.
+      this.handlers.set(CMD.GET_FILE_LIST, () => undefined)
+
+      let result: FileInfo[]
+      if (st && st.files.length > 0) {
+        result = st.files.filter(f => f.time !== null)
+        console.warn(
+          `[Jensen] listFiles stalled for ${LISTFILES_STALL_TIMEOUT_MS / 60_000} minutes — ` +
+          `returning ${result.length} partial files`
+        )
+      } else {
+        result = []
+        console.warn(
+          `[Jensen] listFiles stalled for ${LISTFILES_STALL_TIMEOUT_MS / 60_000} minutes — ` +
+          `no files parsed (handler called: ${st ? 'yes' : 'no'}, tailLen: ${st?.tailLen ?? 'N/A'})`
+        )
+      }
+
+      if (this.currentCommandTag) {
+        const pending = this.pendingPromises.get(this.currentCommandTag)
+        if (pending) {
+          if (pending.timeout) clearTimeout(pending.timeout)
+          pending.resolve(result)
+          this.pendingPromises.delete(this.currentCommandTag)
+        }
+        this.currentCommandTag = null
+        this.currentOperationName = null
+        this.sendNextCommand()
+      }
+    }
+
+    const armListFilesStallTimeout = (): void => {
+      if (stallTimeoutId) clearTimeout(stallTimeoutId)
+      stallTimeoutId = setTimeout(settlePartialFileList, LISTFILES_STALL_TIMEOUT_MS)
+    }
+
     // Register dynamic handler for GET_FILE_LIST (matches jensen.js handler registration)
     this.handlers.set(CMD.GET_FILE_LIST, (msg, device) => {
       const st = device.data[key] as FileListState | null
@@ -1415,6 +1458,10 @@ export class JensenDevice {
       }
 
       if (!st) return undefined // Lock released by timeout; absorb late packet
+
+      // The device can spend several minutes preparing and streaming large file lists.
+      // Treat only prolonged silence as a stall; do not enforce a short total deadline.
+      armListFilesStallTimeout()
 
       // Fix 3: Build working buffer = tail bytes from previous packet + current body
       const bodyLen = msg.body.length
@@ -1549,61 +1596,16 @@ export class JensenDevice {
       return undefined
     })
 
-    // Send command with no per-command timeout; the race below enforces the overall deadline.
+    // Send command with no per-command timeout; the stall watchdog only fires after prolonged silence.
     const commandPromise = this.sendCommand<FileInfo[]>(
       new JensenMessage(CMD.GET_FILE_LIST), undefined, 'listFiles')
+    armListFilesStallTimeout()
 
-    // Fix 4: Race the command against a 120-second hard timeout.
-    // On timeout, extract partial results, release the filelist lock, force-resolve the
-    // pending sendCommand promise, and unblock the queue — mirrors downloadFile abort pattern.
-    const LISTFILES_TIMEOUT_MS = 120_000
-    let timeoutId: ReturnType<typeof setTimeout> | null = null
-
-    const timeoutPromise = new Promise<FileInfo[] | null>((resolve) => {
-      timeoutId = setTimeout(() => {
-        // Extract partial results before cleanup
-        const st = this.data[key] as FileListState | null
-        this.data[key] = null // Release filelist lock
-
-        // Replace handler with no-op absorber so late packets don't re-trigger anything
-        this.handlers.set(CMD.GET_FILE_LIST, () => undefined)
-
-        // Build the result FIRST — before touching the command promise
-        let result: FileInfo[]
-        if (st && st.files.length > 0) {
-          result = st.files.filter(f => f.time !== null)
-          console.warn(`[Jensen] listFiles timeout after 120s — returning ${result.length} partial files`)
-        } else {
-          result = []
-          console.warn(`[Jensen] listFiles timeout after 120s — no files parsed (handler called: ${st ? 'yes' : 'no'}, tailLen: ${st?.tailLen ?? 'N/A'})`)
-        }
-
-        // Resolve the timeout promise FIRST so it wins Promise.race
-        resolve(result)
-
-        // THEN clean up the pending sendCommand promise and unblock the queue.
-        // Don't resolve it (would race with our resolve above) — just delete it.
-        if (this.currentCommandTag) {
-          const pending = this.pendingPromises.get(this.currentCommandTag)
-          if (pending) {
-            if (pending.timeout) clearTimeout(pending.timeout)
-            // Resolve with same result to avoid unhandled rejection
-            pending.resolve(result)
-            this.pendingPromises.delete(this.currentCommandTag)
-          }
-          this.currentCommandTag = null
-          this.currentOperationName = null
-          this.sendNextCommand()
-        }
-      }, LISTFILES_TIMEOUT_MS)
-    })
-
-    const result = await Promise.race([commandPromise, timeoutPromise])
-
-    // Cancel the timeout if the command completed normally
-    if (timeoutId) clearTimeout(timeoutId)
-
-    return result
+    try {
+      return await commandPromise
+    } finally {
+      if (stallTimeoutId) clearTimeout(stallTimeoutId)
+    }
   }
 
   // ================================================================

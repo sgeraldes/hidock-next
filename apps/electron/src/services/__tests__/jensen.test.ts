@@ -617,6 +617,38 @@ describe('JensenDevice', () => {
     })
   })
 
+  describe('listFiles timeout behavior', () => {
+    it('does not stop file listing at the old 120 second cutoff', async () => {
+      vi.useFakeTimers()
+
+      try {
+        device.versionNumber = 327733
+        ;(device as any).device = {
+          transferOut: vi.fn().mockResolvedValue({ status: 'ok', bytesWritten: 12 }),
+          transferIn: vi.fn(() => new Promise(() => {})),
+        }
+
+        let settled = false
+        const promise = device.listFiles().then((result) => {
+          settled = true
+          return result
+        })
+
+        await Promise.resolve()
+        await vi.advanceTimersByTimeAsync(120_001)
+
+        expect(settled).toBe(false)
+
+        await vi.advanceTimersByTimeAsync(480_000)
+
+        await expect(promise).resolves.toEqual([])
+        expect(settled).toBe(true)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
   // ============================================================
   // USB connect listener
   // ============================================================

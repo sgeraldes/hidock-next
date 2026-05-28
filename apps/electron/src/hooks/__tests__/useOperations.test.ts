@@ -58,6 +58,23 @@ global.window.electronAPI = {
     cancelAll: mockCancelAllDownloads
   },
   config: {
+    get: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        transcription: {
+          provider: 'gemini',
+          geminiApiKey: 'test-api-key',
+          geminiModel: 'gemini-3-pro-preview',
+          localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
+          localAsrHfToken: '',
+          localAsrVocabularyFile: 'vocabulary.json',
+          localAsrDiarize: true,
+          localAsrNumBeams: 5,
+          autoTranscribe: true,
+          language: 'es'
+        }
+      }
+    }),
     getValue: vi.fn().mockResolvedValue({ success: true, data: 'test-api-key' })
   }
 } as any
@@ -65,6 +82,23 @@ global.window.electronAPI = {
 describe('useOperations', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(window.electronAPI.config.get).mockResolvedValue({
+      success: true,
+      data: {
+        transcription: {
+          provider: 'gemini',
+          geminiApiKey: 'test-api-key',
+          geminiModel: 'gemini-3-pro-preview',
+          localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
+          localAsrHfToken: '',
+          localAsrVocabularyFile: 'vocabulary.json',
+          localAsrDiarize: true,
+          localAsrNumBeams: 5,
+          autoTranscribe: true,
+          language: 'es'
+        }
+      }
+    })
   })
 
   describe('queueTranscription', () => {
@@ -139,6 +173,47 @@ describe('useOperations', () => {
       expect(mockUpdateStatus).toHaveBeenCalledWith('rec-3', 'pending')
       expect(mockAddToQueueIPC).toHaveBeenCalledWith('rec-3')
       expect(mockAddToQueue).toHaveBeenCalledWith('queue-item-1', 'rec-3', 'eligible.wav')
+    })
+
+    it('queues local ASR transcription without a Gemini API key', async () => {
+      vi.mocked(window.electronAPI.config.get).mockResolvedValue({
+        success: true,
+        data: {
+          transcription: {
+            provider: 'local-asr',
+            geminiApiKey: '',
+            geminiModel: 'gemini-3-pro-preview',
+            localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
+            localAsrHfToken: 'hf_test',
+            localAsrVocabularyFile: 'vocabulary.json',
+            localAsrDiarize: true,
+            localAsrNumBeams: 5,
+            autoTranscribe: true,
+            language: 'es'
+          }
+        }
+      })
+      const { result } = renderHook(() => useOperations())
+
+      const eligible = {
+        id: 'rec-local',
+        filename: 'local.wav',
+        location: 'local-only' as const,
+        localPath: '/path/local.wav',
+        syncStatus: 'synced' as const,
+        transcriptionStatus: 'none' as const,
+        size: 1024,
+        duration: 60,
+        dateRecorded: new Date()
+      }
+
+      let success: boolean | undefined
+      await act(async () => {
+        success = await result.current.queueTranscription(eligible as any)
+      })
+
+      expect(success).toBe(true)
+      expect(mockAddToQueueIPC).toHaveBeenCalledWith('rec-local')
     })
   })
 

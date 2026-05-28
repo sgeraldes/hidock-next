@@ -224,6 +224,7 @@ export interface ElectronAPI {
   storage: {
     getInfo: () => Promise<any>
     openFolder: (folder: 'recordings' | 'transcripts' | 'data') => Promise<boolean>
+    selectFolder?: (currentPath?: string) => Promise<{ success: boolean; data?: string | null; error?: string }>
     openFile: (filePath: string) => Promise<{ success: boolean; error?: string }>
     revealInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>
     readRecording: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>
@@ -633,6 +634,7 @@ const electronAPI: ElectronAPI = {
   storage: {
     getInfo: () => callIPC('storage:get-info'),
     openFolder: (folder) => callIPC('storage:open-folder', folder),
+    selectFolder: (currentPath) => callIPC('storage:select-folder', currentPath),
     openFile: (filePath) => callIPC('storage:open-file', filePath),
     revealInFolder: (filePath) => callIPC('storage:reveal-in-folder', filePath),
     readRecording: (filePath) => callIPC('storage:read-recording', filePath),

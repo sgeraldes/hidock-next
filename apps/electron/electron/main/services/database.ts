@@ -1360,6 +1360,23 @@ function runMigrations(currentVersion: number): void {
   }
 }
 
+function stripLeadingSqlComments(sql: string): string {
+  return sql
+    .split('\n')
+    .filter(line => !line.trim().startsWith('--'))
+    .join('\n')
+    .trim()
+}
+
+function getTableColumns(database: SqlJsDatabase, tableName: string): string[] {
+  const tableInfo = database.exec(`PRAGMA table_info(${tableName})`)
+  if (tableInfo.length === 0 || !tableInfo[0].values) {
+    return []
+  }
+
+  return tableInfo[0].values.map(row => String(row[1]))
+}
+
 /**
  * Safe database initialization.
  * Performs a 4-phase boot sequence:
@@ -1386,7 +1403,7 @@ export async function initializeDatabase(): Promise<void> {
     // --- PHASE 1: CORE TABLES ---
     console.log('[Database] Phase 1: Ensuring core tables exist...')
     for (const sql of statements) {
-      if (sql.toUpperCase().startsWith('CREATE TABLE')) {
+      if (stripLeadingSqlComments(sql).toUpperCase().startsWith('CREATE TABLE')) {
         try {
           database.run(sql)
         } catch (e) {
@@ -1400,23 +1417,25 @@ export async function initializeDatabase(): Promise<void> {
     console.log('[Database] Phase 2: Aligning table structures...')
     
     // Repair Recordings
-    const recordingsInfo = database.exec("PRAGMA table_info(recordings)")
-    const recCols = recordingsInfo[0].values.map(col => col[1])
+    const recCols = getTableColumns(database, 'recordings')
     const recordingRepairs = [
       { name: 'migrated_to_capture_id', def: "TEXT" },
       { name: 'migration_status', def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
       { name: 'migrated_at', def: "TEXT" }
     ]
-    for (const col of recordingRepairs) {
-      if (!recCols.includes(col.name)) {
-        console.log(`[Database] Repairing recordings: adding ${col.name}`)
-        try { database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+    if (recCols.length > 0) {
+      for (const col of recordingRepairs) {
+        if (!recCols.includes(col.name)) {
+          console.log(`[Database] Repairing recordings: adding ${col.name}`)
+          try { database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+        }
       }
+    } else {
+      console.warn('[Database] recordings table unavailable during structural repair; skipping recordings repair')
     }
 
     // Repair Knowledge Captures
-    const captureInfo = database.exec("PRAGMA table_info(knowledge_captures)")
-    const capCols = captureInfo[0].values.map(col => col[1])
+    const capCols = getTableColumns(database, 'knowledge_captures')
     const knowledgeRepairs = [
       { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
       { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
@@ -1431,11 +1450,15 @@ export async function initializeDatabase(): Promise<void> {
       { name: 'correlation_method', def: "correlation_method TEXT" },
       { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
     ]
-    for (const col of knowledgeRepairs) {
-      if (!capCols.includes(col.name)) {
-        console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`)
-        try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch (e) {}
+    if (capCols.length > 0) {
+      for (const col of knowledgeRepairs) {
+        if (!capCols.includes(col.name)) {
+          console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`)
+          try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch (e) {}
+        }
       }
+    } else {
+      console.warn('[Database] knowledge_captures table unavailable during structural repair; skipping capture repair')
     }
 
     // Repair transcription_queue (spec-014: retry persistence and real-time progress)

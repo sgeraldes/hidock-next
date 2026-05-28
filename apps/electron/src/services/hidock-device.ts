@@ -1104,6 +1104,9 @@ class HiDockDeviceService {
 
         return this.cachedRecordings ?? []
       } finally {
+        if (this.state.connected && this.connectionStatus.step === 'counting-files') {
+          this.updateStatus('ready', 'Device ready', 100)
+        }
         this.listRecordingsLock = false
         this.listRecordingsPromise = null
       }

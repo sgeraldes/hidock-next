@@ -173,6 +173,37 @@ describe('JensenDevice (main process)', () => {
     expect(device.getLockHolder()).toBeNull()
   })
 
+  it('listFiles does not stop at the old 120 second cutoff', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const device = new JensenDevice()
+      device.versionNumber = 327733
+      ;(device as any).device = {
+        transferOut: vi.fn().mockResolvedValue({ status: 'ok', bytesWritten: 12 }),
+        transferIn: vi.fn(() => new Promise(() => {})),
+      }
+
+      let settled = false
+      const promise = device.listFiles().then((result) => {
+        settled = true
+        return result
+      })
+
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(120_001)
+
+      expect(settled).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(480_000)
+
+      await expect(promise).resolves.toEqual([])
+      expect(settled).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // -------------------------------------------------------------------------
   // Protocol — JensenMessage packet building
   // -------------------------------------------------------------------------
