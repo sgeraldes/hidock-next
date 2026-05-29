@@ -47,7 +47,7 @@ export function Settings() {
   const [syncInterval, setSyncInterval] = useState(15)
   const [transcriptionProvider, setTranscriptionProvider] = useState<'gemini' | 'local-asr' | 'vibevoice'>('gemini')
   const [geminiApiKey, setGeminiApiKey] = useState('')
-  const [geminiModel, setGeminiModel] = useState('gemini-3-pro-preview')
+  const [geminiModel, setGeminiModel] = useState('gemini-2.5-flash')
   const [localAsrPath, setLocalAsrPath] = useState('G:\\Code\\claude-plugins\\plugins\\mcp-asr')
   const [localAsrHfToken, setLocalAsrHfToken] = useState('')
   const [localAsrVocabularyFile, setLocalAsrVocabularyFile] = useState('vocabulary.json')
@@ -69,12 +69,10 @@ export function Settings() {
   // Available Gemini models for transcription (audio-capable)
   // From: https://ai.google.dev/gemini-api/docs/models
   const GEMINI_MODELS = [
-    // Gemini 3 Series
-    { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro Preview (Best quality)' },
-    { value: 'gemini-3-pro-image-preview', label: 'Gemini 3 Pro Image Preview' },
+    // Gemini 3 Series (note: gemini-3-pro-preview generateContent was deprecated/removed)
     { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview (Fast)' },
     // Gemini 2.5 Pro Series
-    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Stable)' },
+    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (Best quality)' },
     { value: 'gemini-2.5-pro-preview-tts', label: 'Gemini 2.5 Pro TTS Preview' },
     // Gemini 2.5 Flash Series
     { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Stable)' },
@@ -166,7 +164,7 @@ export function Settings() {
     return (
       transcriptionProvider !== (config.transcription.provider || 'gemini') ||
       geminiApiKey !== config.transcription.geminiApiKey ||
-      geminiModel !== (config.transcription.geminiModel || 'gemini-3-pro-preview') ||
+      geminiModel !== (config.transcription.geminiModel || 'gemini-2.5-flash') ||
       localAsrPath !== (config.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr') ||
       localAsrHfToken !== (config.transcription.localAsrHfToken || '') ||
       localAsrVocabularyFile !== (config.transcription.localAsrVocabularyFile || 'vocabulary.json') ||
@@ -208,7 +206,7 @@ export function Settings() {
       setSyncInterval(config.calendar.syncIntervalMinutes)
       setTranscriptionProvider(config.transcription.provider || 'gemini')
       setGeminiApiKey(config.transcription.geminiApiKey)
-      setGeminiModel(config.transcription.geminiModel || 'gemini-3-pro-preview')
+      setGeminiModel(config.transcription.geminiModel || 'gemini-2.5-flash')
       setLocalAsrPath(config.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr')
       setLocalAsrHfToken(config.transcription.localAsrHfToken || '')
       setLocalAsrVocabularyFile(config.transcription.localAsrVocabularyFile || 'vocabulary.json')
@@ -305,7 +303,7 @@ export function Settings() {
 
     // Store previous values for rollback
     const previousApiKey = config?.transcription.geminiApiKey || ''
-    const previousModel = config?.transcription.geminiModel || 'gemini-3-pro-preview'
+    const previousModel = config?.transcription.geminiModel || 'gemini-2.5-flash'
     const previousProvider = config?.transcription.provider || 'gemini'
     const previousLocalAsrPath = config?.transcription.localAsrPath || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr'
     const previousLocalAsrHfToken = config?.transcription.localAsrHfToken || ''

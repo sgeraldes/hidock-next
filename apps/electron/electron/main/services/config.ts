@@ -93,7 +93,7 @@ const DEFAULT_CONFIG: AppConfig = {
   transcription: {
     provider: 'gemini',
     geminiApiKey: '',
-    geminiModel: 'gemini-3-pro-preview', // Best model for audio transcription
+    geminiModel: 'gemini-2.5-flash', // gemini-3-pro-preview generateContent is deprecated (404); 2.5-flash is current, audio-capable, 64k output
     localAsrPath: process.env.ASR_MCP_PATH || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
     localAsrHfToken: process.env.HF_TOKEN || '',
     localAsrVocabularyFile: 'vocabulary.json',
@@ -101,7 +101,7 @@ const DEFAULT_CONFIG: AppConfig = {
     localAsrNumBeams: 5,
     vibevoiceModelId: process.env.VIBEVOICE_MODEL_ID || 'microsoft/VibeVoice-ASR',
     vibevoiceDevice: process.env.ASR_DEVICE || 'cuda:0',
-    vibevoiceAttn: process.env.VIBEVOICE_ATTN || 'flash_attention_2',
+    vibevoiceAttn: process.env.VIBEVOICE_ATTN || 'sdpa', // VibeVoice-ASR supports neither flash_attention_2 (not built on Windows) nor flex_attention (unsupported arch); both silently fall back to sdpa, so use it directly
     autoTranscribe: true,
     language: 'es'
   },

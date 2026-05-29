@@ -171,7 +171,7 @@ async function processQueue(): Promise<void> {
   if (isProcessing) return
 
   // spec-005: Acquire mutex lock to prevent concurrent processing
-  const processId = `proc_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`
+  const processId = `proc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   const lockAcquired = acquireTranscriptionLock(processId)
   if (!lockAcquired) {
     // Throttle to once per 60s — this fires every 10s during active transcription, which is expected
@@ -451,7 +451,7 @@ Only include detections with confidence >= 0.6.`
 
   try {
     const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
-    const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.0-flash-exp' })
+    const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.5-flash' })
 
     const result = await model.generateContent(prompt)
     const responseText = result.response.text()
@@ -530,7 +530,7 @@ async function transcribeWithGemini(
   const mimeType = mimeTypes[ext] || 'audio/wav'
 
   const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
-  const modelName = config.transcription.geminiModel || 'gemini-2.0-flash-exp'
+  const modelName = config.transcription.geminiModel || 'gemini-2.5-flash'
   const model = genAI.getGenerativeModel({ model: modelName })
 
   progressCallback?.('transcribing', 20)
@@ -721,7 +721,7 @@ async function transcribeWithVibeVoice(
       ASR_VOCABULARY_FILE: vocabularyPath || process.env.ASR_VOCABULARY_FILE || '',
       VIBEVOICE_MODEL_ID: config.transcription.vibevoiceModelId || process.env.VIBEVOICE_MODEL_ID || 'microsoft/VibeVoice-ASR',
       ASR_DEVICE: config.transcription.vibevoiceDevice || process.env.ASR_DEVICE || 'cuda:0',
-      VIBEVOICE_ATTN: config.transcription.vibevoiceAttn || process.env.VIBEVOICE_ATTN || 'flex_attention'
+      VIBEVOICE_ATTN: config.transcription.vibevoiceAttn || process.env.VIBEVOICE_ATTN || 'sdpa'
     },
     logPrefix: '[VibeVoice]',
     onStderrLine: (line) => {
@@ -804,7 +804,7 @@ async function analyzeTranscriptWithGemini(
   }
 
   const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
-  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.0-flash-exp' })
+  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.5-flash' })
 
   let meetingSelectionSection = ''
   if (candidateMeetings.length > 1) {
@@ -1002,7 +1002,7 @@ Meeting ${i + 1}: "${m.subject}"
     const VALID_TEMPLATE_IDS = ['meeting_minutes', 'interview_feedback', 'project_status', 'action_items']
 
     for (const detection of detections) {
-      const actionableId = `act_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      const actionableId = `act_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`
 
       // Sanitize template ID: fall back to 'meeting_minutes' if AI suggests an invalid one
       const sanitizedTemplate = detection.suggestedTemplate && VALID_TEMPLATE_IDS.includes(detection.suggestedTemplate)
