@@ -46,6 +46,37 @@ function broadcast(channel: string, payload?: unknown): void {
 
 export function registerJensenHandlers(): void {
   // -------------------------------------------------------------------------
+  // Connection-state push events
+  //
+  // The renderer (JensenIpcClient) keeps no device state of its own — it relies
+  // on these broadcasts to know whether the device is connected and to fire the
+  // renderer-side onconnect/ondisconnect callbacks. The device fires onconnect
+  // after a successful (auto-)connect and ondisconnect on disconnect / physical
+  // unplug; explicit operations also push state below.
+  // -------------------------------------------------------------------------
+
+  const device = getJensenDevice()
+
+  const sendState = (): void => {
+    broadcast('jensen:state-changed', {
+      connected: device.isConnected(),
+      model: device.getModel(),
+      serialNumber: device.serialNumber,
+      versionCode: device.versionCode,
+      versionNumber: device.versionNumber,
+    })
+  }
+
+  device.onconnect = () => {
+    broadcast('jensen:connect-event')
+    sendState()
+  }
+  device.ondisconnect = () => {
+    broadcast('jensen:disconnect-event')
+    sendState()
+  }
+
+  // -------------------------------------------------------------------------
   // Core device operations
   // -------------------------------------------------------------------------
 
@@ -54,6 +85,8 @@ export function registerJensenHandlers(): void {
       return await getJensenDevice().connect()
     } catch {
       return null
+    } finally {
+      sendState()
     }
   })
 
@@ -62,6 +95,8 @@ export function registerJensenHandlers(): void {
       return await getJensenDevice().tryConnect()
     } catch {
       return null
+    } finally {
+      sendState()
     }
   })
 
@@ -71,6 +106,8 @@ export function registerJensenHandlers(): void {
       return null
     } catch {
       return null
+    } finally {
+      sendState()
     }
   })
 
@@ -79,6 +116,8 @@ export function registerJensenHandlers(): void {
       return await getJensenDevice().reset()
     } catch {
       return null
+    } finally {
+      sendState()
     }
   })
 

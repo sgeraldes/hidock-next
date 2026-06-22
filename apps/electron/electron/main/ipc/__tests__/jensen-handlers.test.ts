@@ -510,4 +510,47 @@ describe('registerJensenHandlers', () => {
     const passedDate = mockJensen.setTime.mock.calls[0][0]
     expect(passedDate).toBeInstanceOf(Date)
   })
+
+  // -------------------------------------------------------------------------
+  // Connection-state broadcasts (consumed by the renderer JensenIpcClient)
+  // -------------------------------------------------------------------------
+
+  describe('connection-state push events', () => {
+    it('wires device.onconnect / device.ondisconnect on registration', () => {
+      expect(typeof mockJensen.onconnect).toBe('function')
+      expect(typeof mockJensen.ondisconnect).toBe('function')
+    })
+
+    it('device connect fires jensen:connect-event + jensen:state-changed', () => {
+      mockJensen.isConnected.mockReturnValue(true)
+      mockJensen.onconnect()
+      const channels = broadcastSendCalls.map(([c]) => c)
+      expect(channels).toContain('jensen:connect-event')
+      const state = broadcastSendCalls.find(([c]) => c === 'jensen:state-changed')
+      expect(state?.[1]).toMatchObject({ connected: true })
+    })
+
+    it('device disconnect fires jensen:disconnect-event + jensen:state-changed', () => {
+      mockJensen.isConnected.mockReturnValue(false)
+      mockJensen.ondisconnect()
+      const channels = broadcastSendCalls.map(([c]) => c)
+      expect(channels).toContain('jensen:disconnect-event')
+      const state = broadcastSendCalls.find(([c]) => c === 'jensen:state-changed')
+      expect(state?.[1]).toMatchObject({ connected: false })
+    })
+
+    it('jensen:connect handler broadcasts state afterwards', async () => {
+      mockJensen.connect.mockResolvedValue(true)
+      mockJensen.isConnected.mockReturnValue(true)
+      await mockHandlers['jensen:connect'](makeEvent())
+      const channels = broadcastSendCalls.map(([c]) => c)
+      expect(channels).toContain('jensen:state-changed')
+    })
+
+    it('jensen:disconnect handler broadcasts state even though it returns null', async () => {
+      await mockHandlers['jensen:disconnect'](makeEvent())
+      const channels = broadcastSendCalls.map(([c]) => c)
+      expect(channels).toContain('jensen:state-changed')
+    })
+  })
 })

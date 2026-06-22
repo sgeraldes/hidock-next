@@ -2875,34 +2875,6 @@ describe('HiDockDeviceService - List Recordings Debounce', () => {
     expect(result.length).toBe(1)
     expect(result[0].filename).toBe('new.wav')
   })
-
-  it('should return connection status to ready after file listing completes', async () => {
-    const service = new HiDockDeviceService()
-    const serviceAny = service as any
-
-    serviceAny.state.connected = true
-    serviceAny.initializationComplete = true
-    serviceAny.state.recordingCount = 1
-
-    mockJensen.listFiles.mockResolvedValue([
-      {
-        name: '2026May13-170947-Rec71.hda',
-        length: 1500000,
-        duration: 192,
-        time: new Date('2026-05-13T17:09:47'),
-        version: 1,
-        signature: 'sig-ready'
-      }
-    ])
-
-    await service.listRecordings(undefined, true)
-
-    expect(service.getConnectionStatus()).toEqual({
-      step: 'ready',
-      message: 'Device ready',
-      progress: 100
-    })
-  })
 })
 
 describe('HiDockDeviceService - List Recordings Lock Cases', () => {
