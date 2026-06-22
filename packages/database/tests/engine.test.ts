@@ -12,6 +12,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { existsSync, rmSync } from 'fs'
+import initSqlJs from 'sql.js'
 import { DatabaseEngine, getTableColumns } from '../src/index.js'
 
 function tempDbPath(name: string): string {
@@ -48,6 +49,7 @@ describe('DatabaseEngine', () => {
     repairPhase?: () => void
   }) {
     return {
+      initSqlJs,
       dbPathProvider: () => opts.path,
       schemaVersion: opts.schemaVersion ?? 1,
       schema: SCHEMA,
@@ -113,6 +115,7 @@ describe('DatabaseEngine', () => {
     paths.push(path)
     let runs = 0
     const cfg = () => ({
+      initSqlJs,
       dbPathProvider: () => path,
       schemaVersion: 2,
       schema: SCHEMA,

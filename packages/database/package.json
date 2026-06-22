@@ -28,12 +28,13 @@
     "node": ">=18.0.0"
   },
   "license": "MIT",
-  "dependencies": {
+  "peerDependencies": {
     "sql.js": "^1.11.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/sql.js": "^1.4.9",
+    "@types/sql.js": "1.4.9",
+    "sql.js": "^1.11.0",
     "tsup": "^8.5.1",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

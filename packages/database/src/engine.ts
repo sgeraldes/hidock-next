@@ -15,12 +15,30 @@
  *   4. Full Schema       — re-run all statements to apply indexes/constraints
  */
 
-import initSqlJs, { type Database as SqlJsDatabase } from 'sql.js'
+import type { Database as SqlJsDatabase } from 'sql.js'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 
 export type { SqlJsDatabase }
 
+/**
+ * Minimal shape of the sql.js module returned by initSqlJs().
+ *
+ * The Database constructor's return is intentionally `unknown` (cast to
+ * SqlJsDatabase internally) so this contract is independent of the consumer's
+ * exact `@types/sql.js` version — any compatible sql.js loader is accepted.
+ */
+export interface SqlJsStatic {
+  Database: new (data?: ArrayLike<number> | Buffer | null) => unknown
+}
+
+/** The sql.js loader (its default export). Injected so the consumer owns the
+ *  single sql.js instance — keeps the engine free of a bundled sql.js and lets
+ *  consumers mock it in tests. */
+export type InitSqlJs = () => Promise<SqlJsStatic>
+
 export interface DatabaseEngineConfig {
+  /** sql.js loader (the `initSqlJs` default export from the consuming app). */
+  initSqlJs: InitSqlJs
   /** Returns the absolute path to the .sqlite file (resolved at init time). */
   dbPathProvider: () => string
   /** Target schema version the app expects. */
@@ -69,11 +87,13 @@ export class DatabaseEngine {
     this.dbPath = this.config.dbPathProvider()
 
     try {
-      const SQL = await initSqlJs()
+      const SQL = await this.config.initSqlJs()
+      // Cast the loosely-typed (version-independent) Database handle back to the
+      // sql.js Database type the engine and consumers operate on.
       if (existsSync(this.dbPath)) {
-        this.db = new SQL.Database(readFileSync(this.dbPath))
+        this.db = new SQL.Database(readFileSync(this.dbPath)) as SqlJsDatabase
       } else {
-        this.db = new SQL.Database()
+        this.db = new SQL.Database() as SqlJsDatabase
       }
 
       const database = this.getDatabase()

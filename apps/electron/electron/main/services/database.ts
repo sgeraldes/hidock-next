@@ -1,11 +1,9 @@
-import initSqlJs, { Database as SqlJsDatabase } from 'sql.js'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import initSqlJs from 'sql.js'
+import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { getDatabasePath } from './file-storage'
-
-let db: SqlJsDatabase | null = null
-let dbPath: string = ''
+import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
 
 const SCHEMA_VERSION = 24
 
@@ -1349,210 +1347,128 @@ const MIGRATIONS: Record<number, () => void> = {
 
 }
 
-function runMigrations(currentVersion: number): void {
-  for (let v = currentVersion + 1; v <= SCHEMA_VERSION; v++) {
-    const migration = MIGRATIONS[v]
-    if (migration) {
-      console.log(`Running migration to v${v}...`)
-      migration()
+/**
+ * Phase-2 structural repair (app-specific). Invoked by the engine on every boot,
+ * after core tables and before migrations: force-adds any columns the current
+ * code requires but an older on-disk schema may lack. Idempotent.
+ */
+function repairPhase(): void {
+  const database = getDatabase()
+
+  // Repair Recordings
+  const recCols = getTableColumns(database, 'recordings')
+  const recordingRepairs = [
+    { name: 'migrated_to_capture_id', def: "TEXT" },
+    { name: 'migration_status', def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
+    { name: 'migrated_at', def: "TEXT" }
+  ]
+  if (recCols.length > 0) {
+    for (const col of recordingRepairs) {
+      if (!recCols.includes(col.name)) {
+        console.log(`[Database] Repairing recordings: adding ${col.name}`)
+        try { database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+      }
     }
-    // Record the migration
-    getDatabase().run('INSERT OR REPLACE INTO schema_version (version) VALUES (?)', [v])
-  }
-}
-
-function stripLeadingSqlComments(sql: string): string {
-  return sql
-    .split('\n')
-    .filter(line => !line.trim().startsWith('--'))
-    .join('\n')
-    .trim()
-}
-
-function getTableColumns(database: SqlJsDatabase, tableName: string): string[] {
-  const tableInfo = database.exec(`PRAGMA table_info(${tableName})`)
-  if (tableInfo.length === 0 || !tableInfo[0].values) {
-    return []
+  } else {
+    console.warn('[Database] recordings table unavailable during structural repair; skipping recordings repair')
   }
 
-  return tableInfo[0].values.map(row => String(row[1]))
+  // Repair Knowledge Captures
+  const capCols = getTableColumns(database, 'knowledge_captures')
+  const knowledgeRepairs = [
+    { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
+    { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
+    { name: 'quality_rating', def: "quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated'" },
+    { name: 'quality_confidence', def: "quality_confidence REAL" },
+    { name: 'quality_assessed_at', def: "quality_assessed_at TEXT" },
+    { name: 'storage_tier', def: "storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot'" },
+    { name: 'retention_days', def: "retention_days INTEGER" },
+    { name: 'expires_at', def: "expires_at TEXT" },
+    { name: 'meeting_id', def: "meeting_id TEXT REFERENCES meetings(id)" },
+    { name: 'correlation_confidence', def: "correlation_confidence REAL" },
+    { name: 'correlation_method', def: "correlation_method TEXT" },
+    { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
+  ]
+  if (capCols.length > 0) {
+    for (const col of knowledgeRepairs) {
+      if (!capCols.includes(col.name)) {
+        console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`)
+        try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch (e) {}
+      }
+    }
+  } else {
+    console.warn('[Database] knowledge_captures table unavailable during structural repair; skipping capture repair')
+  }
+
+  // Repair transcription_queue (spec-014: retry persistence and real-time progress)
+  const queueInfo = database.exec("PRAGMA table_info(transcription_queue)")
+  if (queueInfo.length > 0 && queueInfo[0].values) {
+    const queueCols = queueInfo[0].values.map(col => col[1])
+    const queueRepairs = [
+      { name: 'retry_count', def: 'INTEGER DEFAULT 0' },
+      { name: 'progress', def: 'INTEGER DEFAULT 0' },
+      { name: 'provider', def: 'TEXT' }
+    ]
+    for (const col of queueRepairs) {
+      if (!queueCols.includes(col.name)) {
+        console.log(`[Database] Repairing transcription_queue: adding ${col.name}`)
+        try { database.run(`ALTER TABLE transcription_queue ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+      }
+    }
+  }
+
+  // Repair chat_messages (AI-15: columns referenced by assistant mapper)
+  const chatMsgInfo = database.exec("PRAGMA table_info(chat_messages)")
+  if (chatMsgInfo.length > 0 && chatMsgInfo[0].values) {
+    const chatCols = chatMsgInfo[0].values.map(col => col[1])
+    const chatRepairs = [
+      { name: 'edited_at', def: 'TEXT' },
+      { name: 'original_content', def: 'TEXT' },
+      { name: 'created_output_id', def: 'TEXT' },
+      { name: 'saved_as_insight_id', def: 'TEXT' }
+    ]
+    for (const col of chatRepairs) {
+      if (!chatCols.includes(col.name)) {
+        console.log(`[Database] Repairing chat_messages: adding ${col.name}`)
+        try { database.run(`ALTER TABLE chat_messages ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+      }
+    }
+  }
 }
 
 /**
- * Safe database initialization.
- * Performs a 4-phase boot sequence:
- * 1. Core Tables: Ensure basic table structure exists.
- * 2. Structural Repair: Force-add missing columns required by the code.
- * 3. Migrations: Handle version-specific data transformations.
- * 4. Full Schema: Apply indexes and constraints safely.
+ * Shared SQLite engine, configured with this app's schema, version, migrations,
+ * and structural-repair callback. Owns the sql.js lifecycle and the 4-phase boot.
+ */
+const engine = new DatabaseEngine({
+  initSqlJs,
+  dbPathProvider: getDatabasePath,
+  schemaVersion: SCHEMA_VERSION,
+  schema: SCHEMA,
+  migrations: MIGRATIONS,
+  repairPhase,
+})
+
+/**
+ * Safe database initialization. Delegates the 4-phase boot sequence
+ * (core tables → structural repair → migrations → full schema/indexes) to the
+ * shared @hidock/database engine, configured above with this app's schema,
+ * version, migrations, and repairPhase.
  */
 export async function initializeDatabase(): Promise<void> {
-  dbPath = getDatabasePath()
-
-  try {
-    const SQL = await initSqlJs()
-    if (existsSync(dbPath)) {
-      const fileBuffer = readFileSync(dbPath)
-      db = new SQL.Database(fileBuffer)
-    } else {
-      db = new SQL.Database()
-    }
-
-    const database = getDatabase()
-    const statements = SCHEMA.split(';').map(s => s.trim()).filter(s => s.length > 0)
-
-    // --- PHASE 1: CORE TABLES ---
-    console.log('[Database] Phase 1: Ensuring core tables exist...')
-    for (const sql of statements) {
-      if (stripLeadingSqlComments(sql).toUpperCase().startsWith('CREATE TABLE')) {
-        try {
-          database.run(sql)
-        } catch (e) {
-          console.warn(`[Database] Table creation warning: ${(e as Error).message}`)
-        }
-      }
-    }
-
-    // --- PHASE 2: MANDATORY STRUCTURAL REPAIR ---
-    // This runs on EVERY boot to ensure parity between code and disk.
-    console.log('[Database] Phase 2: Aligning table structures...')
-    
-    // Repair Recordings
-    const recCols = getTableColumns(database, 'recordings')
-    const recordingRepairs = [
-      { name: 'migrated_to_capture_id', def: "TEXT" },
-      { name: 'migration_status', def: "TEXT CHECK(migration_status IN ('pending', 'migrated', 'skipped', 'error')) DEFAULT 'pending'" },
-      { name: 'migrated_at', def: "TEXT" }
-    ]
-    if (recCols.length > 0) {
-      for (const col of recordingRepairs) {
-        if (!recCols.includes(col.name)) {
-          console.log(`[Database] Repairing recordings: adding ${col.name}`)
-          try { database.run(`ALTER TABLE recordings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
-        }
-      }
-    } else {
-      console.warn('[Database] recordings table unavailable during structural repair; skipping recordings repair')
-    }
-
-    // Repair Knowledge Captures
-    const capCols = getTableColumns(database, 'knowledge_captures')
-    const knowledgeRepairs = [
-      { name: 'category', def: "category TEXT CHECK(category IN ('meeting', 'interview', '1:1', 'brainstorm', 'note', 'other')) DEFAULT 'meeting'" },
-      { name: 'status', def: "status TEXT CHECK(status IN ('processing', 'ready', 'enriched')) DEFAULT 'ready'" },
-      { name: 'quality_rating', def: "quality_rating TEXT CHECK(quality_rating IN ('valuable', 'archived', 'low-value', 'garbage', 'unrated')) DEFAULT 'unrated'" },
-      { name: 'quality_confidence', def: "quality_confidence REAL" },
-      { name: 'quality_assessed_at', def: "quality_assessed_at TEXT" },
-      { name: 'storage_tier', def: "storage_tier TEXT CHECK(storage_tier IN ('hot', 'cold', 'expiring', 'deleted')) DEFAULT 'hot'" },
-      { name: 'retention_days', def: "retention_days INTEGER" },
-      { name: 'expires_at', def: "expires_at TEXT" },
-      { name: 'meeting_id', def: "meeting_id TEXT REFERENCES meetings(id)" },
-      { name: 'correlation_confidence', def: "correlation_confidence REAL" },
-      { name: 'correlation_method', def: "correlation_method TEXT" },
-      { name: 'source_recording_id', def: "source_recording_id TEXT REFERENCES recordings(id)" }
-    ]
-    if (capCols.length > 0) {
-      for (const col of knowledgeRepairs) {
-        if (!capCols.includes(col.name)) {
-          console.log(`[Database] Repairing knowledge_captures: adding ${col.name}`)
-          try { database.run(`ALTER TABLE knowledge_captures ADD COLUMN ${col.def}`) } catch (e) {}
-        }
-      }
-    } else {
-      console.warn('[Database] knowledge_captures table unavailable during structural repair; skipping capture repair')
-    }
-
-    // Repair transcription_queue (spec-014: retry persistence and real-time progress)
-    const queueInfo = database.exec("PRAGMA table_info(transcription_queue)")
-    if (queueInfo.length > 0 && queueInfo[0].values) {
-      const queueCols = queueInfo[0].values.map(col => col[1])
-      const queueRepairs = [
-        { name: 'retry_count', def: 'INTEGER DEFAULT 0' },
-        { name: 'progress', def: 'INTEGER DEFAULT 0' },
-        { name: 'provider', def: 'TEXT' }
-      ]
-      for (const col of queueRepairs) {
-        if (!queueCols.includes(col.name)) {
-          console.log(`[Database] Repairing transcription_queue: adding ${col.name}`)
-          try { database.run(`ALTER TABLE transcription_queue ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
-        }
-      }
-    }
-
-    // Repair chat_messages (AI-15: columns referenced by assistant mapper)
-    const chatMsgInfo = database.exec("PRAGMA table_info(chat_messages)")
-    if (chatMsgInfo.length > 0 && chatMsgInfo[0].values) {
-      const chatCols = chatMsgInfo[0].values.map(col => col[1])
-      const chatRepairs = [
-        { name: 'edited_at', def: 'TEXT' },
-        { name: 'original_content', def: 'TEXT' },
-        { name: 'created_output_id', def: 'TEXT' },
-        { name: 'saved_as_insight_id', def: 'TEXT' }
-      ]
-      for (const col of chatRepairs) {
-        if (!chatCols.includes(col.name)) {
-          console.log(`[Database] Repairing chat_messages: adding ${col.name}`)
-          try { database.run(`ALTER TABLE chat_messages ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
-        }
-      }
-    }
-
-    // --- PHASE 3: VERSIONED MIGRATIONS ---
-    const versionResult = database.exec('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    const currentVersion = versionResult.length > 0 && versionResult[0].values.length > 0
-        ? (versionResult[0].values[0][0] as number)
-        : 0
-
-    if (currentVersion < SCHEMA_VERSION) {
-      console.log(`[Database] Phase 3: Migrating v${currentVersion} -> v${SCHEMA_VERSION}`)
-      runMigrations(currentVersion)
-    } else if (currentVersion === 0) {
-      database.run('INSERT INTO schema_version (version) VALUES (?)', [SCHEMA_VERSION])
-    }
-
-    // --- PHASE 4: FULL SCHEMA (INDEXES & CONSTRAINTS) ---
-    console.log('[Database] Phase 4: Finalizing schema and indexes...')
-    for (const sql of statements) {
-      try {
-        database.run(sql)
-      } catch (e) {
-        // Log but don't crash the boot if a statement (like an existing index) fails
-        const msg = (e as Error).message
-        if (!msg.includes('already exists') && !msg.includes('duplicate column name')) {
-          console.warn(`[Database] Schema statement warning: ${msg}`)
-        }
-      }
-    }
-
-    saveDatabase()
-    console.log(`[Database] Initialization complete (schema v${SCHEMA_VERSION})`)
-  } catch (error) {
-    console.error('[Database] FATAL initialization error:', error)
-    throw error
-  }
+  await engine.initialize()
 }
 
 export function saveDatabase(): void {
-  if (db && dbPath) {
-    const data = db.export()
-    const buffer = Buffer.from(data)
-    writeFileSync(dbPath, buffer)
-  }
+  engine.saveDatabase()
 }
 
 export function getDatabase(): SqlJsDatabase {
-  if (!db) {
-    throw new Error('Database not initialized')
-  }
-  return db
+  return engine.getDatabase()
 }
 
 export function closeDatabase(): void {
-  if (db) {
-    saveDatabase()
-    db.close()
-    db = null
-  }
+  engine.closeDatabase()
 }
 
 /**
@@ -1590,33 +1506,22 @@ export function updateKnowledgeCaptureTitle(recordingId: string, titleSuggestion
 }
 
 // Generic query helpers
+// Generic query helpers — delegate to the shared engine.
 export function queryAll<T>(sql: string, params: any[] = []): T[] {
-  const stmt = getDatabase().prepare(sql)
-  stmt.bind(params)
-
-  const results: T[] = []
-  while (stmt.step()) {
-    const row = stmt.getAsObject()
-    results.push(row as T)
-  }
-  stmt.free()
-
-  return results
+  return engine.queryAll<T>(sql, params)
 }
 
 export function queryOne<T>(sql: string, params: any[] = []): T | undefined {
-  const results = queryAll<T>(sql, params)
-  return results[0]
+  return engine.queryOne<T>(sql, params)
 }
 
 export function run(sql: string, params: any[] = []): void {
-  getDatabase().run(sql, params)
-  saveDatabase()
+  engine.run(sql, params)
 }
 
 // Internal run that doesn't auto-save (for use within transactions)
 function runNoSave(sql: string, params: any[] = []): void {
-  getDatabase().run(sql, params)
+  engine.runNoSave(sql, params)
 }
 
 /**
@@ -1625,28 +1530,11 @@ function runNoSave(sql: string, params: any[] = []): void {
  * Use this for operations that must be atomic (all-or-nothing).
  */
 export function runInTransaction<T>(fn: () => T): T {
-  const database = getDatabase()
-  database.run('BEGIN TRANSACTION')
-  try {
-    const result = fn()
-    database.run('COMMIT')
-    saveDatabase()
-    return result
-  } catch (error) {
-    database.run('ROLLBACK')
-    throw error
-  }
+  return engine.runInTransaction(fn)
 }
 
 export function runMany(sql: string, items: any[][]): void {
-  const stmt = getDatabase().prepare(sql)
-  for (const item of items) {
-    stmt.bind(item)
-    stmt.step()
-    stmt.reset()
-  }
-  stmt.free()
-  saveDatabase()
+  engine.runMany(sql, items)
 }
 
 /**
