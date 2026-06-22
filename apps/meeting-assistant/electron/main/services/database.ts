@@ -1,12 +1,57 @@
-import initSqlJs, { Database as SqlJsDatabase } from "sql.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import initSqlJs from "sql.js";
+import { mkdirSync } from "fs";
 import { join } from "path";
 import { app } from "electron";
 import { v4 as uuidv4 } from "uuid";
 import { SCHEMA, SCHEMA_VERSION, DEFAULT_NOTE_TEMPLATES } from "./database-schema";
+import { DatabaseEngine, type SqlJsDatabase } from "@hidock/database";
 
-let db: SqlJsDatabase | null = null;
-let dbPath: string = "";
+const MIGRATIONS: Record<number, () => void> = {
+  2: () => {
+    // Migration v2: add kb_sources table
+    console.log("[Database] Migration v2: adding kb_sources table");
+    const database = getDatabase();
+    try {
+      database.run(`CREATE TABLE IF NOT EXISTS kb_sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'pending',
+        chunk_count INTEGER NOT NULL DEFAULT 0,
+        added_at INTEGER NOT NULL,
+        indexed_at INTEGER
+      )`);
+      console.log("[Database] Migration v2 complete");
+    } catch (e) {
+      console.warn("[Database] Migration v2 warning:", e);
+    }
+  },
+  3: () => {
+    // Migration v3: add 'interrupted' to sessions status CHECK constraint
+    console.log("[Database] Migration v3: adding 'interrupted' to sessions status CHECK");
+    const database = getDatabase();
+    try {
+      database.run(`CREATE TABLE IF NOT EXISTS sessions_new (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'recording' CHECK(status IN ('recording', 'processing', 'completed', 'interrupted')),
+        meeting_id TEXT,
+        audio_path TEXT,
+        transcript_path TEXT
+      )`);
+      database.run(`INSERT OR IGNORE INTO sessions_new SELECT * FROM sessions`);
+      database.run(`DROP TABLE IF EXISTS sessions`);
+      database.run(`ALTER TABLE sessions_new RENAME TO sessions`);
+      database.run(`CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)`);
+      database.run(`CREATE INDEX IF NOT EXISTS idx_sessions_meeting ON sessions(meeting_id)`);
+      database.run(`CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at)`);
+      console.log("[Database] Migration v3 complete");
+    } catch (e) {
+      console.warn("[Database] Migration v3 warning:", e);
+    }
+  },
+};
 
 function getDatabaseDir(): string {
   return join(app.getPath("userData"), "data");
@@ -16,13 +61,20 @@ function getDatabasePath(): string {
   return join(getDatabaseDir(), "meeting-assistant.db");
 }
 
+/**
+ * Shared SQLite engine, configured with this app's schema, version, migrations.
+ * Owns the sql.js lifecycle and the 4-phase boot.
+ */
+const engine = new DatabaseEngine({
+  initSqlJs,
+  dbPathProvider: getDatabasePath,
+  schemaVersion: SCHEMA_VERSION,
+  schema: SCHEMA,
+  migrations: MIGRATIONS,
+});
+
 export function getDatabase(): SqlJsDatabase {
-  if (!db) {
-    throw new Error(
-      "Database not initialized. Call initializeDatabase() first.",
-    );
-  }
-  return db;
+  return engine.getDatabase();
 }
 
 export function mapRows<T>(
@@ -40,173 +92,50 @@ export function mapRows<T>(
 }
 
 export async function initializeDatabase(): Promise<void> {
-  dbPath = getDatabasePath();
   const dir = getDatabaseDir();
-
   try {
     mkdirSync(dir, { recursive: true });
   } catch (e) {
     console.warn("[Database] Failed to create directory:", e);
   }
 
-  try {
-    const SQL = await initSqlJs();
+  // 4-phase boot: core tables → structural repair → migrations → full schema/indexes
+  await engine.initialize();
 
-    if (existsSync(dbPath)) {
-      const fileBuffer = readFileSync(dbPath);
-      db = new SQL.Database(fileBuffer);
-    } else {
-      db = new SQL.Database();
-    }
+  // Post-initialize: seed default note templates (app-specific, not part of engine)
+  const database = getDatabase();
+  console.log("[Database] Seeding default note templates...");
+  const existingTemplates = database.exec(
+    "SELECT COUNT(*) FROM note_templates WHERE is_default = 1",
+  );
+  const templateCount =
+    existingTemplates.length > 0
+      ? (existingTemplates[0].values[0][0] as number)
+      : 0;
 
-    const database = getDatabase();
-    const statements = SCHEMA.split(";")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-
-    console.log("[Database] Phase 1: Creating core tables...");
-    for (const sql of statements) {
-      if (sql.toUpperCase().startsWith("CREATE TABLE")) {
-        try {
-          database.run(sql);
-        } catch (e) {
-          console.warn(
-            `[Database] Table creation warning: ${(e as Error).message}`,
-          );
-        }
-      }
-    }
-
-    console.log("[Database] Phase 2: Checking schema version...");
-    const versionResult = database.exec(
-      "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
-    );
-    const currentVersion =
-      versionResult.length > 0 && versionResult[0].values.length > 0
-        ? (versionResult[0].values[0][0] as number)
-        : 0;
-
-    if (currentVersion === 0) {
-      database.run("INSERT INTO schema_version (version) VALUES (?)", [
-        SCHEMA_VERSION,
-      ]);
-    }
-
-    console.log("[Database] Phase 3: Running migrations...");
-    if (currentVersion > 0 && currentVersion < SCHEMA_VERSION) {
-      console.log(
-        `[Database] Schema at v${currentVersion}, target v${SCHEMA_VERSION}`,
-      );
-
-      // Migration v2: add kb_sources table
-      if (currentVersion < 2) {
-        console.log("[Database] Migration v2: adding kb_sources table");
-        try {
-          database.run(`CREATE TABLE IF NOT EXISTS kb_sources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            path TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL DEFAULT 'pending',
-            chunk_count INTEGER NOT NULL DEFAULT 0,
-            added_at INTEGER NOT NULL,
-            indexed_at INTEGER
-          )`);
-          console.log("[Database] Migration v2 complete");
-        } catch (e) {
-          console.warn("[Database] Migration v2 warning:", e);
-        }
-      }
-
-      // Migration v3: add 'interrupted' to sessions status CHECK constraint
-      if (currentVersion < 3) {
-        console.log("[Database] Migration v3: adding 'interrupted' to sessions status CHECK")
-        try {
-          database.run(`CREATE TABLE IF NOT EXISTS sessions_new (
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            started_at INTEGER NOT NULL,
-            ended_at INTEGER,
-            status TEXT NOT NULL DEFAULT 'recording' CHECK(status IN ('recording', 'processing', 'completed', 'interrupted')),
-            meeting_id TEXT,
-            audio_path TEXT,
-            transcript_path TEXT
-          )`)
-          database.run(`INSERT OR IGNORE INTO sessions_new SELECT * FROM sessions`)
-          database.run(`DROP TABLE IF EXISTS sessions`)
-          database.run(`ALTER TABLE sessions_new RENAME TO sessions`)
-          database.run(`CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)`)
-          database.run(`CREATE INDEX IF NOT EXISTS idx_sessions_meeting ON sessions(meeting_id)`)
-          database.run(`CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at)`)
-          console.log("[Database] Migration v3 complete")
-        } catch (e) {
-          console.warn("[Database] Migration v3 warning:", e)
-        }
-      }
-
-      database.run("UPDATE schema_version SET version = ?", [SCHEMA_VERSION]);
-    }
-
-    console.log("[Database] Phase 4: Seeding default note templates...");
-    const existingTemplates = database.exec(
-      "SELECT COUNT(*) FROM note_templates WHERE is_default = 1",
-    );
-    const templateCount =
-      existingTemplates.length > 0
-        ? (existingTemplates[0].values[0][0] as number)
-        : 0;
-
-    if (templateCount === 0) {
-      for (const tmpl of DEFAULT_NOTE_TEMPLATES) {
-        const id = uuidv4();
-        database.run(
-          "INSERT INTO note_templates (id, name, prompt, structure, is_default) VALUES (?, ?, ?, ?, ?)",
-          [id, tmpl.name, tmpl.prompt, tmpl.structure, tmpl.is_default],
-        );
-      }
-      console.log(
-        `[Database] Seeded ${DEFAULT_NOTE_TEMPLATES.length} default note templates`,
+  if (templateCount === 0) {
+    for (const tmpl of DEFAULT_NOTE_TEMPLATES) {
+      const id = uuidv4();
+      database.run(
+        "INSERT INTO note_templates (id, name, prompt, structure, is_default) VALUES (?, ?, ?, ?, ?)",
+        [id, tmpl.name, tmpl.prompt, tmpl.structure, tmpl.is_default],
       );
     }
-
-    console.log("[Database] Phase 5: Creating indexes...");
-    for (const sql of statements) {
-      if (sql.toUpperCase().startsWith("CREATE INDEX")) {
-        try {
-          database.run(sql);
-        } catch (e) {
-          const msg = (e as Error).message;
-          if (!msg.includes("already exists")) {
-            console.warn(`[Database] Index warning: ${msg}`);
-          }
-        }
-      }
-    }
-
-    saveDatabase();
     console.log(
-      `[Database] Initialization complete (schema v${SCHEMA_VERSION})`,
+      `[Database] Seeded ${DEFAULT_NOTE_TEMPLATES.length} default note templates`,
     );
-  } catch (error) {
-    console.error("[Database] FATAL initialization error:", error);
-    throw error;
   }
+
+  engine.saveDatabase();
+  console.log(
+    `[Database] Initialization complete (schema v${SCHEMA_VERSION})`,
+  );
 }
 
 export function saveDatabase(): void {
-  if (db && dbPath) {
-    const data = db.export();
-    const buffer = Buffer.from(data);
-    writeFileSync(dbPath, buffer);
-  }
+  engine.saveDatabase();
 }
 
 export function closeDatabase(): void {
-  if (db) {
-    try {
-      saveDatabase();
-      db.close();
-    } catch (e) {
-      console.warn("[Database] Error closing database:", e);
-    }
-    db = null;
-  }
+  engine.closeDatabase();
 }

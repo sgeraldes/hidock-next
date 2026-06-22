@@ -23,6 +23,7 @@
     "test:run": "vitest run"
   },
   "dependencies": {
+    "@hidock/database": "file:../../packages/database",
     "@ai-sdk/amazon-bedrock": "^4.0.64",
     "@ai-sdk/anthropic": "^3.0.47",
     "@ai-sdk/google": "^3.0.36",
