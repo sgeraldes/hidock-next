@@ -169,10 +169,20 @@ export interface BluetoothStatus {
 }
 
 // ============================================================
-// Logging (always enabled in main process — goes to terminal/log file)
+// Logging — configurable per environment.
+//   Main process: defaults to always-on (terminal/log file).
+//   Renderer: bind the QA-toggle predicate via setJensenLogging() so device
+//   logs respect the QA Logs setting (see project QA logging rules).
 // ============================================================
 
-const shouldLog = (): boolean => true
+let shouldLogFn: () => boolean = () => true
+
+/** Bind the predicate that decides whether Jensen logs are emitted. */
+export function setJensenLogging(fn: () => boolean): void {
+  shouldLogFn = fn
+}
+
+const shouldLog = (): boolean => shouldLogFn()
 
 // ============================================================
 // Duration calculation (unchanged from original)
@@ -337,12 +347,18 @@ export class JensenDevice {
   private usbConnectHandler: ((event: USBConnectionEvent) => void) | null = null
   private usbListenersActive = false
 
-  // === Injected USB backend (WebUSB interface) ===
-  // Browser: navigator.usb. Electron main / Node: new WebUSB() from the `usb` package.
-  protected readonly usb: USB
+  // === USB backend (WebUSB interface) ===
+  // Optionally injected (Electron main / Node: new WebUSB() from the `usb`
+  // package). When not injected, resolves navigator.usb lazily on each access
+  // so the browser's WebUSB can be installed/replaced after construction.
+  private readonly injectedUsb?: USB
 
-  constructor(usb: USB = (globalThis as { navigator?: { usb?: USB } }).navigator?.usb as USB) {
-    this.usb = usb
+  protected get usb(): USB {
+    return (this.injectedUsb ?? (globalThis as { navigator?: { usb?: USB } }).navigator?.usb) as USB
+  }
+
+  constructor(usb?: USB) {
+    this.injectedUsb = usb
     this.registerDefaultHandlers()
   }
 

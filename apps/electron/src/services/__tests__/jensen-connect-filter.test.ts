@@ -45,16 +45,20 @@ describe('FIX-015: USB connect device filter', () => {
     expect(matchesHiDockFixed('')).toBe(false)
   })
 
-  it('jensen.ts must use case-insensitive product name matching', async () => {
+  it('shared jensen-protocol must use case-insensitive product name matching', async () => {
     const fs = await import('fs')
     const path = await import('path')
 
-    const sourceFile = path.join(__dirname, '..', 'jensen.ts')
+    // The device-matching logic now lives in the shared @hidock/jensen-protocol
+    // package (consumed by both the renderer and the main process).
+    const sourceFile = path.join(
+      __dirname, '..', '..', '..', '..', '..',
+      'packages', 'jensen-protocol', 'src', 'jensen-device.ts'
+    )
     const source = fs.readFileSync(sourceFile, 'utf-8')
 
     const hasProductNameLowerCase = source.includes('productName?.toLowerCase()')
-      || source.includes('productName?.toLowerCase()')
-    expect(hasProductNameLowerCase, 'jensen.ts must lowercase productName before matching').toBe(true)
+    expect(hasProductNameLowerCase, 'jensen-protocol must lowercase productName before matching').toBe(true)
 
     const hasCaseSensitiveCheck = /productName\??\.(includes|match)\(/g.test(source)
     expect(hasCaseSensitiveCheck, 'No direct case-sensitive productName.includes() should exist').toBe(false)

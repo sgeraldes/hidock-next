@@ -8,6 +8,7 @@
 
 export {
   JensenDevice,
+  setJensenLogging,
   CMD,
   USB_VENDOR_ID,
   USB_ALTERNATE_VENDOR_ID,
