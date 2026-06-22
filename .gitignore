@@ -201,3 +201,6 @@ nul
 .worktrees/
 .security-key
 logs/security/
+
+# graphify knowledge-graph output (generated)
+graphify-out/
