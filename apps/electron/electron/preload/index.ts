@@ -490,6 +490,18 @@ export interface ElectronAPI {
     onScanProgress: (callback: (data: { current: number; total: number }) => void) => () => void
   }
 
+  // Knowledge Graph API
+  graph: {
+    stats: () => Promise<{ success: boolean; data?: { nodes: number; edges: number; nodesByType: Record<string, number> }; error?: string }>
+    ingestAll: () => Promise<{ success: boolean; data?: { ingested: number; skipped: number; errors: Array<{ transcriptId: string; error: string }> }; error?: string }>
+    ingestFolder: (folderPath: string) => Promise<{ success: boolean; data?: { ingested: number; skipped: number; errors: Array<{ transcriptId: string; error: string }> }; error?: string }>
+    topAttendees: (name: string) => Promise<{ success: boolean; data?: Array<{ person: string; personId: string; meetings: number }>; error?: string }>
+    topSkill: (skill: string) => Promise<{ success: boolean; data?: Array<{ person: string; personId: string; weight: number }>; error?: string }>
+    personProfile: (name: string) => Promise<{ success: boolean; data?: { personId: string; personLabel: string; meetings: any[]; skills: any[]; actionItems: any[] } | undefined; error?: string }>
+    meetingGraph: (meetingId: string) => Promise<{ success: boolean; data?: { meeting: any; nodes: any[]; edges: any[] }; error?: string }>
+    listNodes: (type?: string) => Promise<{ success: boolean; data?: any[]; error?: string }>
+  }
+
   // Domain Events - Event-driven architecture
   onDomainEvent: (callback: (event: any) => void) => () => void
 
@@ -839,6 +851,17 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.on('jensen:scan-progress', handler)
       return () => ipcRenderer.removeListener('jensen:scan-progress', handler)
     },
+  },
+
+  graph: {
+    stats: () => callIPC('graph:stats'),
+    ingestAll: () => callIPC('graph:ingestAll'),
+    ingestFolder: (folderPath: string) => callIPC('graph:ingestFolder', folderPath),
+    topAttendees: (name: string) => callIPC('graph:topAttendees', name),
+    topSkill: (skill: string) => callIPC('graph:topSkill', skill),
+    personProfile: (name: string) => callIPC('graph:personProfile', name),
+    meetingGraph: (meetingId: string) => callIPC('graph:meetingGraph', meetingId),
+    listNodes: (type?: string) => callIPC('graph:listNodes', type),
   },
 
   // Domain Event Listener

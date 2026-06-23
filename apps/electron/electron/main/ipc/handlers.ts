@@ -18,6 +18,7 @@ import { registerAssistantHandlers } from './assistant-handlers'
 import { registerActionablesHandlers } from './actionables-handlers'
 import { registerMeetingsHandlers } from './meetings-handlers'
 import { registerJensenHandlers } from './jensen-handlers'
+import { registerKnowledgeGraphHandlers } from './knowledge-graph-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -41,6 +42,7 @@ export function registerIpcHandlers(): void {
   registerActionablesHandlers()
   registerMeetingsHandlers()
   registerJensenHandlers()
+  registerKnowledgeGraphHandlers()
 
   console.log('All IPC handlers registered')
 }

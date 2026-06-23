@@ -28,6 +28,7 @@
     "@hidock/ai-providers": "file:../../packages/ai-providers",
     "@hidock/database": "file:../../packages/database",
     "@hidock/jensen-protocol": "file:../../packages/jensen-protocol",
+    "@hidock/knowledge-graph": "file:../../packages/knowledge-graph",
     "@google/generative-ai": "^0.21.0",
     "@radix-ui/react-alert-dialog": "^1.1.15",
     "@radix-ui/react-dialog": "^1.1.2",

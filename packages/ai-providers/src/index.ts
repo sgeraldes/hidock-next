@@ -1,5 +1,6 @@
 export { createProvider } from './provider-factory.js'
 export { embed } from './embed.js'
+export { complete } from './complete.js'
 export { createGeminiModel } from './providers/gemini.js'
 export { createOpenAIModel } from './providers/openai.js'
 export { createAnthropicModel } from './providers/anthropic.js'

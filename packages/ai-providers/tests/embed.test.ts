@@ -34,7 +34,6 @@ import { embed as aiEmbed } from 'ai'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock'
-import { createOllama } from 'ollama-ai-provider'
 import { embed } from '../src/embed.js'
 import type { EmbeddingProviderConfig } from '../src/types.js'
 
@@ -144,7 +143,19 @@ describe('embed', () => {
     })
   })
 
+  // The ollama path calls Ollama's REST /api/embed directly (the ollama-ai-provider
+  // EmbeddingModelV1 is rejected by AI SDK v6 at runtime), so these tests mock fetch.
   describe('ollama', () => {
+    let fetchMock: ReturnType<typeof vi.fn>
+
+    beforeEach(() => {
+      fetchMock = vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ embeddings: [[0.1, 0.2, 0.3]], prompt_eval_count: 5 }),
+      }))
+      vi.stubGlobal('fetch', fetchMock)
+    })
+
     it('returns embedding and usage', async () => {
       const config: EmbeddingProviderConfig = { provider: 'ollama', model: 'nomic-embed-text', baseURL: 'http://localhost:11434/api' }
       const result = await embed('hello world', config)
@@ -152,24 +163,23 @@ describe('embed', () => {
       expect(result.usage).toEqual({ tokens: 5 })
     })
 
-    it('passes baseURL to createOllama', async () => {
+    it('POSTs to {baseURL}/embed using the provided baseURL', async () => {
       const config: EmbeddingProviderConfig = { provider: 'ollama', model: 'nomic-embed-text', baseURL: 'http://custom-host:11434/api' }
       await embed('test', config)
-      expect(createOllama).toHaveBeenCalledWith({ baseURL: 'http://custom-host:11434/api' })
+      expect(fetchMock).toHaveBeenCalledWith('http://custom-host:11434/api/embed', expect.objectContaining({ method: 'POST' }))
     })
 
-    it('defaults baseURL to http://localhost:11434/api when not provided', async () => {
+    it('defaults baseURL to http://localhost:11434/api/embed when not provided', async () => {
       const config: EmbeddingProviderConfig = { provider: 'ollama', model: 'nomic-embed-text' }
       await embed('test', config)
-      expect(createOllama).toHaveBeenCalledWith({ baseURL: 'http://localhost:11434/api' })
+      expect(fetchMock).toHaveBeenCalledWith('http://localhost:11434/api/embed', expect.anything())
     })
 
-    it('calls ollama.embedding() with the model id', async () => {
-      const mockEmbeddingFn = vi.fn((modelId: string) => ({ _provider: 'ollama', _modelId: modelId }))
-      vi.mocked(createOllama).mockReturnValueOnce({ embedding: mockEmbeddingFn } as ReturnType<typeof createOllama>)
+    it('sends the model id and input text in the request body', async () => {
       const config: EmbeddingProviderConfig = { provider: 'ollama', model: 'mxbai-embed-large' }
-      await embed('test', config)
-      expect(mockEmbeddingFn).toHaveBeenCalledWith('mxbai-embed-large')
+      await embed('some text', config)
+      const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body)
+      expect(body).toMatchObject({ model: 'mxbai-embed-large', input: 'some text' })
     })
   })
 })
