@@ -23,7 +23,9 @@
     "node": ">=18.0.0"
   },
   "license": "MIT",
-  "dependencies": {},
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0"
+  },
   "devDependencies": {
     "@types/node": "^25.5.0",
     "tsup": "^8.5.1",

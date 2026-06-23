@@ -26,6 +26,7 @@
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",
     "@hidock/ai-providers": "file:../../packages/ai-providers",
+    "@hidock/transcription": "file:../../packages/transcription",
     "@hidock/calendar-sync": "file:../../packages/calendar-sync",
     "@hidock/database": "file:../../packages/database",
     "@hidock/jensen-protocol": "file:../../packages/jensen-protocol",

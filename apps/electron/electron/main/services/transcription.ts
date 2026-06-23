@@ -1,8 +1,9 @@
+import { GeminiEngine } from '@hidock/transcription'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import { readFile, existsSync } from 'fs'
 import { promisify } from 'util'
 import { spawn } from 'child_process'
-import { extname, join, isAbsolute } from 'path'
+import { join, isAbsolute } from 'path'
 
 const readFileAsync = promisify(readFile)
 
@@ -516,44 +517,34 @@ async function transcribeWithGemini(
 
   progressCallback?.('reading_file', 5)
   const audioBuffer = await readFileAsync(filePath)
-  const base64Audio = audioBuffer.toString('base64')
 
-  const ext = extname(filePath).toLowerCase()
-  const mimeTypes: Record<string, string> = {
-    '.wav': 'audio/wav',
-    '.mp3': 'audio/mp3',
-    '.m4a': 'audio/mp4',
-    '.ogg': 'audio/ogg',
-    '.webm': 'audio/webm',
-    '.hda': 'audio/mp3'
-  }
-  const mimeType = mimeTypes[ext] || 'audio/wav'
-
-  const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
   const modelName = config.transcription.geminiModel || 'gemini-2.5-flash'
-  const model = genAI.getGenerativeModel({ model: modelName })
+  const engine = new GeminiEngine({
+    apiKey: config.transcription.geminiApiKey,
+    model: modelName,
+    language: config.transcription.language || 'unknown'
+  })
 
   progressCallback?.('transcribing', 20)
 
-  const transcriptionPrompt = `Transcribe this audio recording.
-The audio may be in Spanish or English - transcribe in the original language.
-Provide a clean, accurate transcription of all speech.
-If there are multiple speakers, try to indicate speaker changes with "Speaker 1:", "Speaker 2:", etc.
-${meetingContext}
-Return ONLY the transcription, no additional commentary.`
+  // Collect the single segment yielded by GeminiEngine.
+  // We pass filePath via the extended options so the engine can detect the MIME type,
+  // and meetingContext via options.context for prompt enrichment.
+  const segments: string[] = []
+  for await (const segment of engine.transcribe(audioBuffer, {
+    source: 'mic',
+    language: config.transcription.language,
+    context: meetingContext || undefined,
+    // GeminiEngine reads filePath from options for MIME type detection
+    filePath
+  } as Parameters<typeof engine.transcribe>[1] & { filePath: string })) {
+    if (segment.text) segments.push(segment.text)
+  }
 
-  const transcriptionResult = await model.generateContent([
-    {
-      inlineData: {
-        mimeType,
-        data: base64Audio
-      }
-    },
-    { text: transcriptionPrompt }
-  ])
+  const fullText = segments.join('\n')
 
   return {
-    fullText: transcriptionResult.response.text(),
+    fullText,
     provider: 'gemini',
     model: modelName,
     language: config.transcription.language || 'unknown'

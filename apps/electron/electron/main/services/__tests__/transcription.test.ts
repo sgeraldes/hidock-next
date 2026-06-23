@@ -111,6 +111,7 @@ vi.mock('../config', () => ({
 }))
 
 // Mock google generative AI - make it fail
+// Used by analyzeTranscriptWithGemini and detectActionables which still call the SDK directly.
 vi.mock('@google/generative-ai', () => ({
   GoogleGenerativeAI: vi.fn(() => ({
     getGenerativeModel: vi.fn(() => ({
@@ -118,6 +119,25 @@ vi.mock('@google/generative-ai', () => ({
     }))
   }))
 }))
+
+// Mock @hidock/transcription so GeminiEngine throws fast (avoids real network calls
+// in tests). GeminiEngine moved the transcription provider dispatch from inline
+// @google/generative-ai calls into the package; mocking it here keeps the
+// orchestration tests fast and deterministic.
+vi.mock('@hidock/transcription', () => {
+  const mockGeminiTranscribe = async function* () {
+    throw new Error('API rate limit exceeded')
+  }
+  function GeminiEngine(_options: { apiKey: string; model?: string; language?: string }) {
+    return {
+      isAvailable: async () => true,
+      isStreaming: false,
+      isLocal: false,
+      transcribe: mockGeminiTranscribe
+    }
+  }
+  return { GeminiEngine }
+})
 
 // Mock fs - simple approach that works in jsdom environment
 vi.mock('fs', async (importOriginal) => {
