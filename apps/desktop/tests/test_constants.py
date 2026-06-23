@@ -29,7 +29,10 @@ class TestConstants:
 
         # Test expected values
         assert constants.DEFAULT_VENDOR_ID == 0x10D6
-        assert constants.DEFAULT_PRODUCT_ID == 0xB00D
+        # DEFAULT_PRODUCT_ID is HIDOCK_PRODUCT_IDS[0] == 0xAF0C (H1).
+        # It is a fallback only used when auto-discovery fails; 0xAF0C is the first
+        # entry in the canonical product-ID list defined in constants.py.
+        assert constants.DEFAULT_PRODUCT_ID == 0xAF0C
 
     def test_endpoint_constants(self):
         """Test endpoint address constants."""

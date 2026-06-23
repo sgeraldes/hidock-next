@@ -288,7 +288,11 @@ class TestLogger:
     def test_logger_internal_log_below_level(self):
         """Test that messages below log level are ignored"""
         logger = Logger()
+        # Logger uses independent per-output levels (console_level, gui_level,
+        # file_level) in addition to the global self.level.  Both must be raised
+        # to ERROR so the console check also filters out the INFO message.
         logger.level = Logger.LEVELS["ERROR"]
+        logger.console_level = Logger.LEVELS["ERROR"]
 
         with patch("builtins.print") as mock_print:
             logger._log("info", "module", "procedure", "message")

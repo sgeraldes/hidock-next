@@ -36,7 +36,7 @@ def get_default_config() -> dict:
     """Returns the default configuration dictionary."""
     return {
         "autoconnect": False,
-        "download_directory": os.path.join(_APP_ROOT_DIR, "..", "audio"),  # ../audio relative to hidock-desktop-app
+        "download_directory": os.path.join(os.path.expanduser("~"), "HiDock_Downloads"),
         "log_level": "INFO",
         "selected_vid": DEFAULT_VENDOR_ID,  # From constants.py
         "selected_pid": DEFAULT_PRODUCT_ID,  # From constants.py
