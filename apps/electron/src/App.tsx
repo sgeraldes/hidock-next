@@ -22,6 +22,7 @@ const PersonDetail = lazyWithRetry(() => import('@/pages/PersonDetail'))
 const Projects = lazyWithRetry(() => import('@/pages/Projects'))
 const Actionables = lazyWithRetry(() => import('@/pages/Actionables'))
 const Settings = lazyWithRetry(() => import('@/pages/Settings'))
+const KnowledgeGraph = lazyWithRetry(() => import('@/pages/KnowledgeGraph'))
 
 function App(): React.ReactElement {
   // Initialize QA monitoring and auto-connect
@@ -183,6 +184,16 @@ function App(): React.ReactElement {
               <ErrorBoundary>
                 <Suspense fallback={<LoadingSpinner message="Loading settings..." />}>
                   <Settings />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
+          <Route
+            path="/knowledge-graph"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading knowledge graph..." />}>
+                  <KnowledgeGraph />
                 </Suspense>
               </ErrorBoundary>
             }

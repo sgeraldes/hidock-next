@@ -19,7 +19,8 @@ import {
   RotateCcw,
   Terminal,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Network
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -55,7 +56,8 @@ const navigationSections: NavigationSection[] = [
     items: [
       { name: 'Library', href: '/library', icon: BookOpen },
       { name: 'Assistant', href: '/assistant', icon: Bot },
-      { name: 'Explore', href: '/explore', icon: Compass }
+      { name: 'Explore', href: '/explore', icon: Compass },
+      { name: 'Knowledge Graph', href: '/knowledge-graph', icon: Network }
     ]
   },
   {
