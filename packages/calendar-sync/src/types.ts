@@ -3,6 +3,11 @@ export interface CalendarAttendee {
   email: string
 }
 
+export interface CalendarOrganizer {
+  name?: string
+  email?: string
+}
+
 export interface CalendarEvent {
   uid: string
   title: string
@@ -11,6 +16,12 @@ export interface CalendarEvent {
   attendees: CalendarAttendee[]
   location?: string
   description?: string
+  /** Event organizer (parsed from the ICS ORGANIZER property), if present. */
+  organizer?: CalendarOrganizer
+  /** True when the event carries an RRULE (recurring series). */
+  isRecurring?: boolean
+  /** Raw RRULE string (e.g. "FREQ=WEEKLY;BYDAY=MO"), if present. */
+  recurrence?: string
 }
 
 export interface CalendarWatcherOptions {

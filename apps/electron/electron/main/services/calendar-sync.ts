@@ -1,92 +1,13 @@
-import ICAL from 'ical.js'
+import { parseICS, correlate } from '@hidock/calendar-sync'
+import type { CalendarEvent } from '@hidock/calendar-sync'
 import { join } from 'path'
 import { getCachePath } from './file-storage'
 import { upsertMeetingsBatch, Meeting } from './database'
 import { getConfig, updateConfig } from './config'
 
-/**
- * Windows timezone names to UTC offset in seconds.
- * Used as fallback when VTIMEZONE component is missing from ICS.
- * Offsets are for standard time (not DST).
- */
-const WINDOWS_TIMEZONE_OFFSETS: Record<string, number> = {
-  // Americas
-  'Pacific Standard Time': -8 * 3600,
-  'Mountain Standard Time': -7 * 3600,
-  'Central Standard Time': -6 * 3600,
-  'Central Standard Time (Mexico)': -6 * 3600,
-  'Central America Standard Time': -6 * 3600, // Guatemala, Costa Rica, etc.
-  'Eastern Standard Time': -5 * 3600,
-  'SA Pacific Standard Time': -5 * 3600, // Colombia, Peru, Ecuador
-  'Venezuela Standard Time': -4 * 3600,
-  'SA Western Standard Time': -4 * 3600, // Bolivia, Guyana
-  'Atlantic Standard Time': -4 * 3600,
-  'Paraguay Standard Time': -4 * 3600,
-  'Pacific SA Standard Time': -3 * 3600, // Chile (Santiago)
-  'SA Eastern Standard Time': -3 * 3600, // Brazil (Brasilia), French Guiana
-  'Argentina Standard Time': -3 * 3600,
-  'E. South America Standard Time': -3 * 3600, // Brazil (Brasilia)
-  'Greenland Standard Time': -3 * 3600,
-  'Montevideo Standard Time': -3 * 3600, // Uruguay
-  'Newfoundland Standard Time': -3.5 * 3600,
-
-  // Europe & Africa
-  'GMT Standard Time': 0,
-  'Greenwich Standard Time': 0,
-  'UTC': 0,
-  'W. Europe Standard Time': 1 * 3600,
-  'Central Europe Standard Time': 1 * 3600,
-  'Central European Standard Time': 1 * 3600,
-  'Romance Standard Time': 1 * 3600, // France, Belgium, Spain
-  'W. Central Africa Standard Time': 1 * 3600,
-  'E. Europe Standard Time': 2 * 3600,
-  'GTB Standard Time': 2 * 3600, // Greece, Turkey, Bulgaria
-  'FLE Standard Time': 2 * 3600, // Finland, Lithuania, Estonia
-  'South Africa Standard Time': 2 * 3600,
-  'Israel Standard Time': 2 * 3600,
-  'Egypt Standard Time': 2 * 3600,
-  'Jordan Standard Time': 3 * 3600,
-  'Arabic Standard Time': 3 * 3600, // Iraq
-  'Arab Standard Time': 3 * 3600, // Kuwait, Riyadh
-  'E. Africa Standard Time': 3 * 3600,
-  'Russian Standard Time': 3 * 3600,
-  'Iran Standard Time': 3.5 * 3600,
-
-  // Asia & Pacific
-  'Arabian Standard Time': 4 * 3600, // Abu Dhabi, Dubai
-  'Azerbaijan Standard Time': 4 * 3600,
-  'Georgian Standard Time': 4 * 3600,
-  'Afghanistan Standard Time': 4.5 * 3600,
-  'West Asia Standard Time': 5 * 3600, // Pakistan
-  'Pakistan Standard Time': 5 * 3600,
-  'India Standard Time': 5.5 * 3600,
-  'Sri Lanka Standard Time': 5.5 * 3600,
-  'Nepal Standard Time': 5.75 * 3600,
-  'Central Asia Standard Time': 6 * 3600, // Kazakhstan
-  'Bangladesh Standard Time': 6 * 3600,
-  'Myanmar Standard Time': 6.5 * 3600,
-  'SE Asia Standard Time': 7 * 3600, // Thailand, Vietnam
-  'North Asia Standard Time': 7 * 3600,
-  'China Standard Time': 8 * 3600,
-  'Singapore Standard Time': 8 * 3600,
-  'W. Australia Standard Time': 8 * 3600,
-  'Taipei Standard Time': 8 * 3600,
-  'Korea Standard Time': 9 * 3600,
-  'Tokyo Standard Time': 9 * 3600,
-  'AUS Central Standard Time': 9.5 * 3600,
-  'Cen. Australia Standard Time': 9.5 * 3600,
-  'AUS Eastern Standard Time': 10 * 3600,
-  'E. Australia Standard Time': 10 * 3600,
-  'West Pacific Standard Time': 10 * 3600,
-  'Tasmania Standard Time': 10 * 3600,
-  'Central Pacific Standard Time': 11 * 3600,
-  'New Zealand Standard Time': 12 * 3600,
-  'Fiji Standard Time': 12 * 3600,
-  'Tonga Standard Time': 13 * 3600,
-
-  // Additional common names
-  'Customized Time Zone': -5 * 3600, // Default to something reasonable
-}
+// Re-export package types and correlate for consumers (e.g. recording-watcher)
+export { correlate }
+export type { CalendarEvent }
 
 // B-CAL-004: Error category for calendar sync failures
 // CS-003: Added 'auth' category for 401/403 errors
@@ -259,161 +180,72 @@ function yieldToEventLoop(): Promise<void> {
 }
 
 /**
- * Register all VTIMEZONE components from a calendar with ICAL.TimezoneService.
- * This is critical for proper timezone conversion - without registration,
- * toJSDate() ignores TZID parameters and returns incorrect times.
+ * URL patterns used to extract meeting links from event description/location.
+ * Kept here (electron-specific) so the shared package stays provider-agnostic.
  */
-function registerTimezones(vcalendar: ICAL.Component): void {
-  const vtimezones = vcalendar.getAllSubcomponents('vtimezone')
-
-  for (const vtimezone of vtimezones) {
-    try {
-      const tzid = vtimezone.getFirstPropertyValue('tzid')
-      if (tzid && typeof tzid === 'string') {
-        const tz = new ICAL.Timezone(vtimezone)
-        // @ts-ignore - ICAL type definitions are sometimes incomplete
-        ICAL.TimezoneService.register(tzid, tz)
-      }
-    } catch (e) {
-      console.warn('[Calendar] Failed to register timezone:', e)
-    }
-  }
-}
+const MEETING_URL_PATTERNS = [
+  /https:\/\/teams\.microsoft\.com\/[^\s<>]+/i,
+  /https:\/\/[\w-]+\.zoom\.us\/[^\s<>]+/i,
+  /https:\/\/meet\.google\.com\/[^\s<>]+/i,
+  /https:\/\/[\w-]+\.webex\.com\/[^\s<>]+/i,
+]
 
 /**
- * Safely convert ICAL.Time to JavaScript Date with proper timezone handling.
+ * Adapter: convert a package CalendarEvent to the electron DB meeting row shape.
  *
- * ICAL.js's toJSDate() has known issues with some timezones, even when registered.
- * This function uses toUnixTime() which is more reliable as it directly calculates
- * the UTC offset using the registered timezone's rules.
+ * The shared @hidock/calendar-sync package now preserves every field electron
+ * relied on before the migration:
+ *  - organizer: parsed from the ICS ORGANIZER property (CN + mailto)
+ *  - isRecurring / recurrence: parsed from the ICS RRULE property
+ *  - Windows/Exchange timezone names (e.g. "Eastern Standard Time") that ship
+ *    no VTIMEZONE block are converted to correct UTC inside parseICS()
  *
- * For floating times (no timezone), we check if there's a TZID parameter that
- * wasn't recognized and use our Windows timezone fallback map.
- *
- * @param icalTime - The ICAL.Time object to convert
- * @param tzidHint - Optional TZID hint from the property (for fallback when zone is floating)
+ * This adapter maps those into the DB column shape:
+ *  - organizer.name/email  → organizer_name / organizer_email
+ *  - isRecurring/recurrence → is_recurring / recurrence_rule
+ *  - attendees: CalendarAttendee[] → JSON string (DB stores attendees as text)
+ *  - meeting_url: electron-specific extraction from description/location
  */
-function safeToJSDate(icalTime: ICAL.Time | null | undefined, tzidHint?: string): Date | null {
-  if (!icalTime) return null
-
-  try {
-    // Check if this is a date-only value (all-day event)
-    if (icalTime.isDate) {
-      // For all-day events, use local date at midnight
-      return new Date(icalTime.year, icalTime.month - 1, icalTime.day, 0, 0, 0, 0)
-    }
-
-    // Get the timezone
-    const zone = icalTime.zone
-
-    // For floating time (no timezone specified), check for fallback
-    if (!zone || zone.tzid === 'floating' || zone === ICAL.Timezone.localTimezone) {
-      // Try to use the tzidHint if we have one and it's in our fallback map
-      if (tzidHint && WINDOWS_TIMEZONE_OFFSETS[tzidHint] !== undefined) {
-        const utcOffset = WINDOWS_TIMEZONE_OFFSETS[tzidHint]
-
-        // Build the local time as if it were UTC
-        const localTimeAsUtc = Date.UTC(
-          icalTime.year,
-          icalTime.month - 1,
-          icalTime.day,
-          icalTime.hour,
-          icalTime.minute,
-          icalTime.second
-        )
-
-        // Subtract the UTC offset to get actual UTC time
-        const utcTime = localTimeAsUtc - (utcOffset * 1000)
-        const jsDate = new Date(utcTime)
-
-        // console.log(`[Calendar] Fallback timezone conversion: ${icalTime.year}-${icalTime.month}-${icalTime.day} ${icalTime.hour}:${icalTime.minute} (${tzidHint}, offset=${utcOffset}s) -> UTC: ${jsDate.toISOString()} (local: ${jsDate.toLocaleTimeString()})`)
-
-        return jsDate
-      }
-
-      // No fallback available, use local time
-      return new Date(
-        icalTime.year,
-        icalTime.month - 1,
-        icalTime.day,
-        icalTime.hour,
-        icalTime.minute,
-        icalTime.second
-      )
-    }
-
-    // For UTC timezone, construct UTC date directly
-    if (zone === ICAL.Timezone.utcTimezone || zone.tzid === 'UTC') {
-      return new Date(Date.UTC(
-        icalTime.year,
-        icalTime.month - 1,
-        icalTime.day,
-        icalTime.hour,
-        icalTime.minute,
-        icalTime.second
-      ))
-    }
-
-    // For named timezones, get the UTC offset from the timezone definition
-    // Then construct the proper UTC time
-    try {
-      // Get the UTC offset for this specific time in this timezone
-      // The offset is in seconds (negative = west of UTC)
-      const utcOffset = zone.utcOffset(icalTime)
-
-      // Build the local time as a Date (treating it as UTC first)
-      const localTimeAsUtc = Date.UTC(
-        icalTime.year,
-        icalTime.month - 1,
-        icalTime.day,
-        icalTime.hour,
-        icalTime.minute,
-        icalTime.second
-      )
-
-      // Subtract the UTC offset to get actual UTC time
-      // If Lima is UTC-5, offset is -18000 seconds
-      // Local 12:00 - (-18000s) = Local 12:00 + 18000s = UTC 17:00 ✓
-      const utcTime = localTimeAsUtc - (utcOffset * 1000)
-      const jsDate = new Date(utcTime)
-
-      // console.debug(`[Calendar] Time conversion: ${icalTime.year}-${icalTime.month}-${icalTime.day} ${icalTime.hour}:${icalTime.minute} (${zone.tzid}, offset=${utcOffset}s) -> UTC: ${jsDate.toISOString()} (local: ${jsDate.toLocaleTimeString()})`)
-
-      return jsDate
-    } catch (offsetError) {
-      console.warn(`[Calendar] Failed to get UTC offset for ${zone.tzid}, falling back to toUnixTime:`, offsetError)
-
-      // Fallback to toUnixTime() which may or may not work correctly
-      const unixTime = icalTime.toUnixTime()
-      const jsDate = new Date(unixTime * 1000)
-
-      // Sanity check: year should match
-      const yearDiff = Math.abs(jsDate.getFullYear() - icalTime.year)
-      if (yearDiff > 1) {
-        console.warn(`[Calendar] toUnixTime() conversion failed for ${zone.tzid} (year off by ${yearDiff}), using local time interpretation`)
-        return new Date(
-          icalTime.year,
-          icalTime.month - 1,
-          icalTime.day,
-          icalTime.hour,
-          icalTime.minute,
-          icalTime.second
-        )
-      }
-
-      return jsDate
-    }
-  } catch (e) {
-    console.warn('[Calendar] Error converting time, using local:', e)
-    // Fallback to local time interpretation
-    return new Date(
-      icalTime.year,
-      icalTime.month - 1,
-      icalTime.day,
-      icalTime.hour || 0,
-      icalTime.minute || 0,
-      icalTime.second || 0
+function calendarEventToMeetingRow(
+  event: CalendarEvent
+): Omit<Meeting, 'created_at' | 'updated_at'> {
+  // Attendees: map CalendarAttendee[] → JSON string (DB stores as text)
+  let attendeesJson: string | undefined
+  if (event.attendees.length > 0) {
+    attendeesJson = JSON.stringify(
+      event.attendees.map((a) => ({
+        ...(a.name !== undefined && { name: a.name }),
+        email: a.email,
+      }))
     )
+  }
+
+  // Extract meeting URL from description and location
+  let meetingUrl: string | undefined
+  const textToSearch = `${event.description ?? ''} ${event.location ?? ''}`
+  for (const pattern of MEETING_URL_PATTERNS) {
+    const match = textToSearch.match(pattern)
+    if (match) {
+      meetingUrl = match[0]
+      break
+    }
+  }
+
+  return {
+    id: event.uid,
+    subject: event.title || 'Untitled Meeting',
+    start_time: event.startTime.toISOString(),
+    end_time: event.endTime.toISOString(),
+    location: event.location ?? undefined,
+    // Organizer restored from the package's parsed ORGANIZER property
+    organizer_name: event.organizer?.name ?? undefined,
+    organizer_email: event.organizer?.email ?? undefined,
+    attendees: attendeesJson,
+    description: event.description ?? undefined,
+    // Recurrence restored from the package's parsed RRULE
+    is_recurring: event.isRecurring ? 1 : 0,
+    recurrence_rule: event.recurrence ?? undefined,
+    meeting_url: meetingUrl,
   }
 }
 
@@ -452,7 +284,7 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
     // Yield before heavy parsing
     await yieldToEventLoop()
 
-    // Parse ICS (yields internally for large calendars)
+    // Parse ICS using shared package, then adapt to DB meeting shape
     const meetings = await parseICSAsync(icsData)
 
     // Yield before heavy database work
@@ -497,133 +329,26 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
   }
 }
 
-// Async version that yields to event loop periodically to prevent UI blocking
+/**
+ * Parse ICS content using the shared @hidock/calendar-sync package, yielding to
+ * the event loop periodically to keep the UI responsive for large calendars.
+ *
+ * Returns DB meeting rows (Omit<Meeting, 'created_at' | 'updated_at'>).
+ */
 export async function parseICSAsync(icsData: string): Promise<Omit<Meeting, 'created_at' | 'updated_at'>[]> {
-  const jcalData = ICAL.parse(icsData)
-  const vcalendar = new ICAL.Component(jcalData)
-
-  // Register timezones BEFORE processing events (critical for correct time conversion)
-  registerTimezones(vcalendar)
-
-  const vevents = vcalendar.getAllSubcomponents('vevent')
+  // Parse using shared package (synchronous, but fast for typical feeds)
+  const events = parseICS(icsData)
 
   const meetings: Omit<Meeting, 'created_at' | 'updated_at'>[] = []
   const YIELD_INTERVAL = 5 // Yield every N events to keep UI responsive
 
-  for (let eventIndex = 0; eventIndex < vevents.length; eventIndex++) {
+  for (let i = 0; i < events.length; i++) {
     // Yield periodically to keep UI responsive
-    if (eventIndex > 0 && eventIndex % YIELD_INTERVAL === 0) {
+    if (i > 0 && i % YIELD_INTERVAL === 0) {
       await yieldToEventLoop()
     }
 
-    const vevent = vevents[eventIndex]
-    const event = new ICAL.Event(vevent)
-
-    // CS-008: Use ICAL.js vevent property API — event.status is not a real ICAL.Event property
-    const eventStatus = vevent.getFirstPropertyValue('status') as string | null
-    if (eventStatus === 'CANCELLED') {
-      continue
-    }
-
-    // Get basic properties
-    const uid = event.uid
-    const summary = event.summary || 'Untitled Meeting'
-
-    // Get TZID hints from DTSTART/DTEND properties for fallback timezone handling
-    // when VTIMEZONE component is missing from ICS
-    const dtStartProp = vevent.getFirstProperty('dtstart')
-    const dtEndProp = vevent.getFirstProperty('dtend')
-    const startTzid = dtStartProp?.getParameter('tzid') as string | undefined
-    const endTzid = dtEndProp?.getParameter('tzid') as string | undefined
-
-    const startDate = safeToJSDate(event.startDate, startTzid)
-    const endDate = safeToJSDate(event.endDate, endTzid)
-
-    if (!uid || !startDate || !endDate) {
-      continue
-    }
-
-    // Get optional properties
-    const location = event.location || undefined
-    const description = event.description || undefined
-
-    // Get organizer
-    const organizerProp = vevent.getFirstProperty('organizer')
-    let organizerName: string | undefined
-    let organizerEmail: string | undefined
-
-    if (organizerProp) {
-      organizerName = organizerProp.getParameter('cn') as string | undefined
-      const mailto = organizerProp.getFirstValue()
-      if (typeof mailto === 'string' && mailto.startsWith('mailto:')) {
-        organizerEmail = mailto.substring(7)
-      }
-    }
-
-    // Get attendees
-    const attendeeProps = vevent.getAllProperties('attendee')
-    const attendees: { name?: string; email?: string; status?: string }[] = []
-
-    for (const attendee of attendeeProps) {
-      const name = attendee.getParameter('cn') as string | undefined
-      const mailto = attendee.getFirstValue()
-      const partstat = attendee.getParameter('partstat') as string | undefined
-
-      let email: string | undefined
-      if (typeof mailto === 'string' && mailto.startsWith('mailto:')) {
-        email = mailto.substring(7)
-      }
-
-      if (name || email) {
-        attendees.push({ name, email, status: partstat })
-      }
-    }
-
-    // Check for recurring event
-    const isRecurring = !!vevent.getFirstProperty('rrule')
-
-
-
-    // Extract meeting URL from description or location
-    let meetingUrl: string | undefined
-    const urlPatterns = [
-      /https:\/\/teams\.microsoft\.com\/[^\s<>]+/i,
-      /https:\/\/[\w-]+\.zoom\.us\/[^\s<>]+/i,
-      /https:\/\/meet\.google\.com\/[^\s<>]+/i,
-      /https:\/\/[\w-]+\.webex\.com\/[^\s<>]+/i
-    ]
-
-    const textToSearch = `${description || ''} ${location || ''}`
-    for (const pattern of urlPatterns) {
-      const match = textToSearch.match(pattern)
-      if (match) {
-        meetingUrl = match[0]
-        break
-      }
-    }
-
-    // Handle recurring events - expand occurrences
-    // Check for exceptions to recurring series
-    // If this is an exception, use the exception's properties
-    if (isRecurring && (event as any).isRecurrenceException === true) {
-      // Logic for handling recurring exceptions can be added here if needed
-    } else {
-      meetings.push({
-        id: uid,
-        subject: summary,
-        start_time: startDate.toISOString(),
-        end_time: endDate.toISOString(),
-        location,
-        organizer_name: organizerName,
-        organizer_email: organizerEmail,
-        attendees: attendees.length > 0 ? JSON.stringify(attendees) : undefined,
-        description,
-        // CS-005: Use actual isRecurring flag instead of hardcoded 0
-        is_recurring: isRecurring ? 1 : 0,
-        recurrence_rule: undefined,
-        meeting_url: meetingUrl
-      })
-    }
+    meetings.push(calendarEventToMeetingRow(events[i]))
   }
 
   return meetings

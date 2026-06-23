@@ -1,6 +1,7 @@
 export type {
   CalendarAttendee,
   CalendarEvent,
+  CalendarOrganizer,
   CalendarWatcherOptions,
   CorrelationOptions,
   CorrelationRecommendation,
