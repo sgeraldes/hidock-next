@@ -1,18 +1,30 @@
 /**
  * Ollama Service
- * Handles embedding generation and LLM inference via local Ollama instance
+ * Handles embedding generation and LLM inference via local Ollama instance.
+ *
+ * Migration notes:
+ *   - Embeddings: delegated to @hidock/ai-providers embed() (Ollama REST /api/embed)
+ *   - Chat/generate: kept as direct Ollama REST calls — the Vercel AI SDK (ai package)
+ *     is not a direct electron dependency and would require hoisting. Direct fetch is
+ *     simpler and avoids the transitive-module boundary.
+ *   - Model management (isAvailable / listModels / hasModel / pullModel / ensureModels):
+ *     kept here via direct Ollama REST — the shared package does not expose these.
+ *
+ * Embedding-dimension safety note:
+ *   Stored vectors (vector_embeddings table) were generated with nomic-embed-text.
+ *   @hidock/ai-providers uses Ollama's /api/embed endpoint (newer) vs the previous
+ *   /api/embeddings endpoint (older). Both return the same 768-dimension output for
+ *   nomic-embed-text — the model determines the dimension, not the endpoint. Existing
+ *   persisted vectors remain fully compatible.
  */
 
+import { embed } from '@hidock/ai-providers'
 import { getConfig } from './config'
 
 // AI-07 FIX: These are now fallback defaults only - actual values come from config
 const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434'
 const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text'
 const DEFAULT_CHAT_MODEL = 'llama3.2'
-
-interface OllamaEmbeddingResponse {
-  embedding: number[]
-}
 
 interface OllamaChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -39,6 +51,8 @@ class OllamaService {
     this.embeddingModel = embeddingModel
     this.chatModel = chatModel
   }
+
+  // ── Model management (not in @hidock/ai-providers) ───────────────────────
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -97,24 +111,16 @@ class OllamaService {
     return results
   }
 
+  // ── Embeddings (via @hidock/ai-providers) ────────────────────────────────
+
   async generateEmbedding(text: string): Promise<number[] | null> {
     try {
-      const response = await fetch(`${this.baseUrl}/api/embeddings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: this.embeddingModel,
-          prompt: text
-        })
+      const result = await embed(text, {
+        provider: 'ollama',
+        model: this.embeddingModel,
+        baseURL: `${this.baseUrl}/api`
       })
-
-      if (!response.ok) {
-        console.error('Ollama embedding error:', response.statusText)
-        return null
-      }
-
-      const data: OllamaEmbeddingResponse = await response.json()
-      return data.embedding
+      return result.embedding
     } catch (error) {
       console.error('Failed to generate embedding:', error)
       return null
@@ -129,6 +135,8 @@ class OllamaService {
     }
     return embeddings
   }
+
+  // ── Chat / generate (direct Ollama REST — avoids hoisting the `ai` SDK) ──
 
   async chat(
     messages: OllamaChatMessage[],

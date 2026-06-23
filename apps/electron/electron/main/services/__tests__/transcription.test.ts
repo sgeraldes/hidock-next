@@ -20,6 +20,46 @@ const mockGetQueueItems = vi.fn()
 const mockGetRecordingById = vi.fn()
 const mockInsertTranscript = vi.fn()
 const mockExecFile = vi.fn()
+
+// spawnStreaming uses `spawn`, not `execFile`. We create a helper that manufactures
+// a fake ChildProcess whose stdout/stderr are minimal EventEmitters so spawnStreaming
+// can wire up its data / close listeners correctly.
+function makeFakeChildProcess(stdout: string, code: number = 0) {
+  const listeners: Record<string, ((...args: any[]) => void)[]> = {}
+
+  function on(event: string, cb: (...args: any[]) => void) {
+    if (!listeners[event]) listeners[event] = []
+    listeners[event].push(cb)
+    return fakeChild
+  }
+
+  function emit(event: string, ...args: any[]) {
+    (listeners[event] || []).forEach(fn => fn(...args))
+  }
+
+  const fakeStdout = {
+    on(event: string, cb: (...args: any[]) => void) {
+      if (event === 'data') {
+        // defer so spawnStreaming can finish wiring listeners
+        Promise.resolve().then(() => cb(Buffer.from(stdout)))
+      }
+      return fakeStdout
+    }
+  }
+
+  const fakeStderr = {
+    setEncoding(_enc: string) { return fakeStderr },
+    on(_event: string, _cb: (...args: any[]) => void) { return fakeStderr }
+  }
+
+  const fakeChild = { stdout: fakeStdout, stderr: fakeStderr, on }
+
+  // Emit close after data has been delivered
+  Promise.resolve().then(() => Promise.resolve()).then(() => emit('close', code))
+
+  return fakeChild
+}
+
 let mockConfig = {
   transcription: {
     provider: 'gemini',
@@ -97,7 +137,9 @@ vi.mock('../vector-store', () => ({
 }))
 
 vi.mock('child_process', () => ({
-  execFile: (...args: any[]) => mockExecFile(...args)
+  execFile: (...args: any[]) => mockExecFile(...args),
+  // spawnStreaming calls spawn() — delegate to mockExecFile so tests can intercept
+  spawn: (...args: any[]) => mockExecFile(...args)
 }))
 
 describe('Transcription Service', () => {
@@ -195,18 +237,13 @@ describe('Transcription Service', () => {
         file_path: 'G:\\Recordings\\local.wav',
         status: 'complete'
       })
-      mockExecFile.mockImplementation((...args: any[]) => {
-        const callback = args[args.length - 1]
-        callback(
-          null,
-          JSON.stringify({
-            text: 'Speaker 1: Hola equipo. Revisamos el plan.',
-            language: 'es',
-            duration_seconds: 12,
-            processing_time_seconds: 1
-          }),
-          ''
-        )
+      mockExecFile.mockImplementation((_cmd: string, _args: string[]) => {
+        return makeFakeChildProcess(JSON.stringify({
+          text: 'Speaker 1: Hola equipo. Revisamos el plan.',
+          language: 'es',
+          duration_seconds: 12,
+          processing_time_seconds: 1
+        }))
       })
 
       const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
@@ -259,23 +296,18 @@ describe('Transcription Service', () => {
         status: 'complete'
       })
       let capturedArgs: string[] = []
-      mockExecFile.mockImplementation((...args: any[]) => {
-        capturedArgs = args[1] as string[]
-        const callback = args[args.length - 1]
-        callback(
-          null,
-          JSON.stringify({
-            segments: [
-              { speaker: 'Speaker 0', start: 0, end: 2.5, text: 'Hola equipo.' },
-              { speaker: 'Speaker 1', start: 2.5, end: 5, text: 'Revisamos el plan.' }
-            ],
-            language: 'es',
-            num_speakers: 2,
-            duration_seconds: 5,
-            processing_time_seconds: 2
-          }),
-          ''
-        )
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        capturedArgs = args
+        return makeFakeChildProcess(JSON.stringify({
+          segments: [
+            { speaker: 'Speaker 0', start: 0, end: 2.5, text: 'Hola equipo.' },
+            { speaker: 'Speaker 1', start: 2.5, end: 5, text: 'Revisamos el plan.' }
+          ],
+          language: 'es',
+          num_speakers: 2,
+          duration_seconds: 5,
+          processing_time_seconds: 2
+        }))
       })
 
       const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')
@@ -330,13 +362,12 @@ describe('Transcription Service', () => {
         status: 'complete'
       })
       let capturedArgs: string[] = []
-      mockExecFile.mockImplementation((...args: any[]) => {
-        capturedArgs = args[1] as string[]
-        const callback = args[args.length - 1]
-        callback(null, JSON.stringify({
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        capturedArgs = args
+        return makeFakeChildProcess(JSON.stringify({
           segments: [{ speaker: 'Speaker 0', start: 0, end: 1, text: 'Bonjour' }],
           language: 'fr'
-        }), '')
+        }))
       })
 
       const { startTranscriptionProcessor, stopTranscriptionProcessor } = await import('../transcription')

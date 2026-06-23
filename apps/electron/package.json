@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",
+    "@hidock/ai-providers": "file:../../packages/ai-providers",
     "@hidock/database": "file:../../packages/database",
     "@hidock/jensen-protocol": "file:../../packages/jensen-protocol",
     "@google/generative-ai": "^0.21.0",
