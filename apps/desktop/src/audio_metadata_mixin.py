@@ -20,6 +20,15 @@ from config_and_logger import logger
 class AudioMetadataMixin:
     """Mixin for integrating audio metadata with the GUI."""
 
+    def __init__(self, gui=None):
+        """Create the audio metadata collaborator.
+
+        Args:
+            gui: The HiDockToolGUI instance. May be None for isolated construction; GUI-dependent
+                methods (those touching self.gui) raise AttributeError if called with gui=None.
+        """
+        self.gui = gui
+
     def _ensure_audio_metadata_initialized(self):
         """Initialize audio metadata system (lazy initialization)."""
         if not hasattr(self, "_audio_metadata_initialized"):
@@ -71,7 +80,7 @@ class AudioMetadataMixin:
             # If no local path is available (file not downloaded), use a placeholder path
             if not file_path:
                 # Use download directory as base path for potential future downloads
-                download_dir = getattr(self, "download_directory", os.path.expanduser("~/Downloads"))
+                download_dir = getattr(self.gui, "download_directory", os.path.expanduser("~/Downloads"))
                 file_path = os.path.join(download_dir, filename)
 
             file_size = file_data.get("length", 0)
@@ -193,7 +202,7 @@ class AudioMetadataMixin:
 
             if success:
                 # Trigger GUI update
-                self.after(0, self._refresh_file_display_for_metadata_change, filename)
+                self.gui.after(0, self._refresh_file_display_for_metadata_change, filename)
 
                 # Start background processing
                 threading.Thread(
@@ -217,7 +226,7 @@ class AudioMetadataMixin:
         try:
             # Step 1: Transcription
             self._audio_metadata_db.update_processing_status(filename, ProcessingStatus.TRANSCRIBING)
-            self.after(0, self._refresh_file_display_for_metadata_change, filename)
+            self.gui.after(0, self._refresh_file_display_for_metadata_change, filename)
 
             # Get file path for transcription
             metadata = self._audio_metadata_db.get_metadata(filename)
@@ -245,11 +254,11 @@ class AudioMetadataMixin:
                     language=transcription_result.get("language"),
                 )
 
-                self.after(0, self._refresh_file_display_for_metadata_change, filename)
+                self.gui.after(0, self._refresh_file_display_for_metadata_change, filename)
 
                 # Step 2: AI Analysis
                 self._audio_metadata_db.update_processing_status(filename, ProcessingStatus.AI_ANALYZING)
-                self.after(0, self._refresh_file_display_for_metadata_change, filename)
+                self.gui.after(0, self._refresh_file_display_for_metadata_change, filename)
 
                 ai_result = self._analyze_transcription_with_ai(transcription_result["text"])
                 if ai_result:
@@ -278,18 +287,18 @@ class AudioMetadataMixin:
                 )
 
             # Final GUI update
-            self.after(0, self._refresh_file_display_for_metadata_change, filename)
+            self.gui.after(0, self._refresh_file_display_for_metadata_change, filename)
 
         except Exception as e:
             logger.error("AudioMetadata", "_process_background", f"Error processing {filename}: {e}")
             self._audio_metadata_db.update_processing_status(filename, ProcessingStatus.ERROR, str(e))
-            self.after(0, self._refresh_file_display_for_metadata_change, filename)
+            self.gui.after(0, self._refresh_file_display_for_metadata_change, filename)
 
     def _find_local_file_path(self, filename: str) -> Optional[str]:
         """Find local path for an audio file."""
         try:
             # Check if file is downloaded
-            for file_detail in getattr(self, "displayed_files_details", []):
+            for file_detail in getattr(self.gui, "displayed_files_details", []):
                 if file_detail.get("name") == filename:
                     local_path = file_detail.get("local_path")
                     if local_path and os.path.exists(local_path):
@@ -305,10 +314,10 @@ class AudioMetadataMixin:
                         )
 
             # Check download directory (primary location)
-            download_dir = getattr(self, "download_directory", None)
+            download_dir = getattr(self.gui, "download_directory", None)
             if not download_dir:
                 # Fallback to config
-                download_dir = self.config.get("download_directory", os.path.expanduser("~/Downloads"))
+                download_dir = self.gui.config.get("download_directory", os.path.expanduser("~/Downloads"))
 
             # Make download_dir absolute if it's relative
             if not os.path.isabs(download_dir):
@@ -341,15 +350,15 @@ class AudioMetadataMixin:
             logger.info("AudioMetadata", "_transcribe", f"Starting transcription of {file_path}")
 
             # Get API key, provider, and model from config
-            provider = self.config.get("ai_api_provider", "gemini")
-            model = self.config.get("ai_model", "gemini-2.0-flash-exp")
+            provider = self.gui.config.get("ai_api_provider", "gemini")
+            model = self.gui.config.get("ai_model", "gemini-2.0-flash-exp")
 
             # Get decrypted API key (supports encrypted keys from settings)
-            if hasattr(self, "get_decrypted_api_key"):
-                api_key = self.get_decrypted_api_key(provider)
+            if hasattr(self.gui, "get_decrypted_api_key"):
+                api_key = self.gui.get_decrypted_api_key(provider)
             else:
                 # Fallback: try direct key (unencrypted)
-                api_key = self.config.get("gemini_api_key", "")
+                api_key = self.gui.config.get("gemini_api_key", "")
 
             if not api_key:
                 logger.error("AudioMetadata", "_transcribe", f"No API key configured for provider: {provider}")
@@ -391,14 +400,14 @@ class AudioMetadataMixin:
             )
 
             # Get provider and API key
-            provider = self.config.get("ai_api_provider", "gemini")
-            model = self.config.get("ai_model", "gemini-2.5-flash")  # Use Flash to avoid rate limits
+            provider = self.gui.config.get("ai_api_provider", "gemini")
+            model = self.gui.config.get("ai_model", "gemini-2.5-flash")  # Use Flash to avoid rate limits
 
             # Get decrypted API key
-            if hasattr(self, "get_decrypted_api_key"):
-                api_key = self.get_decrypted_api_key(provider)
+            if hasattr(self.gui, "get_decrypted_api_key"):
+                api_key = self.gui.get_decrypted_api_key(provider)
             else:
-                api_key = self.config.get("gemini_api_key", "")
+                api_key = self.gui.config.get("gemini_api_key", "")
 
             if not api_key:
                 logger.error("AudioMetadata", "_analyze_ai", "No API key configured")
@@ -435,8 +444,8 @@ class AudioMetadataMixin:
         """Refresh the display for a specific file when its metadata changes."""
         try:
             # Find the file in displayed_files_details and update it
-            if hasattr(self, "displayed_files_details"):
-                for i, file_detail in enumerate(self.displayed_files_details):
+            if hasattr(self.gui, "displayed_files_details"):
+                for i, file_detail in enumerate(self.gui.displayed_files_details):
                     if file_detail.get("name") == filename:
                         # Get updated metadata
                         metadata = self._audio_metadata_db.get_metadata(filename)
@@ -445,8 +454,8 @@ class AudioMetadataMixin:
                             file_detail.update(self._create_metadata_display_fields(metadata))
 
                             # Update the TreeView item directly
-                            if hasattr(self, "file_tree") and self.file_tree.winfo_exists():
-                                if self.file_tree.exists(filename):
+                            if hasattr(self.gui, "file_tree") and self.gui.file_tree.winfo_exists():
+                                if self.gui.file_tree.exists(filename):
                                     self._update_treeview_item_with_metadata(filename, file_detail)
                         break
 
@@ -457,7 +466,7 @@ class AudioMetadataMixin:
         """Update a specific TreeView item with new metadata."""
         try:
             # Get current values
-            current_values = list(self.file_tree.item(filename, "values"))
+            current_values = list(self.gui.file_tree.item(filename, "values"))
 
             # Update meeting column (index 5) with processing status or result
             meeting_text = file_detail.get("meeting_display_text", "")
@@ -468,7 +477,7 @@ class AudioMetadataMixin:
             # Update the meeting column
             if len(current_values) > 5:
                 current_values[5] = meeting_text
-                self.file_tree.item(filename, values=current_values)
+                self.gui.file_tree.item(filename, values=current_values)
 
         except Exception as e:
             logger.warning("AudioMetadata", "_update_treeview_item", f"Error updating TreeView item {filename}: {e}")
@@ -484,7 +493,7 @@ class AudioMetadataMixin:
 
         success = self._audio_metadata_db.update_user_fields(filename, user_title=title)
         if success:
-            self.after(0, self._refresh_file_display_for_metadata_change, filename)
+            self.gui.after(0, self._refresh_file_display_for_metadata_change, filename)
         return success
 
     def update_user_audio_description(self, filename: str, description: str) -> bool:
@@ -493,7 +502,7 @@ class AudioMetadataMixin:
 
         success = self._audio_metadata_db.update_user_fields(filename, user_description=description)
         if success:
-            self.after(0, self._refresh_file_display_for_metadata_change, filename)
+            self.gui.after(0, self._refresh_file_display_for_metadata_change, filename)
         return success
 
     def update_user_audio_metadata(
@@ -520,7 +529,7 @@ class AudioMetadataMixin:
         )
 
         if success:
-            self.after(0, self._refresh_file_display_for_metadata_change, filename)
+            self.gui.after(0, self._refresh_file_display_for_metadata_change, filename)
 
         return success
 
@@ -595,7 +604,7 @@ class AudioMetadataMixin:
         try:
             import tkinter as tk
 
-            menu = tk.Menu(self, tearoff=0)
+            menu = tk.Menu(self.gui, tearoff=0)
 
             # Get metadata to determine available actions
             metadata = self.get_audio_metadata_for_file(filename)
@@ -651,7 +660,7 @@ class AudioMetadataMixin:
             audio_path = self._find_local_file_path(filename)
             if not audio_path:
                 # Fallback to download directory
-                download_dir = getattr(self, "download_directory", os.path.expanduser("~/Downloads"))
+                download_dir = getattr(self.gui, "download_directory", os.path.expanduser("~/Downloads"))
                 audio_path = os.path.join(download_dir, filename)
 
             # Generate .txt filename
@@ -737,7 +746,7 @@ class AudioMetadataMixin:
                     "No Transcription",
                     f"No transcription available for {filename}.\n\n"
                     "Please transcribe the file first by right-clicking and selecting 'Quick Transcribe'.",
-                    parent=self,
+                    parent=self.gui,
                 )
                 return False
 
@@ -763,7 +772,7 @@ class AudioMetadataMixin:
             messagebox.showerror(
                 "Error Opening Transcription",
                 f"Could not open transcription for {filename}.\n\nError: {str(e)}",
-                parent=self,
+                parent=self.gui,
             )
             return False
 
@@ -785,7 +794,7 @@ class AudioMetadataMixin:
                 f"Delete transcription and AI analysis for {filename}?\n\n"
                 "This will remove all transcription text, summaries, and insights.\n"
                 "This action cannot be undone.",
-                parent=self,
+                parent=self.gui,
             )
 
             if not result:
@@ -811,19 +820,19 @@ class AudioMetadataMixin:
                             logger.warning("AudioMetadata", "delete_transcription", f"Could not delete text file: {e}")
 
                 # Refresh display
-                self.after(0, self._refresh_file_display_for_metadata_change, filename)
+                self.gui.after(0, self._refresh_file_display_for_metadata_change, filename)
 
                 messagebox.showinfo(
-                    "Transcription Deleted", f"Transcription and analysis data deleted for {filename}.", parent=self
+                    "Transcription Deleted", f"Transcription and analysis data deleted for {filename}.", parent=self.gui
                 )
                 return True
             else:
-                messagebox.showerror("Delete Failed", f"Could not delete transcription for {filename}.", parent=self)
+                messagebox.showerror("Delete Failed", f"Could not delete transcription for {filename}.", parent=self.gui)
                 return False
 
         except Exception as e:
             logger.error("AudioMetadata", "delete_transcription", f"Error deleting transcription for {filename}: {e}")
             messagebox.showerror(
-                "Error", f"Error deleting transcription for {filename}.\n\nError: {str(e)}", parent=self
+                "Error", f"Error deleting transcription for {filename}.\n\nError: {str(e)}", parent=self.gui
             )
             return False

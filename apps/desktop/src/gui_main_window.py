@@ -73,6 +73,14 @@ from transcription_module import process_audio_file_for_insights
 from unified_filter_widget import UnifiedFilterWidget
 
 
+# Architecture note (2026-06-22): AsyncCalendarMixin and AudioMetadataMixin were converted
+# from base classes to composition collaborators (constructor injection). Access them via:
+#   self.async_calendar  — calendar sync and meeting matching
+#   self.audio_metadata  — audio transcription and metadata management
+# The remaining mixins (TreeViewMixin, DeviceActionsMixin, FileActionsMixin,
+# AuxiliaryMixin, EventHandlersMixin) are retained as base classes due to deep
+# GUI state coupling. DeviceActionsMixin must remain a standalone-instantiable class
+# (test_libusb_cross_platform.py instantiates it directly).
 class HiDockToolGUI(
     ctk.CTk,
     TreeViewMixin,
@@ -80,8 +88,6 @@ class HiDockToolGUI(
     FileActionsMixin,
     AuxiliaryMixin,
     EventHandlersMixin,
-    AsyncCalendarMixin,
-    AudioMetadataMixin,
 ):
     """
     Main application window for the HiDock Desktop Application.
@@ -176,6 +182,9 @@ class HiDockToolGUI(
 
         self.available_usb_devices = []
         self.displayed_files_details = []
+        # Collaborators (composition) - replace former AsyncCalendarMixin / AudioMetadataMixin bases
+        self.async_calendar = AsyncCalendarMixin(gui=self)
+        self.audio_metadata = AudioMetadataMixin(gui=self)
         self.treeview_sort_column = self.saved_treeview_sort_column
         self.treeview_sort_reverse = self.saved_treeview_sort_reverse
         self._recording_check_timer_id = None
@@ -1663,7 +1672,7 @@ class HiDockToolGUI(
             self.view_menu.entryconfig("Refresh File List", state="normal" if is_connected else "disabled")
             # Enable "Check Selected Files for Meetings" if files are selected and calendar is available
             can_check_selected = (
-                has_selection and hasattr(self, "_calendar_cache_manager") and self._calendar_cache_manager
+                has_selection and getattr(self.async_calendar, "_calendar_cache_manager", None) is not None
             )
             self.view_menu.entryconfig(
                 "Check Selected Files for Meetings", state="normal" if can_check_selected else "disabled"
@@ -4186,12 +4195,12 @@ You can dismiss this warning and continue using the application with limited aud
 
             # For files that appear unlinked in GUI, double-check the cache
             filename = file_detail.get("name")
-            if filename and hasattr(self, "_calendar_cache_manager") and self._calendar_cache_manager:
+            if filename and getattr(self.async_calendar, "_calendar_cache_manager", None):
                 try:
                     # Parse file datetime for cache lookup
                     file_datetime = self._parse_file_datetime_for_calendar(file_detail)
                     if file_datetime:
-                        cached_meeting = self._calendar_cache_manager.get_cached_meeting_for_file(
+                        cached_meeting = self.async_calendar._calendar_cache_manager.get_cached_meeting_for_file(
                             filename, file_datetime
                         )
                         if cached_meeting and cached_meeting.subject:
@@ -4289,17 +4298,16 @@ You can dismiss this warning and continue using the application with limited aud
 
                                     # Cache the meeting (same as individual refresh does)
                                     try:
-                                        if hasattr(self, "_calendar_integration") and self._calendar_integration:
+                                        if getattr(self.async_calendar, "_calendar_integration", None):
                                             # Get the meeting object again to cache it properly
-                                            meeting_obj = self._calendar_integration.find_meeting_for_recording(
+                                            meeting_obj = self.async_calendar._calendar_integration.find_meeting_for_recording(
                                                 file_datetime, tolerance_minutes=self._get_calendar_tolerance_minutes()
                                             )
                                             if (
                                                 meeting_obj
-                                                and hasattr(self, "_calendar_cache_manager")
-                                                and self._calendar_cache_manager
+                                                and getattr(self.async_calendar, "_calendar_cache_manager", None)
                                             ):
-                                                self._calendar_cache_manager.cache_meeting_for_file(
+                                                self.async_calendar._calendar_cache_manager.cache_meeting_for_file(
                                                     filename, file_datetime, meeting_obj
                                                 )
                                                 logger.debug(
@@ -4317,8 +4325,8 @@ You can dismiss this warning and continue using the application with limited aud
 
                                     # Cache the "no meeting" result (same as individual refresh does)
                                     try:
-                                        if hasattr(self, "_calendar_cache_manager") and self._calendar_cache_manager:
-                                            self._calendar_cache_manager.cache_no_meeting_for_file(
+                                        if getattr(self.async_calendar, "_calendar_cache_manager", None):
+                                            self.async_calendar._calendar_cache_manager.cache_no_meeting_for_file(
                                                 filename, file_datetime
                                             )
                                             logger.debug(
@@ -4378,8 +4386,8 @@ You can dismiss this warning and continue using the application with limited aud
 
                     # Force save cache to disk to ensure persistence
                     try:
-                        if hasattr(self, "_calendar_cache_manager") and self._calendar_cache_manager:
-                            self._calendar_cache_manager._save_caches()
+                        if getattr(self.async_calendar, "_calendar_cache_manager", None):
+                            self.async_calendar._calendar_cache_manager._save_caches()
                             logger.info("GUI", "refresh_unlinked_files", f"Saved {meetings_found} meetings to cache")
                     except Exception as e:
                         logger.warning("GUI", "refresh_unlinked_files", f"Failed to save cache: {e}")
@@ -4459,8 +4467,8 @@ You can dismiss this warning and continue using the application with limited aud
         """Find meeting for file using live calendar data (same method as individual refresh)."""
         try:
             # Use the same calendar integration as the individual file check
-            if hasattr(self, "_calendar_integration") and self._calendar_integration:
-                calendar_integration = self._calendar_integration
+            if getattr(self.async_calendar, "_calendar_integration", None):
+                calendar_integration = self.async_calendar._calendar_integration
                 logger.debug(
                     "GUI", "_find_meeting_for_file_live", f"Looking for meeting for {filename} at {file_datetime}"
                 )
@@ -4663,7 +4671,7 @@ You can dismiss this warning and continue using the application with limited aud
         """Force refresh calendar data from the GUI with visual feedback."""
         try:
             # Check if async calendar is available
-            if not hasattr(self, "_calendar_cache_manager") or not self._calendar_cache_manager:
+            if getattr(self.async_calendar, "_calendar_cache_manager", None) is None:
                 messagebox.showinfo(
                     "Calendar Not Available",
                     "Calendar integration is not available or not properly configured.",
@@ -5196,7 +5204,7 @@ You can dismiss this warning and continue using the application with limited aud
                 self._hide_calendar_refresh_overlay()
 
                 # CRITICAL FIX: Save the live meeting data to cache so it persists after restart
-                if hasattr(self, "_calendar_cache_manager") and self._calendar_cache_manager:
+                if getattr(self.async_calendar, "_calendar_cache_manager", None):
                     for enhanced_file in enhanced_files:
                         filename = enhanced_file.get("name")
                         has_meeting = enhanced_file.get("has_meeting", False)
@@ -5219,7 +5227,7 @@ You can dismiss this warning and continue using the application with limited aud
                                 file_datetime = self._parse_file_datetime_for_calendar(enhanced_file)
                                 if file_datetime:
                                     # Cache the meeting data
-                                    self._calendar_cache_manager.cache_meeting_for_file(
+                                    self.async_calendar._calendar_cache_manager.cache_meeting_for_file(
                                         filename, file_datetime, simple_meeting
                                     )
                                     logger.debug(
@@ -5239,7 +5247,7 @@ You can dismiss this warning and continue using the application with limited aud
                             try:
                                 file_datetime = self._parse_file_datetime_for_calendar(enhanced_file)
                                 if file_datetime:
-                                    self._calendar_cache_manager.cache_no_meeting_for_file(filename, file_datetime)
+                                    self.async_calendar._calendar_cache_manager.cache_no_meeting_for_file(filename, file_datetime)
                                     logger.debug(
                                         "GUI", "check_selected_files_live", f"Cached 'no meeting' result for {filename}"
                                     )
@@ -5315,3 +5323,88 @@ You can dismiss this warning and continue using the application with limited aud
             messagebox.showerror(
                 "Meeting Check Error", f"Failed to check selected files for meetings: {str(e)}", parent=self
             )
+
+    # --- Async calendar collaborator delegations ---
+
+    def _ensure_async_calendar_initialized(self):
+        return self.async_calendar._ensure_async_calendar_initialized()
+
+    def enhance_files_with_meeting_data_async(self, files_dict, callback=None):
+        return self.async_calendar.enhance_files_with_meeting_data_async(files_dict, callback)
+
+    def enhance_files_with_meeting_data(self, files_dict):
+        return self.async_calendar.enhance_files_with_meeting_data(files_dict)
+
+    def enhance_files_with_meeting_data_sync(self, files_dict):
+        return self.async_calendar.enhance_files_with_meeting_data_sync(files_dict)
+
+    def get_calendar_status_text_for_gui(self):
+        return self.async_calendar.get_calendar_status_text_for_gui()
+
+    def get_calendar_status_text_for_gui_async(self):
+        return self.async_calendar.get_calendar_status_text_for_gui_async()
+
+    def refresh_calendar_data_async(self, callback=None, current_files=None):
+        return self.async_calendar.refresh_calendar_data_async(callback=callback, current_files=current_files)
+
+    def get_calendar_cache_statistics(self):
+        return self.async_calendar.get_calendar_cache_statistics()
+
+    def shutdown_async_calendar(self):
+        return self.async_calendar.shutdown_async_calendar()
+
+    # --- Audio metadata collaborator delegations ---
+
+    def enhance_files_with_audio_metadata(self, files_dict):
+        return self.audio_metadata.enhance_files_with_audio_metadata(files_dict)
+
+    def start_audio_processing(self, filename):
+        return self.audio_metadata.start_audio_processing(filename)
+
+    def get_audio_metadata_for_file(self, filename):
+        return self.audio_metadata.get_audio_metadata_for_file(filename)
+
+    def update_user_audio_title(self, filename, title):
+        return self.audio_metadata.update_user_audio_title(filename, title)
+
+    def update_user_audio_description(self, filename, description):
+        return self.audio_metadata.update_user_audio_description(filename, description)
+
+    def update_user_audio_metadata(self, filename, title=None, description=None, participants=None,
+                                   action_items=None, tags=None, notes=None):
+        return self.audio_metadata.update_user_audio_metadata(
+            filename, title=title, description=description, participants=participants,
+            action_items=action_items, tags=tags, notes=notes)
+
+    def get_audio_processing_statistics(self):
+        return self.audio_metadata.get_audio_processing_statistics()
+
+    def search_audio_content(self, query):
+        return self.audio_metadata.search_audio_content(query)
+
+    def cleanup_audio_metadata(self, current_filenames):
+        return self.audio_metadata.cleanup_audio_metadata(current_filenames)
+
+    def can_process_audio_file(self, filename):
+        return self.audio_metadata.can_process_audio_file(filename)
+
+    def get_files_ready_for_processing(self):
+        return self.audio_metadata.get_files_ready_for_processing()
+
+    def batch_process_ready_files(self, max_files=5):
+        return self.audio_metadata.batch_process_ready_files(max_files)
+
+    def show_audio_metadata_dialog(self, filename):
+        return self.audio_metadata.show_audio_metadata_dialog(filename)
+
+    def on_audio_file_right_click_metadata(self, event, filename):
+        return self.audio_metadata.on_audio_file_right_click_metadata(event, filename)
+
+    def export_transcription_to_file(self, filename):
+        return self.audio_metadata.export_transcription_to_file(filename)
+
+    def open_transcription_in_notepad(self, filename):
+        return self.audio_metadata.open_transcription_in_notepad(filename)
+
+    def _delete_transcription(self, filename):
+        return self.audio_metadata._delete_transcription(filename)
