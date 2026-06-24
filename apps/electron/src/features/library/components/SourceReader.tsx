@@ -16,8 +16,15 @@ import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, parseJsonArray } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, AudioLines } from 'lucide-react'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, AudioLines, MoreHorizontal } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem
@@ -368,82 +375,30 @@ export function SourceReader({
         </div>
       </div>
 
-      {/* Action Buttons Section */}
-      <div className="flex flex-wrap gap-2 px-6 py-3 border-b bg-muted/30">
-        {/* Play/Stop Button - only for local recordings - LB-03 fix: Wire up onPlay callback */}
-        {canPlay && onPlay && (
+      {/* Action Buttons Section — one primary action, the rest demoted to
+          secondary or an overflow menu so the row has a clear hierarchy and
+          doesn't duplicate the bulk-actions bar. */}
+      <div className="flex flex-wrap items-center gap-2 px-6 py-3 border-b bg-muted/30">
+        {/* Primary action: Play/Stop for local files, Download for device-only */}
+        {canPlay && onPlay ? (
           isPlaying ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onStop}
-              className="gap-2"
-              title="Stop playback"
-            >
+            <Button size="sm" onClick={onStop} className="gap-2" title="Stop playback">
               <Square className="h-4 w-4" />
               Stop
             </Button>
           ) : (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={onPlay}
-              className="gap-2"
-              title="Play recording"
-            >
+            <Button size="sm" onClick={onPlay} className="gap-2" title="Play recording">
               <Play className="h-4 w-4" />
               Play
             </Button>
           )
-        )}
-
-        {hasLocalPath(recording) && (
-          <>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => window.electronAPI?.storage.openFile(recording.localPath)}
-              className="gap-2"
-              title="Open in default application"
-            >
-              <ExternalLink className="h-4 w-4" />
-              Open
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => window.electronAPI?.storage.revealInFolder(recording.localPath)}
-              className="gap-2"
-              title="Show in file explorer"
-            >
-              <FolderOpen className="h-4 w-4" />
-              Reveal
-            </Button>
-          </>
-        )}
-
-        {!meeting && !isDeviceOnly(recording) && (
+        ) : isDeviceOnly(recording) && onDownload ? (
           <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setLinkDialogOpen(true)}
-            className="gap-2"
-            title="Link this recording to a meeting"
-          >
-            <Link className="h-4 w-4" />
-            Link Meeting
-          </Button>
-        )}
-
-        {/* Download Button - only for device-only recordings */}
-        {isDeviceOnly(recording) && onDownload && (
-          <Button
-            variant="outline"
             size="sm"
             onClick={onDownload}
             disabled={!deviceConnected || isDownloading}
             className="gap-2"
-            title={!deviceConnected ? "Device not connected" : "Download recording from device"}
+            title={!deviceConnected ? 'Device not connected' : 'Download recording from device'}
           >
             {isDownloading ? (
               <>
@@ -457,9 +412,9 @@ export function SourceReader({
               </>
             )}
           </Button>
-        )}
+        ) : null}
 
-        {/* Transcribe Button - only for local recordings without transcript */}
+        {/* Secondary: transcription actions stay visible for local files */}
         {hasLocalPath(recording) && recording.transcriptionStatus !== 'complete' && onTranscribe && (
           <Button
             variant="outline"
@@ -468,9 +423,9 @@ export function SourceReader({
             disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
             className="gap-2"
             title={
-              recording.transcriptionStatus === 'pending' ? "Transcription queued" :
-              recording.transcriptionStatus === 'processing' ? "Transcription in progress" :
-              "Start AI transcription"
+              recording.transcriptionStatus === 'pending' ? 'Transcription queued' :
+              recording.transcriptionStatus === 'processing' ? 'Transcription in progress' :
+              'Start AI transcription'
             }
           >
             {recording.transcriptionStatus === 'processing' ? (
@@ -492,7 +447,6 @@ export function SourceReader({
           </Button>
         )}
 
-        {/* Re-transcribe with VibeVoice (local full-file / re-processing) */}
         {hasLocalPath(recording) && onReprocessVibeVoice && (
           <Button
             variant="outline"
@@ -507,28 +461,53 @@ export function SourceReader({
           </Button>
         )}
 
-        {/* Delete Button - always available */}
-        {onDelete && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onDelete}
-            disabled={(isDeviceOnly(recording) && !deviceConnected) || isDeleting}
-            className="gap-2 text-destructive hover:text-destructive"
-            title={
-              isDeviceOnly(recording) && !deviceConnected ? "Device not connected" :
-              isDeleting ? "Deleting..." :
-              "Delete recording"
-            }
-          >
-            {isDeleting ? (
-              <RefreshCw className="h-4 w-4 animate-spin" />
-            ) : (
-              <Trash2 className="h-4 w-4" />
+        {/* Overflow: file operations + destructive delete (behind a separator) */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="sm" aria-label="More actions" title="More actions">
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-52">
+            {hasLocalPath(recording) && (
+              <>
+                <DropdownMenuItem onClick={() => window.electronAPI?.storage.openFile(recording.localPath)}>
+                  <ExternalLink className="h-4 w-4" aria-hidden="true" />
+                  Open in default app
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => window.electronAPI?.storage.revealInFolder(recording.localPath)}>
+                  <FolderOpen className="h-4 w-4" aria-hidden="true" />
+                  Reveal in folder
+                </DropdownMenuItem>
+              </>
             )}
-            Delete
-          </Button>
-        )}
+            {!meeting && !isDeviceOnly(recording) && (
+              <DropdownMenuItem onClick={() => setLinkDialogOpen(true)}>
+                <Link className="h-4 w-4" aria-hidden="true" />
+                Link meeting
+              </DropdownMenuItem>
+            )}
+            {onDelete && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={onDelete}
+                  disabled={(isDeviceOnly(recording) && !deviceConnected) || isDeleting}
+                  className="text-destructive focus:text-destructive"
+                >
+                  {isDeleting ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                  )}
+                  {isDeviceOnly(recording) ? 'Delete from device'
+                    : recording.location === 'local-only' ? 'Delete from computer'
+                      : 'Delete everywhere'}
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       {/* Audio Player — shown whenever recording has local file */}
