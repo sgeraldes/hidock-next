@@ -508,6 +508,38 @@ describe('JensenIpcClient', () => {
       expect(receivedChunks[0]).toEqual(new Uint8Array([1, 2]))
     })
 
+    it('drains trailing chunk events that arrive after the invoke resolves', async () => {
+      // Regression: the jensen:download-chunk events travel on a different IPC
+      // channel than the downloadFile invoke reply. Under load the invoke can
+      // resolve while batched chunks are still queued; tearing the listener
+      // down immediately would drop them and truncate the file.
+      let capturedChunkHandler: ((data: { filename: string; data: Uint8Array }) => void) | null = null
+      const unsubChunk = vi.fn()
+      jensenMock.onDownloadChunk.mockImplementation((handler) => {
+        capturedChunkHandler = handler
+        return unsubChunk
+      })
+
+      jensenMock.downloadFile.mockImplementation(async () => {
+        // Deliver only part of the file, then resolve the invoke (it "wins" the race)…
+        capturedChunkHandler?.({ filename: 'test.wav', data: new Uint8Array([1, 2]) })
+        // …and let the remaining chunk arrive AFTER the invoke promise resolves.
+        setTimeout(() => {
+          capturedChunkHandler?.({ filename: 'test.wav', data: new Uint8Array([3, 4]) })
+        }, 10)
+        return true
+      })
+
+      const receivedChunks: Uint8Array[] = []
+      await client.downloadFile('test.wav', 4, (data) => receivedChunks.push(data))
+
+      // The trailing chunk was drained, not dropped — full file received.
+      const total = receivedChunks.reduce((n, c) => n + c.length, 0)
+      expect(total).toBe(4)
+      // Cleanup still ran, but only after draining.
+      expect(unsubChunk).toHaveBeenCalledTimes(1)
+    })
+
     it('invokes onProgress callback when download-progress events fire', async () => {
       let capturedProgressHandler: ((data: { filename: string; bytesReceived: number; totalBytes: number }) => void) | null = null
       jensenMock.onDownloadProgress.mockImplementation((handler) => {

@@ -32,6 +32,13 @@ import type {
   BluetoothStatus,
 } from '@hidock/jensen-protocol'
 
+// Drain trailing `jensen:download-chunk` events after the downloadFile invoke
+// resolves. Poll every IDLE_MS until the received count stops growing or
+// reaches fileSize; TIMEOUT_MS is the hard cap before giving up and letting the
+// main-side integrity check fail+retry the file.
+const DOWNLOAD_DRAIN_IDLE_MS = 50
+const DOWNLOAD_DRAIN_TIMEOUT_MS = 10000
+
 // ---------------------------------------------------------------------------
 // Minimal type for the IPC-pushed connection state
 // ---------------------------------------------------------------------------
@@ -228,10 +235,20 @@ export class JensenIpcClient {
     let cleanupChunk: (() => void) | null = null
     let cleanupProgress: (() => void) | null = null
 
+    // The `jensen:download-chunk` events travel on a different IPC channel than
+    // the `jensen:downloadFile` invoke reply. Under bulk load the invoke promise
+    // can resolve while batched chunk events are still queued in the renderer's
+    // event loop; tearing the listener down immediately would drop them and
+    // truncate the file. Track received bytes so we can drain trailing chunks
+    // before cleanup.
+    let received = 0
+
     cleanupChunk = window.electronAPI.jensen.onDownloadChunk(
       (data: { filename: string; data: Uint8Array }) => {
         if (data.filename === filename) {
-          onChunk(new Uint8Array(data.data))
+          const chunk = new Uint8Array(data.data)
+          received += chunk.length
+          onChunk(chunk)
         }
       }
     )
@@ -258,6 +275,20 @@ export class JensenIpcClient {
 
     try {
       const result = await window.electronAPI.jensen.downloadFile(filename, fileSize)
+      // Drain trailing chunk events still queued in the renderer before removing
+      // the listener. The USB transfer is already complete here, so any
+      // remaining events are dispatched within a tick or two; poll until the
+      // received count stops growing (idle) or reaches fileSize. The deadline
+      // guards the rare case where an event was genuinely lost (the main-side
+      // integrity check then fails the file and it is retried).
+      if (result && fileSize > 0 && received < fileSize) {
+        const deadline = Date.now() + DOWNLOAD_DRAIN_TIMEOUT_MS
+        let prev = -1
+        while (received < fileSize && received !== prev && Date.now() < deadline) {
+          prev = received
+          await new Promise<void>((resolve) => setTimeout(resolve, DOWNLOAD_DRAIN_IDLE_MS))
+        }
+      }
       return result ?? false
     } finally {
       cleanupChunk?.()
