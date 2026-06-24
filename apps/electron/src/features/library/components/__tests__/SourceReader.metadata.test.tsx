@@ -315,12 +315,15 @@ describe('SourceReader — metadata editing', () => {
     expect(screen.getByTitle(/remove meeting link/i)).toBeInTheDocument()
   })
 
-  // 13. "Link Meeting" button shows when no meeting linked
-  it('shows Link Meeting button when no meeting is linked', () => {
+  // 13. "Link Meeting" action shows in the overflow menu when no meeting linked
+  it('shows Link Meeting action in the overflow menu when no meeting is linked', async () => {
     const rec = makeRecording({ knowledgeCaptureId: 'kc-1' })
     render(<SourceReader recording={rec} />)
 
-    expect(screen.getByRole('button', { name: /link meeting/i })).toBeInTheDocument()
+    // Link Meeting moved into the "More actions" overflow menu (audit #4).
+    // Radix opens its menu on keydown (Enter/Space/ArrowDown), not click.
+    fireEvent.keyDown(screen.getByRole('button', { name: /more actions/i }), { key: 'Enter' })
+    expect(await screen.findByRole('menuitem', { name: /link meeting/i })).toBeInTheDocument()
   })
 
   // 14. Remove calls selectMeeting(id, null)

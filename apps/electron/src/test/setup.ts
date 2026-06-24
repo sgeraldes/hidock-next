@@ -47,5 +47,17 @@ if (typeof window !== 'undefined') {
 
   // Mock scrollIntoView
   window.HTMLElement.prototype.scrollIntoView = vi.fn()
+
+  // Pointer-capture APIs jsdom doesn't implement — Radix popper components
+  // (DropdownMenu, Select, Popover) call these when opening via pointer.
+  if (!window.HTMLElement.prototype.hasPointerCapture) {
+    window.HTMLElement.prototype.hasPointerCapture = vi.fn(() => false)
+  }
+  if (!window.HTMLElement.prototype.setPointerCapture) {
+    window.HTMLElement.prototype.setPointerCapture = vi.fn()
+  }
+  if (!window.HTMLElement.prototype.releasePointerCapture) {
+    window.HTMLElement.prototype.releasePointerCapture = vi.fn()
+  }
 }
 
