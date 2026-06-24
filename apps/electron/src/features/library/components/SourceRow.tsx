@@ -1,8 +1,15 @@
 import { memo } from 'react'
-import { Play, X, AlertCircle, Download, Trash2, Wand2, Mic, FileText, RefreshCw, AudioLines } from 'lucide-react'
+import { Play, X, AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu'
 import { formatDate, formatDuration } from '@/lib/utils'
 import { Meeting, Transcript } from '@/types'
 import { UnifiedRecording, hasLocalPath } from '@/types/unified-recording'
@@ -126,14 +133,14 @@ export const SourceRow = memo(function SourceRow({
         </div>
       </div>
 
-      {/* Action area — action buttons, play button, and error indicator */}
+      {/* Action area — error + primary Play; everything else in an overflow menu */}
       <div className="flex items-center gap-1 shrink-0 ml-2">
         {/* Error indicator */}
         {error && (
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
-                <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0" />
+                <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" aria-label="Processing error" />
               </TooltipTrigger>
               <TooltipContent>
                 <p>{error.message}</p>
@@ -143,93 +150,23 @@ export const SourceRow = memo(function SourceRow({
           </TooltipProvider>
         )}
 
-        {/* Ask Assistant button */}
-        {onAskAssistant && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={(e) => { e.stopPropagation(); onAskAssistant(); }}
-            title="Ask Assistant about this capture"
-          >
-            <Mic className="h-3.5 w-3.5" />
-          </Button>
+        {/* Download progress (device-only, in flight) */}
+        {recording.location === 'device-only' && isDownloading && (
+          <div className="flex items-center gap-1 text-xs text-muted-foreground px-2" aria-live="polite">
+            <RefreshCw className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            <span>{downloadProgress ?? 0}%</span>
+          </div>
         )}
 
-        {/* Generate Output button */}
-        {onGenerateOutput && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={(e) => { e.stopPropagation(); onGenerateOutput(); }}
-            title="Generate artifact from this capture"
-          >
-            <FileText className="h-3.5 w-3.5" />
-          </Button>
-        )}
-
-        {/* Transcribe button - only for local recordings without complete transcript */}
-        {hasLocalPath(recording) && recording.transcriptionStatus !== 'complete' && onTranscribe && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={(e) => { e.stopPropagation(); onTranscribe(); }}
-            disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
-            title={
-              recording.transcriptionStatus === 'pending' ? 'Transcription queued' :
-              recording.transcriptionStatus === 'processing' ? 'Transcription in progress' :
-              'Transcribe this capture'
-            }
-          >
-            {recording.transcriptionStatus === 'processing' ? (
-              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Wand2 className="h-3.5 w-3.5" />
-            )}
-          </Button>
-        )}
-
-        {/* Re-transcribe with VibeVoice (local full-file / re-processing) */}
-        {hasLocalPath(recording) && onReprocessVibeVoice && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={(e) => { e.stopPropagation(); onReprocessVibeVoice(); }}
-            disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
-            title="Re-transcribe with VibeVoice (local, speaker-diarized)"
-          >
-            <AudioLines className="h-3.5 w-3.5" />
-          </Button>
-        )}
-
-        {/* Download button - only for device-only recordings */}
-        {recording.location === 'device-only' && onDownload && (
-          isDownloading ? (
-            <div className="flex items-center gap-1 text-xs text-muted-foreground px-2">
-              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-              <span>{downloadProgress ?? 0}%</span>
-            </div>
-          ) : (
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={(e) => { e.stopPropagation(); onDownload(); }}
-              disabled={!deviceConnected}
-              title={deviceConnected ? 'Download to computer' : 'Device not connected'}
-            >
-              <Download className="h-3.5 w-3.5" />
-            </Button>
-          )
-        )}
-
-        {/* Play/Stop button */}
+        {/* Primary action: Play / Stop (always visible) */}
         {isPlaying ? (
           <Button
             variant="ghost"
             size="icon-sm"
             onClick={(e) => { e.stopPropagation(); onStop(); }}
-            title="Stop playback"
+            aria-label="Stop playback"
           >
-            <X className="h-3.5 w-3.5" />
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
           </Button>
         ) : (
           <Button
@@ -237,42 +174,88 @@ export const SourceRow = memo(function SourceRow({
             size="icon-sm"
             onClick={(e) => { e.stopPropagation(); onPlay(); }}
             disabled={!canPlay || error?.type === 'audio_not_found'}
-            title={
-              error?.type === 'audio_not_found'
-                ? 'File missing'
-                : canPlay
-                  ? 'Play capture'
+            aria-label={
+              error?.type === 'audio_not_found' ? 'File missing'
+                : canPlay ? 'Play capture'
                   : 'Download to play'
             }
           >
-            <Play className="h-3.5 w-3.5" />
+            <Play className="h-3.5 w-3.5" aria-hidden="true" />
           </Button>
         )}
 
-        {/* Delete button */}
-        {onDelete && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className={
-              recording.location === 'device-only'
-                ? 'text-destructive hover:text-destructive'
-                : recording.location === 'local-only'
-                  ? 'text-orange-500 hover:text-orange-600'
-                  : 'text-muted-foreground hover:text-orange-500'
-            }
-            title={
-              recording.location === 'device-only'
-                ? 'Delete from device (permanent)'
-                : recording.location === 'local-only'
-                  ? 'Delete from computer (permanent)'
-                  : 'Delete from device and computer'
-            }
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-        )}
+        {/* Secondary actions: overflow menu (labeled, keeps the row uncluttered) */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={(e) => e.stopPropagation()}
+              aria-label="More actions"
+            >
+              <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            {onAskAssistant && (
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onAskAssistant(); }}>
+                <Sparkles className="h-4 w-4" aria-hidden="true" />
+                Ask Assistant
+              </DropdownMenuItem>
+            )}
+            {onGenerateOutput && (
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onGenerateOutput(); }}>
+                <FileText className="h-4 w-4" aria-hidden="true" />
+                Generate output
+              </DropdownMenuItem>
+            )}
+            {hasLocalPath(recording) && recording.transcriptionStatus !== 'complete' && onTranscribe && (
+              <DropdownMenuItem
+                onClick={(e) => { e.stopPropagation(); onTranscribe(); }}
+                disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
+              >
+                {recording.transcriptionStatus === 'processing'
+                  ? <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  : <Wand2 className="h-4 w-4" aria-hidden="true" />}
+                {recording.transcriptionStatus === 'pending' ? 'Transcription queued'
+                  : recording.transcriptionStatus === 'processing' ? 'Transcribing…'
+                    : 'Transcribe'}
+              </DropdownMenuItem>
+            )}
+            {hasLocalPath(recording) && onReprocessVibeVoice && (
+              <DropdownMenuItem
+                onClick={(e) => { e.stopPropagation(); onReprocessVibeVoice(); }}
+                disabled={recording.transcriptionStatus === 'pending' || recording.transcriptionStatus === 'processing'}
+              >
+                <AudioLines className="h-4 w-4" aria-hidden="true" />
+                Re-transcribe (VibeVoice)
+              </DropdownMenuItem>
+            )}
+            {recording.location === 'device-only' && onDownload && !isDownloading && (
+              <DropdownMenuItem
+                onClick={(e) => { e.stopPropagation(); onDownload(); }}
+                disabled={!deviceConnected}
+              >
+                <Download className="h-4 w-4" aria-hidden="true" />
+                {deviceConnected ? 'Download to computer' : 'Device not connected'}
+              </DropdownMenuItem>
+            )}
+            {onDelete && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                  className="text-destructive focus:text-destructive"
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden="true" />
+                  {recording.location === 'device-only' ? 'Delete from device'
+                    : recording.location === 'local-only' ? 'Delete from computer'
+                      : 'Delete everywhere'}
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   )
