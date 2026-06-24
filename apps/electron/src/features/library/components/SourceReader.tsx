@@ -11,6 +11,8 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { TranscriptViewer } from './TranscriptViewer'
+import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
+import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, parseJsonArray } from '@/types'
@@ -200,6 +202,10 @@ export function SourceReader({
 
   const canPlay = hasLocalPath(recording)
 
+  // Same title resolver the list row uses, so clicking a row and the detail
+  // header always agree (no raw filename leaking through here).
+  const { primaryText: displayTitle } = getDisplayTitle(recording, meeting, transcript)
+
   const linkDialogRecording = {
     id: recording.id,
     filename: recording.filename,
@@ -238,14 +244,14 @@ export function SourceReader({
               </div>
             ) : (
               <div className="group flex items-center gap-2">
-                <h2 className="text-xl font-semibold truncate" title={recording.title || meeting?.subject || recording.filename}>
-                  {recording.title || meeting?.subject || recording.filename}
+                <h2 className="text-xl font-semibold line-clamp-2 leading-tight" title={displayTitle}>
+                  {displayTitle}
                 </h2>
                 {recording.knowledgeCaptureId && (
                   <button
                     onClick={() => {
                       setIsEditingTitle(true)
-                      setEditedTitle(recording.title || recording.filename)
+                      setEditedTitle(recording.title || displayTitle)
                     }}
                     className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-muted"
                     aria-label="Edit title"
@@ -311,7 +317,7 @@ export function SourceReader({
             </div>
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Transcription</p>
-              <p className="capitalize">{recording.transcriptionStatus}</p>
+              <TranscriptionStatusBadge status={recording.transcriptionStatus} />
             </div>
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Filename</p>
