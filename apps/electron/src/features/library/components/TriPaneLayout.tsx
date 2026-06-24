@@ -31,7 +31,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
 
   // Normalize panel sizes to ensure they total 100% and respect constraints
   const normalizeDesktopPanelSizes = (sizes: number[]): [number, number, number] => {
-    const [left = 25, center = 45, right = 30] = sizes
+    const [left = 32, center = 42, right = 26] = sizes
     const total = left + center + right
 
     if (Math.abs(total - 100) < 0.1) {

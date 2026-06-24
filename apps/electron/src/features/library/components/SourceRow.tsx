@@ -117,7 +117,7 @@ export const SourceRow = memo(function SourceRow({
 
         {/* Content area — flex-1 to fill remaining space */}
         <div className="flex-1 min-w-0">
-          <p className="font-medium text-sm truncate text-foreground leading-tight">
+          <p className="font-medium text-sm line-clamp-2 text-foreground leading-tight" title={primaryText}>
             {searchQuery ? highlightText(primaryText, searchQuery) : primaryText}
           </p>
           <p className="text-xs text-muted-foreground truncate leading-tight mt-0.5">
