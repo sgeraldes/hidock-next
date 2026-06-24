@@ -1,5 +1,6 @@
-import { Filter, Cloud, HardDrive, Check, Search, ArrowUpDown, ChevronUp, ChevronDown } from 'lucide-react'
+import { Filter, Cloud, HardDrive, Check, Search, ArrowUpDown, ChevronUp, ChevronDown, Info } from 'lucide-react'
 import { Input } from '@/components/ui/input'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   FilterMode,
   SemanticLocationFilter,
@@ -85,10 +86,21 @@ export function LibraryFilters({
             {activeFilterCount} active
           </span>
         )}
-        {/* Filter mode toggle */}
-        <div className="flex items-center gap-2" role="group" aria-label="Filter mode">
-          <span className="text-xs font-medium text-muted-foreground">Mode:</span>
-          <div className="flex gap-1 p-1 bg-muted rounded-lg">
+        {/* Location-filter counting mode */}
+        <div className="flex items-center gap-1.5" role="group" aria-label="Location counting mode">
+          <span className="text-xs font-medium text-muted-foreground">Count as:</span>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Info className="h-3.5 w-3.5 text-muted-foreground cursor-help" aria-label="What is this?" />
+              </TooltipTrigger>
+              <TooltipContent className="max-w-xs">
+                <p><strong>Inclusive:</strong> a synced recording is counted under Device, Locally available, and Synced.</p>
+                <p className="mt-1"><strong>Exclusive:</strong> each recording counts once, under its exact state (Device = not yet downloaded).</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <div className="flex gap-1 p-1 bg-muted rounded-lg ml-0.5">
             <button
               onClick={() => onFilterModeChange('semantic')}
               className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
@@ -96,11 +108,11 @@ export function LibraryFilters({
                   ? 'bg-background shadow-sm'
                   : 'hover:bg-background/50'
               }`}
-              title="Show all files matching the filter (e.g., Device shows all files from any device)"
+              title="Inclusive — a synced recording is counted under every location it matches"
               aria-pressed={filterMode === 'semantic'}
-              aria-label="Show all matching files"
+              aria-label="Inclusive counting"
             >
-              All Matching
+              Inclusive
             </button>
             <button
               onClick={() => onFilterModeChange('exclusive')}
@@ -109,11 +121,11 @@ export function LibraryFilters({
                   ? 'bg-background shadow-sm'
                   : 'hover:bg-background/50'
               }`}
-              title="Show only files in exact location (e.g., Device Only shows files not downloaded)"
+              title="Exclusive — each recording counts once, under its exact state (Device = not yet downloaded)"
               aria-pressed={filterMode === 'exclusive'}
-              aria-label="Show exact location only"
+              aria-label="Exclusive counting"
             >
-              Exact Only
+              Exclusive
             </button>
           </div>
         </div>
