@@ -260,7 +260,7 @@ export function SourceReader({
                       setIsEditingTitle(true)
                       setEditedTitle(recording.title || displayTitle)
                     }}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-muted"
+                    className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity p-1 rounded hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                     aria-label="Edit title"
                     title="Edit title"
                   >
