@@ -342,6 +342,14 @@ export class JensenDevice {
   ondisconnect?: () => void
   onconnect?: () => void
 
+  /**
+   * Optional gate for the USB hot-plug auto-connect. When set and it returns
+   * false, a `connect` USB event for a HiDock device is ignored instead of
+   * triggering tryConnect(). Manual connect()/tryConnect() calls are unaffected.
+   * Consumers wire this to their "auto-connect" preference.
+   */
+  autoConnectGate: (() => boolean) | null = null
+
   // === USB event handlers ===
   private usbDisconnectHandler: ((event: USBConnectionEvent) => void) | null = null
   private usbConnectHandler: ((event: USBConnectionEvent) => void) | null = null
@@ -675,6 +683,10 @@ export class JensenDevice {
 
     this.usbConnectHandler = (event: USBConnectionEvent) => {
       if (this.isHiDockUsbDevice(event.device)) {
+        if (this.autoConnectGate && !this.autoConnectGate()) {
+          if (shouldLog()) console.log('[Jensen] USB connect event ignored (auto-connect disabled)')
+          return
+        }
         if (shouldLog()) console.log('[Jensen] USB connect event, triggering tryConnect')
         this.tryConnect(event.device)
       }

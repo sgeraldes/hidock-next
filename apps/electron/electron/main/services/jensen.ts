@@ -61,9 +61,29 @@ export type {
 
 let deviceInstance: JensenDevice | null = null
 
+// Injected at startup (setAutoConnectChecker) so this module — which is shared
+// with the renderer tsconfig and unit-tested in isolation — does not statically
+// import the Electron-only config module. Defaults to the original always-connect
+// behavior until wired.
+let autoConnectChecker: (() => boolean) | null = null
+const gate = (): boolean => (autoConnectChecker ? autoConnectChecker() : true)
+
+/**
+ * Wire the USB hot-plug auto-connect gate to a config reader. Called once during
+ * main-process startup. Without it, the device reconnects on every power-on /
+ * plug-in regardless of the user's "Auto-connect on startup" toggle. Manual
+ * connect() (the jensen:connect IPC / "Connect Device" button) never goes
+ * through this gate, so it always works.
+ */
+export function setAutoConnectChecker(fn: () => boolean): void {
+  autoConnectChecker = fn
+  if (deviceInstance) deviceInstance.autoConnectGate = gate
+}
+
 export function getJensenDevice(): JensenDevice {
   if (!deviceInstance) {
     deviceInstance = new JensenDevice()
+    deviceInstance.autoConnectGate = gate
     deviceInstance.setupUsbConnectListener()
   }
   return deviceInstance

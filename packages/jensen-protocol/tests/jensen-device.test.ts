@@ -93,6 +93,32 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(await new JensenDevice(makeFakeUsb()).tryConnect()).toBe(false)
   })
 
+  it('hot-plug auto-connect honors autoConnectGate', () => {
+    let connectHandler: ((e: { device: unknown }) => void) | null = null
+    const usb = makeFakeUsb({
+      addEventListener: ((type: string, h: (e: { device: unknown }) => void) => {
+        if (type === 'connect') connectHandler = h
+      }) as unknown as USB['addEventListener'],
+    })
+    const hidockDevice = { vendorId: 0x10d6, productId: USB_PRODUCT_IDS[0], productName: 'HiDock H1E' }
+
+    // Gate closed → the connect event is ignored, tryConnect is not called.
+    const devOff = new JensenDevice(usb)
+    const tryConnectOff = vi.spyOn(devOff, 'tryConnect').mockResolvedValue(false)
+    devOff.autoConnectGate = () => false
+    devOff.setupUsbConnectListener()
+    connectHandler?.({ device: hidockDevice })
+    expect(tryConnectOff).not.toHaveBeenCalled()
+
+    // Gate open → the connect event drives tryConnect.
+    const devOn = new JensenDevice(usb)
+    const tryConnectOn = vi.spyOn(devOn, 'tryConnect').mockResolvedValue(true)
+    devOn.autoConnectGate = () => true
+    devOn.setupUsbConnectListener()
+    connectHandler?.({ device: hidockDevice })
+    expect(tryConnectOn).toHaveBeenCalledTimes(1)
+  })
+
   it('disconnect() is safe when not connected', async () => {
     const device = new JensenDevice(makeFakeUsb())
     await expect(device.disconnect()).resolves.toBeUndefined()

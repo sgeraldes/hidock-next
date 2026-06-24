@@ -18,7 +18,8 @@ const USB_PRODUCT_IDS = [
   0x2041   // P1 Mini (alternate)
 ]
 import { initializeDatabase, closeDatabase } from './services/database'
-import { initializeConfig } from './services/config'
+import { initializeConfig, getConfig } from './services/config'
+import { setAutoConnectChecker } from './services/jensen'
 import { initializeFileStorage } from './services/file-storage'
 import { registerIpcHandlers } from './ipc/handlers'
 import { stopAutoSync, initializeCalendarAutoSync } from './ipc/calendar-handlers'
@@ -163,6 +164,11 @@ async function initializeServices(): Promise<void> {
 
   registerIpcHandlers()
   console.log('IPC handlers registered')
+
+  // Gate USB hot-plug auto-connect on the user's "Auto-connect on startup"
+  // preference. Without this the device reconnects on every power-on / plug-in
+  // regardless of the toggle. Manual "Connect Device" is unaffected.
+  setAutoConnectChecker(() => getConfig().device.autoConnect === true)
 
   // CS-010: Initialize calendar auto-sync after IPC handlers and DB are ready
   initializeCalendarAutoSync()

@@ -95,6 +95,17 @@ describe('JensenDevice (main process)', () => {
     expect(JensenDevice.isSupported()).toBe(true)
   })
 
+  it('setAutoConnectChecker gates the singleton hot-plug auto-connect', async () => {
+    const { getJensenDevice, setAutoConnectChecker } = await import('../jensen')
+    const device = getJensenDevice()
+
+    setAutoConnectChecker(() => false)
+    expect(device.autoConnectGate?.()).toBe(false)
+
+    setAutoConnectChecker(() => true)
+    expect(device.autoConnectGate?.()).toBe(true)
+  })
+
   it('CMD constants are defined', () => {
     expect(CMD.GET_DEVICE_INFO).toBe(1)
     expect(CMD.GET_FILE_LIST).toBe(4)
