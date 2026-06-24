@@ -15,6 +15,12 @@ import { formatTimestamp } from '@/utils/audioUtils'
 
 interface AudioPlayerProps {
   filename?: string
+  /**
+   * The recording this player is showing. When provided, waveform/loading/error
+   * states are scoped to it, so a different recording's stale error or waveform
+   * (these live in global store fields) never bleeds onto this one.
+   */
+  recordingId?: string
   onClose?: () => void
 }
 
@@ -24,17 +30,26 @@ interface AudioPlayerProps {
  * The actual audio playback is handled by OperationController.
  * This component displays the playback state, waveform, and controls.
  */
-export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
+export function AudioPlayer({ filename, recordingId, onClose }: AudioPlayerProps) {
   // Read playback state from UIStore
   const isPlaying = useUIStore((state) => state.isPlaying)
   const currentTime = useUIStore((state) => state.playbackCurrentTime)
   const duration = useUIStore((state) => state.playbackDuration)
-  const waveformData = useUIStore((state) => state.playbackWaveformData)
+  const playbackWaveformData = useUIStore((state) => state.playbackWaveformData)
   const sentimentData = useUIStore((state) => state.playbackSentimentData)
 
   // Read waveform loading state from UIStore
   const waveformLoadingId = useUIStore((state) => state.waveformLoadingId)
-  const waveformLoadingError = useUIStore((state) => state.waveformLoadingError)
+  const rawWaveformError = useUIStore((state) => state.waveformLoadingError)
+  const waveformErrorForId = useUIStore((state) => state.waveformErrorForId)
+  const waveformLoadedForId = useUIStore((state) => state.waveformLoadedForId)
+
+  // Scope global waveform state to this recording (when known) so a different
+  // recording's stale waveform/error/loading never shows here.
+  const isForThis = (id: string | null) => !recordingId || id === recordingId
+  const waveformData = isForThis(waveformLoadedForId) ? playbackWaveformData : null
+  const waveformLoadingError = isForThis(waveformErrorForId) ? rawWaveformError : null
+  const isLoadingThis = !!waveformLoadingId && isForThis(waveformLoadingId)
 
   // Get audio controls from OperationController
   const audioControls = useAudioControls()
@@ -100,7 +115,7 @@ export function AudioPlayer({ filename, onClose }: AudioPlayerProps) {
           <p className="text-destructive">Failed to load waveform</p>
           <p className="text-xs text-muted-foreground">{waveformLoadingError}</p>
         </div>
-      ) : waveformLoadingId ? (
+      ) : isLoadingThis ? (
         <div className="h-20 bg-background rounded flex items-center justify-center">
           <div className="flex gap-1 items-end h-12">
             {Array.from({ length: 40 }).map((_, i) => (

@@ -541,7 +541,7 @@ export function SourceReader({
           {/* No onClose here: the reader's player is always docked, so a
               "Close" button would mislead (it only stops). The transport's
               Square control already stops playback. */}
-          <AudioPlayer key={recording.id} filename={recording.filename} />
+          <AudioPlayer key={recording.id} recordingId={recording.id} filename={recording.filename} />
         </div>
       )}
 

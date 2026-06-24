@@ -33,6 +33,7 @@ export const useUIStore = create<UIStore>()(
   // Waveform loading state
   waveformLoadingId: null,
   waveformLoadingError: null,
+  waveformErrorForId: null,
   waveformLoadedForId: null,
 
   // QA monitoring toggle
@@ -97,14 +98,16 @@ export const useUIStore = create<UIStore>()(
   setWaveformLoading: (recordingId: string | null) => {
     set({
       waveformLoadingId: recordingId,
-      waveformLoadingError: null
+      waveformLoadingError: null,
+      waveformErrorForId: null
     })
   },
 
-  setWaveformLoadingError: (_recordingId: string | null, error: string | null) => {
+  setWaveformLoadingError: (recordingId: string | null, error: string | null) => {
     set({
       waveformLoadingId: null,
-      waveformLoadingError: error
+      waveformLoadingError: error,
+      waveformErrorForId: recordingId
     })
   },
 
@@ -112,6 +115,7 @@ export const useUIStore = create<UIStore>()(
     set({
       waveformLoadingId: null,
       waveformLoadingError: null,
+      waveformErrorForId: null,
       waveformLoadedForId: recordingId
     })
   },

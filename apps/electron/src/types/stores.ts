@@ -152,6 +152,7 @@ export interface UIStore {
   // Waveform loading state (independent of playback)
   waveformLoadingId: string | null
   waveformLoadingError: string | null
+  waveformErrorForId: string | null
   waveformLoadedForId: string | null
 
   // Actions
