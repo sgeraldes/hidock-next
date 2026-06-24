@@ -26,7 +26,7 @@ vi.mock('electron', () => ({ app: { getPath: () => tmpdir(), getVersion: () => '
 vi.mock('../config', () => ({
   getConfig: vi.fn(() => ({
     chat: { provider: 'gemini', geminiModel: 'gemini-2.0-flash', ollamaModel: '', maxContextChunks: 10 },
-    transcription: { geminiApiKey: 'test-api-key', geminiModel: '' },
+    transcription: { geminiApiKey: 'test-api-key', geminiModel: '' }, // pragma: allowlist secret
     storage: { dataPath: tmpdir(), maxRecordingsGB: 50 },
     calendar: { icsUrl: '', syncEnabled: false, syncIntervalMinutes: 15, lastSyncAt: null },
     embeddings: { provider: 'ollama', ollamaBaseUrl: '', ollamaModel: '', chunkSize: 500, chunkOverlap: 50 },
@@ -95,7 +95,7 @@ beforeEach(async () => {
   // Restore config to default (with a valid API key)
   ;(getConfig as any).mockReturnValue({
     chat: { provider: 'gemini', geminiModel: 'gemini-2.0-flash', ollamaModel: '', maxContextChunks: 10 },
-    transcription: { geminiApiKey: 'test-api-key', geminiModel: '' },
+    transcription: { geminiApiKey: 'test-api-key', geminiModel: '' }, // pragma: allowlist secret
   })
   ;(complete as any).mockResolvedValue(FAKE_JSON)
   // Initialize a fresh DB (getDatabasePath returns a new unique path each time)
