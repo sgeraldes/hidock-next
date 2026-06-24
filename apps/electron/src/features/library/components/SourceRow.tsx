@@ -102,8 +102,8 @@ export const SourceRow = memo(function SourceRow({
     <div
       className={[
         '@container flex items-center justify-between py-2 px-3 hover:bg-muted/50 cursor-pointer transition-colors',
-        isSelected ? 'bg-primary/10 border-l-2 border-l-primary/50' : 'border-l-2 border-l-transparent',
-        isActiveSource ? 'bg-primary/15 border-l-primary' : ''
+        // Selection/active state shown via background tint (no side-stripe border)
+        isActiveSource ? 'bg-primary/15' : isSelected ? 'bg-primary/10' : ''
       ].filter(Boolean).join(' ')}
       role="option"
       onClick={handleRowClick}
