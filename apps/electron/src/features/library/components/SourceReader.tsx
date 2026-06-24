@@ -223,7 +223,7 @@ export function SourceReader({
   }
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="@container flex flex-col h-full overflow-hidden">
       {/* Header with comprehensive metadata */}
       <div className="p-6 border-b space-y-4">
         <div>
@@ -272,7 +272,7 @@ export function SourceReader({
           </div>
 
           {/* Comprehensive Metadata Grid - same as SourceRowExpanded */}
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 text-sm">
+          <div className="grid grid-cols-2 @md:grid-cols-3 @xl:grid-cols-4 gap-4 text-sm">
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Date Recorded</p>
               <p>{(() => {
