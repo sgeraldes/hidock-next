@@ -168,84 +168,80 @@ export function TranscriptViewer({
   const hasTimestamps = segments.length > 1 || (segments.length === 1 && segments[0].startMs > 0)
 
   return (
-    <div className="space-y-4">
+    <div className="divide-y divide-border">
       {/* Summary Section */}
       {showSummary && summary && (
-        <div>
+        <section className="py-3 first:pt-0">
           <button
             onClick={() => setSummaryExpanded(!summaryExpanded)}
-            className="flex items-center justify-between w-full p-3 bg-muted rounded-lg hover:bg-muted/80 transition-colors"
+            className="flex items-center justify-between w-full text-left hover:text-foreground/70 transition-colors"
             aria-expanded={summaryExpanded}
           >
-            <span className="text-sm font-medium">Summary</span>
+            <span className="text-sm font-semibold">Summary</span>
             {summaryExpanded ? (
-              <ChevronDown className="h-4 w-4" />
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
             ) : (
-              <ChevronRight className="h-4 w-4" />
+              <ChevronRight className="h-4 w-4 text-muted-foreground" />
             )}
           </button>
           {summaryExpanded && (
-            <div className="p-3 mt-2 bg-muted rounded-lg">
-              <p className="text-sm whitespace-pre-wrap">{summary}</p>
-            </div>
+            <p className="text-sm whitespace-pre-wrap leading-relaxed mt-2">{summary}</p>
           )}
-        </div>
+        </section>
       )}
 
       {/* Action Items Section */}
       {showActionItems && actionItems && actionItems.length > 0 && (
-        <div>
+        <section className="py-3 first:pt-0">
           <button
             onClick={() => setActionItemsExpanded(!actionItemsExpanded)}
-            className="flex items-center justify-between w-full p-3 bg-muted rounded-lg hover:bg-muted/80 transition-colors"
+            className="flex items-center justify-between w-full text-left hover:text-foreground/70 transition-colors"
             aria-expanded={actionItemsExpanded}
           >
-            <span className="text-sm font-medium">Action Items</span>
+            <span className="text-sm font-semibold">Action Items</span>
             {actionItemsExpanded ? (
-              <ChevronDown className="h-4 w-4" />
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
             ) : (
-              <ChevronRight className="h-4 w-4" />
+              <ChevronRight className="h-4 w-4 text-muted-foreground" />
             )}
           </button>
           {actionItemsExpanded && (
-            <div className="p-3 mt-2 bg-muted rounded-lg">
-              <ul className="list-disc list-inside text-sm space-y-1">
-                {actionItems.map((item, i) => (
-                  <li key={i}>{item}</li>
-                ))}
-              </ul>
-            </div>
+            <ul className="list-disc list-inside text-sm space-y-1 mt-2">
+              {actionItems.map((item, i) => (
+                <li key={i}>{item}</li>
+              ))}
+            </ul>
           )}
-        </div>
+        </section>
       )}
 
       {/* Full Transcript Section */}
-      <div>
+      <section className="py-3 first:pt-0 last:pb-0">
         <button
           onClick={() => setTranscriptExpanded(!transcriptExpanded)}
-          className="flex items-center justify-between w-full p-3 bg-muted rounded-lg hover:bg-muted/80 transition-colors"
+          className="flex items-center justify-between w-full text-left hover:text-foreground/70 transition-colors"
           aria-expanded={transcriptExpanded}
         >
-          <span className="text-sm font-medium">Full Transcript</span>
+          <span className="text-sm font-semibold">Full Transcript</span>
           {transcriptExpanded ? (
-            <ChevronDown className="h-4 w-4" />
+            <ChevronDown className="h-4 w-4 text-muted-foreground" />
           ) : (
-            <ChevronRight className="h-4 w-4" />
+            <ChevronRight className="h-4 w-4 text-muted-foreground" />
           )}
         </button>
         {transcriptExpanded && (
-          <div ref={containerRef} className="p-3 mt-2 bg-muted rounded-lg max-h-[60vh] overflow-y-auto">
+          <div ref={containerRef} className="mt-2 max-h-[60vh] overflow-y-auto pr-1">
             {hasTimestamps ? (
-              <div className="space-y-4">
+              <div className="space-y-1">
                 {segments.map((segment, i) => (
                   <div
                     key={i}
                     ref={i === currentSegmentIndex ? activeSegmentRef : null}
-                    className={`text-sm p-3 rounded-lg transition-colors ${
+                    className={`text-sm p-2 rounded-md transition-colors ${
                       i === currentSegmentIndex ? 'bg-primary/10' : ''
                     }`}
                   >
-                    <div className="flex items-center gap-2 mb-2">
+                    <div className="flex items-center gap-2 mb-1">
                       <TimeAnchor
                         startMs={segment.startMs}
                         endMs={segment.endMs}
@@ -265,11 +261,11 @@ export function TranscriptViewer({
                 ))}
               </div>
             ) : (
-              <p className="text-sm whitespace-pre-wrap">{transcript}</p>
+              <p className="text-sm whitespace-pre-wrap leading-relaxed">{transcript}</p>
             )}
           </div>
         )}
-      </div>
+      </section>
     </div>
   )
 }
