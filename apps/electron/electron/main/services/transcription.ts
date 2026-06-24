@@ -452,7 +452,7 @@ Only include detections with confidence >= 0.6.`
 
   try {
     const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
-    const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.5-flash' })
+    const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
 
     const result = await model.generateContent(prompt)
     const responseText = result.response.text()
@@ -518,7 +518,7 @@ async function transcribeWithGemini(
   progressCallback?.('reading_file', 5)
   const audioBuffer = await readFileAsync(filePath)
 
-  const modelName = config.transcription.geminiModel || 'gemini-2.5-flash'
+  const modelName = config.transcription.geminiModel || 'gemini-3.5-flash'
   const engine = new GeminiEngine({
     apiKey: config.transcription.geminiApiKey,
     model: modelName,
@@ -795,7 +795,7 @@ async function analyzeTranscriptWithGemini(
   }
 
   const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
-  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-2.5-flash' })
+  const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
 
   let meetingSelectionSection = ''
   if (candidateMeetings.length > 1) {

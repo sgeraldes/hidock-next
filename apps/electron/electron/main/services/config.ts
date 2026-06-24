@@ -93,7 +93,7 @@ const DEFAULT_CONFIG: AppConfig = {
   transcription: {
     provider: 'gemini',
     geminiApiKey: '',
-    geminiModel: 'gemini-2.5-flash', // gemini-3-pro-preview generateContent is deprecated (404); 2.5-flash is current, audio-capable, 64k output
+    geminiModel: 'gemini-3.5-flash', // current flash model (2.0/2.5-flash retired); audio-capable for transcription
     localAsrPath: process.env.ASR_MCP_PATH || 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
     localAsrHfToken: process.env.HF_TOKEN || '',
     localAsrVocabularyFile: 'vocabulary.json',
@@ -114,7 +114,7 @@ const DEFAULT_CONFIG: AppConfig = {
   },
   chat: {
     provider: 'gemini',
-    geminiModel: 'gemini-2.0-flash',
+    geminiModel: 'gemini-3.5-flash',
     ollamaModel: 'llama3.2',
     maxContextChunks: 10
   },
@@ -142,6 +142,31 @@ export function getDataPath(): string {
   return config.storage.dataPath
 }
 
+// Gemini models that are retired / unavailable for generateContent. Persisted
+// configs holding these are upgraded to the current default on load.
+const RETIRED_GEMINI_MODELS = new Set([
+  'gemini-pro',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+  'gemini-2.0-flash',
+  'gemini-2.5-flash',
+  'gemini-3-pro-preview',
+])
+const CURRENT_GEMINI_MODEL = 'gemini-3.5-flash'
+
+/** Upgrade any retired geminiModel values in-place. Returns true if changed. */
+function migrateRetiredGeminiModels(cfg: AppConfig): boolean {
+  let changed = false
+  for (const section of ['transcription', 'chat'] as const) {
+    const sec = cfg[section] as { geminiModel?: string } | undefined
+    if (sec && sec.geminiModel && RETIRED_GEMINI_MODELS.has(sec.geminiModel)) {
+      sec.geminiModel = CURRENT_GEMINI_MODEL
+      changed = true
+    }
+  }
+  return changed
+}
+
 export async function initializeConfig(): Promise<void> {
   const configPath = getConfigPath()
 
@@ -155,6 +180,12 @@ export async function initializeConfig(): Promise<void> {
       }
       // Merge with defaults to handle new fields
       config = deepMerge(DEFAULT_CONFIG, savedConfig)
+      // Auto-upgrade retired Gemini model names in persisted configs so old
+      // saved values (e.g. gemini-2.0-flash, now 404) don't break transcription
+      // and GraphRAG extraction. Persist if anything changed.
+      if (migrateRetiredGeminiModels(config)) {
+        await saveConfig(config)
+      }
     } else {
       // Create config file with defaults
       await saveConfig(DEFAULT_CONFIG)

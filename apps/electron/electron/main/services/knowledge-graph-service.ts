@@ -83,7 +83,7 @@ function providerConfigFromSettings(): ProviderConfig | null {
   if (cfg.chat.provider === 'gemini' && cfg.transcription.geminiApiKey) {
     return {
       provider: 'google',
-      model: cfg.chat.geminiModel || 'gemini-2.0-flash',
+      model: cfg.chat.geminiModel || 'gemini-3.5-flash',
       apiKey: cfg.transcription.geminiApiKey,
     }
   }
