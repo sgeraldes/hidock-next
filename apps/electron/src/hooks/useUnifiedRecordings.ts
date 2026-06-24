@@ -255,7 +255,9 @@ function buildRecordingMap(
         size: dbRec.file_size,
         duration: dbRec.duration_seconds || 0,
         dateRecorded,
-        transcriptionStatus: mapTranscriptionStatus(dbRec.status, capture?.status ?? undefined),
+        // FL-001: prefer the authoritative transcription_status column; fall back
+        // to the legacy status only when it's absent (matches the 'both' branch).
+        transcriptionStatus: mapTranscriptionStatus(dbRec.transcription_status ?? dbRec.status, capture?.status ?? undefined),
         meetingId: dbRec.meeting_id,
         location: 'local-only',
         localPath: dbRec.file_path,
