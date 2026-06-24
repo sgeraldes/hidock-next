@@ -242,7 +242,7 @@ export function TranscriptViewer({
                     key={i}
                     ref={i === currentSegmentIndex ? activeSegmentRef : null}
                     className={`text-sm p-3 rounded-lg transition-colors ${
-                      i === currentSegmentIndex ? 'bg-primary/5 border-l-2 border-primary' : ''
+                      i === currentSegmentIndex ? 'bg-primary/10' : ''
                     }`}
                   >
                     <div className="flex items-center gap-2 mb-2">
