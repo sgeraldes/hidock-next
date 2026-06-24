@@ -12,7 +12,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { TranscriptViewer } from './TranscriptViewer'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
+import { StatusIcon } from './StatusIcon'
 import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
+import { useUIStore } from '@/store/useUIStore'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, parseJsonArray } from '@/types'
@@ -103,6 +105,11 @@ export function SourceReader({
   // Transcription warning state
   const [metadataEdited, setMetadataEdited] = useState(false)
   const [showTranscribeWarning, setShowTranscribeWarning] = useState(false)
+
+  // Live duration: imported/watched files have no stored duration until the
+  // waveform decode backfills it; show the freshly-decoded value meanwhile.
+  const livePlaybackDuration = useUIStore((s) => s.playbackDuration)
+  const waveformLoadedForId = useUIStore((s) => s.waveformLoadedForId)
 
   // Reset all state when recording changes
   useEffect(() => {
@@ -213,6 +220,14 @@ export function SourceReader({
   // header always agree (no raw filename leaking through here).
   const { primaryText: displayTitle } = getDisplayTitle(recording, meeting, transcript)
 
+  // Prefer the stored duration; fall back to the live decoded value for the
+  // recording whose waveform is currently loaded.
+  const durationSeconds = recording.duration && recording.duration > 0
+    ? recording.duration
+    : waveformLoadedForId === recording.id && livePlaybackDuration > 0
+      ? livePlaybackDuration
+      : 0
+
   const linkDialogRecording = {
     id: recording.id,
     filename: recording.filename,
@@ -285,16 +300,20 @@ export function SourceReader({
             </div>
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Duration</p>
-              <p>{recording.duration ? formatDuration(recording.duration) : 'Unknown'}</p>
+              <p>{durationSeconds > 0 ? formatDuration(durationSeconds) : 'Unknown'}</p>
             </div>
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Size</p>
               <p>{recording.size ? formatBytes(recording.size) : 'Unknown'}</p>
             </div>
-            <div>
-              <p className="text-xs font-medium text-muted-foreground mb-1">Quality</p>
-              <p className="capitalize">{recording.quality || 'Standard'}</p>
-            </div>
+            {/* Quality (value rating) — only shown when actually rated; the old
+                'Standard' fallback was a meaningless placeholder. */}
+            {recording.quality && recording.quality !== 'unrated' && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground mb-1">Quality</p>
+                <p className="capitalize">{recording.quality.replace('-', ' ')}</p>
+              </div>
+            )}
             {recording.knowledgeCaptureId ? (
               <div>
                 <p className="text-xs font-medium text-muted-foreground mb-1">Category</p>
@@ -323,10 +342,13 @@ export function SourceReader({
             ) : null}
             <div>
               <p className="text-xs font-medium text-muted-foreground mb-1">Location</p>
-              <p className="capitalize">{recording.location.replace('-', ' ')}</p>
+              {/* Icon-only (with tooltip/aria) — the verbose text was redundant */}
+              <StatusIcon recording={recording} />
             </div>
             <div>
-              <p className="text-xs font-medium text-muted-foreground mb-1">Transcription</p>
+              {/* No caption: the badge ("Transcribed", "Queued", …) is self-labelling.
+                  Invisible spacer keeps it aligned with the other cells' values. */}
+              <p className="text-xs font-medium mb-1 invisible select-none" aria-hidden="true">Status</p>
               <TranscriptionStatusBadge status={recording.transcriptionStatus} />
             </div>
             <div>

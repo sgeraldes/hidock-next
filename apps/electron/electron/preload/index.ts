@@ -135,6 +135,7 @@ export interface ElectronAPI {
     updateStatus: (id: string, status: string) => Promise<any>
     updateRecordingStatus: (id: string, status: string) => Promise<{ success: boolean; data?: any; error?: string }>
     updateTranscriptionStatus: (id: string, status: string) => Promise<{ success: boolean; data?: any; error?: string }>
+    updateDuration: (id: string, durationSeconds: number) => Promise<{ success: boolean; error?: string }>
     linkToMeeting: (recordingId: string, meetingId: string, confidence: number, method: string) => Promise<any>
     delete: (id: string) => Promise<boolean>
     deleteBatch: (ids: string[]) => Promise<{
@@ -571,6 +572,7 @@ const electronAPI: ElectronAPI = {
     updateStatus: (id, status) => callIPC('db:update-recording-status', id, status),
     updateRecordingStatus: (id, status) => callIPC('recordings:updateStatus', id, status),
     updateTranscriptionStatus: (id, status) => callIPC('recordings:updateTranscriptionStatus', id, status),
+    updateDuration: (id, durationSeconds) => callIPC('recordings:updateDuration', id, durationSeconds),
     linkToMeeting: (recordingId, meetingId, confidence, method) =>
       callIPC('db:link-recording-to-meeting', recordingId, meetingId, confidence, method),
     delete: (id) => callIPC('recordings:delete', id),

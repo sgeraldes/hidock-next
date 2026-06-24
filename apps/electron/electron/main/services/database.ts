@@ -2028,6 +2028,23 @@ export function updateRecordingTranscriptionStatus(id: string, transcriptionStat
   run('UPDATE recordings SET transcription_status = ? WHERE id = ?', [transcriptionStatus, id])
 }
 
+/**
+ * Persist a recording's duration (seconds). Imported/watched local files are
+ * stored with duration_seconds = NULL; the renderer decodes the audio for the
+ * waveform and backfills the real duration here. Only writes when the value is
+ * a positive, finite number and differs from what's stored.
+ */
+export function updateRecordingDuration(id: string, durationSeconds: number): void {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return
+  const rounded = Math.round(durationSeconds)
+  const existing = queryOne<{ duration_seconds: number | null }>(
+    'SELECT duration_seconds FROM recordings WHERE id = ?',
+    [id]
+  )
+  if (existing && existing.duration_seconds === rounded) return
+  run('UPDATE recordings SET duration_seconds = ? WHERE id = ?', [rounded, id])
+}
+
 export function linkRecordingToMeeting(
   recordingId: string,
   meetingId: string,

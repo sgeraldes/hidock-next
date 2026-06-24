@@ -5,6 +5,7 @@ import {
   getRecordingsForMeeting,
   updateRecordingStatus,
   updateRecordingTranscriptionStatus,
+  updateRecordingDuration,
   linkRecordingToMeeting,
   getTranscriptByRecordingId,
   getCandidatesForRecordingWithDetails,
@@ -675,6 +676,24 @@ export function registerRecordingHandlers(): void {
       return { success: true, data: recording }
     } catch (error) {
       console.error('recordings:updateTranscriptionStatus error:', error)
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' }
+    }
+  })
+
+  // Backfill duration discovered by the renderer when it decodes audio for the
+  // waveform. Imported/watched local files have no duration until this runs.
+  ipcMain.handle('recordings:updateDuration', async (_, id: unknown, durationSeconds: unknown): Promise<{ success: boolean; error?: string }> => {
+    try {
+      if (typeof id !== 'string' || !id) {
+        return { success: false, error: 'Invalid recording id' }
+      }
+      if (typeof durationSeconds !== 'number' || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+        return { success: false, error: 'Invalid duration' }
+      }
+      updateRecordingDuration(id, durationSeconds)
+      return { success: true }
+    } catch (error) {
+      console.error('recordings:updateDuration error:', error)
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' }
     }
   })

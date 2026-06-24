@@ -244,6 +244,14 @@ export function useAudioPlayback() {
       setWaveformData(waveformData)
       setWaveformLoadedFor(recordingId)
 
+      // Backfill duration: imported/watched files store none, so the Library
+      // shows "Unknown". The decode gives us the real value — surface it now
+      // (player + detail) and persist it so it survives restarts.
+      if (Number.isFinite(audioBuffer.duration) && audioBuffer.duration > 0) {
+        useUIStore.getState().setPlaybackProgress(0, audioBuffer.duration)
+        void window.electronAPI.recordings.updateDuration(recordingId, audioBuffer.duration)
+      }
+
       if (shouldLogQa()) console.log(`[QA-MONITOR][Operation] Waveform loaded successfully: ${recordingId}`)
     } catch (error) {
       if (signal.aborted) return
