@@ -107,7 +107,7 @@ export const SourceRow = memo(function SourceRow({
       ].filter(Boolean).join(' ')}
       role="option"
       onClick={handleRowClick}
-      aria-selected={isPlaying || isSelected}
+      aria-selected={isSelected}
       tabIndex={0}
     >
       <div className="flex items-center gap-2 min-w-0 flex-1">

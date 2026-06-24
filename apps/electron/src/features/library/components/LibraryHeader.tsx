@@ -121,15 +121,17 @@ export function LibraryHeader({
           </Button>
 
           {/* View Toggle */}
-          <div className="flex items-center border rounded-md overflow-hidden ml-2" data-testid="grid-view-toggle">
+          <div className="flex items-center border rounded-md overflow-hidden ml-2" role="group" aria-label="View layout" data-testid="grid-view-toggle">
             <Button
               variant={compactView ? 'ghost' : 'default'}
               size="sm"
               onClick={() => onSetCompactView(false)}
               className="rounded-none border-0 px-2"
               title="Card view"
+              aria-label="Card view"
+              aria-pressed={!compactView}
             >
-              <LayoutGrid className="h-4 w-4" />
+              <LayoutGrid className="h-4 w-4" aria-hidden="true" />
             </Button>
             <Button
               variant={compactView ? 'default' : 'ghost'}
@@ -137,8 +139,10 @@ export function LibraryHeader({
               onClick={() => onSetCompactView(true)}
               className="rounded-none border-0 border-l px-2"
               title="List view"
+              aria-label="List view"
+              aria-pressed={compactView}
             >
-              <List className="h-4 w-4" />
+              <List className="h-4 w-4" aria-hidden="true" />
             </Button>
           </div>
         </div>
