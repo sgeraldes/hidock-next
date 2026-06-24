@@ -89,13 +89,13 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
     return (
       <div className="flex flex-col h-full">
         {/* Tab Navigation */}
-        <div className="flex border-b border-gray-200 bg-white">
+        <div className="flex border-b border-border bg-card">
           <button
             onClick={() => setActiveMobilePane('left')}
             className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
               activeMobilePane === 'left'
-                ? 'border-b-2 border-blue-500 text-blue-600'
-                : 'text-gray-600 hover:text-gray-900'
+                ? 'border-b-2 border-primary text-primary'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
             aria-label="Show recording list"
             aria-pressed={activeMobilePane === 'left'}
@@ -106,8 +106,8 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
             onClick={() => setActiveMobilePane('center')}
             className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
               activeMobilePane === 'center'
-                ? 'border-b-2 border-blue-500 text-blue-600'
-                : 'text-gray-600 hover:text-gray-900'
+                ? 'border-b-2 border-primary text-primary'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
             aria-label="Show recording content"
             aria-pressed={activeMobilePane === 'center'}
@@ -118,8 +118,8 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
             onClick={() => setActiveMobilePane('right')}
             className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
               activeMobilePane === 'right'
-                ? 'border-b-2 border-blue-500 text-blue-600'
-                : 'text-gray-600 hover:text-gray-900'
+                ? 'border-b-2 border-primary text-primary'
+                : 'text-muted-foreground hover:text-foreground'
             }`}
             aria-label="Show AI assistant"
             aria-pressed={activeMobilePane === 'right'}
@@ -214,17 +214,17 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
           <div
             role="region"
             aria-label="AI Assistant"
-            className="w-80 border-l border-gray-200 overflow-y-auto shadow-lg bg-white flex-shrink-0 z-10"
+            className="w-80 border-l border-border overflow-y-auto shadow-lg bg-card flex-shrink-0 z-10"
           >
-            <div className="flex justify-between items-center p-3 border-b border-gray-200 bg-gray-50">
-              <h3 className="font-semibold text-gray-900">AI Assistant</h3>
+            <div className="flex justify-between items-center p-3 border-b border-border bg-muted/50">
+              <h3 className="font-semibold text-foreground">AI Assistant</h3>
               <button
                 onClick={() => setShowRightPanelTablet(false)}
-                className="p-1.5 hover:bg-gray-200 rounded-md transition-colors"
+                className="p-1.5 hover:bg-muted rounded-md transition-colors"
                 aria-label="Close AI assistant panel"
               >
                 <svg
-                  className="w-4 h-4 text-gray-600"
+                  className="w-4 h-4 text-muted-foreground"
                   fill="none"
                   stroke="currentColor"
                   viewBox="0 0 24 24"
@@ -246,7 +246,7 @@ export function TriPaneLayout({ leftPanel, centerPanel, rightPanel }: TriPaneLay
         {!showRightPanelTablet && (
           <button
             onClick={() => setShowRightPanelTablet(true)}
-            className="fixed bottom-6 right-6 bg-blue-500 text-white px-4 py-3 rounded-full shadow-lg hover:bg-blue-600 transition-colors flex items-center gap-2 z-10"
+            className="fixed bottom-6 right-6 bg-primary text-primary-foreground px-4 py-3 rounded-full shadow-lg hover:bg-primary/90 transition-colors flex items-center gap-2 z-10"
             aria-label="Open AI assistant panel"
           >
             <svg
