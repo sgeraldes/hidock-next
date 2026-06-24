@@ -224,6 +224,9 @@ export function SourceReader({
 
   return (
     <div className="@container flex flex-col h-full overflow-hidden">
+      {/* Single scroll container so the transcript is always reachable even when
+          the pane is short; the audio player sticks to the top while scrolling. */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
       {/* Header with comprehensive metadata */}
       <div className="p-6 border-b space-y-4">
         <div>
@@ -521,7 +524,7 @@ export function SourceReader({
       )}
 
       {/* Transcript Content */}
-      <div className="flex-1 overflow-auto p-4">
+      <div className="p-4">
         {transcript ? (
           <TranscriptViewer
             transcript={transcript.full_text}
@@ -550,6 +553,7 @@ export function SourceReader({
             )}
           </div>
         )}
+      </div>
       </div>
 
       {/* Meeting link dialog */}

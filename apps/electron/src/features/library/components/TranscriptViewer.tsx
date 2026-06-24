@@ -28,23 +28,62 @@ interface TranscriptSegment {
 }
 
 /**
- * Parse speaker name from text.
- * Supports formats: "Speaker Name:" or "[Speaker Name]" at the start of text
+ * Parse speaker name from text. Supports, at the start of the text:
+ *   **Speaker Name:**   / **Speaker Name**:   / **Speaker Name**   (markdown-bold)
+ *   [Speaker Name]
+ *   Speaker Name:
  */
 function parseSpeaker(text: string): { speaker: string | undefined; remainingText: string } {
-  // Try "Speaker Name:" format
-  const colonMatch = text.match(/^([A-Z][^:]*?):\s*(.*)/)
-  if (colonMatch) {
-    return { speaker: colonMatch[1].trim(), remainingText: colonMatch[2].trim() }
+  const trimmed = text.trimStart()
+
+  // Markdown-bold label: **Name:** rest / **Name**: rest / **Name** rest
+  // [^*\n]+? captures the name (and any inner colon); trailing colon is stripped below.
+  const boldMatch = trimmed.match(/^\*\*\s*([^*\n]+?)\s*\*\*\s*:?\s*([\s\S]*)$/)
+  if (boldMatch) {
+    return { speaker: boldMatch[1].replace(/:\s*$/, '').trim(), remainingText: boldMatch[2].trim() }
   }
 
-  // Try "[Speaker Name]" format
-  const bracketMatch = text.match(/^\[([^\]]+)\]\s*(.*)/)
+  // "[Speaker Name]" format
+  const bracketMatch = trimmed.match(/^\[([^\]]+)\]\s*([\s\S]*)$/)
   if (bracketMatch) {
     return { speaker: bracketMatch[1].trim(), remainingText: bracketMatch[2].trim() }
   }
 
+  // "Speaker Name:" format (capitalised, no colon inside the name)
+  const colonMatch = trimmed.match(/^([A-Z][^:\n]*?):\s+([\s\S]*)$/)
+  if (colonMatch) {
+    return { speaker: colonMatch[1].trim(), remainingText: colonMatch[2].trim() }
+  }
+
   return { speaker: undefined, remainingText: text }
+}
+
+// A line that begins a new speaker turn (markdown-bold, bracket, or "Name:").
+const SPEAKER_LINE_REGEX = /^[ \t]*(?:\*\*[^*\n]+\*\*\s*:?|\[[^\]\n]+\]|[A-Z][^:\n]{0,40}?:)\s/
+
+/**
+ * Parse a transcript with no timestamps into speaker turns. Each turn starts at
+ * a line with a speaker label; continuation lines are appended to the turn.
+ * Returns a single plain segment when no speaker labels are present.
+ */
+function parseSpeakerSegments(transcript: string): TranscriptSegment[] {
+  const segments: TranscriptSegment[] = []
+  let current: TranscriptSegment | null = null
+
+  for (const line of transcript.split('\n')) {
+    if (SPEAKER_LINE_REGEX.test(line)) {
+      if (current) segments.push(current)
+      const { speaker, remainingText } = parseSpeaker(line)
+      current = { startMs: 0, speaker, text: remainingText }
+    } else if (current) {
+      current.text += line.trim() ? `\n${line.trim()}` : ''
+    } else if (line.trim()) {
+      current = { startMs: 0, text: line.trim() }
+    }
+  }
+  if (current) segments.push(current)
+
+  return segments.length > 0 ? segments : [{ startMs: 0, text: transcript.trim() }]
 }
 
 /**
@@ -83,7 +122,7 @@ function parseTimestamp(timestampStr: string): number | null {
  * Parse transcript into segments with timestamps.
  * Detects timestamps in formats: [MM:SS], [HH:MM:SS], bare MM:SS, HH:MM:SS at line start
  */
-function parseTranscriptSegments(transcript: string): TranscriptSegment[] {
+function parseTranscriptSegments(transcript: string): { segments: TranscriptSegment[]; hasTimestamps: boolean } {
   const segments: TranscriptSegment[] = []
 
   // Regex to match timestamps at the start of a line (with optional brackets)
@@ -113,15 +152,12 @@ function parseTranscriptSegments(transcript: string): TranscriptSegment[] {
     }
   }
 
-  // If no timestamps found, return entire transcript as single segment
-  if (segments.length === 0) {
-    return [{
-      startMs: 0,
-      text: transcript.trim()
-    }]
+  if (segments.length > 0) {
+    return { segments, hasTimestamps: true }
   }
 
-  return segments
+  // No timestamps — fall back to speaker-turn parsing (handles **Name:** etc.)
+  return { segments: parseSpeakerSegments(transcript), hasTimestamps: false }
 }
 
 export function TranscriptViewer({
@@ -140,19 +176,19 @@ export function TranscriptViewer({
   const [actionItemsExpanded, setActionItemsExpanded] = useState(true)
   const [transcriptExpanded, setTranscriptExpanded] = useState(true)
 
-  // Parse transcript into segments
-  const segments = useMemo(() => parseTranscriptSegments(transcript), [transcript])
+  // Parse transcript into segments (timestamped or speaker-turn based)
+  const { segments, hasTimestamps } = useMemo(() => parseTranscriptSegments(transcript), [transcript])
 
-  // Find current segment index based on currentTimeMs
+  // Find current segment index based on currentTimeMs (only meaningful with timestamps)
   const currentSegmentIndex = useMemo(() => {
-    if (currentTimeMs === undefined) return -1
+    if (!hasTimestamps || currentTimeMs === undefined) return -1
 
     return segments.findIndex((seg, i) => {
       const isAfterStart = currentTimeMs >= seg.startMs
       const isBeforeEnd = i === segments.length - 1 || (seg.endMs && currentTimeMs < seg.endMs)
       return isAfterStart && isBeforeEnd
     })
-  }, [segments, currentTimeMs])
+  }, [segments, currentTimeMs, hasTimestamps])
 
   // Auto-scroll to current segment during playback
   useEffect(() => {
@@ -164,8 +200,8 @@ export function TranscriptViewer({
     }
   }, [currentSegmentIndex])
 
-  // If transcript has no timestamps, render as plain text
-  const hasTimestamps = segments.length > 1 || (segments.length === 1 && segments[0].startMs > 0)
+  // Render structured turns when we have timestamps or detected speakers; else plain text
+  const hasStructure = hasTimestamps || segments.some((seg) => seg.speaker)
 
   return (
     <div className="divide-y divide-border">
@@ -230,32 +266,36 @@ export function TranscriptViewer({
           )}
         </button>
         {transcriptExpanded && (
-          <div ref={containerRef} className="mt-2 max-h-[60vh] overflow-y-auto pr-1">
-            {hasTimestamps ? (
+          <div ref={containerRef} className="mt-2 pr-1">
+            {hasStructure ? (
               <div className="space-y-1">
                 {segments.map((segment, i) => (
                   <div
                     key={i}
-                    ref={i === currentSegmentIndex ? activeSegmentRef : null}
+                    ref={hasTimestamps && i === currentSegmentIndex ? activeSegmentRef : null}
                     className={`text-sm p-2 rounded-md transition-colors ${
-                      i === currentSegmentIndex ? 'bg-primary/10' : ''
+                      hasTimestamps && i === currentSegmentIndex ? 'bg-primary/10' : ''
                     }`}
                   >
-                    <div className="flex items-center gap-2 mb-1">
-                      <TimeAnchor
-                        startMs={segment.startMs}
-                        endMs={segment.endMs}
-                        isActive={i === currentSegmentIndex}
-                        onSeek={onSeek}
-                      >
-                        {null}
-                      </TimeAnchor>
-                      {segment.speaker && (
-                        <span className="font-semibold text-foreground">
-                          {segment.speaker}
-                        </span>
-                      )}
-                    </div>
+                    {(hasTimestamps || segment.speaker) && (
+                      <div className="flex items-center gap-2 mb-1">
+                        {hasTimestamps && (
+                          <TimeAnchor
+                            startMs={segment.startMs}
+                            endMs={segment.endMs}
+                            isActive={i === currentSegmentIndex}
+                            onSeek={onSeek}
+                          >
+                            {null}
+                          </TimeAnchor>
+                        )}
+                        {segment.speaker && (
+                          <span className="font-semibold text-foreground">
+                            {segment.speaker}
+                          </span>
+                        )}
+                      </div>
+                    )}
                     <p className="whitespace-pre-wrap leading-relaxed">{segment.text}</p>
                   </div>
                 ))}
