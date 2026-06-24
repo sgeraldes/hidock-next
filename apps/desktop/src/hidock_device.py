@@ -1900,11 +1900,15 @@ class HiDockJensen:
                     # Accumulate this chunk
                     file_list_chunks.append(response_data)
                     total_bytes_received += len(response_data)
-                    logger.debug(
-                        "Jensen",
-                        "list_files",
-                        f"Accumulated chunk {len(file_list_chunks)}, size: {len(response_data)} bytes, total: {total_bytes_received}",
-                    )
+                    # Throttle per-chunk DEBUG logging: a runaway/looping transfer can emit
+                    # millions of chunks, and logging every one previously produced multi-GB
+                    # log files. Log the first chunk and then only every 50th.
+                    if len(file_list_chunks) == 1 or len(file_list_chunks) % 50 == 0:
+                        logger.debug(
+                            "Jensen",
+                            "list_files",
+                            f"Accumulated chunk {len(file_list_chunks)}, size: {len(response_data)} bytes, total: {total_bytes_received}",
+                        )
 
                     # Get expected count from first chunk header if available (fast header extraction)
                     if expected_file_count is None and len(file_list_chunks) == 1:
@@ -1923,11 +1927,12 @@ class HiDockJensen:
                         # Subtract 6 bytes for header
                         estimated_files = max(0, (total_bytes_received - 6) // 60)
 
-                        logger.debug(
-                            "Jensen",
-                            "list_files",
-                            f"Estimated {estimated_files}/{expected_file_count} files from {total_bytes_received} bytes",
-                        )
+                        if len(file_list_chunks) == 1 or len(file_list_chunks) % 50 == 0:
+                            logger.debug(
+                                "Jensen",
+                                "list_files",
+                                f"Estimated {estimated_files}/{expected_file_count} files from {total_bytes_received} bytes",
+                            )
 
                         # Don't use estimation to trigger early parsing - it was causing issues
                         # Just continue accumulating chunks until we get an empty one
@@ -1941,11 +1946,40 @@ class HiDockJensen:
                 max_consecutive_timeouts = 10  # Increased for large file lists (488+ files)
                 adaptive_timeout = 1000  # Back to original timeout
 
+                # Runaway-transfer guards. A misbehaving device (or a streaming/sequence
+                # fault) can send an unbounded stream of small CMD_GET_FILE_LIST chunks
+                # without ever sending the empty terminator. Each non-empty chunk resets the
+                # timeout counter, so without these bounds the loop never exits and the log
+                # grows without limit (this produced a 19GB log file). Bounds are far above
+                # any legitimate file list: ~60 bytes/file, so even 50k files is ~3MB.
+                MAX_FILE_LIST_BYTES = 64 * 1024 * 1024  # 64MB absolute ceiling
+                MAX_FILE_LIST_CHUNKS = 200000           # absolute chunk-count ceiling
+
                 while final_files is None:
                     # Check if we should abort
                     if self._abort_operations:
                         logger.info("Jensen", "list_files", "Operation aborted due to disconnect")
                         return {"files": [], "totalFiles": 0, "totalSize": 0, "error": "Operation aborted"}
+
+                    # Bail out of a runaway transfer before it can exhaust memory/disk.
+                    sane_byte_ceiling = MAX_FILE_LIST_BYTES
+                    if expected_file_count:
+                        # Allow generous slack over the device-reported count (120 bytes/file,
+                        # +4KB header slack) but never exceed the absolute ceiling.
+                        sane_byte_ceiling = min(
+                            MAX_FILE_LIST_BYTES,
+                            (expected_file_count + 100) * 120 + 4096,
+                        )
+                    if total_bytes_received > sane_byte_ceiling or len(file_list_chunks) > MAX_FILE_LIST_CHUNKS:
+                        logger.error(
+                            "Jensen",
+                            "list_files",
+                            f"Runaway file-list transfer detected: {len(file_list_chunks)} chunks, "
+                            f"{total_bytes_received} bytes (expected ~{expected_file_count} files). "
+                            f"Aborting accumulation and parsing what was received.",
+                        )
+                        final_files = file_list_handler(b"")  # Empty data signals completion
+                        break
 
                     response = self._receive_response(
                         seq_id,
