@@ -513,7 +513,10 @@ export function SourceReader({
       {/* Audio Player — shown whenever recording has local file */}
       {canPlay && (
         <div className="sticky top-0 bg-background z-10 border-b">
-          <AudioPlayer key={recording.id} filename={recording.filename} onClose={onStop} />
+          {/* No onClose here: the reader's player is always docked, so a
+              "Close" button would mislead (it only stops). The transport's
+              Square control already stops playback. */}
+          <AudioPlayer key={recording.id} filename={recording.filename} />
         </div>
       )}
 
