@@ -11,6 +11,7 @@ import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
 import { shouldLogQa } from '@/services/qa-monitor'
 import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
+import { requestScopedDownloads } from '@/hooks/useDownloadOrchestrator'
 
 export function useDeviceSubscriptions() {
   const deviceService = getHiDockDeviceService()
@@ -131,6 +132,9 @@ export function useDeviceSubscriptions() {
                 size: rec.size,
                 dateCreated: rec.dateCreated?.toISOString()
               }))
+              // Slice 1: register scope so the orchestrator downloads these even
+              // if auto-download is off (auto-sync is an explicit "download all to-sync").
+              requestScopedDownloads(filesToQueue.map(f => f.filename))
               await window.electronAPI.downloadService.startSession(filesToQueue)
               setDeviceSyncStateRef.current({
                 deviceSyncing: true,
@@ -253,6 +257,8 @@ export function useDeviceSubscriptions() {
             size: rec.size,
             dateCreated: rec.dateCreated?.toISOString()
           }))
+          // Slice 1: register scope (explicit auto-sync set) — see note above.
+          requestScopedDownloads(filesToQueue.map(f => f.filename))
           await window.electronAPI.downloadService.startSession(filesToQueue)
           // SM-M02: Use ref to avoid stale closure
           setDeviceSyncStateRef.current({

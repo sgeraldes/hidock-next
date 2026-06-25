@@ -214,9 +214,9 @@ export function useDownloadOrchestrator() {
     // so a single download never drains unrelated/stale pending items.
     let autoDownload = false
     try {
-      const cfg = await window.electronAPI.config.get()
-      const device = (cfg?.data?.device ?? cfg?.device) as { autoDownload?: boolean } | undefined
-      autoDownload = device?.autoDownload === true
+      const result = await window.electronAPI.config.get()
+      const cfg = result?.success ? (result.data as { device?: { autoDownload?: boolean } }) : null
+      autoDownload = cfg?.device?.autoDownload === true
     } catch {
       autoDownload = false
     }
@@ -226,9 +226,10 @@ export function useDownloadOrchestrator() {
       isProcessingDownloads.current = false
       return
     }
-
-    // Claim these items so a concurrent trigger doesn't reprocess them.
-    for (const item of pendingItems) _requestedDownloads.delete(item.filename)
+    // NOTE: scope entries are removed only after a SUCCESSFUL download (below),
+    // so a failed item stays in scope and is retried (e.g. on reconnect) instead
+    // of being silently dropped. The isProcessingDownloads mutex already prevents
+    // concurrent reprocessing.
     downloadAbortControllerRef.current = new AbortController()
     // DL-14: Sync module-level ref so cancelDownloads() can abort from outside
     _downloadAbortControllerRef = downloadAbortControllerRef.current
@@ -298,6 +299,9 @@ export function useDownloadOrchestrator() {
       if (success) {
         completed++
         bytesDownloaded += item.fileSize || 0
+        // Consume the scope entry only once the file is actually downloaded;
+        // failed items stay scoped so a retry re-processes them (auto-download OFF).
+        _requestedDownloads.delete(item.filename)
       } else {
         failed++
       }
