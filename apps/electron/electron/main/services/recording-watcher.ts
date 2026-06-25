@@ -7,12 +7,10 @@ import {
   insertRecording,
   getMeetings,
   linkRecordingToMeeting,
-  addToQueue,
   updateRecordingLifecycle,
   Recording
 } from './database'
 import { BrowserWindow } from 'electron'
-import { getConfig } from './config'
 
 const AUDIO_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.ogg', '.webm', '.hda']
 
@@ -203,15 +201,11 @@ async function processNewRecording(filePath: string): Promise<void> {
 
     correlateWithMeeting(recordingId, new Date(dateRecorded))
 
-    const config = getConfig()
-    if (config.transcription.autoTranscribe) {
-      addToQueue(recordingId)
-      import('./transcription').then(({ processQueueManually }) => {
-        processQueueManually()
-      }).catch(err => {
-        console.error('[RecordingWatcher] Failed to import transcription service:', err)
-      })
-    }
+    import('./transcription').then(({ queueTranscriptionIfEnabled }) => {
+      queueTranscriptionIfEnabled(recordingId)
+    }).catch(err => {
+      console.error('[RecordingWatcher] Failed to import transcription service:', err)
+    })
 
     notifyRenderer('recording:new', { recording })
   } catch (error) {

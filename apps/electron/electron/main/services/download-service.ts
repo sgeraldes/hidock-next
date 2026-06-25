@@ -17,7 +17,6 @@ import { BrowserWindow, ipcMain, Notification } from 'electron'
 import {
   markRecordingDownloaded,
   addSyncedFile,
-  addToQueue,
   isFileSynced,
   getRecordingByFilename,
   getSyncedFilenames,
@@ -28,7 +27,6 @@ import {
 } from './database'
 import { saveRecording, getRecordingsPath } from './file-storage'
 import { emitActivityLog } from './activity-log'
-import { getConfig } from './config'
 import { existsSync } from 'fs'
 import { join, basename } from 'path'
 
@@ -486,20 +484,16 @@ class DownloadService {
       this.markDirty()
       this.emitStateUpdate(true) // C-004: immediate emit for completion
 
-      const config = getConfig()
-      if (config.transcription.autoTranscribe) {
-        const recording = getRecordingByFilename(filename)
-          ?? (wavFilename !== filename ? getRecordingByFilename(wavFilename) : undefined)
-          ?? getRecordingByFilename(basename(filePath))
+      const recording = getRecordingByFilename(filename)
+        ?? (wavFilename !== filename ? getRecordingByFilename(wavFilename) : undefined)
+        ?? getRecordingByFilename(basename(filePath))
 
-        if (recording) {
-          addToQueue(recording.id)
-          import('./transcription').then(({ processQueueManually }) => {
-            processQueueManually()
-          }).catch(err => {
-            console.error('[DownloadService] Failed to import transcription service:', err)
-          })
-        }
+      if (recording) {
+        import('./transcription').then(({ queueTranscriptionIfEnabled }) => {
+          queueTranscriptionIfEnabled(recording.id)
+        }).catch(err => {
+          console.error('[DownloadService] Failed to import transcription service:', err)
+        })
       }
 
       // DL-07: Clean up completed items from queue after emitting final state.

@@ -7,6 +7,7 @@ import { ipcMain } from 'electron'
 import { registerStorageHandlers } from '../storage-handlers'
 import * as db from '../../services/database'
 import * as config from '../../services/config'
+import * as transcription from '../../services/transcription'
 
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
@@ -26,7 +27,6 @@ vi.mock('../../services/file-storage', () => ({
 
 vi.mock('../../services/database', () => ({
   insertRecording: vi.fn(),
-  addToQueue: vi.fn(),
   getMeetings: vi.fn(() => []),
   linkRecordingToMeeting: vi.fn(),
   addSyncedFile: vi.fn()
@@ -35,6 +35,16 @@ vi.mock('../../services/database', () => ({
 vi.mock('../../services/config', () => ({
   getConfig: vi.fn()
 }))
+
+// storage:save-recording now delegates the auto-transcribe gate to the single
+// funnel in the transcription service (loaded via dynamic import).
+vi.mock('../../services/transcription', () => ({
+  queueTranscriptionIfEnabled: vi.fn()
+}))
+
+// Flush the microtask queue so the handler's fire-and-forget dynamic import
+// of the transcription service resolves before assertions run.
+const flushMicrotasks = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 function getHandler(channel: string): (...args: unknown[]) => Promise<{ success: boolean; error?: string }> {
   const call = (ipcMain.handle as unknown as { mock: { calls: unknown[][] } }).mock.calls.find(
@@ -56,9 +66,12 @@ describe('storage:save-recording — auto-transcribe gating', () => {
     const handler = getHandler('storage:save-recording')
 
     const res = await handler({}, '2026Jun24-180500-Rec78.hda', [1, 2, 3])
+    await flushMicrotasks()
 
     expect(res.success).toBe(true)
-    expect(db.addToQueue).not.toHaveBeenCalled()
+    // The funnel itself is the no-op when autoTranscribe is off; it is still
+    // invoked, but with autoTranscribe false it does not queue. The handler must
+    // record transcription_status 'none' for the inserted recording.
     const inserted = (db.insertRecording as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(inserted.transcription_status).toBe('none')
   })
@@ -71,10 +84,14 @@ describe('storage:save-recording — auto-transcribe gating', () => {
     const handler = getHandler('storage:save-recording')
 
     const res = await handler({}, '2026Jun24-180500-Rec78.hda', [1, 2, 3])
+    await flushMicrotasks()
 
     expect(res.success).toBe(true)
-    expect(db.addToQueue).toHaveBeenCalledTimes(1)
+    // Handler delegates queuing to the single transcription funnel.
+    expect(transcription.queueTranscriptionIfEnabled).toHaveBeenCalledTimes(1)
     const inserted = (db.insertRecording as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    const recordingId = inserted.id
+    expect(transcription.queueTranscriptionIfEnabled).toHaveBeenCalledWith(recordingId)
     expect(inserted.transcription_status).toBe('pending')
   })
 })

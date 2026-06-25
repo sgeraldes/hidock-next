@@ -20,6 +20,7 @@ const mockGetQueueItems = vi.fn()
 const mockGetRecordingById = vi.fn()
 const mockInsertTranscript = vi.fn()
 const mockExecFile = vi.fn()
+const mockAddToQueue = vi.fn()
 
 // spawnStreaming uses `spawn`, not `execFile`. We create a helper that manufactures
 // a fake ChildProcess whose stdout/stderr are minimal EventEmitters so spawnStreaming
@@ -66,6 +67,7 @@ let mockConfig = {
     geminiApiKey: 'test-api-key',
     geminiModel: 'gemini-2.0-flash',
     language: 'es',
+    autoTranscribe: false,
     localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
     localAsrVocabularyFile: 'vocabulary.json',
     localAsrDiarize: true,
@@ -75,6 +77,7 @@ let mockConfig = {
 
 // Mock database
 vi.mock('../database', () => ({
+  addToQueue: (...args: any[]) => mockAddToQueue(...args),
   getRecordingById: (...args: any[]) => mockGetRecordingById(...args),
   updateRecordingStatus: (...args: any[]) => mockUpdateRecordingStatus(...args),
   updateRecordingTranscriptionStatus: (...args: any[]) => mockUpdateRecordingStatus(...args),
@@ -171,6 +174,7 @@ describe('Transcription Service', () => {
         geminiApiKey: 'test-api-key',
         geminiModel: 'gemini-2.0-flash',
         language: 'es',
+        autoTranscribe: false,
         localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
         localAsrVocabularyFile: 'vocabulary.json',
         localAsrDiarize: true,
@@ -225,6 +229,33 @@ describe('Transcription Service', () => {
     })
   })
 
+  describe('queueTranscriptionIfEnabled (single transcription funnel)', () => {
+    it('queues the recording and returns true when autoTranscribe is enabled', async () => {
+      mockConfig.transcription.autoTranscribe = true
+      // processQueueManually() runs the queue; keep it a no-op by returning no pending items.
+      mockGetQueueItems.mockReturnValue([])
+
+      const { queueTranscriptionIfEnabled } = await import('../transcription')
+
+      const result = queueTranscriptionIfEnabled('rec-funnel')
+
+      expect(result).toBe(true)
+      expect(mockAddToQueue).toHaveBeenCalledTimes(1)
+      expect(mockAddToQueue).toHaveBeenCalledWith('rec-funnel')
+    })
+
+    it('does not queue and returns false when autoTranscribe is disabled', async () => {
+      mockConfig.transcription.autoTranscribe = false
+
+      const { queueTranscriptionIfEnabled } = await import('../transcription')
+
+      const result = queueTranscriptionIfEnabled('rec-funnel')
+
+      expect(result).toBe(false)
+      expect(mockAddToQueue).not.toHaveBeenCalled()
+    })
+  })
+
   describe('local ASR provider', () => {
     it('should process local ASR transcripts without requiring a Gemini API key', async () => {
       mockConfig = {
@@ -233,6 +264,7 @@ describe('Transcription Service', () => {
           geminiApiKey: '',
           geminiModel: 'gemini-2.0-flash',
           language: 'es',
+          autoTranscribe: false,
           localAsrPath: 'G:\\Code\\claude-plugins\\plugins\\mcp-asr',
           localAsrVocabularyFile: 'vocabulary.json',
           localAsrDiarize: true,

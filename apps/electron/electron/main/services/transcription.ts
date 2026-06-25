@@ -87,6 +87,7 @@ function spawnStreaming(
 }
 import { getConfig } from './config'
 import {
+  addToQueue,
   getRecordingById,
   updateRecordingTranscriptionStatus,
   insertTranscript,
@@ -389,6 +390,19 @@ async function processQueue(): Promise<void> {
  */
 export async function processQueueManually(): Promise<void> {
   return processQueue()
+}
+
+/**
+ * Single funnel for "queue this recording for transcription if the user has
+ * auto-transcribe enabled". Consolidates the previously duplicated gate from
+ * download-service, recording-watcher, and storage:save-recording (ADR-0005
+ * category A). Returns true if the recording was queued, false otherwise.
+ */
+export function queueTranscriptionIfEnabled(recordingId: string): boolean {
+  if (getConfig().transcription.autoTranscribe !== true) return false
+  addToQueue(recordingId)
+  processQueueManually()
+  return true
 }
 
 interface ActionableDetection {

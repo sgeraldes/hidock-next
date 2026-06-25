@@ -11,7 +11,6 @@ import {
 } from '../services/file-storage'
 import {
   insertRecording,
-  addToQueue,
   getMeetings,
   linkRecordingToMeeting,
   addSyncedFile,
@@ -295,9 +294,9 @@ export function registerStorageHandlers(): void {
       }
 
       // Add to transcription queue only when auto-transcribe is enabled
-      if (autoTranscribe) {
-        addToQueue(recordingId)
-      }
+      import('../services/transcription').then(({ queueTranscriptionIfEnabled }) => {
+        queueTranscriptionIfEnabled(recordingId)
+      }).catch(() => {})
 
       // Track this file as synced so we don't re-download it
       addSyncedFile(result.data.filename, result.data.filename, filePath, buffer.length)
