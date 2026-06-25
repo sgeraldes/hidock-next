@@ -1,5 +1,12 @@
 # USB Device Pipeline — Design Specification
 
+> **Why this matters (ADR-0005).** Four device bugs fixed in 2026-06 — auto-connect
+> and auto-transcribe ignoring their toggles, the DL-button double-fire, and the
+> download size-mismatch — were traced (via `graphify-out/`) to one root: device
+> actions have multiple entry points and policy is enforced at scattered call
+> sites instead of one funnel. This pipeline is the structural cure. See
+> `.claude/architecture-decisions/ADR-0005-device-actions-flow-through-coordinators.md`.
+
 ## Problem
 
 The HiDock Electron app has 4 independent systems competing for the USB bus:
@@ -212,10 +219,23 @@ class DevicePipelineService {
 1. If all init commands fail → USB reset → reconnect → retry pipeline once
 2. If still failing → disconnect cleanly → phase = 'error' with message "Please unplug and reconnect"
 
-**Auto-connect:**
-- On app startup, if config has `device.autoConnect = true`, call `tryConnect()`
-- On USB plug event (`usb` package device-added event), attempt `tryConnect()`
-- On disconnect, if auto-connect enabled, listen for re-plug
+**Auto-connect:** see the [Auto-Connect Flow](#auto-connect-flow) section — the
+plug-event handler re-checks `config.device.autoConnect` at event time.
+
+**Single-funnel invariants (ADR-0005).** Each device action has exactly one
+initiator, and each user setting is enforced once, at that funnel:
+- **Downloads:** every download — Sync *and* the per-file DL button — goes
+  through `DevicePipelineService`/`DownloadService`. There is no direct
+  `storage:save-recording` download path. One queue, one integrity check, one
+  progress/state. (Interim DL guard: commit `eccbeab8`.)
+- **Transcription:** exactly **one** ingestion funnel queues transcription —
+  `RecordingWatcher` detecting the saved file on disk. `download-service` and
+  `storage:save-recording` must **not** call `addToQueue`; the auto-transcribe
+  preference is checked only in that one place. (Interim duplicate-gate fix:
+  commit `11ce9830`.)
+- **State:** authoritative download/connection/device state lives in main
+  (`PipelineState`) and is projected to the renderer via one subscription; the
+  renderer holds no second queue or connection FSM.
 
 ### 3. IPC Contract
 
@@ -412,24 +432,23 @@ For `tryConnect()` (auto-connect with previously authorized device), `node-usb`'
 
 ## Auto-Connect Flow
 
+**Policy is checked at event time, not at registration.** The earlier
+implementation registered the USB-plug listener only when auto-connect was on at
+startup, and the listener then auto-connected on every plug **without
+re-reading the preference** — so toggling auto-connect off did not stop power-on
+reconnects (shipped interim fix: `setAutoConnectChecker`, commit `25d6c22e`; see
+ADR-0005 category C). The listener must always be registered and must consult
+`config.device.autoConnect` **inside** the handler, every time it fires.
+
 ```typescript
 // In DevicePipelineService constructor or init
 async initAutoConnect(): Promise<void> {
-  const config = getConfig()
-  if (!config.device?.autoConnect) return
-
-  // Try connecting to any authorized HiDock device
-  const devices = await this.webusb.getDevices()
-  const hidock = devices.find(d => isHiDockDevice(d))
-  if (hidock) {
-    await this.connect(hidock)  // → runPipeline()
-  }
-
-  // Listen for USB plug events
+  // The plug/disconnect listeners are ALWAYS registered. The auto-connect
+  // PREFERENCE is re-checked at event time so toggling it takes effect live.
   this.webusb.addEventListener('connect', (event) => {
-    if (isHiDockDevice(event.device)) {
-      this.connect(event.device)
-    }
+    if (!isHiDockDevice(event.device)) return
+    if (!getConfig().device?.autoConnect) return  // ← event-time policy gate
+    this.connect(event.device)                     // → runPipeline()
   })
 
   this.webusb.addEventListener('disconnect', (event) => {
@@ -437,8 +456,17 @@ async initAutoConnect(): Promise<void> {
       this.handleDisconnect()
     }
   })
+
+  // Startup: only auto-connect to an already-attached device if enabled now.
+  if (!getConfig().device?.autoConnect) return
+  const devices = await this.webusb.getDevices()
+  const hidock = devices.find(d => isHiDockDevice(d))
+  if (hidock) await this.connect(hidock)  // → runPipeline()
 }
 ```
+
+Manual connect (the "Connect Device" button → `connect()`) never passes through
+this gate, so it always works regardless of the preference.
 
 ## Error Handling
 
