@@ -586,3 +586,29 @@ rules in CLAUDE.md override). Each slice's QA notes carry a `HARDWARE: DEFERRED`
 - Retire the renderer auto-connect cluster on `HiDockDeviceService`, the direct `storage:save-recording` download path, and the interim patches (`cfdeb3fa`/`25d6c22e`/`11ce9830`/`eccbeab8`) once their slice subsumes them.
 
 **Disposition of interim patches:** keep each until its slice subsumes it (Slice 1 ⊃ DL guard; Slice 2 ⊃ auto-transcribe gate; Slice 3 ⊃ auto-connect checker; Slice 5 ⊃ chunk drain).
+
+---
+
+## Build Status & Cutover Plan (2026-06-25 overnight run)
+
+**The entire new device stack is built and unit-tested (green); only activation remains.**
+
+| Slice | Status |
+|-------|--------|
+| 1 — Scoped downloads | ✅ Shipped & working (fixes "download one → all"). Reviewed. |
+| 2 — Single transcription funnel | ✅ Shipped (`queueTranscriptionIfEnabled`). |
+| 3 — DevicePipelineService coordinator | ✅ Built additive + 35 unit tests (`device-pipeline.ts`). Not yet the device owner. |
+| 4 — IPC bridge + `useDevicePipeline` hook | ✅ Built inert + 24 unit tests. Not consumed by pages. |
+| 5 — Binary in main | ✅ Realized by the coordinator's `downloadOne` (accumulates in main, saves via `processDownload`, no renderer round-trip). |
+| 6 — Cutover / activation | ⛔ **DEFERRED — requires supervised hardware verification.** |
+
+**Why Slice 6 is hardware-gated, not blind-shippable:** activating the coordinator means it becomes the **sole** USB owner. It cannot run alongside the old path (`jensen.setupUsbConnectListener` auto-connect, `useDeviceSubscriptions`, `useDownloadOrchestrator`, `handleConnect`) — two USB owners contend on the bus and can lock the device (the #1 device-safety hazard). So cutover = retire the old path in the same step. Mock tests verify the coordinator's *logic*, but only a real device + the live UI can verify it actually drives the hardware and that every device-consuming component still works. Flipping it blind would almost certainly break the app — exactly what the device-safety + real-delivery-gate rules forbid.
+
+### Cutover checklist (≈30 min, supervised, device on hand)
+1. **Main:** in `index.ts`, call `getDevicePipelineService().initAutoConnect()`; stop registering the old `setupUsbConnectListener` auto-connect (or have it no-op). Keep `getJensenDevice()` as the shared transport.
+2. **Renderer:** replace the device-state consumers (`handleConnect` flow, `useDeviceSubscriptions`, `useDownloadOrchestrator`, the device parts of `useUnifiedRecordings`) with `useDevicePipeline()`. Wire Device.tsx connect/sync/cancel/delete/format and the connection/scan/download status to the pipeline state.
+3. **Downloads:** route the Library/Calendar/DL-button downloads through `device-pipeline:sync`/scoped actions; retire the renderer queue-drain path and the `jensen-ipc-client` chunk-drain (no longer needed — binary stays in main).
+4. **Transcription:** the funnel already lands via `queueTranscriptionIfEnabled` from the coordinator's `downloadOne`.
+5. **Delete (Slice 6 cleanup):** old auto-connect cluster on `HiDockDeviceService`, the direct `storage:save-recording` download path, and the now-subsumed interim patches (`cfdeb3fa`/`25d6c22e`/`11ce9830`/`eccbeab8`).
+6. **Update tests** that mock the retired hooks; keep `npm run typecheck` + `npm run test:run` green.
+7. **HARDWARE VERIFY (the irreducible step):** clean connect → SN/firmware/storage populate → download one file (only that one) → Sync all → power-cycle with auto-connect off (no reconnect) → auto-transcribe respects toggle. Power-cycle available throughout.
