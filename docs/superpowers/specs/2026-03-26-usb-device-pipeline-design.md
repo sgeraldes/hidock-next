@@ -520,3 +520,56 @@ The `usb` package requires native compilation. electron-builder handles this via
 - Windows: WinUSB driver (already working for WebUSB)
 - macOS: libusb (auto-installed by usb package)
 - Linux: libusb-1.0 + udev rules (existing setup script handles this)
+
+---
+
+## Phased Rollout (added 2026-06-25)
+
+Sequenced so each slice is independently shippable, leaves the tree green, and
+the USB-locking blast radius is contained. Motivated by ADR-0005 and the live
+"download one → downloads all 52" bug (one global queue with drain-all-on-pending
+semantics; `useDownloadOrchestrator` line 377 → `processDownloadQueue` line 184).
+
+**Acceptance criteria (the defects that must die):**
+1. Download exactly what's requested — selecting 1 file downloads 1, regardless of what else is pending.
+2. auto-connect / auto-download / auto-transcribe each honored, checked at action time, in one place.
+3. One queue, one progress/state, projected read-only to the renderer.
+4. No binary round-trips the renderer.
+
+**Verification policy (overnight constraint):** USB-flow slices are gated by the
+mock test harness + typecheck + full build + full Vitest suite (+ app boot smoke
+where safe). **Live hardware verification is DEFERRED** to a supervised session
+(one clean connect, power-cycle available) — never run unattended (device-safety
+rules in CLAUDE.md override). Each slice's QA notes carry a `HARDWARE: DEFERRED` stamp.
+
+### Slice 0 — Safety net (test-only, no behavior change)
+- Mock WebUSB/Jensen harness reusable across services (no hardware in tests).
+- Characterization tests pinning current connect / scan / download / transcribe behavior.
+- **Files:** `electron/main/services/__tests__/*`, test utils.
+
+### Slice 1 — Scoped downloads + queue hygiene (fixes the P0 "downloads all" bug)
+- `DownloadService.requestDownloads(files)` is the single entry; `processDownloadQueue(scope?)` downloads only the requested filenames.
+- Auto-resume of persisted pending gated by `config.device.autoDownload`; prune stale/orphaned queue rows on load.
+- Manual Sync / Download-selected / single / DL button all route through the scoped entry.
+- **Files:** `download-service.ts`, `useDownloadOrchestrator.ts`, `useOperations.ts`, `Library.tsx`, `DeviceFileList.tsx`.
+
+### Slice 2 — Single ingestion funnel (fixes auto-transcribe duplication)
+- `RecordingWatcher` becomes the sole post-save → transcription funnel; remove `addToQueue` from `download-service` and `storage:save-recording`. `autoTranscribe` checked once.
+- **Files:** `recording-watcher.ts`, `download-service.ts`, `storage-handlers.ts`.
+
+### Slice 3 — DevicePipelineService coordinator (main)
+- One owner of `JensenDevice` + `DownloadService`; connect→scan→reconcile→download phase machine; auto-connect plug handler re-checks config at event time. Becomes the sole initiator, replacing the 4 competing renderer callers.
+- **Files:** new `device-pipeline.ts`, `index.ts`, `jensen.ts`, ipc handlers.
+
+### Slice 4 — Single state projection
+- `PipelineState` in main is authoritative; renderer subscribes via one channel; no second queue/FSM in the renderer. Removes the reload "stuck connecting" desync + dual download-queue.
+- **Files:** `device-pipeline.ts`, `hidock-device.ts`, `useDeviceSubscriptions.ts`, `useDownloadOrchestrator.ts`, `useAppStore.ts`.
+
+### Slice 5 — Binary stays in main
+- Download + save in one main pass; renderer gets progress events only. Removes the chunk-drain workaround in `jensen-ipc-client.ts`.
+- **Files:** `device-pipeline.ts`, `download-service.ts`, `jensen-handlers.ts`, `jensen-ipc-client.ts`.
+
+### Slice 6 — Delete dead paths + interim patches
+- Retire the renderer auto-connect cluster on `HiDockDeviceService`, the direct `storage:save-recording` download path, and the interim patches (`cfdeb3fa`/`25d6c22e`/`11ce9830`/`eccbeab8`) once their slice subsumes them.
+
+**Disposition of interim patches:** keep each until its slice subsumes it (Slice 1 ⊃ DL guard; Slice 2 ⊃ auto-transcribe gate; Slice 3 ⊃ auto-connect checker; Slice 5 ⊃ chunk drain).
