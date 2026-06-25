@@ -13,7 +13,7 @@ import { toast } from '@/components/ui/toaster'
 import { useAppStore } from '@/store/useAppStore'
 import { hasDeviceFile, type DeviceOnlyRecording, type BothLocationsRecording } from '@/types/unified-recording'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
-import { cancelDownloads } from '@/hooks/useDownloadOrchestrator'
+import { cancelDownloads, requestScopedDownloads } from '@/hooks/useDownloadOrchestrator'
 
 import { formatEta, formatBytes } from '@/utils/formatters'
 import { DeviceFileList } from '@/components/DeviceFileList'
@@ -488,6 +488,9 @@ export function Device() {
       // Queue files to download service - useDownloadOrchestrator will handle actual downloads
       // IMPORTANT: Pass dateCreated to preserve original recording dates from device
       // Note: dateCreated from getFilesToSync is already serialized to ISO string by IPC
+      // Slice 1: Sync is an explicit "download all to-sync" action — register the full
+      // scope so the orchestrator downloads exactly these (works regardless of autoDownload).
+      requestScopedDownloads(toSync.map(f => f.filename))
       const queuedIds = await window.electronAPI.downloadService.queueDownloads(
         toSync.map(f => ({
           filename: f.filename,

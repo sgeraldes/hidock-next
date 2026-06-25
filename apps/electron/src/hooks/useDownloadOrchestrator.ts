@@ -32,6 +32,33 @@ let _cancelInProgress = false
 let _cancelEpoch = 0
 let _lastProcessedEpoch = 0
 
+// Slice 1 (ADR-0005): explicit per-action download scope.
+// Every download path funnels into one persisted queue that the orchestrator
+// used to drain entirely on any pending item — so "download this one file"
+// pulled in every other pending/stale item (the "download one → all 52" bug).
+// When auto-download is OFF, the orchestrator now processes ONLY filenames a
+// user action explicitly registered here. When auto-download is ON, it keeps
+// the bulk "drain all pending" behavior (that is what the toggle means).
+// Register intent BEFORE enqueueing so the state-update subscription sees it.
+const _requestedDownloads = new Set<string>()
+
+export function requestScopedDownloads(filenames: string[]): void {
+  for (const f of filenames) _requestedDownloads.add(f)
+}
+
+/**
+ * Pure selector for which pending items to process. Exported for unit tests.
+ * - auto-download ON  → all pending (bulk auto-sync semantics)
+ * - auto-download OFF → only items the user explicitly requested
+ */
+export function selectDownloadsToProcess<T extends { filename: string }>(
+  pending: T[],
+  requested: Set<string>,
+  autoDownload: boolean
+): T[] {
+  return autoDownload ? pending : pending.filter((p) => requested.has(p.filename))
+}
+
 /**
  * Cancel in-progress downloads by aborting the USB transfer.
  * Call this from UI cancel buttons in addition to setting deviceSyncing = false.
@@ -181,12 +208,27 @@ export function useDownloadOrchestrator() {
     isProcessingDownloads.current = true
 
     const state = await window.electronAPI.downloadService.getState()
-    const pendingItems = state.queue.filter((item: DownloadQueueItem) => item.status === 'pending')
+    const allPending = state.queue.filter((item: DownloadQueueItem) => item.status === 'pending')
+
+    // Slice 1: scope to the user's explicit request when auto-download is off,
+    // so a single download never drains unrelated/stale pending items.
+    let autoDownload = false
+    try {
+      const cfg = await window.electronAPI.config.get()
+      const device = (cfg?.data?.device ?? cfg?.device) as { autoDownload?: boolean } | undefined
+      autoDownload = device?.autoDownload === true
+    } catch {
+      autoDownload = false
+    }
+    const pendingItems = selectDownloadsToProcess(allPending, _requestedDownloads, autoDownload)
 
     if (pendingItems.length === 0 || !deviceService.isConnected()) {
       isProcessingDownloads.current = false
       return
     }
+
+    // Claim these items so a concurrent trigger doesn't reprocess them.
+    for (const item of pendingItems) _requestedDownloads.delete(item.filename)
     downloadAbortControllerRef.current = new AbortController()
     // DL-14: Sync module-level ref so cancelDownloads() can abort from outside
     _downloadAbortControllerRef = downloadAbortControllerRef.current
