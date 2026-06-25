@@ -556,6 +556,19 @@ rules in CLAUDE.md override). Each slice's QA notes carry a `HARDWARE: DEFERRED`
 ### Slice 2 — Single ingestion funnel (fixes auto-transcribe duplication)
 - `RecordingWatcher` becomes the sole post-save → transcription funnel; remove `addToQueue` from `download-service` and `storage:save-recording`. `autoTranscribe` checked once.
 - **Files:** `recording-watcher.ts`, `download-service.ts`, `storage-handlers.ts`.
+- **⚠ Refinement (found 2026-06-25, do NOT skip):** `processNewRecording` currently
+  **returns early (recording-watcher.ts:156–165) for files that already have a DB
+  row** — and every *downloaded* device file already has a row (device scan /
+  `storage:save-recording` inserts it). So simply removing the other `addToQueue`
+  calls would **silently break auto-transcribe for all downloaded files** (the
+  watcher skips them). Slice 2 must move the gated transcription trigger into the
+  watcher's **existing-row branch** too: when a download sets `file_path`
+  (file becomes locally available), run the single `autoTranscribe`-gated queue
+  there. Net funnel = "a recording's file became locally available → gated queue,
+  exactly once."
+- **Verification:** requires an integration/hardware run (download → watcher
+  detects 'add' → `file_path` set → queued exactly once; confirm no double-queue
+  and no missed-queue). **HARDWARE: DEFERRED** — do not ship blind.
 
 ### Slice 3 — DevicePipelineService coordinator (main)
 - One owner of `JensenDevice` + `DownloadService`; connect→scan→reconcile→download phase machine; auto-connect plug handler re-checks config at event time. Becomes the sole initiator, replacing the 4 competing renderer callers.
