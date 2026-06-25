@@ -23,6 +23,7 @@ import {
   DeleteRecordingFileSchema,
   SaveRecordingSchema
 } from './validation'
+import { getConfig } from '../services/config'
 
 // Month name mapping for HiDock filename parsing
 const MONTH_NAMES: Record<string, number> = {
@@ -251,6 +252,9 @@ export function registerStorageHandlers(): void {
 
       const recordingId = randomUUID()
 
+      // Only auto-queue for transcription when the user has enabled it.
+      const autoTranscribe = getConfig().transcription.autoTranscribe === true
+
       // Insert into database
       const recording: Omit<Recording, 'created_at'> = {
         id: recordingId,
@@ -267,7 +271,7 @@ export function registerStorageHandlers(): void {
         location: 'both',
         on_device: 1,
         on_local: 1,
-        transcription_status: 'pending',
+        transcription_status: autoTranscribe ? 'pending' : 'none',
         source: 'hidock',
         is_imported: 0
       }
@@ -290,13 +294,17 @@ export function registerStorageHandlers(): void {
         }
       }
 
-      // Add to transcription queue
-      addToQueue(recordingId)
+      // Add to transcription queue only when auto-transcribe is enabled
+      if (autoTranscribe) {
+        addToQueue(recordingId)
+      }
 
       // Track this file as synced so we don't re-download it
       addSyncedFile(result.data.filename, result.data.filename, filePath, buffer.length)
 
-      console.log(`Recording saved and queued for transcription: ${result.data.filename}`)
+      console.log(
+        `Recording saved${autoTranscribe ? ' and queued for transcription' : ''}: ${result.data.filename}`
+      )
       return { success: true, data: filePath }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
