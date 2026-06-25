@@ -19,6 +19,7 @@ import { registerActionablesHandlers } from './actionables-handlers'
 import { registerMeetingsHandlers } from './meetings-handlers'
 import { registerJensenHandlers } from './jensen-handlers'
 import { registerKnowledgeGraphHandlers } from './knowledge-graph-handlers'
+import { registerDevicePipelineHandlers } from './device-pipeline-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -43,6 +44,10 @@ export function registerIpcHandlers(): void {
   registerMeetingsHandlers()
   registerJensenHandlers()
   registerKnowledgeGraphHandlers()
+  // Slice 4: DevicePipeline state/action IPC bridge. INERT — the live app still
+  // uses the old device path; this only exposes get-state/actions + event bridge.
+  // It does NOT call initAutoConnect (no competing USB connect listener).
+  registerDevicePipelineHandlers()
 
   console.log('All IPC handlers registered')
 }

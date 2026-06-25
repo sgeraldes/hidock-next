@@ -69,12 +69,13 @@ import type {
 } from '../main/types/api'
 import type { Contact, ContactWithMeetings, Project, ProjectWithMeetings } from '../main/types/database'
 import type { MigrationAPI } from './migration-types'
-import type { 
-  KnowledgeCapture, 
-  Actionable, 
-  Conversation, 
-  Message 
+import type {
+  KnowledgeCapture,
+  Actionable,
+  Conversation,
+  Message
 } from '../../src/types/knowledge'
+import type { PipelineState } from '../main/types/device-pipeline'
 
 // Type definitions for the API
 export interface ElectronAPI {
@@ -491,6 +492,21 @@ export interface ElectronAPI {
     onScanProgress: (callback: (data: { current: number; total: number }) => void) => () => void
   }
 
+  // Device Pipeline API (Slice 4) — INERT main→renderer state projection.
+  // Built + unit-tested but NOT consumed by any page yet; cutover is a later slice.
+  devicePipeline: {
+    getState: () => Promise<PipelineState>
+    getFiles: () => Promise<any[]>
+    connect: () => Promise<boolean>
+    disconnect: () => Promise<void>
+    sync: () => Promise<void>
+    cancel: () => Promise<void>
+    deleteFile: (filename: string) => Promise<{ result: string } | null>
+    format: () => Promise<{ result: string } | null>
+    onState: (callback: (state: PipelineState) => void) => () => void
+    onFiles: (callback: (files: any[]) => void) => () => void
+  }
+
   // Knowledge Graph API
   graph: {
     stats: () => Promise<{ success: boolean; data?: { nodes: number; edges: number; nodesByType: Record<string, number> }; error?: string }>
@@ -853,6 +869,28 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.on('jensen:scan-progress', handler)
       return () => ipcRenderer.removeListener('jensen:scan-progress', handler)
     },
+  },
+
+  // Device Pipeline API (Slice 4) — INERT main→renderer state projection.
+  devicePipeline: {
+    getState: () => callIPC('device-pipeline:get-state'),
+    getFiles: () => callIPC('device-pipeline:get-files'),
+    connect: () => callIPC('device-pipeline:connect'),
+    disconnect: () => callIPC('device-pipeline:disconnect'),
+    sync: () => callIPC('device-pipeline:sync'),
+    cancel: () => callIPC('device-pipeline:cancel'),
+    deleteFile: (filename: string) => callIPC('device-pipeline:delete-file', { filename }),
+    format: () => callIPC('device-pipeline:format'),
+    onState: (callback: (state: any) => void) => {
+      const handler = (_event: any, state: any) => callback(state)
+      ipcRenderer.on('device-pipeline:state', handler)
+      return () => ipcRenderer.removeListener('device-pipeline:state', handler)
+    },
+    onFiles: (callback: (files: any[]) => void) => {
+      const handler = (_event: any, files: any[]) => callback(files)
+      ipcRenderer.on('device-pipeline:files', handler)
+      return () => ipcRenderer.removeListener('device-pipeline:files', handler)
+    }
   },
 
   graph: {

@@ -37,43 +37,22 @@ import type { DeviceModel, FileInfo } from '@hidock/jensen-protocol'
 
 // ---------------------------------------------------------------------------
 // Phase machine
+//
+// The PURE projection types (PipelinePhase / PipelineDeviceState /
+// PipelineDownloadProgress / PipelineState) live in a dependency-free module so
+// the renderer + preload can import them without dragging in this service's
+// main-only graph. Re-exported here so existing imports from this file keep
+// working.
 // ---------------------------------------------------------------------------
 
-export type PipelinePhase =
-  | 'disconnected'
-  | 'connecting'
-  | 'initializing'
-  | 'scanning'
-  | 'reconciling'
-  | 'downloading'
-  | 'idle'
-  | 'error'
+export type {
+  PipelinePhase,
+  PipelineDeviceState,
+  PipelineDownloadProgress,
+  PipelineState
+} from '../types/device-pipeline'
 
-export interface PipelineDeviceState {
-  model: DeviceModel
-  serialNumber: string | null
-  firmwareVersion: string | null
-  storage: { used: number; capacity: number; freePercent: number } | null
-  settings: { autoRecord: boolean } | null
-  recordingCount: number
-}
-
-export interface PipelineDownloadProgress {
-  filename: string
-  current: number
-  total: number
-  bytesDownloaded: number
-  totalBytes: number
-  eta: number | null
-}
-
-export interface PipelineState {
-  phase: PipelinePhase
-  device: PipelineDeviceState | null
-  scanProgress: { current: number; total: number } | null
-  downloadProgress: PipelineDownloadProgress | null
-  error: string | null
-}
+import type { PipelinePhase, PipelineState } from '../types/device-pipeline'
 
 /** A file selected for download — the scoped unit the pipeline operates on. */
 export interface DownloadItem {
