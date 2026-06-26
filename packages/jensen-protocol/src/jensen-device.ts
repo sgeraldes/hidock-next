@@ -313,6 +313,11 @@ export class JensenDevice {
   // === Continuous read loop (jensen.js: r[], k, y) ===
   private receiveChunks: DataView[] = []
   private readLoopRunning = false
+  // When set, the self-sustaining read loop stops re-issuing transferIn after the
+  // current read completes. Lets a graceful teardown drain an in-flight stream and
+  // close() WITHOUT a device.reset() — resetting mid-file-list-stream wedges the
+  // firmware (device left mid-send → every command on the next connect times out).
+  private stopReadLoopRequested = false
   private totalBytesReceived = 0
 
   // Carry buffer for partial Jensen messages between processBufferedData() calls
@@ -502,6 +507,7 @@ export class JensenDevice {
     this.currentCommandTag = null
     this.currentOperationName = null
     this.readLoopRunning = false
+    this.stopReadLoopRequested = false
     this.sequenceId = 0
     this.receiveChunks.length = 0
     this.carryLen = 0
@@ -550,20 +556,67 @@ export class JensenDevice {
     this.pendingPromises.clear()
   }
 
+  /**
+   * Tear down the USB handle the way the browser does: drain the in-flight read
+   * instead of resetting the device.
+   *
+   * The continuous read loop always leaves a transferIn pending, and node-usb
+   * refuses to close a device with a pending request ("Can't close device with a
+   * pending request"). We previously called device.reset() to cancel it — but a
+   * USB reset *mid file-list stream* wedges the firmware (the device is left
+   * mid-send and stops answering every command on the next connect).
+   *
+   * Instead: ask the loop to stop re-issuing, then wait briefly. If the device is
+   * streaming, the in-flight read completes on its own (readLoopRunning flips
+   * false) and we close() WITHOUT a reset — no wedge. If the device is idle the
+   * read can't complete by itself, so we fall back to reset() to cancel it (safe
+   * on an idle device — that's the normal disconnect that already worked).
+   */
+  private async gracefulCloseDevice(): Promise<void> {
+    if (!this.device) return
+    this.stopReadLoopRequested = true
+
+    let drainedCleanly = false
+    if (this.readLoopRunning) {
+      const deadline = Date.now() + 3000
+      let lastBytes = this.totalBytesReceived
+      let idleMs = 0
+      while (Date.now() < deadline) {
+        if (!this.readLoopRunning) {
+          drainedCleanly = true // in-flight read completed, loop stopped, nothing pending
+          break
+        }
+        if (this.totalBytesReceived !== lastBytes) {
+          lastBytes = this.totalBytesReceived
+          idleMs = 0
+        } else {
+          idleMs += 30
+          if (idleMs >= 400) break // no data flowing → idle read, won't complete on its own
+        }
+        await new Promise((r) => setTimeout(r, 30))
+      }
+    } else {
+      // Loop wasn't running (no pending transfer) — close cleanly, no reset needed.
+      drainedCleanly = true
+    }
+
+    this.readLoopRunning = false
+    try {
+      if (!drainedCleanly) {
+        // An idle transferIn is still pending; reset() cancels it so close() works.
+        try { await this.device.reset() } catch { /* may re-enumerate / already gone */ }
+      }
+      try { await this.device.close() } catch { /* ignore */ }
+    } finally {
+      this.stopReadLoopRequested = false
+    }
+  }
+
   async disconnect(): Promise<void> {
     this.removeUsbDisconnectListener()
-    // Stop issuing new reads before tearing down the device.
-    this.readLoopRunning = false
 
     if (this.device) {
-      // The continuous read loop leaves a transferIn PENDING, and node-usb
-      // refuses to close a device with a pending request ("Can't close device
-      // with a pending request"). That left the device open+claimed, so the next
-      // connect's claimInterface failed with LIBUSB_ERROR_ACCESS. reset() cancels
-      // pending transfers (what the browser does on teardown) so close() — and
-      // the next connect — succeed.
-      try { await this.device.reset() } catch { /* may re-enumerate / already gone */ }
-      try { await this.device.close() } catch { /* ignore */ }
+      await this.gracefulCloseDevice()
       this.device = null
     }
 
@@ -870,7 +923,7 @@ export class JensenDevice {
    * It stops naturally when device is null (disconnected).
    */
   private startReadLoop(): void {
-    if (!this.device) return
+    if (!this.device || this.stopReadLoopRequested) return
     this.readLoopRunning = true
 
     this.device.transferIn(2, 51200).then(
@@ -900,8 +953,15 @@ export class JensenDevice {
       this.receiveChunks.push(result.data)
     }
 
-    // Restart read loop immediately (perpetual — matches jensen.js: R() in N())
-    this.startReadLoop()
+    // Restart read loop immediately (perpetual — matches jensen.js: R() in N()),
+    // unless a graceful teardown asked us to stop. Stopping here (rather than
+    // re-issuing) means no transferIn is left pending, so close() succeeds without
+    // a device reset.
+    if (this.stopReadLoopRequested) {
+      this.readLoopRunning = false
+    } else {
+      this.startReadLoop()
+    }
 
     // Debounce parse (matches jensen.js: clearTimeout + setTimeout(E, timewait))
     if (this.decodeTimer) clearTimeout(this.decodeTimer)

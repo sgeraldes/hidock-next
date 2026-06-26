@@ -125,14 +125,8 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(device.isConnected()).toBe(false)
   })
 
-  it('disconnect() resets (cancels pending transfers) BEFORE closing', async () => {
-    // Regression: the continuous read loop leaves a transferIn pending, and
-    // node-usb refuses to close a device with a pending request. reset() cancels
-    // pending transfers so close() succeeds — otherwise the device stays
-    // open+claimed and the next connect's claimInterface fails with ACCESS.
-    const reset = vi.fn(async () => {})
-    const close = vi.fn(async () => {})
-    const fakeDevice = {
+  function makeTeardownDevice(reset: ReturnType<typeof vi.fn>, close: ReturnType<typeof vi.fn>): USBDevice {
+    return {
       vendorId: 0x10d6,
       productId: USB_PRODUCT_IDS[0],
       productName: 'HiDock H1E',
@@ -144,17 +138,63 @@ describe('JensenDevice (transport-agnostic core)', () => {
       reset,
       close,
     } as unknown as USBDevice
+  }
 
+  it('disconnect() drains a streaming read and closes WITHOUT reset (no mid-stream wedge)', async () => {
+    // A USB reset while the file list is streaming wedges the firmware. When data
+    // is flowing, disconnect() must let the in-flight read complete and close
+    // without resetting — mirroring the browser's teardown.
+    const reset = vi.fn(async () => {})
+    const close = vi.fn(async () => {})
     const device = new JensenDevice(makeFakeUsb())
-    await device.tryConnect(fakeDevice)
+    await device.tryConnect(makeTeardownDevice(reset, close))
     expect(device.isConnected()).toBe(true)
+
+    // Simulate an active read loop (streaming).
+    ;(device as unknown as { readLoopRunning: boolean }).readLoopRunning = true
+
+    const p = device.disconnect()
+    // The in-flight read completes and the loop stops re-issuing (synchronously,
+    // before the drain's first poll tick fires).
+    ;(device as unknown as { readLoopRunning: boolean }).readLoopRunning = false
+    await p
+
+    expect(close).toHaveBeenCalled()
+    expect(reset).not.toHaveBeenCalled()
+    expect(device.isConnected()).toBe(false)
+  })
+
+  it('disconnect() resets to cancel a stuck idle read, then closes', async () => {
+    // When the read loop is pending but no data is flowing (idle), the transfer
+    // cannot complete on its own — reset() cancels it so close() succeeds (the
+    // normal-disconnect path; safe on an idle device).
+    const reset = vi.fn(async () => {})
+    const close = vi.fn(async () => {})
+    const device = new JensenDevice(makeFakeUsb())
+    await device.tryConnect(makeTeardownDevice(reset, close))
+
+    // Active loop but no bytes ever arrive → idle; drain gives up after ~400ms.
+    ;(device as unknown as { readLoopRunning: boolean }).readLoopRunning = true
 
     await device.disconnect()
 
     expect(reset).toHaveBeenCalled()
     expect(close).toHaveBeenCalled()
-    // reset must come before close
     expect(reset.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[0])
+    expect(device.isConnected()).toBe(false)
+  })
+
+  it('disconnect() closes without reset when the read loop is idle (no pending transfer)', async () => {
+    // No read loop running → nothing pending → close() directly, no reset.
+    const reset = vi.fn(async () => {})
+    const close = vi.fn(async () => {})
+    const device = new JensenDevice(makeFakeUsb())
+    await device.tryConnect(makeTeardownDevice(reset, close))
+
+    await device.disconnect()
+
+    expect(close).toHaveBeenCalled()
+    expect(reset).not.toHaveBeenCalled()
     expect(device.isConnected()).toBe(false)
   })
 
