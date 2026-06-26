@@ -184,6 +184,94 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(device.isConnected()).toBe(false)
   })
 
+  // --- Native poll path (Electron/Node: node-usb startPoll/stopPoll) ---
+
+  function makePollDevice(
+    startPoll: ReturnType<typeof vi.fn>,
+    stopPoll: ReturnType<typeof vi.fn>,
+    reset: ReturnType<typeof vi.fn>,
+    close: ReturnType<typeof vi.fn>
+  ): USBDevice {
+    const pollEp = { startPoll, stopPoll }
+    const native = {
+      interface: (n: number) => (n === 0 ? { endpoint: (addr: number) => (addr === 0x82 ? pollEp : undefined) } : undefined),
+    }
+    return {
+      vendorId: 0x10d6,
+      productId: USB_PRODUCT_IDS[0],
+      productName: 'HiDock H1E',
+      opened: true,
+      open: vi.fn(async () => {}),
+      selectConfiguration: vi.fn(async () => {}),
+      claimInterface: vi.fn(async () => {}),
+      selectAlternateInterface: vi.fn(async () => {}),
+      transferOut: vi.fn(async () => ({ status: 'ok', bytesWritten: 12 })),
+      transferIn: vi.fn(() => new Promise(() => {})),
+      reset,
+      close,
+      // Native usb.Device handle reached by getNativeInEndpoint().
+      device: native,
+    } as unknown as USBDevice
+  }
+
+  it('read loop uses native startPoll(3, 32768) when a native endpoint is available', async () => {
+    const startPoll = vi.fn()
+    const stopPoll = vi.fn((cb?: () => void) => cb?.())
+    const device = new JensenDevice(makeFakeUsb())
+    await device.tryConnect(makePollDevice(startPoll, stopPoll, vi.fn(async () => {}), vi.fn(async () => {})))
+
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+    // Second call must not double-start (poll is continuous).
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    expect(startPoll).toHaveBeenCalledTimes(1)
+    expect(startPoll.mock.calls[0][0]).toBe(3)
+    expect(startPoll.mock.calls[0][1]).toBe(32768)
+
+    await device.disconnect()
+  })
+
+  it('disconnect() uses stopPoll (clean cancel) and closes WITHOUT reset on the native poll path', async () => {
+    const startPoll = vi.fn()
+    const stopPoll = vi.fn((cb?: () => void) => cb?.())
+    const reset = vi.fn(async () => {})
+    const close = vi.fn(async () => {})
+    const device = new JensenDevice(makeFakeUsb())
+    await device.tryConnect(makePollDevice(startPoll, stopPoll, reset, close))
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    await device.disconnect()
+
+    expect(stopPoll).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalled()
+    expect(reset).not.toHaveBeenCalled() // never reset on the poll path
+    expect(device.isConnected()).toBe(false)
+  })
+
+  it('native poll callback copies the reused libusb buffer into receiveChunks', async () => {
+    let pollCb: ((e: unknown, b: Uint8Array, n: number, c?: boolean) => void) | undefined
+    const startPoll = vi.fn((_n: number, _s: number, cb: typeof pollCb) => { pollCb = cb })
+    const stopPoll = vi.fn((cb?: () => void) => cb?.())
+    const device = new JensenDevice(makeFakeUsb())
+    await device.tryConnect(makePollDevice(startPoll, stopPoll, vi.fn(async () => {}), vi.fn(async () => {})))
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+    expect(pollCb).toBeTypeOf('function')
+
+    const shared = new Uint8Array([1, 2, 3, 4])
+    pollCb!(undefined, shared, 4)
+    // libusb reuses the same buffer for the next transfer — overwrite it; the
+    // stored chunk must be an independent copy.
+    shared.fill(0)
+
+    const chunks = (device as unknown as { receiveChunks: DataView[] }).receiveChunks
+    expect(chunks).toHaveLength(1)
+    expect(chunks[0].getUint8(0)).toBe(1)
+    expect(chunks[0].getUint8(3)).toBe(4)
+    expect((device as unknown as { totalBytesReceived: number }).totalBytesReceived).toBe(4)
+
+    await device.disconnect()
+  })
+
   it('disconnect() closes without reset when the read loop is idle (no pending transfer)', async () => {
     // No read loop running → nothing pending → close() directly, no reset.
     const reset = vi.fn(async () => {})

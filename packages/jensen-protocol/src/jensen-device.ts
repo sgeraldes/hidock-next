@@ -28,6 +28,25 @@ interface USBConnectionEvent extends Event {
   readonly device: USBDevice
 }
 
+// Minimal shape of node-usb's native InEndpoint (poll API). Declared structurally
+// so this module keeps its transport-agnostic design (no `usb` import — only the
+// native endpoint reached at runtime through the WebUSB device wrapper). Buffers
+// passed to the startPoll callback are reused by libusb — copy before returning.
+interface NativePollEndpoint {
+  startPoll(
+    nTransfers: number,
+    transferSize: number,
+    callback: (error: (Error & { errno?: number }) | undefined, buffer: Uint8Array, actualLength: number, cancelled?: boolean) => void
+  ): void
+  stopPoll(callback?: () => void): void
+}
+
+// Shape of node-usb's native usb.Device reached via the WebUSB wrapper's private
+// `device` field, used only to obtain the IN endpoint for poll-based reads.
+interface NativeUsbDeviceLike {
+  interface(n: number): { endpoint(address: number): NativePollEndpoint | undefined } | undefined
+}
+
 class USBAbortError extends Error {
   readonly name = 'AbortError'
   constructor(message = 'The operation was aborted') { super(message) }
@@ -318,6 +337,11 @@ export class JensenDevice {
   // close() WITHOUT a device.reset() — resetting mid-file-list-stream wedges the
   // firmware (device left mid-send → every command on the next connect times out).
   private stopReadLoopRequested = false
+  // Native node-usb InEndpoint used for poll-based reads when available (Electron
+  // main / Node). startPoll/stopPoll cancel pending transfers cleanly — like the
+  // browser's close() — so teardown never needs a device.reset(). Null in a real
+  // browser (no native endpoint), where we fall back to the WebUSB transferIn loop.
+  private pollEndpoint: NativePollEndpoint | null = null
   private totalBytesReceived = 0
 
   // Carry buffer for partial Jensen messages between processBufferedData() calls
@@ -508,6 +532,7 @@ export class JensenDevice {
     this.currentOperationName = null
     this.readLoopRunning = false
     this.stopReadLoopRequested = false
+    this.pollEndpoint = null
     this.sequenceId = 0
     this.receiveChunks.length = 0
     this.carryLen = 0
@@ -557,25 +582,43 @@ export class JensenDevice {
   }
 
   /**
-   * Tear down the USB handle the way the browser does: drain the in-flight read
+   * Tear down the USB handle the way the browser does: cancel the in-flight read
    * instead of resetting the device.
    *
-   * The continuous read loop always leaves a transferIn pending, and node-usb
-   * refuses to close a device with a pending request ("Can't close device with a
-   * pending request"). We previously called device.reset() to cancel it — but a
-   * USB reset *mid file-list stream* wedges the firmware (the device is left
-   * mid-send and stops answering every command on the next connect).
+   * node-usb's close() refuses a device with a pending transfer ("Can't close
+   * device with a pending request"), and its only force-cancel is device.reset() —
+   * a USB port reset that wedges the firmware if the device is mid-operation.
    *
-   * Instead: ask the loop to stop re-issuing, then wait briefly. If the device is
-   * streaming, the in-flight read completes on its own (readLoopRunning flips
-   * false) and we close() WITHOUT a reset — no wedge. If the device is idle the
-   * read can't complete by itself, so we fall back to reset() to cancel it (safe
-   * on an idle device — that's the normal disconnect that already worked).
+   * Native poll path (Electron/Node): stopPoll() cancels the pending transfers
+   * cleanly (real libusb cancel, like the browser) and fires its callback once
+   * they unwind — then close() succeeds with NO reset, for any operation.
+   *
+   * transferIn fallback (browser): there is no clean cancel, so we drain — if the
+   * device is streaming the in-flight read completes on its own and we close
+   * without reset; only a truly idle read falls back to reset() (safe — the device
+   * isn't mid-operation).
    */
   private async gracefulCloseDevice(): Promise<void> {
     if (!this.device) return
     this.stopReadLoopRequested = true
 
+    // Native poll path — clean cancel, never reset.
+    if (this.pollEndpoint) {
+      const ep = this.pollEndpoint
+      this.pollEndpoint = null
+      await new Promise<void>((resolve) => {
+        let done = false
+        const finish = (): void => { if (!done) { done = true; resolve() } }
+        try { ep.stopPoll(finish) } catch { finish() }
+        setTimeout(finish, 2000) // safety: never hang teardown on a missing callback
+      })
+      this.readLoopRunning = false
+      try { await this.device.close() } catch { /* ignore */ }
+      this.stopReadLoopRequested = false
+      return
+    }
+
+    // transferIn fallback — drain, reset only a stuck idle read.
     let drainedCleanly = false
     if (this.readLoopRunning) {
       const deadline = Date.now() + 3000
@@ -596,14 +639,12 @@ export class JensenDevice {
         await new Promise((r) => setTimeout(r, 30))
       }
     } else {
-      // Loop wasn't running (no pending transfer) — close cleanly, no reset needed.
-      drainedCleanly = true
+      drainedCleanly = true // loop wasn't running (no pending transfer)
     }
 
     this.readLoopRunning = false
     try {
       if (!drainedCleanly) {
-        // An idle transferIn is still pending; reset() cancels it so close() works.
         try { await this.device.reset() } catch { /* may re-enumerate / already gone */ }
       }
       try { await this.device.close() } catch { /* ignore */ }
@@ -733,6 +774,7 @@ export class JensenDevice {
   private handleDisconnect(): void {
     if (shouldLog()) console.log('[Jensen] USB device physically disconnected')
     this.device = null
+    this.pollEndpoint = null // device gone; poll transfers already errored out
     this.sequenceId = 0
     this.readLoopRunning = false
     this.receiveChunks.length = 0
@@ -917,15 +959,67 @@ export class JensenDevice {
   // ================================================================
 
   /**
+   * Reach node-usb's native IN endpoint (poll API) through the WebUSB wrapper.
+   * Returns null in a real browser or if the native handle isn't exposed — the
+   * caller then falls back to the WebUSB transferIn loop.
+   */
+  private getNativeInEndpoint(): NativePollEndpoint | null {
+    try {
+      const native = (this.device as unknown as { device?: NativeUsbDeviceLike })?.device
+      const ep = native?.interface?.(0)?.endpoint?.(EP_IN)
+      if (ep && typeof ep.startPoll === 'function' && typeof ep.stopPoll === 'function') {
+        return ep
+      }
+    } catch { /* fall back to transferIn */ }
+    return null
+  }
+
+  /**
    * Start (or continue) the continuous USB read loop.
-   * Matches jensen.js R(): transferIn(2, 51200).then(N)
-   * The loop is self-sustaining: onDataReceived calls startReadLoop again.
-   * It stops naturally when device is null (disconnected).
+   *
+   * Preferred path (Electron main / Node): native startPoll(3, 32768). libusb
+   * keeps 3 transfers pending in its event thread (continuous flow even when the
+   * JS thread is busy), and stopPoll() cancels them cleanly on teardown — so we
+   * never device.reset() (which wedges the firmware mid-operation). Matches the
+   * approach prescribed in CLAUDE.md.
+   *
+   * Fallback path (real browser): self-sustaining transferIn(2, 51200) loop, as
+   * in jensen.js R(); onDataReceived re-issues it.
    */
   private startReadLoop(): void {
     if (!this.device || this.stopReadLoopRequested) return
-    this.readLoopRunning = true
+    if (this.readLoopRunning) return // already reading (poll is continuous)
 
+    if (!this.pollEndpoint) this.pollEndpoint = this.getNativeInEndpoint()
+
+    if (this.pollEndpoint) {
+      this.readLoopRunning = true
+      // 32768 = wMaxPacketSize (512) * 64, per CLAUDE.md.
+      this.pollEndpoint.startPoll(3, 32768, (error, buffer, actualLength, cancelled) => {
+        if (cancelled || this.stopReadLoopRequested) return // teardown — ignore
+        if (error) {
+          const msg = error.message || String(error)
+          if (/NO_DEVICE|NOT_FOUND|LIBUSB_TRANSFER_NO_DEVICE|LIBUSB_ERROR_NO_DEVICE/.test(msg)) {
+            this.readLoopRunning = false
+            this.pollEndpoint = null
+            this.handleDisconnect()
+          } else {
+            console.warn('[Jensen] USB poll error (non-disconnect):', msg)
+          }
+          return
+        }
+        if (actualLength > 0 && buffer) {
+          // libusb reuses the poll buffer — copy out before it is overwritten.
+          const copy = new Uint8Array(actualLength)
+          copy.set(buffer.subarray(0, actualLength))
+          this.ingestReadChunk(new DataView(copy.buffer))
+        }
+      })
+      return
+    }
+
+    // Fallback: WebUSB transferIn loop (browser).
+    this.readLoopRunning = true
     this.device.transferIn(2, 51200).then(
       (result) => this.onDataReceived(result),
       (error) => {
@@ -944,15 +1038,26 @@ export class JensenDevice {
   }
 
   /**
+   * Buffer a received chunk and schedule a parse. Shared by the poll callback and
+   * the transferIn fallback (onDataReceived).
+   */
+  private ingestReadChunk(chunk: DataView): void {
+    this.totalBytesReceived += chunk.byteLength
+    this.receiveChunks.push(chunk)
+
+    if (this.decodeTimer) clearTimeout(this.decodeTimer)
+    this.decodeTimer = setTimeout(() => this.processBufferedData(), this.parseDelay)
+
+    if (this.onreceive) {
+      try { this.onreceive(this.totalBytesReceived) } catch { /* ignore */ }
+    }
+  }
+
+  /**
    * Handle data received from USB.
    * Matches jensen.js N(): push data, restart loop, debounce parse, fire onreceive.
    */
   private onDataReceived(result: USBInTransferResult): void {
-    if (result.data && result.data.byteLength > 0) {
-      this.totalBytesReceived += result.data.byteLength
-      this.receiveChunks.push(result.data)
-    }
-
     // Restart read loop immediately (perpetual — matches jensen.js: R() in N()),
     // unless a graceful teardown asked us to stop. Stopping here (rather than
     // re-issuing) means no transferIn is left pending, so close() succeeds without
@@ -960,16 +1065,12 @@ export class JensenDevice {
     if (this.stopReadLoopRequested) {
       this.readLoopRunning = false
     } else {
+      this.readLoopRunning = false // allow startReadLoop to re-issue (guards on readLoopRunning)
       this.startReadLoop()
     }
 
-    // Debounce parse (matches jensen.js: clearTimeout + setTimeout(E, timewait))
-    if (this.decodeTimer) clearTimeout(this.decodeTimer)
-    this.decodeTimer = setTimeout(() => this.processBufferedData(), this.parseDelay)
-
-    // Real-time progress callback (matches jensen.js: g.onreceive(y))
-    if (this.onreceive) {
-      try { this.onreceive(this.totalBytesReceived) } catch { /* ignore */ }
+    if (result.data && result.data.byteLength > 0) {
+      this.ingestReadChunk(result.data)
     }
   }
 
