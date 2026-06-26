@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { EventEmitter } from 'events'
 import { JensenDevice, USB_PRODUCT_IDS, CMD } from '../src/index.js'
 
 // A minimal WebUSB backend stand-in: no devices, rejecting picker.
@@ -185,16 +186,21 @@ describe('JensenDevice (transport-agnostic core)', () => {
   })
 
   // --- Native poll path (Electron/Node: node-usb startPoll/stopPoll) ---
+  //
+  // node-usb's InEndpoint is an EventEmitter: polled data arrives via the 'data'
+  // event (NOT the startPoll callback, which only fires on end/cancel). The mock
+  // mirrors that contract exactly.
 
-  function makePollDevice(
-    startPoll: ReturnType<typeof vi.fn>,
-    stopPoll: ReturnType<typeof vi.fn>,
-    reset: ReturnType<typeof vi.fn>,
-    close: ReturnType<typeof vi.fn>
-  ): USBDevice {
-    const pollEp = { startPoll, stopPoll }
+  function makePollEndpoint(): EventEmitter & { startPoll: ReturnType<typeof vi.fn>; stopPoll: ReturnType<typeof vi.fn> } {
+    const ep = new EventEmitter() as EventEmitter & { startPoll: ReturnType<typeof vi.fn>; stopPoll: ReturnType<typeof vi.fn> }
+    ep.startPoll = vi.fn()
+    ep.stopPoll = vi.fn((cb?: () => void) => cb?.()) // emit 'end' synchronously
+    return ep
+  }
+
+  function makePollDevice(ep: unknown, reset: ReturnType<typeof vi.fn>, close: ReturnType<typeof vi.fn>): USBDevice {
     const native = {
-      interface: (n: number) => (n === 0 ? { endpoint: (addr: number) => (addr === 0x82 ? pollEp : undefined) } : undefined),
+      interface: (n: number) => (n === 0 ? { endpoint: (addr: number) => (addr === 0x82 ? ep : undefined) } : undefined),
     }
     return {
       vendorId: 0x10d6,
@@ -215,50 +221,48 @@ describe('JensenDevice (transport-agnostic core)', () => {
   }
 
   it('read loop uses native startPoll(3, 32768) when a native endpoint is available', async () => {
-    const startPoll = vi.fn()
-    const stopPoll = vi.fn((cb?: () => void) => cb?.())
+    const ep = makePollEndpoint()
     const device = new JensenDevice(makeFakeUsb())
-    await device.tryConnect(makePollDevice(startPoll, stopPoll, vi.fn(async () => {}), vi.fn(async () => {})))
+    await device.tryConnect(makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {})))
 
     ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
     // Second call must not double-start (poll is continuous).
     ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
 
-    expect(startPoll).toHaveBeenCalledTimes(1)
-    expect(startPoll.mock.calls[0][0]).toBe(3)
-    expect(startPoll.mock.calls[0][1]).toBe(32768)
+    expect(ep.startPoll).toHaveBeenCalledTimes(1)
+    expect(ep.startPoll.mock.calls[0][0]).toBe(3)
+    expect(ep.startPoll.mock.calls[0][1]).toBe(32768)
+    // listening for data on the 'data' event (node-usb's real contract)
+    expect(ep.listenerCount('data')).toBe(1)
 
     await device.disconnect()
   })
 
   it('disconnect() uses stopPoll (clean cancel) and closes WITHOUT reset on the native poll path', async () => {
-    const startPoll = vi.fn()
-    const stopPoll = vi.fn((cb?: () => void) => cb?.())
+    const ep = makePollEndpoint()
     const reset = vi.fn(async () => {})
     const close = vi.fn(async () => {})
     const device = new JensenDevice(makeFakeUsb())
-    await device.tryConnect(makePollDevice(startPoll, stopPoll, reset, close))
+    await device.tryConnect(makePollDevice(ep, reset, close))
     ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
 
     await device.disconnect()
 
-    expect(stopPoll).toHaveBeenCalledTimes(1)
+    expect(ep.stopPoll).toHaveBeenCalledTimes(1)
     expect(close).toHaveBeenCalled()
     expect(reset).not.toHaveBeenCalled() // never reset on the poll path
+    expect(ep.listenerCount('data')).toBe(0) // listeners cleaned up
     expect(device.isConnected()).toBe(false)
   })
 
-  it('native poll callback copies the reused libusb buffer into receiveChunks', async () => {
-    let pollCb: ((e: unknown, b: Uint8Array, n: number, c?: boolean) => void) | undefined
-    const startPoll = vi.fn((_n: number, _s: number, cb: typeof pollCb) => { pollCb = cb })
-    const stopPoll = vi.fn((cb?: () => void) => cb?.())
+  it("native 'data' event copies the reused libusb buffer into receiveChunks", async () => {
+    const ep = makePollEndpoint()
     const device = new JensenDevice(makeFakeUsb())
-    await device.tryConnect(makePollDevice(startPoll, stopPoll, vi.fn(async () => {}), vi.fn(async () => {})))
+    await device.tryConnect(makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {})))
     ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
-    expect(pollCb).toBeTypeOf('function')
 
     const shared = new Uint8Array([1, 2, 3, 4])
-    pollCb!(undefined, shared, 4)
+    ep.emit('data', shared)
     // libusb reuses the same buffer for the next transfer — overwrite it; the
     // stored chunk must be an independent copy.
     shared.fill(0)

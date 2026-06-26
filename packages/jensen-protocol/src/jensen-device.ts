@@ -30,14 +30,18 @@ interface USBConnectionEvent extends Event {
 
 // Minimal shape of node-usb's native InEndpoint (poll API). Declared structurally
 // so this module keeps its transport-agnostic design (no `usb` import — only the
-// native endpoint reached at runtime through the WebUSB device wrapper). Buffers
-// passed to the startPoll callback are reused by libusb — copy before returning.
+// native endpoint reached at runtime through the WebUSB device wrapper).
+//
+// IMPORTANT: node-usb delivers polled data via the EventEmitter 'data' event (the
+// startPoll `callback` arg only fires once, on end/cancel). The 'data' buffer is a
+// view over a libusb buffer that gets reused — copy it before the next event.
+type PollDataHandler = (buffer: Uint8Array) => void
+type PollErrorHandler = (error: Error & { errno?: number }) => void
 interface NativePollEndpoint {
-  startPoll(
-    nTransfers: number,
-    transferSize: number,
-    callback: (error: (Error & { errno?: number }) | undefined, buffer: Uint8Array, actualLength: number, cancelled?: boolean) => void
-  ): void
+  on(event: 'data', handler: PollDataHandler): void
+  on(event: 'error', handler: PollErrorHandler): void
+  removeListener(event: 'data' | 'error', handler: PollDataHandler | PollErrorHandler): void
+  startPoll(nTransfers: number, transferSize: number): void
   stopPoll(callback?: () => void): void
 }
 
@@ -342,6 +346,8 @@ export class JensenDevice {
   // browser's close() — so teardown never needs a device.reset(). Null in a real
   // browser (no native endpoint), where we fall back to the WebUSB transferIn loop.
   private pollEndpoint: NativePollEndpoint | null = null
+  private pollDataHandler: PollDataHandler | null = null
+  private pollErrorHandler: PollErrorHandler | null = null
   private totalBytesReceived = 0
 
   // Carry buffer for partial Jensen messages between processBufferedData() calls
@@ -533,6 +539,8 @@ export class JensenDevice {
     this.readLoopRunning = false
     this.stopReadLoopRequested = false
     this.pollEndpoint = null
+    this.pollDataHandler = null
+    this.pollErrorHandler = null
     this.sequenceId = 0
     this.receiveChunks.length = 0
     this.carryLen = 0
@@ -606,6 +614,7 @@ export class JensenDevice {
     if (this.pollEndpoint) {
       const ep = this.pollEndpoint
       this.pollEndpoint = null
+      this.detachPollListeners(ep)
       await new Promise<void>((resolve) => {
         let done = false
         const finish = (): void => { if (!done) { done = true; resolve() } }
@@ -773,6 +782,7 @@ export class JensenDevice {
 
   private handleDisconnect(): void {
     if (shouldLog()) console.log('[Jensen] USB device physically disconnected')
+    if (this.pollEndpoint) this.detachPollListeners(this.pollEndpoint)
     this.device = null
     this.pollEndpoint = null // device gone; poll transfers already errored out
     this.sequenceId = 0
@@ -974,6 +984,16 @@ export class JensenDevice {
     return null
   }
 
+  /** Remove the 'data'/'error' listeners attached for poll-based reading. */
+  private detachPollListeners(ep: NativePollEndpoint): void {
+    try {
+      if (this.pollDataHandler) ep.removeListener('data', this.pollDataHandler)
+      if (this.pollErrorHandler) ep.removeListener('error', this.pollErrorHandler)
+    } catch { /* ignore */ }
+    this.pollDataHandler = null
+    this.pollErrorHandler = null
+  }
+
   /**
    * Start (or continue) the continuous USB read loop.
    *
@@ -994,27 +1014,35 @@ export class JensenDevice {
 
     if (this.pollEndpoint) {
       this.readLoopRunning = true
-      // 32768 = wMaxPacketSize (512) * 64, per CLAUDE.md.
-      this.pollEndpoint.startPoll(3, 32768, (error, buffer, actualLength, cancelled) => {
-        if (cancelled || this.stopReadLoopRequested) return // teardown — ignore
-        if (error) {
-          const msg = error.message || String(error)
-          if (/NO_DEVICE|NOT_FOUND|LIBUSB_TRANSFER_NO_DEVICE|LIBUSB_ERROR_NO_DEVICE/.test(msg)) {
-            this.readLoopRunning = false
-            this.pollEndpoint = null
-            this.handleDisconnect()
-          } else {
-            console.warn('[Jensen] USB poll error (non-disconnect):', msg)
-          }
-          return
-        }
-        if (actualLength > 0 && buffer) {
-          // libusb reuses the poll buffer — copy out before it is overwritten.
-          const copy = new Uint8Array(actualLength)
-          copy.set(buffer.subarray(0, actualLength))
+      const ep = this.pollEndpoint
+
+      this.pollDataHandler = (buffer: Uint8Array) => {
+        if (this.stopReadLoopRequested) return // teardown — ignore
+        if (buffer && buffer.byteLength > 0) {
+          // The 'data' buffer is a view over a reused libusb buffer — copy it out
+          // before the next transfer overwrites it.
+          const copy = new Uint8Array(buffer.byteLength)
+          copy.set(buffer)
           this.ingestReadChunk(new DataView(copy.buffer))
         }
-      })
+      }
+      this.pollErrorHandler = (error: Error) => {
+        if (this.stopReadLoopRequested) return // cancellation during teardown
+        const msg = error?.message || String(error)
+        if (/NO_DEVICE|NOT_FOUND|LIBUSB_TRANSFER_NO_DEVICE|LIBUSB_ERROR_NO_DEVICE/.test(msg)) {
+          this.readLoopRunning = false
+          this.detachPollListeners(ep)
+          this.pollEndpoint = null
+          this.handleDisconnect()
+        } else {
+          console.warn('[Jensen] USB poll error (non-disconnect):', msg)
+        }
+      }
+
+      ep.on('data', this.pollDataHandler)
+      ep.on('error', this.pollErrorHandler)
+      // 32768 = wMaxPacketSize (512) * 64, per CLAUDE.md. Data arrives via 'data'.
+      ep.startPoll(3, 32768)
       return
     }
 
