@@ -524,6 +524,11 @@ export class JensenDevice {
     this.removeUsbDisconnectListener()
 
     if (this.device) {
+      // Release the claimed interface BEFORE closing. Without this, the device's
+      // interface stays claimed/active and the next connect's claimInterface(0)
+      // fails with LIBUSB_ERROR_ACCESS — locking the device after a
+      // disconnect → reconnect cycle.
+      try { await this.device.releaseInterface(0) } catch { /* not claimed / already released */ }
       try { await this.device.close() } catch { /* ignore */ }
       this.device = null
     }

@@ -125,6 +125,39 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(device.isConnected()).toBe(false)
   })
 
+  it('disconnect() releases the claimed interface BEFORE closing', async () => {
+    // Regression: without releaseInterface, the next connect's claimInterface(0)
+    // fails with LIBUSB_ERROR_ACCESS, locking the device after disconnect→reconnect.
+    const releaseInterface = vi.fn(async () => {})
+    const close = vi.fn(async () => {})
+    const fakeDevice = {
+      vendorId: 0x10d6,
+      productId: USB_PRODUCT_IDS[0],
+      productName: 'HiDock H1E',
+      opened: true,
+      open: vi.fn(async () => {}),
+      selectConfiguration: vi.fn(async () => {}),
+      claimInterface: vi.fn(async () => {}),
+      selectAlternateInterface: vi.fn(async () => {}),
+      releaseInterface,
+      close,
+    } as unknown as USBDevice
+
+    const device = new JensenDevice(makeFakeUsb())
+    await device.tryConnect(fakeDevice)
+    expect(device.isConnected()).toBe(true)
+
+    await device.disconnect()
+
+    expect(releaseInterface).toHaveBeenCalledWith(0)
+    expect(close).toHaveBeenCalled()
+    // release must come before close
+    expect(releaseInterface.mock.invocationCallOrder[0]).toBeLessThan(
+      close.mock.invocationCallOrder[0]
+    )
+    expect(device.isConnected()).toBe(false)
+  })
+
   it('reset() returns false when not connected', async () => {
     expect(await new JensenDevice(makeFakeUsb()).reset()).toBe(false)
   })
