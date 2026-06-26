@@ -488,13 +488,12 @@ describe('registerJensenHandlers', () => {
     expect(mockJensen.getFileCount).not.toHaveBeenCalled()
   })
 
-  it('jensen:disconnect preempts in-flight work via abortInFlight() before disconnecting', async () => {
+  it('jensen:disconnect does NOT preempt in-flight work (waits for it via the serializer)', async () => {
+    // Disconnect must let a running scan finish so the device empties its USB FIFO
+    // before close — preempting it leaves stale bytes that wedge the next connect.
     await mockHandlers['jensen:disconnect'](makeEvent())
-    expect(mockJensen.abortInFlight).toHaveBeenCalledTimes(1)
     expect(mockJensen.disconnect).toHaveBeenCalledTimes(1)
-    expect(mockJensen.abortInFlight.mock.invocationCallOrder[0]).toBeLessThan(
-      mockJensen.disconnect.mock.invocationCallOrder[0]
-    )
+    expect(mockJensen.abortInFlight).not.toHaveBeenCalled()
   })
 
   it('jensen:reset preempts in-flight work via abortInFlight() before resetting', async () => {
