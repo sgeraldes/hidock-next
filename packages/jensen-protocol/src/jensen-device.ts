@@ -527,6 +527,29 @@ export class JensenDevice {
     return this.device !== null
   }
 
+  /**
+   * Abort any in-flight command (scan / download) WITHOUT tearing down the USB
+   * device. Resolves every pending command promise with null and clears the
+   * command queue + scan accumulator so a waiting listFiles()/getFileCount()
+   * returns immediately.
+   *
+   * Used so a disconnect/reset can PREEMPT a running (or stalled) scan instead of
+   * queueing behind it — a 10-minute stalled scan would otherwise block disconnect.
+   * Does not touch the read loop or the USB handle; the caller (disconnect/reset)
+   * performs the actual teardown right after.
+   */
+  abortInFlight(): void {
+    this.currentCommandTag = null
+    this.currentOperationName = null
+    this.commandQueue.length = 0
+    this.data = {}
+    for (const [, pending] of this.pendingPromises) {
+      if (pending.timeout) clearTimeout(pending.timeout)
+      pending.resolve(null)
+    }
+    this.pendingPromises.clear()
+  }
+
   async disconnect(): Promise<void> {
     this.removeUsbDisconnectListener()
     // Stop issuing new reads before tearing down the device.

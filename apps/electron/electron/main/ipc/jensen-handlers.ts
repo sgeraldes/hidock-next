@@ -28,10 +28,15 @@ import {
 let currentDownloadAbort: AbortController | null = null
 
 // ---------------------------------------------------------------------------
-// Serialize device lifecycle operations (connect / tryConnect / disconnect /
-// reset). Rapid UI clicks otherwise interleave open/setup/read-loop with
-// reset/close, corrupting device state (ACCESS lock, "no recordings"). This
-// runs them one-at-a-time in arrival order; a failed op never breaks the chain.
+// Serialize device operations (connect / tryConnect / disconnect / reset /
+// listFiles / getFileCount). Rapid UI clicks otherwise interleave open/setup/
+// read-loop with reset/close, OR start a file-list scan during/after a
+// disconnect — corrupting device state (ACCESS lock, "no recordings"). This runs
+// them one-at-a-time in arrival order; a failed op never breaks the chain.
+//
+// disconnect/reset additionally call device.abortInFlight() *before* queueing,
+// so they preempt a running (or stalled) scan/download instead of waiting behind
+// it in the chain.
 // ---------------------------------------------------------------------------
 
 let deviceOpChain: Promise<unknown> = Promise.resolve()
@@ -120,6 +125,9 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:disconnect', async () => {
     try {
+      // Preempt any in-flight scan/download so disconnect doesn't queue behind a
+      // (possibly stalled) operation in the serializer.
+      getJensenDevice().abortInFlight()
       await serializeDeviceOp(() => getJensenDevice().disconnect())
       return null
     } catch {
@@ -131,6 +139,7 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:reset', async () => {
     try {
+      getJensenDevice().abortInFlight()
       return await serializeDeviceOp(() => getJensenDevice().reset())
     } catch {
       return null
@@ -185,7 +194,8 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:getFileCount', async () => {
     try {
-      return await getJensenDevice().getFileCount()
+      if (!getJensenDevice().isConnected()) return null
+      return await serializeDeviceOp(() => getJensenDevice().getFileCount())
     } catch {
       return null
     }
@@ -223,12 +233,16 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:listFiles', async (event) => {
     try {
+      // Never scan a device that isn't connected (e.g. a scan requested during or
+      // right after a disconnect) — returning null lets the renderer keep its
+      // cached list instead of mistaking an interrupted scan for an empty device.
+      if (!getJensenDevice().isConnected()) return null
       const onProgress = (filesFound: number, expectedFiles: number) => {
         if (!event.sender.isDestroyed()) {
           event.sender.send('jensen:scan-progress', { current: filesFound, total: expectedFiles })
         }
       }
-      return await getJensenDevice().listFiles(onProgress)
+      return await serializeDeviceOp(() => getJensenDevice().listFiles(onProgress))
     } catch {
       return null
     }

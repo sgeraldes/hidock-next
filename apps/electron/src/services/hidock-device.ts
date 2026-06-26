@@ -1063,10 +1063,30 @@ class HiDockDeviceService {
         animationCancelled = true
         clearInterval(animationInterval)
 
-        // Fix 1: Guard against null response (disconnect, timeout, decode error)
+        // Fix 1: Guard against null response (disconnect, timeout, decode error).
+        // Do NOT poison the cache or report an empty device — return whatever we
+        // already have so the UI keeps its existing list.
         if (!files) {
           this.logActivity('error', 'Device returned no file data', 'Received null response from listFiles — device may have disconnected')
-          return []
+          return this.cachedRecordings ?? []
+        }
+
+        // An empty result while the device reports recordings means the scan was
+        // INTERRUPTED (disconnect / cancel / stall mid-stream), not an empty device.
+        // Treat it as a failed scan: keep the cache untouched and do not log
+        // "storage empty" — otherwise the poisoned cache (count==expected, list==[])
+        // would make every subsequent call a "cache hit" returning 0 files forever.
+        if (files.length === 0 && expectedFileCount > 0) {
+          this.logActivity(
+            'error',
+            'File scan interrupted',
+            `Device reports ${expectedFileCount} recording${expectedFileCount === 1 ? '' : 's'} but the scan returned none — keeping existing list (likely disconnected mid-scan)`
+          )
+          // Count as a failure so the backoff/retry logic re-scans rather than
+          // trusting this empty result.
+          this.listRecordingsFailureCount++
+          this.listRecordingsLastFailure = Date.now()
+          return this.cachedRecordings ?? []
         }
 
         if (shouldLogQa()) console.log(`[HiDockDevice] listRecordings: Received ${files.length} files`)

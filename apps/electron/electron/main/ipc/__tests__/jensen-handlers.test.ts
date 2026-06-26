@@ -87,6 +87,7 @@ const mockJensen: any = {
   connect: vi.fn().mockResolvedValue(false),
   tryConnect: vi.fn().mockResolvedValue(false),
   disconnect: vi.fn().mockResolvedValue(undefined),
+  abortInFlight: vi.fn(),
   reset: vi.fn().mockResolvedValue(false),
   isConnected: vi.fn().mockReturnValue(false),
   getModel: vi.fn().mockReturnValue('unknown'),
@@ -433,6 +434,7 @@ describe('registerJensenHandlers', () => {
 
   it('jensen:listFiles sends scan-progress events during file listing', async () => {
     const event = makeEvent(false)
+    mockJensen.isConnected.mockReturnValue(true)
 
     mockJensen.listFiles.mockImplementation(
       async (onProgress: (found: number, expected: number) => void) => {
@@ -455,6 +457,7 @@ describe('registerJensenHandlers', () => {
 
   it('jensen:listFiles does not send scan-progress to destroyed window', async () => {
     const event = makeEvent(true) // isDestroyed = true
+    mockJensen.isConnected.mockReturnValue(true)
 
     mockJensen.listFiles.mockImplementation(
       async (onProgress: (found: number, expected: number) => void) => {
@@ -469,6 +472,38 @@ describe('registerJensenHandlers', () => {
       (c) => c[0] === 'jensen:scan-progress'
     )
     expect(progressCalls).toHaveLength(0)
+  })
+
+  it('jensen:listFiles returns null without scanning when the device is disconnected', async () => {
+    mockJensen.isConnected.mockReturnValue(false)
+    const result = await mockHandlers['jensen:listFiles'](makeEvent())
+    expect(result).toBeNull()
+    expect(mockJensen.listFiles).not.toHaveBeenCalled()
+  })
+
+  it('jensen:getFileCount returns null without querying when the device is disconnected', async () => {
+    mockJensen.isConnected.mockReturnValue(false)
+    const result = await mockHandlers['jensen:getFileCount'](makeEvent())
+    expect(result).toBeNull()
+    expect(mockJensen.getFileCount).not.toHaveBeenCalled()
+  })
+
+  it('jensen:disconnect preempts in-flight work via abortInFlight() before disconnecting', async () => {
+    await mockHandlers['jensen:disconnect'](makeEvent())
+    expect(mockJensen.abortInFlight).toHaveBeenCalledTimes(1)
+    expect(mockJensen.disconnect).toHaveBeenCalledTimes(1)
+    expect(mockJensen.abortInFlight.mock.invocationCallOrder[0]).toBeLessThan(
+      mockJensen.disconnect.mock.invocationCallOrder[0]
+    )
+  })
+
+  it('jensen:reset preempts in-flight work via abortInFlight() before resetting', async () => {
+    await mockHandlers['jensen:reset'](makeEvent())
+    expect(mockJensen.abortInFlight).toHaveBeenCalledTimes(1)
+    expect(mockJensen.reset).toHaveBeenCalledTimes(1)
+    expect(mockJensen.abortInFlight.mock.invocationCallOrder[0]).toBeLessThan(
+      mockJensen.reset.mock.invocationCallOrder[0]
+    )
   })
 
   // -------------------------------------------------------------------------
@@ -488,6 +523,7 @@ describe('registerJensenHandlers', () => {
   })
 
   it('jensen:listFiles returns null when jensen throws', async () => {
+    mockJensen.isConnected.mockReturnValue(true)
     mockJensen.listFiles.mockRejectedValue(new Error('USB error'))
     const result = await mockHandlers['jensen:listFiles'](makeEvent())
     expect(result).toBeNull()

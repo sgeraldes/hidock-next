@@ -189,6 +189,38 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(await new JensenDevice(makeFakeUsb()).reset()).toBe(false)
   })
 
+  it('abortInFlight() resolves pending commands with null and clears scan/queue state', async () => {
+    // Preemption hook used by disconnect/reset so they don't queue behind a
+    // running (or stalled) scan. A pending command promise must settle with null,
+    // and the listFiles accumulator (this.data) + command queue must be cleared.
+    const device = new JensenDevice(makeFakeUsb()) as unknown as {
+      pendingPromises: Map<string, { resolve: (v: unknown) => void; timeout?: ReturnType<typeof setTimeout> }>
+      commandQueue: unknown[]
+      data: Record<string, unknown>
+      currentCommandTag: string | null
+      abortInFlight: () => void
+    }
+
+    let resolved: unknown = 'unset'
+    const pending = new Promise((resolve) => {
+      device.pendingPromises.set('filelist', { resolve })
+    }).then((v) => {
+      resolved = v
+    })
+    device.commandQueue.push({})
+    device.data['filelist'] = { files: [] }
+    device.currentCommandTag = 'filelist'
+
+    device.abortInFlight()
+    await pending
+
+    expect(resolved).toBeNull()
+    expect(device.pendingPromises.size).toBe(0)
+    expect(device.commandQueue.length).toBe(0)
+    expect(device.data['filelist']).toBeUndefined()
+    expect(device.currentCommandTag).toBeNull()
+  })
+
   it('isOperationInProgress()/getLockHolder() are idle on a fresh instance', () => {
     const device = new JensenDevice(makeFakeUsb())
     expect(device.isOperationInProgress()).toBe(false)
