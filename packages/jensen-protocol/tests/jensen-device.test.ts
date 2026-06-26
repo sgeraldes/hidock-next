@@ -255,6 +255,22 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(device.isConnected()).toBe(false)
   })
 
+  it('reset() stops the native poll BEFORE issuing device.reset() (no mid-poll wedge)', async () => {
+    const ep = makePollEndpoint()
+    const reset = vi.fn(async () => {})
+    const close = vi.fn(async () => {})
+    const device = new JensenDevice(makeFakeUsb())
+    await device.tryConnect(makePollDevice(ep, reset, close))
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+    expect(ep.startPoll).toHaveBeenCalled()
+
+    await device.reset()
+
+    expect(ep.stopPoll).toHaveBeenCalled()
+    expect(reset).toHaveBeenCalled()
+    expect(ep.stopPoll.mock.invocationCallOrder[0]).toBeLessThan(reset.mock.invocationCallOrder[0])
+  })
+
   it("native 'data' event copies the reused libusb buffer into receiveChunks", async () => {
     const ep = makePollEndpoint()
     const device = new JensenDevice(makeFakeUsb())

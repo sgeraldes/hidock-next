@@ -89,15 +89,8 @@ export function registerJensenHandlers(): void {
       versionNumber: device.versionNumber,
     })
   }
-
-  device.onconnect = () => {
-    broadcast('jensen:connect-event')
-    sendState()
-  }
-  device.ondisconnect = () => {
-    broadcast('jensen:disconnect-event')
-    sendState()
-  }
+  // NOTE: device.onconnect/ondisconnect are wired once below (the canonical
+  // registration). sendState() is used by the operation handlers' finally blocks.
 
   // -------------------------------------------------------------------------
   // Core device operations

@@ -612,16 +612,7 @@ export class JensenDevice {
 
     // Native poll path — clean cancel, never reset.
     if (this.pollEndpoint) {
-      const ep = this.pollEndpoint
-      this.pollEndpoint = null
-      this.detachPollListeners(ep)
-      await new Promise<void>((resolve) => {
-        let done = false
-        const finish = (): void => { if (!done) { done = true; resolve() } }
-        try { ep.stopPoll(finish) } catch { finish() }
-        setTimeout(finish, 2000) // safety: never hang teardown on a missing callback
-      })
-      this.readLoopRunning = false
+      await this.stopNativePoll()
       try { await this.device.close() } catch { /* ignore */ }
       this.stopReadLoopRequested = false
       return
@@ -704,6 +695,11 @@ export class JensenDevice {
 
     if (shouldLog()) console.log('[Jensen] Resetting device...')
     try {
+      // Cancel the native poll FIRST (clean libusb cancel) — issuing device.reset()
+      // while poll transfers are pending re-triggers the very wedge this avoids.
+      this.stopReadLoopRequested = true
+      await this.stopNativePoll()
+
       // Clear protocol state
       this.sequenceId = 0
       this.currentCommandTag = null
@@ -731,9 +727,12 @@ export class JensenDevice {
           await this.device.selectAlternateInterface(0, 0)
         }
       }
+      // Allow the read loop to start again for post-reset commands.
+      this.stopReadLoopRequested = false
       return true
     } catch (error) {
       console.error('[Jensen] Reset failed:', error)
+      this.stopReadLoopRequested = false
       return false
     }
   }
@@ -782,7 +781,15 @@ export class JensenDevice {
 
   private handleDisconnect(): void {
     if (shouldLog()) console.log('[Jensen] USB device physically disconnected')
-    if (this.pollEndpoint) this.detachPollListeners(this.pollEndpoint)
+    // Cancel the poll best-effort (this can be reached via the WebUSB 'disconnect'
+    // DOM event, racing libusb's own NO_DEVICE error) so kernel transfers aren't
+    // left orphaned. The device is gone, so stopPoll may throw — ignore.
+    if (this.pollEndpoint) {
+      const ep = this.pollEndpoint
+      this.detachPollListeners(ep)
+      try { ep.stopPoll() } catch { /* device already gone */ }
+    }
+    this.stopReadLoopRequested = false
     this.device = null
     this.pollEndpoint = null // device gone; poll transfers already errored out
     this.sequenceId = 0
@@ -992,6 +999,26 @@ export class JensenDevice {
     } catch { /* ignore */ }
     this.pollDataHandler = null
     this.pollErrorHandler = null
+  }
+
+  /**
+   * Cancel the native poll cleanly: detach listeners, stopPoll() (real libusb
+   * cancel — no device.reset()), and wait for the transfers to unwind. Safe to
+   * call when not polling (no-op). Used by both teardown and reset() so a USB
+   * port reset never fires with poll transfers still pending.
+   */
+  private async stopNativePoll(): Promise<void> {
+    const ep = this.pollEndpoint
+    if (!ep) return
+    this.pollEndpoint = null
+    this.detachPollListeners(ep)
+    await new Promise<void>((resolve) => {
+      let done = false
+      const finish = (): void => { if (!done) { done = true; resolve() } }
+      try { ep.stopPoll(finish) } catch { finish() }
+      setTimeout(finish, 2000) // safety: never hang on a missing callback
+    })
+    this.readLoopRunning = false
   }
 
   /**
