@@ -28,6 +28,24 @@ import {
 let currentDownloadAbort: AbortController | null = null
 
 // ---------------------------------------------------------------------------
+// Serialize device lifecycle operations (connect / tryConnect / disconnect /
+// reset). Rapid UI clicks otherwise interleave open/setup/read-loop with
+// reset/close, corrupting device state (ACCESS lock, "no recordings"). This
+// runs them one-at-a-time in arrival order; a failed op never breaks the chain.
+// ---------------------------------------------------------------------------
+
+let deviceOpChain: Promise<unknown> = Promise.resolve()
+
+function serializeDeviceOp<T>(op: () => Promise<T>): Promise<T> {
+  const run = deviceOpChain.then(op, op)
+  deviceOpChain = run.then(
+    () => undefined,
+    () => undefined
+  )
+  return run
+}
+
+// ---------------------------------------------------------------------------
 // Broadcast helper — sends to the first available window
 // ---------------------------------------------------------------------------
 
@@ -82,7 +100,7 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:connect', async () => {
     try {
-      return await getJensenDevice().connect()
+      return await serializeDeviceOp(() => getJensenDevice().connect())
     } catch {
       return null
     } finally {
@@ -92,7 +110,7 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:tryConnect', async () => {
     try {
-      return await getJensenDevice().tryConnect()
+      return await serializeDeviceOp(() => getJensenDevice().tryConnect())
     } catch {
       return null
     } finally {
@@ -102,7 +120,7 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:disconnect', async () => {
     try {
-      await getJensenDevice().disconnect()
+      await serializeDeviceOp(() => getJensenDevice().disconnect())
       return null
     } catch {
       return null
@@ -113,7 +131,7 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:reset', async () => {
     try {
-      return await getJensenDevice().reset()
+      return await serializeDeviceOp(() => getJensenDevice().reset())
     } catch {
       return null
     } finally {
