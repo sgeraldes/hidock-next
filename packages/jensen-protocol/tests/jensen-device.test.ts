@@ -125,10 +125,12 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(device.isConnected()).toBe(false)
   })
 
-  it('disconnect() releases the claimed interface BEFORE closing', async () => {
-    // Regression: without releaseInterface, the next connect's claimInterface(0)
-    // fails with LIBUSB_ERROR_ACCESS, locking the device after disconnect→reconnect.
-    const releaseInterface = vi.fn(async () => {})
+  it('disconnect() resets (cancels pending transfers) BEFORE closing', async () => {
+    // Regression: the continuous read loop leaves a transferIn pending, and
+    // node-usb refuses to close a device with a pending request. reset() cancels
+    // pending transfers so close() succeeds — otherwise the device stays
+    // open+claimed and the next connect's claimInterface fails with ACCESS.
+    const reset = vi.fn(async () => {})
     const close = vi.fn(async () => {})
     const fakeDevice = {
       vendorId: 0x10d6,
@@ -139,7 +141,7 @@ describe('JensenDevice (transport-agnostic core)', () => {
       selectConfiguration: vi.fn(async () => {}),
       claimInterface: vi.fn(async () => {}),
       selectAlternateInterface: vi.fn(async () => {}),
-      releaseInterface,
+      reset,
       close,
     } as unknown as USBDevice
 
@@ -149,13 +151,38 @@ describe('JensenDevice (transport-agnostic core)', () => {
 
     await device.disconnect()
 
-    expect(releaseInterface).toHaveBeenCalledWith(0)
+    expect(reset).toHaveBeenCalled()
     expect(close).toHaveBeenCalled()
-    // release must come before close
-    expect(releaseInterface.mock.invocationCallOrder[0]).toBeLessThan(
-      close.mock.invocationCallOrder[0]
-    )
+    // reset must come before close
+    expect(reset.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[0])
     expect(device.isConnected()).toBe(false)
+  })
+
+  it('tryConnect() releases the device when claimInterface fails (no ACCESS lock)', async () => {
+    // setup() must fail the connect cleanly on a claim error and release the
+    // device, instead of reporting "connected" while every command errors.
+    const close = vi.fn(async () => {})
+    const reset = vi.fn(async () => {})
+    const fakeDevice = {
+      vendorId: 0x10d6,
+      productId: USB_PRODUCT_IDS[0],
+      productName: 'HiDock H1E',
+      opened: true,
+      open: vi.fn(async () => {}),
+      selectConfiguration: vi.fn(async () => {}),
+      claimInterface: vi.fn(async () => { throw new Error('LIBUSB_ERROR_ACCESS') }),
+      selectAlternateInterface: vi.fn(async () => {}),
+      reset,
+      close,
+    } as unknown as USBDevice
+
+    const device = new JensenDevice(makeFakeUsb())
+    const ok = await device.tryConnect(fakeDevice)
+
+    expect(ok).toBe(false)
+    expect(device.isConnected()).toBe(false)
+    // device was released (reset+close) rather than left open+claimed
+    expect(close).toHaveBeenCalled()
   })
 
   it('reset() returns false when not connected', async () => {

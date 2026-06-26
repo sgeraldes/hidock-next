@@ -466,6 +466,9 @@ export class JensenDevice {
       await this.setup()
       return true
     } catch {
+      // Release the device on any failure (open/claim/setup) so it isn't left
+      // open+claimed — otherwise the next connect's claimInterface fails ACCESS.
+      await this.disconnect()
       return false
     }
   }
@@ -488,7 +491,11 @@ export class JensenDevice {
       await this.device.selectAlternateInterface(0, 0)
       this.model = this.detectModel(this.device.productId)
     } catch (error) {
+      // A failed claim (e.g. LIBUSB_ERROR_ACCESS) must FAIL the connect cleanly —
+      // not fall through to onconnect and report "connected" while every command
+      // errors. Rethrow so tryConnect()/connect() release the device and return false.
       console.error('[Jensen] setup error:', error)
+      throw error
     }
 
     // Reset protocol state (jensen.js: h = null, k = false)
@@ -522,13 +529,17 @@ export class JensenDevice {
 
   async disconnect(): Promise<void> {
     this.removeUsbDisconnectListener()
+    // Stop issuing new reads before tearing down the device.
+    this.readLoopRunning = false
 
     if (this.device) {
-      // Release the claimed interface BEFORE closing. Without this, the device's
-      // interface stays claimed/active and the next connect's claimInterface(0)
-      // fails with LIBUSB_ERROR_ACCESS — locking the device after a
-      // disconnect → reconnect cycle.
-      try { await this.device.releaseInterface(0) } catch { /* not claimed / already released */ }
+      // The continuous read loop leaves a transferIn PENDING, and node-usb
+      // refuses to close a device with a pending request ("Can't close device
+      // with a pending request"). That left the device open+claimed, so the next
+      // connect's claimInterface failed with LIBUSB_ERROR_ACCESS. reset() cancels
+      // pending transfers (what the browser does on teardown) so close() — and
+      // the next connect — succeed.
+      try { await this.device.reset() } catch { /* may re-enumerate / already gone */ }
       try { await this.device.close() } catch { /* ignore */ }
       this.device = null
     }

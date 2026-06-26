@@ -529,19 +529,22 @@ class HiDockDeviceService {
     await this.jensen.disconnect()
   }
 
-  // Reset device USB connection (for recovery from stuck state)
+  // Reset device USB connection (for recovery from stuck state).
+  // A "reset" is a clean disconnect + reconnect. The old path used the libusb
+  // device.reset(), which RE-ENUMERATES the device on Windows and leaves it
+  // locked (LIBUSB_ERROR_ACCESS / NOT_FOUND). The reliable recovery is to fully
+  // release the handle (disconnect → reset+close internally) and re-acquire it.
   async resetDevice(): Promise<boolean> {
-    this.logActivity('info', 'Resetting USB device...')
+    this.logActivity('info', 'Resetting USB connection...')
     try {
-      const success = await this.jensen.reset()
-      if (success) {
-        this.logActivity('success', 'Device reset successful')
-        // Re-initialize the device after reset
-        this.initializationComplete = false
-        await this.handleConnect()
-      } else {
-        this.logActivity('error', 'Device reset failed')
-      }
+      await this.disconnect()
+      // Brief settle so the OS fully releases the handle before re-acquiring.
+      await new Promise(resolve => setTimeout(resolve, 300))
+      const success = await this.connect()
+      this.logActivity(
+        success ? 'success' : 'error',
+        success ? 'Device reset complete' : 'Reset failed to reconnect'
+      )
       return success
     } catch (error) {
       this.logActivity('error', 'Device reset error', error instanceof Error ? error.message : 'Unknown error')
