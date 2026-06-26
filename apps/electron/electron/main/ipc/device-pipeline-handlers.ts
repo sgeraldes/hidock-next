@@ -21,7 +21,7 @@
  */
 
 import { ipcMain, BrowserWindow } from 'electron'
-import { getDevicePipelineService } from '../services/device-pipeline'
+import { getDevicePipelineService } from '../services/device-pipeline-instance'
 import type { DevicePipelineService } from '../services/device-pipeline'
 
 // ---------------------------------------------------------------------------

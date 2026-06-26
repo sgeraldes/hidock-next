@@ -48,9 +48,9 @@ vi.mock('electron', () => ({
   },
 }))
 
-// Prevent the real getDevicePipelineService() default (which lazy-requires
+// Prevent the real getDevicePipelineService() default (which statically imports
 // jensen/usb/etc.) from ever loading — we always inject our own instance.
-vi.mock('../../services/device-pipeline', () => ({
+vi.mock('../../services/device-pipeline-instance', () => ({
   getDevicePipelineService: () => {
     throw new Error('default singleton should not be used in tests')
   },

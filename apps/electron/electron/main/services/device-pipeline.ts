@@ -637,39 +637,7 @@ export class DevicePipelineService extends EventEmitter {
 // index.ts during Slice 3; a later slice wires it + IPC.
 // ---------------------------------------------------------------------------
 
-let pipelineInstance: DevicePipelineService | null = null
-
-export function getDevicePipelineService(): DevicePipelineService {
-  if (!pipelineInstance) {
-    // Lazy requires keep this module importable in pure unit tests (no electron
-    // / native usb at module load) while defaulting to the real singletons in
-    // the running app.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { getJensenDevice } = require('./jensen') as typeof import('./jensen')
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { getDownloadService } = require('./download-service') as typeof import('./download-service')
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { getConfig } = require('./config') as typeof import('./config')
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { queueTranscriptionIfEnabled } = require('./transcription') as typeof import('./transcription')
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { getRecordingByFilename } = require('./database') as typeof import('./database')
-
-    pipelineInstance = new DevicePipelineService(
-      getJensenDevice() as unknown as PipelineJensen,
-      getDownloadService() as unknown as PipelineDownloadService,
-      {
-        getConfig: () => getConfig() as { device?: { autoConnect?: boolean } },
-        queueTranscriptionIfEnabled,
-        getRecordingByFilename: (filename: string) =>
-          getRecordingByFilename(filename) as { id: string } | null | undefined
-      }
-    )
-  }
-  return pipelineInstance
-}
-
-/** Test-only: reset the singleton between suites. */
-export function __resetDevicePipelineServiceForTests(): void {
-  pipelineInstance = null
-}
+// NOTE: the real-singleton accessor getDevicePipelineService() lives in
+// device-pipeline-instance.ts (static imports, bundler-safe). This module
+// exports only the class + types so it stays importable in unit tests without
+// loading the Electron / native-USB module graph.
