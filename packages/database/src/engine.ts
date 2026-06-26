@@ -75,6 +75,11 @@ export function stripLeadingSqlComments(sql: string): string {
 export class DatabaseEngine {
   private db: SqlJsDatabase | null = null
   private dbPath = ''
+  // Tracks an active runInTransaction so nested calls don't issue a second
+  // BEGIN (sql.js has no nested transactions). Without this, a nested call's
+  // BEGIN fails and the catch's ROLLBACK throws "cannot rollback - no
+  // transaction is active", masking the real error.
+  private inTransaction = false
 
   constructor(private readonly config: DatabaseEngineConfig) {}
 
@@ -213,7 +218,10 @@ export class DatabaseEngine {
 
   run(sql: string, params: unknown[] = []): void {
     this.getDatabase().run(sql, params as never)
-    this.saveDatabase()
+    // Persisting (db.export) mid-transaction ends the active transaction in
+    // sql.js, which then breaks the enclosing COMMIT/ROLLBACK. Inside a
+    // transaction, defer the save to the single COMMIT.
+    if (!this.inTransaction) this.saveDatabase()
   }
 
   /** run() variant that does not persist — for use inside a transaction. */
@@ -226,6 +234,12 @@ export class DatabaseEngine {
    */
   runInTransaction<T>(fn: () => T): T {
     const database = this.getDatabase()
+    // Re-entrant: if we're already inside a transaction, just run inline so we
+    // don't issue a nested BEGIN (unsupported by sql.js).
+    if (this.inTransaction) {
+      return fn()
+    }
+    this.inTransaction = true
     database.run('BEGIN TRANSACTION')
     try {
       const result = fn()
@@ -233,8 +247,15 @@ export class DatabaseEngine {
       this.saveDatabase()
       return result
     } catch (error) {
-      database.run('ROLLBACK')
+      // Defensive: never let a failed ROLLBACK mask the original error.
+      try {
+        database.run('ROLLBACK')
+      } catch {
+        /* no active transaction to roll back */
+      }
       throw error
+    } finally {
+      this.inTransaction = false
     }
   }
 
@@ -246,6 +267,6 @@ export class DatabaseEngine {
       stmt.reset()
     }
     stmt.free()
-    this.saveDatabase()
+    if (!this.inTransaction) this.saveDatabase()
   }
 }

@@ -87,6 +87,44 @@ describe('DatabaseEngine', () => {
     expect(engine.queryOne<{ name: string }>('SELECT name FROM items WHERE id = ?', ['a'])?.name).toBe('Alpha')
   })
 
+  it('runInTransaction commits and is re-entrant (nested calls do not BEGIN twice)', async () => {
+    const engine = makeEngine('tx-nested')
+    await engine.initialize()
+
+    // Nested runInTransaction must not throw "cannot start a transaction within
+    // a transaction" / "cannot rollback - no transaction is active".
+    expect(() =>
+      engine.runInTransaction(() => {
+        engine.run('INSERT INTO items (id, name) VALUES (?, ?)', ['a', 'Alpha'])
+        engine.runInTransaction(() => {
+          engine.run('INSERT INTO items (id, name) VALUES (?, ?)', ['b', 'Beta'])
+        })
+      })
+    ).not.toThrow()
+
+    expect(engine.queryAll('SELECT * FROM items')).toHaveLength(2)
+  })
+
+  it('runInTransaction rolls back and rethrows the ORIGINAL error (not a rollback error)', async () => {
+    const engine = makeEngine('tx-rollback')
+    await engine.initialize()
+
+    const boom = new Error('boom')
+    expect(() =>
+      engine.runInTransaction(() => {
+        engine.run('INSERT INTO items (id, name) VALUES (?, ?)', ['a', 'Alpha'])
+        throw boom
+      })
+    ).toThrow(boom)
+
+    // Insert was rolled back, and a subsequent transaction still works (state clean).
+    expect(engine.queryAll('SELECT * FROM items')).toHaveLength(0)
+    engine.runInTransaction(() => {
+      engine.run('INSERT INTO items (id, name) VALUES (?, ?)', ['c', 'Gamma'])
+    })
+    expect(engine.queryAll('SELECT * FROM items')).toHaveLength(1)
+  })
+
   it('runs migrations in ascending order up to schemaVersion', async () => {
     const calls: number[] = []
     const engine = makeEngine('migrate', {
