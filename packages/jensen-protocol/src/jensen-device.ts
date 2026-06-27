@@ -606,18 +606,53 @@ export class JensenDevice {
    * without reset; only a truly idle read falls back to reset() (safe — the device
    * isn't mid-operation).
    */
+  /**
+   * Wait for the device to stop streaming (its IN FIFO drained) before teardown.
+   * Watches the raw byte counter: while data keeps arriving the device is still
+   * sending; ~500ms of silence means it's idle. Bounded by maxMs so an
+   * interrupted huge transfer can't hang disconnect forever (it falls through to
+   * teardown, accepting a small wedge risk only in that rare case). Returns
+   * immediately when not actively reading (idle disconnect).
+   */
+  private async drainUntilIdle(maxMs = 20000): Promise<void> {
+    if (!this.readLoopRunning) return
+    const deadline = Date.now() + maxMs
+    let lastBytes = this.totalBytesReceived
+    let idleMs = 0
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50))
+      if (this.totalBytesReceived !== lastBytes) {
+        lastBytes = this.totalBytesReceived
+        idleMs = 0
+      } else {
+        idleMs += 50
+        if (idleMs >= 500) return // device quiet → FIFO drained
+      }
+    }
+  }
+
   private async gracefulCloseDevice(): Promise<void> {
     if (!this.device) return
-    this.stopReadLoopRequested = true
 
-    // Native poll path — clean cancel, never reset.
+    // Native poll path — drain in-flight stream, then clean cancel, never reset.
     if (this.pollEndpoint) {
+      // If a stream is in flight (e.g. a download or scan interrupted by
+      // disconnect), let the poll consume the rest of the device's IN FIFO until
+      // it goes idle BEFORE cancelling the poll. Cancelling mid-send leaves data
+      // queued in the device and wedges the firmware — the next connect then reads
+      // those stale bytes instead of the command response. This automates the
+      // manual "disconnect → wait → reconnect" drain. Poll stays active (so data
+      // is consumed); stopReadLoopRequested is set only after the drain so the
+      // data handler keeps counting bytes while we wait.
+      await this.drainUntilIdle()
+      this.stopReadLoopRequested = true
       await this.stopNativePoll()
       try { await this.device.close() } catch { /* ignore */ }
       this.stopReadLoopRequested = false
       return
     }
 
+    this.stopReadLoopRequested = true
     // transferIn fallback — drain, reset only a stuck idle read.
     let drainedCleanly = false
     if (this.readLoopRunning) {

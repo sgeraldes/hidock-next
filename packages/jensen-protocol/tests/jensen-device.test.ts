@@ -292,6 +292,46 @@ describe('JensenDevice (transport-agnostic core)', () => {
     await device.disconnect()
   })
 
+  it('drainUntilIdle blocks while bytes flow, resolves after ~500ms of silence', async () => {
+    // Disconnect during a download/scan must let the device finish streaming (FIFO
+    // drained) before teardown — cancelling mid-send wedges the firmware.
+    vi.useFakeTimers()
+    try {
+      const device = new JensenDevice(makeFakeUsb()) as unknown as {
+        readLoopRunning: boolean
+        totalBytesReceived: number
+        drainUntilIdle: (m?: number) => Promise<void>
+      }
+      device.readLoopRunning = true
+      device.totalBytesReceived = 0
+      let settled = false
+      const p = device.drainUntilIdle(20000).then(() => { settled = true })
+
+      // Data still arriving → must keep waiting.
+      for (let i = 0; i < 6; i++) {
+        device.totalBytesReceived += 100
+        await vi.advanceTimersByTimeAsync(50)
+      }
+      expect(settled).toBe(false)
+
+      // Silence → resolves after ~500ms.
+      await vi.advanceTimersByTimeAsync(550)
+      await p
+      expect(settled).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drainUntilIdle returns immediately when not actively reading (idle disconnect)', async () => {
+    const device = new JensenDevice(makeFakeUsb()) as unknown as {
+      readLoopRunning: boolean
+      drainUntilIdle: () => Promise<void>
+    }
+    device.readLoopRunning = false
+    await expect(device.drainUntilIdle()).resolves.toBeUndefined()
+  })
+
   it('disconnect() closes without reset when the read loop is idle (no pending transfer)', async () => {
     // No read loop running → nothing pending → close() directly, no reset.
     const reset = vi.fn(async () => {})

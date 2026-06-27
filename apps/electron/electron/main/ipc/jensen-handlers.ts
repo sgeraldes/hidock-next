@@ -118,13 +118,20 @@ export function registerJensenHandlers(): void {
 
   ipcMain.handle('jensen:disconnect', async () => {
     try {
+      // Abort an in-flight download so it stops being saved. The device keeps
+      // streaming the rest of the file regardless; gracefulCloseDevice then drains
+      // that out of the IN FIFO before closing (see below).
+      if (currentDownloadAbort) currentDownloadAbort.abort()
+
       // Do NOT preempt an in-flight scan: disconnect is serialized, so it waits
       // for the running listFiles/getFileCount to finish first. That lets the
       // device stream its file list to the end-of-list marker and empty its USB
       // FIFO before we close — otherwise the leftover bytes are read on the NEXT
       // connect instead of the device-info response ("Failed to get device info",
-      // recovered only after a second disconnect/connect). Teardown then runs on
-      // an idle device and closes cleanly via stopPoll (no reset).
+      // recovered only after a second disconnect/connect). For downloads (not
+      // serialized) the abort above + the drain in gracefulCloseDevice play the
+      // same role. Teardown then runs on an idle device and closes cleanly via
+      // stopPoll (no reset).
       await serializeDeviceOp(() => getJensenDevice().disconnect())
       return null
     } catch {
