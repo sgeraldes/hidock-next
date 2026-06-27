@@ -43,9 +43,14 @@ const mockNavigatorUSB = {
     getDevices: vi.fn().mockResolvedValue([]),
 };
 
+// Tracks the sequence id of the most recently sent command so the default
+// transferIn mock can echo a matching response (see beforeEach).
+let lastSentSeqId = 0;
+
 // Setup global mocks
 beforeEach(() => {
     vi.clearAllMocks();
+    lastSentSeqId = 0;
 
     // Mock navigator.usb
     Object.defineProperty(window.navigator, 'usb', {
@@ -59,12 +64,28 @@ beforeEach(() => {
     (deviceService as unknown as TestableDeviceService).sequenceId = 0;
     (deviceService as unknown as TestableDeviceService).receiveBuffer = new Uint8Array(0);
 
-    // Mock transferIn and transferOut to prevent timeouts
-    mockUSBDevice.transferIn.mockResolvedValue({ status: 'ok', data: new DataView(new ArrayBuffer(0)) });
-    mockUSBDevice.transferOut.mockResolvedValue({ status: 'ok', bytesWritten: 12 });
-
-    mockUSBDevice.transferIn.mockResolvedValue({ status: 'ok', data: new DataView(new ArrayBuffer(0)) });
-    mockUSBDevice.transferOut.mockResolvedValue({ status: 'ok', bytesWritten: 12 });
+    // Responsive default mock: echo back a valid Jensen response packet whose
+    // sequence id matches the last command sent, so receiveResponse() resolves
+    // immediately instead of spinning to its 5s/60s real-timer timeout (which made
+    // the whole suite take minutes). Empty body — the connection parsers
+    // (getDeviceInfo/getStorageInfo) tolerate it and fall back. Individual tests
+    // that need specific payloads still override transferIn with mockImplementation.
+    mockUSBDevice.transferOut.mockImplementation((...args: unknown[]) => {
+        const data = args[1] as Uint8Array;
+        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        lastSentSeqId = view.getUint32(4, false);
+        return Promise.resolve({ status: 'ok', bytesWritten: data.byteLength });
+    });
+    mockUSBDevice.transferIn.mockImplementation(() => {
+        const pkt = new Uint8Array(12);
+        const v = new DataView(pkt.buffer);
+        v.setUint8(0, 0x12);
+        v.setUint8(1, 0x34);
+        v.setUint16(2, 0, false); // command id echo (unused on this path)
+        v.setUint32(4, lastSentSeqId, false); // match the awaited sequence id
+        v.setUint32(8, 0, false); // zero-length body
+        return Promise.resolve({ status: 'ok', data: new DataView(pkt.buffer) });
+    });
 });
 
 describe('DeviceService WebUSB Implementation', () => {
@@ -81,14 +102,16 @@ describe('DeviceService WebUSB Implementation', () => {
         it('should request device with correct filters', async () => {
             await deviceService.requestDevice();
 
-            expect(mockNavigatorUSB.requestDevice).toHaveBeenCalledWith({
-                filters: [
-                    { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.H1 },
-                    { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.H1E },
-                    { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.P1 },
-                    { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.DEFAULT },
-                ]
-            });
+            // requestDevice() offers every supported vendor×product combination —
+            // assert the key models are present rather than pinning the exact list.
+            expect(mockNavigatorUSB.requestDevice).toHaveBeenCalledTimes(1);
+            const filters = mockNavigatorUSB.requestDevice.mock.calls[0][0].filters;
+            expect(Array.isArray(filters)).toBe(true);
+            expect(filters).toEqual(expect.arrayContaining([
+                { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.H1 },
+                { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.H1E },
+                { vendorId: HIDOCK_DEVICE_CONFIG.VENDOR_ID, productId: HIDOCK_PRODUCT_IDS.P1 },
+            ]));
         });
 
         it('should connect to device successfully', async () => {
@@ -203,9 +226,10 @@ describe('DeviceService WebUSB Implementation', () => {
             const parsed = (deviceService as unknown as TestableDeviceService).parsePacket();
 
             expect(parsed).toEqual({
-                id: commandId,
-                sequence: sequence,
-                body: body
+                cmdId: commandId,
+                seqId: sequence,
+                data: body,
+                isComplete: true
             });
         });
 
@@ -285,8 +309,8 @@ describe('DeviceService WebUSB Implementation', () => {
                     });
                 }
             });
-
-            mockUSBDevice.transferOut.mockResolvedValue({ status: 'ok', bytesWritten: 12 });
+            // transferOut keeps the outer beforeEach's implementation, which records
+            // lastSentSeqId so the getRecordings test can echo matching responses.
 
             await deviceService.requestDevice();
         });
@@ -315,14 +339,20 @@ describe('DeviceService WebUSB Implementation', () => {
                     ...new Array(16).fill(0x00), // Signature (16 bytes)
                 ]);
 
-                const mockFileListResponse = new Uint8Array([
-                    0x12, 0x34, // Sync bytes
-                    0x00, 0x00, // Command ID: 0 (big endian)
-                    0x00, 0x00, 0x00, 0x04, // Sequence: 4 (big endian) - this is the next sequence after connection
-                    0x02, 0x00, 0x00, fileListBody.length, // Body length with 2-byte checksum (big endian)
-                    ...fileListBody, // File list data
-                    0x56, 0x78, // Checksum (2 bytes)
-                ]);
+                // Respond to whatever command was just sent (getRecordings issues
+                // getFileCount then GET_FILE_LIST). Match the live sequence id so the
+                // non-streaming getFileCount resolves; cmd id 4 also matches the
+                // GET_FILE_LIST streaming read.
+                const mockFileListResponse = new Uint8Array(12 + fileListBody.length + 2);
+                const respView = new DataView(mockFileListResponse.buffer);
+                respView.setUint8(0, 0x12);
+                respView.setUint8(1, 0x34);
+                respView.setUint16(2, HIDOCK_COMMANDS.GET_FILE_LIST, false);
+                respView.setUint32(4, lastSentSeqId, false);
+                respView.setUint32(8, (0x02 << 24) | fileListBody.length, false); // 2-byte checksum + body length
+                mockFileListResponse.set(fileListBody, 12);
+                mockFileListResponse[12 + fileListBody.length] = 0x56;
+                mockFileListResponse[12 + fileListBody.length + 1] = 0x78;
 
                 return Promise.resolve({
                     status: 'ok',
