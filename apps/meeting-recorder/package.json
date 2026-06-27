@@ -23,7 +23,6 @@
     "test:run": "vitest run"
   },
   "dependencies": {
-    "@hidock/database": "file:../../packages/database",
     "@ai-sdk/amazon-bedrock": "^4.0.64",
     "@ai-sdk/anthropic": "^3.0.47",
     "@ai-sdk/google": "^3.0.36",
@@ -31,6 +30,7 @@
     "@electron-toolkit/preload": "^3.0.1",
     "@electron-toolkit/utils": "^4.0.0",
     "@google-cloud/speech": "^7.3.0",
+    "@hidock/database": "file:../../packages/database",
     "@radix-ui/react-dialog": "^1.1.2",
     "@radix-ui/react-dropdown-menu": "^2.1.2",
     "@radix-ui/react-label": "^2.1.0",
@@ -78,10 +78,10 @@
     "@types/react-dom": "^18.3.1",
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^4.3.3",
-    "@vitest/ui": "^4.0.16",
+    "@vitest/ui": "^4.1.9",
     "autoprefixer": "^10.4.20",
     "electron": "^39.2.7",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "eslint": "^9.39.2",
     "jsdom": "^27.4.0",
@@ -89,6 +89,9 @@
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.3",
     "vite": "^7.3.1",
-    "vitest": "^4.0.16"
+    "vitest": "^4.1.9"
+  },
+  "overrides": {
+    "@ai-sdk/provider-utils": "^4.0.21"
   }
 }

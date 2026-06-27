@@ -36,5 +36,9 @@
     "tsup": "^8.5.1",
     "typescript": "^5.6.3",
     "vitest": "^4.0.16"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1",
+    "@ai-sdk/provider-utils": "^4.0.21"
   }
 }
