@@ -375,6 +375,35 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(device.getLockHolder()).toBeNull()
   })
 
+  it('ingestReadChunk throttles parsing (continuous stream still parses; one parse per window)', () => {
+    // Regression: a debounce (reset timer on every chunk) means a continuous
+    // poll stream never parses until it stops — which froze download progress and
+    // buffered the whole file. Throttle = at most one parse per parseDelay, and it
+    // reschedules afterwards so the stream keeps parsing.
+    vi.useFakeTimers()
+    try {
+      const device = new JensenDevice(makeFakeUsb()) as unknown as {
+        parseDelay: number
+        ingestReadChunk: (c: DataView) => void
+        processBufferedData: () => void
+      }
+      const parse = vi.spyOn(device, 'processBufferedData').mockImplementation(() => {})
+      device.parseDelay = 100
+      const chunk = () => device.ingestReadChunk(new DataView(new Uint8Array([1, 2, 3]).buffer))
+
+      chunk(); chunk(); chunk() // continuous flow within one window
+      expect(parse).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(100)
+      expect(parse).toHaveBeenCalledTimes(1) // throttled, not 3
+
+      chunk() // a later chunk schedules the next parse
+      vi.advanceTimersByTime(100)
+      expect(parse).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('listFiles does not stop at the old 120 second cutoff', async () => {
     vi.useFakeTimers()
     try {

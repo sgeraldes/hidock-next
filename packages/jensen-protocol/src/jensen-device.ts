@@ -1100,8 +1100,18 @@ export class JensenDevice {
     this.totalBytesReceived += chunk.byteLength
     this.receiveChunks.push(chunk)
 
-    if (this.decodeTimer) clearTimeout(this.decodeTimer)
-    this.decodeTimer = setTimeout(() => this.processBufferedData(), this.parseDelay)
+    // THROTTLE (not debounce) the parse. Resetting the timer on every chunk means
+    // a continuous stream — startPoll keeps transfers pending with no gaps — never
+    // triggers a parse until it stops, which buffered the whole file in memory and
+    // froze download/scan progress until the end. Scheduling at most one parse per
+    // parseDelay makes it fire on schedule during continuous flow; the carry buffer
+    // already handles messages split across parse boundaries.
+    if (!this.decodeTimer) {
+      this.decodeTimer = setTimeout(() => {
+        this.decodeTimer = null
+        this.processBufferedData()
+      }, this.parseDelay)
+    }
 
     if (this.onreceive) {
       try { this.onreceive(this.totalBytesReceived) } catch { /* ignore */ }
@@ -1962,8 +1972,12 @@ export class JensenDevice {
     let received = 0
     let aborted = false
 
-    // Set real-time progress callback (jensen.js: this.onreceive = r)
-    this.onreceive = onProgress ? () => onProgress(received) : null
+    // Set real-time progress callback (jensen.js: this.onreceive = r). Report the
+    // per-chunk byte counter (fired on every poll chunk) rather than `received`
+    // (which only advances when the throttled parser runs) so the progress bar
+    // moves smoothly during the download. Clamp to fileSize — the raw counter
+    // includes per-packet Jensen headers, so it would otherwise nudge past 100%.
+    this.onreceive = onProgress ? (bytes: number) => onProgress(Math.min(bytes, fileSize)) : null
 
     // Abort handling
     const abortHandler = (): void => {
