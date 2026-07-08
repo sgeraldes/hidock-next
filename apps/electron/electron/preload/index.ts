@@ -663,6 +663,18 @@ export interface ElectronAPI {
       data?: { people: string[]; topics: string[] }
       error?: string
     }>
+    getAliases: (
+      contactId: string
+    ) => Promise<{
+      success: boolean
+      data?: Array<{
+        alias: string
+        source: 'merge' | 'speaker_assign' | 'manual' | 'inferred' | 'rejected' | null
+        confidence: number | null
+        created_at: string
+      }>
+      error?: string
+    }>
   }
 
   // Domain Events - Event-driven architecture
@@ -1106,7 +1118,8 @@ const electronAPI: ElectronAPI = {
     getMergeImpact: (request) => callIPC('identity:getMergeImpact', request),
     getMentionSnippets: (name: string, limit?: number) =>
       callIPC('identity:getMentionSnippets', { name, limit }),
-    getPersonContext: (idOrName: string) => callIPC('identity:getPersonContext', idOrName)
+    getPersonContext: (idOrName: string) => callIPC('identity:getPersonContext', idOrName),
+    getAliases: (contactId: string) => callIPC('identity:getAliases', contactId)
   },
 
   // Domain Event Listener

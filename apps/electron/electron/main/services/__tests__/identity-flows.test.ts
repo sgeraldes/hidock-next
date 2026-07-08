@@ -27,7 +27,9 @@ import {
   rejectIdentitySuggestion,
   getMergeJournal,
   unmergeContacts,
-  getMentionSnippets
+  getMentionSnippets,
+  getContactAliases,
+  upsertContactAlias
 } from '../database'
 
 interface AliasRow {
@@ -173,6 +175,25 @@ describe('alias memory + identity suggestion flows', () => {
       (s) => s.target_id === 'k7' && s.candidate_name === 'Marín Duarte'
     )!
     expect(JSON.parse(siblingB.evidence!).superseded).toBe(true)
+  })
+
+  it('getContactAliases returns non-rejected aliases newest-first and excludes rejected blocks', () => {
+    contact('k8', 'Alejandro Núñez')
+    upsertContactAlias('k8', 'Ale', 'manual', 1.0)
+    upsertContactAlias('k8', 'Alejo', 'speaker_assign', 0.95)
+    // A rejected block ('Different person…') must never surface as a known-by name.
+    upsertContactAlias('k8', 'Sandro', 'rejected', 0)
+
+    const aliases = getContactAliases('k8')
+    const names = aliases.map((a) => a.alias)
+    expect(names).toContain('ale')
+    expect(names).toContain('alejo')
+    expect(names).not.toContain('sandro')
+    // Source + confidence flow through unchanged for the tooltip.
+    const alejo = aliases.find((a) => a.alias === 'alejo')!
+    expect(alejo.source).toBe('speaker_assign')
+    expect(alejo.confidence).toBe(0.95)
+    expect(getContactAliases('')).toEqual([])
   })
 
   it('getMentionSnippets returns a windowed excerpt and every matching recording', () => {

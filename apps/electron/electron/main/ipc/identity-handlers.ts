@@ -18,11 +18,13 @@ import {
   getMergeImpact,
   getMentionSnippets,
   getPersonContext,
+  getContactAliases,
   IdentitySuggestion,
   AcceptSuggestionResult,
   MergeJournalEntry,
   MentionResult,
-  PersonContext
+  PersonContext,
+  ContactAlias
 } from '../services/database'
 import { discoverContactMerges, discoverProjectMerges, DiscoveryResult } from '../services/identity-discovery'
 import { success, error, Result } from '../types/api'
@@ -123,6 +125,23 @@ export function registerIdentityHandlers(): void {
     } catch (err) {
       console.error('identity:getPersonContext error:', err)
       return error('DATABASE_ERROR', 'Failed to fetch person context', err)
+    }
+  })
+
+  /**
+   * "Also known as" aliases for a contact (the PersonDetail chip row): every
+   * non-rejected alias folded onto this person, newest first. Bare contact id.
+   */
+  ipcMain.handle('identity:getAliases', async (_, contactId: unknown): Promise<Result<ContactAlias[]>> => {
+    try {
+      const parsed = IdSchema.safeParse(contactId)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid contact id', parsed.error.format())
+      }
+      return success(getContactAliases(parsed.data))
+    } catch (err) {
+      console.error('identity:getAliases error:', err)
+      return error('DATABASE_ERROR', 'Failed to fetch contact aliases', err)
     }
   })
 

@@ -1018,26 +1018,31 @@ Respond in JSON format:
   "selection_reason": "..."` : ''}
 }`
 
-  // Two-attempt strategy. Attempt 1 forces JSON output and disables thinking:
-  // the thinking model intermittently burns its output budget on reasoning and
-  // returns junk (observed: analysis titled "Transcripción no proporcionada"
-  // for a complete 7.5k-word transcript). Attempt 2 (only if the first yields
-  // unparseable output — seen on large real transcripts where responseMime="json"
-  // silently produces an empty/truncated body) drops responseMimeType and parses
-  // a fenced or brace-matched block from plain text.
+  // Two-attempt strategy (both disable thinking: the thinking model intermittently
+  // burns its output budget on reasoning and returns junk — observed: analysis titled
+  // "Transcripción no proporcionada" for a complete 7.5k-word transcript).
+  //
+  // Order: plain-text FIRST, json-mime second. A full day of live evidence showed the
+  // json-mime attempt fails to parse on essentially every real Spanish transcript
+  // (multiple malformation classes — unescaped inner quotes, raw control chars, and
+  // splice-corruption that the repair pass cannot recover), after which the plain-text
+  // attempt reliably succeeds — so leading with json-mime cost one wasted API call per
+  // analysis. Plain-text (fenced or brace-matched block, run through the same repair
+  // pass) is now the primary. json-mime is kept as a second attempt: it still wins
+  // occasionally on short English prompts and remains a cheap safety net.
   const attempts: Array<{ label: string; generationConfig: Record<string, unknown> }> = [
     {
-      label: 'json-mime',
+      label: 'plain-text',
       generationConfig: {
         maxOutputTokens: 8192,
-        responseMimeType: 'application/json',
         thinkingConfig: { thinkingBudget: 0 }
       }
     },
     {
-      label: 'plain-text-fallback',
+      label: 'json-mime-fallback',
       generationConfig: {
         maxOutputTokens: 8192,
+        responseMimeType: 'application/json',
         thinkingConfig: { thinkingBudget: 0 }
       }
     }

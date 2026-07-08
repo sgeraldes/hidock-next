@@ -49,6 +49,7 @@ import {
   SelectItem
 } from '@/components/ui/select'
 import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { MeetingHoverCard } from '@/components/entity'
 import { formatDateTime } from '@/lib/utils'
 import type { Person, PersonType } from '@/types/knowledge'
@@ -79,6 +80,25 @@ interface OrphanLink {
   key: string
   label: string
   date: string | null
+}
+
+/** An "also known as" alias folded onto this contact (from identity:getAliases). */
+interface PersonAlias {
+  alias: string
+  source: 'merge' | 'speaker_assign' | 'manual' | 'inferred' | 'rejected' | null
+  confidence: number | null
+  created_at: string
+}
+
+/** Human phrase for where an alias came from, for the per-chip tooltip. */
+function aliasSourceLabel(source: PersonAlias['source']): string {
+  switch (source) {
+    case 'merge': return 'from merge'
+    case 'speaker_assign': return 'speaker assignment'
+    case 'manual': return 'confirmed suggestion'
+    case 'inferred': return 'inferred from context'
+    default: return 'alias'
+  }
 }
 
 export function PersonDetail() {
@@ -112,6 +132,9 @@ export function PersonDetail() {
   // High-stakes gate: when BOTH sides are heavily linked, require typing the loser's name.
   const [mergeImpact, setMergeImpact] = useState<{ keeper: number; loser: number } | null>(null)
   const [mergeConfirmText, setMergeConfirmText] = useState('')
+
+  // "Also known as" aliases (read-only chip row)
+  const [aliases, setAliases] = useState<PersonAlias[]>([])
 
   // Merge history / unmerge
   const [mergeJournal, setMergeJournal] = useState<MergeHistoryEntry[]>([])
@@ -157,6 +180,18 @@ export function PersonDetail() {
       console.error('Failed to load person details:', error)
     } finally {
       setLoading(false)
+    }
+  }, [id])
+
+  // Load this contact's "also known as" aliases (read-only chip row).
+  const loadAliases = useCallback(async () => {
+    if (!id) return
+    try {
+      const result = await window.electronAPI.identity.getAliases(id)
+      setAliases(result.success && result.data ? (result.data as PersonAlias[]) : [])
+    } catch (error) {
+      console.error('Failed to load aliases:', error)
+      setAliases([])
     }
   }, [id])
 
@@ -397,7 +432,8 @@ export function PersonDetail() {
   useEffect(() => {
     loadDetails()
     loadMergeJournal()
-  }, [loadDetails, loadMergeJournal])
+    loadAliases()
+  }, [loadDetails, loadMergeJournal, loadAliases])
 
   const getTypeColor = (type: PersonType) => {
     switch (type) {
@@ -672,6 +708,35 @@ export function PersonDetail() {
                         ))}
                       </div>
                     )}
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* "Also known as" — read-only aliases folded onto this contact */}
+              {aliases.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+                      Also known as
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <TooltipProvider delayDuration={200}>
+                      <div className="flex flex-wrap gap-2">
+                        {aliases.map((a) => (
+                          <Tooltip key={`${a.alias}:${a.created_at}`}>
+                            <TooltipTrigger asChild>
+                              <span className="text-xs bg-muted/60 text-muted-foreground px-2.5 py-1 rounded-full border border-border/40 cursor-default">
+                                {a.alias}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {aliasSourceLabel(a.source)} · {formatDateTime(a.created_at)}
+                            </TooltipContent>
+                          </Tooltip>
+                        ))}
+                      </div>
+                    </TooltipProvider>
                   </CardContent>
                 </Card>
               )}
