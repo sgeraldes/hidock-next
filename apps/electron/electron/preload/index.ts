@@ -102,6 +102,41 @@ interface ProjectActionable {
   createdAt: string
 }
 
+/** A keeper link that appeared after a merge — surfaced by unmerge for manual review (v30). */
+interface OrphanLink {
+  table: 'meeting_contacts' | 'transcript_speakers' | 'meeting_projects' | 'knowledge_projects'
+  key: string
+  label: string
+  date: string | null
+}
+
+/** Result of an unmerge: restore counts + links the user must reassign by hand (v30). */
+interface UnmergeResult {
+  loserId: string
+  loserName: string
+  restored: {
+    meetingLinks: number
+    speakerLinks: number
+    knowledgeLinks: number
+    aliases: number
+    fieldsRestored: number
+    skipped: number
+  }
+  orphanedSinceMerge: OrphanLink[]
+}
+
+/** One merge-journal entry surfaced in an entity's "Merge history" (v30). */
+interface MergeJournalEntry {
+  id: string
+  kind: 'contact' | 'project'
+  keeperId: string
+  loserId: string
+  loserName: string
+  createdAt: string
+  undoneAt: string | null
+  linkCount: number
+}
+
 // Type definitions for the API
 export interface ElectronAPI {
   // App
@@ -141,6 +176,7 @@ export interface ElectronAPI {
     update: (request: UpdateContactRequest) => Promise<Result<Contact>>
     delete: (id: string) => Promise<Result<void>>
     merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Person>>
+    unmerge: (journalId: string) => Promise<Result<UnmergeResult>>
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
   }
 
@@ -155,6 +191,7 @@ export interface ElectronAPI {
     untagMeeting: (request: TagMeetingRequest) => Promise<Result<void>>
     getForMeeting: (meetingId: string) => Promise<Result<Project[]>>
     merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Project>>
+    unmerge: (journalId: string) => Promise<Result<UnmergeResult>>
     getForKnowledge: (knowledgeCaptureId: string) => Promise<Result<Project[]>>
     getNotes: (request: { projectId: string; kind?: 'issue' | 'risk' | 'note' }) => Promise<Result<ProjectNote[]>>
     addNote: (request: { projectId: string; kind: 'issue' | 'risk' | 'note'; content: string }) => Promise<Result<ProjectNote>>
@@ -591,6 +628,12 @@ export interface ElectronAPI {
       data?: { candidatePairs: number; suggestionsCreated: number; autoMergeable: number }
       error?: string
     }>
+    getMergeJournal: (
+      request: { kind: 'contact' | 'project'; keeperId: string }
+    ) => Promise<Result<MergeJournalEntry[]>>
+    getMergeImpact: (
+      request: { kind: 'contact' | 'project'; keeperId: string; loserId: string }
+    ) => Promise<Result<{ keeper: number; loser: number }>>
   }
 
   // Domain Events - Event-driven architecture
@@ -644,6 +687,7 @@ const electronAPI: ElectronAPI = {
     update: (request) => callIPC('contacts:update', request),
     delete: (id) => callIPC('contacts:delete', id),
     merge: (request) => callIPC('contacts:merge', request),
+    unmerge: (journalId) => callIPC('contacts:unmerge', journalId),
     getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
   },
 
@@ -657,6 +701,7 @@ const electronAPI: ElectronAPI = {
     untagMeeting: (request) => callIPC('projects:untagMeeting', request),
     getForMeeting: (meetingId) => callIPC('projects:getForMeeting', meetingId),
     merge: (request) => callIPC('projects:merge', request),
+    unmerge: (journalId) => callIPC('projects:unmerge', journalId),
     getForKnowledge: (knowledgeCaptureId) => callIPC('projects:getForKnowledge', knowledgeCaptureId),
     getNotes: (request) => callIPC('projects:getNotes', request),
     addNote: (request) => callIPC('projects:addNote', request),
@@ -1016,7 +1061,9 @@ const electronAPI: ElectronAPI = {
     acceptSuggestion: (id: string) => callIPC('identity:acceptSuggestion', id),
     rejectSuggestion: (id: string) => callIPC('identity:rejectSuggestion', id),
     discoverContacts: () => callIPC('identity:discoverContacts'),
-    discoverProjects: () => callIPC('identity:discoverProjects')
+    discoverProjects: () => callIPC('identity:discoverProjects'),
+    getMergeJournal: (request) => callIPC('identity:getMergeJournal', request),
+    getMergeImpact: (request) => callIPC('identity:getMergeImpact', request)
   },
 
   // Domain Event Listener

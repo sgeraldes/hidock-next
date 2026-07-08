@@ -21,6 +21,8 @@ import {
   getKnowledgeIdsForProject,
   getPersonIdsForProject,
   mergeProjects,
+  unmergeProjects,
+  UnmergeResult,
   getProjectsForKnowledge,
   getProjectNotes,
   addProjectNote,
@@ -310,6 +312,22 @@ export function registerProjectsHandlers(): void {
       }
     }
   )
+
+  /**
+   * Reverse a project merge from its merge_journal id. Mirrors contacts:unmerge.
+   */
+  ipcMain.handle('projects:unmerge', async (_, journalId: unknown): Promise<Result<UnmergeResult>> => {
+    try {
+      const parsed = UUIDSchema.safeParse(journalId)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid journal id', parsed.error.format())
+      }
+      return success(unmergeProjects(parsed.data))
+    } catch (err) {
+      console.error('projects:unmerge error:', err)
+      return error('DATABASE_ERROR', err instanceof Error ? err.message : 'Failed to unmerge projects', err)
+    }
+  })
 
   /**
    * Get projects directly assigned to a knowledge capture (knowledge_projects).

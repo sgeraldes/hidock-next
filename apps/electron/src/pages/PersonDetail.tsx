@@ -15,7 +15,10 @@ import {
   Check,
   X,
   Trash2,
-  GitMerge
+  GitMerge,
+  Undo2,
+  History,
+  AlertTriangle
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -55,6 +58,29 @@ import { toast } from '@/components/ui/toaster'
 
 const PERSON_TYPES: PersonType[] = ['team', 'candidate', 'customer', 'external', 'unknown']
 
+/** Above this many links on BOTH sides, a merge requires typing the loser's name. */
+const MERGE_LINK_THRESHOLD = 10
+
+/** A past merge folded into this contact (from identity:getMergeJournal). */
+interface MergeHistoryEntry {
+  id: string
+  kind: 'contact' | 'project'
+  keeperId: string
+  loserId: string
+  loserName: string
+  createdAt: string
+  undoneAt: string | null
+  linkCount: number
+}
+
+/** A keeper link that appeared after a merge — surfaced by unmerge for manual review. */
+interface OrphanLink {
+  table: string
+  key: string
+  label: string
+  date: string | null
+}
+
 export function PersonDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -83,6 +109,15 @@ export function PersonDetail() {
   const [mergeSearch, setMergeSearch] = useState('')
   const [mergeTarget, setMergeTarget] = useState<Person | null>(null)
   const [merging, setMerging] = useState(false)
+  // High-stakes gate: when BOTH sides are heavily linked, require typing the loser's name.
+  const [mergeImpact, setMergeImpact] = useState<{ keeper: number; loser: number } | null>(null)
+  const [mergeConfirmText, setMergeConfirmText] = useState('')
+
+  // Merge history / unmerge
+  const [mergeJournal, setMergeJournal] = useState<MergeHistoryEntry[]>([])
+  const [unmergeTarget, setUnmergeTarget] = useState<MergeHistoryEntry | null>(null)
+  const [unmerging, setUnmerging] = useState(false)
+  const [orphanReview, setOrphanReview] = useState<{ loserName: string; orphans: OrphanLink[] } | null>(null)
 
   // B-PPL-002: Wrapped in useCallback to satisfy dependency arrays
   const loadDetails = useCallback(async () => {
@@ -122,6 +157,18 @@ export function PersonDetail() {
       console.error('Failed to load person details:', error)
     } finally {
       setLoading(false)
+    }
+  }, [id])
+
+  // Load this contact's merge history (open, undoable merges folded into it).
+  const loadMergeJournal = useCallback(async () => {
+    if (!id) return
+    try {
+      const result = await window.electronAPI.identity.getMergeJournal({ kind: 'contact', keeperId: id })
+      setMergeJournal(result.success && result.data ? (result.data as MergeHistoryEntry[]) : [])
+    } catch (error) {
+      console.error('Failed to load merge history:', error)
+      setMergeJournal([])
     }
   }, [id])
 
@@ -240,6 +287,8 @@ export function PersonDetail() {
     setMergeDialogOpen(true)
     setMergeSearch('')
     setMergeTarget(null)
+    setMergeImpact(null)
+    setMergeConfirmText('')
     try {
       const result = await window.electronAPI.contacts.getAll()
       if (result.success) {
@@ -251,8 +300,36 @@ export function PersonDetail() {
     }
   }
 
+  // Fetch true link counts for the high-stakes gate once a target is picked.
+  useEffect(() => {
+    setMergeConfirmText('')
+    if (!id || !mergeTarget) {
+      setMergeImpact(null)
+      return
+    }
+    let cancelled = false
+    window.electronAPI.identity
+      .getMergeImpact({ kind: 'contact', keeperId: id, loserId: mergeTarget.id })
+      .then((res) => {
+        if (!cancelled) setMergeImpact(res.success && res.data ? res.data : null)
+      })
+      .catch(() => {
+        if (!cancelled) setMergeImpact(null)
+      })
+    return () => {
+      cancelled = true
+    }
+    // Keyed on the target id only — the mergeTarget object is otherwise stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, mergeTarget?.id])
+
+  // Both sides heavily linked → require typing the loser's name before merging.
+  const highStakesMerge =
+    !!mergeImpact && mergeImpact.keeper > MERGE_LINK_THRESHOLD && mergeImpact.loser > MERGE_LINK_THRESHOLD
+  const mergeConfirmed = !highStakesMerge || mergeConfirmText.trim() === (mergeTarget?.name ?? '').trim()
+
   const handleMerge = async () => {
-    if (!id || !person || !mergeTarget) return
+    if (!id || !person || !mergeTarget || !mergeConfirmed) return
     setMerging(true)
     try {
       const result = await window.electronAPI.contacts.merge({ keeperId: id, loserId: mergeTarget.id })
@@ -260,7 +337,10 @@ export function PersonDetail() {
         toast.success('Contacts merged', `${mergeTarget.name} was merged into ${person.name}.`)
         setMergeDialogOpen(false)
         setMergeTarget(null)
+        setMergeImpact(null)
+        setMergeConfirmText('')
         await loadDetails()
+        await loadMergeJournal()
       } else {
         toast.error('Failed to merge contacts', (result as any).error?.message || 'Unknown error')
       }
@@ -269,6 +349,38 @@ export function PersonDetail() {
       toast.error('Failed to merge contacts', error instanceof Error ? error.message : 'Unknown error')
     } finally {
       setMerging(false)
+    }
+  }
+
+  // Undo a previously recorded merge: recreate the split contact, repoint the
+  // journaled links back, and surface any links added since the merge for review.
+  const handleUnmerge = async () => {
+    if (!unmergeTarget) return
+    setUnmerging(true)
+    try {
+      const result = await window.electronAPI.contacts.unmerge(unmergeTarget.id)
+      if (result.success && result.data) {
+        const { restored, orphanedSinceMerge, loserName } = result.data
+        toast.success(
+          'Merge undone',
+          `Restored ${loserName}: ${restored.meetingLinks} meeting, ${restored.speakerLinks} speaker link(s)` +
+            (restored.skipped ? `, ${restored.skipped} skipped` : '') +
+            '.'
+        )
+        setUnmergeTarget(null)
+        if (orphanedSinceMerge.length > 0) {
+          setOrphanReview({ loserName, orphans: orphanedSinceMerge as OrphanLink[] })
+        }
+        await loadDetails()
+        await loadMergeJournal()
+      } else {
+        toast.error('Failed to undo merge', (result as any).error?.message || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to undo merge:', error)
+      toast.error('Failed to undo merge', error instanceof Error ? error.message : 'Unknown error')
+    } finally {
+      setUnmerging(false)
     }
   }
 
@@ -284,7 +396,8 @@ export function PersonDetail() {
 
   useEffect(() => {
     loadDetails()
-  }, [loadDetails])
+    loadMergeJournal()
+  }, [loadDetails, loadMergeJournal])
 
   const getTypeColor = (type: PersonType) => {
     switch (type) {
@@ -562,6 +675,45 @@ export function PersonDetail() {
                   </CardContent>
                 </Card>
               )}
+
+              {/* v30: Merge history — undoable merges folded into this contact */}
+              {mergeJournal.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                      <History className="h-4 w-4" />
+                      Merge history
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    {mergeJournal.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="flex items-center justify-between gap-2 p-2 border rounded-lg text-sm"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-medium truncate" title={entry.loserName}>
+                            {entry.loserName}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {entry.linkCount} link(s) · {formatDateTime(entry.createdAt)}
+                          </p>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="flex-shrink-0"
+                          onClick={() => setUnmergeTarget(entry)}
+                          title={`Undo merge with ${entry.loserName}`}
+                        >
+                          <Undo2 className="h-3.5 w-3.5 mr-1" />
+                          Undo
+                        </Button>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              )}
             </div>
 
             {/* Right Column: Timeline & Knowledge */}
@@ -694,7 +846,7 @@ export function PersonDetail() {
             <DialogTitle>Merge into {person.name}</DialogTitle>
             <DialogDescription>
               {mergeTarget
-                ? `Merge ${mergeTarget.name} into ${person.name}? All meetings, transcripts, and details will be folded into ${person.name}. This cannot be undone.`
+                ? `Merge ${mergeTarget.name} into ${person.name}? All meetings, transcripts, and details will be folded into ${person.name}. You can undo this from ${person.name}'s Merge history.`
                 : `Pick a duplicate contact to fold into ${person.name}. The other contact will be deleted.`}
             </DialogDescription>
           </DialogHeader>
@@ -728,6 +880,23 @@ export function PersonDetail() {
             </>
           )}
 
+          {mergeTarget && highStakesMerge && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-xs">
+              <p className="text-amber-700 dark:text-amber-400 font-medium">
+                High-stakes merge: {person.name} has {mergeImpact!.keeper} links and {mergeTarget.name} has{' '}
+                {mergeImpact!.loser}. To confirm, type <span className="font-semibold">{mergeTarget.name}</span>.
+              </p>
+              <input
+                type="text"
+                value={mergeConfirmText}
+                onChange={(e) => setMergeConfirmText(e.target.value)}
+                placeholder={mergeTarget.name}
+                aria-label={`Type ${mergeTarget.name} to confirm merge`}
+                className="w-full text-sm border rounded px-2 py-1.5 bg-background mt-2"
+              />
+            </div>
+          )}
+
           <DialogFooter>
             {mergeTarget ? (
               <>
@@ -737,7 +906,7 @@ export function PersonDetail() {
                 <Button
                   className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                   onClick={handleMerge}
-                  disabled={merging}
+                  disabled={merging || !mergeConfirmed}
                 >
                   {merging ? <RefreshCw className="h-4 w-4 mr-2 animate-spin" /> : <GitMerge className="h-4 w-4 mr-2" />}
                   Merge
@@ -748,6 +917,60 @@ export function PersonDetail() {
                 <Button variant="outline">Cancel</Button>
               </DialogClose>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* v30: Unmerge confirmation */}
+      <AlertDialog open={!!unmergeTarget} onOpenChange={(open) => !open && setUnmergeTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Undo merge with {unmergeTarget?.loserName}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This recreates {unmergeTarget?.loserName} as a separate contact and moves the{' '}
+              {unmergeTarget?.linkCount ?? 0} link(s) recorded at merge time back to it. Links added to {person.name}{' '}
+              <em>after</em> the merge stay put and are listed for you to reassign by hand.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={unmerging}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleUnmerge} disabled={unmerging}>
+              {unmerging ? <RefreshCw className="h-4 w-4 mr-2 animate-spin" /> : <Undo2 className="h-4 w-4 mr-2" />}
+              Undo merge
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* v30: Manual-review list of links that appeared after the merge */}
+      <Dialog open={!!orphanReview} onOpenChange={(open) => !open && setOrphanReview(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-amber-500" />
+              Review links added after the merge
+            </DialogTitle>
+            <DialogDescription>
+              These {orphanReview?.orphans.length ?? 0} link(s) were attached to {person.name} after the original merge,
+              so unmerge left them in place. If any of them actually belong to {orphanReview?.loserName}, open it and
+              reassign it by hand.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-64 overflow-auto space-y-1">
+            {orphanReview?.orphans.map((o) => (
+              <div key={`${o.table}:${o.key}`} className="p-2 border rounded-lg text-sm">
+                <p className="font-medium">{o.label}</p>
+                <p className="text-xs text-muted-foreground">
+                  {o.table === 'transcript_speakers' ? 'Speaker binding' : 'Meeting link'}
+                  {o.date ? ` · ${formatDateTime(o.date)}` : ''}
+                </p>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Done</Button>
+            </DialogClose>
           </DialogFooter>
         </DialogContent>
       </Dialog>

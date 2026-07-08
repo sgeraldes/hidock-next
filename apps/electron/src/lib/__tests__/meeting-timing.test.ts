@@ -69,6 +69,27 @@ describe('classifyMeetingTimings', () => {
     expect(timings.get('past')?.isFocus).toBe(false)
   })
 
+  it('flags the next-up meeting separately from focus while one is in progress', () => {
+    const meetings = [
+      m('running', 'All hands', -5, 60), // in progress → focus
+      m('next', 'Client call', 10, 30), // soonest upcoming → next-up but not focus
+      m('later', 'Retro', 180, 60)
+    ]
+    const timings = classifyMeetingTimings(meetings, now)
+    expect(timings.get('running')?.isFocus).toBe(true)
+    expect(timings.get('running')?.isNextUp).toBe(false)
+    expect(timings.get('next')?.isFocus).toBe(false)
+    expect(timings.get('next')?.isNextUp).toBe(true)
+    expect(timings.get('later')?.isNextUp).toBe(false)
+  })
+
+  it('makes the next-up meeting the focus when nothing is in progress', () => {
+    const meetings = [m('past', 'Morning review', -120, 30), m('next', 'Client call', 4, 30)]
+    const timings = classifyMeetingTimings(meetings, now)
+    expect(timings.get('next')?.isFocus).toBe(true)
+    expect(timings.get('next')?.isNextUp).toBe(true)
+  })
+
   it('marks cancelled meetings and never focuses them', () => {
     const meetings = [
       { ...m('cancelled', 'Cancelado: Standup', 4, 30) },

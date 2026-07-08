@@ -160,27 +160,33 @@ Every change: `npm run typecheck` + `npm run lint` (0 errors) +
 screenshot), then commit+push. Issues live in OVERNIGHT_PLAN.md (session log)
 and this file (architecture); rounds tracked in INTERACTIVITY_PLAN.md.
 
-## 8. Merge safety & reversibility (design — v29 follow-up)
+## 8. Merge safety & reversibility (BUILT — schema v30)
 
 Merges are destructive folds (`mergeContacts`/`mergeProjects`): child FKs are
 repointed and the loser row is deleted. Discovery (Round 4b) proposes them but
-never executes — the user clicks. To make that click *reversible*, a merge must
-record what it did.
+never executes — the user clicks. To make that click *reversible*, a merge
+records what it did in `merge_journal`.
 
-**`merge_journal` table (v29 follow-up — NOT yet added; a schema-owner adds it):**
+**`merge_journal` table (schema v30):**
 
 | Column | Purpose |
 |---|---|
 | `id` | journal entry id |
-| `kind` | `'person'` \| `'project'` |
+| `kind` | `'contact'` \| `'project'` |
 | `keeper_id` | surviving entity |
 | `loser_snapshot` | JSON of the deleted loser row (all columns) — enough to recreate it |
-| `manifest` | JSON `{ table → [pk...] }`: exactly the child rows this merge repointed loser→keeper (e.g. `meeting_contacts`, `transcript_speakers`, `*_aliases`) |
+| `repointed_manifest` | JSON of everything the fold touched: per junction the rows **repointed** loser→keeper and the ones **collided** (dropped), the loser's own aliases (cascade-deleted with it), the merge-created alias norm, and the keeper's **pre-merge** link set (for orphan detection) |
+| `folded_fields` | JSON `{ field: {from, to} }` — the keeper fields the merge filled from the loser, with before/after values |
 | `created_at` | ISO timestamp |
+| `undone_at` | set when the merge is reversed (a journal row is unmerged at most once) |
 
-The merge writes one journal row inside the same transaction as the fold.
+The merge writes one journal row inside the same transaction as the fold. IPC:
+`contacts:unmerge(journalId)` / `projects:unmerge(journalId)`,
+`identity:getMergeJournal({kind, keeperId})` (open merges for an entity's "Merge
+history"), and `identity:getMergeImpact({kind, keeperId, loserId})` (link counts
+for the pre-merge gate).
 
-**`contacts:unmerge(journalId)` semantics:**
+**`contacts:unmerge(journalId)` semantics (implemented):**
 1. Recreate the loser from `loser_snapshot` (re-INSERT with its original id).
 2. Repoint back *exactly* the rows in `manifest` (keeper→loser) — no more, no less.
 3. Rows linked to the keeper **after** the merge are NOT in the manifest, so they
@@ -188,14 +194,20 @@ The merge writes one journal row inside the same transaction as the fold.
    "a meeting got wrongly attached to the merged person — find it and reassign it"
    flow the user described: unmerge restores the split, then the user moves the
    one stray link by hand rather than the system guessing.
-4. Delete the alias rows the merge created (folded loser-name → keeper) and the
-   journal entry. Recompute counts on both entities.
+4. Delete the alias rows the merge created (folded loser-name → keeper), restore
+   the folded keeper fields **only where the keeper still holds the folded value**
+   (a newer user edit is never clobbered), recompute counts on both entities, and
+   stamp `undone_at` (the journal row is kept as an audit trail, not deleted).
+   Manifest rows that no longer exist (deleted / reassigned since the merge) are
+   skipped and counted.
 
-**Pre-merge warning heuristic:** if BOTH entities are heavily linked (each with
-> N links across `meeting_contacts`/`transcript_speakers`/`meeting_projects`;
-start N≈10), the merge dialog requires the user to **type the loser's name** to
-confirm — a wrong merge of two well-established entities is the expensive mistake,
-and unmerge's manual-review step is the safety net, not a substitute for the gate.
+**Pre-merge warning heuristic (implemented):** if BOTH entities are heavily
+linked (each with > N links across `meeting_contacts`/`transcript_speakers` for
+contacts, `meeting_projects`/`knowledge_projects` for projects; N = 10 via
+`getMergeImpact`), the merge UI (People quick-merge bar + PersonDetail dialog)
+requires the user to **type the loser's name** to confirm — a wrong merge of two
+well-established entities is the expensive mistake, and unmerge's manual-review
+step is the safety net, not a substitute for the gate.
 
 Discovery's `evidence.autoMergeable` flag never bypasses this — it only pre-selects
 the card; execution is always an explicit, journaled, reversible click.

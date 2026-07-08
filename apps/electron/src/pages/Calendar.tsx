@@ -1251,8 +1251,8 @@ export function Calendar() {
                   )}
                 >
                   <div className={cn(
-                    'text-xs font-medium uppercase tracking-wide',
-                    isWeekend ? 'text-muted-foreground' : 'text-muted-foreground'
+                    'text-xs font-semibold uppercase tracking-wide',
+                    today ? 'text-primary' : 'text-foreground/70'
                   )}>
                     {date.toLocaleDateString('en-US', { weekday: calendarView === 'day' ? 'long' : 'short' })}
                   </div>

@@ -14,13 +14,19 @@ import {
   getIdentitySuggestions,
   acceptIdentitySuggestion,
   rejectIdentitySuggestion,
-  IdentitySuggestion
+  getMergeJournal,
+  getMergeImpact,
+  IdentitySuggestion,
+  MergeJournalEntry
 } from '../services/database'
 import { discoverContactMerges, discoverProjectMerges, DiscoveryResult } from '../services/identity-discovery'
 import { success, error, Result } from '../types/api'
 
 const StatusSchema = z.enum(['pending', 'accepted', 'rejected'])
 const IdSchema = z.string().min(1).max(200)
+const KindSchema = z.enum(['contact', 'project'])
+const MergeJournalRequestSchema = z.object({ kind: KindSchema, keeperId: IdSchema })
+const MergeImpactRequestSchema = z.object({ kind: KindSchema, keeperId: IdSchema, loserId: IdSchema })
 
 export function registerIdentityHandlers(): void {
   /**
@@ -100,4 +106,41 @@ export function registerIdentityHandlers(): void {
       return error('DATABASE_ERROR', 'Failed to run project discovery sweep', err)
     }
   })
+
+  /**
+   * Merge history for an entity (the "Merge history" row in its detail view):
+   * the open, undoable merges folded into this keeper. { kind, keeperId }.
+   */
+  ipcMain.handle('identity:getMergeJournal', async (_, request?: unknown): Promise<Result<MergeJournalEntry[]>> => {
+    try {
+      const parsed = MergeJournalRequestSchema.safeParse(request)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid merge journal request', parsed.error.format())
+      }
+      return success(getMergeJournal(parsed.data.kind, parsed.data.keeperId))
+    } catch (err) {
+      console.error('identity:getMergeJournal error:', err)
+      return error('DATABASE_ERROR', 'Failed to fetch merge journal', err)
+    }
+  })
+
+  /**
+   * Link counts for both sides of a proposed merge, so the renderer can gate a
+   * high-stakes merge (both sides heavily linked) behind a type-to-confirm step.
+   */
+  ipcMain.handle(
+    'identity:getMergeImpact',
+    async (_, request?: unknown): Promise<Result<{ keeper: number; loser: number }>> => {
+      try {
+        const parsed = MergeImpactRequestSchema.safeParse(request)
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid merge impact request', parsed.error.format())
+        }
+        return success(getMergeImpact(parsed.data.kind, parsed.data.keeperId, parsed.data.loserId))
+      } catch (err) {
+        console.error('identity:getMergeImpact error:', err)
+        return error('DATABASE_ERROR', 'Failed to compute merge impact', err)
+      }
+    }
+  )
 }

@@ -76,7 +76,10 @@ global.window.electronAPI = {
     discoverContacts: vi.fn().mockResolvedValue({
       success: true,
       data: { candidatePairs: 12, suggestionsCreated: 3, autoMergeable: 1 }
-    })
+    }),
+    // v30: low link counts by default → no high-stakes type-to-confirm gate.
+    getMergeImpact: vi.fn().mockResolvedValue({ success: true, data: { keeper: 1, loser: 1 } }),
+    getMergeJournal: vi.fn().mockResolvedValue({ success: true, data: [] })
   }
 } as any
 

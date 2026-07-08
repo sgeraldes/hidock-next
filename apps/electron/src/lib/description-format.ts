@@ -134,6 +134,27 @@ export function parseDescriptionBlocks(raw: string | null | undefined): DescBloc
   return blocks
 }
 
+// A line made up only of separator/marker characters (horizontal rules like
+// "______" or "------", stray bullets, "===" dividers) carries no meaning —
+// Teams/Outlook descriptions routinely open with these.
+const SEPARATOR_ONLY_RE = /^[\s*_=~–—-]+$/
+
+/**
+ * The first human-meaningful line of a description, for a one-line summary such
+ * as the Today row's secondary line. Reuses {@link normalizeDescriptionLines}
+ * (so lone bullet markers are folded into their text and blank runs collapse),
+ * then skips separator/rule junk and returns the first line with real content,
+ * stripped of any leading bullet marker. Empty when nothing meaningful remains.
+ */
+export function firstMeaningfulLine(description: string | null | undefined): string {
+  if (!description) return ''
+  for (const line of normalizeDescriptionLines(description)) {
+    const text = line.replace(/^-\s+/, '').trim()
+    if (text && !SEPARATOR_ONLY_RE.test(text)) return text
+  }
+  return ''
+}
+
 // Known video-conferencing hosts whose links are worth surfacing as "Join".
 const MEETING_HOST_RE = /(teams\.microsoft\.com|teams\.live\.com|zoom\.us|meet\.google\.com|webex\.com|whereby\.com|gotomeeting\.com)/i
 

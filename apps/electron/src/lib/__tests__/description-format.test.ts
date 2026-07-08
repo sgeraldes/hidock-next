@@ -3,7 +3,8 @@ import {
   linkify,
   normalizeDescriptionLines,
   parseDescriptionBlocks,
-  extractMeetingUrl
+  extractMeetingUrl,
+  firstMeaningfulLine
 } from '../description-format'
 
 describe('linkify', () => {
@@ -72,6 +73,33 @@ describe('parseDescriptionBlocks', () => {
     expect(parseDescriptionBlocks('')).toEqual([])
     expect(parseDescriptionBlocks(null)).toEqual([])
     expect(parseDescriptionBlocks('   ')).toEqual([])
+  })
+})
+
+describe('firstMeaningfulLine', () => {
+  it('skips a lone asterisk marker and returns the real text', () => {
+    expect(firstMeaningfulLine('*\nDelivery Managers Weekly')).toBe('Delivery Managers Weekly')
+  })
+
+  it('skips an underscore horizontal rule', () => {
+    expect(firstMeaningfulLine('________________________________\nCX-Weekly agenda')).toBe('CX-Weekly agenda')
+  })
+
+  it('skips dash and equals rules', () => {
+    expect(firstMeaningfulLine('--------\nRetro Belcorp')).toBe('Retro Belcorp')
+    expect(firstMeaningfulLine('====\nPasaporte')).toBe('Pasaporte')
+  })
+
+  it('returns the leading real text directly, without a bullet marker', () => {
+    expect(firstMeaningfulLine('* Review roadmap\nmore')).toBe('Review roadmap')
+    expect(firstMeaningfulLine('Just a plain agenda line')).toBe('Just a plain agenda line')
+  })
+
+  it('returns empty for blank or junk-only descriptions', () => {
+    expect(firstMeaningfulLine('')).toBe('')
+    expect(firstMeaningfulLine(null)).toBe('')
+    expect(firstMeaningfulLine(undefined)).toBe('')
+    expect(firstMeaningfulLine('____\n\n----\n   ')).toBe('')
   })
 })
 

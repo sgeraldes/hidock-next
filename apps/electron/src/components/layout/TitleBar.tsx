@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { PanelLeft, Search, CheckCircle2, Loader2, Usb, ChevronDown, LogOut, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDeviceConnection } from '@/hooks/useDeviceConnection'
+import { useAppStore } from '@/store'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -45,6 +46,9 @@ export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
   const navigate = useNavigate()
   // Shared with the Device Sync page — same status source, same connect action.
   const { status, label: connectionLabel, connect, disconnect } = useDeviceConnection()
+  // Live device-recording flag (see useAppStore.deviceRecording TODO). Stays false
+  // until a device-status read path sets it, so the red dot only shows when recording.
+  const deviceRecording = useAppStore((s) => s.deviceRecording)
   const [search, setSearch] = useState('')
 
   const submitSearch = (e: React.FormEvent) => {
@@ -98,6 +102,7 @@ export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
       <ConnectionControl
         status={status}
         label={connectionLabel}
+        recording={deviceRecording}
         onConnect={() => void connect()}
         onDisconnect={() => void disconnect()}
         onGoToSync={() => navigate('/sync')}
@@ -112,6 +117,8 @@ const PILL_BASE =
 interface ConnectionControlProps {
   status: 'connected' | 'connecting' | 'disconnected'
   label: string
+  /** Device is actively capturing a recording — shows a red pulsing dot on the pill. */
+  recording: boolean
   onConnect: () => void
   onDisconnect: () => void
   onGoToSync: () => void
@@ -125,7 +132,7 @@ interface ConnectionControlProps {
  *                   opens a menu (Go to Sync / Disconnect) rather than
  *                   disconnecting, so it can't be hit by accident.
  */
-function ConnectionControl({ status, label, onConnect, onDisconnect, onGoToSync }: ConnectionControlProps) {
+function ConnectionControl({ status, label, recording, onConnect, onDisconnect, onGoToSync }: ConnectionControlProps) {
   if (status === 'connecting') {
     return (
       <button
@@ -161,14 +168,23 @@ function ConnectionControl({ status, label, onConnect, onDisconnect, onGoToSync 
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          title={`Device connected: ${label}`}
+          title={recording ? `Recording — ${label}` : `Device connected: ${label}`}
           className={cn(
             PILL_BASE,
-            'border-emerald-700/50 bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/60 data-[state=open]:bg-emerald-900/70'
+            recording
+              ? 'border-red-700/50 bg-red-950/40 text-red-300 hover:bg-red-950/60 data-[state=open]:bg-red-950/70'
+              : 'border-emerald-700/50 bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/60 data-[state=open]:bg-emerald-900/70'
           )}
         >
-          <CheckCircle2 className="h-3.5 w-3.5" />
-          <span className="hidden md:inline">{label}</span>
+          {recording ? (
+            <span
+              className="h-2 w-2 rounded-full bg-red-500 animate-pulse motion-reduce:animate-none"
+              aria-label="Recording in progress"
+            />
+          ) : (
+            <CheckCircle2 className="h-3.5 w-3.5" />
+          )}
+          <span className="hidden md:inline">{recording ? 'Recording' : label}</span>
           <ChevronDown className="h-3 w-3 opacity-70" />
         </button>
       </DropdownMenuTrigger>

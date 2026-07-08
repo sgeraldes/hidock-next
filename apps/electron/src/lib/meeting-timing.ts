@@ -19,6 +19,13 @@ export interface MeetingTiming {
   minutes: number
   /** The single meeting to visually highlight (current, else next upcoming). */
   isFocus: boolean
+  /**
+   * The soonest upcoming meeting to start — independent of {@link isFocus}. When
+   * a meeting is in progress it takes focus, and this flags the *next* meeting so
+   * the UI can give "what's next" a secondary emphasis. When nothing is running,
+   * the next-up meeting is also the focus.
+   */
+  isNextUp: boolean
 }
 
 export interface TimeableMeeting {
@@ -56,7 +63,7 @@ export function classifyMeetingTimings<T extends TimeableMeeting>(
 
   for (const m of meetings) {
     if (isCancelledSubject(m.subject)) {
-      result.set(m.id, { state: 'cancelled', minutes: 0, isFocus: false })
+      result.set(m.id, { state: 'cancelled', minutes: 0, isFocus: false, isNextUp: false })
       continue
     }
 
@@ -66,27 +73,35 @@ export function classifyMeetingTimings<T extends TimeableMeeting>(
     const validEnd = Number.isFinite(end)
 
     if (validEnd && end <= nowMs) {
-      result.set(m.id, { state: 'past', minutes: 0, isFocus: false })
+      result.set(m.id, { state: 'past', minutes: 0, isFocus: false, isNextUp: false })
     } else if (validStart && start <= nowMs && (!validEnd || nowMs < end)) {
       const minutes = validEnd ? Math.max(0, Math.ceil((end - nowMs) / 60000)) : 0
-      result.set(m.id, { state: 'in_progress', minutes, isFocus: false })
+      result.set(m.id, { state: 'in_progress', minutes, isFocus: false, isNextUp: false })
       if (validEnd) running.push({ id: m.id, end })
     } else if (validStart && start > nowMs) {
       const minutes = Math.max(0, Math.ceil((start - nowMs) / 60000))
-      result.set(m.id, { state: 'upcoming', minutes, isFocus: false })
+      result.set(m.id, { state: 'upcoming', minutes, isFocus: false, isNextUp: false })
       upcoming.push({ id: m.id, start })
     } else {
       // Unparseable timestamps — treat as upcoming-unknown so the row still shows.
-      result.set(m.id, { state: 'upcoming', minutes: 0, isFocus: false })
+      result.set(m.id, { state: 'upcoming', minutes: 0, isFocus: false, isNextUp: false })
     }
+  }
+
+  // Next-up: the soonest upcoming meeting, flagged regardless of focus so the UI
+  // can emphasize "what's next" even while another meeting is in progress.
+  const nextUpId = upcoming.length > 0 ? upcoming.sort((a, b) => a.start - b.start)[0].id : undefined
+  if (nextUpId) {
+    const t = result.get(nextUpId)
+    if (t) result.set(nextUpId, { ...t, isNextUp: true })
   }
 
   // Focus: the running meeting finishing soonest, else the next to start.
   let focusId: string | undefined
   if (running.length > 0) {
     focusId = running.sort((a, b) => a.end - b.end)[0].id
-  } else if (upcoming.length > 0) {
-    focusId = upcoming.sort((a, b) => a.start - b.start)[0].id
+  } else {
+    focusId = nextUpId
   }
   if (focusId) {
     const t = result.get(focusId)

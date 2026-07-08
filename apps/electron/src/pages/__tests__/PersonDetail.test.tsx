@@ -47,7 +47,13 @@ global.window.electronAPI = {
     update: mockUpdate,
     delete: vi.fn().mockResolvedValue({ success: true }),
     getAll: mockGetAll,
-    merge: mockMerge
+    merge: mockMerge,
+    unmerge: vi.fn().mockResolvedValue({ success: true, data: { loserId: 'l', loserName: 'L', restored: { meetingLinks: 0, speakerLinks: 0, knowledgeLinks: 0, aliases: 0, fieldsRestored: 0, skipped: 0 }, orphanedSinceMerge: [] } })
+  },
+  // v30: merge history empty + low link counts by default.
+  identity: {
+    getMergeJournal: vi.fn().mockResolvedValue({ success: true, data: [] }),
+    getMergeImpact: vi.fn().mockResolvedValue({ success: true, data: { keeper: 1, loser: 1 } })
   }
 } as any
 

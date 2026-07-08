@@ -5,6 +5,7 @@
  */
 
 import { ipcMain } from 'electron'
+import { z } from 'zod'
 import {
   getContacts,
   getContactById,
@@ -13,6 +14,8 @@ import {
   getMeetingsForContact,
   getContactsForMeeting,
   mergeContacts,
+  unmergeContacts,
+  UnmergeResult,
   Contact
 } from '../services/database'
 import { getEventBus } from '../services/event-bus'
@@ -211,6 +214,24 @@ export function registerContactsHandlers(): void {
       }
     }
   )
+
+  /**
+   * Reverse a contact merge from its merge_journal id. Recreates the loser,
+   * repoints the journaled links back, and returns restore counts plus the list
+   * of links that appeared after the merge for the user to reassign by hand.
+   */
+  ipcMain.handle('contacts:unmerge', async (_, journalId: unknown): Promise<Result<UnmergeResult>> => {
+    try {
+      const parsed = z.string().min(1).max(200).safeParse(journalId)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid journal id', parsed.error.format())
+      }
+      return success(unmergeContacts(parsed.data))
+    } catch (err) {
+      console.error('contacts:unmerge error:', err)
+      return error('DATABASE_ERROR', err instanceof Error ? err.message : 'Failed to unmerge contacts', err)
+    }
+  })
 
   /**
    * Get contacts for a specific meeting

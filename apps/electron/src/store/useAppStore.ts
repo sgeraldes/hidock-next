@@ -46,6 +46,21 @@ interface AppState {
   connectionStatus: ConnectionStatus
   activityLog: ActivityLogEntry[]
 
+  // Whether the HiDock is *currently capturing* a recording (its physical record
+  // button is engaged). Drives the live "Recording" indicators on the Today page
+  // and the titlebar device pill.
+  //
+  // TODO(device-recording-signal): No passive live-recording signal exists in the
+  // current device layer — `HiDockDeviceState.recordingCount` is only the count of
+  // *stored* files, and Device.tsx's `realtimeActive` is app-initiated streaming,
+  // not the device's own record state. Wiring this to `true` requires a Jensen
+  // status/growing-file poll that does NOT exist yet (and must not be added as an
+  // ad-hoc USB probe — see CLAUDE.md USB safety rules). Once a device-status read
+  // path lands (ideally in the main-process Jensen bridge / DevicePipeline), call
+  // `setDeviceRecording()` from there. Until then this stays `false` and the
+  // indicators remain hidden.
+  deviceRecording: boolean
+
   // Device sync state (for sidebar indicator)
   deviceSyncing: boolean
   deviceSyncProgress: { current: number; total: number } | null
@@ -84,6 +99,7 @@ interface AppState {
 
   // Device state actions (updated by OperationController)
   setDeviceState: (state: HiDockDeviceState) => void
+  setDeviceRecording: (recording: boolean) => void
   setConnectionStatus: (status: ConnectionStatus) => void
   addActivityLogEntry: (entry: ActivityLogEntry) => void
   addActivityLogBatch: (entries: ActivityLogEntry[]) => void
@@ -150,6 +166,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   connectionStatus: { step: 'idle', message: 'Not connected' },
   activityLog: [],
+  deviceRecording: false,
 
   // Device sync initial state
   deviceSyncing: false,
@@ -238,6 +255,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Device state actions
   setDeviceState: (deviceState) => set({ deviceState }),
+  setDeviceRecording: (deviceRecording) => set({ deviceRecording }),
   setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
   addActivityLogEntry: (entry) => set((state) => {
     // Validate entry before adding (prevents corruption from invalid entries)

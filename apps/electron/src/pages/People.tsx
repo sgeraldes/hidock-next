@@ -41,6 +41,9 @@ import type { Person, PersonType } from '@/types/knowledge'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 
+/** Above this many links on BOTH sides, a merge requires typing the loser's name. */
+const MERGE_LINK_THRESHOLD = 10
+
 export function People() {
   const navigate = useNavigate()
 
@@ -64,6 +67,9 @@ export function People() {
   const [selectedForMerge, setSelectedForMerge] = useState<Person[]>([])
   const [keeperId, setKeeperId] = useState<string | null>(null)
   const [merging, setMerging] = useState(false)
+  // High-stakes gate: when BOTH sides are heavily linked, require typing the loser's name.
+  const [mergeImpact, setMergeImpact] = useState<{ keeper: number; loser: number } | null>(null)
+  const [mergeConfirmText, setMergeConfirmText] = useState('')
 
   // Discovery sweep: analyze contacts for possible duplicates → new suggestions.
   const [discovering, setDiscovering] = useState(false)
@@ -189,6 +195,34 @@ export function People() {
 
   const keeper = selectedForMerge.find((p) => p.id === keeperId) ?? null
   const loser = selectedForMerge.find((p) => p.id !== keeperId) ?? null
+
+  // Fetch true link counts for the high-stakes gate whenever the pair changes.
+  useEffect(() => {
+    setMergeConfirmText('')
+    if (!keeper || !loser) {
+      setMergeImpact(null)
+      return
+    }
+    let cancelled = false
+    window.electronAPI.identity
+      .getMergeImpact({ kind: 'contact', keeperId: keeper.id, loserId: loser.id })
+      .then((res) => {
+        if (!cancelled) setMergeImpact(res.success && res.data ? res.data : null)
+      })
+      .catch(() => {
+        if (!cancelled) setMergeImpact(null)
+      })
+    return () => {
+      cancelled = true
+    }
+    // Keyed on ids only: re-fetch when the *pair* changes, not when loadPeople
+    // hands back fresh Person objects for the same two ids.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keeper?.id, loser?.id])
+
+  // Both sides heavily linked → merging the wrong pair is expensive; make the user type the loser's name.
+  const highStakesMerge = !!mergeImpact && mergeImpact.keeper > MERGE_LINK_THRESHOLD && mergeImpact.loser > MERGE_LINK_THRESHOLD
+  const mergeConfirmed = !highStakesMerge || mergeConfirmText.trim() === (loser?.name ?? '').trim()
 
   const handleConfirmMerge = useCallback(async () => {
     if (!keeper || !loser) return
@@ -554,40 +588,57 @@ export function People() {
       {/* Floating merge action bar — appears once exactly two people are selected */}
       {mergeMode && keeper && loser && (
         <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 w-[min(640px,calc(100%-2rem))]">
-          <div className="flex flex-col sm:flex-row items-center gap-3 rounded-xl border bg-background/95 backdrop-blur shadow-lg px-4 py-3">
-            <div className="flex items-center gap-2 text-sm min-w-0 flex-1">
-              <GitMerge className="h-4 w-4 text-primary flex-shrink-0" />
-              <span className="text-muted-foreground">Keep</span>
-              <span className="font-semibold truncate max-w-[120px]" title={keeper.name}>{keeper.name}</span>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 w-7 p-0 flex-shrink-0"
-                onClick={swapKeeper}
-                title="Swap merge direction"
-                aria-label="Swap merge direction"
-              >
-                <ArrowLeftRight className="h-4 w-4" />
-              </Button>
-              <span className="text-muted-foreground">absorb</span>
-              <span className="font-semibold truncate max-w-[120px] line-through decoration-muted-foreground/50" title={loser.name}>
-                {loser.name}
-              </span>
+          <div className="flex flex-col gap-3 rounded-xl border bg-background/95 backdrop-blur shadow-lg px-4 py-3">
+            <div className="flex flex-col sm:flex-row items-center gap-3">
+              <div className="flex items-center gap-2 text-sm min-w-0 flex-1">
+                <GitMerge className="h-4 w-4 text-primary flex-shrink-0" />
+                <span className="text-muted-foreground">Keep</span>
+                <span className="font-semibold truncate max-w-[120px]" title={keeper.name}>{keeper.name}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0 flex-shrink-0"
+                  onClick={swapKeeper}
+                  title="Swap merge direction"
+                  aria-label="Swap merge direction"
+                >
+                  <ArrowLeftRight className="h-4 w-4" />
+                </Button>
+                <span className="text-muted-foreground">absorb</span>
+                <span className="font-semibold truncate max-w-[120px] line-through decoration-muted-foreground/50" title={loser.name}>
+                  {loser.name}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <Button variant="outline" size="sm" onClick={toggleMergeMode} disabled={merging}>
+                  <X className="h-4 w-4 mr-1" />
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={handleConfirmMerge} disabled={merging || !mergeConfirmed}>
+                  {merging ? (
+                    <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
+                  ) : (
+                    <GitMerge className="h-4 w-4 mr-1" />
+                  )}
+                  Confirm merge
+                </Button>
+              </div>
             </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
-              <Button variant="outline" size="sm" onClick={toggleMergeMode} disabled={merging}>
-                <X className="h-4 w-4 mr-1" />
-                Cancel
-              </Button>
-              <Button size="sm" onClick={handleConfirmMerge} disabled={merging}>
-                {merging ? (
-                  <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
-                ) : (
-                  <GitMerge className="h-4 w-4 mr-1" />
-                )}
-                Confirm merge
-              </Button>
-            </div>
+            {highStakesMerge && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/[0.06] px-3 py-2 text-xs">
+                <p className="text-amber-700 dark:text-amber-400 font-medium">
+                  High-stakes merge: {keeper.name} has {mergeImpact!.keeper} links and {loser.name} has{' '}
+                  {mergeImpact!.loser}. To confirm, type <span className="font-semibold">{loser.name}</span>.
+                </p>
+                <Input
+                  value={mergeConfirmText}
+                  onChange={(e) => setMergeConfirmText(e.target.value)}
+                  placeholder={loser.name}
+                  aria-label={`Type ${loser.name} to confirm merge`}
+                  className="mt-2 h-8"
+                />
+              </div>
+            )}
           </div>
         </div>
       )}

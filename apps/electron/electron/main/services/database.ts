@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 29
+const SCHEMA_VERSION = 30
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -581,13 +581,31 @@ CREATE TABLE IF NOT EXISTS identity_suggestions (
     UNIQUE(kind, candidate_name, target_id)
 );
 
+-- Merge journal (v30): one row per executed contact/project merge, written inside
+-- the merge's own transaction, so a fold can be reversed. loser_snapshot is the
+-- full deleted loser row. repointed_manifest is the exact set of child rows the
+-- merge moved (plus the loser's own aliases and the keeper's pre-merge link set,
+-- for precise restore and orphan detection). folded_fields records which keeper
+-- fields the merge filled from the loser, with before/after values.
+CREATE TABLE IF NOT EXISTS merge_journal (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('contact', 'project')),
+    keeper_id TEXT NOT NULL,
+    loser_snapshot TEXT NOT NULL,
+    repointed_manifest TEXT NOT NULL,
+    folded_fields TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    undone_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id);
 CREATE INDEX IF NOT EXISTS idx_project_aliases_project ON project_aliases(project_id);
 CREATE INDEX IF NOT EXISTS idx_identity_suggestions_status ON identity_suggestions(status);
+CREATE INDEX IF NOT EXISTS idx_merge_journal_kind_keeper ON merge_journal(kind, keeper_id);
 
 -- Entity-type artifacts (C0 / v28). Every concrete imported file/blob (pdf, md,
 -- txt, json, image…). A knowledge_capture can own many artifacts. Text is
--- extracted per registered entity type (artifact-types.ts); dedup by content_hash.
+-- extracted per registered entity type (artifact-types.ts), dedup by content_hash.
 CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,
     knowledge_capture_id TEXT,
@@ -1656,6 +1674,31 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v29 complete')
+  },
+
+  30: () => {
+    // v30: Merge safety & reversibility. merge_journal records every executed
+    // contact/project merge so it can be unmerged. Idempotent CREATE + index.
+    console.log('Running migration to schema v30: merge_journal (merge reversibility)')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS merge_journal (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL CHECK(kind IN ('contact', 'project')),
+          keeper_id TEXT NOT NULL,
+          loser_snapshot TEXT NOT NULL,
+          repointed_manifest TEXT NOT NULL,
+          folded_fields TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          undone_at TEXT
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_merge_journal_kind_keeper ON merge_journal(kind, keeper_id)')
+    } catch (e) {
+      console.warn('[Migration v30] merge_journal failed:', e)
+    }
+    console.log('Migration v30 complete')
   }
 
 }
@@ -3174,10 +3217,110 @@ function recomputeContactMeetingCount(contactId: string): void {
   )
 }
 
+// =============================================================================
+// Merge journal & unmerge (v30) — makes contact/project folds reversible
+// =============================================================================
+
+export type MergeKind = 'contact' | 'project'
+
+/** A repointed junction row (the role is kept where the table carries one). */
+interface RepointedLink {
+  key: string // the "other" PK column value (meeting_id / knowledge_capture_id)
+  role?: string
+}
+
+/** Contact-merge manifest: everything the fold touched, enough to reverse it. */
+interface ContactMergeManifest {
+  meetingContacts: { repointed: RepointedLink[]; collided: RepointedLink[] }
+  transcriptSpeakers: { repointed: string[] } // transcript_speakers.id values moved
+  createdAliasNorms: string[] // aliases the merge created (loser-name → keeper)
+  loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
+  keeperBefore: { meetingIds: string[]; speakerIds: string[] }
+}
+
+/** Project-merge manifest. */
+interface ProjectMergeManifest {
+  meetingProjects: { repointed: string[]; collided: string[] } // meeting_id values
+  knowledgeProjects: { repointed: string[]; collided: string[] } // knowledge_capture_id values
+  createdAliasNorms: string[]
+  loserAliases: Array<{ alias_norm: string; source: string | null; confidence: number | null }>
+  keeperBefore: { meetingIds: string[]; knowledgeIds: string[] }
+}
+
+/** A keeper link that appeared after the merge — the user must review it by hand. */
+export interface OrphanLink {
+  table: 'meeting_contacts' | 'transcript_speakers' | 'meeting_projects' | 'knowledge_projects'
+  key: string
+  label: string
+  date: string | null
+}
+
+/** Result of an unmerge: what was restored + links the user must reassign manually. */
+export interface UnmergeResult {
+  loserId: string
+  loserName: string
+  restored: {
+    meetingLinks: number
+    speakerLinks: number
+    knowledgeLinks: number
+    aliases: number
+    fieldsRestored: number
+    skipped: number // manifest rows that no longer exist / were reassigned since merge
+  }
+  orphanedSinceMerge: OrphanLink[]
+}
+
+/** A merge-journal row surfaced to the UI (loser name parsed from the snapshot). */
+export interface MergeJournalEntry {
+  id: string
+  kind: MergeKind
+  keeperId: string
+  loserId: string
+  loserName: string
+  createdAt: string
+  undoneAt: string | null
+  linkCount: number // repointed links recorded — a rough "size" of the merge
+}
+
+interface MergeJournalRow {
+  id: string
+  kind: MergeKind
+  keeper_id: string
+  loser_snapshot: string
+  repointed_manifest: string
+  folded_fields: string | null
+  created_at: string
+  undone_at: string | null
+}
+
+/**
+ * Count the links that anchor an entity, used by the high-stakes merge gate:
+ * merging two heavily-linked entities is the expensive mistake, so the UI warns
+ * (and requires typing the loser's name) when BOTH sides exceed the threshold.
+ * Contacts: meeting_contacts + transcript_speakers. Projects: meeting_projects +
+ * knowledge_projects.
+ */
+export function getEntityLinkCount(kind: MergeKind, id: string): number {
+  if (kind === 'contact') {
+    const mc = queryOne<{ n: number }>('SELECT COUNT(1) AS n FROM meeting_contacts WHERE contact_id = ?', [id])
+    const ts = queryOne<{ n: number }>('SELECT COUNT(1) AS n FROM transcript_speakers WHERE contact_id = ?', [id])
+    return (mc?.n ?? 0) + (ts?.n ?? 0)
+  }
+  const mp = queryOne<{ n: number }>('SELECT COUNT(1) AS n FROM meeting_projects WHERE project_id = ?', [id])
+  const kp = queryOne<{ n: number }>('SELECT COUNT(1) AS n FROM knowledge_projects WHERE project_id = ?', [id])
+  return (mp?.n ?? 0) + (kp?.n ?? 0)
+}
+
+/** Link counts for both sides of a proposed merge (for the pre-merge warning). */
+export function getMergeImpact(kind: MergeKind, keeperId: string, loserId: string): { keeper: number; loser: number } {
+  return { keeper: getEntityLinkCount(kind, keeperId), loser: getEntityLinkCount(kind, loserId) }
+}
+
 /**
  * Merge two contacts into one. The keeper survives; the loser's relationships
  * are repointed and its useful fields folded in, then the loser row is deleted.
- * Runs atomically in a single transaction.
+ * Runs atomically in a single transaction, which also writes a merge_journal row
+ * so the fold can be reversed via {@link unmergeContacts}.
  *
  * Folding rules (keeper wins): email/role/company/notes filled from the loser
  * only when the keeper's is empty; type taken from the loser only when the
@@ -3201,6 +3344,36 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
     loserName = loser.name
     keeperName = keeper.name
 
+    // --- Capture the manifest BEFORE mutating, so unmerge can reverse exactly. ---
+    const keeperMeetingIds = queryAll<{ meeting_id: string }>(
+      'SELECT meeting_id FROM meeting_contacts WHERE contact_id = ?',
+      [keeperId]
+    ).map((r) => r.meeting_id)
+    const keeperMeetingSet = new Set(keeperMeetingIds)
+    const loserLinks = queryAll<{ meeting_id: string; role: string }>(
+      'SELECT meeting_id, role FROM meeting_contacts WHERE contact_id = ?',
+      [loserId]
+    )
+    const mcRepointed: RepointedLink[] = []
+    const mcCollided: RepointedLink[] = []
+    for (const l of loserLinks) {
+      if (keeperMeetingSet.has(l.meeting_id)) mcCollided.push({ key: l.meeting_id, role: l.role })
+      else mcRepointed.push({ key: l.meeting_id, role: l.role })
+    }
+    const keeperSpeakerIds = queryAll<{ id: string }>(
+      'SELECT id FROM transcript_speakers WHERE contact_id = ?',
+      [keeperId]
+    ).map((r) => r.id)
+    const loserSpeakerIds = queryAll<{ id: string }>(
+      'SELECT id FROM transcript_speakers WHERE contact_id = ?',
+      [loserId]
+    ).map((r) => r.id)
+    const loserAliases = queryAll<{ alias_norm: string; source: string | null; confidence: number | null }>(
+      'SELECT alias_norm, source, confidence FROM contact_aliases WHERE contact_id = ?',
+      [loserId]
+    )
+    const createdAliasNorm = normalizeName(loser.name)
+
     // Record the loser's name as a permanent alias of the keeper (v27) so a
     // future mention of that name resolves straight to the survivor.
     upsertContactAliasNoSave(keeperId, loser.name, 'merge', 1.0)
@@ -3222,17 +3395,43 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
     const notes = notEmpty(keeper.notes) ? keeper.notes : loser.notes ?? null
     const type = keeper.type && keeper.type !== 'unknown' ? keeper.type : loser.type || 'unknown'
     const tags = [...new Set([...parseContactTags(keeper.tags), ...parseContactTags(loser.tags)])]
+    const tagsJson = tags.length ? JSON.stringify(tags) : null
     const firstSeen = [keeper.first_seen_at, loser.first_seen_at].filter(Boolean).sort()[0] ?? keeper.first_seen_at
     const lastSeen = [keeper.last_seen_at, loser.last_seen_at].filter(Boolean).sort().slice(-1)[0] ?? keeper.last_seen_at
+
+    // Diff keeper's before/after so unmerge can restore only the folded fields
+    // (and only when the keeper still holds the folded value — no clobbering edits).
+    const foldedFields = diffFoldedFields(
+      {
+        email: keeper.email,
+        role: keeper.role,
+        company: keeper.company,
+        notes: keeper.notes,
+        type: keeper.type,
+        tags: keeper.tags,
+        first_seen_at: keeper.first_seen_at,
+        last_seen_at: keeper.last_seen_at
+      },
+      { email, role, company, notes, type, tags: tagsJson, first_seen_at: firstSeen, last_seen_at: lastSeen }
+    )
 
     runNoSave(
       `UPDATE contacts SET email = ?, role = ?, company = ?, notes = ?, type = ?, tags = ?,
          first_seen_at = ?, last_seen_at = ? WHERE id = ?`,
-      [email, role, company, notes, type, tags.length ? JSON.stringify(tags) : null, firstSeen, lastSeen, keeperId]
+      [email, role, company, notes, type, tagsJson, firstSeen, lastSeen, keeperId]
     )
 
     runNoSave('DELETE FROM contacts WHERE id = ?', [loserId])
     recomputeContactMeetingCount(keeperId)
+
+    const manifest: ContactMergeManifest = {
+      meetingContacts: { repointed: mcRepointed, collided: mcCollided },
+      transcriptSpeakers: { repointed: loserSpeakerIds },
+      createdAliasNorms: createdAliasNorm ? [createdAliasNorm] : [],
+      loserAliases,
+      keeperBefore: { meetingIds: keeperMeetingIds, speakerIds: keeperSpeakerIds }
+    }
+    writeMergeJournalNoSave('contact', keeperId, loser, manifest, foldedFields)
 
     return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [keeperId])!
   })
@@ -3250,6 +3449,241 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
   }
 
   return merged
+}
+
+/**
+ * Diff a keeper's pre-merge column values against the folded (post-merge) values,
+ * returning only the fields the merge actually changed, as { field: {from, to} }.
+ * Unmerge restores `from` — but only where the keeper still holds `to` (so a newer
+ * user edit is never clobbered). Values are compared/stored as their raw SQL form.
+ */
+function diffFoldedFields(
+  before: Record<string, string | null>,
+  after: Record<string, string | null>
+): Record<string, { from: string | null; to: string | null }> {
+  const folded: Record<string, { from: string | null; to: string | null }> = {}
+  for (const key of Object.keys(after)) {
+    const from = before[key] ?? null
+    const to = after[key] ?? null
+    if (from !== to) folded[key] = { from, to }
+  }
+  return folded
+}
+
+/** Insert a merge_journal row inside the merge's transaction (no auto-save). */
+function writeMergeJournalNoSave(
+  kind: MergeKind,
+  keeperId: string,
+  loserRow: unknown,
+  manifest: ContactMergeManifest | ProjectMergeManifest,
+  foldedFields: Record<string, { from: string | null; to: string | null }>
+): void {
+  runNoSave(
+    `INSERT INTO merge_journal (id, kind, keeper_id, loser_snapshot, repointed_manifest, folded_fields, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      randomUUID(),
+      kind,
+      keeperId,
+      JSON.stringify(loserRow),
+      JSON.stringify(manifest),
+      Object.keys(foldedFields).length ? JSON.stringify(foldedFields) : null,
+      new Date().toISOString()
+    ]
+  )
+}
+
+/** Restore keeper columns to their pre-merge values, only where unchanged since. */
+function restoreFoldedFields(table: 'contacts' | 'projects', keeperId: string, foldedJson: string | null): number {
+  if (!foldedJson) return 0
+  let folded: Record<string, { from: string | null; to: string | null }>
+  try {
+    folded = JSON.parse(foldedJson)
+  } catch {
+    return 0
+  }
+  const current = queryOne<Record<string, string | null>>(`SELECT * FROM ${table} WHERE id = ?`, [keeperId])
+  if (!current) return 0
+  let restored = 0
+  for (const [field, { from, to }] of Object.entries(folded)) {
+    // Only revert if the keeper still holds exactly the folded value — otherwise
+    // the user edited this field after the merge and we must not clobber it.
+    if ((current[field] ?? null) === to) {
+      runNoSave(`UPDATE ${table} SET ${field} = ? WHERE id = ?`, [from, keeperId])
+      restored++
+    }
+  }
+  return restored
+}
+
+/** Fetch and validate an un-undone journal row of the given kind. @throws otherwise. */
+function loadOpenJournal(journalId: string, kind: MergeKind): MergeJournalRow {
+  const row = queryOne<MergeJournalRow>('SELECT * FROM merge_journal WHERE id = ?', [journalId])
+  if (!row) throw new Error(`Merge journal entry ${journalId} not found`)
+  if (row.kind !== kind) throw new Error(`Journal entry ${journalId} is a ${row.kind} merge, not ${kind}`)
+  if (row.undone_at) throw new Error('This merge has already been unmerged')
+  return row
+}
+
+/**
+ * Reverse a contact merge recorded in merge_journal. In one transaction:
+ *   1. Recreate the loser row from the snapshot (fails if its id is taken again).
+ *   2. Restore the loser's own aliases (they cascaded away when it was deleted).
+ *   3. Repoint the manifest's moved rows back keeper→loser; re-insert the loser
+ *      links the merge dropped as collisions. Manifest rows that no longer exist
+ *      (deleted or reassigned since the merge) are skipped and counted.
+ *   4. Delete the alias the merge created, restore folded keeper fields (only
+ *      where the keeper still holds the folded value), recompute both counts.
+ *   5. Report keeper links that appeared AFTER the merge (not in the keeper's
+ *      pre-merge set) — the "a meeting got wrongly attached, reassign it" list.
+ *   6. Stamp undone_at.
+ *
+ * @throws if the journal id is unknown, already undone, or the loser id is taken.
+ */
+export function unmergeContacts(journalId: string): UnmergeResult {
+  return runInTransaction(() => {
+    const row = loadOpenJournal(journalId, 'contact')
+    const keeperId = row.keeper_id
+    const loser = JSON.parse(row.loser_snapshot) as Contact
+    const manifest = JSON.parse(row.repointed_manifest) as ContactMergeManifest
+
+    if (queryOne('SELECT 1 FROM contacts WHERE id = ?', [loser.id])) {
+      throw new Error(`Cannot unmerge: a contact with id ${loser.id} already exists`)
+    }
+
+    // 1. Recreate the loser row from the snapshot.
+    runNoSave(
+      `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        loser.id,
+        loser.name,
+        loser.email ?? null,
+        loser.type ?? 'unknown',
+        loser.role ?? null,
+        loser.company ?? null,
+        loser.notes ?? null,
+        loser.tags ?? null,
+        loser.first_seen_at,
+        loser.last_seen_at,
+        0,
+        loser.created_at
+      ]
+    )
+
+    // 2. Restore the loser's own aliases (skip any whose norm is now taken).
+    let aliasesRestored = 0
+    for (const a of manifest.loserAliases ?? []) {
+      if (queryOne('SELECT 1 FROM contact_aliases WHERE alias_norm = ?', [a.alias_norm])) continue
+      runNoSave(
+        `INSERT INTO contact_aliases (id, alias_norm, contact_id, source, confidence, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [randomUUID(), a.alias_norm, loser.id, a.source, a.confidence, new Date().toISOString()]
+      )
+      aliasesRestored++
+    }
+
+    let meetingLinks = 0
+    let speakerLinks = 0
+    let skipped = 0
+
+    // 3a. Move repointed meeting_contacts back keeper→loser (skip if gone).
+    for (const l of manifest.meetingContacts.repointed) {
+      const exists = queryOne('SELECT 1 FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?', [l.key, keeperId])
+      if (!exists) {
+        skipped++
+        continue
+      }
+      runNoSave('UPDATE OR IGNORE meeting_contacts SET contact_id = ? WHERE meeting_id = ? AND contact_id = ?', [
+        loser.id,
+        l.key,
+        keeperId
+      ])
+      meetingLinks++
+    }
+    // 3b. Re-insert the loser links the merge dropped as collisions (keeper keeps its own).
+    for (const l of manifest.meetingContacts.collided) {
+      if (!queryOne('SELECT 1 FROM meetings WHERE id = ?', [l.key])) {
+        skipped++
+        continue
+      }
+      runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+        l.key,
+        loser.id,
+        l.role ?? 'attendee'
+      ])
+      meetingLinks++
+    }
+
+    // 3c. Move repointed transcript_speakers back (skip if row gone or reassigned).
+    for (const tsId of manifest.transcriptSpeakers.repointed) {
+      const cur = queryOne<{ contact_id: string }>('SELECT contact_id FROM transcript_speakers WHERE id = ?', [tsId])
+      if (!cur || cur.contact_id !== keeperId) {
+        skipped++
+        continue
+      }
+      runNoSave('UPDATE transcript_speakers SET contact_id = ? WHERE id = ?', [loser.id, tsId])
+      speakerLinks++
+    }
+
+    // 4. Delete the alias(es) the merge created, restore folded keeper fields.
+    for (const norm of manifest.createdAliasNorms ?? []) {
+      runNoSave('DELETE FROM contact_aliases WHERE alias_norm = ? AND contact_id = ? AND source = ?', [
+        norm,
+        keeperId,
+        'merge'
+      ])
+    }
+    const fieldsRestored = restoreFoldedFields('contacts', keeperId, row.folded_fields)
+
+    recomputeContactMeetingCount(keeperId)
+    recomputeContactMeetingCount(loser.id)
+
+    // 5. Orphan report: keeper links not present before the merge (added since).
+    const beforeMeetings = new Set(manifest.keeperBefore.meetingIds)
+    const beforeSpeakers = new Set(manifest.keeperBefore.speakerIds)
+    const orphanedSinceMerge: OrphanLink[] = []
+    const nowMeetings = queryAll<{ meeting_id: string; subject: string | null; start_time: string | null }>(
+      `SELECT mc.meeting_id, m.subject, m.start_time
+       FROM meeting_contacts mc LEFT JOIN meetings m ON m.id = mc.meeting_id
+       WHERE mc.contact_id = ?`,
+      [keeperId]
+    )
+    for (const r of nowMeetings) {
+      if (!beforeMeetings.has(r.meeting_id)) {
+        orphanedSinceMerge.push({
+          table: 'meeting_contacts',
+          key: r.meeting_id,
+          label: r.subject || 'Untitled meeting',
+          date: r.start_time
+        })
+      }
+    }
+    const nowSpeakers = queryAll<{ id: string; recording_id: string; speaker_label: string }>(
+      'SELECT id, recording_id, speaker_label FROM transcript_speakers WHERE contact_id = ?',
+      [keeperId]
+    )
+    for (const r of nowSpeakers) {
+      if (!beforeSpeakers.has(r.id)) {
+        orphanedSinceMerge.push({
+          table: 'transcript_speakers',
+          key: r.id,
+          label: `${r.speaker_label} in recording ${r.recording_id}`,
+          date: null
+        })
+      }
+    }
+
+    // 6. Mark the journal undone.
+    runNoSave('UPDATE merge_journal SET undone_at = ? WHERE id = ?', [new Date().toISOString(), journalId])
+
+    return {
+      loserId: loser.id,
+      loserName: loser.name,
+      restored: { meetingLinks, speakerLinks, knowledgeLinks: 0, aliases: aliasesRestored, fieldsRestored, skipped },
+      orphanedSinceMerge
+    }
+  })
 }
 
 // =============================================================================
@@ -3643,6 +4077,40 @@ export function mergeProjects(keeperId: string, loserId: string): Project {
     if (!keeper) throw new Error(`Keeper project ${keeperId} not found`)
     if (!loser) throw new Error(`Loser project ${loserId} not found`)
 
+    // --- Capture the manifest BEFORE mutating, so unmerge can reverse exactly. ---
+    const keeperMeetingIds = queryAll<{ meeting_id: string }>(
+      'SELECT meeting_id FROM meeting_projects WHERE project_id = ?',
+      [keeperId]
+    ).map((r) => r.meeting_id)
+    const keeperMeetingSet = new Set(keeperMeetingIds)
+    const mpRepointed: string[] = []
+    const mpCollided: string[] = []
+    for (const r of queryAll<{ meeting_id: string }>('SELECT meeting_id FROM meeting_projects WHERE project_id = ?', [
+      loserId
+    ])) {
+      if (keeperMeetingSet.has(r.meeting_id)) mpCollided.push(r.meeting_id)
+      else mpRepointed.push(r.meeting_id)
+    }
+    const keeperKnowledgeIds = queryAll<{ knowledge_capture_id: string }>(
+      'SELECT knowledge_capture_id FROM knowledge_projects WHERE project_id = ?',
+      [keeperId]
+    ).map((r) => r.knowledge_capture_id)
+    const keeperKnowledgeSet = new Set(keeperKnowledgeIds)
+    const kpRepointed: string[] = []
+    const kpCollided: string[] = []
+    for (const r of queryAll<{ knowledge_capture_id: string }>(
+      'SELECT knowledge_capture_id FROM knowledge_projects WHERE project_id = ?',
+      [loserId]
+    )) {
+      if (keeperKnowledgeSet.has(r.knowledge_capture_id)) kpCollided.push(r.knowledge_capture_id)
+      else kpRepointed.push(r.knowledge_capture_id)
+    }
+    const loserAliases = queryAll<{ alias_norm: string; source: string | null; confidence: number | null }>(
+      'SELECT alias_norm, source, confidence FROM project_aliases WHERE project_id = ?',
+      [loserId]
+    )
+    const createdAliasNorm = normalizeName(loser.name)
+
     // Record the loser's name as a permanent alias of the keeper (v27).
     upsertProjectAliasNoSave(keeperId, loser.name, 'merge', 1.0)
 
@@ -3658,11 +4126,235 @@ export function mergeProjects(keeperId: string, loserId: string): Project {
     const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
     const description = notEmpty(keeper.description) ? keeper.description : loser.description ?? null
     const status = notEmpty(keeper.status) ? keeper.status : loser.status || 'active'
+    const foldedFields = diffFoldedFields(
+      { description: keeper.description, status: keeper.status },
+      { description, status }
+    )
 
     runNoSave('UPDATE projects SET description = ?, status = ? WHERE id = ?', [description, status, keeperId])
     runNoSave('DELETE FROM projects WHERE id = ?', [loserId])
 
+    const manifest: ProjectMergeManifest = {
+      meetingProjects: { repointed: mpRepointed, collided: mpCollided },
+      knowledgeProjects: { repointed: kpRepointed, collided: kpCollided },
+      createdAliasNorms: createdAliasNorm ? [createdAliasNorm] : [],
+      loserAliases,
+      keeperBefore: { meetingIds: keeperMeetingIds, knowledgeIds: keeperKnowledgeIds }
+    }
+    writeMergeJournalNoSave('project', keeperId, loser, manifest, foldedFields)
+
     return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [keeperId])!
+  })
+}
+
+/**
+ * Reverse a project merge recorded in merge_journal. Mirrors {@link unmergeContacts}:
+ * recreate the loser project + its aliases, repoint the manifest's meeting_projects
+ * and knowledge_projects back, re-insert dropped collisions, delete the merge-created
+ * alias, restore folded keeper fields, and report keeper links added since the merge.
+ *
+ * @throws if the journal id is unknown, already undone, or the loser id is taken.
+ */
+export function unmergeProjects(journalId: string): UnmergeResult {
+  return runInTransaction(() => {
+    const row = loadOpenJournal(journalId, 'project')
+    const keeperId = row.keeper_id
+    const loser = JSON.parse(row.loser_snapshot) as Project
+    const manifest = JSON.parse(row.repointed_manifest) as ProjectMergeManifest
+
+    if (queryOne('SELECT 1 FROM projects WHERE id = ?', [loser.id])) {
+      throw new Error(`Cannot unmerge: a project with id ${loser.id} already exists`)
+    }
+
+    // 1. Recreate the loser project from the snapshot.
+    runNoSave(
+      `INSERT INTO projects (id, name, description, status, folder_path, url, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        loser.id,
+        loser.name,
+        loser.description ?? null,
+        loser.status ?? 'active',
+        loser.folder_path ?? null,
+        loser.url ?? null,
+        loser.created_at
+      ]
+    )
+
+    // 2. Restore the loser's own aliases (skip any whose norm is now taken).
+    let aliasesRestored = 0
+    for (const a of manifest.loserAliases ?? []) {
+      if (queryOne('SELECT 1 FROM project_aliases WHERE alias_norm = ?', [a.alias_norm])) continue
+      runNoSave(
+        `INSERT INTO project_aliases (id, alias_norm, project_id, source, confidence, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [randomUUID(), a.alias_norm, loser.id, a.source, a.confidence, new Date().toISOString()]
+      )
+      aliasesRestored++
+    }
+
+    let meetingLinks = 0
+    let knowledgeLinks = 0
+    let skipped = 0
+
+    // 3a. Move repointed meeting_projects back keeper→loser (skip if gone).
+    for (const meetingId of manifest.meetingProjects.repointed) {
+      if (!queryOne('SELECT 1 FROM meeting_projects WHERE meeting_id = ? AND project_id = ?', [meetingId, keeperId])) {
+        skipped++
+        continue
+      }
+      runNoSave('UPDATE OR IGNORE meeting_projects SET project_id = ? WHERE meeting_id = ? AND project_id = ?', [
+        loser.id,
+        meetingId,
+        keeperId
+      ])
+      meetingLinks++
+    }
+    // 3b. Re-insert dropped meeting_projects collisions for the loser.
+    for (const meetingId of manifest.meetingProjects.collided) {
+      if (!queryOne('SELECT 1 FROM meetings WHERE id = ?', [meetingId])) {
+        skipped++
+        continue
+      }
+      runNoSave('INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)', [meetingId, loser.id])
+      meetingLinks++
+    }
+
+    // 3c. Move repointed knowledge_projects back keeper→loser (skip if gone).
+    for (const kcId of manifest.knowledgeProjects.repointed) {
+      if (
+        !queryOne('SELECT 1 FROM knowledge_projects WHERE knowledge_capture_id = ? AND project_id = ?', [kcId, keeperId])
+      ) {
+        skipped++
+        continue
+      }
+      runNoSave(
+        'UPDATE OR IGNORE knowledge_projects SET project_id = ? WHERE knowledge_capture_id = ? AND project_id = ?',
+        [loser.id, kcId, keeperId]
+      )
+      knowledgeLinks++
+    }
+    // 3d. Re-insert dropped knowledge_projects collisions for the loser.
+    for (const kcId of manifest.knowledgeProjects.collided) {
+      if (!queryOne('SELECT 1 FROM knowledge_captures WHERE id = ?', [kcId])) {
+        skipped++
+        continue
+      }
+      runNoSave('INSERT OR IGNORE INTO knowledge_projects (knowledge_capture_id, project_id) VALUES (?, ?)', [
+        kcId,
+        loser.id
+      ])
+      knowledgeLinks++
+    }
+
+    // 4. Delete the alias(es) the merge created, restore folded keeper fields.
+    for (const norm of manifest.createdAliasNorms ?? []) {
+      runNoSave('DELETE FROM project_aliases WHERE alias_norm = ? AND project_id = ? AND source = ?', [
+        norm,
+        keeperId,
+        'merge'
+      ])
+    }
+    const fieldsRestored = restoreFoldedFields('projects', keeperId, row.folded_fields)
+
+    // 5. Orphan report: keeper links not present before the merge (added since).
+    const beforeMeetings = new Set(manifest.keeperBefore.meetingIds)
+    const beforeKnowledge = new Set(manifest.keeperBefore.knowledgeIds)
+    const orphanedSinceMerge: OrphanLink[] = []
+    const nowMeetings = queryAll<{ meeting_id: string; subject: string | null; start_time: string | null }>(
+      `SELECT mp.meeting_id, m.subject, m.start_time
+       FROM meeting_projects mp LEFT JOIN meetings m ON m.id = mp.meeting_id
+       WHERE mp.project_id = ?`,
+      [keeperId]
+    )
+    for (const r of nowMeetings) {
+      if (!beforeMeetings.has(r.meeting_id)) {
+        orphanedSinceMerge.push({
+          table: 'meeting_projects',
+          key: r.meeting_id,
+          label: r.subject || 'Untitled meeting',
+          date: r.start_time
+        })
+      }
+    }
+    const nowKnowledge = queryAll<{ knowledge_capture_id: string }>(
+      'SELECT knowledge_capture_id FROM knowledge_projects WHERE project_id = ?',
+      [keeperId]
+    )
+    for (const r of nowKnowledge) {
+      if (!beforeKnowledge.has(r.knowledge_capture_id)) {
+        orphanedSinceMerge.push({
+          table: 'knowledge_projects',
+          key: r.knowledge_capture_id,
+          label: `Knowledge capture ${r.knowledge_capture_id}`,
+          date: null
+        })
+      }
+    }
+
+    // 6. Mark the journal undone.
+    runNoSave('UPDATE merge_journal SET undone_at = ? WHERE id = ?', [new Date().toISOString(), journalId])
+
+    return {
+      loserId: loser.id,
+      loserName: loser.name,
+      restored: { meetingLinks, speakerLinks: 0, knowledgeLinks, aliases: aliasesRestored, fieldsRestored, skipped },
+      orphanedSinceMerge
+    }
+  })
+}
+
+/**
+ * Merge-journal entries for an entity (keeper), newest first. By default only
+ * open (not-yet-undone) merges are returned — the ones that can still be undone.
+ */
+export function getMergeJournal(kind: MergeKind, keeperId: string, includeUndone = false): MergeJournalEntry[] {
+  const rows = queryAll<MergeJournalRow>(
+    `SELECT * FROM merge_journal WHERE kind = ? AND keeper_id = ?
+     ${includeUndone ? '' : 'AND undone_at IS NULL'}
+     ORDER BY created_at DESC`,
+    [kind, keeperId]
+  )
+  return rows.map((r) => {
+    let loserName = 'Unknown'
+    let loserId = ''
+    let linkCount = 0
+    try {
+      const loser = JSON.parse(r.loser_snapshot) as { id?: string; name?: string }
+      loserName = loser.name ?? 'Unknown'
+      loserId = loser.id ?? ''
+    } catch {
+      /* keep defaults */
+    }
+    try {
+      const m = JSON.parse(r.repointed_manifest)
+      if (kind === 'contact') {
+        const mm = m as ContactMergeManifest
+        linkCount =
+          (mm.meetingContacts?.repointed?.length ?? 0) +
+          (mm.meetingContacts?.collided?.length ?? 0) +
+          (mm.transcriptSpeakers?.repointed?.length ?? 0)
+      } else {
+        const pm = m as ProjectMergeManifest
+        linkCount =
+          (pm.meetingProjects?.repointed?.length ?? 0) +
+          (pm.meetingProjects?.collided?.length ?? 0) +
+          (pm.knowledgeProjects?.repointed?.length ?? 0) +
+          (pm.knowledgeProjects?.collided?.length ?? 0)
+      }
+    } catch {
+      /* keep default */
+    }
+    return {
+      id: r.id,
+      kind: r.kind,
+      keeperId: r.keeper_id,
+      loserId,
+      loserName,
+      createdAt: r.created_at,
+      undoneAt: r.undone_at,
+      linkCount
+    }
   })
 }
 
