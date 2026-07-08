@@ -97,6 +97,17 @@ capture (device/MP3-in-.wav)
   (who's who) — discoverability is a first-class metric, not polish.
 - Two agents editing the same file (SCHEMA_VERSION) requires explicit
   serialization; parallel agents work only with disjoint file sets.
+- The device-incident chain (2026-07-08 afternoon): a NEW periodic protocol
+  command (CMD 18 poll) interleaved with in-flight commands → protocol
+  desync → half-connected state (SN null, empty file list) → a read blocked
+  forever → the app kill left an UNKILLABLE zombie (IRP-stuck) holding the
+  USB claim → every later connect failed LIBUSB_ERROR_ACCESS → only a USB
+  node reset clears it. Lessons: single-outstanding-command protocols need a
+  hard mutex at the service layer (not "skip if busy" guards); a failed
+  connect must tear down cleanly, never half-connect; on Windows, stopping
+  the npm tree leaks the Electron main (app-cycle stop now verifies
+  orphans); liveness checks flicker unreliably against IRP-stuck zombies.
+  And the dock is the LIVE call audio path — no USB resets during meetings.
 
 ## 5. Coverage map — components × metrics
 
