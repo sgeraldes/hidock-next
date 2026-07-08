@@ -43,7 +43,9 @@ export class GeminiEngine implements TranscriptionEngine {
 
   constructor(options: GeminiEngineOptions) {
     this.apiKey = options.apiKey
-    this.model = options.model ?? 'gemini-2.5-flash'
+    // Keep in sync with CURRENT_GEMINI_MODEL in the electron app's config.ts —
+    // 2.x models are retired and 404 on generateContent.
+    this.model = options.model ?? 'gemini-3.5-flash'
     this.language = options.language ?? 'unknown'
   }
 
