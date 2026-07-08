@@ -1,16 +1,21 @@
+// @vitest-environment node
 /**
- * Artifact service + entity-type registry (C0) — integration.
+ * Artifact service + entity-type registry (C0/C1) — integration.
  *
  * Exercises the real database.ts (real sql.js engine, schema v28): registry
- * resolution, importArtifact dedup-by-hash, md/txt extraction + capture creation,
- * and getArtifactsForCapture. Embeddings + data-root are stubbed so the test is
- * deterministic and offline.
+ * resolution, importArtifact dedup-by-hash, md/txt/pdf extraction + capture
+ * creation, and getArtifactsForCapture. Embeddings + data-root are stubbed so
+ * the test is deterministic and offline.
+ *
+ * Runs in the `node` environment (not jsdom): pdf-parse's bundled pdf.js detects
+ * jsdom's `window` as a browser and demands a Worker, which is unavailable here.
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { createRequire } from 'module'
 import { tmpdir } from 'os'
-import { join } from 'path'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs'
+import { dirname, join } from 'path'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 
 const testRoot = join(tmpdir(), `hidock-artifact-test-${Date.now()}`)
 const dbPath = join(testRoot, 'hidock.db')
@@ -38,6 +43,23 @@ import { initializeDatabase, closeDatabase, queryOne } from '../database'
 import { resolveType, getArtifactType, ArtifactExtractionError } from '../artifact-types'
 import { importArtifact, getArtifactsForCapture } from '../artifact-service'
 
+/**
+ * A real, valid PDF fixture. We deliberately do NOT hand-build one: pdf-parse
+ * bundles a 2018 build of pdf.js whose xref-*table* code path miscomputes offsets
+ * under vitest's worker runtime (a generated table-based PDF fails with "bad XRef
+ * entry", though it parses in production/native node). The bundled sample uses an
+ * xref *stream*, which parses reliably everywhere — so it is the robust fixture.
+ *
+ * `EXPECTED_PAGES`/`EXPECTED_TITLE`/`EXPECTED_TEXT` are properties of this exact,
+ * version-pinned sample shipped with pdf-parse.
+ */
+const require = createRequire(import.meta.url)
+const SAMPLE_PDF = join(dirname(require.resolve('pdf-parse/package.json')), 'test', 'data', '04-valid.pdf')
+const pdfBytes = (): Buffer => readFileSync(SAMPLE_PDF)
+const EXPECTED_PAGES = 5
+const EXPECTED_TITLE = 'sag-39-3-4-0902-21:sag-0'
+const EXPECTED_TEXT = 'Turk J Med Sci'
+
 describe('entity-type registry', () => {
   it('resolves by file extension', () => {
     expect(resolveType('notes.md')?.kind).toBe('md')
@@ -59,10 +81,20 @@ describe('entity-type registry', () => {
     expect(resolveType('application/x-tar')).toBeUndefined()
   })
 
-  it('pdf extraction reports NOT_AVAILABLE (no parser installed)', async () => {
+  it('pdf extraction returns text, page count, and title from a real PDF', async () => {
     const pdf = getArtifactType('pdf')!
-    await expect(pdf.extractText('x.pdf')).rejects.toBeInstanceOf(ArtifactExtractionError)
-    await expect(pdf.extractText('x.pdf')).rejects.toMatchObject({ code: 'NOT_AVAILABLE' })
+    const result = await pdf.extractText('doc.pdf', pdfBytes())
+    expect(result.text).toContain(EXPECTED_TEXT)
+    expect(result.metadata?.pageCount).toBe(EXPECTED_PAGES)
+    expect(result.metadata?.title).toBe(EXPECTED_TITLE)
+    expect(result.metadata?.source).toBe('pdf-parse')
+  })
+
+  it('pdf extraction fails gracefully on a corrupt file (typed error, no crash)', async () => {
+    const pdf = getArtifactType('pdf')!
+    const garbage = Buffer.from('this is not a pdf at all', 'utf-8')
+    await expect(pdf.extractText('broken.pdf', garbage)).rejects.toBeInstanceOf(ArtifactExtractionError)
+    await expect(pdf.extractText('broken.pdf', garbage)).rejects.toMatchObject({ code: 'PARSE_FAILED' })
   })
 
   it('image extraction skips gracefully without a Gemini key', async () => {
@@ -115,6 +147,45 @@ describe('artifact service', () => {
     const result = await importArtifact(filePath)
     expect(result.artifact.kind).toBe('txt')
     expect(result.artifact.extracted_text).toBe('hello world from a plain text artifact')
+  })
+
+  it('imports a PDF end-to-end: extracts text, records page count + title, creates a capture', async () => {
+    const filePath = join(srcDir, 'report.pdf')
+    writeFileSync(filePath, pdfBytes())
+
+    const result = await importArtifact(filePath)
+
+    expect(result.deduped).toBe(false)
+    expect(result.artifact.kind).toBe('pdf')
+    expect(result.artifact.mime).toBe('application/pdf')
+    expect(result.artifact.extracted_text).toContain(EXPECTED_TEXT)
+    expect(existsSync(result.artifact.storage_path!)).toBe(true)
+
+    const meta = JSON.parse(result.artifact.metadata!) as { pageCount?: number; title?: string; source?: string }
+    expect(meta.pageCount).toBe(EXPECTED_PAGES)
+    expect(meta.title).toBe(EXPECTED_TITLE)
+    expect(meta.source).toBe('pdf-parse')
+
+    const capture = queryOne<{ id: string; title: string; category: string }>(
+      'SELECT id, title, category FROM knowledge_captures WHERE id = ?',
+      [result.knowledgeCaptureId]
+    )
+    expect(capture!.title).toBe('report.pdf')
+    expect(capture!.category).toBe('note')
+  })
+
+  it('imports a corrupt PDF without crashing (empty text + extractionError note)', async () => {
+    const filePath = join(srcDir, 'corrupt.pdf')
+    writeFileSync(filePath, Buffer.from('%PDF-1.4 not really a pdf', 'utf-8'))
+
+    const result = await importArtifact(filePath)
+
+    expect(result.artifact.kind).toBe('pdf')
+    expect(result.artifact.extracted_text).toBeNull()
+    const meta = JSON.parse(result.artifact.metadata!) as { extractionError?: string }
+    expect(meta.extractionError).toBe('PARSE_FAILED')
+    // The file is still stored despite the extraction failure.
+    expect(existsSync(result.artifact.storage_path!)).toBe(true)
   })
 
   it('dedupes by content hash (same bytes → existing artifact returned)', async () => {

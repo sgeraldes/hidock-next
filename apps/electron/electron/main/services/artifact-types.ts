@@ -13,6 +13,10 @@
 import { extname } from 'path'
 import { readFileSync } from 'fs'
 import { GoogleGenerativeAI } from '@google/generative-ai'
+// Import the library entry directly, not the package root: pdf-parse's index.js
+// runs a debug harness that reads a bundled test PDF when `!module.parent`,
+// which throws ENOENT in some runtimes. The lib entry is the pure parser.
+import pdfParse, { type PdfParseResult } from 'pdf-parse/lib/pdf-parse.js'
 import { chunkText } from './vector-store'
 import { getConfig } from './config'
 
@@ -152,14 +156,33 @@ registerArtifactType({
   mimes: ['application/pdf'],
   exts: ['pdf'],
   chunk: chunkText,
-  extractText: async () => {
-    // No PDF parser is installed (pdf-parse / pdfjs-dist absent from package.json).
-    // Per C0 constraints we do NOT auto-install; import still stores the file and
-    // records this NOT_AVAILABLE note on the artifact. C1 wires a real extractor.
-    throw new ArtifactExtractionError(
-      'NOT_AVAILABLE',
-      'PDF text extraction requires pdf-parse or pdfjs-dist, which are not installed. The file was imported without extracted text.'
-    )
+  extractText: async (filePath, buffer) => {
+    const data = buffer ?? readFileSync(filePath)
+
+    let parsed: PdfParseResult
+    try {
+      parsed = await pdfParse(data)
+    } catch (e) {
+      // Encrypted/password-protected PDFs (pdf.js throws a PasswordException) and
+      // otherwise-malformed files must NOT crash the import. Surface a typed error
+      // so the service stores the file with empty text + an extractionError note.
+      const message = e instanceof Error ? e.message : String(e)
+      const code = /password|encrypt/i.test(message) ? 'ENCRYPTED' : 'PARSE_FAILED'
+      throw new ArtifactExtractionError(code, `PDF text extraction failed (${code}): ${message}`)
+    }
+
+    const text = (parsed.text ?? '').trim()
+    const info = (parsed.info ?? {}) as Record<string, unknown>
+    const metadata: Record<string, unknown> = { pageCount: parsed.numpages, source: 'pdf-parse' }
+
+    const title = info.Title
+    if (typeof title === 'string' && title.trim()) metadata.title = title.trim()
+
+    // A page count with no text is the signature of a scanned/image-only PDF —
+    // record that so the empty extraction is explainable rather than looking broken.
+    if (!text) metadata.note = 'no extractable text (likely a scanned or image-only PDF)'
+
+    return { text, metadata }
   }
 })
 

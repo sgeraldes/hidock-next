@@ -5,7 +5,7 @@
  * and listener management.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest'
 import type { ActivityLogEntry } from '../hidock-device'
 
 // Mock jensen module
@@ -48,6 +48,29 @@ vi.mock('../../utils/timeout', () => ({
 vi.mock('../qa-monitor', () => ({
   shouldLogQa: vi.fn(() => false)
 }))
+
+// The device service logs verbosely and keeps timers/promises running that emit
+// console output asynchronously — sometimes after a test has finished, while the
+// worker is tearing down. Those late messages were still in flight when the RPC
+// channel closed, surfacing as noisy
+// "Closing rpc while onUserConsoleLog was pending" (EnvironmentTeardownError)
+// lines under parallel workers.
+//
+// Silence the service's own console output for the ENTIRE file lifetime (not just
+// per-test) so no message is ever forwarded to the worker RPC, including during
+// inter-test async work and teardown. Tests that assert on console.error re-spy
+// it themselves; those spies still record calls on top of these no-op stubs and
+// restore back to them (never to the real console) when done.
+const SILENCED_CONSOLE_METHODS = ['log', 'info', 'warn', 'debug', 'error'] as const
+const silencedConsoleSpies: Array<ReturnType<typeof vi.spyOn>> = []
+beforeAll(() => {
+  for (const method of SILENCED_CONSOLE_METHODS) {
+    silencedConsoleSpies.push(vi.spyOn(console, method).mockImplementation(() => {}))
+  }
+})
+afterAll(() => {
+  silencedConsoleSpies.forEach((spy) => spy.mockRestore())
+})
 
 describe('HiDockDeviceService - Activity Log Historical Replay', () => {
   let HiDockDeviceService: any
