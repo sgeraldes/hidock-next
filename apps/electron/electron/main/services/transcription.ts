@@ -103,6 +103,7 @@ import {
   removeFromQueueByRecordingId,
   cancelPendingTranscriptions,
   run,
+  runInTransaction,
   queryOne,
   queryAll,
   acquireTranscriptionLock,
@@ -476,7 +477,15 @@ Only include detections with confidence >= 0.6.`
     const genAI = new GoogleGenerativeAI(config.transcription.geminiApiKey)
     const model = genAI.getGenerativeModel({ model: config.transcription.geminiModel || 'gemini-3.5-flash' })
 
-    const result = await model.generateContent(prompt)
+    // JSON-forced + no thinking, same hardening as the analysis call
+    const result = await model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        maxOutputTokens: 8192,
+        responseMimeType: 'application/json',
+        thinkingConfig: { thinkingBudget: 0 }
+      } as never
+    })
     const responseText = result.response.text()
 
     // Extract JSON from response (might be wrapped in markdown code blocks)
@@ -905,16 +914,187 @@ Respond in JSON format:
   "selection_reason": "..."` : ''}
 }`
 
-  const analysisResult = await model.generateContent(analysisPrompt)
-  const analysisText = analysisResult.response.text()
+  // Two-attempt strategy. Attempt 1 forces JSON output and disables thinking:
+  // the thinking model intermittently burns its output budget on reasoning and
+  // returns junk (observed: analysis titled "Transcripción no proporcionada"
+  // for a complete 7.5k-word transcript). Attempt 2 (only if the first yields
+  // unparseable output — seen on large real transcripts where responseMime="json"
+  // silently produces an empty/truncated body) drops responseMimeType and parses
+  // a fenced or brace-matched block from plain text.
+  const attempts: Array<{ label: string; generationConfig: Record<string, unknown> }> = [
+    {
+      label: 'json-mime',
+      generationConfig: {
+        maxOutputTokens: 8192,
+        responseMimeType: 'application/json',
+        thinkingConfig: { thinkingBudget: 0 }
+      }
+    },
+    {
+      label: 'plain-text-fallback',
+      generationConfig: {
+        maxOutputTokens: 8192,
+        thinkingConfig: { thinkingBudget: 0 }
+      }
+    }
+  ]
 
-  try {
-    const jsonMatch = analysisText.match(/\{[\s\S]*\}/)
-    return jsonMatch ? JSON.parse(jsonMatch[0]) : {}
-  } catch (e) {
-    console.warn('Failed to parse analysis JSON:', e)
-    return { summary: 'Analysis failed', language: 'unknown' }
+  for (const attempt of attempts) {
+    try {
+      const analysisResult = await model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }],
+        generationConfig: attempt.generationConfig as never
+      })
+      const response = analysisResult.response
+      let analysisText = ''
+      try {
+        analysisText = response.text()
+      } catch {
+        // .text() throws when the candidate carries no text part (e.g. blocked
+        // or MAX_TOKENS with no content) — treat as empty and log diagnostics.
+        analysisText = ''
+      }
+
+      const parsed = extractAnalysisJson(analysisText)
+      if (parsed) return parsed
+
+      // Parse miss — surface why so the failure isn't invisible.
+      logAnalysisFailure(attempt.label, response, analysisText)
+    } catch (e) {
+      console.warn(`[Analysis] Gemini call failed (${attempt.label}):`, e instanceof Error ? e.message : e)
+    }
   }
+
+  return { summary: 'Analysis failed', language: 'unknown' }
+}
+
+/**
+ * Extract the analysis object from a Gemini response body. Tolerates a
+ * ```json fenced block, any fenced block, or a bare brace-matched object
+ * (the plain-text fallback and the JSON-mime path both flow through here).
+ */
+function extractAnalysisJson(text: string): TranscriptAnalysis | null {
+  if (!text) return null
+  const fencedInner = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
+  const candidates = [
+    fencedInner,
+    fencedInner?.match(/\{[\s\S]*\}/)?.[0],
+    text.match(/\{[\s\S]*\}/)?.[0]
+  ].filter((c): c is string => Boolean(c))
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate) as TranscriptAnalysis
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return null
+}
+
+/**
+ * Log the diagnostics that make an otherwise-silent analysis failure
+ * debuggable: the model's finishReason, token usage, and the head of the
+ * response body (the three things missing when a real transcript produced
+ * `{ summary: 'Analysis failed' }`).
+ */
+function logAnalysisFailure(label: string, response: unknown, text: string): void {
+  const r = response as {
+    candidates?: Array<{ finishReason?: string }>
+    usageMetadata?: unknown
+  }
+  const finishReason = r?.candidates?.[0]?.finishReason ?? 'unknown'
+  const usage = r?.usageMetadata ? JSON.stringify(r.usageMetadata) : 'n/a'
+  console.warn(
+    `[Analysis] Failed to parse Gemini analysis (${label}): finishReason=${finishReason}, ` +
+    `usage=${usage}, text[0:300]=${JSON.stringify((text || '').slice(0, 300))}`
+  )
+}
+
+/**
+ * Self-healing backfill: find transcripts whose analysis never completed — the
+ * 'Analysis failed' sentinel, or a NULL summary/title from an older build — and
+ * re-run the Gemini analysis on the stored full_text. Analysis normally runs
+ * only once, at transcription time, so without this a transient Gemini failure
+ * leaves a transcript with junk analysis (filename-slug wiki titles, skipped
+ * actionables) forever. Bounded to `limit` rows per run to keep API cost
+ * predictable. Returns the number of transcripts actually healed.
+ */
+export async function reanalyzeFailedTranscripts(limit = 3): Promise<number> {
+  const config = getConfig()
+  if (!config.transcription.geminiApiKey) {
+    // No Gemini key → re-analysis can't produce anything better; skip rather
+    // than churn the same rows every run.
+    return 0
+  }
+
+  const rows = queryAll<{ recording_id: string; full_text: string }>(
+    `SELECT recording_id, full_text FROM transcripts
+     WHERE (summary IS NULL OR summary = 'Analysis failed' OR title_suggestion IS NULL)
+       AND full_text IS NOT NULL AND TRIM(full_text) != ''
+     ORDER BY created_at DESC
+     LIMIT ?`,
+    [limit]
+  )
+  if (rows.length === 0) return 0
+
+  console.log(`[Reanalyze] Re-running analysis for ${rows.length} transcript(s) with failed/missing analysis`)
+
+  let healed = 0
+  for (const row of rows) {
+    try {
+      // Re-run with no candidate meetings — backfill only heals the analysis
+      // fields; meeting matching already ran (or will re-run) elsewhere.
+      const analysis = await analyzeTranscriptWithGemini(row.full_text, [])
+
+      // Still failing — don't overwrite with the sentinel again.
+      if (!analysis.summary || analysis.summary === 'Analysis failed') {
+        console.warn(`[Reanalyze] Analysis still failing for ${row.recording_id}, leaving row as-is`)
+        continue
+      }
+
+      // Batch this transcript's field updates into a single transaction
+      // (sql.js discipline — never loop bare run() for multiple writes).
+      runInTransaction(() => {
+        run(
+          `UPDATE transcripts SET
+             summary = ?, action_items = ?, topics = ?, key_points = ?,
+             title_suggestion = ?, question_suggestions = ?, language = ?
+           WHERE recording_id = ?`,
+          [
+            analysis.summary ?? null,
+            analysis.action_items ? JSON.stringify(analysis.action_items) : null,
+            analysis.topics ? JSON.stringify(analysis.topics) : null,
+            analysis.key_points ? JSON.stringify(analysis.key_points) : null,
+            analysis.title_suggestion ?? null,
+            analysis.question_suggestions ? JSON.stringify(analysis.question_suggestions) : null,
+            analysis.language ?? 'unknown',
+            row.recording_id
+          ]
+        )
+      })
+
+      if (analysis.title_suggestion) {
+        updateKnowledgeCaptureTitle(row.recording_id, analysis.title_suggestion)
+      }
+
+      // Re-export the wiki page from the now-healed row (new file name may
+      // differ from any earlier filename-slug page; acceptable). Non-fatal.
+      try {
+        const { exportMeetingWiki } = await import('./meeting-wiki')
+        const wikiPath = exportMeetingWiki(row.recording_id)
+        if (wikiPath) console.log(`[Reanalyze] Re-exported wiki ${wikiPath}`)
+      } catch (e) {
+        console.error('[Reanalyze] Wiki re-export failed:', e)
+      }
+
+      healed++
+      console.log(`[Reanalyze] Healed transcript ${row.recording_id}: "${analysis.title_suggestion ?? '(no title)'}"`)
+    } catch (e) {
+      console.error(`[Reanalyze] Failed to reanalyze ${row.recording_id}:`, e instanceof Error ? e.message : e)
+    }
+  }
+
+  return healed
 }
 
 async function transcribeRecording(

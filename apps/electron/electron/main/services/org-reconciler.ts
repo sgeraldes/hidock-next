@@ -307,12 +307,182 @@ export function applyTranscriptEntities(opts: {
   return { contacts, projectLinked }
 }
 
+interface DuplicateRecordingRow {
+  id: string
+  filename: string
+  file_path?: string | null
+  created_at?: string | null
+  on_device?: number | null
+  on_local?: number | null
+  meeting_id?: string | null
+  /** Whether a transcript row points at this recording. */
+  hasTranscript?: boolean
+}
+
+/** Strip a recording audio extension so .hda/.wav/.mp3/.m4a variants group together. */
+function baseRecordingName(filename: string): string {
+  return (filename || '').replace(/\.(hda|wav|mp3|m4a)$/i, '')
+}
+
+/**
+ * Choose which row in a duplicate group to keep. Preference order:
+ *   1. has a transcript (most expensive to recreate)
+ *   2. .wav filename (the downloaded/played format the UI prefers)
+ *   3. file_path set (an actual local file exists)
+ *   4. most recent created_at
+ * Pure so the selection rules can be unit-tested without a database.
+ */
+export function pickKeeperRecording<T extends DuplicateRecordingRow>(rows: T[]): T {
+  const isWav = (r: T) => /\.wav$/i.test(r.filename || '')
+  const hasPath = (r: T) => !!(r.file_path && r.file_path.length > 0)
+  return [...rows].sort((a, b) => {
+    const at = a.hasTranscript ? 1 : 0
+    const bt = b.hasTranscript ? 1 : 0
+    if (at !== bt) return bt - at
+    const aw = isWav(a) ? 1 : 0
+    const bw = isWav(b) ? 1 : 0
+    if (aw !== bw) return bw - aw
+    const ap = hasPath(a) ? 1 : 0
+    const bp = hasPath(b) ? 1 : 0
+    if (ap !== bp) return bp - ap
+    const ac = a.created_at || ''
+    const bc = b.created_at || ''
+    if (ac !== bc) return ac < bc ? 1 : -1
+    return 0
+  })[0]
+}
+
+/**
+ * Collapse legacy duplicate recordings — rows for the same audio that predate
+ * markRecordingDownloaded() becoming extension-variant-aware (e.g. a .hda row
+ * and a .wav row for the same take, both with file_path set). The Library
+ * showed the meeting twice and batch transcription paid to transcribe it twice.
+ *
+ * For each base-filename group with more than one row we pick a keeper (see
+ * pickKeeperRecording), repoint child rows off the losers, fold the losers'
+ * lifecycle flags onto the keeper, and delete the loser rows — all in ONE
+ * transaction so the whole sql.js DB is persisted once, not per row.
+ */
+export function mergeDuplicateRecordings(): number {
+  const recordings = queryAll<DuplicateRecordingRow>(
+    `SELECT id, filename, file_path, created_at, on_device, on_local, meeting_id FROM recordings`
+  )
+  if (recordings.length === 0) return 0
+
+  // Which recordings already have a transcript — drives keeper selection.
+  const withTranscript = new Set(
+    queryAll<{ recording_id: string }>(`SELECT recording_id FROM transcripts`).map((t) => t.recording_id)
+  )
+
+  const groups = new Map<string, DuplicateRecordingRow[]>()
+  for (const rec of recordings) {
+    const key = baseRecordingName(rec.filename || rec.id).toLowerCase()
+    const list = groups.get(key)
+    if (list) list.push(rec)
+    else groups.set(key, [rec])
+  }
+
+  const dupGroups = [...groups.values()].filter((g) => g.length > 1)
+  if (dupGroups.length === 0) return 0
+
+  // vector_embeddings is created lazily by the vector store and may not exist
+  // yet; skip it rather than blowing up the whole transaction on a fresh DB.
+  const existingTables = new Set(
+    queryAll<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table'`).map((r) => r.name)
+  )
+
+  let mergedGroups = 0
+  let removedRows = 0
+
+  runInTransaction(() => {
+    for (const group of dupGroups) {
+      const rows = group.map((r) => ({ ...r, hasTranscript: withTranscript.has(r.id) }))
+      const keeper = pickKeeperRecording(rows)
+      const losers = rows.filter((r) => r.id !== keeper.id)
+      if (losers.length === 0) continue
+
+      // Keeper selection sorts transcript-holders first, so the keeper already
+      // owns a transcript whenever the group has one; the repoint branch below
+      // is defensive for the inverse case only.
+      let keeperHasTranscript = keeper.hasTranscript === true
+
+      for (const loser of losers) {
+        if (loser.hasTranscript) {
+          // transcripts.recording_id is UNIQUE and the PK is `trans_<recordingId>`.
+          if (keeperHasTranscript) {
+            run(`DELETE FROM transcripts WHERE recording_id = ?`, [loser.id])
+          } else {
+            run(`UPDATE transcripts SET id = ?, recording_id = ? WHERE recording_id = ?`, [
+              `trans_${keeper.id}`,
+              keeper.id,
+              loser.id
+            ])
+            keeperHasTranscript = true
+          }
+        }
+
+        run(`UPDATE transcription_queue SET recording_id = ? WHERE recording_id = ?`, [keeper.id, loser.id])
+        // candidates are UNIQUE(recording_id, meeting_id) — move what won't
+        // collide with the keeper's rows, then drop any leftover collisions.
+        run(`UPDATE OR IGNORE recording_meeting_candidates SET recording_id = ? WHERE recording_id = ?`, [
+          keeper.id,
+          loser.id
+        ])
+        run(`DELETE FROM recording_meeting_candidates WHERE recording_id = ?`, [loser.id])
+        if (existingTables.has('vector_embeddings')) {
+          run(`UPDATE vector_embeddings SET recording_id = ? WHERE recording_id = ?`, [keeper.id, loser.id])
+        }
+        run(`UPDATE knowledge_captures SET source_recording_id = ? WHERE source_recording_id = ?`, [
+          keeper.id,
+          loser.id
+        ])
+      }
+
+      // Fold lifecycle flags onto the keeper: a merged take is on-device/on-local
+      // if ANY variant was, and keeps a meeting link / local file if one exists.
+      const onDevice = rows.some((r) => (r.on_device ?? 0) === 1) ? 1 : 0
+      const onLocal = rows.some((r) => (r.on_local ?? 0) === 1) ? 1 : 0
+      const meetingId = keeper.meeting_id ?? rows.find((r) => r.meeting_id)?.meeting_id ?? null
+      const wavPath = rows.find((r) => /\.wav$/i.test(r.filename || '') && r.file_path)?.file_path
+      const filePath = keeper.file_path ?? wavPath ?? rows.find((r) => r.file_path)?.file_path ?? null
+      // Keep the location badge consistent with the merged on_device/on_local flags.
+      const location =
+        onDevice && onLocal ? 'both' : onDevice ? 'device-only' : onLocal ? 'local-only' : 'deleted'
+
+      run(`UPDATE recordings SET on_device = ?, on_local = ?, meeting_id = ?, file_path = ?, location = ? WHERE id = ?`, [
+        onDevice,
+        onLocal,
+        meetingId,
+        filePath,
+        location,
+        keeper.id
+      ])
+
+      for (const loser of losers) {
+        run(`DELETE FROM recordings WHERE id = ?`, [loser.id])
+        removedRows++
+      }
+      mergedGroups++
+    }
+  })
+
+  if (mergedGroups > 0) {
+    console.log(`[OrgReconciler] Merged ${mergedGroups} duplicate recording groups (removed ${removedRows} rows)`)
+  }
+  return mergedGroups
+}
+
 /** Full reconciliation pass — run after calendar syncs and at startup. */
 export function reconcileOrganization(): void {
   try {
     repairEscapedMeetingText()
   } catch (e) {
     console.error('[OrgReconciler] text repair failed:', e)
+  }
+  try {
+    mergeDuplicateRecordings()
+  } catch (e) {
+    console.error('[OrgReconciler] duplicate recording merge failed:', e)
   }
   try {
     autoLinkRecordingsToMeetings()

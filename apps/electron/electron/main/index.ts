@@ -305,6 +305,15 @@ app.whenReady().then(async () => {
       .catch((e) => console.error('[OrgReconciler] error:', e))
   }, 8000)
 
+  // Self-heal transcripts whose Gemini analysis failed (or was never run on an
+  // older build) by re-analysing the stored full_text. Bounded per run to keep
+  // API cost predictable. Deferred so startup stays fast.
+  setTimeout(() => {
+    import('./services/transcription')
+      .then(({ reanalyzeFailedTranscripts }) => reanalyzeFailedTranscripts())
+      .catch((e) => console.error('[Reanalyze] Backfill error:', e))
+  }, 20000)
+
   // Show security warning in production when remote debugging is explicitly enabled
   if (!is.dev && process.env.ENABLE_REMOTE_DEBUGGING === 'true' && mainWindow) {
     // Wait for window to be ready before sending the warning
