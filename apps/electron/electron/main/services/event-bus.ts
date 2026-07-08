@@ -69,6 +69,14 @@ export interface ArtifactReadyEvent extends DomainEvent {
   }
 }
 
+/** A calendar sync finished successfully — meeting-list surfaces should refetch. */
+export interface CalendarSyncedEvent extends DomainEvent {
+  type: 'calendar:synced'
+  payload: {
+    meetingsCount: number
+  }
+}
+
 export type KnownDomainEvent =
   | QualityAssessedEvent
   | StorageTierAssignedEvent
@@ -76,6 +84,7 @@ export type KnownDomainEvent =
   | ContactChangedEvent
   | TranscriptReadyEvent
   | ArtifactReadyEvent
+  | CalendarSyncedEvent
 
 /**
  * Sanitize event payload before broadcasting to renderer process

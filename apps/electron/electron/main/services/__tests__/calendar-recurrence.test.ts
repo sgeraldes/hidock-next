@@ -82,6 +82,31 @@ describe('expandMeetingOccurrences', () => {
     expect(rows).toHaveLength(97)
   })
 
+  it('re-anchors an all-day (VALUE=DATE) event to LOCAL midnight and flags it', () => {
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:holiday@example.com',
+      'SUMMARY:Feriado',
+      'DTSTART;VALUE=DATE:20260709',
+      'DTEND;VALUE=DATE:20260710',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n')
+
+    const rows = expandMeetingOccurrences(parseICS(ics), now)
+    expect(rows).toHaveLength(1)
+    const row = rows[0]
+    // Flag + timezone-independent named date.
+    expect(row.is_all_day).toBe(1)
+    expect(row.all_day_date).toBe('2026-07-09')
+    // start_time is LOCAL midnight of Jul 9 (not UTC midnight, which would be
+    // Jul 8 21:00 in a negative-offset zone and leak onto the wrong day).
+    expect(row.start_time).toBe(new Date(2026, 6, 9).toISOString())
+    expect(row.end_time).toBe(new Date(2026, 6, 10).toISOString())
+  })
+
   it('keeps the master-DTSTART occurrence keyed on the bare uid (back-compat)', () => {
     const rows = expandMeetingOccurrences(parseICS(dailyIcs()), now)
 

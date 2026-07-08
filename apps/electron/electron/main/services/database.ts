@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 31
+const SCHEMA_VERSION = 32
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS meetings (
     is_recurring INTEGER DEFAULT 0,
     recurrence_rule TEXT,
     meeting_url TEXT,
+    is_all_day INTEGER DEFAULT 0,
+    all_day_date TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -1731,6 +1733,33 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v31] recording_preassignments failed:', e)
     }
     console.log('Migration v31 complete')
+  },
+
+  32: () => {
+    // v32: all-day / holiday events. is_all_day flags a calendar-DATE event;
+    // all_day_date is its timezone-independent named day (YYYY-MM-DD) so the UI
+    // matches by local calendar date rather than the stored UTC instant.
+    console.log('Running migration to schema v32: meetings.is_all_day + all_day_date')
+    const database = getDatabase()
+    const info = database.exec('PRAGMA table_info(meetings)')
+    if (info.length > 0 && info[0].values) {
+      const columns = info[0].values.map((row: any) => row[1])
+      if (!columns.includes('is_all_day')) {
+        try {
+          database.run('ALTER TABLE meetings ADD COLUMN is_all_day INTEGER DEFAULT 0')
+        } catch (e) {
+          console.warn('[Migration v32] add is_all_day failed:', e)
+        }
+      }
+      if (!columns.includes('all_day_date')) {
+        try {
+          database.run('ALTER TABLE meetings ADD COLUMN all_day_date TEXT')
+        } catch (e) {
+          console.warn('[Migration v32] add all_day_date failed:', e)
+        }
+      }
+    }
+    console.log('Migration v32 complete')
   }
 
 }
@@ -1742,6 +1771,23 @@ const MIGRATIONS: Record<number, () => void> = {
  */
 function repairPhase(): void {
   const database = getDatabase()
+
+  // Repair Meetings (v32): all-day flag + named calendar date. Force-add so an
+  // older on-disk schema that skipped the migration still gets the columns
+  // before any calendar-sync write. Idempotent.
+  const meetingCols = getTableColumns(database, 'meetings')
+  const meetingRepairs = [
+    { name: 'is_all_day', def: 'INTEGER DEFAULT 0' },
+    { name: 'all_day_date', def: 'TEXT' }
+  ]
+  if (meetingCols.length > 0) {
+    for (const col of meetingRepairs) {
+      if (!meetingCols.includes(col.name)) {
+        console.log(`[Database] Repairing meetings: adding ${col.name}`)
+        try { database.run(`ALTER TABLE meetings ADD COLUMN ${col.name} ${col.def}`) } catch (e) {}
+      }
+    }
+  }
 
   // Repair Recordings
   const recCols = getTableColumns(database, 'recordings')
@@ -2093,7 +2139,7 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             subject = ?, start_time = ?, end_time = ?, location = ?,
             organizer_name = ?, organizer_email = ?, attendees = ?,
             description = ?, is_recurring = ?, recurrence_rule = ?,
-            meeting_url = ?, updated_at = CURRENT_TIMESTAMP
+            meeting_url = ?, is_all_day = ?, all_day_date = ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ?`,
           [
             meeting.subject,
@@ -2107,14 +2153,17 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             meeting.is_recurring,
             meeting.recurrence_rule ?? null,
             meeting.meeting_url ?? null,
+            meeting.is_all_day ?? 0,
+            meeting.all_day_date ?? null,
             meeting.id
           ]
         )
       } else {
         runNoSave(
           `INSERT INTO meetings (id, subject, start_time, end_time, location, organizer_name,
-            organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url,
+            is_all_day, all_day_date)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             meeting.id,
             meeting.subject,
@@ -2127,7 +2176,9 @@ export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'upda
             meeting.description ?? null,
             meeting.is_recurring,
             meeting.recurrence_rule ?? null,
-            meeting.meeting_url ?? null
+            meeting.meeting_url ?? null,
+            meeting.is_all_day ?? 0,
+            meeting.all_day_date ?? null
           ]
         )
       }
@@ -2151,6 +2202,10 @@ export interface Meeting {
   is_recurring: number
   recurrence_rule?: string
   meeting_url?: string
+  /** 1 for a calendar-DATE (all-day/holiday) event, 0 otherwise (v32). */
+  is_all_day?: number
+  /** Named calendar day (YYYY-MM-DD) for all-day events; null for timed (v32). */
+  all_day_date?: string | null
   created_at: string
   updated_at: string
 }
@@ -2244,7 +2299,7 @@ export function upsertMeeting(meeting: Omit<Meeting, 'created_at' | 'updated_at'
           subject = ?, start_time = ?, end_time = ?, location = ?,
           organizer_name = ?, organizer_email = ?, attendees = ?,
           description = ?, is_recurring = ?, recurrence_rule = ?,
-          meeting_url = ?, updated_at = CURRENT_TIMESTAMP
+          meeting_url = ?, is_all_day = ?, all_day_date = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?`,
         [
           meeting.subject,
@@ -2258,14 +2313,17 @@ export function upsertMeeting(meeting: Omit<Meeting, 'created_at' | 'updated_at'
           meeting.is_recurring,
           meeting.recurrence_rule ?? null,
           meeting.meeting_url ?? null,
+          meeting.is_all_day ?? 0,
+          meeting.all_day_date ?? null,
           meeting.id
         ]
       )
     } else {
       runNoSave(
         `INSERT INTO meetings (id, subject, start_time, end_time, location, organizer_name,
-          organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          organizer_email, attendees, description, is_recurring, recurrence_rule, meeting_url,
+          is_all_day, all_day_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           meeting.id,
           meeting.subject,
@@ -2278,7 +2336,9 @@ export function upsertMeeting(meeting: Omit<Meeting, 'created_at' | 'updated_at'
           meeting.description ?? null,
           meeting.is_recurring,
           meeting.recurrence_rule ?? null,
-          meeting.meeting_url ?? null
+          meeting.meeting_url ?? null,
+          meeting.is_all_day ?? 0,
+          meeting.all_day_date ?? null
         ]
       )
     }

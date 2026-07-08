@@ -70,6 +70,64 @@ describe('parseICS', () => {
     expect(events[1].title).toBe('Meeting 2')
   })
 
+  it('flags a VALUE=DATE all-day event and exposes its named calendar date', () => {
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:holiday@example.com',
+      'SUMMARY:Feriado',
+      'DTSTART;VALUE=DATE:20260709',
+      'DTEND;VALUE=DATE:20260710',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n')
+
+    const events = parseICS(ics)
+    expect(events).toHaveLength(1)
+    expect(events[0].isAllDay).toBe(true)
+    expect(events[0].allDayDate).toBe('2026-07-09')
+    // The instant is still UTC-midnight of the named day (electron re-anchors it
+    // to local midnight when it builds the DB row).
+    expect(events[0].startTime).toEqual(new Date(Date.UTC(2026, 6, 9)))
+  })
+
+  it('flags a bare-date (no VALUE param) DTSTART as all-day', () => {
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:bare-date@example.com',
+      'SUMMARY:All Day',
+      'DTSTART:20260709',
+      'DTEND:20260710',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n')
+
+    const events = parseICS(ics)
+    expect(events[0].isAllDay).toBe(true)
+    expect(events[0].allDayDate).toBe('2026-07-09')
+  })
+
+  it('does NOT flag a timed (date-time) event as all-day', () => {
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:timed@example.com',
+      'SUMMARY:Standup',
+      'DTSTART:20260709T140000Z',
+      'DTEND:20260709T150000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n')
+
+    const events = parseICS(ics)
+    expect(events[0].isAllDay).toBeUndefined()
+    expect(events[0].allDayDate).toBeUndefined()
+  })
+
   it('parses attendees with CN and mailto', () => {
     const ics = [
       'BEGIN:VCALENDAR',

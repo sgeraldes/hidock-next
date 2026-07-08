@@ -164,6 +164,29 @@ function parseICSDateTime(value: string): Date | null {
 }
 
 /**
+ * Detect an all-day DTSTART and return its named calendar date as `YYYY-MM-DD`.
+ *
+ * An event is all-day when DTSTART is a calendar DATE rather than a date-time:
+ * either it carries the `VALUE=DATE` parameter (RFC 5545 §3.8.2.4) or its value
+ * is a bare 8-digit `YYYYMMDD`. `VALUE=DATE-TIME` (note the hyphen) is explicitly
+ * NOT all-day. The input is the {@link extractDateValue} output, so it may be
+ * `PARAM=...:value` or a bare value. Returns null for timed events.
+ */
+function parseAllDayDate(dtstartValue: string): string | null {
+  let params = ''
+  let value = dtstartValue
+  const colonIdx = value.indexOf(':')
+  if (colonIdx !== -1 && value.substring(0, colonIdx).includes('=')) {
+    params = value.substring(0, colonIdx)
+    value = value.substring(colonIdx + 1)
+  }
+  const isDateValue = /VALUE=DATE(?!-)/i.test(params) || /^\d{8}$/.test(value)
+  if (!isDateValue) return null
+  const m = /^(\d{4})(\d{2})(\d{2})/.exec(value)
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null
+}
+
+/**
  * Extract the email address from an ICS property value containing a mailto:.
  */
 function extractMailto(fullLine: string): string | undefined {
@@ -331,6 +354,7 @@ export function parseICS(icsContent: string): CalendarEvent[] {
       const endDate = dtend ? parseICSDateTime(dtend) : null
 
       if (uid && startDate && endDate) {
+        const allDayDate = dtstart ? parseAllDayDate(dtstart) : null
         const event: CalendarEvent = {
           uid,
           title: title || '',
@@ -340,6 +364,10 @@ export function parseICS(icsContent: string): CalendarEvent[] {
           ...(location !== undefined && { location }),
           ...(description !== undefined && { description }),
           ...(organizer !== undefined && { organizer }),
+        }
+        if (allDayDate) {
+          event.isAllDay = true
+          event.allDayDate = allDayDate
         }
         if (recurrence !== undefined) {
           event.isRecurring = true

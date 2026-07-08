@@ -43,6 +43,32 @@ export interface TimeableMeeting {
   subject: string | null
   start_time: string
   end_time: string
+  /** 1 for an all-day / calendar-DATE event (v32); authoritative over the span heuristic. */
+  is_all_day?: number | boolean | null
+  /** Named calendar day (YYYY-MM-DD) for all-day events; timezone-independent (v32). */
+  all_day_date?: string | null
+}
+
+/** Local calendar date (`YYYY-MM-DD`) for a Date, in the viewer's timezone. */
+export function localDateString(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+/**
+ * Whether an all-day meeting belongs to the given local day. Prefers the
+ * timezone-independent `all_day_date` (the ICS-named day); falls back to the
+ * stored start instant's local date for legacy rows written before v32.
+ */
+export function allDayMeetingOnLocalDate(
+  m: { all_day_date?: string | null; start_time: string },
+  day: Date
+): boolean {
+  const target = localDateString(day)
+  if (m.all_day_date) return m.all_day_date === target
+  return localDateString(new Date(m.start_time)) === target
 }
 
 /**
@@ -103,7 +129,9 @@ export function classifyMeetingTimings<T extends TimeableMeeting>(
 
     // All-day events are never timed context: excluded from focus/next-up and the
     // upcoming/running pools, so they can't become the highlighted "what's next".
-    if (isAllDayMeeting(m.start_time, m.end_time)) {
+    // The explicit v32 flag is authoritative; the span heuristic is a fallback
+    // for legacy rows written before it existed.
+    if (m.is_all_day || isAllDayMeeting(m.start_time, m.end_time)) {
       result.set(m.id, { state: 'all_day', minutes: 0, isFocus: false, isNextUp: false })
       continue
     }

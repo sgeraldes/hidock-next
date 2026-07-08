@@ -4,6 +4,8 @@ import {
   isCancelledSubject,
   isAllDayMeeting,
   recordingOverlapsMeeting,
+  allDayMeetingOnLocalDate,
+  localDateString,
   formatMinutesUntil,
   formatMinutesLeft,
   formatMinutesSinceEnd,
@@ -188,6 +190,39 @@ describe('isAllDayMeeting', () => {
 
   it('returns false for unparseable timestamps', () => {
     expect(isAllDayMeeting('nope', 'nope')).toBe(false)
+  })
+
+  it('honors an explicit is_all_day flag over the span heuristic', () => {
+    // A short span that the heuristic would call timed, but the parser flagged
+    // all-day (e.g. a DATE value the feed emitted as a 1h block) is all-day.
+    const meetings: TimeableMeeting[] = [
+      { id: 'flagged', subject: 'Holiday', start_time: '2026-07-08T00:00:00Z', end_time: '2026-07-08T01:00:00Z', is_all_day: 1 }
+    ]
+    expect(classifyMeetingTimings(meetings, now).get('flagged')?.state).toBe('all_day')
+  })
+})
+
+describe('allDayMeetingOnLocalDate', () => {
+  it("matches tomorrow's holiday to tomorrow, NOT today (the Feriado leak)", () => {
+    // Jul-9 holiday stored at local midnight; named date Jul-9.
+    const holiday = { all_day_date: '2026-07-09', start_time: new Date(2026, 6, 9).toISOString() }
+    const jul8 = new Date(2026, 6, 8, 10, 0, 0)
+    const jul9 = new Date(2026, 6, 9, 10, 0, 0)
+    expect(allDayMeetingOnLocalDate(holiday, jul8)).toBe(false)
+    expect(allDayMeetingOnLocalDate(holiday, jul9)).toBe(true)
+  })
+
+  it('falls back to the local start date for legacy rows without all_day_date', () => {
+    const legacy = { start_time: new Date(2026, 6, 9).toISOString() }
+    expect(allDayMeetingOnLocalDate(legacy, new Date(2026, 6, 9))).toBe(true)
+    expect(allDayMeetingOnLocalDate(legacy, new Date(2026, 6, 8))).toBe(false)
+  })
+})
+
+describe('localDateString', () => {
+  it('formats a Date as YYYY-MM-DD in local time', () => {
+    expect(localDateString(new Date(2026, 6, 9, 23, 59))).toBe('2026-07-09')
+    expect(localDateString(new Date(2026, 0, 1, 0, 0))).toBe('2026-01-01')
   })
 })
 

@@ -32,6 +32,7 @@ import {
   formatMinutesUntil,
   formatMinutesSinceEnd,
   recordingOverlapsMeeting,
+  allDayMeetingOnLocalDate,
   type RecordingSpan
 } from '@/lib/meeting-timing'
 import type { Contact } from '@/types'
@@ -47,6 +48,8 @@ interface BriefingMeeting {
   description?: string
   meeting_url?: string
   organizer_name?: string
+  is_all_day?: number
+  all_day_date?: string | null
 }
 
 /** A meeting is "online" when it carries a join URL or a Teams/Zoom-style location. */
@@ -167,6 +170,28 @@ export function Today() {
     load()
   }, [load])
 
+  // Refetch the briefing when a calendar sync completes. The briefing loads once
+  // on mount, so a boot/background sync (which lands new meetings in the DB) would
+  // otherwise leave this page showing the pre-sync list. Multiple syncs in quick
+  // succession are debounced into a single reload.
+  useEffect(() => {
+    const onDomainEvent = window.electronAPI?.onDomainEvent
+    if (!onDomainEvent) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const unsubscribe = onDomainEvent((event: { type?: string }) => {
+      if (event?.type !== 'calendar:synced') return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        load()
+      }, 300)
+    })
+    return () => {
+      if (timer) clearTimeout(timer)
+      unsubscribe?.()
+    }
+  }, [load])
+
   // Fetch known participants for today's meetings once per briefing load, in
   // parallel and tolerant of failures (empty results simply hide the line).
   const todayMeetings = data?.todayMeetings
@@ -264,7 +289,12 @@ export function Today() {
 
   // Split all-day / holiday events out of the timed list — they render as a slim
   // banner, never as time-ranged rows (and never steal the "what's next" highlight).
-  const allDayMeetings = (data?.todayMeetings ?? []).filter((m) => timings.get(m.id)?.state === 'all_day')
+  // All-day events name a calendar DAY, so they must match TODAY by local calendar
+  // date — a stored UTC instant would otherwise leak tomorrow's holiday into today
+  // (or push today's onto yesterday) in any non-UTC timezone.
+  const allDayMeetings = (data?.todayMeetings ?? []).filter(
+    (m) => timings.get(m.id)?.state === 'all_day' && allDayMeetingOnLocalDate(m, now)
+  )
   const timedMeetings = (data?.todayMeetings ?? []).filter((m) => timings.get(m.id)?.state !== 'all_day')
 
   // When the device is recording, where did the current capture start? Used to
@@ -361,22 +391,6 @@ export function Today() {
               <p className="text-sm text-muted-foreground">No meetings scheduled today.</p>
             ) : (
               <div className="space-y-3">
-                {allDayMeetings.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-dashed bg-muted/30 px-3 py-2">
-                    <CalendarDays className="h-3.5 w-3.5 flex-shrink-0 text-foreground/50" aria-hidden="true" />
-                    <span className="text-[11px] font-semibold uppercase tracking-wide text-foreground/50">All day</span>
-                    {allDayMeetings.map((m, i) => (
-                      <Fragment key={m.id}>
-                        {i > 0 && (
-                          <span className="text-foreground/30" aria-hidden="true">
-                            ·
-                          </span>
-                        )}
-                        <span className="text-xs font-medium text-foreground/75">{m.subject}</span>
-                      </Fragment>
-                    ))}
-                  </div>
-                )}
                 {timedMeetings.length === 0 ? (
                   <p className="text-sm text-muted-foreground">No timed meetings today.</p>
                 ) : (
@@ -537,6 +551,22 @@ export function Today() {
                     <Fragment key={m.id}>{rowButton}</Fragment>
                   )
                 })}
+                  </div>
+                )}
+                {/* All-day / holiday context — placed below the schedule and kept
+                    subtle: it's background context for the day, not a timed slot. */}
+                {allDayMeetings.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 pt-1 text-foreground/45">
+                    <CalendarDays className="h-3 w-3 flex-shrink-0" aria-hidden="true" />
+                    <span className="text-[10px] font-semibold uppercase tracking-wide">All day</span>
+                    {allDayMeetings.map((m, i) => (
+                      <Fragment key={m.id}>
+                        {i > 0 && (
+                          <span aria-hidden="true">·</span>
+                        )}
+                        <span className="text-[11px] font-medium text-foreground/60">{m.subject}</span>
+                      </Fragment>
+                    ))}
                   </div>
                 )}
               </div>

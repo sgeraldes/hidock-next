@@ -31,6 +31,59 @@ vi.mock('../database', () => ({
   upsertMeetingsBatch: vi.fn(),
 }))
 
+// Mock the event bus so we can assert the calendar:synced broadcast.
+const { emitDomainEvent } = vi.hoisted(() => ({ emitDomainEvent: vi.fn() }))
+vi.mock('../event-bus', () => ({
+  getEventBus: () => ({ emitDomainEvent }),
+}))
+
+// Mock the side-effect modules syncCalendar dynamically imports.
+vi.mock('../activity-log', () => ({ emitActivityLog: vi.fn() }))
+vi.mock('../org-reconciler', () => ({ reconcileOrganization: vi.fn() }))
+vi.mock('fs/promises', () => ({ writeFile: vi.fn().mockResolvedValue(undefined) }))
+
+describe('syncCalendar — calendar:synced broadcast', () => {
+  let syncCalendar: typeof import('../calendar-sync').syncCalendar
+
+  beforeEach(async () => {
+    emitDomainEvent.mockClear()
+    const mod = await import('../calendar-sync')
+    syncCalendar = mod.syncCalendar
+  })
+
+  it('emits calendar:synced with the meeting count on a successful sync', async () => {
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'BEGIN:VEVENT',
+      'UID:evt-1@example.com',
+      'SUMMARY:Standup',
+      'DTSTART:20260708T140000Z',
+      'DTEND:20260708T150000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n')
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => ics }) as any
+
+    const result = await syncCalendar('https://calendar.example.com/test.ics')
+
+    expect(result.success).toBe(true)
+    expect(emitDomainEvent).toHaveBeenCalledTimes(1)
+    expect(emitDomainEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'calendar:synced', payload: { meetingsCount: result.meetingsCount } })
+    )
+  })
+
+  it('does NOT emit calendar:synced when the fetch fails', async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 500, statusText: 'Server Error' }) as any
+
+    const result = await syncCalendar('https://calendar.example.com/test.ics')
+
+    expect(result.success).toBe(false)
+    expect(emitDomainEvent).not.toHaveBeenCalled()
+  })
+})
+
 describe('categorizeCalendarError', () => {
   let categorizeCalendarError: typeof import('../calendar-sync').categorizeCalendarError
 

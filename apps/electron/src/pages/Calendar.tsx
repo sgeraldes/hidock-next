@@ -200,8 +200,8 @@ export function Calendar() {
     }
   }, [uiConfig, calendarConfig, setCalendarView, setLastCalendarSync])
 
-  // Load meetings when date or view changes
-  useEffect(() => {
+  // Compute the [start, end] ISO range covering the current view.
+  const computeViewRange = useCallback((): { startDate: string; endDate: string } => {
     let startDate: string
     let endDate: string
 
@@ -232,8 +232,36 @@ export function Calendar() {
       endDate = lastDate.toISOString()
     }
 
+    return { startDate, endDate }
+  }, [currentDate, calendarView])
+
+  // Load meetings when date or view changes
+  useEffect(() => {
+    const { startDate, endDate } = computeViewRange()
     loadMeetings(startDate, endDate)
-  }, [currentDate, calendarView, loadMeetings])
+  }, [computeViewRange, loadMeetings])
+
+  // Refetch when a calendar sync completes (boot/background sync lands new
+  // meetings in the DB; without this the view keeps showing the pre-sync list).
+  // Debounced so a burst of syncs triggers a single reload.
+  useEffect(() => {
+    const onDomainEvent = window.electronAPI?.onDomainEvent
+    if (!onDomainEvent) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const unsubscribe = onDomainEvent((event: { type?: string }) => {
+      if (event?.type !== 'calendar:synced') return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        const { startDate, endDate } = computeViewRange()
+        loadMeetings(startDate, endDate)
+      }, 300)
+    })
+    return () => {
+      if (timer) clearTimeout(timer)
+      unsubscribe?.()
+    }
+  }, [computeViewRange, loadMeetings])
 
   // Get dates for current view
   const viewDates = useMemo((): Date[] => {

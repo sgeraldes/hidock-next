@@ -229,6 +229,34 @@ function buildMeetingRow(
   event: CalendarEvent,
   overrides: { id: string; startTime: Date; endTime: Date; isRecurring: boolean; recurrenceRule?: string }
 ): Omit<Meeting, 'created_at' | 'updated_at'> {
+  // All-day handling: an all-day event names a calendar DAY, not an instant.
+  // The parser stores its DTSTART as UTC midnight of that named day, so a feed
+  // date like 2026-07-09 becomes 2026-07-09T00:00Z — which is the *previous*
+  // local day in any negative-offset timezone, leaking a holiday onto the wrong
+  // day. Re-anchor all-day rows to LOCAL midnight of the named date (derived
+  // from the slot's UTC Y/M/D, which equals the named day), and record both the
+  // is_all_day flag and the timezone-independent named date so the UI can match
+  // by local calendar date rather than by the stored instant.
+  let startIso = overrides.startTime.toISOString()
+  let endIso = overrides.endTime.toISOString()
+  let isAllDay = 0
+  let allDayDate: string | undefined
+  if (event.isAllDay) {
+    const y = overrides.startTime.getUTCFullYear()
+    const m = overrides.startTime.getUTCMonth()
+    const d = overrides.startTime.getUTCDate()
+    const spanDays = Math.max(
+      1,
+      Math.round((overrides.endTime.getTime() - overrides.startTime.getTime()) / DAY_MS)
+    )
+    startIso = new Date(y, m, d).toISOString()
+    endIso = new Date(y, m, d + spanDays).toISOString()
+    isAllDay = 1
+    allDayDate = `${y.toString().padStart(4, '0')}-${(m + 1).toString().padStart(2, '0')}-${d
+      .toString()
+      .padStart(2, '0')}`
+  }
+
   // Attendees: map CalendarAttendee[] → JSON string (DB stores as text)
   let attendeesJson: string | undefined
   if (event.attendees.length > 0) {
@@ -254,8 +282,8 @@ function buildMeetingRow(
   return {
     id: overrides.id,
     subject: event.title || 'Untitled Meeting',
-    start_time: overrides.startTime.toISOString(),
-    end_time: overrides.endTime.toISOString(),
+    start_time: startIso,
+    end_time: endIso,
     location: event.location ?? undefined,
     // Organizer restored from the package's parsed ORGANIZER property
     organizer_name: event.organizer?.name ?? undefined,
@@ -265,6 +293,8 @@ function buildMeetingRow(
     is_recurring: overrides.isRecurring ? 1 : 0,
     recurrence_rule: overrides.recurrenceRule ?? undefined,
     meeting_url: meetingUrl,
+    is_all_day: isAllDay,
+    all_day_date: allDayDate,
   }
 }
 
@@ -543,6 +573,21 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
 
     console.log(`Calendar sync complete: ${meetings.length} meetings`)
     emitActivityLog('success', 'Calendar sync complete', `Loaded ${meetings.length} meetings`)
+
+    // Signal the renderer that meetings changed so surfaces that loaded their
+    // meeting list once (Today briefing, Calendar view) can refetch. Without
+    // this, a boot/background sync silently leaves those views showing the
+    // pre-sync list. Non-fatal — a failed emit must never fail the sync.
+    try {
+      const { getEventBus } = await import('./event-bus')
+      getEventBus().emitDomainEvent({
+        type: 'calendar:synced',
+        timestamp: now,
+        payload: { meetingsCount: meetings.length }
+      })
+    } catch (emitError) {
+      console.error('Failed to emit calendar:synced event:', emitError)
+    }
 
     return {
       success: true,

@@ -18,6 +18,18 @@ export interface CalendarEvent {
   description?: string
   /** Event organizer (parsed from the ICS ORGANIZER property), if present. */
   organizer?: CalendarOrganizer
+  /**
+   * True when DTSTART is a calendar DATE (RFC 5545 `VALUE=DATE`, e.g. a holiday
+   * or full-day event) rather than a date-time. All-day events name a calendar
+   * day, not an instant, so they must be matched by local calendar date — never
+   * by the UTC instant they happen to be stored at.
+   */
+  isAllDay?: boolean
+  /**
+   * For an all-day event, the named calendar date in `YYYY-MM-DD` form (from the
+   * ICS DATE value, timezone-independent). Present only when {@link isAllDay}.
+   */
+  allDayDate?: string
   /** True when the event carries an RRULE (recurring series). */
   isRecurring?: boolean
   /** Raw RRULE string (e.g. "FREQ=WEEKLY;BYDAY=MO"), if present. */
