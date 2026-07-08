@@ -76,4 +76,27 @@ describe('TranscriptViewer stored segments', () => {
     // The plain transcript text must not be used when segments are present.
     expect(screen.queryByText('ignored plain text')).not.toBeInTheDocument()
   })
+
+  it('splits a legacy single segment with inline [MM:SS] Speaker N: markers into separate turns', () => {
+    // Pre-fix data: a whole chunk stored as ONE segment with inline markers.
+    const segments = [
+      {
+        speaker: 'Speaker 1',
+        start: 0,
+        end: 600,
+        text: '[00:03] Speaker 1: Hola, buenos días. [00:09] Speaker 2: Buenos días a todos. [05:32] Speaker 3: Perdón la demora.'
+      }
+    ]
+    render(<TranscriptViewer transcript={'ignored'} segments={segments} onSeek={noop} />)
+
+    // Each embedded speaker becomes its own labelled turn.
+    expect(screen.getByText('Speaker 1')).toBeInTheDocument()
+    expect(screen.getByText('Speaker 2')).toBeInTheDocument()
+    expect(screen.getByText('Speaker 3')).toBeInTheDocument()
+    expect(screen.getByText('Hola, buenos días.')).toBeInTheDocument()
+    expect(screen.getByText('Buenos días a todos.')).toBeInTheDocument()
+    expect(screen.getByText('Perdón la demora.')).toBeInTheDocument()
+    // The raw marker text must not survive glued together in one box.
+    expect(screen.queryByText(/\[00:09\] Speaker 2:/)).not.toBeInTheDocument()
+  })
 })

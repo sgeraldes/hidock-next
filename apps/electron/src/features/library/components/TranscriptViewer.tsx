@@ -9,6 +9,7 @@
 import { useEffect, useRef, useMemo, useState } from 'react'
 import { TimeAnchor } from './TimeAnchor'
 import { ChevronDown, ChevronRight } from 'lucide-react'
+import { expandInlineStoredSegments } from '../utils/splitInlineTurns'
 
 /** Stored transcript segment (from the `speakers` JSON column). Times in seconds. */
 export interface StoredSegment {
@@ -68,9 +69,12 @@ function toParagraphs(text: string): string[] {
   return paragraphs.length > 0 ? paragraphs : [text.trim()]
 }
 
-/** Map stored (seconds-based) segments to the viewer's internal ms-based shape. */
+/** Map stored (seconds-based) segments to the viewer's internal ms-based shape.
+ * Legacy segments that packed a whole chunk into one text blob with inline
+ * `[MM:SS] Speaker N:` markers are first re-split into individual turns so they
+ * render correctly without re-transcription. */
 function fromStoredSegments(stored: StoredSegment[]): TranscriptSegment[] {
-  return stored
+  return expandInlineStoredSegments(stored)
     .filter((s) => s.text?.trim())
     .map((s) => ({
       startMs: Math.round((s.start || 0) * 1000),
