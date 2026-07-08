@@ -30,9 +30,15 @@ interface HoverCardProps {
   openDelay?: number
   closeDelay?: number
   onOpenChange?: (open: boolean) => void
+  /**
+   * Force the card closed and ignore hover/focus while true. Used when a
+   * co-located popover/menu opens on the same trigger, so the informational
+   * hover card doesn't overlap the interactive surface.
+   */
+  suppressed?: boolean
 }
 
-function HoverCard({ children, openDelay = 250, closeDelay = 150, onOpenChange }: HoverCardProps) {
+function HoverCard({ children, openDelay = 250, closeDelay = 150, onOpenChange, suppressed = false }: HoverCardProps) {
   const [open, setOpen] = React.useState(false)
   const openTimer = React.useRef<ReturnType<typeof setTimeout>>()
   const closeTimer = React.useRef<ReturnType<typeof setTimeout>>()
@@ -50,10 +56,20 @@ function HoverCard({ children, openDelay = 250, closeDelay = 150, onOpenChange }
     [onOpenChange]
   )
 
+  // When suppressed (e.g. the trigger's popover just opened), close immediately
+  // and cancel any pending open so the card never appears over the popover.
+  React.useEffect(() => {
+    if (suppressed) {
+      clearTimers()
+      setOpenState(false)
+    }
+  }, [suppressed, clearTimers, setOpenState])
+
   const handleOpen = React.useCallback(() => {
+    if (suppressed) return
     clearTimers()
     openTimer.current = setTimeout(() => setOpenState(true), openDelay)
-  }, [clearTimers, openDelay, setOpenState])
+  }, [clearTimers, openDelay, setOpenState, suppressed])
 
   const handleClose = React.useCallback(() => {
     clearTimers()

@@ -104,6 +104,10 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
   (8,168 words, was 5,921 truncated), Rec16 10,669 words + Rec14 19,277 words
   (both previously hard-failed; MP3 chunking fixed them). TOTAL ≈ 53 unique —
   ≥50 TARGET REACHED.
+- Wave 5+6 (done): ~21 more unique (Jun5–Jun9). Total ≈ 74.
+- Wave 7 (done, 12/12): RECENCY QUEUE VERIFIED LIVE — completions arrived in
+  strict date_recorded DESC order (Rec84→…→Rec74 all Jun5, then Jun4 Rec73
+  LAST). Total ≈ 86 unique audios transcribed this session.
 - Organization state: 37 people, 5 auto-projects (Itaú Integration, DFX5
   Gateway, Resource Mgmt, TSC Platform, WTS Transition), 1,905 captures after
   1,057-row dedupe. Feedback filed: "Alex" vs "Alex / Óscar" person dedupe,
@@ -116,10 +120,14 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
   re-emitted next line). repairJsonString can't fix; fallback absorbed it.
   Repair rule to add: key token followed by another key token → drop the
   dangling key. Seen 10:5x wave 6, small English prompt (563 tokens).
-- json-mime analysis on very large prompts (27.8k tokens, Rec16) produced
-  CORRUPTED output (string closes then next line starts mid-word) — not an
-  escaping bug; repair can't fix. Plain-text fallback absorbed it. If this
-  recurs: order attempts by prompt size (plain-text first above ~20k tokens).
+- json-mime SPLICE corruption (string closes, next line resumes mid-content):
+  seen at 27.8k tokens (Rec16) AND now 6.2k tokens (wave 7, 11:3x) — not
+  size-bound, not an escaping bug; repair can't fix corrupted content. The
+  plain-text fallback absorbs every instance (zero 'Analysis failed'
+  sentinels since backfill). VERDICT forming: json-mime responseMimeType is
+  unreliable for this model+content; consider swapping attempt order
+  (plain-text first, json-mime fallback) to save the wasted first call —
+  measure fallback rate first.
 - Flaky perf test: library-performance "switches view modes" 203.79ms vs
   200ms budget once under full-suite load; passes in isolation. If it fails
   again in a gate run, relax budget or isolate the timing.

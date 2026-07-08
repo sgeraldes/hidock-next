@@ -73,6 +73,44 @@ Canonical entity + id-based mentions:
   meeting/library; Actionables recipients → person chips; Today organizer;
   Project member rows → /person; dates → /calendar{date} everywhere.
 
+### Round 4 — Progressive entity resolution + living knowledge graph
+(User directive 2026-07-08 ~12:00: certainty values so the system stops
+creating duplicate people/projects; entity metadata changes trigger graph
+re-discovery; graph constantly and effortlessly updated.)
+
+Recon facts (2026-07-08): graph nodes keyed by (type, normalized label) NOT
+contact id — renames/merges orphan nodes; applyTranscriptEntities resolves by
+exact LOWER(name) only (duplicate factory); graph ingest = LLM per transcript,
+incremental via graph_ingested_transcripts, renderer-triggered ONLY (no
+startup/event hook); event-bus exists but has no entity events; contacts has
+no phone column.
+
+R4a backend (after R3a lands; migration v27):
+1. `contact_aliases(alias_norm UNIQUE, contact_id, source
+   merge|speaker_assign|manual|inferred, confidence, created_at)` +
+   `project_aliases`. Auto-populated: contacts:merge writes loser-name alias
+   (1.0); assignSpeaker writes non-generic labels; accent-normalization pass.
+2. `entity-resolver.ts`: resolveContact(name, ctx)/resolveProject(name, ctx) →
+   {id?, confidence, method}. Tiers: exact email 1.0 > exact name .95 >
+   alias .9 > accent-normalized .85 > fuzzy+context .6–.8 (context boost:
+   candidate co-occurs in meeting attendees / same project). ≥.8 auto-link;
+   .5–.8 → identity_suggestion row (NO new entity); <.5 → create new entity
+   flagged low-certainty. Replace exact-name matching in
+   applyTranscriptEntities; use in addAttendee + recipient resolution.
+3. `identity_suggestions(id, kind person|project, candidate_name, target_id,
+   confidence, evidence JSON, status pending|accepted|rejected)` + IPC
+   list/accept/reject. Accept → alias + link (or merge); reject → alias-block.
+4. Event bus: new domain events entity:contact-changed/merged,
+   entity:speaker-assigned, entity:transcript-ready emitted at mutation
+   points. Graph-sync subscriber: label-level node UPDATE/merge on contact
+   rename/merge (no LLM — direct graph_nodes/graph_edges surgery); new
+   transcripts auto-enqueue LLM ingest (debounced) so the graph updates
+   without manual "Ingest".
+5. Later (R4c): re-key person nodes by contact id during ingest.
+
+R4b UI: identity-suggestions review queue (People page + Today card),
+confidence badge on auto-created entities, alias list on PersonDetail.
+
 ### Round 3 — Deep editability
 - Project rename inline (IPC already supports name) + projects:merge.
 - Direct project assignment: knowledge/recording/actionable ↔ project junction
@@ -89,7 +127,15 @@ Canonical entity + id-based mentions:
       person/project/meeting hover cards; `useContactResolver`; wired into KnowledgeGraph,
       Chat source chips, Actionables recipients, Projects members, Today dates,
       MeetingDetail date-mention, Explore result cards, PersonDetail timeline)
-- [ ] Round 3 — deep editability
+- [~] Round 2b — speaker discoverability (USER FEEDBACK 11:4x with screenshots,
+      agent r2b-speaker-discovery): hover cards on speaker labels (assigned →
+      full person metadata; unassigned → identify hint), assigned-speaker
+      actions (view person / change identity / reset to unidentified,
+      left-click + right-click), rich picker rows (avatar, role · company,
+      meeting count) — bare-name list useless with Sebas/Sebastián dupes.
+- [~] Round 3a — deep-edit backend (agent r3-edit-backend): v26
+      knowledge_projects junction, projects:merge, knowledge:setProjects,
+      action_items.assignee_contact_id, graph:resolvePerson.
 - [ ] Enhancement queue: accent/diacritic-normalized auto-merge (Oscar=Óscar
       safe); diminutive suggestions (Sebas→Sebastián) as UI hints, never auto.
       Also: recency-first queue landed with 774c4904 (recency principle).

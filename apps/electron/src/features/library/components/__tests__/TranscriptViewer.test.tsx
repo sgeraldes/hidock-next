@@ -8,11 +8,18 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { TranscriptViewer } from '../TranscriptViewer'
 
 vi.mock('@/components/ui/toaster', () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() }
 }))
+
+const mockNavigate = vi.fn()
+vi.mock('react-router-dom', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router-dom')>()
+  return { ...actual, useNavigate: () => mockNavigate }
+})
 
 const noop = () => {}
 
@@ -108,10 +115,19 @@ describe('TranscriptViewer stored segments', () => {
 describe('TranscriptViewer speaker assignment (recordingId)', () => {
   const mockGetSpeakerMap = vi.fn()
   const mockGetAll = vi.fn()
+  const mockGetById = vi.fn()
   const mockAssignSpeaker = vi.fn()
   const mockUnassignSpeaker = vi.fn()
 
   const segments = [{ speaker: 'Speaker 1', start: 0, end: 5, text: 'Hello there, everyone.' }]
+
+  function renderViewer(props: Partial<React.ComponentProps<typeof TranscriptViewer>> = {}) {
+    return render(
+      <MemoryRouter>
+        <TranscriptViewer transcript="x" segments={segments} recordingId="rec1" onSeek={noop} {...props} />
+      </MemoryRouter>
+    )
+  }
 
   beforeEach(() => {
     vi.clearAllMocks()
@@ -120,10 +136,35 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
       success: true,
       data: {
         contacts: [
-          { id: 'c1', name: 'Alice', email: 'alice@example.com', type: 'team', tags: [] },
+          {
+            id: 'c1',
+            name: 'Alice',
+            email: 'alice@example.com',
+            type: 'team',
+            role: 'Engineer',
+            company: 'Acme',
+            interactionCount: 12,
+            tags: []
+          },
           { id: 'c2', name: 'Bob', email: null, type: 'unknown', tags: [] }
         ],
         total: 2
+      }
+    })
+    mockGetById.mockResolvedValue({
+      success: true,
+      data: {
+        contact: {
+          id: 'c1',
+          name: 'Alice',
+          email: 'alice@example.com',
+          type: 'team',
+          role: 'Engineer',
+          company: 'Acme',
+          interactionCount: 12,
+          lastSeenAt: '2026-05-01T10:00:00Z',
+          tags: []
+        }
       }
     })
     mockAssignSpeaker.mockResolvedValue({ success: true, data: { id: 'c1', name: 'Alice' } })
@@ -134,18 +175,18 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
         assignSpeaker: mockAssignSpeaker,
         unassignSpeaker: mockUnassignSpeaker
       },
-      contacts: { getAll: mockGetAll }
+      contacts: { getAll: mockGetAll, getById: mockGetById }
     }
   })
 
   it('renders the speaker label as an assign button and loads the speaker map', async () => {
-    render(<TranscriptViewer transcript="x" segments={segments} recordingId="rec1" onSeek={noop} />)
+    renderViewer()
     await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalledWith({ recordingId: 'rec1' }))
     expect(screen.getByRole('button', { name: /Assign speaker Speaker 1/i })).toBeInTheDocument()
   })
 
   it('assigns an existing contact when picked from the popover', async () => {
-    render(<TranscriptViewer transcript="x" segments={segments} recordingId="rec1" onSeek={noop} />)
+    renderViewer()
     await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
 
     fireEvent.click(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
@@ -164,8 +205,20 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
     )
   })
 
+  it('renders rich picker rows with role · company and meeting count', async () => {
+    renderViewer()
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+
+    // Secondary line combines role and company; interactionCount renders as meetings.
+    expect(await screen.findByText('Engineer · Acme')).toBeInTheDocument()
+    expect(screen.getByText('12 meetings')).toBeInTheDocument()
+  })
+
   it('creates a new person from a typed name', async () => {
-    render(<TranscriptViewer transcript="x" segments={segments} recordingId="rec1" onSeek={noop} />)
+    renderViewer()
     await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
 
     fireEvent.click(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
@@ -182,27 +235,93 @@ describe('TranscriptViewer speaker assignment (recordingId)', () => {
     )
   })
 
-  it('renders the assigned person name and can unassign', async () => {
+  it('shows an unidentified hint when hovering an unassigned label', async () => {
+    renderViewer()
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.mouseEnter(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
+    expect(await screen.findByText('Unidentified speaker')).toBeInTheDocument()
+  })
+
+  it('shows the assigned person metadata when hovering an assigned label', async () => {
     mockGetSpeakerMap.mockResolvedValue({
       success: true,
       data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
     })
-    render(<TranscriptViewer transcript="x" segments={segments} recordingId="rec1" onSeek={noop} />)
+    renderViewer()
+
+    const nameButton = await screen.findByRole('button', { name: /Speaker: Alice/i })
+    fireEvent.mouseEnter(nameButton)
+
+    // PersonHoverCard lazily fetches the contact and shows its metadata.
+    await waitFor(() => expect(mockGetById).toHaveBeenCalledWith('c1'))
+    expect(await screen.findByText('alice@example.com')).toBeInTheDocument()
+    expect(screen.getByText(/Engineer · Acme/)).toBeInTheDocument()
+  })
+
+  it('resets an assigned speaker to unidentified', async () => {
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
+    })
+    renderViewer()
 
     // Once resolved, the label button shows the person's name.
     const nameButton = await screen.findByRole('button', { name: /Speaker: Alice/i })
-    expect(nameButton).toBeInTheDocument()
-
     fireEvent.click(nameButton)
-    fireEvent.click(await screen.findByText(/Unassign Alice/i))
+
+    // The assigned popover shows actions rather than the picker by default.
+    fireEvent.click(await screen.findByText(/Reset to unidentified/i))
 
     await waitFor(() =>
       expect(mockUnassignSpeaker).toHaveBeenCalledWith({ recordingId: 'rec1', speakerLabel: 'Speaker 1' })
     )
   })
 
+  it('navigates to the person page from the assigned popover', async () => {
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
+    })
+    renderViewer()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Speaker: Alice/i }))
+    fireEvent.click(await screen.findByText('View person'))
+
+    expect(mockNavigate).toHaveBeenCalledWith('/person/c1')
+  })
+
+  it('reveals the picker via "Change identity" for an assigned speaker', async () => {
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
+    })
+    renderViewer()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Speaker: Alice/i }))
+    // Picker is hidden until "Change identity" is chosen.
+    expect(screen.queryByLabelText('Search or create person')).not.toBeInTheDocument()
+
+    fireEvent.click(await screen.findByText(/Change identity/i))
+    expect(await screen.findByLabelText('Search or create person')).toBeInTheDocument()
+  })
+
+  it('opens the same popover on right-click (no native context menu)', async () => {
+    renderViewer()
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.contextMenu(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
+    // Right-click routes through the open path, so contacts load lazily too.
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+    expect(await screen.findByLabelText('Search or create person')).toBeInTheDocument()
+  })
+
   it('renders labels as plain text (no button) when recordingId is absent', () => {
-    render(<TranscriptViewer transcript="x" segments={segments} onSeek={noop} />)
+    render(
+      <MemoryRouter>
+        <TranscriptViewer transcript="x" segments={segments} onSeek={noop} />
+      </MemoryRouter>
+    )
     expect(screen.getByText('Speaker 1')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Assign speaker/i })).not.toBeInTheDocument()
   })
