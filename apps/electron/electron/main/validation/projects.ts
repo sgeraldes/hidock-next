@@ -54,6 +54,14 @@ export const DeleteProjectRequestSchema = z.object({
 })
 
 /**
+ * Merge projects request — fold the loser into the keeper.
+ */
+export const MergeProjectsRequestSchema = z.object({
+  keeperId: UUIDSchema,
+  loserId: UUIDSchema
+})
+
+/**
  * Tag meeting to project request
  */
 export const TagMeetingRequestSchema = z.object({
@@ -95,6 +103,7 @@ export type GetProjectByIdRequest = z.infer<typeof GetProjectByIdRequestSchema>
 export type CreateProjectRequest = z.infer<typeof CreateProjectRequestSchema>
 export type UpdateProjectRequest = z.infer<typeof UpdateProjectRequestSchema>
 export type DeleteProjectRequest = z.infer<typeof DeleteProjectRequestSchema>
+export type MergeProjectsRequest = z.infer<typeof MergeProjectsRequestSchema>
 export type TagMeetingRequest = z.infer<typeof TagMeetingRequestSchema>
 export type UntagMeetingRequest = z.infer<typeof UntagMeetingRequestSchema>
 export type ProjectCreate = z.infer<typeof ProjectCreateSchema>

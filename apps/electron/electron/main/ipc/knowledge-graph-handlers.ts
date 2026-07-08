@@ -10,6 +10,7 @@
  *   graph:personProfile  — person profile (meetings, skills, action items)
  *   graph:meetingGraph   — all nodes/edges for a meeting
  *   graph:listNodes      — list nodes, optionally filtered by type
+ *   graph:resolvePerson  — resolve a graph person name to a canonical contact
  */
 
 import { ipcMain } from 'electron'
@@ -23,6 +24,7 @@ import {
   queryMeetingGraph,
   queryListNodes,
 } from '../services/knowledge-graph-service'
+import { getContactByName } from '../services/database'
 
 export function registerKnowledgeGraphHandlers(): void {
   ipcMain.handle('graph:stats', async () => {
@@ -123,6 +125,22 @@ export function registerKnowledgeGraphHandlers(): void {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       console.error('[graph:listNodes] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // Resolve a graph person node's name to a canonical contact (v26). Gives the
+  // renderer a direct, indexed lookup instead of scanning contacts.getAll.
+  ipcMain.handle('graph:resolvePerson', async (_event, name: unknown) => {
+    try {
+      if (!name || typeof name !== 'string') {
+        return { success: false, error: 'name must be a non-empty string' }
+      }
+      const contact = getContactByName(name)
+      return { success: true, data: contact ?? null }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[graph:resolvePerson] Error:', e)
       return { success: false, error: msg }
     }
   })

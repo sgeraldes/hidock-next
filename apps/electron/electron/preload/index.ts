@@ -130,6 +130,8 @@ export interface ElectronAPI {
     tagMeeting: (request: TagMeetingRequest) => Promise<Result<void>>
     untagMeeting: (request: TagMeetingRequest) => Promise<Result<void>>
     getForMeeting: (meetingId: string) => Promise<Result<Project[]>>
+    merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Project>>
+    getForKnowledge: (knowledgeCaptureId: string) => Promise<Result<Project[]>>
   }
 
   // Database - Recordings
@@ -194,6 +196,12 @@ export interface ElectronAPI {
     getById: (id: string) => Promise<KnowledgeCapture | null>
     getByIds: (ids: string[]) => Promise<KnowledgeCapture[]> // B-CHAT-004
     update: (id: string, updates: Partial<KnowledgeCapture>) => Promise<{ success: boolean; error?: string }>
+    setProjects: (request: { knowledgeCaptureId: string; projectIds: string[] }) => Promise<Result<void>>
+  }
+
+  // Action items (first-class action_items table)
+  actionItems: {
+    setAssignee: (request: { actionItemId: string; contactId: string | null }) => Promise<Result<any>>
   }
 
   // Actionables
@@ -530,6 +538,7 @@ export interface ElectronAPI {
     personProfile: (name: string) => Promise<{ success: boolean; data?: { personId: string; personLabel: string; meetings: any[]; skills: any[]; actionItems: any[] } | undefined; error?: string }>
     meetingGraph: (meetingId: string) => Promise<{ success: boolean; data?: { meeting: any; nodes: any[]; edges: any[] }; error?: string }>
     listNodes: (type?: string) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    resolvePerson: (name: string) => Promise<{ success: boolean; data?: Contact | null; error?: string }>
   }
 
   // Domain Events - Event-driven architecture
@@ -594,7 +603,9 @@ const electronAPI: ElectronAPI = {
     delete: (id) => callIPC('projects:delete', id),
     tagMeeting: (request) => callIPC('projects:tagMeeting', request),
     untagMeeting: (request) => callIPC('projects:untagMeeting', request),
-    getForMeeting: (meetingId) => callIPC('projects:getForMeeting', meetingId)
+    getForMeeting: (meetingId) => callIPC('projects:getForMeeting', meetingId),
+    merge: (request) => callIPC('projects:merge', request),
+    getForKnowledge: (knowledgeCaptureId) => callIPC('projects:getForKnowledge', knowledgeCaptureId)
   },
 
   recordings: {
@@ -649,7 +660,12 @@ const electronAPI: ElectronAPI = {
     getAll: (options) => callIPC('knowledge:getAll', options),
     getById: (id) => callIPC('knowledge:getById', id),
     getByIds: (ids) => callIPC('knowledge:getByIds', ids), // B-CHAT-004
-    update: (id, updates) => callIPC('knowledge:update', id, updates)
+    update: (id, updates) => callIPC('knowledge:update', id, updates),
+    setProjects: (request) => callIPC('knowledge:setProjects', request)
+  },
+
+  actionItems: {
+    setAssignee: (request) => callIPC('actionItems:setAssignee', request)
   },
 
   actionables: {
@@ -926,6 +942,7 @@ const electronAPI: ElectronAPI = {
     personProfile: (name: string) => callIPC('graph:personProfile', name),
     meetingGraph: (meetingId: string) => callIPC('graph:meetingGraph', meetingId),
     listNodes: (type?: string) => callIPC('graph:listNodes', type),
+    resolvePerson: (name: string) => callIPC('graph:resolvePerson', name),
   },
 
   // Domain Event Listener

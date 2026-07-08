@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto'
 import { getDatabasePath } from './file-storage'
 import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
 
-const SCHEMA_VERSION = 25
+const SCHEMA_VERSION = 26
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS action_items (
     -- Action item content
     content TEXT NOT NULL,
     assignee TEXT,
+    assignee_contact_id TEXT, -- canonical contact link (v26) — assignee stays the raw name string
     due_date TEXT,
 
     -- Priority and status
@@ -414,6 +415,17 @@ CREATE TABLE IF NOT EXISTS meeting_projects (
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
+-- Junction table: Knowledge-Project relationship (v26). Enables DIRECT project
+-- assignment for knowledge captures / recordings with no meeting.
+CREATE TABLE IF NOT EXISTS knowledge_projects (
+    knowledge_capture_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (knowledge_capture_id, project_id),
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
 -- Recording-Meeting candidates: tracks all possible meetings a recording could match
 -- Allows AI to select the best match and user to override
 CREATE TABLE IF NOT EXISTS recording_meeting_candidates (
@@ -474,6 +486,8 @@ CREATE INDEX IF NOT EXISTS idx_meeting_contacts_contact ON meeting_contacts(cont
 CREATE INDEX IF NOT EXISTS idx_transcript_speakers_recording ON transcript_speakers(recording_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_meeting ON meeting_projects(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_project ON meeting_projects(project_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_projects_knowledge ON knowledge_projects(knowledge_capture_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_projects_project ON knowledge_projects(project_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_recording ON recording_meeting_candidates(recording_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_meeting ON recording_meeting_candidates(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_selected ON recording_meeting_candidates(is_selected);
@@ -1383,6 +1397,47 @@ const MIGRATIONS: Record<number, () => void> = {
     } catch (e) {
       console.warn('[Migration v25] Failed:', e)
     }
+  },
+
+  26: () => {
+    // v26: Deep editability backend.
+    //  - knowledge_projects junction: DIRECT project assignment for knowledge
+    //    captures / recordings that have no meeting.
+    //  - action_items.assignee_contact_id: canonical contact link for assignees.
+    // Idempotent: CREATE TABLE IF NOT EXISTS + guarded ALTER.
+    console.log('Running migration to schema v26: knowledge_projects + action_items.assignee_contact_id')
+    const database = getDatabase()
+
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS knowledge_projects (
+          knowledge_capture_id TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (knowledge_capture_id, project_id),
+          FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_knowledge_projects_knowledge ON knowledge_projects(knowledge_capture_id)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_knowledge_projects_project ON knowledge_projects(project_id)')
+    } catch (e) {
+      console.warn('[Migration v26] knowledge_projects failed:', e)
+    }
+
+    try {
+      const info = database.exec('PRAGMA table_info(action_items)')
+      if (info.length > 0 && info[0].values) {
+        const cols = info[0].values.map((row: unknown[]) => row[1])
+        if (!cols.includes('assignee_contact_id')) {
+          database.run('ALTER TABLE action_items ADD COLUMN assignee_contact_id TEXT')
+        }
+      }
+    } catch (e) {
+      console.warn('[Migration v26] action_items.assignee_contact_id failed:', e)
+    }
+
+    console.log('Migration v26 complete')
   }
 
 }
@@ -1474,6 +1529,28 @@ function repairPhase(): void {
       )
     `)
   } catch (e) { /* table already exists */ }
+
+  // Repair knowledge_projects (v26): force-create so an older on-disk DB that
+  // skipped the migration still gets it before any setProjects write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS knowledge_projects (
+        knowledge_capture_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (knowledge_capture_id, project_id),
+        FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      )
+    `)
+  } catch (e) { /* table already exists */ }
+
+  // Repair action_items (v26): force-add assignee_contact_id if missing.
+  const actionItemCols = getTableColumns(database, 'action_items')
+  if (actionItemCols.length > 0 && !actionItemCols.includes('assignee_contact_id')) {
+    console.log('[Database] Repairing action_items: adding assignee_contact_id')
+    try { database.run('ALTER TABLE action_items ADD COLUMN assignee_contact_id TEXT') } catch (e) {}
+  }
 
   // Repair chat_messages (AI-15: columns referenced by assistant mapper)
   const chatMsgInfo = database.exec("PRAGMA table_info(chat_messages)")
@@ -3143,16 +3220,20 @@ export function untagMeetingFromProject(meetingId: string, projectId: string): v
 }
 
 /**
- * Get knowledge capture IDs associated with a project via its meetings.
- * Path: project -> meeting_projects -> meetings -> recordings -> knowledge_captures
+ * Get knowledge capture IDs associated with a project. Unions two paths:
+ *  1. transitive: project -> meeting_projects -> meetings -> recordings -> knowledge_captures
+ *  2. direct: project -> knowledge_projects -> knowledge_captures (v26)
+ * DISTINCT + UNION dedupes captures reachable by both paths.
  */
 export function getKnowledgeIdsForProject(projectId: string): string[] {
   const rows = queryAll<{ id: string }>(
     `SELECT DISTINCT kc.id FROM knowledge_captures kc
      JOIN recordings r ON kc.source_recording_id = r.id
      JOIN meeting_projects mp ON r.meeting_id = mp.meeting_id
-     WHERE mp.project_id = ?`,
-    [projectId]
+     WHERE mp.project_id = ?
+     UNION
+     SELECT knowledge_capture_id AS id FROM knowledge_projects WHERE project_id = ?`,
+    [projectId, projectId]
   )
   return rows.map(r => r.id)
 }
@@ -3169,6 +3250,118 @@ export function getPersonIdsForProject(projectId: string): string[] {
     [projectId]
   )
   return rows.map(r => r.contact_id)
+}
+
+/**
+ * Merge two projects into one. Mirrors mergeContacts: the keeper survives; the
+ * loser's meeting_projects and knowledge_projects links are repointed (OR IGNORE
+ * to skip collisions, then leftovers dropped), useful fields folded in
+ * (keeper wins, null-fill from loser), and the loser row deleted. One tx.
+ *
+ * @throws if the ids are equal or either project does not exist.
+ */
+export function mergeProjects(keeperId: string, loserId: string): Project {
+  if (keeperId === loserId) {
+    throw new Error('Cannot merge a project into itself')
+  }
+
+  return runInTransaction(() => {
+    const keeper = queryOne<Project>('SELECT * FROM projects WHERE id = ?', [keeperId])
+    const loser = queryOne<Project>('SELECT * FROM projects WHERE id = ?', [loserId])
+    if (!keeper) throw new Error(`Keeper project ${keeperId} not found`)
+    if (!loser) throw new Error(`Loser project ${loserId} not found`)
+
+    // Repoint meeting_projects (PK: meeting_id, project_id).
+    runNoSave('UPDATE OR IGNORE meeting_projects SET project_id = ? WHERE project_id = ?', [keeperId, loserId])
+    runNoSave('DELETE FROM meeting_projects WHERE project_id = ?', [loserId])
+
+    // Repoint knowledge_projects (PK: knowledge_capture_id, project_id).
+    runNoSave('UPDATE OR IGNORE knowledge_projects SET project_id = ? WHERE project_id = ?', [keeperId, loserId])
+    runNoSave('DELETE FROM knowledge_projects WHERE project_id = ?', [loserId])
+
+    // Fold fields onto the keeper (keeper wins; null-fill from loser).
+    const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
+    const description = notEmpty(keeper.description) ? keeper.description : loser.description ?? null
+    const status = notEmpty(keeper.status) ? keeper.status : loser.status || 'active'
+
+    runNoSave('UPDATE projects SET description = ?, status = ? WHERE id = ?', [description, status, keeperId])
+    runNoSave('DELETE FROM projects WHERE id = ?', [loserId])
+
+    return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [keeperId])!
+  })
+}
+
+/**
+ * Replace the full set of projects directly assigned to a knowledge capture (v26).
+ * Deletes existing knowledge_projects rows for the capture and inserts the new
+ * set in one transaction. Passing an empty array clears all direct assignments.
+ */
+export function setKnowledgeProjects(knowledgeCaptureId: string, projectIds: string[]): void {
+  runInTransaction(() => {
+    runNoSave('DELETE FROM knowledge_projects WHERE knowledge_capture_id = ?', [knowledgeCaptureId])
+    const seen = new Set<string>()
+    for (const projectId of projectIds) {
+      if (seen.has(projectId)) continue
+      seen.add(projectId)
+      runNoSave('INSERT OR IGNORE INTO knowledge_projects (knowledge_capture_id, project_id) VALUES (?, ?)', [
+        knowledgeCaptureId,
+        projectId
+      ])
+    }
+  })
+}
+
+/** Projects directly assigned to a knowledge capture via knowledge_projects (v26). */
+export function getProjectsForKnowledge(knowledgeCaptureId: string): Project[] {
+  return queryAll<Project>(
+    `SELECT p.* FROM projects p
+     JOIN knowledge_projects kp ON p.id = kp.project_id
+     WHERE kp.knowledge_capture_id = ?
+     ORDER BY p.name`,
+    [knowledgeCaptureId]
+  )
+}
+
+// =============================================================================
+// Action item assignee → contact (v26)
+// =============================================================================
+
+export interface ActionItem {
+  id: string
+  knowledge_capture_id: string
+  content: string
+  assignee: string | null
+  assignee_contact_id: string | null
+  due_date: string | null
+  priority: string
+  status: string
+}
+
+/**
+ * Bind (or clear) the canonical contact for an action item's assignee (v26).
+ * The raw `assignee` name string is left untouched — this only sets the id link.
+ * Pass null to clear the binding. Returns the updated row.
+ *
+ * @throws if the action item does not exist.
+ */
+export function setActionItemAssignee(actionItemId: string, contactId: string | null): ActionItem {
+  const item = queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])
+  if (!item) throw new Error(`Action item ${actionItemId} not found`)
+  run('UPDATE action_items SET assignee_contact_id = ?, updated_at = ? WHERE id = ?', [
+    contactId,
+    new Date().toISOString(),
+    actionItemId
+  ])
+  return queryOne<ActionItem>('SELECT * FROM action_items WHERE id = ?', [actionItemId])!
+}
+
+/**
+ * Resolve a contact by case-insensitive exact name (v26). Backs graph:resolvePerson
+ * so the renderer's name-based resolution has a direct path instead of scanning
+ * the full contact roster. Returns the first match or undefined.
+ */
+export function getContactByName(name: string): Contact | undefined {
+  return queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?) LIMIT 1', [name])
 }
 
 /**

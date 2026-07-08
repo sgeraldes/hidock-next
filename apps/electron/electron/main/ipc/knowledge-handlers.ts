@@ -1,7 +1,15 @@
 
 import { ipcMain } from 'electron'
-import { queryAll, queryOne, run } from '../services/database'
+import { queryAll, queryOne, run, setKnowledgeProjects } from '../services/database'
 import type { KnowledgeCapture } from '@/types/knowledge'
+import { success, error, Result } from '../types/api'
+import { z } from 'zod'
+import { UUIDSchema } from '../validation/common'
+
+const SetKnowledgeProjectsRequestSchema = z.object({
+  knowledgeCaptureId: UUIDSchema,
+  projectIds: z.array(UUIDSchema)
+})
 
 // B-CHAT-007: Explicit column list instead of SELECT *
 const KNOWLEDGE_CAPTURE_COLUMNS = `id, title, summary, category, status, quality_rating, quality_confidence, quality_assessed_at, storage_tier, retention_days, expires_at, meeting_id, correlation_confidence, correlation_method, source_recording_id, captured_at, created_at, updated_at, deleted_at`
@@ -100,6 +108,32 @@ export function registerKnowledgeHandlers(): void {
       return { success: false, error: (error as Error).message }
     }
   })
+
+  // Replace the full set of projects directly assigned to a knowledge capture (v26)
+  ipcMain.handle(
+    'knowledge:setProjects',
+    async (_, request: unknown): Promise<Result<void>> => {
+      try {
+        const parsed = SetKnowledgeProjectsRequestSchema.safeParse(request)
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid setProjects request', parsed.error.format())
+        }
+
+        const capture = queryOne<{ id: string }>('SELECT id FROM knowledge_captures WHERE id = ?', [
+          parsed.data.knowledgeCaptureId
+        ])
+        if (!capture) {
+          return error('NOT_FOUND', `Knowledge capture ${parsed.data.knowledgeCaptureId} not found`)
+        }
+
+        setKnowledgeProjects(parsed.data.knowledgeCaptureId, parsed.data.projectIds)
+        return success(undefined)
+      } catch (err) {
+        console.error('knowledge:setProjects error:', err)
+        return error('DATABASE_ERROR', 'Failed to set knowledge projects', err)
+      }
+    }
+  )
 }
 
 // Mapper from DB snake_case to Interface camelCase

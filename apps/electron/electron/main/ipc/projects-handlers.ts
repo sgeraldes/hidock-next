@@ -19,6 +19,8 @@ import {
   getTopicsForProjectMeetings,
   getKnowledgeIdsForProject,
   getPersonIdsForProject,
+  mergeProjects,
+  getProjectsForKnowledge,
   Project as DBProject
 } from '../services/database'
 import { success, error, Result } from '../types/api'
@@ -29,8 +31,10 @@ import {
   UpdateProjectRequestSchema,
   DeleteProjectRequestSchema,
   TagMeetingRequestSchema,
-  UntagMeetingRequestSchema
+  UntagMeetingRequestSchema,
+  MergeProjectsRequestSchema
 } from '../validation/projects'
+import { UUIDSchema } from '../validation/common'
 import type { Project } from '@/types/knowledge'
 import { randomUUID } from 'crypto'
 
@@ -253,6 +257,60 @@ export function registerProjectsHandlers(): void {
       } catch (err) {
         console.error('projects:untagMeeting error:', err)
         return error('DATABASE_ERROR', 'Failed to untag meeting from project', err)
+      }
+    }
+  )
+
+  /**
+   * Merge one project into another. The keeper survives; the loser's links are
+   * repointed, useful fields folded in, and the loser row deleted.
+   */
+  ipcMain.handle(
+    'projects:merge',
+    async (_, request: unknown): Promise<Result<Project>> => {
+      try {
+        const parsed = MergeProjectsRequestSchema.safeParse(request)
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid merge request', parsed.error.format())
+        }
+
+        const { keeperId, loserId } = parsed.data
+        if (keeperId === loserId) {
+          return error('VALIDATION_ERROR', 'Cannot merge a project into itself')
+        }
+        if (!getProjectById(keeperId)) {
+          return error('NOT_FOUND', `Keeper project ${keeperId} not found`)
+        }
+        if (!getProjectById(loserId)) {
+          return error('NOT_FOUND', `Loser project ${loserId} not found`)
+        }
+
+        const merged = mergeProjects(keeperId, loserId)
+        return success(mapToProject(merged))
+      } catch (err) {
+        console.error('projects:merge error:', err)
+        return error('DATABASE_ERROR', 'Failed to merge projects', err)
+      }
+    }
+  )
+
+  /**
+   * Get projects directly assigned to a knowledge capture (knowledge_projects).
+   */
+  ipcMain.handle(
+    'projects:getForKnowledge',
+    async (_, knowledgeCaptureId: unknown): Promise<Result<Project[]>> => {
+      try {
+        const parsed = UUIDSchema.safeParse(knowledgeCaptureId)
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid knowledge capture ID', parsed.error.format())
+        }
+
+        const projects = getProjectsForKnowledge(parsed.data)
+        return success(projects.map(mapToProject))
+      } catch (err) {
+        console.error('projects:getForKnowledge error:', err)
+        return error('DATABASE_ERROR', 'Failed to fetch projects for knowledge capture', err)
       }
     }
   )
