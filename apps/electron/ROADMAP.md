@@ -127,3 +127,20 @@ Verification was diff-driven (does what I built work?) not journey-driven
 (can the user answer their real questions on every surface?). Standing rule
 added: each round's verification must include one user-journey walk on a
 surface the round did NOT touch, screenshotted, judged against §D.
+
+## F. Score corrections (2026-07-08 ~15:30, user review of Today/MeetingDetail)
+User caught optimistic scoring — indices must be measured against what a
+user can actually DO, not what code paths exist:
+- Today meeting rows: contrast fails 4.5:1, no hover motion, no
+  time-to-meeting/next-highlight, giant empty rows → discover was 20, real
+  experience ≈ 10. Fix in flight (impeccable-today-meeting agent).
+- MeetingDetail: edit score 65 was WRONG — date/start/end/duration not
+  editable (score should have been ≈45); description renders raw `*` bullet
+  markers; "Join Meeting Link" not an actual link (meeting_url null, URL
+  embedded in description text). All in the same fix.
+- Rule: a surface's edit score counts ONLY fields a user can change in the
+  UI; discover counts ONLY information visibly reachable (hover/click),
+  not data present in the DB.
+- Impeccable cadence violation: ran once (titlebar), never re-run on new
+  surfaces despite standing instruction. Cadence now: after every UI-landing
+  round, run the impeccable pass on the changed surfaces + one untouched one.
