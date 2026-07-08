@@ -34,14 +34,37 @@ describe('evidenceToPhrases', () => {
     expect(phrases).toContain('different email addresses (caution)')
   })
 
-  it('falls back to the legacy method note when there are no signals', () => {
+  it('falls back to the legacy method note only when names are unrelated and unsignalled', () => {
     expect(evidenceToPhrases({ method: 'fuzzy_context' }, 'X', 'Zzz')).toEqual(['matched by fuzzy context'])
   })
 
-  it('describes accent-only differences', () => {
-    expect(evidenceToPhrases({ signals: { name: 0.9 } }, 'Oscar', 'Óscar')).toContain(
-      'the same name spelled differently'
+  it('describes accent-only differences from the names alone (no signal needed)', () => {
+    expect(evidenceToPhrases({}, 'Oscar', 'Óscar')).toContain('same name with/without accents')
+    expect(evidenceToPhrases({ method: 'fuzzy' }, 'Jose', 'José')).toContain('same name with/without accents')
+  })
+
+  it('describes a one-letter spelling difference concretely', () => {
+    expect(evidenceToPhrases({ method: 'fuzzy' }, 'Nouman', 'Nauman')[0]).toBe(
+      "'Nouman' is one letter from 'Nauman'"
     )
+  })
+
+  it('describes a two-letter spelling difference concretely', () => {
+    expect(evidenceToPhrases({}, 'Kevin', 'Kavon')[0]).toBe("'Kevin' is two letters from 'Kavon'")
+  })
+
+  it('reports identical names', () => {
+    expect(evidenceToPhrases({}, 'Ana', 'Ana')[0]).toBe('identical names')
+  })
+
+  it('never emits "matched by fuzzy" for a fuzzy name match — it computes a human phrase', () => {
+    const phrases = evidenceToPhrases({ method: 'fuzzy', signals: { name: 0.72 } }, 'Nouman', 'Numan')
+    expect(phrases.some((p) => /matched by/.test(p))).toBe(false)
+    expect(phrases[0]).toBe("'Nouman' is one letter from 'Numan'")
+  })
+
+  it('falls back to "similar names" when a signal exists but no concrete relationship applies', () => {
+    expect(evidenceToPhrases({ signals: { name: 0.7 } }, 'Bill', 'William')).toContain('similar names')
   })
 
   it('caps topic chips at the requested max', () => {

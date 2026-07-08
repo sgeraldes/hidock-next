@@ -99,6 +99,20 @@ describe('IdentitySuggestionsSection', () => {
     expect(screen.getByText(/is part of/)).toBeInTheDocument()
   })
 
+  it('resolves a zero-match transcript lookup to the extracted-from-analysis note (never stuck loading)', async () => {
+    renderSection()
+    expect((await screen.findAllByText(/extracted from meeting analysis/i)).length).toBeGreaterThan(0)
+    expect(screen.queryByText(/checking transcripts/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/no transcript mentions/i)).not.toBeInTheDocument()
+  })
+
+  it('shows a distinct error when the transcript lookup fails, not "no mentions"', async () => {
+    mockGetMentionSnippets.mockRejectedValue(new Error('boom'))
+    renderSection()
+    expect((await screen.findAllByText(/Couldn't check transcripts/i)).length).toBeGreaterThan(0)
+    expect(screen.queryByText(/extracted from meeting analysis/i)).not.toBeInTheDocument()
+  })
+
   it('clusters suggestions that share a target into one group card', async () => {
     const second = { ...suggestion, id: 's2', candidate_name: 'Sebi', confidence: 0.66 }
     mockGetSuggestions.mockResolvedValue({ success: true, data: [suggestion, second] })

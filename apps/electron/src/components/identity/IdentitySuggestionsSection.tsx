@@ -26,7 +26,7 @@ import {
 } from './useIdentitySuggestions'
 import { parseEvidence, evidenceToPhrases, topicChips } from './evidenceToPhrases'
 import { groupSuggestions, TIER_LABEL, type SuggestionTier } from './groupSuggestions'
-import { computeCoMention, mentionKey, type MentionResult } from './mentionEvidence'
+import { computeCoMention, mentionKey, mentionStatus, type MentionResult } from './mentionEvidence'
 
 /** Confidence → badge styling. ≥80 emerald, 50–79 amber. */
 function confidenceBadge(confidence: number | null): { label: string; className: string } {
@@ -93,7 +93,7 @@ function MiniProfileCard({
 }) {
   const displayName = profile?.name || name
   const roleCompany = [profile?.role, profile?.company].filter(Boolean).join(' · ')
-  const mentionCount = mentions?.recordingIds.length ?? 0
+  const status = mentionStatus(mentions)
   return (
     <div
       className={cn(
@@ -129,15 +129,15 @@ function MiniProfileCard({
           </div>
         )}
         {profile?.description && <div className="truncate">{profile.description}</div>}
-        <div className="flex items-center gap-1 pt-0.5">
+        <div
+          className={cn(
+            'flex items-center gap-1 pt-0.5',
+            status.state === 'extracted' && 'italic text-muted-foreground/70',
+            status.state === 'error' && 'text-amber-600 dark:text-amber-400'
+          )}
+        >
           <FileText className="h-3 w-3 flex-shrink-0" />
-          <span>
-            {mentions
-              ? mentionCount > 0
-                ? `appears in ${mentionCount} recording${mentionCount === 1 ? '' : 's'}`
-                : 'no transcript mentions'
-              : 'checking transcripts…'}
-          </span>
+          <span>{status.text}</span>
         </div>
       </div>
       <div className="mt-1.5">

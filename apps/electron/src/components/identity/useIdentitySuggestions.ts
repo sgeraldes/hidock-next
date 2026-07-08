@@ -47,6 +47,23 @@ function idsFor(s: IdentitySuggestion): Array<{ id: string; kind: 'person' | 'pr
   return out
 }
 
+/** Reject after `ms` if the promise hasn't settled — guards a hung/never-resolving IPC lookup. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout')), ms)
+    p.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(timer)
+        reject(e)
+      }
+    )
+  })
+}
+
 async function fetchProfile(id: string, kind: 'person' | 'project'): Promise<MiniProfile | null> {
   try {
     if (kind === 'person') {
@@ -163,10 +180,16 @@ export function useIdentitySuggestions() {
       await Promise.all(
         [...names].map(async ([key, raw]) => {
           try {
-            const res = await window.electronAPI.identity.getMentionSnippets(raw, 2)
-            updates[key] = res.success && res.data ? res.data : { snippets: [], recordingIds: [] }
+            // 5s guard: a hung transcript lookup must not leave the card stuck on
+            // "checking transcripts…" forever — surface a distinct error state instead.
+            const res = await withTimeout(window.electronAPI.identity.getMentionSnippets(raw, 2), 5000)
+            updates[key] = res.success
+              ? res.data
+                ? { ...res.data, error: false }
+                : { snippets: [], recordingIds: [], error: false }
+              : { snippets: [], recordingIds: [], error: true }
           } catch {
-            updates[key] = { snippets: [], recordingIds: [] }
+            updates[key] = { snippets: [], recordingIds: [], error: true }
           }
         })
       )

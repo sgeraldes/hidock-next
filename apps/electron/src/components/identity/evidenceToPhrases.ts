@@ -44,10 +44,40 @@ function titleCase(s: string): string {
   return s.replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
+/** Combining diacritical marks (U+0300–U+036F); built from escapes to keep the source ASCII. */
+const COMBINING_MARKS = new RegExp('[\\u0300-\\u036f]', 'g')
+
+/** Drop diacritics for accent-insensitive comparison ("Jose" with accent → "jose"). */
+function stripAccents(s: string): string {
+  return s.normalize('NFD').replace(COMBINING_MARKS, '')
+}
+
+/** Levenshtein edit distance between two strings. */
+function editDistance(a: string, b: string): number {
+  const m = a.length
+  const n = b.length
+  if (m === 0) return n
+  if (n === 0) return m
+  let prev = Array.from({ length: n + 1 }, (_, j) => j)
+  let curr = new Array<number>(n + 1)
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+    }
+    ;[prev, curr] = [curr, prev]
+  }
+  return prev[n]
+}
+
 /**
- * A phrase describing how the two names relate, or null when they are unrelated.
- * Prefers a concrete containment ("'Sergi' is part of 'Sergio'"); otherwise leans
- * on the resolver's name signal for accent/spelling similarity.
+ * A phrase describing how the two names relate, computed from the names themselves
+ * so it works even when the resolver supplied no numeric signal. In priority order:
+ * identical → containment ("'Sergi' is part of 'Sergio'") → accent variant → a 1–2
+ * character difference ("'Nouman' is one letter from 'Nauman'"). Falls back to the
+ * generic "similar names" only when a name signal exists but none of the concrete
+ * relationships apply, and to null only when a name is missing.
  */
 function namePhrase(candidateName: string, keeperName: string, nameSignal?: number): string | null {
   const a = norm(candidateName)
@@ -55,6 +85,7 @@ function namePhrase(candidateName: string, keeperName: string, nameSignal?: numb
   if (!a || !b) return null
   if (a === b) return 'identical names'
 
+  // Containment: one name is wholly inside the other (nickname / partial spelling).
   const [short, long] = a.length <= b.length ? [a, b] : [b, a]
   if (short.length >= 3 && long.includes(short)) {
     const shortDisplay = short === a ? candidateName : keeperName
@@ -62,11 +93,16 @@ function namePhrase(candidateName: string, keeperName: string, nameSignal?: numb
     return `'${shortDisplay.trim()}' is part of '${longDisplay.trim()}'`
   }
 
-  const sig = nameSignal ?? 0
-  if (sig >= 0.9) return 'the same name spelled differently'
-  if (sig >= 0.7) return 'very similar spelling'
-  if (sig > 0) return 'similar names'
-  return null
+  // Accent variant: identical once diacritics are removed ("Óscar" vs "Oscar").
+  if (stripAccents(a) === stripAccents(b)) return 'same name with/without accents'
+
+  // A small spelling difference the reader can verify at a glance.
+  const dist = editDistance(a, b)
+  if (dist === 1) return `'${candidateName.trim()}' is one letter from '${keeperName.trim()}'`
+  if (dist === 2) return `'${candidateName.trim()}' is two letters from '${keeperName.trim()}'`
+
+  // No concrete relationship — only assert similarity if the resolver flagged one.
+  return (nameSignal ?? 0) > 0 ? 'similar names' : null
 }
 
 /** Role-overlap phrase from the shared normalized role tokens ("both Project Manager"). */

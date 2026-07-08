@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeCoMention, mentionKey, type MentionResult } from '../mentionEvidence'
+import { computeCoMention, mentionKey, mentionStatus, type MentionResult } from '../mentionEvidence'
 
 const result = (recordingIds: string[]): MentionResult => ({ snippets: [], recordingIds })
 
@@ -30,5 +30,28 @@ describe('computeCoMention', () => {
   it('dedupes shared ids', () => {
     const co = computeCoMention(result(['r1', 'r1', 'r2']), result(['r1']))
     expect(co.recordingIds).toEqual(['r1'])
+  })
+})
+
+describe('mentionStatus', () => {
+  it('is a transient loading state while the lookup is unresolved', () => {
+    expect(mentionStatus(undefined)).toEqual({ state: 'loading', text: 'checking transcripts…' })
+  })
+
+  it('reports a resolved lookup with zero matches as extracted-from-analysis, not an error', () => {
+    const status = mentionStatus(result([]))
+    expect(status.state).toBe('extracted')
+    expect(status.text).toBe('No verbatim mentions — extracted from meeting analysis')
+  })
+
+  it('distinguishes an errored/timed-out lookup from zero matches', () => {
+    const status = mentionStatus({ snippets: [], recordingIds: [], error: true })
+    expect(status.state).toBe('error')
+    expect(status.text).toBe("Couldn't check transcripts")
+  })
+
+  it('counts recordings, singularizing one', () => {
+    expect(mentionStatus(result(['r1'])).text).toBe('appears in 1 recording')
+    expect(mentionStatus(result(['r1', 'r2'])).text).toBe('appears in 2 recordings')
   })
 })
