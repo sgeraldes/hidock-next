@@ -55,16 +55,20 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
 - [x] ISSUE-5 verified live: Rec43 re-transcribed 44,191 chars (was 32,249),
       goodbyes present, 295 speaker segments covering full 60.1 min; Rec16
       (previously hard-failed) now 10,669 words. Commits f34468aa, 9f8da3f4.
-- [~] ISSUE-7 (agent: fix-quality-round2): parseTurns splits only at line
-      starts — Rec43 chunk 1 is ONE segment (0–600s) with inline [MM:SS]
-      Speaker N markers unsplit. Split on markers anywhere in the text.
-- [~] ISSUE-8 (same agent): wiki NOT re-exported after re-transcription —
-      Rec43 wiki timestamp 03:30 predates 04:01 re-run, still has truncated
-      text. exportMeetingWiki must run on the re-transcription path too.
-- [~] ISSUE-9 (same agent): repair pass can't fix unbalanced brackets —
-      live failure "Expected ',' or ']' after array element at position 699",
-      payload ends `}\n}` (missing `]`). Add tail bracket-balancing to
-      repairJsonString.
+- [x] ISSUE-7: parseTurns inline-marker split (engine, commit 1d064a82) +
+      render-time splitInlineTurns for legacy stored segments (54391b68).
+      VERIFIED LIVE: Rec43 renders as timestamped speaker turns.
+- [x] ISSUE-8: root cause was wiki FILENAME DRIFT (title-derived slug changes
+      between runs, orphaning stale pages) — removeStaleWikiPages self-heals
+      (1d064a82); orphaned Rec43 page deleted manually.
+- [x] ISSUE-9: bracket-stack balancing in repairJsonString + rootClosed
+      discard of content after JSON root closes (1d064a82, 893d0add).
+- [x] ISSUE-10 (found by orchestrator UI test): hooks-order crash selecting a
+      recording — transcriptSegments useMemo below the early return. Fixed +
+      2 regression tests (39dd65af). VERIFIED LIVE.
+- [~] ISSUE-11 (agent: fix-quality-round2): flaky perf budget test
+      (library-performance "switches view modes", 200ms wall-clock) failed 2
+      full-suite gate runs tonight, passes in isolation. Making deterministic.
 - [x] ISSUE-2 (design, Opus — after fix-analysis lands, shares index.ts):
       unified Office-365-style titlebar: frameless BrowserWindow with overlay
       window controls, app identity + global actions in the custom titlebar,
@@ -80,8 +84,11 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
 - Wave 1: 9 unique queued (7 .hda twins cancelled); Rec43 re-run done.
 - Wave 2: ~8 unique done (Jun19 Rec58/60, Jun24 Rec75-78, Jun25 Rec84,
   Jun26 Rec85-89). Running total ≈ 18 unique.
-- Wave 3 (queued 06:40): 15 audios Jun12–Jun18 (Rec28-30, Rec31-40, Rec46,
-  Rec50). Post-dedupe: no twin cancels needed. Target total ≈ 33.
+- Wave 3 (done): 15 audios Jun12–Jun18. Total ≈ 33.
+- Wave 4 (done): 15 new (Jun9–Jun12) + 3 re-runs — Rec43 re-transcribed FULL
+  (8,168 words, was 5,921 truncated), Rec16 10,669 words + Rec14 19,277 words
+  (both previously hard-failed; MP3 chunking fixed them). TOTAL ≈ 53 unique —
+  ≥50 TARGET REACHED.
 - Organization state: 37 people, 5 auto-projects (Itaú Integration, DFX5
   Gateway, Resource Mgmt, TSC Platform, WTS Transition), 1,905 captures after
   1,057-row dedupe. Feedback filed: "Alex" vs "Alex / Óscar" person dedupe,
