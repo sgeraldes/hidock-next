@@ -563,7 +563,6 @@ class DownloadService {
   updateProgress(filename: string, bytesReceived: number): void {
     const item = this.state.queue.get(filename)
     if (item) {
-      const oldProgress = item.progress
       const statusTransition = item.status === 'pending'
       if (statusTransition) {
         item.status = 'downloading'
@@ -576,8 +575,13 @@ class DownloadService {
       const rawProgress = item.fileSize > 0 ? (bytesReceived / item.fileSize) * 100 : 0
       item.progress = Math.round(Number.isFinite(rawProgress) ? rawProgress : 0)
 
-      // Persist every 10% to avoid database spam
-      if (Math.floor(oldProgress / 10) !== Math.floor(item.progress / 10)) {
+      // Persist ONLY the pending -> downloading status transition, never the
+      // progress percentage. Progress lives in memory + throttled IPC; writing
+      // it to the DB on every 10% was a per-file multiplier on the full-DB save
+      // storm that froze the main thread. On restart an incomplete download is
+      // re-attempted from scratch, so the exact mid-download percentage is not
+      // worth a database write.
+      if (statusTransition) {
         this.persistQueueItem(item)
       }
 
