@@ -4,7 +4,12 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
+    /* Surface hierarchy (depth pass):
+     *  --background = app canvas, a low-chroma cool tint so elevated white
+     *    surfaces (cards, popovers, panels) visibly lift off it.
+     *  --card / --popover = white, the elevated tier (paired with shadow-sm/md).
+     *  --muted = sunken fills (input wells, skeletons) sitting just below canvas. */
+    --background: 214 32% 96%;
     --foreground: 222.2 84% 4.9%;
     --card: 0 0% 100%;
     --card-foreground: 222.2 84% 4.9%;
@@ -86,6 +91,18 @@
 
 .titlebar-no-drag {
   -webkit-app-region: no-drag;
+}
+
+/* Accessibility: honor the OS "reduce motion" setting (WCAG 2.1 — 2.3.3). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Row expansion - no animation to ensure virtualizer measures correctly */

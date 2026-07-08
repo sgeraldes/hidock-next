@@ -90,6 +90,15 @@ ipcMain.on('splash:quit', () => {
 })
 
 function createWindow(): void {
+  const isMac = process.platform === 'darwin'
+
+  // Office-365-style unified titlebar: the native window controls render OVER our
+  // custom React titlebar (src/components/layout/TitleBar.tsx).
+  //  - Windows/Linux: 'hidden' + titleBarOverlay draws native min/max/close in the
+  //    top-right, tinted to match our dark titlebar chrome (slate-900 / slate-200).
+  //  - macOS: 'hiddenInset' keeps the traffic lights top-left; TitleBar reserves
+  //    left padding for them.
+  // The overlay height MUST match the TitleBar height (TITLEBAR_HEIGHT = 40px).
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -97,8 +106,17 @@ function createWindow(): void {
     minHeight: 700,
     show: false,
     autoHideMenuBar: true,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 15, y: 15 },
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    trafficLightPosition: { x: 15, y: 13 },
+    ...(isMac
+      ? {}
+      : {
+          titleBarOverlay: {
+            color: '#0f172a', // slate-900 — matches TitleBar background
+            symbolColor: '#e2e8f0', // slate-200 — matches TitleBar icon color
+            height: 40
+          }
+        }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,

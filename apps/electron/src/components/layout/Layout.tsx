@@ -11,11 +11,6 @@ import {
   Compass,
   ListTodo,
   Settings,
-  ChevronLeft,
-  ChevronRight,
-  CheckCircle2,
-  Loader2,
-  XCircle,
   RotateCcw,
   Terminal,
   ChevronDown,
@@ -23,6 +18,7 @@ import {
   Network,
   Sun
 } from 'lucide-react'
+import { TitleBar } from '@/components/layout/TitleBar'
 import { cn } from '@/lib/utils'
 import {
   useAppStore,
@@ -206,17 +202,16 @@ export function Layout({ children }: LayoutProps) {
     }
   }, [config?.calendar.icsUrl])
 
-  // Determine device status display
-  const isConnected = deviceState.connected
-  const isConnecting = connectionStatus.step !== 'idle' && connectionStatus.step !== 'ready' && connectionStatus.step !== 'error'
-  const isScanning = connectionStatus.step === 'counting-files'
-  const deviceModel = deviceState.model?.replace('hidock-', '').toUpperCase() || 'Device'
-
   return (
-    <div className="flex h-screen bg-background">
+    <div className="flex h-screen flex-col bg-background">
       {/* Background operations controller - never unmounts, handles ALL operations */}
       <OperationController />
 
+      {/* Office-365-style unified titlebar (window chrome merged with the app) */}
+      <TitleBar sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
+
+      {/* Sidebar + content row (sits below the titlebar) */}
+      <div className="flex min-h-0 flex-1">
       {/* Dark Sidebar */}
       <aside
         className={cn(
@@ -224,71 +219,8 @@ export function Layout({ children }: LayoutProps) {
           sidebarOpen ? 'w-56' : 'w-16'
         )}
       >
-        {/* Logo/Header - matching page header height (text-2xl + py-4 = ~85px) */}
-        <div className="flex h-[85px] items-center justify-between border-b border-slate-700 px-4 titlebar-drag-region">
-          {sidebarOpen && (
-            <span className="font-bold text-2xl titlebar-no-drag">HiDock Next</span>
-          )}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 titlebar-no-drag text-slate-300 hover:text-white hover:bg-slate-800"
-            onClick={toggleSidebar}
-          >
-            {sidebarOpen ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-          </Button>
-        </div>
-
-        {/* Device Connection Status */}
-        <Link
-          to="/sync"
-          className={cn(
-            'mx-2 mt-2 flex items-center gap-2 rounded-lg px-3 py-2 transition-colors',
-            isConnected
-              ? 'bg-emerald-900/30 border border-emerald-700/50 hover:bg-emerald-900/50'
-              : isConnecting
-                ? 'bg-amber-900/30 border border-amber-700/50 hover:bg-amber-900/50'
-                : 'bg-slate-800/50 border border-slate-700/50 hover:bg-slate-800'
-          )}
-        >
-          {isConnected && isScanning ? (
-            <Loader2 className="h-4 w-4 flex-shrink-0 text-emerald-400 animate-spin" />
-          ) : isConnected ? (
-            <CheckCircle2 className="h-4 w-4 flex-shrink-0 text-emerald-400" />
-          ) : isConnecting ? (
-            <Loader2 className="h-4 w-4 flex-shrink-0 text-amber-400 animate-spin" />
-          ) : (
-            <XCircle className="h-4 w-4 flex-shrink-0 text-slate-500" />
-          )}
-          {sidebarOpen && (
-            <div className="flex flex-col min-w-0">
-              <span className={cn(
-                'text-xs font-medium truncate',
-                isConnected ? 'text-emerald-300' : isConnecting ? 'text-amber-300' : 'text-slate-400'
-              )}>
-                {isConnected ? deviceModel : isConnecting ? 'Connecting...' : 'Disconnected'}
-              </span>
-              {isConnected && isScanning && (
-                <span className="text-[10px] text-amber-400 truncate">
-                  {connectionStatus.message}
-                </span>
-              )}
-              {isConnected && !isScanning && deviceState.recordingCount > 0 && (
-                <span className="text-[10px] text-slate-500">
-                  {deviceState.recordingCount} recordings
-                </span>
-              )}
-              {!isConnected && !isConnecting && (
-                <span className="text-[10px] text-slate-600">
-                  Click to connect
-                </span>
-              )}
-            </div>
-          )}
-        </Link>
-
         {/* Navigation */}
-        <nav className="flex-1 p-2 space-y-4 overflow-y-auto">
+        <nav className="flex-1 p-2 pt-3 space-y-4 overflow-y-auto">
           {navigationSections.map((section, sectionIdx) => (
             <div key={section.title}>
               {/* Section Header */}
@@ -306,11 +238,12 @@ export function Layout({ children }: LayoutProps) {
                       key={item.href}
                       to={item.href}
                       className={cn(
-                        'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors',
+                        'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
                         isActive
-                          ? 'bg-slate-700 text-white font-medium'
+                          ? 'bg-sky-600 text-white font-medium shadow-sm'
                           : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
                       )}
+                      aria-current={isActive ? 'page' : undefined}
                     >
                       <item.icon className="h-5 w-5 flex-shrink-0" />
                       {sidebarOpen && <span>{item.name}</span>}
@@ -330,11 +263,12 @@ export function Layout({ children }: LayoutProps) {
             <Link
               to="/settings"
               className={cn(
-                'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors',
+                'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
                 location.pathname.startsWith('/settings')
-                  ? 'bg-slate-700 text-white font-medium'
+                  ? 'bg-sky-600 text-white font-medium shadow-sm'
                   : 'text-slate-400 hover:bg-slate-800 hover:text-slate-100'
               )}
+              aria-current={location.pathname.startsWith('/settings') ? 'page' : undefined}
             >
               <Settings className="h-5 w-5 flex-shrink-0" />
               {sidebarOpen && <span>Settings</span>}
@@ -446,6 +380,7 @@ export function Layout({ children }: LayoutProps) {
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">{children}</main>
+      </div>
     </div>
   )
 }

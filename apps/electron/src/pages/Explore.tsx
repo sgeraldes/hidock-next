@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Search,
   RefreshCw,
@@ -59,7 +59,10 @@ const SEARCH_PAGE_SIZE = 20
 
 export function Explore() {
   const navigate = useNavigate()
-  const [query, setQuery] = useState('')
+  const location = useLocation()
+  // Seed the search box from the titlebar global-search handoff (navigate('/explore', { state: { query } })).
+  const initialQuery = (location.state as { query?: string } | null)?.query ?? ''
+  const [query, setQuery] = useState(initialQuery)
   const [results, setResults] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
