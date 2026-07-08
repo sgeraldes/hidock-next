@@ -7,7 +7,7 @@
  * meeting to highlight — the one currently running, or the next one to start.
  */
 
-export type MeetingTimingState = 'cancelled' | 'past' | 'ran_over' | 'in_progress' | 'upcoming'
+export type MeetingTimingState = 'cancelled' | 'all_day' | 'past' | 'ran_over' | 'in_progress' | 'upcoming'
 
 /**
  * A meeting whose scheduled end has passed but by no more than this counts as
@@ -59,6 +59,30 @@ function instant(iso: string): number {
   return new Date(iso).getTime()
 }
 
+/**
+ * A span this long or longer is treated as an all-day event rather than a timed
+ * meeting. 23h (not 24h) absorbs DST shifts and feeds that trim a minute off the
+ * midnight-to-midnight span.
+ */
+export const ALL_DAY_MS = 23 * 60 * 60 * 1000
+
+/**
+ * All-day / holiday events (ICS `DTSTART;VALUE=DATE`) must never be treated as
+ * timed meetings — otherwise a "Feriado" renders as "09:00 PM–09:00 PM" and gets
+ * highlighted as next-up "in 2 h 56 min". Detection is timezone-independent (works
+ * off the raw span, not wall-clock midnight, since times are stored as UTC ISO):
+ *   - zero/negative span — a feed that stores `DTSTART == DTEND` for the marker
+ *   - a span covering essentially a whole day or more (single all-day = 24h;
+ *     multi-day holidays are longer)
+ */
+export function isAllDayMeeting(startIso: string, endIso: string): boolean {
+  const start = instant(startIso)
+  const end = instant(endIso)
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return false
+  if (end <= start) return true
+  return end - start >= ALL_DAY_MS
+}
+
 /** Classify every meeting and flag the one to highlight. */
 export function classifyMeetingTimings<T extends TimeableMeeting>(
   meetings: T[],
@@ -74,6 +98,13 @@ export function classifyMeetingTimings<T extends TimeableMeeting>(
   for (const m of meetings) {
     if (isCancelledSubject(m.subject)) {
       result.set(m.id, { state: 'cancelled', minutes: 0, isFocus: false, isNextUp: false })
+      continue
+    }
+
+    // All-day events are never timed context: excluded from focus/next-up and the
+    // upcoming/running pools, so they can't become the highlighted "what's next".
+    if (isAllDayMeeting(m.start_time, m.end_time)) {
+      result.set(m.id, { state: 'all_day', minutes: 0, isFocus: false, isNextUp: false })
       continue
     }
 
@@ -153,4 +184,32 @@ export function formatMinutesLeft(minutes: number): string {
   const h = Math.floor(minutes / 60)
   const m = minutes % 60
   return m === 0 ? `Now · ${h} h left` : `Now · ${h} h ${m} min left`
+}
+
+/** Fraction of a meeting a recording must cover (by time overlap) to count as its capture. */
+export const RECORDING_OVERLAP_THRESHOLD = 0.25
+
+/** A device recording placed on the timeline: start instant + span (ms). */
+export interface RecordingSpan {
+  startMs: number
+  endMs: number
+}
+
+/**
+ * Whether a device recording plausibly captured a meeting. True when the recording
+ * *started inside* the meeting window (the common case — you hit record as the
+ * meeting begins), OR its span overlaps at least {@link RECORDING_OVERLAP_THRESHOLD}
+ * of the meeting (catches a recording started early / running long). Used to show a
+ * "recorded · on device" hint on today's rows before the file is downloaded.
+ */
+export function recordingOverlapsMeeting(rec: RecordingSpan, meeting: TimeableMeeting): boolean {
+  const mStart = instant(meeting.start_time)
+  const mEnd = instant(meeting.end_time)
+  if (!Number.isFinite(mStart) || !Number.isFinite(mEnd) || mEnd <= mStart) return false
+  if (!Number.isFinite(rec.startMs)) return false
+  if (rec.startMs >= mStart && rec.startMs <= mEnd) return true
+  const spanEnd = Number.isFinite(rec.endMs) && rec.endMs > rec.startMs ? rec.endMs : rec.startMs
+  const overlap = Math.min(spanEnd, mEnd) - Math.max(rec.startMs, mStart)
+  if (overlap <= 0) return false
+  return overlap / (mEnd - mStart) >= RECORDING_OVERLAP_THRESHOLD
 }

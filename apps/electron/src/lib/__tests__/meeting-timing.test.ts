@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   classifyMeetingTimings,
   isCancelledSubject,
+  isAllDayMeeting,
+  recordingOverlapsMeeting,
   formatMinutesUntil,
   formatMinutesLeft,
   formatMinutesSinceEnd,
@@ -9,6 +11,7 @@ import {
 } from '../meeting-timing'
 
 const now = new Date('2026-07-08T10:00:00Z')
+const t = (iso: string) => new Date(iso).getTime()
 
 function m(id: string, subject: string, startOffsetMin: number, durationMin: number): TimeableMeeting {
   const start = new Date(now.getTime() + startOffsetMin * 60000)
@@ -139,6 +142,90 @@ describe('classifyMeetingTimings', () => {
     const timings = classifyMeetingTimings(meetings, now)
     expect(timings.get('bad')?.state).toBe('upcoming')
     expect(timings.get('bad')?.minutes).toBe(0)
+  })
+
+  it('classifies all-day events and never focuses or flags them as next-up', () => {
+    const meetings: TimeableMeeting[] = [
+      // 24h span (single all-day event, e.g. "Feriado")
+      { id: 'holiday', subject: 'Feriado', start_time: '2026-07-08T00:00:00Z', end_time: '2026-07-09T00:00:00Z' },
+      // zero-duration marker (feed stores DTSTART == DTEND)
+      { id: 'marker', subject: 'Payday', start_time: '2026-07-08T21:00:00Z', end_time: '2026-07-08T21:00:00Z' },
+      m('next', 'Client call', 4, 30) // real upcoming meeting
+    ]
+    const timings = classifyMeetingTimings(meetings, now)
+
+    expect(timings.get('holiday')?.state).toBe('all_day')
+    expect(timings.get('holiday')?.isFocus).toBe(false)
+    expect(timings.get('holiday')?.isNextUp).toBe(false)
+    expect(timings.get('marker')?.state).toBe('all_day')
+    expect(timings.get('marker')?.isFocus).toBe(false)
+    expect(timings.get('marker')?.isNextUp).toBe(false)
+
+    // Focus/next-up fall through to the real timed meeting, unaffected by all-day events.
+    expect(timings.get('next')?.state).toBe('upcoming')
+    expect(timings.get('next')?.isFocus).toBe(true)
+    expect(timings.get('next')?.isNextUp).toBe(true)
+  })
+})
+
+describe('isAllDayMeeting', () => {
+  it('detects a full-day (24h) span', () => {
+    expect(isAllDayMeeting('2026-07-08T00:00:00Z', '2026-07-09T00:00:00Z')).toBe(true)
+  })
+
+  it('detects a zero-duration (start == end) marker', () => {
+    expect(isAllDayMeeting('2026-07-08T21:00:00Z', '2026-07-08T21:00:00Z')).toBe(true)
+  })
+
+  it('detects a multi-day span', () => {
+    expect(isAllDayMeeting('2026-07-08T00:00:00Z', '2026-07-11T00:00:00Z')).toBe(true)
+  })
+
+  it('does not treat a normal timed meeting as all-day', () => {
+    expect(isAllDayMeeting('2026-07-08T10:00:00Z', '2026-07-08T11:00:00Z')).toBe(false)
+    expect(isAllDayMeeting('2026-07-08T09:00:00Z', '2026-07-08T17:00:00Z')).toBe(false) // long 8h workshop
+  })
+
+  it('returns false for unparseable timestamps', () => {
+    expect(isAllDayMeeting('nope', 'nope')).toBe(false)
+  })
+})
+
+describe('recordingOverlapsMeeting', () => {
+  const meeting: TimeableMeeting = {
+    id: 'm',
+    subject: 'Weekly',
+    start_time: '2026-07-08T10:00:00Z',
+    end_time: '2026-07-08T11:00:00Z'
+  }
+
+  it('matches when the recording started inside the meeting window', () => {
+    const rec = { startMs: t('2026-07-08T10:05:00Z'), endMs: t('2026-07-08T10:07:00Z') }
+    expect(recordingOverlapsMeeting(rec, meeting)).toBe(true)
+  })
+
+  it('matches when the span overlaps at least 25% though it started before the meeting', () => {
+    // 09:00–10:20 → 20 min of overlap out of 60 (33%), start not inside window.
+    const rec = { startMs: t('2026-07-08T09:00:00Z'), endMs: t('2026-07-08T10:20:00Z') }
+    expect(recordingOverlapsMeeting(rec, meeting)).toBe(true)
+  })
+
+  it('does not match when overlap is below the 25% threshold', () => {
+    // 09:00–10:10 → 10 min of overlap out of 60 (17%), start not inside window.
+    const rec = { startMs: t('2026-07-08T09:00:00Z'), endMs: t('2026-07-08T10:10:00Z') }
+    expect(recordingOverlapsMeeting(rec, meeting)).toBe(false)
+  })
+
+  it('does not match a recording entirely outside the meeting', () => {
+    const rec = { startMs: t('2026-07-08T12:00:00Z'), endMs: t('2026-07-08T12:30:00Z') }
+    expect(recordingOverlapsMeeting(rec, meeting)).toBe(false)
+  })
+
+  it('handles a zero-duration recording via the start-within rule', () => {
+    const inside = { startMs: t('2026-07-08T10:30:00Z'), endMs: t('2026-07-08T10:30:00Z') }
+    const outside = { startMs: t('2026-07-08T09:30:00Z'), endMs: t('2026-07-08T09:30:00Z') }
+    expect(recordingOverlapsMeeting(inside, meeting)).toBe(true)
+    expect(recordingOverlapsMeeting(outside, meeting)).toBe(false)
   })
 })
 

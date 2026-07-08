@@ -30,7 +30,9 @@ import {
   classifyMeetingTimings,
   formatMinutesLeft,
   formatMinutesUntil,
-  formatMinutesSinceEnd
+  formatMinutesSinceEnd,
+  recordingOverlapsMeeting,
+  type RecordingSpan
 } from '@/lib/meeting-timing'
 import type { Contact } from '@/types'
 
@@ -109,6 +111,10 @@ export function Today() {
   const [error, setError] = useState<string | null>(null)
   const [participantsByMeeting, setParticipantsByMeeting] = useState<Record<string, Contact[]>>({})
   const [recordingByMeeting, setRecordingByMeeting] = useState<Record<string, boolean>>({})
+  // Which meetings have a recording sitting on the device but not yet downloaded
+  // (from the cached device file listing). Distinct from recordingByMeeting, which
+  // tracks recordings already ingested and linked.
+  const [recordedOnDeviceByMeeting, setRecordedOnDeviceByMeeting] = useState<Record<string, boolean>>({})
   // Live device-recording flag (see useAppStore.deviceRecording TODO). Scalar → no
   // useShallow needed. Stays false until a device-status read path sets it.
   const deviceRecording = useAppStore((s) => s.deviceRecording)
@@ -212,7 +218,54 @@ export function Today() {
     }
   }, [todayMeetings])
 
+  // Which of today's meetings were recorded on the device (from the cached file
+  // listing) even before the file is downloaded. One fetch per briefing load,
+  // tolerant of an empty/stale/absent cache (then simply no amber badge). Recording
+  // start is parsed from the filename; the span uses the cached duration (seconds).
+  useEffect(() => {
+    if (!todayMeetings || todayMeetings.length === 0) {
+      setRecordedOnDeviceByMeeting({})
+      return
+    }
+    const getAll = window.electronAPI?.deviceCache?.getAll
+    if (!getAll) {
+      setRecordedOnDeviceByMeeting({})
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const cached = await getAll()
+        if (cancelled) return
+        const spans: RecordingSpan[] = (Array.isArray(cached) ? cached : [])
+          .map((c: { filename?: string; duration?: number }) => {
+            const start = parseRecordingStart(String(c?.filename ?? ''))
+            if (!start) return null
+            const startMs = start.getTime()
+            const durationSec = Number(c?.duration) || 0
+            return { startMs, endMs: startMs + durationSec * 1000 }
+          })
+          .filter((s): s is RecordingSpan => s !== null)
+        const map: Record<string, boolean> = {}
+        for (const meeting of todayMeetings) {
+          map[meeting.id] = spans.some((s) => recordingOverlapsMeeting(s, meeting))
+        }
+        if (!cancelled) setRecordedOnDeviceByMeeting(map)
+      } catch {
+        if (!cancelled) setRecordedOnDeviceByMeeting({})
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [todayMeetings])
+
   const timings = classifyMeetingTimings(data?.todayMeetings ?? [], now)
+
+  // Split all-day / holiday events out of the timed list — they render as a slim
+  // banner, never as time-ranged rows (and never steal the "what's next" highlight).
+  const allDayMeetings = (data?.todayMeetings ?? []).filter((m) => timings.get(m.id)?.state === 'all_day')
+  const timedMeetings = (data?.todayMeetings ?? []).filter((m) => timings.get(m.id)?.state !== 'all_day')
 
   // When the device is recording, where did the current capture start? Used to
   // decide whether a just-ended ("ran over") meeting is still the one being
@@ -307,8 +360,28 @@ export function Today() {
             ) : data.todayMeetings.length === 0 ? (
               <p className="text-sm text-muted-foreground">No meetings scheduled today.</p>
             ) : (
-              <div className="space-y-2">
-                {data.todayMeetings.map((m) => {
+              <div className="space-y-3">
+                {allDayMeetings.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-dashed bg-muted/30 px-3 py-2">
+                    <CalendarDays className="h-3.5 w-3.5 flex-shrink-0 text-foreground/50" aria-hidden="true" />
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-foreground/50">All day</span>
+                    {allDayMeetings.map((m, i) => (
+                      <Fragment key={m.id}>
+                        {i > 0 && (
+                          <span className="text-foreground/30" aria-hidden="true">
+                            ·
+                          </span>
+                        )}
+                        <span className="text-xs font-medium text-foreground/75">{m.subject}</span>
+                      </Fragment>
+                    ))}
+                  </div>
+                )}
+                {timedMeetings.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No timed meetings today.</p>
+                ) : (
+                  <div className="space-y-2">
+                {timedMeetings.map((m) => {
                   const people = participantsByMeeting[m.id] ?? []
                   const names = people.slice(0, TODAY_PARTICIPANT_LIMIT).map(participantFirstName)
                   const extra = people.length - names.length
@@ -327,6 +400,9 @@ export function Today() {
                   const secondaryEmphasis = isNextUp && !isFocus
                   const online = isOnlineMeeting(m)
                   const hasRecording = recordingByMeeting[m.id]
+                  // Recorded on the device but not yet downloaded/linked — amber hint,
+                  // distinct from the green "linked recording" mic.
+                  const recordedOnDevice = !hasRecording && !!recordedOnDeviceByMeeting[m.id]
                   // Live capture: the HiDock is recording and this is the meeting in
                   // progress it's most likely capturing (the focused running meeting).
                   const recording = inProgress && isFocus && deviceRecording
@@ -390,12 +466,20 @@ export function Today() {
                                   aria-label="Online meeting"
                                 />
                               )}
-                              {hasRecording && (
+                              {hasRecording ? (
                                 <Mic
                                   className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-500 flex-shrink-0"
                                   aria-label="Recording linked"
                                 />
-                              )}
+                              ) : recordedOnDevice ? (
+                                <span
+                                  className="flex items-center gap-1 flex-shrink-0 text-amber-600 dark:text-amber-500"
+                                  aria-label="Recorded — on device, not yet downloaded"
+                                >
+                                  <Mic className="h-3.5 w-3.5" />
+                                  <span className="text-[10px] font-medium whitespace-nowrap">recorded · on device</span>
+                                </span>
+                              ) : null}
                               {(recording || runningOver) && (
                                 <span
                                   className="flex items-center gap-1 flex-shrink-0 rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-500"
@@ -453,6 +537,8 @@ export function Today() {
                     <Fragment key={m.id}>{rowButton}</Fragment>
                   )
                 })}
+                  </div>
+                )}
               </div>
             )}
           </CardContent>
