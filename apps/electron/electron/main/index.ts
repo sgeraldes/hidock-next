@@ -290,6 +290,13 @@ app.whenReady().then(async () => {
       .catch((e) => console.error('[VectorStore] Backfill error:', e))
   }, 15000)
 
+  // Backfill the plain-markdown meeting wiki (no API calls — DB → files).
+  setTimeout(() => {
+    import('./services/meeting-wiki')
+      .then(({ backfillMeetingWiki }) => backfillMeetingWiki())
+      .catch((e) => console.error('[MeetingWiki] Backfill error:', e))
+  }, 10000)
+
   // Show security warning in production when remote debugging is explicitly enabled
   if (!is.dev && process.env.ENABLE_REMOTE_DEBUGGING === 'true' && mainWindow) {
     // Wait for window to be ready before sending the warning

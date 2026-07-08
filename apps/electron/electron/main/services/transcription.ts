@@ -1063,6 +1063,16 @@ Meeting ${i + 1}: "${m.subject}"
     // Don't fail the transcription if actionable detection fails
   }
 
+  // Export the per-meeting wiki page (plain markdown knowledge base readable
+  // by the user and by external agents like Claude Code). Non-fatal.
+  try {
+    const { exportMeetingWiki } = await import('./meeting-wiki')
+    const wikiPath = exportMeetingWiki(recordingId)
+    if (wikiPath) console.log(`[MeetingWiki] Exported ${wikiPath}`)
+  } catch (e) {
+    console.error('[MeetingWiki] Export failed:', e)
+  }
+
   progressCallback?.('indexing', 85) // spec-014: progress reporting
 
   // Index transcript into vector store for RAG

@@ -167,6 +167,22 @@ function migrateRetiredGeminiModels(cfg: AppConfig): boolean {
   return changed
 }
 
+/**
+ * One-time: re-enable auto-transcription. Long-recording transcription was
+ * broken (truncation/hangs) and users turned the toggle off; now that the
+ * pipeline works, restore it once. The marker keeps the user's choice
+ * authoritative afterwards — turning it off again sticks.
+ */
+function migrateAutoTranscribeRestore(cfg: AppConfig): boolean {
+  const marker = (cfg as unknown as Record<string, unknown>)['autoTranscribeRestored2026_07']
+  if (marker) return false
+  ;(cfg as unknown as Record<string, unknown>)['autoTranscribeRestored2026_07'] = true
+  if (cfg.transcription.autoTranscribe !== true) {
+    cfg.transcription.autoTranscribe = true
+  }
+  return true
+}
+
 export async function initializeConfig(): Promise<void> {
   const configPath = getConfigPath()
 
@@ -183,7 +199,9 @@ export async function initializeConfig(): Promise<void> {
       // Auto-upgrade retired Gemini model names in persisted configs so old
       // saved values (e.g. gemini-2.0-flash, now 404) don't break transcription
       // and GraphRAG extraction. Persist if anything changed.
-      if (migrateRetiredGeminiModels(config)) {
+      const modelsChanged = migrateRetiredGeminiModels(config)
+      const autoTransChanged = migrateAutoTranscribeRestore(config)
+      if (modelsChanged || autoTransChanged) {
         await saveConfig(config)
       }
     } else {
