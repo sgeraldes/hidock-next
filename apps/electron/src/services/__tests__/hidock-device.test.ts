@@ -3589,6 +3589,27 @@ describe('HiDockDeviceService - Constructor Callbacks', () => {
     handleConnectSpy.mockRestore()
   })
 
+  it('fails the connect cleanly when device info cannot be read (no half-connected SN-null state)', async () => {
+    // Regression: a desynced device returns null device-info (not a throw), which used
+    // to leave the service "connected" with SN null forever — and because the USB handle
+    // stayed open, the next tryConnect short-circuited on "already connected". The connect
+    // must instead tear the handle down and light the honest failure pill.
+    const service = new HiDockDeviceService()
+    const serviceAny = service as any
+    serviceAny.jensen.getModel = vi.fn(() => 'unknown')
+    serviceAny.jensen.isConnected = vi.fn(() => true)
+    serviceAny.jensen.getDeviceInfo = vi.fn().mockResolvedValue(null) // desynced / unresponsive
+    const disconnectSpy = vi.fn().mockResolvedValue(undefined)
+    serviceAny.jensen.disconnect = disconnectSpy
+
+    await serviceAny.handleConnect()
+
+    expect(disconnectSpy).toHaveBeenCalledTimes(1) // USB handle torn down for a clean retry
+    expect(serviceAny.state.connected).toBe(false) // not left half-connected
+    expect(serviceAny.state.serialNumber).toBeNull()
+    expect(serviceAny.connectionStatus.connectFailed).toBe(true) // honest "Connection failed" pill
+  })
+
   it('should call handleDisconnect when ondisconnect callback fires', () => {
     const service = new HiDockDeviceService()
     const serviceAny = service as any

@@ -451,4 +451,124 @@ describe('parseICS', () => {
       expect(events[0].isRecurring).toBeUndefined()
     })
   })
+
+  describe('EXDATE', () => {
+    it('parses a single EXDATE instant on a recurring master', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-exdate',
+        'SUMMARY:Daily',
+        'DTSTART:20260701T220000Z',
+        'DTEND:20260701T223000Z',
+        'RRULE:FREQ=DAILY',
+        'EXDATE:20260703T220000Z',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(1)
+      expect(events[0].exdates).toEqual([new Date('2026-07-03T22:00:00Z')])
+    })
+
+    it('parses multiple comma-separated EXDATE values', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-exdate-multi',
+        'DTSTART:20260701T220000Z',
+        'DTEND:20260701T223000Z',
+        'RRULE:FREQ=DAILY',
+        'EXDATE:20260703T220000Z,20260705T220000Z',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events[0].exdates).toEqual([
+        new Date('2026-07-03T22:00:00Z'),
+        new Date('2026-07-05T22:00:00Z'),
+      ])
+    })
+
+    it('applies a shared TZID to EXDATE values (Windows/Exchange zone)', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-exdate-tz',
+        'DTSTART;TZID=Eastern Standard Time:20260701T170000',
+        'DTEND;TZID=Eastern Standard Time:20260701T173000',
+        'RRULE:FREQ=DAILY',
+        'EXDATE;TZID=Eastern Standard Time:20260703T170000',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      // Eastern Standard Time = -5h → 17:00 local = 22:00 UTC
+      expect(events[0].exdates).toEqual([new Date('2026-07-03T22:00:00Z')])
+    })
+
+    it('leaves exdates undefined when there is no EXDATE', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-no-exdate',
+        'DTSTART:20260701T220000Z',
+        'DTEND:20260701T223000Z',
+        'RRULE:FREQ=DAILY',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events[0].exdates).toBeUndefined()
+    })
+  })
+
+  describe('RECURRENCE-ID', () => {
+    it('parses RECURRENCE-ID on an override VEVENT', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-series',
+        'DTSTART:20260701T220000Z',
+        'DTEND:20260701T223000Z',
+        'RRULE:FREQ=DAILY',
+        'END:VEVENT',
+        'BEGIN:VEVENT',
+        'UID:uid-series',
+        'RECURRENCE-ID:20260704T220000Z',
+        'DTSTART:20260704T230000Z',
+        'DTEND:20260704T233000Z',
+        'SUMMARY:Moved instance',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events).toHaveLength(2)
+      const master = events.find((e) => e.recurrence && !e.recurrenceId)
+      const override = events.find((e) => e.recurrenceId)
+      expect(master?.recurrenceId).toBeUndefined()
+      expect(override?.recurrenceId).toEqual(new Date('2026-07-04T22:00:00Z'))
+      expect(override?.startTime).toEqual(new Date('2026-07-04T23:00:00Z'))
+    })
+
+    it('leaves recurrenceId undefined for a normal (non-override) event', () => {
+      const ics = [
+        'BEGIN:VCALENDAR',
+        'BEGIN:VEVENT',
+        'UID:uid-plain',
+        'DTSTART:20260701T220000Z',
+        'DTEND:20260701T223000Z',
+        'END:VEVENT',
+        'END:VCALENDAR',
+      ].join('\r\n')
+
+      const events = parseICS(ics)
+      expect(events[0].recurrenceId).toBeUndefined()
+    })
+  })
 })

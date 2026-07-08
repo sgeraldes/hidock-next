@@ -1,5 +1,6 @@
 import { parseICS, correlate } from '@hidock/calendar-sync'
 import type { CalendarEvent } from '@hidock/calendar-sync'
+import ICAL from 'ical.js'
 import { join } from 'path'
 import { getCachePath } from './file-storage'
 import { upsertMeetingsBatch, Meeting } from './database'
@@ -168,7 +169,7 @@ function validateCalendarUrl(url: string): { valid: boolean; error?: string } {
     }
 
     return { valid: true }
-  } catch (e) {
+  } catch {
     return { valid: false, error: 'Invalid URL format' }
   }
 }
@@ -209,6 +210,25 @@ const MEETING_URL_PATTERNS = [
 function calendarEventToMeetingRow(
   event: CalendarEvent
 ): Omit<Meeting, 'created_at' | 'updated_at'> {
+  return buildMeetingRow(event, {
+    id: event.uid,
+    startTime: event.startTime,
+    endTime: event.endTime,
+    isRecurring: !!event.isRecurring,
+    recurrenceRule: event.recurrence,
+  })
+}
+
+/**
+ * Build a DB meeting row from a CalendarEvent, allowing the identity, times and
+ * recurrence flags to be overridden per occurrence. Attendee/organizer/URL/
+ * subject/description all come from the source event; the expander supplies the
+ * occurrence-specific id, start/end, and recurrence metadata.
+ */
+function buildMeetingRow(
+  event: CalendarEvent,
+  overrides: { id: string; startTime: Date; endTime: Date; isRecurring: boolean; recurrenceRule?: string }
+): Omit<Meeting, 'created_at' | 'updated_at'> {
   // Attendees: map CalendarAttendee[] → JSON string (DB stores as text)
   let attendeesJson: string | undefined
   if (event.attendees.length > 0) {
@@ -232,21 +252,225 @@ function calendarEventToMeetingRow(
   }
 
   return {
-    id: event.uid,
+    id: overrides.id,
     subject: event.title || 'Untitled Meeting',
-    start_time: event.startTime.toISOString(),
-    end_time: event.endTime.toISOString(),
+    start_time: overrides.startTime.toISOString(),
+    end_time: overrides.endTime.toISOString(),
     location: event.location ?? undefined,
     // Organizer restored from the package's parsed ORGANIZER property
     organizer_name: event.organizer?.name ?? undefined,
     organizer_email: event.organizer?.email ?? undefined,
     attendees: attendeesJson,
     description: event.description ?? undefined,
-    // Recurrence restored from the package's parsed RRULE
-    is_recurring: event.isRecurring ? 1 : 0,
-    recurrence_rule: event.recurrence ?? undefined,
+    is_recurring: overrides.isRecurring ? 1 : 0,
+    recurrence_rule: overrides.recurrenceRule ?? undefined,
     meeting_url: meetingUrl,
   }
+}
+
+// Recurrence expansion window, measured from sync time.
+const RECURRENCE_WINDOW_BACK_DAYS = 60
+const RECURRENCE_WINDOW_FORWARD_DAYS = 90
+const DAY_MS = 24 * 60 * 60 * 1000
+// Cap emitted occurrences per series per window; a pathological RRULE (e.g. an
+// hourly rule with no COUNT/UNTIL) is truncated with a warning rather than
+// materializing unbounded rows.
+const MAX_OCCURRENCES_PER_SERIES = 400
+// Hard safety bound on iterator steps regardless of window, so a series anchored
+// far in the past cannot spin indefinitely before reaching the window.
+const MAX_ITERATOR_STEPS = 20000
+
+/**
+ * Stable per-occurrence meeting id.
+ *
+ * The occurrence at the series master's own DTSTART keeps the bare `uid` — this
+ * is exactly what the pre-expansion code stored for a recurring master, so the
+ * existing single-instance row (and any recordings / contacts / projects linked
+ * to it) is UPDATEd in place rather than orphaned. Every other occurrence is
+ * keyed `${uid}::${slotISO}` on its scheduled-slot instant, which is stable
+ * across re-syncs (the master DTSTART does not move), so repeated syncs UPSERT
+ * instead of duplicating.
+ */
+function occurrenceId(uid: string, slotMs: number, masterStartMs: number): string {
+  return slotMs === masterStartMs ? uid : `${uid}::${new Date(slotMs).toISOString()}`
+}
+
+/**
+ * Expand a recurring master (plus its RECURRENCE-ID overrides and EXDATE
+ * exclusions) into per-occurrence meeting rows within the sync window.
+ */
+function expandMaster(
+  master: CalendarEvent,
+  overrides: CalendarEvent[],
+  windowStartMs: number,
+  windowEndMs: number
+): Omit<Meeting, 'created_at' | 'updated_at'>[] {
+  const rows: Omit<Meeting, 'created_at' | 'updated_at'>[] = []
+  const uid = master.uid
+  const masterStartMs = master.startTime.getTime()
+  const durationMs = master.endTime.getTime() - master.startTime.getTime()
+  const recurrenceRule = master.recurrence
+
+  const exdateSet = new Set((master.exdates ?? []).map((d) => d.getTime()))
+  const overrideBySlot = new Map<number, CalendarEvent>()
+  for (const o of overrides) {
+    if (o.recurrenceId) overrideBySlot.set(o.recurrenceId.getTime(), o)
+  }
+
+  // Returns the next occurrence instant, or null when the rule is exhausted.
+  // ical.js types iterator.next() as always returning a Time, but at runtime it
+  // yields a falsy value once COUNT/UNTIL (or the internal limit) is reached.
+  let nextOccurrence: () => Date | null
+  try {
+    const recur = ICAL.Recur.fromString(master.recurrence as string)
+    const icalStart = ICAL.Time.fromJSDate(master.startTime, true)
+    const iter = recur.iterator(icalStart)
+    nextOccurrence = () => {
+      const t = iter.next() as unknown as { toJSDate(): Date } | null | undefined
+      return t ? t.toJSDate() : null
+    }
+  } catch (e) {
+    // RRULE we can't parse: fall back to the pre-expansion behavior (emit the
+    // master once) so the series never disappears, then still apply overrides.
+    console.warn(`[calendar-sync] Failed to expand RRULE for ${uid}; emitting master only:`, e)
+    rows.push(calendarEventToMeetingRow(master))
+    for (const o of overrides) {
+      if (!o.recurrenceId) continue
+      rows.push(
+        buildMeetingRow(o, {
+          id: occurrenceId(uid, o.recurrenceId.getTime(), masterStartMs),
+          startTime: o.startTime,
+          endTime: o.endTime,
+          isRecurring: true,
+          recurrenceRule,
+        })
+      )
+    }
+    return rows
+  }
+
+  const emittedSlots = new Set<number>()
+  let inWindowCount = 0
+  let steps = 0
+  let capped = false
+
+  let occurrence = nextOccurrence()
+  while (occurrence) {
+    if (++steps > MAX_ITERATOR_STEPS) {
+      capped = true
+      break
+    }
+    const slotMs = occurrence.getTime()
+    if (slotMs > windowEndMs) break
+
+    if (slotMs >= windowStartMs && !exdateSet.has(slotMs)) {
+      if (inWindowCount >= MAX_OCCURRENCES_PER_SERIES) {
+        capped = true
+        break
+      }
+      const override = overrideBySlot.get(slotMs)
+      if (override) {
+        rows.push(
+          buildMeetingRow(override, {
+            id: occurrenceId(uid, slotMs, masterStartMs),
+            startTime: override.startTime,
+            endTime: override.endTime,
+            isRecurring: true,
+            recurrenceRule,
+          })
+        )
+      } else {
+        rows.push(
+          buildMeetingRow(master, {
+            id: occurrenceId(uid, slotMs, masterStartMs),
+            startTime: new Date(slotMs),
+            endTime: new Date(slotMs + durationMs),
+            isRecurring: true,
+            recurrenceRule,
+          })
+        )
+      }
+      emittedSlots.add(slotMs)
+      inWindowCount++
+    }
+    occurrence = nextOccurrence()
+  }
+
+  // Overrides whose original slot the iterator never produced (e.g. a moved
+  // instance, or a slot outside the stepped range) still need a row when their
+  // actual time lands inside the window — otherwise a rescheduled occurrence
+  // would vanish.
+  for (const o of overrides) {
+    if (!o.recurrenceId) continue
+    const slotMs = o.recurrenceId.getTime()
+    if (emittedSlots.has(slotMs)) continue
+    const oStartMs = o.startTime.getTime()
+    if (oStartMs >= windowStartMs && oStartMs <= windowEndMs) {
+      rows.push(
+        buildMeetingRow(o, {
+          id: occurrenceId(uid, slotMs, masterStartMs),
+          startTime: o.startTime,
+          endTime: o.endTime,
+          isRecurring: true,
+          recurrenceRule,
+        })
+      )
+    }
+  }
+
+  if (capped) {
+    console.warn(
+      `[calendar-sync] Recurring series ${uid} hit the occurrence cap ` +
+        `(${MAX_OCCURRENCES_PER_SERIES}/window); remaining occurrences were truncated.`
+    )
+  }
+
+  return rows
+}
+
+/**
+ * Expand parsed calendar events into DB meeting rows, materializing recurring
+ * series into individual occurrences. Non-recurring events pass through
+ * unchanged (id === uid). Exported for unit testing.
+ */
+export function expandMeetingOccurrences(
+  events: CalendarEvent[],
+  now: Date = new Date()
+): Omit<Meeting, 'created_at' | 'updated_at'>[] {
+  const windowStartMs = now.getTime() - RECURRENCE_WINDOW_BACK_DAYS * DAY_MS
+  const windowEndMs = now.getTime() + RECURRENCE_WINDOW_FORWARD_DAYS * DAY_MS
+
+  // Group VEVENTs sharing a UID: a recurring series is one master (has RRULE,
+  // no RECURRENCE-ID) plus zero or more overrides (each has RECURRENCE-ID).
+  const groups = new Map<string, CalendarEvent[]>()
+  for (const event of events) {
+    const arr = groups.get(event.uid)
+    if (arr) arr.push(event)
+    else groups.set(event.uid, [event])
+  }
+
+  const rows: Omit<Meeting, 'created_at' | 'updated_at'>[] = []
+  for (const group of groups.values()) {
+    const master = group.find((e) => e.recurrence && !e.recurrenceId)
+    if (!master) {
+      // No recurring master in this group → emit every event unchanged, exactly
+      // as before expansion existed. Preserves non-recurring behavior.
+      for (const e of group) rows.push(calendarEventToMeetingRow(e))
+      continue
+    }
+
+    const overrides = group.filter((e) => e.recurrenceId)
+    rows.push(...expandMaster(master, overrides, windowStartMs, windowEndMs))
+
+    // Any stray same-uid events that are neither the master nor overrides are
+    // emitted unchanged so nothing is silently dropped.
+    for (const e of group) {
+      if (e === master || e.recurrenceId) continue
+      rows.push(calendarEventToMeetingRow(e))
+    }
+  }
+
+  return rows
 }
 
 export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> {
@@ -348,19 +572,12 @@ export async function parseICSAsync(icsData: string): Promise<Omit<Meeting, 'cre
   // Parse using shared package (synchronous, but fast for typical feeds)
   const events = parseICS(icsData)
 
-  const meetings: Omit<Meeting, 'created_at' | 'updated_at'>[] = []
-  const YIELD_INTERVAL = 5 // Yield every N events to keep UI responsive
+  // Yield before expansion so a large feed doesn't block the parse→expand gap.
+  await yieldToEventLoop()
 
-  for (let i = 0; i < events.length; i++) {
-    // Yield periodically to keep UI responsive
-    if (i > 0 && i % YIELD_INTERVAL === 0) {
-      await yieldToEventLoop()
-    }
-
-    meetings.push(calendarEventToMeetingRow(events[i]))
-  }
-
-  return meetings
+  // Expand recurring series into individual occurrences within the sync window.
+  // Non-recurring events pass through unchanged.
+  return expandMeetingOccurrences(events)
 }
 
 export function getLastSyncTime(): string | null {

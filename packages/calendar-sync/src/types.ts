@@ -22,6 +22,17 @@ export interface CalendarEvent {
   isRecurring?: boolean
   /** Raw RRULE string (e.g. "FREQ=WEEKLY;BYDAY=MO"), if present. */
   recurrence?: string
+  /**
+   * Excluded occurrence instants parsed from EXDATE properties (RFC 5545 §3.8.5.1).
+   * Present only on recurring masters that carry at least one EXDATE.
+   */
+  exdates?: Date[]
+  /**
+   * The instant of the original occurrence this VEVENT overrides, parsed from
+   * RECURRENCE-ID (RFC 5545 §3.8.4.4). Present only on override VEVENTs — the
+   * per-instance edits Outlook/Exchange publish alongside a recurring master.
+   */
+  recurrenceId?: Date
 }
 
 export interface CalendarWatcherOptions {

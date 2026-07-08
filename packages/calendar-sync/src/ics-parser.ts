@@ -232,6 +232,31 @@ function extractDateValue(trimmed: string): string {
 }
 
 /**
+ * Parse an EXDATE property line into zero or more Date instants. EXDATE values
+ * may be comma-separated and may carry a shared TZID parameter (RFC 5545
+ * §3.8.5.1), e.g. `EXDATE;TZID=Eastern Standard Time:20260703T220000,20260710T220000`.
+ * Each value is routed through parseICSDateTime so the same Windows/Exchange
+ * timezone handling used for DTSTART applies here too.
+ */
+function parseExDates(trimmed: string): Date[] {
+  const colonIdx = trimmed.indexOf(':')
+  if (colonIdx === -1) return []
+  const params = trimmed.substring(0, colonIdx)
+  const tzidMatch = /TZID=([^;:]+)/i.exec(params)
+  const tzidPrefix = tzidMatch ? `TZID=${tzidMatch[1]}:` : ''
+  const valuesPart = trimmed.substring(colonIdx + 1)
+
+  const out: Date[] = []
+  for (const raw of valuesPart.split(',')) {
+    const v = raw.trim()
+    if (!v) continue
+    const d = parseICSDateTime(tzidPrefix + v)
+    if (d) out.push(d)
+  }
+  return out
+}
+
+/**
  * Unescape RFC 5545 TEXT values: `\\n`/`\\N` → newline, `\\,` → `,`,
  * `\\;` → `;`, `\\\\` → `\`. Without this, Outlook descriptions render with
  * literal "\n" runs and escaped commas in the UI.
@@ -277,6 +302,8 @@ export function parseICS(icsContent: string): CalendarEvent[] {
   let attendees: CalendarAttendee[] = []
   let organizer: CalendarOrganizer | undefined
   let recurrence: string | undefined
+  let exdates: Date[] = []
+  let recurrenceId: Date | undefined
 
   for (const line of lines) {
     const trimmed = line.trim()
@@ -293,6 +320,8 @@ export function parseICS(icsContent: string): CalendarEvent[] {
       attendees = []
       organizer = undefined
       recurrence = undefined
+      exdates = []
+      recurrenceId = undefined
       continue
     }
 
@@ -316,6 +345,12 @@ export function parseICS(icsContent: string): CalendarEvent[] {
           event.isRecurring = true
           event.recurrence = recurrence
         }
+        if (exdates.length > 0) {
+          event.exdates = exdates
+        }
+        if (recurrenceId !== undefined) {
+          event.recurrenceId = recurrenceId
+        }
         events.push(event)
       }
       continue
@@ -337,6 +372,11 @@ export function parseICS(icsContent: string): CalendarEvent[] {
       description = unescapeIcsText(trimmed.substring(12))
     } else if (upperLine.startsWith('RRULE:')) {
       recurrence = trimmed.substring(6)
+    } else if (upperLine.startsWith('EXDATE')) {
+      exdates.push(...parseExDates(trimmed))
+    } else if (upperLine.startsWith('RECURRENCE-ID')) {
+      // RECURRENCE-ID;TZID=...:value  or  RECURRENCE-ID:20260703T220000Z
+      recurrenceId = parseICSDateTime(extractDateValue(trimmed)) ?? undefined
     } else if (upperLine.startsWith('DTSTART')) {
       // DTSTART:20260329T140000Z  or  DTSTART;TZID=...:20260329T140000
       dtstart = extractDateValue(trimmed)
