@@ -119,6 +119,7 @@ rounds land). **Identity** = mentions resolve to canonical ids.
 | Assistant/Chat | 60 | 30 | 55 | 55 | conversations not renameable; chunk cards inert |
 | Today | 70 | 0 | 35 | 45 | organizer inert; action-item lines inert |
 | TitleBar | 90 | n/a | 60 | n/a | connect pill live (056fb4b7) |
+| Connectors (framework) | 0 | 0 | 0 | 0 | designed (CONNECTORS.md); C1=PDF vertical queued |
 
 **Pipeline-level identity coverage:** resolution 35 (Round 4 pending), alias
 memory 0 (designed), suggestion queue 0 (designed), graph liveness 20
@@ -140,6 +141,10 @@ graph-nodes still name-strings).
 6. **Calendar day-cell click → day view; event create** (edit 25).
 7. **Graph re-key by contact id (R4c)** — after events land.
 8. **Transcript text correction + action-item mentions in TranscriptViewer.**
+9. **Connector framework C1–C4** (CONNECTORS.md): MCP-first external systems —
+   identity enrichment (email autocomplete, HR/Slack metadata), living
+   knowledge sources (Slack channels, GitHub md, PDFs, images), entity
+   actions, graph signals. Interleaves with rounds by file-set availability.
 
 ## 7. Standing quality gates
 
