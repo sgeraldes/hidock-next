@@ -251,11 +251,17 @@ describe('Database Service', () => {
           Database: MockSQLDatabase
         }))
       }))
-      vi.doMock('fs', () => ({
-        existsSync: vi.fn(() => false),
-        readFileSync: vi.fn(() => Buffer.from('fake')),
-        writeFileSync: vi.fn()
-      }))
+      // Must include a `default` export: this doMock persists for all later
+      // imports in this file, and the @hidock/database engine import breaks
+      // on a default-less fs mock.
+      vi.doMock('fs', () => {
+        const fsMock = {
+          existsSync: vi.fn(() => false),
+          readFileSync: vi.fn(() => Buffer.from('fake')),
+          writeFileSync: vi.fn()
+        }
+        return { ...fsMock, default: fsMock }
+      })
       vi.doMock('../file-storage', () => ({
         getDatabasePath: vi.fn(() => '/tmp/test-hidock.db')
       }))
@@ -899,6 +905,149 @@ describe('Database Service', () => {
       // Should auto-save after run()
       expect(mockDatabase.export).toHaveBeenCalled()
       expect(fs.writeFileSync).toHaveBeenCalled()
+    })
+  })
+
+  // =========================================================================
+  // Recording lifecycle: insertRecording / markRecordingDownloaded /
+  // resolveRecordingId (regression tests for the download→transcribe bug)
+  // =========================================================================
+
+  /**
+   * Script per-queryOne results: each entry is the row (or undefined) that the
+   * Nth queryOne call should return. Uses free() as the per-query boundary.
+   * step() yields at most one row per query — queryAll loops on step(), so a
+   * constant-true implementation would loop forever.
+   */
+  function scriptQueryOneResults(results: (Record<string, unknown> | undefined)[]) {
+    let call = 0
+    let steppedThisQuery = false
+    mockStmt.step.mockImplementation(() => {
+      if (steppedThisQuery || results[call] === undefined) return false
+      steppedThisQuery = true
+      return true
+    })
+    mockStmt.getAsObject.mockImplementation(() => results[call] ?? {})
+    mockStmt.free.mockImplementation(() => {
+      call++
+      steppedThisQuery = false
+    })
+  }
+
+  describe('insertRecording()', () => {
+    it('persists lifecycle columns instead of relying on device-oriented DDL defaults', async () => {
+      const dbModule = await initTestDatabase()
+      mockDatabase.run.mockClear()
+
+      dbModule.insertRecording({
+        id: 'rec-1',
+        filename: 'file.wav',
+        original_filename: 'file.wav',
+        file_path: '/recordings/file.wav',
+        file_size: 100,
+        duration_seconds: undefined,
+        date_recorded: '2026-07-07T19:31:44',
+        meeting_id: undefined,
+        correlation_confidence: undefined,
+        correlation_method: undefined,
+        status: 'none',
+        location: 'local-only',
+        on_device: 0,
+        on_local: 1,
+        transcription_status: 'none',
+        source: 'hidock',
+        is_imported: 0
+      } as any)
+
+      const [sql, params] = mockDatabase.run.mock.calls[0]
+      expect(sql).toContain('location')
+      expect(sql).toContain('on_local')
+      expect(sql).toContain('on_device')
+      expect(params).toContain('local-only')
+      // on_local=1 present in params (after the fixed column order)
+      expect(params[params.length - 3]).toBe(1) // on_local
+    })
+  })
+
+  describe('markRecordingDownloaded()', () => {
+    it('updates the device row when it exists under a different extension (.hda vs .wav)', async () => {
+      const dbModule = await initTestDatabase()
+      mockDatabase.run.mockClear()
+
+      const deviceRow = {
+        id: 'rec-dev',
+        filename: '2026Jul07-193144-Rec43.hda',
+        on_device: 1,
+        on_local: 0,
+        location: 'device-only'
+      }
+      // 1st queryOne (exact .hda) hits the device row
+      scriptQueryOneResults([deviceRow])
+
+      const id = dbModule.markRecordingDownloaded(
+        '2026Jul07-193144-Rec43.hda',
+        'F:\\Audios\\2026Jul07-193144-Rec43.wav'
+      )
+
+      expect(id).toBe('rec-dev')
+      const updateCall = mockDatabase.run.mock.calls.find(([sql]) => String(sql).startsWith('UPDATE recordings'))
+      expect(updateCall).toBeDefined()
+      expect(String(updateCall![0])).toContain('on_local = ?')
+      expect(updateCall![1]).toContain('both')
+    })
+
+    it('creates a properly-flagged row when no recording exists yet (no watcher race)', async () => {
+      const dbModule = await initTestDatabase()
+      mockDatabase.run.mockClear()
+
+      // All variant lookups miss
+      scriptQueryOneResults([undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined])
+
+      const id = dbModule.markRecordingDownloaded(
+        '2026Jul07-193144-Rec43.hda',
+        'F:\\Audios\\2026Jul07-193144-Rec43.wav',
+        { fileSize: 123, dateRecorded: '2026-07-07T19:31:44.000Z' }
+      )
+
+      expect(id).toBeTruthy()
+      const insertCall = mockDatabase.run.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO recordings'))
+      expect(insertCall).toBeDefined()
+      const [sql, params] = insertCall!
+      expect(String(sql)).toContain("'both'")
+      expect(params).toContain('2026Jul07-193144-Rec43.wav') // local basename as canonical filename
+      expect(params).toContain('2026Jul07-193144-Rec43.hda') // original device filename preserved
+      expect(params).toContain(123)
+    })
+  })
+
+  describe('resolveRecordingId()', () => {
+    it('returns the recording directly when the id exists', async () => {
+      const dbModule = await initTestDatabase()
+      const rec = { id: 'rec-1', filename: 'a.wav' }
+      scriptQueryOneResults([rec])
+
+      expect(dbModule.resolveRecordingId('rec-1')).toEqual(rec)
+    })
+
+    it('resolves a synced_files id to the recording via local filename', async () => {
+      const dbModule = await initTestDatabase()
+      const synced = {
+        original_filename: '2026Jul07-193144-Rec43.hda',
+        local_filename: '2026Jul07-193144-Rec43.wav',
+        file_path: 'F:\\Audios\\2026Jul07-193144-Rec43.wav'
+      }
+      const rec = { id: 'rec-real', filename: '2026Jul07-193144-Rec43.wav' }
+      // 1: recordings by id → miss; 2: synced_files by id → hit; 3: exact filename → hit
+      scriptQueryOneResults([undefined, synced, rec])
+
+      expect(dbModule.resolveRecordingId('synced-id')).toEqual(rec)
+    })
+
+    it('returns undefined for unknown ids', async () => {
+      const dbModule = await initTestDatabase()
+      scriptQueryOneResults([undefined, undefined])
+
+      expect(dbModule.resolveRecordingId('ghost')).toBeUndefined()
     })
   })
 })

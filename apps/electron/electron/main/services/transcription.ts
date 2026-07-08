@@ -89,6 +89,7 @@ import { getConfig } from './config'
 import {
   addToQueue,
   getRecordingById,
+  resolveRecordingId,
   updateRecordingTranscriptionStatus,
   insertTranscript,
   getQueueItems,
@@ -407,7 +408,7 @@ export function queueTranscriptionIfEnabled(recordingId: string): boolean {
 
 interface ActionableDetection {
   type: 'meeting_minutes' | 'interview_feedback' | 'status_report' |
-        'decision_log' | 'action_items' | 'research_summary'
+        'decision_log' | 'action_items' | 'research_summary' | 'follow_up_work'
   confidence: number // 0.0 to 1.0
   suggestedTitle: string
   reason: string // Why detected
@@ -452,13 +453,19 @@ Detect if speaker mentions need to:
 4. Document decisions
 5. Share action items
 6. Compile research/findings
+7. Do follow-up work after the call (e.g. draft a solution design document after a
+   sales-to-delivery handoff, kick off or scaffold a project after a kickoff,
+   implement changes discussed in an engineering session, remediate blockers from
+   a status call). If the call is a working/business meeting with concrete next
+   steps, ALWAYS include one follow_up_work detection with template
+   "claude_code_prompt" so the user can hand the work to an AI coding agent.
 
 For each detected intent, return:
-- type: The type of actionable (meeting_minutes, interview_feedback, status_report, decision_log, action_items, research_summary)
+- type: The type of actionable (meeting_minutes, interview_feedback, status_report, decision_log, action_items, research_summary, follow_up_work)
 - confidence: 0.0-1.0 (how confident you are)
-- suggestedTitle: Brief title for the actionable (e.g., "Send meeting notes to team")
+- suggestedTitle: Brief title for the actionable (e.g., "Send meeting notes to team", "Draft SDD for Acme migration")
 - reason: Why you detected this (quote from transcript)
-- suggestedTemplate: Template name to use (e.g., "meeting_minutes", "interview_feedback")
+- suggestedTemplate: Template name to use ("meeting_minutes", "interview_feedback", "project_status", "action_items", "claude_code_prompt")
 - suggestedRecipients: Who should receive it (if mentioned)
 
 Return as JSON array. If no actionables detected, return empty array [].
@@ -556,6 +563,12 @@ async function transcribeWithGemini(
   }
 
   const fullText = segments.join('\n')
+
+  // An empty transcript is a failure, not a success — persisting it would mark
+  // the recording 'complete' with no usable content and block re-transcription.
+  if (!fullText.trim()) {
+    throw new Error('Gemini returned an empty transcript')
+  }
 
   return {
     fullText,
@@ -885,10 +898,14 @@ async function transcribeRecording(
   progressCallback?: (stage: string, progress: number) => void,
   providerOverride?: string
 ): Promise<void> {
-  const recording = getRecordingById(recordingId)
+  // Resolve stale/foreign IDs (e.g. a synced_files id queued by an older
+  // renderer build) to the real recordings row before failing.
+  const recording = getRecordingById(recordingId) ?? resolveRecordingId(recordingId)
   if (!recording || !recording.file_path) {
     throw new Error(`Recording not found or no local file: ${recordingId}`)
   }
+  // Continue with the canonical id so status updates hit the real row.
+  recordingId = recording.id
 
   if (!existsSync(recording.file_path)) {
     throw new Error(`Recording file not found: ${recording.file_path}`)
@@ -1004,7 +1021,7 @@ Meeting ${i + 1}: "${m.subject}"
     })
 
     // Create actionable entries with TEXT IDs
-    const VALID_TEMPLATE_IDS = ['meeting_minutes', 'interview_feedback', 'project_status', 'action_items']
+    const VALID_TEMPLATE_IDS = ['meeting_minutes', 'interview_feedback', 'project_status', 'action_items', 'claude_code_prompt']
 
     for (const detection of detections) {
       const actionableId = `act_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`

@@ -11,6 +11,7 @@ import {
   getCandidatesForRecordingWithDetails,
   getMeetingsNearDate,
   insertRecording,
+  resolveRecordingId,
   type Recording,
   type Transcript
 } from '../services/database'
@@ -556,8 +557,18 @@ export function registerRecordingHandlers(): void {
         }
       }
 
-      const queueItemId = addToQueue(recordingId)
-      updateRecordingTranscriptionStatus(recordingId, 'queued')
+      // Resolve renderer-supplied IDs (may be a synced_files id from the
+      // unified view) to the real recordings row before queueing.
+      const recording = resolveRecordingId(recordingId)
+      if (!recording) {
+        return {
+          success: false,
+          error: `Recording not found: ${recordingId}. Try refreshing the library.`
+        }
+      }
+
+      const queueItemId = addToQueue(recording.id)
+      updateRecordingTranscriptionStatus(recording.id, 'queued')
       // spec-005: Trigger immediate queue processing after adding
       processQueueManually()
       return queueItemId
@@ -599,8 +610,13 @@ export function registerRecordingHandlers(): void {
           }
         }
 
-        const queueItemId = addToQueue(recordingId, provider)
-        updateRecordingTranscriptionStatus(recordingId, 'queued')
+        const recording = resolveRecordingId(recordingId)
+        if (!recording) {
+          return { success: false, error: `Recording not found: ${recordingId}. Try refreshing the library.` }
+        }
+
+        const queueItemId = addToQueue(recording.id, provider)
+        updateRecordingTranscriptionStatus(recording.id, 'queued')
         processQueueManually()
         return { success: true, queueItemId }
       } catch (error) {
@@ -630,8 +646,13 @@ export function registerRecordingHandlers(): void {
         return { success: false, error: result.error.issues[0]?.message || 'Invalid request' }
       }
 
-      const queueItemId = addToQueue(result.data.recordingId)
-      updateRecordingTranscriptionStatus(result.data.recordingId, 'pending')
+      const recording = resolveRecordingId(result.data.recordingId)
+      if (!recording) {
+        return { success: false, error: `Recording not found: ${result.data.recordingId}` }
+      }
+
+      const queueItemId = addToQueue(recording.id)
+      updateRecordingTranscriptionStatus(recording.id, 'pending')
       processQueueManually()
       return { success: true, queueItemId }
     } catch (error) {

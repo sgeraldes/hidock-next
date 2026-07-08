@@ -1853,6 +1853,27 @@ export function getRecordingById(id: string): Recording | undefined {
   return queryOne<Recording>('SELECT * FROM recordings WHERE id = ?', [id])
 }
 
+/**
+ * Resolve an ID coming from the renderer to a recordings row.
+ * The renderer's unified view historically fell back to synced_files.id when
+ * no recordings row was matched, so IDs arriving over IPC may belong to the
+ * synced_files table. Resolve those to the real recording via filename.
+ */
+export function resolveRecordingId(id: string): Recording | undefined {
+  const direct = getRecordingById(id)
+  if (direct) return direct
+
+  const synced = queryOne<{ original_filename: string; local_filename: string; file_path: string }>(
+    'SELECT original_filename, local_filename, file_path FROM synced_files WHERE id = ?',
+    [id]
+  )
+  if (!synced) return undefined
+
+  const byLocal = getRecordingByFilenameVariants(synced.local_filename)
+  if (byLocal) return byLocal
+  return getRecordingByFilenameVariants(synced.original_filename)
+}
+
 export function getRecordingsForMeeting(meetingId: string): Recording[] {
   return queryAll<Recording>('SELECT * FROM recordings WHERE meeting_id = ?', [meetingId])
 }
@@ -1972,9 +1993,40 @@ export function getAllRecordingsUnified(): Recording[] {
   `)
 }
 
-// Mark recording as downloaded
-export function markRecordingDownloaded(filename: string, localPath: string): void {
-  const recording = getRecordingByFilename(filename)
+// Known audio extensions a recording may exist under (.hda on device, .wav/.mp3 locally)
+const RECORDING_EXTENSIONS = ['hda', 'wav', 'mp3', 'm4a']
+
+/**
+ * Find a recording row by filename, tolerating extension differences.
+ * Device files are .hda while downloads are saved as .wav/.mp3, so rows may
+ * exist under any variant of the same base name.
+ */
+export function getRecordingByFilenameVariants(filename: string): Recording | undefined {
+  const exact = getRecordingByFilename(filename)
+  if (exact) return exact
+
+  const base = filename.replace(/\.(hda|wav|mp3|m4a|aac|ogg|flac)$/i, '')
+  for (const ext of RECORDING_EXTENSIONS) {
+    const variant = `${base}.${ext}`
+    if (variant === filename) continue
+    const match = getRecordingByFilename(variant)
+    if (match) return match
+  }
+  return undefined
+}
+
+// Mark recording as downloaded.
+// Upserts: if no row exists yet (device scan didn't create one and the file
+// watcher hasn't fired), create it here so the download path never depends on
+// a race with other row-creation paths. Returns the recording id.
+export function markRecordingDownloaded(
+  filename: string,
+  localPath: string,
+  opts?: { fileSize?: number; dateRecorded?: string }
+): string {
+  const localBasename = localPath.replace(/^.*[\\/]/, '')
+  const recording = getRecordingByFilenameVariants(filename) ?? getRecordingByFilenameVariants(localBasename)
+
   if (recording) {
     const newLocation = recording.on_device ? 'both' : 'local-only'
     updateRecordingLifecycle(recording.id, {
@@ -1982,7 +2034,20 @@ export function markRecordingDownloaded(filename: string, localPath: string): vo
       on_local: 1,
       location: newLocation as Recording['location']
     })
+    return recording.id
   }
+
+  // No row exists — create one. A download implies the file was on the device.
+  const id = crypto.randomUUID()
+  const now = new Date().toISOString()
+  run(
+    `INSERT INTO recordings (id, filename, original_filename, file_path, file_size,
+      duration_seconds, date_recorded, status, location, transcription_status,
+      on_device, device_last_seen, on_local, source, is_imported)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, 'none', 'both', 'none', 1, ?, 1, 'hidock', 0)`,
+    [id, localBasename, filename, localPath, opts?.fileSize ?? null, opts?.dateRecorded ?? now, now]
+  )
+  return id
 }
 
 // Delete recording file from local storage (keeps metadata if transcribed)
@@ -1999,11 +2064,15 @@ export function deleteRecordingLocal(id: string): void {
 }
 
 export function insertRecording(recording: Omit<Recording, 'created_at'>): void {
+  // Lifecycle columns (location/on_device/on_local/...) must be written explicitly:
+  // the DDL defaults are device-oriented ('device-only', on_device=1, on_local=0),
+  // which silently mislabels locally-created rows if these fields are dropped.
   run(
     `INSERT INTO recordings (id, filename, original_filename, file_path, file_size,
       duration_seconds, date_recorded, meeting_id, correlation_confidence,
-      correlation_method, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      correlation_method, status, location, transcription_status, on_device,
+      on_local, source, is_imported)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       recording.id,
       recording.filename,
@@ -2015,7 +2084,13 @@ export function insertRecording(recording: Omit<Recording, 'created_at'>): void 
       recording.meeting_id ?? null,
       recording.correlation_confidence ?? null,
       recording.correlation_method ?? null,
-      recording.status
+      recording.status,
+      recording.location ?? (recording.file_path ? 'local-only' : 'device-only'),
+      recording.transcription_status ?? 'none',
+      recording.on_device ?? (recording.file_path ? 0 : 1),
+      recording.on_local ?? (recording.file_path ? 1 : 0),
+      recording.source ?? 'hidock',
+      recording.is_imported ?? 0
     ]
   )
 }

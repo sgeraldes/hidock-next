@@ -28,6 +28,7 @@ vi.mock('../../services/database', () => ({
   getCandidatesForRecordingWithDetails: vi.fn(),
   getMeetingsNearDate: vi.fn(),
   insertRecording: vi.fn(),
+  resolveRecordingId: vi.fn(),
   getQueueItems: vi.fn(),
   addToQueue: vi.fn(),
   updateQueueItem: vi.fn()
@@ -810,7 +811,8 @@ describe('Recording IPC Handlers', () => {
 
   describe('recordings:addToQueue', () => {
     it('should add recording to queue and update transcription status', async () => {
-      const { addToQueue, updateRecordingTranscriptionStatus } = await import('../../services/database')
+      const { addToQueue, updateRecordingTranscriptionStatus, resolveRecordingId } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockReturnValue({ id: 'rec-1' } as any)
       vi.mocked(addToQueue).mockReturnValue('queue-item-id')
 
       const result = await handlers['recordings:addToQueue'](null, 'rec-1')
@@ -820,8 +822,36 @@ describe('Recording IPC Handlers', () => {
       expect(result).toBe('queue-item-id')
     })
 
+    it('resolves a stale/synced id to the canonical recording id before queueing', async () => {
+      const { addToQueue, updateRecordingTranscriptionStatus, resolveRecordingId } = await import('../../services/database')
+      // Renderer sent a synced_files id; resolver maps it to the real recording
+      vi.mocked(resolveRecordingId).mockReturnValue({ id: 'real-rec-id' } as any)
+      vi.mocked(addToQueue).mockReturnValue('queue-item-id')
+
+      const result = await handlers['recordings:addToQueue'](null, 'synced-file-id')
+
+      expect(resolveRecordingId).toHaveBeenCalledWith('synced-file-id')
+      expect(addToQueue).toHaveBeenCalledWith('real-rec-id')
+      expect(updateRecordingTranscriptionStatus).toHaveBeenCalledWith('real-rec-id', 'queued')
+      expect(result).toBe('queue-item-id')
+    })
+
+    it('returns an error when the recording cannot be resolved', async () => {
+      const { addToQueue, resolveRecordingId } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockReturnValue(undefined)
+
+      const result = await handlers['recordings:addToQueue'](null, 'ghost-id')
+
+      expect(addToQueue).not.toHaveBeenCalled()
+      expect(result).toEqual({
+        success: false,
+        error: 'Recording not found: ghost-id. Try refreshing the library.'
+      })
+    })
+
     it('should return false on error', async () => {
-      const { addToQueue } = await import('../../services/database')
+      const { addToQueue, resolveRecordingId } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockReturnValue({ id: 'rec-1' } as any)
       vi.mocked(addToQueue).mockImplementation(() => {
         throw new Error('Queue full')
       })

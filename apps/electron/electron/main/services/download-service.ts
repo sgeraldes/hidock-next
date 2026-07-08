@@ -460,15 +460,14 @@ class DownloadService {
       // Save the file with the original recording date if available
       const filePath = await saveRecording(filename, data, undefined, item.recordingDate)
 
-      // Update database
-      const wavFilename = filename.replace(/\.hda$/i, '.wav')
+      // Update database. markRecordingDownloaded matches any extension variant
+      // (.hda device name vs .wav local name) and creates the recordings row
+      // itself when none exists, so downloads never race the file watcher.
       addSyncedFile(filename, basename(filePath), filePath, data.length)
-      markRecordingDownloaded(filename, filePath)
-
-      // Also try to mark by wav name if different
-      if (wavFilename !== filename) {
-        markRecordingDownloaded(wavFilename, filePath)
-      }
+      const recordingId = markRecordingDownloaded(filename, filePath, {
+        fileSize: data.length,
+        dateRecorded: item.recordingDate?.toISOString()
+      })
 
       // Update queue item
       item.status = 'completed'
@@ -484,17 +483,11 @@ class DownloadService {
       this.markDirty()
       this.emitStateUpdate(true) // C-004: immediate emit for completion
 
-      const recording = getRecordingByFilename(filename)
-        ?? (wavFilename !== filename ? getRecordingByFilename(wavFilename) : undefined)
-        ?? getRecordingByFilename(basename(filePath))
-
-      if (recording) {
-        import('./transcription').then(({ queueTranscriptionIfEnabled }) => {
-          queueTranscriptionIfEnabled(recording.id)
-        }).catch(err => {
-          console.error('[DownloadService] Failed to import transcription service:', err)
-        })
-      }
+      import('./transcription').then(({ queueTranscriptionIfEnabled }) => {
+        queueTranscriptionIfEnabled(recordingId)
+      }).catch(err => {
+        console.error('[DownloadService] Failed to import transcription service:', err)
+      })
 
       // DL-07: Clean up completed items from queue after emitting final state.
       // Keep them briefly so the renderer sees the 100% state, then remove.
