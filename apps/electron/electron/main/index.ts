@@ -278,6 +278,18 @@ app.whenReady().then(async () => {
   startTranscriptionProcessor()
   console.log('Background services started')
 
+  // Backfill vector embeddings for transcripts indexed before embeddings
+  // worked (or added while the app was closed). Deferred so startup stays fast.
+  setTimeout(() => {
+    import('./services/vector-store')
+      .then(async ({ getVectorStore }) => {
+        const store = getVectorStore()
+        await store.initialize()
+        await store.backfillMissingTranscripts()
+      })
+      .catch((e) => console.error('[VectorStore] Backfill error:', e))
+  }, 15000)
+
   // Show security warning in production when remote debugging is explicitly enabled
   if (!is.dev && process.env.ENABLE_REMOTE_DEBUGGING === 'true' && mainWindow) {
     // Wait for window to be ready before sending the warning

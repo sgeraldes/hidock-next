@@ -4,7 +4,7 @@
  */
 
 import { getDatabase } from './database'
-import { getOllamaService } from './ollama'
+import { getEmbeddingsService } from './embeddings'
 
 interface VectorDocument {
   id: string
@@ -138,10 +138,7 @@ class VectorStore {
     content: string,
     metadata: VectorDocument['metadata']
   ): Promise<string | null> {
-    const ollama = getOllamaService()
-
-    // Generate embedding
-    const embedding = await ollama.generateEmbedding(content)
+    const embedding = await getEmbeddingsService().generateEmbedding(content)
     if (!embedding) {
       console.error('Failed to generate embedding for document')
       return null
@@ -200,18 +197,40 @@ class VectorStore {
       }
     }
 
-    // Chunk the transcript
+    // Chunk the transcript and embed all chunks in one batched call
     const chunks = chunkText(transcript)
+    const embeddings = await getEmbeddingsService().generateEmbeddings(chunks)
+
+    const db = getDatabase()
     let indexed = 0
-
     for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i]
-      const id = await this.addDocument(chunk, {
-        ...metadata,
-        chunkIndex: i
-      })
+      const embedding = embeddings[i]
+      if (!embedding) continue
 
-      if (id) indexed++
+      const id = `${metadata.recordingId || 'doc'}_${i}_${Date.now()}`
+      const doc: VectorDocument = {
+        id,
+        content: chunks[i],
+        embedding,
+        metadata: { ...metadata, chunkIndex: i }
+      }
+      this.documents.set(id, doc)
+      db.run(
+        `INSERT OR REPLACE INTO vector_embeddings
+         (id, content, embedding, meeting_id, recording_id, chunk_index, timestamp, subject)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          chunks[i],
+          JSON.stringify(embedding),
+          metadata.meetingId || null,
+          metadata.recordingId || null,
+          i,
+          metadata.timestamp || null,
+          metadata.subject || null
+        ]
+      )
+      indexed++
     }
 
     console.log(`Indexed ${indexed} chunks for transcript`)
@@ -219,10 +238,7 @@ class VectorStore {
   }
 
   async search(query: string, topK = 5): Promise<SearchResult[]> {
-    const ollama = getOllamaService()
-
-    // Generate query embedding
-    const queryEmbedding = await ollama.generateEmbedding(query)
+    const queryEmbedding = await getEmbeddingsService().generateEmbedding(query)
     if (!queryEmbedding) {
       console.error('Failed to generate query embedding')
       return []
@@ -239,6 +255,50 @@ class VectorStore {
     // Sort by score descending and take top K
     results.sort((a, b) => b.score - a.score)
     return results.slice(0, topK)
+  }
+
+  /**
+   * Index every transcript that has no vector embeddings yet. Runs in the
+   * background after startup so the assistant's memory covers the whole
+   * knowledge base, not just newly transcribed recordings.
+   */
+  async backfillMissingTranscripts(): Promise<{ indexed: number; skipped: number }> {
+    const db = getDatabase()
+    const stmt = db.prepare(`
+      SELECT t.recording_id, t.full_text, r.date_recorded, r.filename
+      FROM transcripts t
+      LEFT JOIN recordings r ON r.id = t.recording_id
+      WHERE TRIM(COALESCE(t.full_text, '')) != ''
+        AND NOT EXISTS (
+          SELECT 1 FROM vector_embeddings v WHERE v.recording_id = t.recording_id
+        )
+    `)
+    const rows: Array<{ recording_id: string; full_text: string; date_recorded?: string; filename?: string }> = []
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject() as never)
+    }
+    stmt.free()
+
+    let indexed = 0
+    let skipped = 0
+    for (const row of rows) {
+      try {
+        const count = await this.indexTranscript(row.full_text, {
+          recordingId: row.recording_id,
+          timestamp: row.date_recorded,
+          subject: row.filename
+        })
+        if (count > 0) indexed++
+        else skipped++
+      } catch (e) {
+        skipped++
+        console.error(`[VectorStore] Backfill failed for ${row.recording_id}:`, e)
+      }
+    }
+    if (rows.length > 0) {
+      console.log(`[VectorStore] Backfill complete: ${indexed} transcripts indexed, ${skipped} skipped (of ${rows.length})`)
+    }
+    return { indexed, skipped }
   }
 
   async searchByMeeting(meetingId: string): Promise<VectorDocument[]> {
