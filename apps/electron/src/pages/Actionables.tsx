@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   RefreshCw,
   FileText,
@@ -100,6 +101,25 @@ export function Actionables() {
   // C-ACT-007: Confirmation dialog state for regeneration
   const [confirmRegenerate, setConfirmRegenerate] = useState<Actionable | null>(null)
 
+  // Cancellable generation: each run gets a nonce; Cancel bumps the nonce so
+  // in-flight results are discarded when the IPC eventually resolves.
+  const generationNonceRef = useRef(0)
+  const cancelGeneration = useCallback((actionableId?: string) => {
+    generationNonceRef.current++
+    setGenerating(false)
+    if (actionableId) {
+      setLoadingActionableIds((prev) => {
+        const next = new Set(prev)
+        next.delete(actionableId)
+        return next
+      })
+      // Revert the server-side in_progress status
+      window.electronAPI.actionables.updateStatus(actionableId, 'pending').catch(() => {})
+    }
+    toast.info('Generation cancelled', 'The output will be discarded when it finishes.')
+  }, [])
+  const [cancellableActionableId, setCancellableActionableId] = useState<string | undefined>(undefined)
+
   // C-ACT-M02: Cache insertion helper with size eviction
   const cacheOutput = useCallback((id: string, output: { content: string; templateId: string; generatedAt: string; sourceId?: string }) => {
     const cache = outputCacheRef.current
@@ -139,12 +159,15 @@ export function Actionables() {
     setGenerating(true)
     setCurrentGeneratingTemplate(templateId)
     setGenerationError(null)
+    setCancellableActionableId(undefined)
+    const nonce = generationNonceRef.current
 
     try {
       const result = await window.electronAPI.outputs.generate({
         templateId: templateId as OutputTemplateId,
         knowledgeCaptureId: sourceId
       })
+      if (nonce !== generationNonceRef.current) return // cancelled — discard
 
       if (result.success) {
         const output = { ...result.data, sourceId }
@@ -156,10 +179,11 @@ export function Actionables() {
         setGenerationError(result.error.message || 'Failed to generate output')
       }
     } catch (error: any) {
+      if (nonce !== generationNonceRef.current) return
       setGenerationError(error.message || 'Failed to generate output')
       console.error('Output generation failed:', error)
     } finally {
-      setGenerating(false)
+      if (nonce === generationNonceRef.current) setGenerating(false)
     }
   }, [])
 
@@ -238,9 +262,12 @@ export function Actionables() {
       setGenerating(true)
       setCurrentGeneratingTemplate(templateId)
       setGenerationError(null)
+      setCancellableActionableId(actionable.id)
+      const nonce = generationNonceRef.current
 
       // Call generateOutput handler to update status to in_progress
       const approvalResult = await window.electronAPI.actionables.generateOutput(actionable.id)
+      if (nonce !== generationNonceRef.current) return // cancelled — discard
 
       if (!approvalResult.success) {
         toast.error('Approval failed', approvalResult.error || 'Failed to approve actionable')
@@ -253,6 +280,7 @@ export function Actionables() {
         knowledgeCaptureId: actionable.sourceKnowledgeId,
         actionableId: actionable.id
       })
+      if (nonce !== generationNonceRef.current) return // cancelled — discard
 
       if (result.success) {
         const output = { ...result.data, sourceId: actionable.sourceKnowledgeId }
@@ -620,11 +648,16 @@ export function Actionables() {
                   currentGeneratingTemplate === 'interview_feedback' ? 'Interview Feedback' :
                   currentGeneratingTemplate === 'project_status' ? 'Project Status' :
                   currentGeneratingTemplate === 'action_items' ? 'Action Items' :
+                  currentGeneratingTemplate === 'claude_code_prompt' ? 'Claude Code Handoff' :
                   'Output'
                 }...
               </h3>
               <p className="text-sm text-muted-foreground">This may take a few moments...</p>
             </div>
+            <Button variant="outline" size="sm" onClick={() => cancelGeneration(cancellableActionableId)}>
+              <X className="h-4 w-4 mr-2" />
+              Cancel
+            </Button>
           </div>
         </div>
       )}
@@ -671,7 +704,7 @@ export function Actionables() {
             </DialogDescription>
           </DialogHeader>
           <div className="prose prose-sm max-w-none dark:prose-invert bg-muted/30 p-4 rounded-md border">
-            <ReactMarkdown>{generatedOutput?.content || ''}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{generatedOutput?.content || ''}</ReactMarkdown>
           </div>
           <DialogFooter className="gap-2">
             {generatedOutput?.sourceId && (

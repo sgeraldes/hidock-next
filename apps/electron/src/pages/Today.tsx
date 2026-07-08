@@ -109,7 +109,7 @@ export function Today() {
   }
 
   return (
-    <div className="flex-1 overflow-auto p-6">
+    <div className="h-full overflow-y-auto p-6">
       <div className="max-w-5xl mx-auto space-y-6">
         {/* Header */}
         <div className="flex items-end justify-between">
