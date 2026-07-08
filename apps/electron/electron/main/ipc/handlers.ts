@@ -23,6 +23,7 @@ import { registerKnowledgeGraphHandlers } from './knowledge-graph-handlers'
 import { registerDevicePipelineHandlers } from './device-pipeline-handlers'
 import { registerBriefingHandlers } from './briefing-handlers'
 import { registerActionItemsHandlers } from './action-items-handlers'
+import { registerIdentityHandlers } from './identity-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -54,6 +55,7 @@ export function registerIpcHandlers(): void {
   registerDevicePipelineHandlers()
   registerBriefingHandlers()
   registerActionItemsHandlers()
+  registerIdentityHandlers()
 
   console.log('All IPC handlers registered')
 }

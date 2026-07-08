@@ -541,6 +541,15 @@ export interface ElectronAPI {
     resolvePerson: (name: string) => Promise<{ success: boolean; data?: Contact | null; error?: string }>
   }
 
+  // Identity suggestions (Round 4a) — the resolver's 0.5–0.8 review queue
+  identity: {
+    getSuggestions: (
+      status?: 'pending' | 'accepted' | 'rejected'
+    ) => Promise<{ success: boolean; data?: any[]; error?: string }>
+    acceptSuggestion: (id: string) => Promise<{ success: boolean; data?: any; error?: string }>
+    rejectSuggestion: (id: string) => Promise<{ success: boolean; data?: any; error?: string }>
+  }
+
   // Domain Events - Event-driven architecture
   onDomainEvent: (callback: (event: any) => void) => () => void
 
@@ -943,6 +952,13 @@ const electronAPI: ElectronAPI = {
     meetingGraph: (meetingId: string) => callIPC('graph:meetingGraph', meetingId),
     listNodes: (type?: string) => callIPC('graph:listNodes', type),
     resolvePerson: (name: string) => callIPC('graph:resolvePerson', name),
+  },
+
+  // Identity suggestions (Round 4a)
+  identity: {
+    getSuggestions: (status?: 'pending' | 'accepted' | 'rejected') => callIPC('identity:getSuggestions', status),
+    acceptSuggestion: (id: string) => callIPC('identity:acceptSuggestion', id),
+    rejectSuggestion: (id: string) => callIPC('identity:rejectSuggestion', id)
   },
 
   // Domain Event Listener

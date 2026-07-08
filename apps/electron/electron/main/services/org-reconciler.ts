@@ -12,8 +12,14 @@
  */
 
 import { unescapeIcsText } from '@hidock/calendar-sync'
-import { queryAll, queryOne, run, runInTransaction, mergeContacts } from './database'
+import { queryAll, queryOne, run, runInTransaction, mergeContacts, insertIdentitySuggestion } from './database'
+import { resolveContact, resolveProject } from './entity-resolver'
+import { isGenericSpeakerLabel } from './entity-normalize'
 import { randomUUID } from 'crypto'
+
+/** Resolver thresholds (INTELLIGENCE.md §2): ≥0.8 auto-link, 0.5–0.8 suggest, <0.5 create. */
+const AUTO_LINK_THRESHOLD = 0.8
+const SUGGEST_THRESHOLD = 0.5
 
 interface MeetingRow {
   id: string
@@ -241,36 +247,62 @@ export function applyTranscriptEntities(opts: {
   runInTransaction(() => {
     const now = new Date().toISOString()
 
+    // Names of other attendees already on the meeting — evidence for suggestions.
+    const meetingAttendeeNames = (): string[] =>
+      opts.meetingId
+        ? queryAll<{ name: string }>(
+            `SELECT c.name FROM meeting_contacts mc JOIN contacts c ON c.id = mc.contact_id WHERE mc.meeting_id = ?`,
+            [opts.meetingId]
+          )
+            .map((r) => r.name)
+            .slice(0, 5)
+        : []
+
     for (const person of opts.participants ?? []) {
       const name = (person.name || '').trim()
-      if (!name || name.length < 2 || /^speaker\s*\d*$/i.test(name)) continue
+      if (!name || name.length < 2 || isGenericSpeakerLabel(name)) continue
 
-      let contact = queryOne<{ id: string; role?: string }>(
-        `SELECT id, role FROM contacts WHERE LOWER(name) = LOWER(?)`,
-        [name]
-      )
-      if (!contact) {
+      // Confidence-scored resolution replaces the old exact-name lookup — this is
+      // what stops the duplicate factory (INTELLIGENCE.md §2).
+      const res = resolveContact(name, { meetingId: opts.meetingId })
+      let contactId: string | null = null
+
+      if (res.id && res.confidence >= AUTO_LINK_THRESHOLD) {
+        // High confidence — link the existing contact, never create.
+        contactId = res.id
+        if (person.role) {
+          const existing = queryOne<{ role?: string }>(`SELECT role FROM contacts WHERE id = ?`, [contactId])
+          if (existing && !existing.role) run(`UPDATE contacts SET role = ? WHERE id = ?`, [person.role, contactId])
+        }
+      } else if (res.id && res.confidence >= SUGGEST_THRESHOLD) {
+        // Mid confidence — queue a reviewable suggestion; do NOT create or link.
+        insertIdentitySuggestion('person', name, res.id, res.confidence, {
+          method: res.method,
+          meetingId: opts.meetingId,
+          coOccurring: meetingAttendeeNames()
+        })
+        continue
+      } else {
+        // Low confidence — genuinely new person.
         const id = randomUUID()
         run(
           `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count)
            VALUES (?, ?, 'unknown', ?, ?, ?, 0)`,
           [id, name, person.role ?? null, now, now]
         )
-        contact = { id }
+        contactId = id
         contacts++
-      } else if (person.role && !contact.role) {
-        run(`UPDATE contacts SET role = ? WHERE id = ?`, [person.role, contact.id])
       }
 
-      if (opts.meetingId) {
+      if (contactId && opts.meetingId) {
         const link = queryOne<{ meeting_id: string }>(
           `SELECT meeting_id FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?`,
-          [opts.meetingId, contact.id]
+          [opts.meetingId, contactId]
         )
         if (!link) {
           run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, 'attendee')`, [
             opts.meetingId,
-            contact.id
+            contactId
           ])
         }
         run(
@@ -278,26 +310,37 @@ export function applyTranscriptEntities(opts: {
              meeting_count = (SELECT COUNT(1) FROM meeting_contacts mc WHERE mc.contact_id = contacts.id),
              last_seen_at = ?
            WHERE id = ?`,
-          [now, contact.id]
+          [now, contactId]
         )
       }
     }
 
     const projectName = (opts.project?.name || '').trim()
     if (projectName) {
-      let project = queryOne<{ id: string }>(`SELECT id FROM projects WHERE LOWER(name) = LOWER(?)`, [projectName])
-      if (!project) {
+      const res = resolveProject(projectName, { meetingId: opts.meetingId })
+      let projectId: string | null = null
+
+      if (res.id && res.confidence >= AUTO_LINK_THRESHOLD) {
+        projectId = res.id
+      } else if (res.id && res.confidence >= SUGGEST_THRESHOLD) {
+        insertIdentitySuggestion('project', projectName, res.id, res.confidence, {
+          method: res.method,
+          meetingId: opts.meetingId,
+          coOccurring: []
+        })
+      } else {
         const id = randomUUID()
         run(`INSERT INTO projects (id, name, status) VALUES (?, ?, 'active')`, [id, projectName])
-        project = { id }
+        projectId = id
       }
-      if (opts.meetingId) {
+
+      if (projectId && opts.meetingId) {
         const link = queryOne<{ meeting_id: string }>(
           `SELECT meeting_id FROM meeting_projects WHERE meeting_id = ? AND project_id = ?`,
-          [opts.meetingId, project.id]
+          [opts.meetingId, projectId]
         )
         if (!link) {
-          run(`INSERT INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)`, [opts.meetingId, project.id])
+          run(`INSERT INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)`, [opts.meetingId, projectId])
         }
         projectLinked = true
       }

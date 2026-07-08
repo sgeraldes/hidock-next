@@ -183,6 +183,13 @@ async function initializeServices(): Promise<void> {
   registerIpcHandlers()
   console.log('IPC handlers registered')
 
+  // Living knowledge graph (v27): subscribe graph-sync to entity events now, so
+  // renames/merges and finished transcripts keep the graph in step. DB-only +
+  // debounced ingest; guarded so it can never break the pipeline.
+  import('./services/graph-sync')
+    .then(({ startGraphSync }) => startGraphSync())
+    .catch((e) => console.error('[GraphSync] startup wiring failed:', e))
+
   // Gate USB hot-plug auto-connect on the user's "Auto-connect on startup"
   // preference. Without this the device reconnects on every power-on / plug-in
   // regardless of the toggle. Manual "Connect Device" is unaffected.

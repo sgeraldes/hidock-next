@@ -4,8 +4,10 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { getDatabasePath } from './file-storage'
 import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
+import { normalizeName, isGenericSpeakerLabel } from './entity-normalize'
+import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 26
+const SCHEMA_VERSION = 27
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -522,6 +524,48 @@ CREATE TABLE IF NOT EXISTS actionables (
 
 CREATE INDEX IF NOT EXISTS idx_actionables_source_knowledge ON actionables(source_knowledge_id);
 CREATE INDEX IF NOT EXISTS idx_actionables_status ON actionables(status);
+
+-- Alias memory (v27). Every merge, speaker assignment, and accepted/rejected
+-- suggestion writes a permanent alias so a settled identity is never re-asked.
+-- alias_norm is the normalized (lowercased, whitespace-collapsed) alias string,
+-- and a rejected-source row blocks resolving that alias to the paired entity.
+CREATE TABLE IF NOT EXISTS contact_aliases (
+    id TEXT PRIMARY KEY,
+    alias_norm TEXT NOT NULL UNIQUE,
+    contact_id TEXT NOT NULL,
+    source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+    confidence REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS project_aliases (
+    id TEXT PRIMARY KEY,
+    alias_norm TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL,
+    source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+    confidence REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+-- Identity suggestion queue (v27). The 0.5–0.8 resolver band lands here as
+-- reviewable cards. Accept writes an alias and links, reject blocks the pairing.
+CREATE TABLE IF NOT EXISTS identity_suggestions (
+    id TEXT PRIMARY KEY,
+    kind TEXT CHECK(kind IN ('person', 'project')),
+    candidate_name TEXT,
+    target_id TEXT,
+    confidence REAL,
+    evidence TEXT,
+    status TEXT CHECK(status IN ('pending', 'accepted', 'rejected')) DEFAULT 'pending',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(kind, candidate_name, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id);
+CREATE INDEX IF NOT EXISTS idx_project_aliases_project ON project_aliases(project_id);
+CREATE INDEX IF NOT EXISTS idx_identity_suggestions_status ON identity_suggestions(status);
 
 `
 
@@ -1438,6 +1482,61 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v26 complete')
+  },
+
+  27: () => {
+    // v27: Alias memory + identity suggestion queue (Round 4a).
+    //  - contact_aliases / project_aliases: permanent normalized-name → entity
+    //    aliases with a source + confidence (a 'rejected' row blocks a pairing).
+    //  - identity_suggestions: the 0.5–0.8 resolver band as reviewable cards.
+    // Idempotent: CREATE TABLE IF NOT EXISTS.
+    console.log('Running migration to schema v27: alias memory + identity suggestions')
+    const database = getDatabase()
+
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS contact_aliases (
+          id TEXT PRIMARY KEY,
+          alias_norm TEXT NOT NULL UNIQUE,
+          contact_id TEXT NOT NULL,
+          source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+          confidence REAL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        )
+      `)
+      database.run(`
+        CREATE TABLE IF NOT EXISTS project_aliases (
+          id TEXT PRIMARY KEY,
+          alias_norm TEXT NOT NULL UNIQUE,
+          project_id TEXT NOT NULL,
+          source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+          confidence REAL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+      `)
+      database.run(`
+        CREATE TABLE IF NOT EXISTS identity_suggestions (
+          id TEXT PRIMARY KEY,
+          kind TEXT CHECK(kind IN ('person', 'project')),
+          candidate_name TEXT,
+          target_id TEXT,
+          confidence REAL,
+          evidence TEXT,
+          status TEXT CHECK(status IN ('pending', 'accepted', 'rejected')) DEFAULT 'pending',
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(kind, candidate_name, target_id)
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_project_aliases_project ON project_aliases(project_id)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_identity_suggestions_status ON identity_suggestions(status)')
+    } catch (e) {
+      console.warn('[Migration v27] Failed:', e)
+    }
+
+    console.log('Migration v27 complete')
   }
 
 }
@@ -1544,6 +1643,49 @@ function repairPhase(): void {
       )
     `)
   } catch (e) { /* table already exists */ }
+
+  // Repair alias memory + suggestion tables (v27): force-create so an older
+  // on-disk DB that skipped the migration still gets them. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS contact_aliases (
+        id TEXT PRIMARY KEY,
+        alias_norm TEXT NOT NULL UNIQUE,
+        contact_id TEXT NOT NULL,
+        source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+        confidence REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+      )
+    `)
+    database.run(`
+      CREATE TABLE IF NOT EXISTS project_aliases (
+        id TEXT PRIMARY KEY,
+        alias_norm TEXT NOT NULL UNIQUE,
+        project_id TEXT NOT NULL,
+        source TEXT CHECK(source IN ('merge', 'speaker_assign', 'manual', 'inferred', 'rejected')),
+        confidence REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      )
+    `)
+    database.run(`
+      CREATE TABLE IF NOT EXISTS identity_suggestions (
+        id TEXT PRIMARY KEY,
+        kind TEXT CHECK(kind IN ('person', 'project')),
+        candidate_name TEXT,
+        target_id TEXT,
+        confidence REAL,
+        evidence TEXT,
+        status TEXT CHECK(status IN ('pending', 'accepted', 'rejected')) DEFAULT 'pending',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(kind, candidate_name, target_id)
+      )
+    `)
+    database.run('CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_project_aliases_project ON project_aliases(project_id)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_identity_suggestions_status ON identity_suggestions(status)')
+  } catch (e) { /* tables already exist */ }
 
   // Repair action_items (v26): force-add assignee_contact_id if missing.
   const actionItemCols = getTableColumns(database, 'action_items')
@@ -2876,11 +3018,19 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
     throw new Error('Cannot merge a contact into itself')
   }
 
-  return runInTransaction(() => {
+  let loserName = ''
+  let keeperName = ''
+  const merged = runInTransaction(() => {
     const keeper = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [keeperId])
     const loser = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [loserId])
     if (!keeper) throw new Error(`Keeper contact ${keeperId} not found`)
     if (!loser) throw new Error(`Loser contact ${loserId} not found`)
+    loserName = loser.name
+    keeperName = keeper.name
+
+    // Record the loser's name as a permanent alias of the keeper (v27) so a
+    // future mention of that name resolves straight to the survivor.
+    upsertContactAliasNoSave(keeperId, loser.name, 'merge', 1.0)
 
     // Repoint meeting_contacts (PK: meeting_id, contact_id). Move links that
     // won't collide with the keeper's, then drop leftover collisions.
@@ -2913,6 +3063,20 @@ export function mergeContacts(keeperId: string, loserId: string): Contact {
 
     return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [keeperId])!
   })
+
+  // Living knowledge graph (v27): fold the loser's person node into the keeper's.
+  // Emitted after the tx commits; graph-sync does label-level surgery (no LLM).
+  try {
+    getEventBus().emitDomainEvent({
+      type: 'entity:contact-changed',
+      timestamp: new Date().toISOString(),
+      payload: { contactId: keeperId, change: 'merged', oldName: loserName, newName: keeperName }
+    })
+  } catch (e) {
+    console.warn('[mergeContacts] contact-changed emit failed:', e)
+  }
+
+  return merged
 }
 
 // =============================================================================
@@ -2978,6 +3142,12 @@ export function assignSpeaker(
       'INSERT OR REPLACE INTO transcript_speakers (id, recording_id, speaker_label, contact_id) VALUES (?, ?, ?, ?)',
       [randomUUID(), recordingId, speakerLabel, contact.id]
     )
+
+    // Alias memory (v27): a non-generic speaker label ("Javier", not "Speaker 2")
+    // is a real name the user just bound — remember it as an alias of the contact.
+    if (!isGenericSpeakerLabel(speakerLabel)) {
+      upsertContactAliasNoSave(contact.id, speakerLabel, 'speaker_assign', 0.95)
+    }
 
     const rec = queryOne<{ meeting_id?: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [recordingId])
     if (rec?.meeting_id) {
@@ -3271,6 +3441,9 @@ export function mergeProjects(keeperId: string, loserId: string): Project {
     if (!keeper) throw new Error(`Keeper project ${keeperId} not found`)
     if (!loser) throw new Error(`Loser project ${loserId} not found`)
 
+    // Record the loser's name as a permanent alias of the keeper (v27).
+    upsertProjectAliasNoSave(keeperId, loser.name, 'merge', 1.0)
+
     // Repoint meeting_projects (PK: meeting_id, project_id).
     runNoSave('UPDATE OR IGNORE meeting_projects SET project_id = ? WHERE project_id = ?', [keeperId, loserId])
     runNoSave('DELETE FROM meeting_projects WHERE project_id = ?', [loserId])
@@ -3362,6 +3535,167 @@ export function setActionItemAssignee(actionItemId: string, contactId: string | 
  */
 export function getContactByName(name: string): Contact | undefined {
   return queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?) LIMIT 1', [name])
+}
+
+// =============================================================================
+// Alias memory + identity suggestions (v27, Round 4a)
+// =============================================================================
+
+export type AliasSource = 'merge' | 'speaker_assign' | 'manual' | 'inferred' | 'rejected'
+
+/** Upsert (INSERT OR REPLACE on the UNIQUE alias_norm) a contact alias, no auto-save. */
+function upsertContactAliasNoSave(contactId: string, aliasName: string, source: AliasSource, confidence: number): void {
+  const norm = normalizeName(aliasName)
+  if (!norm) return
+  runNoSave(
+    `INSERT OR REPLACE INTO contact_aliases (id, alias_norm, contact_id, source, confidence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), norm, contactId, source, confidence, new Date().toISOString()]
+  )
+}
+
+/** Upsert a contact alias (auto-saves). Public entry for callers outside a tx. */
+export function upsertContactAlias(contactId: string, aliasName: string, source: AliasSource, confidence: number): void {
+  const norm = normalizeName(aliasName)
+  if (!norm) return
+  run(
+    `INSERT OR REPLACE INTO contact_aliases (id, alias_norm, contact_id, source, confidence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), norm, contactId, source, confidence, new Date().toISOString()]
+  )
+}
+
+/** Upsert a project alias, no auto-save (for use inside a transaction). */
+function upsertProjectAliasNoSave(projectId: string, aliasName: string, source: AliasSource, confidence: number): void {
+  const norm = normalizeName(aliasName)
+  if (!norm) return
+  runNoSave(
+    `INSERT OR REPLACE INTO project_aliases (id, alias_norm, project_id, source, confidence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), norm, projectId, source, confidence, new Date().toISOString()]
+  )
+}
+
+/** Upsert a project alias (auto-saves). */
+export function upsertProjectAlias(projectId: string, aliasName: string, source: AliasSource, confidence: number): void {
+  const norm = normalizeName(aliasName)
+  if (!norm) return
+  run(
+    `INSERT OR REPLACE INTO project_aliases (id, alias_norm, project_id, source, confidence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), norm, projectId, source, confidence, new Date().toISOString()]
+  )
+}
+
+export interface IdentitySuggestion {
+  id: string
+  kind: 'person' | 'project'
+  candidate_name: string
+  target_id: string
+  confidence: number | null
+  evidence: string | null
+  status: 'pending' | 'accepted' | 'rejected'
+  created_at: string
+}
+
+/**
+ * Queue an identity suggestion (the 0.5–0.8 resolver band). INSERT OR IGNORE on
+ * UNIQUE(kind, candidate_name, target_id) so a settled pairing is never re-queued
+ * — a prior 'rejected'/'accepted' row for the same pairing wins. Uses run() so it
+ * composes with applyTranscriptEntities' existing run()-based transaction.
+ */
+export function insertIdentitySuggestion(
+  kind: 'person' | 'project',
+  candidateName: string,
+  targetId: string,
+  confidence: number,
+  evidence: Record<string, unknown>
+): void {
+  run(
+    `INSERT OR IGNORE INTO identity_suggestions (id, kind, candidate_name, target_id, confidence, evidence, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+    [randomUUID(), kind, candidateName, targetId, confidence, JSON.stringify(evidence ?? {}), new Date().toISOString()]
+  )
+}
+
+/** List identity suggestions, optionally filtered by status. Highest confidence first. */
+export function getIdentitySuggestions(status?: 'pending' | 'accepted' | 'rejected'): IdentitySuggestion[] {
+  if (status) {
+    return queryAll<IdentitySuggestion>(
+      'SELECT * FROM identity_suggestions WHERE status = ? ORDER BY confidence DESC, created_at DESC',
+      [status]
+    )
+  }
+  return queryAll<IdentitySuggestion>('SELECT * FROM identity_suggestions ORDER BY confidence DESC, created_at DESC')
+}
+
+/**
+ * Accept an identity suggestion: write the candidate name as a 'manual' alias
+ * (confidence 1.0) of the target entity and perform the link — for a person,
+ * attach to the evidence.meetingId meeting; for a project, tag that meeting.
+ * Sets the suggestion status to 'accepted'. One transaction.
+ *
+ * @throws if the suggestion does not exist.
+ */
+export function acceptIdentitySuggestion(id: string): IdentitySuggestion {
+  return runInTransaction(() => {
+    const s = queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])
+    if (!s) throw new Error(`Identity suggestion ${id} not found`)
+
+    let meetingId: string | undefined
+    try {
+      const ev = s.evidence ? (JSON.parse(s.evidence) as { meetingId?: string }) : {}
+      meetingId = ev.meetingId
+    } catch {
+      // malformed evidence JSON — proceed without a meeting link
+    }
+
+    if (s.kind === 'person') {
+      upsertContactAliasNoSave(s.target_id, s.candidate_name, 'manual', 1.0)
+      if (meetingId) {
+        runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+          meetingId,
+          s.target_id,
+          'attendee'
+        ])
+        recomputeContactMeetingCount(s.target_id)
+      }
+    } else {
+      upsertProjectAliasNoSave(s.target_id, s.candidate_name, 'manual', 1.0)
+      if (meetingId) {
+        runNoSave('INSERT OR IGNORE INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)', [
+          meetingId,
+          s.target_id
+        ])
+      }
+    }
+
+    runNoSave("UPDATE identity_suggestions SET status = 'accepted' WHERE id = ?", [id])
+    return queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!
+  })
+}
+
+/**
+ * Reject an identity suggestion: write a 'rejected' alias so the resolver never
+ * links that name to that entity again, and set the suggestion status to
+ * 'rejected'. One transaction.
+ *
+ * @throws if the suggestion does not exist.
+ */
+export function rejectIdentitySuggestion(id: string): IdentitySuggestion {
+  return runInTransaction(() => {
+    const s = queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])
+    if (!s) throw new Error(`Identity suggestion ${id} not found`)
+
+    if (s.kind === 'person') {
+      upsertContactAliasNoSave(s.target_id, s.candidate_name, 'rejected', 0)
+    } else {
+      upsertProjectAliasNoSave(s.target_id, s.candidate_name, 'rejected', 0)
+    }
+
+    runNoSave("UPDATE identity_suggestions SET status = 'rejected' WHERE id = ?", [id])
+    return queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!
+  })
 }
 
 /**

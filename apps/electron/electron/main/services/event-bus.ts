@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events'
-import { BrowserWindow } from 'electron'
+import type { BrowserWindow } from 'electron'
 
 // Domain Event Types
 export interface DomainEvent {
@@ -38,7 +38,32 @@ export interface RecordingCleanupSuggestedEvent extends DomainEvent {
   }
 }
 
-export type KnownDomainEvent = QualityAssessedEvent | StorageTierAssignedEvent | RecordingCleanupSuggestedEvent
+/** A canonical contact was renamed or merged — the living graph re-keys its node (v27). */
+export interface ContactChangedEvent extends DomainEvent {
+  type: 'entity:contact-changed'
+  payload: {
+    contactId: string
+    change: 'updated' | 'merged'
+    oldName?: string
+    newName?: string
+  }
+}
+
+/** A transcript finished analysis/entity extraction — the living graph auto-ingests it (v27). */
+export interface TranscriptReadyEvent extends DomainEvent {
+  type: 'entity:transcript-ready'
+  payload: {
+    transcriptId: string
+    recordingId: string
+  }
+}
+
+export type KnownDomainEvent =
+  | QualityAssessedEvent
+  | StorageTierAssignedEvent
+  | RecordingCleanupSuggestedEvent
+  | ContactChangedEvent
+  | TranscriptReadyEvent
 
 /**
  * Sanitize event payload before broadcasting to renderer process

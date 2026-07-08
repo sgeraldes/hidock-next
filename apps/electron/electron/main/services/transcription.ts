@@ -1552,6 +1552,19 @@ Meeting ${i + 1}: "${m.subject}"
     console.error('[OrgReconciler] Transcript entity extraction failed:', e)
   }
 
+  // Living knowledge graph (v27): announce the finished transcript so graph-sync
+  // can debounce-ingest only the new material. Non-fatal.
+  try {
+    const { getEventBus } = await import('./event-bus')
+    getEventBus().emitDomainEvent({
+      type: 'entity:transcript-ready',
+      timestamp: new Date().toISOString(),
+      payload: { transcriptId: `trans_${recordingId}`, recordingId }
+    })
+  } catch (e) {
+    console.warn('[GraphSync] transcript-ready emit failed:', e)
+  }
+
   // Export the per-meeting wiki page (plain markdown knowledge base readable
   // by the user and by external agents like Claude Code). Non-fatal.
   try {

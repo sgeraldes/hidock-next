@@ -15,6 +15,7 @@ import {
   mergeContacts,
   Contact
 } from '../services/database'
+import { getEventBus } from '../services/event-bus'
 import { success, error, Result } from '../types/api'
 import {
   GetContactsRequestSchema,
@@ -124,6 +125,25 @@ export function registerContactsHandlers(): void {
         updateContact(id, updates)
 
         const updatedContact = getContactById(id)
+
+        // Living knowledge graph (v27): a rename re-keys the person's graph node.
+        if (name !== undefined && updatedContact && contact.name !== updatedContact.name) {
+          try {
+            getEventBus().emitDomainEvent({
+              type: 'entity:contact-changed',
+              timestamp: new Date().toISOString(),
+              payload: {
+                contactId: id,
+                change: 'updated',
+                oldName: contact.name,
+                newName: updatedContact.name
+              }
+            })
+          } catch (e) {
+            console.warn('[contacts:update] contact-changed emit failed:', e)
+          }
+        }
+
         return success(mapToPerson(updatedContact!))
       } catch (err) {
         console.error('contacts:update error:', err)
