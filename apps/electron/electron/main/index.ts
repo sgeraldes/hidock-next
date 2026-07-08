@@ -297,6 +297,14 @@ app.whenReady().then(async () => {
       .catch((e) => console.error('[MeetingWiki] Backfill error:', e))
   }, 10000)
 
+  // Reconcile organization data (meeting↔recording links, People from
+  // attendees, ICS text repair). Cheap, DB-only, idempotent.
+  setTimeout(() => {
+    import('./services/org-reconciler')
+      .then(({ reconcileOrganization }) => reconcileOrganization())
+      .catch((e) => console.error('[OrgReconciler] error:', e))
+  }, 8000)
+
   // Show security warning in production when remote debugging is explicitly enabled
   if (!is.dev && process.env.ENABLE_REMOTE_DEBUGGING === 'true' && mainWindow) {
     // Wait for window to be ready before sending the warning

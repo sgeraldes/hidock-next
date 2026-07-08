@@ -353,12 +353,17 @@ export function registerRecordingHandlers(): void {
   // Get meeting candidates for a recording (for manual linking)
   ipcMain.handle('recordings:getCandidates', async (_, recordingId: unknown) => {
     try {
-      const result = GetRecordingByIdSchema.safeParse({ id: recordingId })
-      if (!result.success) {
-        console.error('recordings:getCandidates validation error:', result.error)
+      if (typeof recordingId !== 'string' || !recordingId) {
         return { success: false, data: [], error: 'Invalid recording ID' }
       }
-      const data = getCandidatesForRecordingWithDetails(result.data.id)
+      // Device-only entries carry synthetic (non-UUID) ids and have no DB row —
+      // resolve what we can and return an empty candidate list otherwise so the
+      // link dialog can still offer meetings near the recording's date.
+      const recording = resolveRecordingId(recordingId)
+      if (!recording) {
+        return { success: true, data: [] }
+      }
+      const data = getCandidatesForRecordingWithDetails(recording.id)
       return { success: true, data }
     } catch (error) {
       console.error('recordings:getCandidates error:', error)

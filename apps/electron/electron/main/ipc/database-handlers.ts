@@ -114,6 +114,15 @@ export function registerDatabaseHandlers(): void {
     const meeting = getMeetingById(meetingId)
     if (!meeting) return null
 
+    // Self-heal: recordings and meetings arrive independently (device download
+    // vs ICS sync), so run the time-overlap auto-linker before reading links.
+    try {
+      const { autoLinkRecordingsToMeetings } = await import('../services/org-reconciler')
+      autoLinkRecordingsToMeetings()
+    } catch (e) {
+      console.error('db:get-meeting-details auto-link failed:', e)
+    }
+
     const recordings = getRecordingsForMeeting(meetingId)
     const recordingsWithTranscripts = recordings.map((recording) => ({
       ...recording,

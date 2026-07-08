@@ -314,7 +314,7 @@ export function MeetingDetail() {
     <div className="flex flex-col h-full">
       {/* Header */}
       <header className="flex items-center gap-4 border-b px-6 py-4">
-        <Button variant="ghost" size="icon" onClick={() => navigate('/calendar')}>
+        <Button variant="ghost" size="icon" onClick={() => navigate('/calendar', { state: { date: meeting.start_time } })}>
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1">
@@ -463,7 +463,9 @@ export function MeetingDetail() {
                       placeholder="Meeting description..."
                     />
                   ) : (
-                    <p className="text-sm text-muted-foreground whitespace-pre-wrap">{meeting.description}</p>
+                    <p className="text-sm text-muted-foreground whitespace-pre-wrap [overflow-wrap:anywhere] max-h-64 overflow-y-auto">
+                      {meeting.description}
+                    </p>
                   )}
                 </div>
               )}
@@ -504,7 +506,7 @@ export function MeetingDetail() {
                     variant="outline"
                     size="sm"
                     className="mt-4"
-                    onClick={() => navigate('/calendar')}
+                    onClick={() => navigate('/calendar', { state: { date: meeting.start_time } })}
                   >
                     Go to Calendar
                   </Button>

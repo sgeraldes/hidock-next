@@ -728,11 +728,12 @@ describe('Recording IPC Handlers', () => {
 
   describe('recordings:getCandidates', () => {
     it('should return meeting candidates for a valid recording ID', async () => {
-      const { getCandidatesForRecordingWithDetails } = await import('../../services/database')
+      const { getCandidatesForRecordingWithDetails, resolveRecordingId } = await import('../../services/database')
       const recId = '550e8400-e29b-41d4-a716-446655440000'
       const mockCandidates = [
         { recording_id: recId, meeting_id: 'm-1', confidence_score: 0.9 }
       ]
+      vi.mocked(resolveRecordingId).mockReturnValue({ id: recId } as any)
       vi.mocked(getCandidatesForRecordingWithDetails).mockReturnValue(mockCandidates as any)
 
       const result = await handlers['recordings:getCandidates'](null, recId)
@@ -741,8 +742,18 @@ describe('Recording IPC Handlers', () => {
       expect(result).toEqual({ success: true, data: mockCandidates })
     })
 
-    it('should return error shape for invalid recording ID', async () => {
-      const result = await handlers['recordings:getCandidates'](null, 'bad-id')
+    it('returns empty candidates for unresolvable ids (device-only synthetic ids)', async () => {
+      const { getCandidatesForRecordingWithDetails, resolveRecordingId } = await import('../../services/database')
+      vi.mocked(resolveRecordingId).mockReturnValue(undefined)
+
+      const result = await handlers['recordings:getCandidates'](null, '2026Jul07-193144-Rec43.hda')
+
+      expect(getCandidatesForRecordingWithDetails).not.toHaveBeenCalled()
+      expect(result).toEqual({ success: true, data: [] })
+    })
+
+    it('should return error shape for non-string recording ID', async () => {
+      const result = await handlers['recordings:getCandidates'](null, 42)
 
       expect(result).toEqual({ success: false, data: [], error: 'Invalid recording ID' })
     })

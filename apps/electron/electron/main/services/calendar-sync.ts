@@ -299,6 +299,15 @@ export async function syncCalendar(icsUrl: string): Promise<CalendarSyncResult> 
       throw new Error(`Database error: ${dbError instanceof Error ? dbError.message : 'Unknown database error'}`)
     }
 
+    // Tie the new meetings into the rest of the app: auto-link overlapping
+    // recordings and create People from attendees. Non-fatal.
+    try {
+      const { reconcileOrganization } = await import('./org-reconciler')
+      reconcileOrganization()
+    } catch (reconcileError) {
+      console.error('Post-sync reconciliation failed:', reconcileError)
+    }
+
     // Update last sync time in config and persist it
     const now = new Date().toISOString()
     try {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { Mic, RefreshCw, Play, X, LayoutGrid, Square, CheckSquare, FileText, Trash2, List, FileAudio, Download } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn, formatTime, isToday, formatDuration } from '@/lib/utils'
@@ -120,6 +120,20 @@ export function Calendar() {
   // B-CAL-001: Named action selectors replace raw useAppStore.setState()
   const setLastCalendarSync = useSetLastCalendarSync()
   const setCalendarSyncing = useSetCalendarSyncing()
+
+  // Navigate the calendar to a requested date (e.g. "Go to Calendar" from a
+  // meeting detail page) instead of always showing the current week.
+  const location = useLocation()
+  useEffect(() => {
+    const state = location.state as { date?: string } | null
+    if (state?.date) {
+      const target = new Date(state.date)
+      if (!isNaN(target.getTime())) {
+        setCurrentDate(target)
+      }
+      navigate(location.pathname, { replace: true, state: null })
+    }
+  }, [location.state, location.pathname, navigate, setCurrentDate])
 
   // Get unified recordings (device + local)
   const { recordings: unifiedRecordings, loading: recordingsLoading, refresh: refreshRecordings, deviceConnected, stats } = useUnifiedRecordings()
@@ -371,6 +385,69 @@ export function Calendar() {
     }
     return grouped
   }, [meetingOverlays, viewDates, hideEmptyMeetings])
+
+  // Outlook-style conflict layout: assign overlapping blocks to side-by-side
+  // columns instead of stacking them on top of each other.
+  // Returns per-id {col, cols} so the renderer can compute left/width.
+  const computeOverlapColumns = useCallback(
+    (blocks: Array<{ id: string; startTime: Date; endTime: Date }>): Map<string, { col: number; cols: number }> => {
+      const result = new Map<string, { col: number; cols: number }>()
+      const sorted = [...blocks].sort((a, b) => a.startTime.getTime() - b.startTime.getTime())
+
+      let cluster: Array<{ id: string; end: number; col: number }> = []
+      let clusterIds: string[] = []
+      let clusterMaxCols = 0
+
+      const flushCluster = () => {
+        for (const cid of clusterIds) {
+          const entry = result.get(cid)
+          if (entry) entry.cols = clusterMaxCols
+        }
+        cluster = []
+        clusterIds = []
+        clusterMaxCols = 0
+      }
+
+      for (const block of sorted) {
+        const start = block.startTime.getTime()
+        const end = Math.max(block.endTime.getTime(), start + 1)
+
+        // Remove finished blocks from the active set
+        cluster = cluster.filter((c) => c.end > start)
+        if (cluster.length === 0 && clusterIds.length > 0) flushCluster()
+
+        // Assign the smallest free column
+        const used = new Set(cluster.map((c) => c.col))
+        let col = 0
+        while (used.has(col)) col++
+
+        cluster.push({ id: block.id, end, col })
+        clusterIds.push(block.id)
+        clusterMaxCols = Math.max(clusterMaxCols, cluster.length, col + 1)
+        result.set(block.id, { col, cols: 1 })
+      }
+      if (clusterIds.length > 0) flushCluster()
+
+      return result
+    },
+    []
+  )
+
+  const overlayColumnsByDay = useMemo(() => {
+    const map: Record<string, Map<string, { col: number; cols: number }>> = {}
+    for (const key in meetingOverlaysByDay) {
+      map[key] = computeOverlapColumns(meetingOverlaysByDay[key])
+    }
+    return map
+  }, [meetingOverlaysByDay, computeOverlapColumns])
+
+  const recordingColumnsByDay = useMemo(() => {
+    const map: Record<string, Map<string, { col: number; cols: number }>> = {}
+    for (const key in recordingsByDay) {
+      map[key] = computeOverlapColumns(recordingsByDay[key])
+    }
+    return map
+  }, [recordingsByDay, computeOverlapColumns])
 
   const handleMeetingClick = (meeting: Meeting) => {
     navigate(`/meeting/${meeting.id}`)
@@ -1256,6 +1333,8 @@ export function Calendar() {
                       if (startHour < visibleStartHour || startHour >= visibleEndHour) return null
 
                       const canShowTime = height > 35
+                      // Outlook-style conflict columns: overlapping meetings share the width
+                      const layout = overlayColumnsByDay[key]?.get(meeting.id) ?? { col: 0, cols: 1 }
 
                       return (
                         <Tooltip key={`overlay-${meeting.id}`}>
@@ -1263,7 +1342,7 @@ export function Calendar() {
                             <button
                               onClick={() => handleMeetingClick({ id: meeting.id } as Meeting)}
                               className={cn(
-                                'absolute w-[calc(100%-8px)] left-1 rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left',
+                                'absolute rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left',
                                 'border-2 border-dashed border-slate-300 dark:border-slate-600',
                                 'bg-slate-50/30 dark:bg-slate-800/20 text-slate-400 dark:text-slate-500',
                                 'hover:bg-slate-100/50 dark:hover:bg-slate-700/30 hover:border-slate-400',
@@ -1273,6 +1352,8 @@ export function Calendar() {
                                 top,
                                 height,
                                 minHeight: 24,
+                                left: `calc(${(layout.col / layout.cols) * 100}% + 4px)`,
+                                width: `calc(${100 / layout.cols}% - 8px)`,
                                 zIndex: 5 // Below recordings
                               }}
                             >
@@ -1310,6 +1391,8 @@ export function Calendar() {
 
                       // Display label: meeting subject if linked, otherwise filename
                       const displayLabel = recording.linkedMeeting?.subject || recording.filename
+                      // Outlook-style conflict columns for overlapping recordings
+                      const layout = recordingColumnsByDay[key]?.get(recording.id) ?? { col: 0, cols: 1 }
 
                       return (
                         <Tooltip key={recording.id}>
@@ -1317,7 +1400,7 @@ export function Calendar() {
                             <button
                               onClick={() => handleRecordingClick(recording)}
                               className={cn(
-                                'absolute w-[calc(100%-8px)] left-1 rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left',
+                                'absolute rounded-md px-2 py-1 text-xs overflow-hidden transition-all text-left',
                                 'hover:ring-2 hover:ring-ring hover:z-30 hover:shadow-lg',
                                 'shadow-sm',
                                 // Synced/downloaded recording (green)
@@ -1334,6 +1417,8 @@ export function Calendar() {
                                 top,
                                 height,
                                 minHeight: 24,
+                                left: `calc(${(layout.col / layout.cols) * 100}% + 4px)`,
+                                width: `calc(${100 / layout.cols}% - 8px)`,
                                 zIndex: 15 + recIdx // Above meeting overlays
                               }}
                             >

@@ -232,6 +232,33 @@ function extractDateValue(trimmed: string): string {
 }
 
 /**
+ * Unescape RFC 5545 TEXT values: `\\n`/`\\N` → newline, `\\,` → `,`,
+ * `\\;` → `;`, `\\\\` → `\`. Without this, Outlook descriptions render with
+ * literal "\n" runs and escaped commas in the UI.
+ */
+export function unescapeIcsText(value: string): string {
+  let out = ''
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]
+    if (ch === '\\' && i + 1 < value.length) {
+      const next = value[i + 1]
+      if (next === 'n' || next === 'N') {
+        out += '\n'
+        i++
+        continue
+      }
+      if (next === ',' || next === ';' || next === '\\') {
+        out += next
+        i++
+        continue
+      }
+    }
+    out += ch
+  }
+  return out
+}
+
+/**
  * Parse an ICS string and return calendar events.
  */
 export function parseICS(icsContent: string): CalendarEvent[] {
@@ -303,11 +330,11 @@ export function parseICS(icsContent: string): CalendarEvent[] {
     if (upperLine.startsWith('UID:')) {
       uid = trimmed.substring(4)
     } else if (upperLine.startsWith('SUMMARY:')) {
-      title = trimmed.substring(8)
+      title = unescapeIcsText(trimmed.substring(8))
     } else if (upperLine.startsWith('LOCATION:')) {
-      location = trimmed.substring(9)
+      location = unescapeIcsText(trimmed.substring(9))
     } else if (upperLine.startsWith('DESCRIPTION:')) {
-      description = trimmed.substring(12)
+      description = unescapeIcsText(trimmed.substring(12))
     } else if (upperLine.startsWith('RRULE:')) {
       recurrence = trimmed.substring(6)
     } else if (upperLine.startsWith('DTSTART')) {
