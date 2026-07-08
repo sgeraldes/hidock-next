@@ -26,6 +26,7 @@ import {
   looksLikeEmail,
   fuzzyNameScore,
 } from './entity-normalize'
+import { nameRarity, type Rarity } from './name-rarity'
 
 export {
   normalizeName,
@@ -37,6 +38,7 @@ export {
   fuzzyNameScore,
   isOppositeGenderSpanishPair,
 } from './entity-normalize'
+export { nameRarity } from './name-rarity'
 
 export interface ResolveContext {
   meetingId?: string
@@ -47,12 +49,44 @@ export interface ResolveResult {
   id: string | null
   confidence: number
   method: string
+  /** Base-rate label for a fuzzy match (present only when common/rare) — the merge
+   *  card frames a 'common' match with a "verify carefully" caution. */
+  rarity?: Rarity
 }
 
 /** Highest fuzzy+boost confidence we allow — keeps fuzzy below the exact-email 1.0. */
 const FUZZY_CAP = 0.97
 /** Context co-occurrence boost added to a fuzzy base score. */
 const CONTEXT_BOOST = 0.15
+/** The auto-link line callers gate on; a plain (uncorroborated) fuzzy stays below it. */
+const AUTO_LINK_LINE = 0.8
+
+/** Length of the first whitespace token of a normalized name (its base-rate token). */
+function firstTokenLength(norm: string): number {
+  const tok = norm.split(' ')[0]
+  return (tok || norm).length
+}
+
+/**
+ * Fold a fuzzy match's base-rate into its confidence: a rare name's match is boosted
+ * a touch, a common short token's is docked so it doesn't clear the suggest bar on
+ * string similarity alone. `collisions` is how many corpus entities the name fuzzy-
+ * matched — its collision probability. A plain (uncorroborated) fuzzy is kept below
+ * the auto-link line so a rare-name boost never silently links without review.
+ */
+function applyRarity(
+  best: { id: string; score: number; boosted: boolean },
+  norm: string,
+  collisions: number
+): ResolveResult {
+  const { rarity, delta } = nameRarity({ bearers: collisions, tokenLength: firstTokenLength(norm) })
+  let score = Math.max(0, Math.min(best.score + delta, FUZZY_CAP))
+  if (!best.boosted) score = Math.min(score, AUTO_LINK_LINE - 0.01)
+  const method = best.boosted ? 'fuzzy-context' : 'fuzzy'
+  return rarity === 'normal'
+    ? { id: best.id, confidence: score, method }
+    : { id: best.id, confidence: score, method, rarity }
+}
 
 // ---------------------------------------------------------------------------
 // Context (co-occurrence) sets
@@ -160,21 +194,23 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
     }
   }
 
-  // Tier 5 — fuzzy + context boost.
+  // Tier 5 — fuzzy + context boost, then a name base-rate adjustment.
   const coOcc = coOccurringContactIds(ctx)
   let best: { id: string; score: number; boosted: boolean } | null = null
+  let collisions = 0
   for (const c of candidates) {
     if (blocked(c.id)) continue
     const cNorm = normalizeName(c.name)
     if (cNorm === norm) continue
     const base = fuzzyNameScore(norm, cNorm)
     if (base <= 0) continue
+    collisions++
     const boosted = coOcc.has(c.id)
     const score = Math.min(base + (boosted ? CONTEXT_BOOST : 0), FUZZY_CAP)
     if (!best || score > best.score) best = { id: c.id, score, boosted }
   }
   if (best) {
-    return { id: best.id, confidence: best.score, method: best.boosted ? 'fuzzy-context' : 'fuzzy' }
+    return applyRarity(best, norm, collisions)
   }
 
   return { id: null, confidence: 0, method: 'none' }
@@ -220,21 +256,23 @@ export function resolveProject(name: string, ctx?: ResolveContext): ResolveResul
     }
   }
 
-  // Tier 4 — fuzzy + context boost.
+  // Tier 4 — fuzzy + context boost, then a name base-rate adjustment.
   const coOcc = coOccurringProjectIds(ctx)
   let best: { id: string; score: number; boosted: boolean } | null = null
+  let collisions = 0
   for (const p of candidates) {
     if (blocked(p.id)) continue
     const pNorm = normalizeName(p.name)
     if (pNorm === norm) continue
     const base = fuzzyNameScore(norm, pNorm)
     if (base <= 0) continue
+    collisions++
     const boosted = coOcc.has(p.id)
     const score = Math.min(base + (boosted ? CONTEXT_BOOST : 0), FUZZY_CAP)
     if (!best || score > best.score) best = { id: p.id, score, boosted }
   }
   if (best) {
-    return { id: best.id, confidence: best.score, method: best.boosted ? 'fuzzy-context' : 'fuzzy' }
+    return applyRarity(best, norm, collisions)
   }
 
   return { id: null, confidence: 0, method: 'none' }

@@ -651,6 +651,13 @@ export interface ElectronAPI {
       }
       error?: string
     }>
+    getPersonContext: (
+      idOrName: string
+    ) => Promise<{
+      success: boolean
+      data?: { people: string[]; topics: string[] }
+      error?: string
+    }>
   }
 
   // Domain Events - Event-driven architecture
@@ -1082,7 +1089,8 @@ const electronAPI: ElectronAPI = {
     getMergeJournal: (request) => callIPC('identity:getMergeJournal', request),
     getMergeImpact: (request) => callIPC('identity:getMergeImpact', request),
     getMentionSnippets: (name: string, limit?: number) =>
-      callIPC('identity:getMentionSnippets', { name, limit })
+      callIPC('identity:getMentionSnippets', { name, limit }),
+    getPersonContext: (idOrName: string) => callIPC('identity:getPersonContext', idOrName)
   },
 
   // Domain Event Listener

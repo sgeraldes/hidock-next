@@ -41,6 +41,10 @@ const mockContactUnmerge = vi.fn()
 const mockProjectUnmerge = vi.fn()
 const mockGetMentionSnippets = vi.fn()
 const mockGetMergeImpact = vi.fn()
+const mockGetPersonContext = vi.fn()
+const mockGetMergeJournal = vi.fn()
+const mockContactsGetAll = vi.fn()
+const mockContactsMerge = vi.fn()
 
 global.window.electronAPI = {
   identity: {
@@ -48,10 +52,14 @@ global.window.electronAPI = {
     acceptSuggestion: mockAccept,
     rejectSuggestion: mockReject,
     getMentionSnippets: mockGetMentionSnippets,
-    getMergeImpact: mockGetMergeImpact
+    getMergeImpact: mockGetMergeImpact,
+    getPersonContext: mockGetPersonContext,
+    getMergeJournal: mockGetMergeJournal
   },
   contacts: {
     getById: mockContactGetById,
+    getAll: mockContactsGetAll,
+    merge: mockContactsMerge,
     unmerge: mockContactUnmerge
   },
   projects: {
@@ -81,6 +89,13 @@ beforeEach(() => {
   mockContactUnmerge.mockResolvedValue({ success: true })
   mockGetMentionSnippets.mockResolvedValue({ success: true, data: { snippets: [], recordingIds: [] } })
   mockGetMergeImpact.mockResolvedValue({ success: true, data: { keeper: 1, loser: 1 } })
+  mockGetPersonContext.mockResolvedValue({ success: true, data: { people: [], topics: [] } })
+  mockGetMergeJournal.mockResolvedValue({ success: true, data: [{ id: 'j-new' }] })
+  mockContactsGetAll.mockResolvedValue({
+    success: true,
+    data: { contacts: [{ id: 'c-real', name: 'Sebastian Geraldes', role: 'Engineer', meeting_count: 5 }], total: 1 }
+  })
+  mockContactsMerge.mockResolvedValue({ success: true, data: { id: 'c-real', name: 'Sebastian Geraldes' } })
 })
 
 describe('IdentitySuggestionsSection', () => {
@@ -246,6 +261,70 @@ describe('IdentitySuggestionsSection', () => {
     const undoBtn = await screen.findByRole('button', { name: /Undo/i })
     fireEvent.click(undoBtn)
     await waitFor(() => expect(mockContactUnmerge).toHaveBeenCalledWith('j1'))
+  })
+
+  it('renders both sides’ graph-neighborhood context with shared entries', async () => {
+    mockContactGetById.mockResolvedValue({ success: true, data: { contact: { name: 'Yaraví' } } })
+    mockGetSuggestions.mockResolvedValue({ success: true, data: [mergeSuggestion] })
+    // Keeper (c1) and candidate (l1) both co-attend with Bob → Bob is shared context.
+    mockGetPersonContext.mockImplementation((key: string) =>
+      key === 'c1' || key === 'l1'
+        ? Promise.resolve({ success: true, data: { people: ['Bob'], topics: ['Atlas'] } })
+        : Promise.resolve({ success: true, data: { people: [], topics: [] } })
+    )
+
+    renderSection()
+    // Bob appears on both sides (shared) — at least two chips.
+    await waitFor(() => expect(screen.getAllByText('Bob').length).toBeGreaterThanOrEqual(2))
+    expect(screen.getAllByText('Atlas').length).toBeGreaterThanOrEqual(2)
+    expect(screen.queryByText(/Different circles/i)).not.toBeInTheDocument()
+  })
+
+  it('warns "different circles" when the two sides share no context', async () => {
+    mockContactGetById.mockResolvedValue({ success: true, data: { contact: { name: 'Yaraví' } } })
+    mockGetSuggestions.mockResolvedValue({ success: true, data: [mergeSuggestion] })
+    mockGetPersonContext.mockImplementation((key: string) =>
+      key === 'c1'
+        ? Promise.resolve({ success: true, data: { people: ['Alice'], topics: [] } })
+        : Promise.resolve({ success: true, data: { people: ['Zoe'], topics: [] } })
+    )
+
+    renderSection()
+    expect(await screen.findByText(/Different circles/i)).toBeInTheDocument()
+  })
+
+  it('frames a common name with a "verify carefully" caution', async () => {
+    const commonSuggestion = {
+      ...suggestion,
+      id: 'sc',
+      evidence: JSON.stringify({ method: 'fuzzy', rarity: 'common' })
+    }
+    mockGetSuggestions.mockResolvedValue({ success: true, data: [commonSuggestion] })
+    renderSection()
+    expect(await screen.findByText(/Common name/i)).toBeInTheDocument()
+  })
+
+  it('third door routes the merge to the chosen keeper, not the suggested one', async () => {
+    mockContactGetById.mockResolvedValue({ success: true, data: { contact: { name: 'Yaraví' } } })
+    mockGetSuggestions
+      .mockResolvedValueOnce({ success: true, data: [mergeSuggestion] })
+      .mockResolvedValue({ success: true, data: [] })
+
+    renderSection()
+    // Open the overflow menu (keyboard opens Radix reliably in jsdom).
+    const moreBtn = await screen.findByRole('button', { name: /More options for 'Yeraví'/i })
+    fireEvent.keyDown(moreBtn, { key: 'Enter' })
+
+    fireEvent.click(await screen.findByText(/Merge into someone else/i))
+
+    // Pick a DIFFERENT person (c-real) than the suggested keeper (c1).
+    const row = await screen.findByRole('button', { name: /Sebastian Geraldes/i })
+    fireEvent.click(row)
+
+    // The reviewed duplicate (loserId 'l1') folds into the chosen keeper 'c-real'.
+    await waitFor(() =>
+      expect(mockContactsMerge).toHaveBeenCalledWith({ keeperId: 'c-real', loserId: 'l1' })
+    )
   })
 })
 

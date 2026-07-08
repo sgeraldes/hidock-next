@@ -190,6 +190,34 @@ describe('identity-discovery — contacts', () => {
     expect(res.suggestionsCreated).toBe(0)
   })
 
+  it('tags a common short-token pair rarity:common (base-rate demotion)', () => {
+    // Three 'Juan' bearers ⇒ 'juan' is common; a shared meeting keeps the demoted
+    // composite above the suggest bar so the flag is observable on the suggestion.
+    addContact('c-jp', 'Juan Perez', { meetings: 1 })
+    addContact('c-jx', 'Juan Perex', { meetings: 1 })
+    addContact('c-jd', 'Juan Diaz', { meetings: 0 })
+    link('m1', 'c-jp')
+    link('m1', 'c-jx')
+
+    discoverContactMerges()
+    const rows = suggestions().filter((s) => JSON.parse(s.evidence).rarity === 'common')
+    expect(rows.length).toBeGreaterThanOrEqual(1)
+    const s = rows.find((r) => r.candidate_name === 'Juan Perez' || r.candidate_name === 'Juan Perex')
+    expect(s).toBeDefined()
+    expect(JSON.parse(s!.evidence).rarity).toBe('common')
+  })
+
+  it('lets a rare-name boost tip a name-only pair over the suggest bar', () => {
+    // 'Yaraví'/'Yeraví' are a single edit apart with no other signal — 0.6·0.78 = 0.468,
+    // below 0.5. The rare-name boost (+0.05) lifts it to a suggestion tagged rarity:rare.
+    addContact('c-ya', 'Yaraví', { meetings: 0 })
+    addContact('c-ye', 'Yeraví', { meetings: 0 })
+
+    const res = discoverContactMerges()
+    expect(res.suggestionsCreated).toBe(1)
+    expect(JSON.parse(suggestions()[0].evidence).rarity).toBe('rare')
+  })
+
   it('is idempotent — a second sweep creates no duplicate suggestion', () => {
     addContact('c-edu', 'Edu', { role: 'Project Manager', meetings: 2 })
     addContact('c-eduardo', 'Eduardo', { role: 'PM', meetings: 3 })

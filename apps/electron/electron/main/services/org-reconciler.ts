@@ -279,7 +279,8 @@ export function applyTranscriptEntities(opts: {
         insertIdentitySuggestion('person', name, res.id, res.confidence, {
           method: res.method,
           meetingId: opts.meetingId,
-          coOccurring: meetingAttendeeNames()
+          coOccurring: meetingAttendeeNames(),
+          ...(res.rarity ? { rarity: res.rarity } : {})
         })
         continue
       } else {
@@ -326,7 +327,8 @@ export function applyTranscriptEntities(opts: {
         insertIdentitySuggestion('project', projectName, res.id, res.confidence, {
           method: res.method,
           meetingId: opts.meetingId,
-          coOccurring: []
+          coOccurring: [],
+          ...(res.rarity ? { rarity: res.rarity } : {})
         })
       } else {
         const id = randomUUID()

@@ -12,10 +12,23 @@ import {
   Briefcase,
   CalendarDays,
   AlertTriangle,
-  FileText
+  FileText,
+  MoreVertical,
+  UserSearch,
+  Ban,
+  ExternalLink,
+  Network
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator
+} from '@/components/ui/dropdown-menu'
+import { toast } from '@/components/ui/toaster'
 import { EntityMention } from '@/components/entity'
 import { cn, formatDate } from '@/lib/utils'
 import {
@@ -27,6 +40,8 @@ import {
 import { parseEvidence, evidenceToPhrases, topicChips } from './evidenceToPhrases'
 import { groupSuggestions, TIER_LABEL, type SuggestionTier } from './groupSuggestions'
 import { computeCoMention, mentionKey, mentionStatus, type MentionResult } from './mentionEvidence'
+import { computeSharedContext, type PersonContext, type SideContext } from './personContext'
+import { MergeIntoDialog } from './MergeIntoDialog'
 
 /** Confidence → badge styling. ≥80 emerald, 50–79 amber. */
 function confidenceBadge(confidence: number | null): { label: string; className: string } {
@@ -70,6 +85,35 @@ function SnippetList({
 }
 
 /**
+ * The graph-neighborhood context row for one side (B7 symmetric context): the
+ * people this side most co-attends with and its closest topics/projects. SHARED
+ * entries (present on both sides) are primary-tinted — corroborating evidence that
+ * the two records are one person; a fully disjoint row reads as "different circles".
+ */
+function ContextChips({ context }: { context?: SideContext }) {
+  const chips = context ? [...context.people, ...context.topics] : []
+  if (chips.length === 0) return null
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1" aria-label="Related context">
+      {chips.map((c, i) => (
+        <span
+          key={`${c.label}-${i}`}
+          className={cn(
+            'inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] leading-none',
+            c.shared
+              ? 'border-primary/40 bg-primary/10 text-primary font-medium'
+              : 'border-border bg-muted/40 text-muted-foreground'
+          )}
+          title={c.shared ? 'Shared by both — merge evidence' : undefined}
+        >
+          {c.label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+/**
  * A profile block for one side of a proposed merge. Both sides render with equal
  * weight (B7 symmetry): identity fields when present, and ALWAYS the mention count
  * + primary-source excerpts, so the "duplicate" side is never a bare chip.
@@ -81,6 +125,7 @@ function MiniProfileCard({
   profile,
   role,
   mentions,
+  context,
   onOpenRecording
 }: {
   kind: 'person' | 'project'
@@ -89,6 +134,7 @@ function MiniProfileCard({
   profile?: MiniProfile
   role: 'keeper' | 'candidate'
   mentions?: MentionResult
+  context?: SideContext
   onOpenRecording: (recordingId: string) => void
 }) {
   const displayName = profile?.name || name
@@ -143,6 +189,7 @@ function MiniProfileCard({
       <div className="mt-1.5">
         <SnippetList mentions={mentions} onOpenRecording={onOpenRecording} />
       </div>
+      <ContextChips context={context} />
     </div>
   )
 }
@@ -189,11 +236,15 @@ function CandidateDecision({
   keeperName,
   candidateMentions,
   keeperMentions,
+  keeperContext,
+  candidateContext,
   coMention,
   impact,
   onAccept,
   onReject,
-  onOpenRecording
+  onMergeInto,
+  onOpenRecording,
+  onOpenProfile
 }: {
   suggestion: IdentitySuggestion
   keeper?: MiniProfile
@@ -201,11 +252,15 @@ function CandidateDecision({
   keeperName: string
   candidateMentions?: MentionResult
   keeperMentions?: MentionResult
+  keeperContext?: PersonContext
+  candidateContext?: PersonContext
   coMention: boolean
   impact?: MergeImpact
   onAccept: (id: string) => void
   onReject: (id: string) => void
+  onMergeInto: (suggestionId: string, keeperId: string, loserId: string, keeperName: string) => void
   onOpenRecording: (recordingId: string) => void
+  onOpenProfile: (id: string) => void
 }) {
   const ev = parseEvidence(suggestion.evidence)
   const loserName = suggestion.candidate_name
@@ -217,9 +272,32 @@ function CandidateDecision({
   const movedRecordings = candidateMentions?.recordingIds.length ?? 0
   const highStakes = !!impact && (impact.keeper > MERGE_LINK_THRESHOLD || impact.loser > MERGE_LINK_THRESHOLD)
 
+  // Base-rate framing: a fuzzy match on a common name proves little on its own.
+  const isCommonName = ev.rarity === 'common'
+  // Both sides' graph neighborhoods, with shared entries highlighted (B7 context).
+  const comparison =
+    suggestion.kind === 'person'
+      ? computeSharedContext(
+          keeperContext ?? { people: [], topics: [] },
+          candidateContext ?? { people: [], topics: [] }
+        )
+      : undefined
+  // The reviewed duplicate's own contact id — required to re-route the merge.
+  const loserId = ev.loserId
+  const canMergeElsewhere = suggestion.kind === 'person' && !!loserId
+
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [confirmText, setConfirmText] = useState('')
   const confirmMatches = confirmText.trim() === loserName.trim()
+
+  const openBothProfiles = () => {
+    if (suggestion.kind !== 'person') return
+    onOpenProfile(suggestion.target_id)
+    if (loserId) {
+      toast.info(`Opened ${keeperName}`, `Also review '${loserName}' to compare in full.`)
+    }
+  }
 
   const handleAccept = () => {
     if (highStakes && !confirming) {
@@ -239,6 +317,7 @@ function CandidateDecision({
           profile={keeper}
           role="keeper"
           mentions={keeperMentions}
+          context={comparison?.a}
           onOpenRecording={onOpenRecording}
         />
         <div className="flex items-center">
@@ -251,9 +330,24 @@ function CandidateDecision({
           profile={loser}
           role="candidate"
           mentions={candidateMentions}
+          context={comparison?.b}
           onOpenRecording={onOpenRecording}
         />
       </div>
+
+      {comparison?.disjoint && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/[0.06] px-2.5 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+          <Network className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" aria-hidden />
+          <span>Different circles — no shared people or topics between the two.</span>
+        </div>
+      )}
+
+      {isCommonName && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/[0.06] px-2.5 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+          <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" aria-hidden />
+          <span>Common name — verify carefully; the name alone is weak evidence.</span>
+        </div>
+      )}
 
       {coMention && (
         <div
@@ -355,7 +449,49 @@ function CandidateDecision({
           <X className="h-3.5 w-3.5 mr-1" />
           No
         </Button>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 w-7 p-0"
+              aria-label={`More options for '${loserName}'`}
+            >
+              <MoreVertical className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            {canMergeElsewhere && (
+              <DropdownMenuItem onSelect={() => setPickerOpen(true)}>
+                <UserSearch className="h-4 w-4 mr-2 text-muted-foreground" />
+                Merge into someone else…
+              </DropdownMenuItem>
+            )}
+            {suggestion.kind === 'person' && (
+              <DropdownMenuItem onSelect={openBothProfiles}>
+                <ExternalLink className="h-4 w-4 mr-2 text-muted-foreground" />
+                Open both profiles
+              </DropdownMenuItem>
+            )}
+            {(canMergeElsewhere || suggestion.kind === 'person') && <DropdownMenuSeparator />}
+            <DropdownMenuItem onSelect={() => onReject(suggestion.id)}>
+              <Ban className="h-4 w-4 mr-2 text-muted-foreground" />
+              Reject and don&rsquo;t ask again
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
+
+      {canMergeElsewhere && loserId && (
+        <MergeIntoDialog
+          open={pickerOpen}
+          onOpenChange={setPickerOpen}
+          loserName={loserName}
+          excludeIds={[suggestion.target_id, loserId]}
+          onPick={(chosenId, chosenName) => onMergeInto(suggestion.id, chosenId, loserId, chosenName)}
+        />
+      )}
     </div>
   )
 }
@@ -381,7 +517,7 @@ export const IdentitySuggestionsSection = forwardRef<
   IdentitySuggestionsSectionHandle,
   IdentitySuggestionsSectionProps
 >(function IdentitySuggestionsSection({ kind }, ref) {
-  const { suggestions, loading, profiles, targetNames, mentions, impacts, reload, accept, reject } =
+  const { suggestions, loading, profiles, targetNames, mentions, impacts, contexts, reload, accept, reject, mergeInto } =
     useIdentitySuggestions()
   const [expanded, setExpanded] = useState(true)
   const navigate = useNavigate()
@@ -389,6 +525,7 @@ export const IdentitySuggestionsSection = forwardRef<
   useImperativeHandle(ref, () => ({ reload }), [reload])
 
   const openRecording = (recordingId: string) => navigate('/library', { state: { selectedId: recordingId } })
+  const openProfile = (id: string) => navigate(`/person/${id}`)
 
   const visible = kind ? suggestions.filter((s) => s.kind === kind) : suggestions
 
@@ -470,6 +607,8 @@ export const IdentitySuggestionsSection = forwardRef<
                         const candidateMentions = mentions[mentionKey(c.candidate_name)]
                         const keeperMentions = mentions[mentionKey(keeperName)]
                         const { coMention } = computeCoMention(candidateMentions, keeperMentions)
+                        const keeperContext = contexts[c.target_id]
+                        const candidateContext = contexts[ev.loserId || c.candidate_name]
                         return (
                           <div key={c.id} className={cn(isMulti && 'py-3 first:pt-0 last:pb-0')}>
                             <CandidateDecision
@@ -479,11 +618,15 @@ export const IdentitySuggestionsSection = forwardRef<
                               keeperName={keeperName}
                               candidateMentions={candidateMentions}
                               keeperMentions={keeperMentions}
+                              keeperContext={keeperContext}
+                              candidateContext={candidateContext}
                               coMention={coMention}
                               impact={impacts[c.id]}
                               onAccept={accept}
                               onReject={reject}
+                              onMergeInto={mergeInto}
                               onOpenRecording={openRecording}
+                              onOpenProfile={openProfile}
                             />
                           </div>
                         )

@@ -31,6 +31,7 @@
 import { queryAll, queryOne, insertIdentitySuggestion } from './database'
 import type { Contact, Project } from './database'
 import { normalizeName, accentFoldedKey, fuzzyNameScore } from './entity-normalize'
+import { nameRarity, type Rarity } from './name-rarity'
 
 // ---------------------------------------------------------------------------
 // Weights & thresholds (documented — the single source of truth for tuning)
@@ -149,6 +150,73 @@ function roleSignal(aRole: string | null, bRole: string | null): { boost: number
   const { score, shared } = jaccard(a, b)
   if (shared.length === 0) return { boost: 0, shared: [] }
   return { boost: score >= ROLE_STRONG_JACCARD ? ROLE_STRONG_BOOST : ROLE_WEAK_BOOST, shared }
+}
+
+// ---------------------------------------------------------------------------
+// Name base-rate (rarity) — token frequency + transcript mentions
+// ---------------------------------------------------------------------------
+
+/** First accent-folded whitespace token of a name (its base-rate token). */
+function foldedFirstToken(name: string): string {
+  const folded = accentFoldedKey(name)
+  return folded.split(' ')[0] || folded
+}
+
+/** Distinct-entity count per folded first token across the corpus — the base rate. */
+function buildTokenBearers(entities: Array<{ name: string }>): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const e of entities) {
+    const tok = foldedFirstToken(e.name)
+    if (!tok) continue
+    counts.set(tok, (counts.get(tok) ?? 0) + 1)
+  }
+  return counts
+}
+
+/** Escape LIKE wildcards so a name is matched literally. */
+function likeEscape(s: string): string {
+  return s.replace(/[\\%_]/g, (m) => '\\' + m)
+}
+
+/** Memoized transcript mention count for a name (0 when transcripts are absent). */
+function makeMentionCounter(): (name: string) => number {
+  const cache = new Map<string, number>()
+  return (name: string): number => {
+    const key = normalizeName(name)
+    if (!key) return 0
+    const hit = cache.get(key)
+    if (hit !== undefined) return hit
+    const rows = safeQueryAll<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM transcripts WHERE full_text LIKE ? ESCAPE '\\'`,
+      [`%${likeEscape(name.trim())}%`]
+    )
+    const n = rows[0]?.n ?? 0
+    cache.set(key, n)
+    return n
+  }
+}
+
+/**
+ * Base-rate rarity for a candidate pair. The more-common of the two names' first
+ * tokens drives the delta, so a match on 'Juan'/'Ale' is docked (−0.15) and one on
+ * 'Yaraví' stands (+0.05). Bearer frequency classifies first; a transcript scan is
+ * paid for only when the bearer count leaves the pair 'normal' (mentions can promote
+ * normal → common but never override a rare/common bearer verdict).
+ */
+function pairRarity(
+  aName: string,
+  bName: string,
+  bearers: Map<string, number>,
+  mentionsOf: (name: string) => number
+): { rarity: Rarity; delta: number } {
+  const at = foldedFirstToken(aName)
+  const bt = foldedFirstToken(bName)
+  const token = at === bt ? at : at.length <= bt.length ? at : bt
+  const bearerCount = Math.max(bearers.get(at) ?? 0, bearers.get(bt) ?? 0)
+  const byBearers = nameRarity({ bearers: bearerCount, tokenLength: token.length })
+  if (byBearers.rarity !== 'normal') return byBearers
+  const mentions = Math.max(mentionsOf(aName), mentionsOf(bName))
+  return nameRarity({ bearers: bearerCount, tokenLength: token.length, mentions })
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +380,8 @@ export function discoverContactMerges(): DiscoveryResult {
 
   const aliasKeys = loadAliasKeys('contact_aliases', 'contact_id')
   const neighborsFor = makeNeighborLoader(PERSON_NEIGHBORS_SQL, 1)
+  const tokenBearers = buildTokenBearers(contacts)
+  const mentionsOf = makeMentionCounter()
 
   const pairs = candidatePairsFrom(contacts.map((c) => ({ id: c.id, name: c.name, email: c.email })))
 
@@ -336,7 +406,9 @@ export function discoverContactMerges(): DiscoveryResult {
     if (rel === 'exact') emailBoost = EMAIL_EXACT_BOOST
     else if (rel === 'local') emailBoost = EMAIL_LOCAL_BOOST
 
-    let composite = NAME_WEIGHT * name + role.boost + graph + emailBoost
+    const rar = pairRarity(a.name, b.name, tokenBearers, mentionsOf)
+
+    let composite = NAME_WEIGHT * name + role.boost + graph + emailBoost + rar.delta
     if (rel === 'conflict') composite -= EMAIL_CONFLICT_PENALTY
     composite = clamp01(composite)
     const emailCorroborated = rel === 'exact'
@@ -369,6 +441,7 @@ export function discoverContactMerges(): DiscoveryResult {
       roleOverlap: role.shared,
       sharedMeetings: mJac.shared.length,
       sharedTopics,
+      ...(rar.rarity !== 'normal' ? { rarity: rar.rarity } : {}),
     })
     result.suggestionsCreated++
     if (autoMergeable) result.autoMergeable++
@@ -399,6 +472,8 @@ export function discoverProjectMerges(): DiscoveryResult {
 
   const aliasKeys = loadAliasKeys('project_aliases', 'project_id')
   const neighborsFor = makeNeighborLoader(PROJECT_NEIGHBORS_SQL, 2)
+  const tokenBearers = buildTokenBearers(projects)
+  const mentionsOf = makeMentionCounter()
 
   const pairs = candidatePairsFrom(projects.map((p) => ({ id: p.id, name: p.name, email: null })))
 
@@ -415,8 +490,10 @@ export function discoverProjectMerges(): DiscoveryResult {
     const tJac = jaccard(new Set(aNeighbors.keys()), new Set(bNeighbors.keys()))
     const graph = GRAPH_MAX_BOOST * clamp01(mJac.score + tJac.score)
 
+    const rar = pairRarity(a.name, b.name, tokenBearers, mentionsOf)
+
     // Projects have no email/role → never auto-mergeable (that gate needs email corroboration).
-    const composite = clamp01(NAME_WEIGHT * name + graph)
+    const composite = clamp01(NAME_WEIGHT * name + graph + rar.delta)
     if (composite < SUGGEST_THRESHOLD) continue
 
     const keeperIsA = preferKeeper(
@@ -442,6 +519,7 @@ export function discoverProjectMerges(): DiscoveryResult {
       roleOverlap: [],
       sharedMeetings: mJac.shared.length,
       sharedTopics,
+      ...(rar.rarity !== 'normal' ? { rarity: rar.rarity } : {}),
     })
     result.suggestionsCreated++
   }

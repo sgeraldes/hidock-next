@@ -17,10 +17,12 @@ import {
   getMergeJournal,
   getMergeImpact,
   getMentionSnippets,
+  getPersonContext,
   IdentitySuggestion,
   AcceptSuggestionResult,
   MergeJournalEntry,
-  MentionResult
+  MentionResult,
+  PersonContext
 } from '../services/database'
 import { discoverContactMerges, discoverProjectMerges, DiscoveryResult } from '../services/identity-discovery'
 import { success, error, Result } from '../types/api'
@@ -31,6 +33,7 @@ const MentionSnippetsRequestSchema = z.object({
   name: z.string().min(1).max(200),
   limit: z.number().int().min(1).max(10).optional()
 })
+const PersonContextRequestSchema = IdSchema
 const KindSchema = z.enum(['contact', 'project'])
 const MergeJournalRequestSchema = z.object({ kind: KindSchema, keeperId: IdSchema })
 const MergeImpactRequestSchema = z.object({ kind: KindSchema, keeperId: IdSchema, loserId: IdSchema })
@@ -103,6 +106,23 @@ export function registerIdentityHandlers(): void {
     } catch (err) {
       console.error('identity:getMentionSnippets error:', err)
       return error('DATABASE_ERROR', 'Failed to fetch mention snippets', err)
+    }
+  })
+
+  /**
+   * Graph-neighborhood context for one side of a merge card: the person's closest
+   * co-attendees and topics/projects. Accepts a contact id OR a raw name.
+   */
+  ipcMain.handle('identity:getPersonContext', async (_, idOrName?: unknown): Promise<Result<PersonContext>> => {
+    try {
+      const parsed = PersonContextRequestSchema.safeParse(idOrName)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid person context request', parsed.error.format())
+      }
+      return success(getPersonContext(parsed.data))
+    } catch (err) {
+      console.error('identity:getPersonContext error:', err)
+      return error('DATABASE_ERROR', 'Failed to fetch person context', err)
     }
   })
 

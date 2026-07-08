@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from '@/components/ui/toaster'
 import { parseEvidence, type SuggestionEvidence } from './evidenceToPhrases'
 import { mentionKey, type MentionResult } from './mentionEvidence'
+import type { PersonContext } from './personContext'
 
 export { parseEvidence, type SuggestionEvidence }
 export type { MentionResult } from './mentionEvidence'
+export type { PersonContext } from './personContext'
 
 /**
  * A row from `identity:getSuggestions` — the resolver's 0.5–0.8 confidence band
@@ -108,9 +110,11 @@ export function useIdentitySuggestions() {
   const [profiles, setProfiles] = useState<Record<string, MiniProfile>>({})
   const [mentions, setMentions] = useState<Record<string, MentionResult>>({})
   const [impacts, setImpacts] = useState<Record<string, MergeImpact>>({})
+  const [contexts, setContexts] = useState<Record<string, PersonContext>>({})
   const resolving = useRef<Set<string>>(new Set())
   const resolvingMentions = useRef<Set<string>>(new Set())
   const resolvingImpacts = useRef<Set<string>>(new Set())
+  const resolvingContexts = useRef<Set<string>>(new Set())
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
@@ -239,6 +243,44 @@ export function useIdentitySuggestions() {
     }
   }, [suggestions, impacts])
 
+  // Lazily fetch graph-neighborhood context for each PERSON side of a suggestion —
+  // the keeper (by target id) and the candidate (by loser id, else its name) — so the
+  // card can render both sides' co-attendees/topics with shared entries highlighted.
+  // Cached per key so each person hits the graph once.
+  useEffect(() => {
+    const wanted = new Set<string>()
+    for (const s of suggestions) {
+      if (s.kind !== 'person') continue
+      const ev = parseEvidence(s.evidence)
+      for (const k of [s.target_id, ev.loserId || s.candidate_name]) {
+        const key = (k || '').trim()
+        if (key && !(key in contexts) && !resolvingContexts.current.has(key)) wanted.add(key)
+      }
+    }
+    if (wanted.size === 0) return
+    for (const k of wanted) resolvingContexts.current.add(k)
+    let cancelled = false
+    ;(async () => {
+      const updates: Record<string, PersonContext> = {}
+      await Promise.all(
+        [...wanted].map(async (k) => {
+          try {
+            const res = await window.electronAPI.identity.getPersonContext?.(k)
+            updates[k] = res?.success && res.data ? res.data : { people: [], topics: [] }
+          } catch {
+            updates[k] = { people: [], topics: [] }
+          }
+        })
+      )
+      if (!cancelled && Object.keys(updates).length > 0) {
+        setContexts((prev) => ({ ...prev, ...updates }))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [suggestions, contexts])
+
   // Backward-compatible map of target_id → display name (used by the Today card).
   const targetNames = useMemo(() => {
     const map: Record<string, string> = {}
@@ -306,5 +348,73 @@ export function useIdentitySuggestions() {
     [suggestions]
   )
 
-  return { suggestions, loading, targetNames, profiles, mentions, impacts, reload: load, accept, reject }
+  // Third door: fold the reviewed duplicate (loserId) into a DIFFERENT chosen keeper
+  // than the suggestion proposed. Performs a real contact merge, offers the same
+  // time-boxed Undo (via the newest merge-journal entry), retires the now-moot
+  // suggestion, and refetches.
+  const mergeInto = useCallback(
+    async (suggestionId: string, keeperId: string, loserId: string, keeperName: string) => {
+      const snapshot = suggestions
+      setSuggestions((prev) => prev.filter((s) => s.id !== suggestionId)) // optimistic
+      try {
+        const res = await window.electronAPI.contacts.merge({ keeperId, loserId })
+        if (!res.success) throw new Error((res as { error?: { message?: string } }).error?.message || 'Failed')
+
+        // The merge does not return its journal id — read the newest open entry for undo.
+        let journalId: string | null = null
+        try {
+          const j = await window.electronAPI.identity.getMergeJournal({ kind: 'contact', keeperId })
+          journalId = j.success && j.data && j.data.length > 0 ? j.data[0].id : null
+        } catch {
+          /* undo simply unavailable */
+        }
+
+        // Retire the original suggestion so it never re-surfaces (best-effort).
+        window.electronAPI.identity.rejectSuggestion(suggestionId).catch(() => {})
+
+        toast.success(
+          'Merged into a different person',
+          `Records were folded into ${keeperName}.`,
+          journalId
+            ? {
+                duration: 10000,
+                action: {
+                  label: 'Undo',
+                  onClick: async () => {
+                    try {
+                      const undo = await window.electronAPI.contacts.unmerge(journalId as string)
+                      if (!undo.success) throw new Error('unmerge failed')
+                      toast.info('Merge undone', 'The separate records were restored.')
+                    } catch {
+                      toast.error('Undo failed', 'The records could not be separated again.')
+                    } finally {
+                      load(true)
+                    }
+                  }
+                }
+              }
+            : undefined
+        )
+        load(true)
+      } catch (err) {
+        setSuggestions(snapshot) // rollback
+        toast.error('Failed to merge', err instanceof Error ? err.message : 'Unknown error')
+      }
+    },
+    [suggestions, load]
+  )
+
+  return {
+    suggestions,
+    loading,
+    targetNames,
+    profiles,
+    mentions,
+    impacts,
+    contexts,
+    reload: load,
+    accept,
+    reject,
+    mergeInto
+  }
 }

@@ -3142,6 +3142,93 @@ export function getContactById(id: string): Contact | undefined {
   return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])
 }
 
+/** Graph-neighborhood context for a person: closest co-attendees + topics/projects. */
+export interface PersonContext {
+  /** Co-attendee display names, most-shared-meetings first. */
+  people: string[]
+  /** Topic/project labels closest to the person. */
+  topics: string[]
+}
+
+/** queryAll that returns [] if the graph tables are absent (pre-first-ingest). */
+function safeGraphQuery<T>(sql: string, params: unknown[]): T[] {
+  try {
+    return queryAll<T>(sql, params)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Compact graph-neighborhood context for the identity merge card (B7 symmetric
+ * context): the people this person most co-attends meetings with, and the
+ * topics/projects closest to them. Accepts a contact id OR a raw name (resolver-band
+ * candidates carry only a name). One cheap query set — resolve, co-attendees, then
+ * topics via the knowledge graph (person node → ATTENDED → meeting → ABOUT → topic/
+ * project), falling back to meeting_projects transitively before the graph exists.
+ */
+export function getPersonContext(idOrName: string, limit = 4): PersonContext {
+  const raw = (idOrName || '').trim()
+  if (!raw) return { people: [], topics: [] }
+  const cap = Math.max(1, Math.min(Math.floor(limit) || 4, 10))
+
+  // Resolve to a contact id + display name: id first, then exact normalized name.
+  let contact = getContactById(raw)
+  if (!contact) {
+    const norm = raw.toLowerCase().replace(/\s+/g, ' ')
+    contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = ? LIMIT 1', [norm])
+  }
+  const contactId = contact?.id ?? null
+  const normKey = (contact?.name ?? raw).toLowerCase().trim().replace(/\s+/g, ' ')
+
+  const people = contactId
+    ? queryAll<{ name: string }>(
+        `SELECT c.name AS name, COUNT(*) AS shared
+           FROM meeting_contacts mc1
+           JOIN meeting_contacts mc2 ON mc2.meeting_id = mc1.meeting_id AND mc2.contact_id <> mc1.contact_id
+           JOIN contacts c ON c.id = mc2.contact_id
+          WHERE mc1.contact_id = ?
+          GROUP BY mc2.contact_id
+          ORDER BY shared DESC, c.name ASC
+          LIMIT ?`,
+        [contactId, cap]
+      )
+        .map((r) => r.name)
+        .filter(Boolean)
+    : []
+
+  // Topics via the graph; fall back to the person's meeting projects when empty.
+  let topics = safeGraphQuery<{ label: string }>(
+    `SELECT DISTINCT t.label AS label
+       FROM graph_nodes p
+       JOIN graph_edges ea ON ea.source_id = p.id AND ea.type = 'ATTENDED'
+       JOIN graph_nodes m  ON m.id = ea.target_id AND m.type = 'meeting'
+       JOIN graph_edges ab ON ab.source_id = m.id AND ab.type = 'ABOUT'
+       JOIN graph_nodes t  ON t.id = ab.target_id AND (t.type = 'topic' OR t.type = 'project')
+      WHERE p.type = 'person' AND p.norm_key = ?
+      LIMIT ?`,
+    [normKey, cap]
+  )
+    .map((r) => r.label)
+    .filter(Boolean)
+
+  if (topics.length === 0 && contactId) {
+    topics = safeGraphQuery<{ label: string }>(
+      `SELECT DISTINCT pr.name AS label
+         FROM meeting_contacts mc
+         JOIN meeting_projects mp ON mp.meeting_id = mc.meeting_id
+         JOIN projects pr ON pr.id = mp.project_id
+        WHERE mc.contact_id = ?
+        LIMIT ?`,
+      [contactId, cap]
+    )
+      .map((r) => r.label)
+      .filter(Boolean)
+  }
+
+  return { people, topics }
+}
+
 export function getContactByEmail(email: string): Contact | undefined {
   return queryOne<Contact>('SELECT * FROM contacts WHERE email = ?', [email])
 }

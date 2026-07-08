@@ -24,6 +24,8 @@ export interface SuggestionEvidence {
   sharedMeetings?: number
   sharedTopics?: string[]
   superseded?: boolean
+  /** Name base-rate label from the resolver/discovery — 'common' triggers a caution. */
+  rarity?: 'common' | 'rare'
 }
 
 /** Safely parse the evidence JSON string; never throws. */

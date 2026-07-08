@@ -114,6 +114,13 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
   contact type always UNKNOWN.
 
 ## Observations (not yet actionable)
+- ISSUE-15 (1 occurrence, 2026-07-08 16:5x): Gemini RECITATION block failed a
+  backlog transcription (chunk resembled copyrighted content — music/video in
+  the meeting audio). no-silent-drop correctly failed loudly. Fix design when
+  it recurs: per-chunk RECITATION retry with temperature adjustment; if still
+  blocked, insert a visible "[content blocked by provider]" chunk placeholder
+  and continue — loud gap, not a dropped transcript. Identify the recording
+  via the failed queue row.
 - ISSUE-14 (queued; transcription.ts busy with fix-queue-priority agent): new
   json-mime malformation class — DANGLING KEY then duplicated key
   (`"participants":\n  "participants": [],` — key emitted with no value,
