@@ -1,8 +1,15 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { PanelLeft, Search, CheckCircle2, Loader2, XCircle } from 'lucide-react'
+import { PanelLeft, Search, CheckCircle2, Loader2, Usb, ChevronDown, LogOut, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useDeviceState, useConnectionStatus } from '@/store/useAppStore'
+import { useDeviceConnection } from '@/hooks/useDeviceConnection'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator
+} from '@/components/ui/dropdown-menu'
 
 /**
  * Office-365-style unified titlebar.
@@ -36,17 +43,9 @@ interface TitleBarProps {
 
 export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
   const navigate = useNavigate()
-  const deviceState = useDeviceState()
-  const connectionStatus = useConnectionStatus()
+  // Shared with the Device Sync page — same status source, same connect action.
+  const { status, label: connectionLabel, connect, disconnect } = useDeviceConnection()
   const [search, setSearch] = useState('')
-
-  const isConnected = deviceState.connected
-  const isConnecting =
-    connectionStatus.step !== 'idle' &&
-    connectionStatus.step !== 'ready' &&
-    connectionStatus.step !== 'error'
-  const deviceModel = deviceState.model?.replace('hidock-', '').toUpperCase() || 'Device'
-  const connectionLabel = isConnected ? deviceModel : isConnecting ? 'Connecting…' : 'Disconnected'
 
   const submitSearch = (e: React.FormEvent) => {
     e.preventDefault()
@@ -94,30 +93,100 @@ export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
         </div>
       </form>
 
-      {/* Device connection status — relocated from the sidebar header */}
+      {/* Device connection control — same status + connect/disconnect action as
+          the Device Sync page (via useDeviceConnection). */}
+      <ConnectionControl
+        status={status}
+        label={connectionLabel}
+        onConnect={() => void connect()}
+        onDisconnect={() => void disconnect()}
+        onGoToSync={() => navigate('/sync')}
+      />
+    </header>
+  )
+}
+
+const PILL_BASE =
+  'titlebar-no-drag flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400'
+
+interface ConnectionControlProps {
+  status: 'connected' | 'connecting' | 'disconnected'
+  label: string
+  onConnect: () => void
+  onDisconnect: () => void
+  onGoToSync: () => void
+}
+
+/**
+ * Three-state device pill:
+ *  - disconnected → button labelled "Connect device"; click = one connect attempt.
+ *  - connecting   → disabled pill with a spinner (no click).
+ *  - connected    → dropdown trigger (model + connected styling); a bare click
+ *                   opens a menu (Go to Sync / Disconnect) rather than
+ *                   disconnecting, so it can't be hit by accident.
+ */
+function ConnectionControl({ status, label, onConnect, onDisconnect, onGoToSync }: ConnectionControlProps) {
+  if (status === 'connecting') {
+    return (
       <button
         type="button"
-        onClick={() => navigate('/sync')}
-        title={`Device: ${connectionLabel}`}
-        className={cn(
-          'titlebar-no-drag flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400',
-          isConnected
-            ? 'border-emerald-700/50 bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/60'
-            : isConnecting
-              ? 'border-amber-700/50 bg-amber-900/40 text-amber-300 hover:bg-amber-900/60'
-              : 'border-slate-700 bg-slate-800/70 text-slate-400 hover:bg-slate-700'
-        )}
+        disabled
+        title="Connecting to device…"
+        className={cn(PILL_BASE, 'cursor-wait border-amber-700/50 bg-amber-900/40 text-amber-300')}
       >
-        {isConnected ? (
-          <CheckCircle2 className="h-3.5 w-3.5" />
-        ) : isConnecting ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <XCircle className="h-3.5 w-3.5" />
-        )}
-        <span className="hidden md:inline">{connectionLabel}</span>
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        <span className="hidden md:inline">{label}</span>
       </button>
-    </header>
+    )
+  }
+
+  if (status === 'disconnected') {
+    return (
+      <button
+        type="button"
+        onClick={onConnect}
+        title="Connect device"
+        className={cn(PILL_BASE, 'border-slate-700 bg-slate-800/70 text-slate-400 hover:bg-slate-700 hover:text-slate-200')}
+      >
+        <Usb className="h-3.5 w-3.5" />
+        <span className="hidden md:inline">{label}</span>
+      </button>
+    )
+  }
+
+  // Connected — dropdown. DropdownMenuContent renders through a Radix portal, so
+  // the menu is never clipped by the titlebar's overflow.
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          title={`Device connected: ${label}`}
+          className={cn(
+            PILL_BASE,
+            'border-emerald-700/50 bg-emerald-900/40 text-emerald-300 hover:bg-emerald-900/60 data-[state=open]:bg-emerald-900/70'
+          )}
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          <span className="hidden md:inline">{label}</span>
+          <ChevronDown className="h-3 w-3 opacity-70" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="titlebar-no-drag w-44">
+        <DropdownMenuItem onSelect={onGoToSync}>
+          <ArrowRight className="mr-2 h-4 w-4" />
+          Go to Sync
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onSelect={onDisconnect}
+          className="text-red-600 focus:text-red-600 dark:text-red-400 dark:focus:text-red-400"
+        >
+          <LogOut className="mr-2 h-4 w-4" />
+          Disconnect
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 

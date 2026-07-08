@@ -68,11 +68,16 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
       2 regression tests (39dd65af). VERIFIED LIVE.
 - [x] ISSUE-11: flaky perf budget test — now times only the synchronous
       click→commit; waitFor untimed; suite green 2× consecutively (5ef9cb48).
-- [~] ISSUE-12 (agent: fix-assistant-gemini; found by orchestrator user-test):
-      Assistant chat is the LAST Ollama-only path — page shows "Ollama
-      offline", input disabled, core "ask your knowledge" feature dead.
-      Making it Gemini-first with Ollama fallback (mirror output-generator/
-      embeddings pattern) + availability badge reflects active backend.
+- [x] ISSUE-12: Assistant chat was the LAST Ollama-only path ("Ollama
+      offline", dead input). New chat-llm service: Gemini-first w/ Ollama
+      fallback; rag:status exposes backend; also fixed latent retrieval bug
+      (query embeddings now same vector space as index). Commits 07298be1,
+      2e53dd13. VERIFIED LIVE: "Gemini · 4249 chunks", full RAG answer about
+      SIP-to-WebRTC Gateway citing Rec43.
+- [~] ISSUE-13 (agent: fix-titlebar-connect; USER-REQUESTED 07:2x): titlebar
+      status pill must be the same control as Sync page's Connect Device —
+      shared hook, connect on click when disconnected, popover w/ Disconnect
+      when connected, connecting state, no new USB paths.
 - [x] ISSUE-2 (design, Opus — after fix-analysis lands, shares index.ts):
       unified Office-365-style titlebar: frameless BrowserWindow with overlay
       window controls, app identity + global actions in the custom titlebar,

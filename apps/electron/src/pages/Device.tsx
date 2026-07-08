@@ -13,6 +13,7 @@ import { toast } from '@/components/ui/toaster'
 import { useAppStore } from '@/store/useAppStore'
 import { hasDeviceFile, type DeviceOnlyRecording, type BothLocationsRecording } from '@/types/unified-recording'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
+import { useDeviceConnection } from '@/hooks/useDeviceConnection'
 import { cancelDownloads, requestScopedDownloads } from '@/hooks/useDownloadOrchestrator'
 
 import { formatEta, formatBytes } from '@/utils/formatters'
@@ -33,6 +34,10 @@ export function Device() {
 
   // Initialize service
   const deviceService = getHiDockDeviceService()
+  // Shared connect/disconnect action with the titlebar pill so the two can't
+  // drift. The page keeps its own inline error banner, so suppress the hook's
+  // toast to avoid double-surfacing (toastErrors: false).
+  const { connect: connectDevice, disconnect: disconnectDevice } = useDeviceConnection({ toastErrors: false })
   const { recordings, loading: loadingRecordings, refresh: refreshRecordings } = useUnifiedRecordings()
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -406,7 +411,7 @@ export function Device() {
     }, CONNECTION_TIMEOUT_MS)
 
     try {
-      const success = await deviceService.connect()
+      const success = await connectDevice()
       if (!success) {
         setError('Failed to connect to device. Check if the device is connected and not in use.')
       }
@@ -421,7 +426,7 @@ export function Device() {
   }
 
   const handleDisconnect = async () => {
-    await deviceService.disconnect()
+    await disconnectDevice()
     // Sync UI state after disconnect persists config
     setAutoConnectConfig(deviceService.getAutoConnectConfig())
   }
