@@ -6,10 +6,13 @@
  * and auto-scrolls during playback.
  */
 
-import { useEffect, useRef, useMemo, useState } from 'react'
+import { useCallback, useEffect, useRef, useMemo, useState } from 'react'
 import { TimeAnchor } from './TimeAnchor'
+import { SpeakerAssignPopover } from './SpeakerAssignPopover'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { expandInlineStoredSegments } from '../utils/splitInlineTurns'
+import { toast } from '@/components/ui/toaster'
+import type { Person } from '@/types/knowledge'
 
 /** Stored transcript segment (from the `speakers` JSON column). Times in seconds. */
 export interface StoredSegment {
@@ -33,6 +36,13 @@ interface TranscriptViewerProps {
    * instead of re-parsing the plain `transcript` string.
    */
   segments?: StoredSegment[]
+  /**
+   * When provided, speaker labels become interactive: each can be assigned to a
+   * canonical contact (existing or new). Assignments are resolved through the
+   * recording's speaker map so every turn with the same label renders the
+   * person's name. Omit to render labels as plain, non-interactive text.
+   */
+  recordingId?: string
 }
 
 interface TranscriptSegment {
@@ -225,7 +235,8 @@ export function TranscriptViewer({
   showActionItems = true,
   summary,
   actionItems,
-  segments: storedSegments
+  segments: storedSegments,
+  recordingId
 }: TranscriptViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeSegmentRef = useRef<HTMLDivElement>(null)
@@ -233,6 +244,84 @@ export function TranscriptViewer({
   const [summaryExpanded, setSummaryExpanded] = useState(true)
   const [actionItemsExpanded, setActionItemsExpanded] = useState(true)
   const [transcriptExpanded, setTranscriptExpanded] = useState(true)
+
+  // Speaker → contact assignment. Only active when a recordingId is supplied.
+  // speakerMap resolves a raw label ("Speaker 2") to the assigned contact; the
+  // contacts list backs the popover's searchable picker (loaded lazily).
+  const assignEnabled = Boolean(recordingId)
+  const [speakerMap, setSpeakerMap] = useState<Map<string, { contactId: string; name: string }>>(new Map())
+  const [contacts, setContacts] = useState<Person[]>([])
+  const [contactsLoaded, setContactsLoaded] = useState(false)
+
+  const loadSpeakerMap = useCallback(async () => {
+    if (!recordingId) {
+      setSpeakerMap(new Map())
+      return
+    }
+    try {
+      const res = await window.electronAPI.transcripts.getSpeakerMap({ recordingId })
+      if (res.success) {
+        const next = new Map<string, { contactId: string; name: string }>()
+        for (const row of res.data) next.set(row.speaker_label, { contactId: row.contact_id, name: row.name })
+        setSpeakerMap(next)
+      }
+    } catch {
+      // Non-fatal: labels simply render un-resolved.
+    }
+  }, [recordingId])
+
+  useEffect(() => {
+    loadSpeakerMap()
+  }, [loadSpeakerMap])
+
+  const ensureContacts = useCallback(async () => {
+    if (contactsLoaded) return
+    try {
+      const res = await window.electronAPI.contacts.getAll()
+      if (res.success) setContacts(res.data.contacts)
+    } catch {
+      // Non-fatal: picker shows an empty list, create-new still works.
+    } finally {
+      setContactsLoaded(true)
+    }
+  }, [contactsLoaded])
+
+  const assignSpeaker = useCallback(
+    async (label: string, payload: { contactId?: string; newName?: string }) => {
+      if (!recordingId) return
+      try {
+        const res = await window.electronAPI.transcripts.assignSpeaker({ recordingId, speakerLabel: label, ...payload })
+        if (res.success) {
+          await loadSpeakerMap()
+          setContactsLoaded(false) // a new person may have been created
+          toast.success('Speaker assigned', `${label} is now ${res.data.name}.`)
+        } else {
+          toast.error('Failed to assign speaker')
+        }
+      } catch (err) {
+        toast.error('Failed to assign speaker', err instanceof Error ? err.message : undefined)
+      }
+    },
+    [recordingId, loadSpeakerMap]
+  )
+
+  const unassignSpeaker = useCallback(
+    async (label: string) => {
+      if (!recordingId) return
+      try {
+        const res = await window.electronAPI.transcripts.unassignSpeaker({ recordingId, speakerLabel: label })
+        if (res.success) {
+          await loadSpeakerMap()
+          toast.success('Speaker unassigned')
+        } else {
+          toast.error('Failed to unassign speaker')
+        }
+      } catch (err) {
+        toast.error('Failed to unassign speaker', err instanceof Error ? err.message : undefined)
+      }
+    },
+    [recordingId, loadSpeakerMap]
+  )
 
   // Prefer pre-parsed segments (timestamped speaker turns) when available;
   // otherwise parse the plain transcript string (timestamped or speaker-turn based).
@@ -357,9 +446,22 @@ export function TranscriptViewer({
                           </TimeAnchor>
                         )}
                         {segment.speaker && (
-                          <span className="font-semibold text-foreground">
-                            {segment.speaker}
-                          </span>
+                          assignEnabled ? (
+                            <SpeakerAssignPopover
+                              label={segment.speaker}
+                              assignedContactId={speakerMap.get(segment.speaker)?.contactId}
+                              assignedName={speakerMap.get(segment.speaker)?.name}
+                              contacts={contacts}
+                              onOpen={ensureContacts}
+                              onAssignContact={(contactId) => assignSpeaker(segment.speaker!, { contactId })}
+                              onAssignNew={(name) => assignSpeaker(segment.speaker!, { newName: name })}
+                              onUnassign={() => unassignSpeaker(segment.speaker!)}
+                            />
+                          ) : (
+                            <span className="font-semibold text-foreground">
+                              {segment.speaker}
+                            </span>
+                          )
                         )}
                       </div>
                     )}

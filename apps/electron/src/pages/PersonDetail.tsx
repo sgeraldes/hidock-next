@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -14,7 +14,8 @@ import {
   Bot,
   Check,
   X,
-  Trash2
+  Trash2,
+  GitMerge
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -28,11 +29,29 @@ import {
   AlertDialogHeader,
   AlertDialogTitle
 } from '@/components/ui/alert-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose
+} from '@/components/ui/dialog'
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem
+} from '@/components/ui/select'
 import { formatDateTime } from '@/lib/utils'
 import type { Person, PersonType } from '@/types/knowledge'
 import type { Meeting } from '@/types'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
+
+const PERSON_TYPES: PersonType[] = ['team', 'candidate', 'customer', 'external', 'unknown']
 
 export function PersonDetail() {
   const { id } = useParams<{ id: string }>()
@@ -42,10 +61,26 @@ export function PersonDetail() {
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'timeline' | 'knowledge'>('timeline')
   const [isEditing, setIsEditing] = useState(false)
-  const [editForm, setEditForm] = useState<{ name: string; email: string; role: string; company: string; notes: string }>({
-    name: '', email: '', role: '', company: '', notes: ''
+  const [editForm, setEditForm] = useState<{
+    name: string
+    email: string
+    role: string
+    company: string
+    notes: string
+    type: PersonType
+    tags: string[]
+  }>({
+    name: '', email: '', role: '', company: '', notes: '', type: 'unknown', tags: []
   })
+  const [tagInput, setTagInput] = useState('')
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
+
+  // Merge dialog state
+  const [mergeDialogOpen, setMergeDialogOpen] = useState(false)
+  const [mergeCandidates, setMergeCandidates] = useState<Person[]>([])
+  const [mergeSearch, setMergeSearch] = useState('')
+  const [mergeTarget, setMergeTarget] = useState<Person | null>(null)
+  const [merging, setMerging] = useState(false)
 
   // B-PPL-002: Wrapped in useCallback to satisfy dependency arrays
   const loadDetails = useCallback(async () => {
@@ -73,7 +108,9 @@ export function PersonDetail() {
           email: personData.email || '',
           role: personData.role || '',
           company: personData.company || '',
-          notes: personData.notes || ''
+          notes: personData.notes || '',
+          type: personData.type || 'unknown',
+          tags: personData.tags || []
         })
         if (result.data.meetings) {
           setMeetings(result.data.meetings)
@@ -110,7 +147,7 @@ export function PersonDetail() {
     }
 
     try {
-      const updatePayload: Record<string, string | undefined> = {
+      const updatePayload: Record<string, unknown> = {
         id,
         notes: editForm.notes || undefined,
         role: editForm.role || undefined,
@@ -123,6 +160,17 @@ export function PersonDetail() {
       }
       if (trimmedEmail !== (person.email || '')) {
         updatePayload.email = trimmedEmail || undefined
+      }
+      // R1b: person type + tags are now editable
+      if (editForm.type !== person.type) {
+        updatePayload.type = editForm.type
+      }
+      const currentTags = person.tags || []
+      const nextTags = editForm.tags
+      const tagsChanged =
+        nextTags.length !== currentTags.length || nextTags.some((t, i) => t !== currentTags[i])
+      if (tagsChanged) {
+        updatePayload.tags = nextTags
       }
 
       await window.electronAPI.contacts.update(updatePayload as any)
@@ -142,9 +190,12 @@ export function PersonDetail() {
         email: person.email || '',
         role: person.role || '',
         company: person.company || '',
-        notes: person.notes || ''
+        notes: person.notes || '',
+        type: person.type || 'unknown',
+        tags: person.tags || []
       })
     }
+    setTagInput('')
     setIsEditing(false)
   }
 
@@ -165,6 +216,69 @@ export function PersonDetail() {
     }
     setDeleteDialogOpen(false)
   }
+
+  // R1b: tag editing (edit mode)
+  const addTag = () => {
+    const t = tagInput.trim()
+    if (!t) return
+    if (editForm.tags.some((existing) => existing.toLowerCase() === t.toLowerCase())) {
+      setTagInput('')
+      return
+    }
+    setEditForm((prev) => ({ ...prev, tags: [...prev.tags, t] }))
+    setTagInput('')
+  }
+
+  const removeTag = (tag: string) => {
+    setEditForm((prev) => ({ ...prev, tags: prev.tags.filter((t) => t !== tag) }))
+  }
+
+  // R1b: merge — fold another contact into this one (canonical entity dedupe)
+  const openMergeDialog = async () => {
+    setMergeDialogOpen(true)
+    setMergeSearch('')
+    setMergeTarget(null)
+    try {
+      const result = await window.electronAPI.contacts.getAll()
+      if (result.success) {
+        setMergeCandidates(result.data.contacts.filter((c) => c.id !== id))
+      }
+    } catch (error) {
+      console.error('Failed to load merge candidates:', error)
+      toast.error('Failed to load contacts')
+    }
+  }
+
+  const handleMerge = async () => {
+    if (!id || !person || !mergeTarget) return
+    setMerging(true)
+    try {
+      const result = await window.electronAPI.contacts.merge({ keeperId: id, loserId: mergeTarget.id })
+      if (result.success) {
+        toast.success('Contacts merged', `${mergeTarget.name} was merged into ${person.name}.`)
+        setMergeDialogOpen(false)
+        setMergeTarget(null)
+        await loadDetails()
+      } else {
+        toast.error('Failed to merge contacts', (result as any).error?.message || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to merge contacts:', error)
+      toast.error('Failed to merge contacts', error instanceof Error ? error.message : 'Unknown error')
+    } finally {
+      setMerging(false)
+    }
+  }
+
+  const filteredMergeCandidates = useMemo(() => {
+    const q = mergeSearch.trim().toLowerCase()
+    const list = q
+      ? mergeCandidates.filter(
+          (c) => c.name.toLowerCase().includes(q) || (c.email ?? '').toLowerCase().includes(q)
+        )
+      : mergeCandidates
+    return list.slice(0, 50)
+  }, [mergeCandidates, mergeSearch])
 
   useEffect(() => {
     loadDetails()
@@ -226,12 +340,30 @@ export function PersonDetail() {
                   <h1 className="text-xl font-bold leading-tight">{person.name}</h1>
                 )}
                 <div className="flex items-center gap-2 mt-1">
-                  <span className={cn(
-                    "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider",
-                    getTypeColor(person.type)
-                  )}>
-                    {person.type}
-                  </span>
+                  {isEditing ? (
+                    <Select
+                      value={editForm.type}
+                      onValueChange={(value) => setEditForm((prev) => ({ ...prev, type: value as PersonType }))}
+                    >
+                      <SelectTrigger className="h-7 w-[130px] text-xs" aria-label="Person type">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PERSON_TYPES.map((t) => (
+                          <SelectItem key={t} value={t} className="capitalize">
+                            {t}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <span className={cn(
+                      "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider",
+                      getTypeColor(person.type)
+                    )}>
+                      {person.type}
+                    </span>
+                  )}
                   {person.company && (
                     <span className="text-xs text-muted-foreground">- {person.company}</span>
                   )}
@@ -261,6 +393,11 @@ export function PersonDetail() {
                 <Button size="sm" variant="default" onClick={() => setIsEditing(true)} disabled={loading}>
                   <Edit className="h-4 w-4 mr-2" />
                   Edit
+                </Button>
+                {/* R1b: Merge another contact into this one */}
+                <Button size="sm" variant="outline" onClick={openMergeDialog} disabled={loading}>
+                  <GitMerge className="h-4 w-4 mr-2" />
+                  Merge…
                 </Button>
                 <Button
                   size="sm"
@@ -363,20 +500,63 @@ export function PersonDetail() {
                 </CardContent>
               </Card>
 
-              {person.tags.length > 0 && (
+              {(person.tags.length > 0 || isEditing) && (
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Tags</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <div className="flex flex-wrap gap-2">
-                      {person.tags.map(tag => (
-                        <div key={tag} className="flex items-center gap-1.5 text-xs bg-secondary px-3 py-1 rounded-full border border-border/50">
-                          <Tag className="h-3 w-3" />
-                          {tag}
+                    {isEditing ? (
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap gap-2">
+                          {editForm.tags.map(tag => (
+                            <div key={tag} className="flex items-center gap-1.5 text-xs bg-secondary px-3 py-1 rounded-full border border-border/50">
+                              <Tag className="h-3 w-3" />
+                              {tag}
+                              <button
+                                type="button"
+                                onClick={() => removeTag(tag)}
+                                className="ml-0.5 text-muted-foreground hover:text-destructive"
+                                aria-label={`Remove tag ${tag}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </div>
+                          ))}
+                          {editForm.tags.length === 0 && (
+                            <span className="text-xs text-muted-foreground">No tags yet</span>
+                          )}
                         </div>
-                      ))}
-                    </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={tagInput}
+                            onChange={(e) => setTagInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                addTag()
+                              }
+                            }}
+                            className="flex-1 text-sm border rounded px-2 py-1 bg-background"
+                            placeholder="Add a tag..."
+                            aria-label="Add a tag"
+                          />
+                          <Button size="sm" variant="outline" onClick={addTag} disabled={!tagInput.trim()}>
+                            Add
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {person.tags.map(tag => (
+                          <div key={tag} className="flex items-center gap-1.5 text-xs bg-secondary px-3 py-1 rounded-full border border-border/50">
+                            <Tag className="h-3 w-3" />
+                            {tag}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               )}
@@ -497,6 +677,71 @@ export function PersonDetail() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* R1b: Merge Contacts Dialog */}
+      <Dialog open={mergeDialogOpen} onOpenChange={setMergeDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Merge into {person.name}</DialogTitle>
+            <DialogDescription>
+              {mergeTarget
+                ? `Merge ${mergeTarget.name} into ${person.name}? All meetings, transcripts, and details will be folded into ${person.name}. This cannot be undone.`
+                : `Pick a duplicate contact to fold into ${person.name}. The other contact will be deleted.`}
+            </DialogDescription>
+          </DialogHeader>
+
+          {!mergeTarget && (
+            <>
+              <input
+                type="text"
+                value={mergeSearch}
+                onChange={(e) => setMergeSearch(e.target.value)}
+                placeholder="Search contacts..."
+                aria-label="Search contacts to merge"
+                className="w-full text-sm border rounded px-2 py-1.5 bg-background"
+              />
+              <div className="max-h-64 overflow-auto space-y-1 mt-1">
+                {filteredMergeCandidates.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-6">No other contacts found.</p>
+                ) : (
+                  filteredMergeCandidates.map((c) => (
+                    <button
+                      key={c.id}
+                      className="w-full text-left p-2 border rounded-lg hover:bg-muted transition-colors"
+                      onClick={() => setMergeTarget(c)}
+                    >
+                      <p className="font-medium text-sm">{c.name}</p>
+                      {c.email && <p className="text-xs text-muted-foreground">{c.email}</p>}
+                    </button>
+                  ))
+                )}
+              </div>
+            </>
+          )}
+
+          <DialogFooter>
+            {mergeTarget ? (
+              <>
+                <Button variant="outline" onClick={() => setMergeTarget(null)} disabled={merging}>
+                  Back
+                </Button>
+                <Button
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  onClick={handleMerge}
+                  disabled={merging}
+                >
+                  {merging ? <RefreshCw className="h-4 w-4 mr-2 animate-spin" /> : <GitMerge className="h-4 w-4 mr-2" />}
+                  Merge
+                </Button>
+              </>
+            ) : (
+              <DialogClose asChild>
+                <Button variant="outline">Cancel</Button>
+              </DialogClose>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

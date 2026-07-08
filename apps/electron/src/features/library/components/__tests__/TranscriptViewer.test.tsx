@@ -6,9 +6,13 @@
  * previously rendered with literal asterisks.
  */
 
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { TranscriptViewer } from '../TranscriptViewer'
+
+vi.mock('@/components/ui/toaster', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() }
+}))
 
 const noop = () => {}
 
@@ -98,5 +102,108 @@ describe('TranscriptViewer stored segments', () => {
     expect(screen.getByText('Perdón la demora.')).toBeInTheDocument()
     // The raw marker text must not survive glued together in one box.
     expect(screen.queryByText(/\[00:09\] Speaker 2:/)).not.toBeInTheDocument()
+  })
+})
+
+describe('TranscriptViewer speaker assignment (recordingId)', () => {
+  const mockGetSpeakerMap = vi.fn()
+  const mockGetAll = vi.fn()
+  const mockAssignSpeaker = vi.fn()
+  const mockUnassignSpeaker = vi.fn()
+
+  const segments = [{ speaker: 'Speaker 1', start: 0, end: 5, text: 'Hello there, everyone.' }]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetSpeakerMap.mockResolvedValue({ success: true, data: [] })
+    mockGetAll.mockResolvedValue({
+      success: true,
+      data: {
+        contacts: [
+          { id: 'c1', name: 'Alice', email: 'alice@example.com', type: 'team', tags: [] },
+          { id: 'c2', name: 'Bob', email: null, type: 'unknown', tags: [] }
+        ],
+        total: 2
+      }
+    })
+    mockAssignSpeaker.mockResolvedValue({ success: true, data: { id: 'c1', name: 'Alice' } })
+    mockUnassignSpeaker.mockResolvedValue({ success: true })
+    ;(window as any).electronAPI = {
+      transcripts: {
+        getSpeakerMap: mockGetSpeakerMap,
+        assignSpeaker: mockAssignSpeaker,
+        unassignSpeaker: mockUnassignSpeaker
+      },
+      contacts: { getAll: mockGetAll }
+    }
+  })
+
+  it('renders the speaker label as an assign button and loads the speaker map', async () => {
+    render(<TranscriptViewer transcript="x" segments={segments} recordingId="rec1" onSeek={noop} />)
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalledWith({ recordingId: 'rec1' }))
+    expect(screen.getByRole('button', { name: /Assign speaker Speaker 1/i })).toBeInTheDocument()
+  })
+
+  it('assigns an existing contact when picked from the popover', async () => {
+    render(<TranscriptViewer transcript="x" segments={segments} recordingId="rec1" onSeek={noop} />)
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
+
+    // Popover opening lazily loads the contacts list.
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+
+    fireEvent.click(await screen.findByText('Alice'))
+
+    await waitFor(() =>
+      expect(mockAssignSpeaker).toHaveBeenCalledWith({
+        recordingId: 'rec1',
+        speakerLabel: 'Speaker 1',
+        contactId: 'c1'
+      })
+    )
+  })
+
+  it('creates a new person from a typed name', async () => {
+    render(<TranscriptViewer transcript="x" segments={segments} recordingId="rec1" onSeek={noop} />)
+    await waitFor(() => expect(mockGetSpeakerMap).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole('button', { name: /Assign speaker Speaker 1/i }))
+    const input = await screen.findByLabelText('Search or create person')
+    fireEvent.change(input, { target: { value: 'Charlie' } })
+    fireEvent.click(screen.getByText(/Create/))
+
+    await waitFor(() =>
+      expect(mockAssignSpeaker).toHaveBeenCalledWith({
+        recordingId: 'rec1',
+        speakerLabel: 'Speaker 1',
+        newName: 'Charlie'
+      })
+    )
+  })
+
+  it('renders the assigned person name and can unassign', async () => {
+    mockGetSpeakerMap.mockResolvedValue({
+      success: true,
+      data: [{ speaker_label: 'Speaker 1', contact_id: 'c1', name: 'Alice' }]
+    })
+    render(<TranscriptViewer transcript="x" segments={segments} recordingId="rec1" onSeek={noop} />)
+
+    // Once resolved, the label button shows the person's name.
+    const nameButton = await screen.findByRole('button', { name: /Speaker: Alice/i })
+    expect(nameButton).toBeInTheDocument()
+
+    fireEvent.click(nameButton)
+    fireEvent.click(await screen.findByText(/Unassign Alice/i))
+
+    await waitFor(() =>
+      expect(mockUnassignSpeaker).toHaveBeenCalledWith({ recordingId: 'rec1', speakerLabel: 'Speaker 1' })
+    )
+  })
+
+  it('renders labels as plain text (no button) when recordingId is absent', () => {
+    render(<TranscriptViewer transcript="x" segments={segments} onSeek={noop} />)
+    expect(screen.getByText('Speaker 1')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Assign speaker/i })).not.toBeInTheDocument()
   })
 })

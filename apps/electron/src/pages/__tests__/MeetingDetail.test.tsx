@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { MeetingDetail } from '../MeetingDetail'
@@ -41,13 +41,21 @@ const mockGetByMeeting = vi.fn()
 const mockUpdate = vi.fn()
 const mockSelectMeeting = vi.fn()
 const mockGetCandidates = vi.fn()
+const mockGetForMeeting = vi.fn()
+const mockAddAttendee = vi.fn()
+const mockRemoveAttendee = vi.fn()
 
 beforeEach(() => {
   vi.clearAllMocks()
+  mockGetForMeeting.mockResolvedValue({ success: true, data: [] })
+  mockAddAttendee.mockResolvedValue({ success: true, data: { id: 'ct-new', name: 'Carol' } })
+  mockRemoveAttendee.mockResolvedValue({ success: true })
   ;(window as any).electronAPI = {
     meetings: {
       getDetails: mockGetDetails,
       update: mockUpdate,
+      addAttendee: mockAddAttendee,
+      removeAttendee: mockRemoveAttendee,
     },
     recordings: {
       selectMeeting: mockSelectMeeting,
@@ -55,6 +63,9 @@ beforeEach(() => {
     },
     actionables: {
       getByMeeting: mockGetByMeeting,
+    },
+    contacts: {
+      getForMeeting: mockGetForMeeting,
     },
   }
 })
@@ -220,6 +231,49 @@ describe('MeetingDetail', () => {
         expect(screen.getByText('Bob')).toBeInTheDocument()
         expect(screen.getByText('Attendees (2)')).toBeInTheDocument()
       })
+    })
+
+    it('should link a resolved attendee chip and remove it in edit mode', async () => {
+      mockGetDetails.mockResolvedValue(validMeetingDetails)
+      mockGetByMeeting.mockResolvedValue([])
+      // Alice resolves to a canonical contact (matched by email)
+      mockGetForMeeting.mockResolvedValue({
+        success: true,
+        data: [{ id: 'ct1', name: 'Alice', email: 'alice@example.com', notes: null, first_seen_at: '', last_seen_at: '', meeting_count: 1, created_at: '' }],
+      })
+
+      renderMeetingDetail('m1')
+      await screen.findByText('Alice')
+
+      // Enter edit mode → resolved chip exposes a remove (X) control
+      fireEvent.click(screen.getByRole('button', { name: /Edit/i }))
+      fireEvent.click(await screen.findByLabelText('Remove Alice'))
+
+      await waitFor(() =>
+        expect(mockRemoveAttendee).toHaveBeenCalledWith({ meetingId: 'm1', contactId: 'ct1' })
+      )
+    })
+
+    it('should add a new attendee from the inline form', async () => {
+      mockGetDetails.mockResolvedValue(validMeetingDetails)
+      mockGetByMeeting.mockResolvedValue([])
+
+      renderMeetingDetail('m1')
+      await screen.findByText('Alice')
+
+      fireEvent.click(screen.getByRole('button', { name: /Edit/i }))
+
+      fireEvent.change(await screen.findByLabelText('New attendee name'), { target: { value: 'Carol' } })
+      fireEvent.change(screen.getByLabelText('New attendee email'), { target: { value: 'carol@example.com' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+      await waitFor(() =>
+        expect(mockAddAttendee).toHaveBeenCalledWith({
+          meetingId: 'm1',
+          name: 'Carol',
+          email: 'carol@example.com',
+        })
+      )
     })
 
     it('should truncate attendees list when over limit and show expand button', async () => {

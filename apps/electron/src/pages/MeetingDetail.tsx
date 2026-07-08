@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Clock, MapPin, Users, Mic, FileText, Play, X, Edit, Check, Loader2, Link, Unlink, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react'
+import { ArrowLeft, Clock, MapPin, Users, Mic, FileText, Play, X, Edit, Check, Loader2, Link, Unlink, ChevronDown, ChevronUp, AlertCircle, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dialog'
 import { formatDateTime, formatDuration } from '@/lib/utils'
 import { parseAttendees, parseJsonArray } from '@/types'
+import type { Contact } from '@/types'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { MeetingActionables } from '@/components/MeetingActionables'
 import { useAudioControls } from '@/components/OperationController'
@@ -71,8 +72,15 @@ export function MeetingDetail() {
     start_time: '',
     end_time: '',
     location: '',
-    description: ''
+    description: '',
+    organizer_name: '',
+    organizer_email: ''
   })
+
+  // R1b: attendee ↔ contact resolution + editing
+  const [meetingContacts, setMeetingContacts] = useState<Contact[]>([])
+  const [newAttendee, setNewAttendee] = useState({ name: '', email: '' })
+  const [attendeeBusy, setAttendeeBusy] = useState(false)
 
   // Recording link dialog state (B-MTG-002)
   const [linkDialogOpen, setLinkDialogOpen] = useState(false)
@@ -134,8 +142,20 @@ export function MeetingDetail() {
         start_time: data.meeting.start_time || '',
         end_time: data.meeting.end_time || '',
         location: data.meeting.location || '',
-        description: data.meeting.description || ''
+        description: data.meeting.description || '',
+        organizer_name: data.meeting.organizer_name || '',
+        organizer_email: data.meeting.organizer_email || ''
       })
+
+      // R1b: load the meeting's canonical contacts so attendee chips can resolve
+      // to /person/:id and expose a remove (X) action with the contact id.
+      try {
+        const contactsResult = await window.electronAPI.contacts.getForMeeting(meetingId)
+        setMeetingContacts(contactsResult.success ? contactsResult.data : [])
+      } catch (contactsErr) {
+        console.error('Failed to load meeting contacts:', contactsErr)
+        setMeetingContacts([])
+      }
     } catch (error) {
       console.error('Failed to load meeting details:', error)
       setError((error as Error).message || 'Failed to load meeting')
@@ -167,6 +187,13 @@ export function MeetingDetail() {
       if (editForm.subject !== details.meeting.subject) updates.subject = editForm.subject
       if (editForm.location !== (details.meeting.location || '')) updates.location = editForm.location || null
       if (editForm.description !== (details.meeting.description || '')) updates.description = editForm.description || null
+      // R1b: organizer name/email editable
+      if (editForm.organizer_name !== (details.meeting.organizer_name || '')) {
+        updates.organizer_name = editForm.organizer_name || null
+      }
+      if (editForm.organizer_email !== (details.meeting.organizer_email || '')) {
+        updates.organizer_email = editForm.organizer_email || null
+      }
 
       if (Object.keys(updates).length === 0) {
         setIsEditing(false)
@@ -194,9 +221,12 @@ export function MeetingDetail() {
         start_time: details.meeting.start_time || '',
         end_time: details.meeting.end_time || '',
         location: details.meeting.location || '',
-        description: details.meeting.description || ''
+        description: details.meeting.description || '',
+        organizer_name: details.meeting.organizer_name || '',
+        organizer_email: details.meeting.organizer_email || ''
       })
     }
+    setNewAttendee({ name: '', email: '' })
     setIsEditing(false)
   }
 
@@ -257,6 +287,71 @@ export function MeetingDetail() {
     } catch (err) {
       console.error('Failed to link recording:', err)
       toast.error('Failed to link recording', err instanceof Error ? err.message : 'Unknown error')
+    }
+  }
+
+  // R1b: resolve an attendee (from the attendees JSON projection) to a canonical
+  // contact by email first, then by name — both case-insensitive.
+  const resolveAttendee = (attendee: { name?: string; email?: string }): Contact | undefined => {
+    const email = attendee.email?.trim().toLowerCase()
+    const name = attendee.name?.trim().toLowerCase()
+    return meetingContacts.find((c) => {
+      if (email && c.email && c.email.toLowerCase() === email) return true
+      if (name && c.name.toLowerCase() === name) return true
+      return false
+    })
+  }
+
+  const handleAddAttendee = async () => {
+    if (!id) return
+    const name = newAttendee.name.trim()
+    const email = newAttendee.email.trim()
+    if (!name && !email) {
+      toast.error('Add attendee', 'Provide a name or an email.')
+      return
+    }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      toast.error('Add attendee', 'Please enter a valid email address.')
+      return
+    }
+    setAttendeeBusy(true)
+    try {
+      const result = await window.electronAPI.meetings.addAttendee({
+        meetingId: id,
+        name: name || undefined,
+        email: email || undefined
+      })
+      if (result.success) {
+        toast.success('Attendee added')
+        setNewAttendee({ name: '', email: '' })
+        await loadMeetingDetails(id)
+      } else {
+        toast.error('Failed to add attendee', (result as any).error?.message || 'Unknown error')
+      }
+    } catch (err) {
+      console.error('Failed to add attendee:', err)
+      toast.error('Failed to add attendee', err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setAttendeeBusy(false)
+    }
+  }
+
+  const handleRemoveAttendee = async (contactId: string) => {
+    if (!id) return
+    setAttendeeBusy(true)
+    try {
+      const result = await window.electronAPI.meetings.removeAttendee({ meetingId: id, contactId })
+      if (result.success) {
+        toast.success('Attendee removed')
+        await loadMeetingDetails(id)
+      } else {
+        toast.error('Failed to remove attendee', (result as any).error?.message || 'Unknown error')
+      }
+    } catch (err) {
+      console.error('Failed to remove attendee:', err)
+      toast.error('Failed to remove attendee', err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setAttendeeBusy(false)
     }
   }
 
@@ -400,32 +495,78 @@ export function MeetingDetail() {
                 </div>
               )}
 
-              {meeting.organizer_name && (
-                <div className="flex items-center gap-3">
-                  <Users className="h-5 w-5 text-muted-foreground" />
-                  <div>
-                    <p className="font-medium">Organizer: {meeting.organizer_name}</p>
-                    {meeting.organizer_email && (
-                      <p className="text-sm text-muted-foreground">{meeting.organizer_email}</p>
-                    )}
-                  </div>
+              {(meeting.organizer_name || isEditing) && (
+                <div className="flex items-start gap-3">
+                  <Users className="h-5 w-5 text-muted-foreground mt-0.5" />
+                  {isEditing ? (
+                    <div className="flex-1 space-y-2">
+                      <p className="text-xs text-muted-foreground">Organizer</p>
+                      <Input
+                        value={editForm.organizer_name}
+                        onChange={(e) => setEditForm(prev => ({ ...prev, organizer_name: e.target.value }))}
+                        placeholder="Organizer name..."
+                        aria-label="Organizer name"
+                      />
+                      <Input
+                        value={editForm.organizer_email}
+                        onChange={(e) => setEditForm(prev => ({ ...prev, organizer_email: e.target.value }))}
+                        placeholder="Organizer email..."
+                        aria-label="Organizer email"
+                      />
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="font-medium">Organizer: {meeting.organizer_name}</p>
+                      {meeting.organizer_email && (
+                        <p className="text-sm text-muted-foreground">{meeting.organizer_email}</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* B-MTG-005: Attendees with overflow and "Show all" toggle */}
-              {attendees.length > 0 && (
+              {/* B-MTG-005: Attendees with overflow and "Show all" toggle.
+                  R1b: chips resolve to contacts (clickable → /person/:id) and, in
+                  edit mode, expose remove (X) + an inline add form. */}
+              {(attendees.length > 0 || isEditing) && (
                 <div>
                   <p className="font-medium mb-2">Attendees ({attendees.length})</p>
                   <div className="max-h-40 overflow-auto">
                     <div className="flex flex-wrap gap-2">
-                      {visibleAttendees.map((attendee, i) => (
-                        <span
-                          key={i}
-                          className="px-2 py-1 bg-secondary text-secondary-foreground rounded-full text-xs"
-                        >
-                          {attendee.name || attendee.email}
-                        </span>
-                      ))}
+                      {visibleAttendees.map((attendee, i) => {
+                        const contact = resolveAttendee(attendee)
+                        const labelText = attendee.name || attendee.email
+                        return (
+                          <span
+                            key={i}
+                            className="inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded-full text-xs"
+                          >
+                            {contact ? (
+                              <button
+                                type="button"
+                                onClick={() => navigate(`/person/${contact.id}`)}
+                                className="hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded"
+                                title={`View ${contact.name}`}
+                              >
+                                {labelText}
+                              </button>
+                            ) : (
+                              <span>{labelText}</span>
+                            )}
+                            {isEditing && contact && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveAttendee(contact.id)}
+                                disabled={attendeeBusy}
+                                className="text-muted-foreground hover:text-destructive disabled:opacity-50"
+                                aria-label={`Remove ${labelText}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            )}
+                          </span>
+                        )
+                      })}
                     </div>
                   </div>
                   {hasMoreAttendees && (
@@ -447,6 +588,28 @@ export function MeetingDetail() {
                         </>
                       )}
                     </Button>
+                  )}
+                  {isEditing && (
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      <Input
+                        value={newAttendee.name}
+                        onChange={(e) => setNewAttendee(prev => ({ ...prev, name: e.target.value }))}
+                        placeholder="Name"
+                        aria-label="New attendee name"
+                        className="w-32 h-8 text-sm"
+                      />
+                      <Input
+                        value={newAttendee.email}
+                        onChange={(e) => setNewAttendee(prev => ({ ...prev, email: e.target.value }))}
+                        placeholder="Email"
+                        aria-label="New attendee email"
+                        className="w-48 h-8 text-sm"
+                      />
+                      <Button size="sm" variant="outline" onClick={handleAddAttendee} disabled={attendeeBusy}>
+                        <Plus className="h-3.5 w-3.5 mr-1" />
+                        Add
+                      </Button>
+                    </div>
                   )}
                 </div>
               )}

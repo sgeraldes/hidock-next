@@ -28,15 +28,33 @@ const mockGetById = vi.fn().mockResolvedValue({
 })
 
 const mockUpdate = vi.fn().mockResolvedValue({ success: true })
+const mockGetAll = vi.fn().mockResolvedValue({
+  success: true,
+  data: {
+    contacts: [
+      { id: 'p1', name: 'Mario', email: 'mario@example.com', type: 'team', tags: [] },
+      { id: 'p2', name: 'Luigi', email: 'luigi@example.com', type: 'team', tags: [] }
+    ],
+    total: 2
+  }
+})
+const mockMerge = vi.fn().mockResolvedValue({ success: true, data: { id: 'p1', name: 'Mario' } })
 
 // Mock Electron API
 global.window.electronAPI = {
   contacts: {
     getById: mockGetById,
     update: mockUpdate,
-    delete: vi.fn().mockResolvedValue({ success: true })
+    delete: vi.fn().mockResolvedValue({ success: true }),
+    getAll: mockGetAll,
+    merge: mockMerge
   }
 } as any
+
+// Mock toast to avoid store side effects
+vi.mock('@/components/ui/toaster', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() }
+}))
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -175,5 +193,33 @@ describe('PersonDetail Page', () => {
     await screen.findByText('Mario')
 
     expect(screen.getByText('Great teammate')).toBeInTheDocument()
+  })
+
+  it('should show a Type select in edit mode', async () => {
+    renderPersonDetail()
+    await screen.findByText('Mario')
+
+    fireEvent.click(screen.getByText('Edit'))
+    expect(screen.getByLabelText('Person type')).toBeInTheDocument()
+  })
+
+  it('should merge another contact into this one with the right ids', async () => {
+    renderPersonDetail()
+    await screen.findByText('Mario')
+
+    // Open the merge dialog
+    fireEvent.click(screen.getByRole('button', { name: /Merge/i }))
+
+    // Candidates are loaded (current contact p1 filtered out)
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalled())
+    const luigi = await screen.findByText('Luigi')
+    fireEvent.click(luigi)
+
+    // Confirm the merge
+    fireEvent.click(await screen.findByRole('button', { name: 'Merge' }))
+
+    await waitFor(() =>
+      expect(mockMerge).toHaveBeenCalledWith({ keeperId: 'p1', loserId: 'p2' })
+    )
   })
 })

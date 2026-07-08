@@ -568,6 +568,7 @@ export function SourceReader({
           <TranscriptViewer
             transcript={transcript.full_text}
             segments={transcriptSegments}
+            recordingId={recording.id}
             currentTimeMs={currentTimeMs}
             onSeek={onSeek || (() => {})}
             showSummary={true}
