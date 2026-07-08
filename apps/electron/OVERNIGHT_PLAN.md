@@ -74,10 +74,16 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
       (query embeddings now same vector space as index). Commits 07298be1,
       2e53dd13. VERIFIED LIVE: "Gemini · 4249 chunks", full RAG answer about
       SIP-to-WebRTC Gateway citing Rec43.
-- [~] ISSUE-13 (agent: fix-titlebar-connect; USER-REQUESTED 07:2x): titlebar
-      status pill must be the same control as Sync page's Connect Device —
-      shared hook, connect on click when disconnected, popover w/ Disconnect
-      when connected, connecting state, no new USB paths.
+- [x] ISSUE-13 (USER-REQUESTED): titlebar pill = Sync page Connect control.
+      useDeviceConnection shared hook (module-level in-flight guard, one
+      click = one attempt), popover Disconnect when connected, toast errors.
+      Commit 056fb4b7, VERIFIED LIVE ("Connect device" pill renders).
+- [~] INITIATIVE (USER-REQUESTED 07:4x, task #21): interactivity & entity
+      propagation — everything editable/clickable/hoverable; person edits
+      propagate everywhere; meeting info flows to attendees; person merge.
+      Round 0 audit agent running; then design → implementation rounds.
+      Note from live RAG answer: assistant cites "Speaker 2/Speaker 3" —
+      speaker→person mapping is the highest-value identity gap.
 - [x] ISSUE-2 (design, Opus — after fix-analysis lands, shares index.ts):
       unified Office-365-style titlebar: frameless BrowserWindow with overlay
       window controls, app identity + global actions in the custom titlebar,
