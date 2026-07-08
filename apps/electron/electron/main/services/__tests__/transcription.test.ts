@@ -526,3 +526,62 @@ describe('extractAnalysisJson — Gemini JSON repair', () => {
     expect(extractAnalysisJson('{ "summary": ')).toBeNull()
   })
 })
+
+describe('repairJsonString — bracket balancing (ISSUE-9)', () => {
+  it('leaves already-balanced JSON structurally intact', async () => {
+    const { repairJsonString } = await import('../transcription')
+    const valid = '{"a":[1,2],"b":{"c":3},"d":["x","y"]}'
+    expect(repairJsonString(valid)).toBe(valid)
+    expect(JSON.parse(repairJsonString(valid))).toEqual(JSON.parse(valid))
+  })
+
+  it('appends a missing trailing ] to an unclosed array', async () => {
+    const { repairJsonString } = await import('../transcription')
+    // Object + its enclosing array both left unclosed (final `}]` dropped).
+    const broken = '[{"type":"action_items","suggestedRecipients":["Fer","Gastón","Valentina"]'
+    expect(() => JSON.parse(broken)).toThrow()
+    const parsed = JSON.parse(repairJsonString(broken))
+    expect(parsed).toEqual([
+      { type: 'action_items', suggestedRecipients: ['Fer', 'Gastón', 'Valentina'] }
+    ])
+  })
+
+  it('corrects a top-level array closed with } instead of ] (the live tail)', async () => {
+    const { repairJsonString } = await import('../transcription')
+    // Exact live shape: inner array closes fine, object closes fine, but the
+    // top-level array is closed with `}` instead of `]`.
+    const broken = '[{"type":"follow_up_work","suggestedRecipients":["Fer","Gastón","Valentina"]}}'
+    expect(() => JSON.parse(broken)).toThrow()
+    const parsed = JSON.parse(repairJsonString(broken))
+    expect(parsed).toEqual([
+      { type: 'follow_up_work', suggestedRecipients: ['Fer', 'Gastón', 'Valentina'] }
+    ])
+  })
+
+  it('balances a mismatched closer in a nested structure', async () => {
+    const { repairJsonString } = await import('../transcription')
+    // Inner array closed with `}` (should be `]`); outer object then truncated.
+    const broken = '{"summary":"ok","items":["uno","dos"}'
+    expect(() => JSON.parse(broken)).toThrow()
+    const parsed = JSON.parse(repairJsonString(broken))
+    expect(parsed).toEqual({ summary: 'ok', items: ['uno', 'dos'] })
+  })
+
+  it('drops a dangling trailing comma before appending the missing closer', async () => {
+    const { repairJsonString } = await import('../transcription')
+    const broken = '{"topics":["uno","dos",'
+    const parsed = JSON.parse(repairJsonString(broken))
+    expect(parsed).toEqual({ topics: ['uno', 'dos'] })
+  })
+
+  it('flows through extractAnalysisJson for a mismatched inner array closer', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    // Inner topics array closed with `}` instead of `]`; repair corrects it and
+    // extractAnalysisJson recovers the object.
+    const payload = '{"summary":"Resumen","topics":["a","b"}}'
+    const parsed = extractAnalysisJson(payload)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.summary).toBe('Resumen')
+    expect(parsed?.topics).toEqual(['a', 'b'])
+  })
+})

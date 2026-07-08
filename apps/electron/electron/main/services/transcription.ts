@@ -1005,10 +1005,19 @@ Respond in JSON format:
  * (`, } ] :` or end-of-input); otherwise it is an unescaped inner quote and
  * gets escaped. This is the documented signature of the failures observed live
  * (`SyntaxError: Expected ',' or '}' after property value`).
+ *
+ * Bracket balancing (last pass): the scan tracks the open `{`/`[` stack. A closer
+ * is emitted as the one its opener actually requires, correcting a mismatch such
+ * as a top-level array closed with `}` instead of `]` (the live position-699
+ * failure); a stray closer with nothing open is dropped; and at end-of-input any
+ * still-open brackets are appended in innermost-first order (with a dangling
+ * trailing comma stripped first). Balanced JSON is left untouched.
  */
-function repairJsonString(input: string): string {
+export function repairJsonString(input: string): string {
   let out = ''
   let inString = false
+  // Expected closer for each still-open `{`/`[`, innermost last.
+  const stack: string[] = []
   for (let i = 0; i < input.length; i++) {
     const ch = input[i]
 
@@ -1018,11 +1027,24 @@ function repairJsonString(input: string): string {
         out += ch
         continue
       }
+      if (ch === '{' || ch === '[') {
+        stack.push(ch === '{' ? '}' : ']')
+        out += ch
+        continue
+      }
+      if (ch === '}' || ch === ']') {
+        // Drop a stray closer that matches nothing that is open.
+        if (stack.length === 0) continue
+        // Emit the closer the opener requires (corrects `}`/`]` mismatches).
+        out += stack.pop()
+        continue
+      }
       if (ch === ',') {
-        // Drop a trailing comma: `,` followed only by whitespace then `}`/`]`.
+        // Drop a trailing comma: `,` followed only by whitespace then `}`/`]`
+        // or end-of-input (a closer may still be appended by the EOF balancing).
         let j = i + 1
         while (j < input.length && /\s/.test(input[j])) j++
-        if (input[j] === '}' || input[j] === ']') continue
+        if (j >= input.length || input[j] === '}' || input[j] === ']') continue
       }
       out += ch
       continue
@@ -1064,6 +1086,14 @@ function repairJsonString(input: string): string {
     }
 
     out += ch
+  }
+
+  // EOF balancing: close an unterminated string, drop a dangling trailing comma,
+  // then append any brackets left open (innermost first).
+  if (inString) out += '"'
+  if (stack.length > 0) {
+    out = out.replace(/[\s,]+$/, '')
+    while (stack.length > 0) out += stack.pop()
   }
   return out
 }

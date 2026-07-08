@@ -10,7 +10,7 @@
  * database. Files are regenerable at any time from the database.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { getTranscriptsPath } from './file-storage'
 import { queryAll, queryOne } from './database'
@@ -99,6 +99,40 @@ function buildMarkdown(row: WikiRow): { filename: string; content: string } {
   }
 }
 
+/**
+ * Remove wiki page(s) previously written for `recordingId` whose filename is not
+ * `keepFilename`. The filename is derived from the (mutable) title suggestion —
+ * falling back to the source filename when analysis fails — so re-transcribing a
+ * recording whose title changed writes a NEW file and would otherwise leave the
+ * old page orphaned with stale content. Live case (ISSUE-8, Rec43): the first run
+ * failed analysis (filename-slug page), the re-run produced a real title and a new
+ * page, and the truncated first page lingered. Each page carries its
+ * `recording_id` in the YAML frontmatter, so match on that.
+ */
+function removeStaleWikiPages(dir: string, recordingId: string, keepFilename: string): void {
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return // dir just created / unreadable — nothing to clean
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith('.md') || entry === keepFilename) continue
+    const full = join(dir, entry)
+    try {
+      // recording_id sits in the frontmatter near the top; only read the head.
+      const head = readFileSync(full, 'utf-8').slice(0, 1000)
+      const match = head.match(/^recording_id:\s*(\S+)\s*$/m)
+      if (match && match[1] === recordingId) {
+        unlinkSync(full)
+        console.log(`[MeetingWiki] Removed superseded page ${entry} for ${recordingId}`)
+      }
+    } catch (e) {
+      console.warn(`[MeetingWiki] Could not inspect ${entry} for cleanup:`, e)
+    }
+  }
+}
+
 /** Export (or re-export) the wiki page for one recording. Returns the path. */
 export function exportMeetingWiki(recordingId: string): string | null {
   const row = queryOne<WikiRow>(
@@ -118,6 +152,8 @@ export function exportMeetingWiki(recordingId: string): string | null {
   const { filename, content } = buildMarkdown(row)
   const path = join(dir, filename)
   writeFileSync(path, content, 'utf-8')
+  // Drop any earlier page for this recording that used a different (older) title.
+  removeStaleWikiPages(dir, recordingId, filename)
   return path
 }
 

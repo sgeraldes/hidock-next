@@ -244,14 +244,75 @@ export function splitMp3IntoChunks(audio: Buffer, targetSeconds = 600): AudioChu
   }))
 }
 
+/** `[MM:SS] Speaker N:` (or `[HH:MM:SS] …`) turn marker, matched ANYWHERE in the
+ * text — not just at a line start. Gemini sometimes returns a whole chunk as one
+ * paragraph with dozens of embedded markers; splitting on line starts alone left
+ * them all glued into a single 0–600s segment (ISSUE-7, seen live on Rec43). */
+const INLINE_TURN_RE = /\[(\d{1,3}):(\d{2})(?::(\d{2}))?\]\s*(Speaker\s*\d+)\s*:/g
+
 /**
- * Parse a chunk's transcription text into speaker turns. Recognises lines of
- * the form `[MM:SS] Speaker N: text` (the format the prompt requests), where
- * the timestamp is relative to the chunk start and is offset by `chunkStartSec`
- * to become an absolute recording time. Lines without a leading timestamp or
- * speaker label are treated as continuations of the current turn, so no content
- * is dropped. When the chunk has no structure at all (plain prose), the whole
- * chunk becomes a single turn — content is still preserved verbatim.
+ * Split `text` on every `[ts] Speaker N:` marker, wherever it occurs. Returns
+ * one segment per marker (plus a leading default-speaker segment for any prose
+ * before the first marker, so nothing is dropped), or null when the text has no
+ * such marker — in which case the caller falls back to the line-based parser.
+ */
+function parseInlineTurns(
+  text: string,
+  chunkStartSec: number,
+  defaultSpeaker: string,
+  source: 'mic' | 'system'
+): TranscriptSegment[] | null {
+  const markers: Array<{ contentStart: number; markerStart: number; tsSec: number; speaker: string }> = []
+  INLINE_TURN_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = INLINE_TURN_RE.exec(text)) !== null) {
+    const min = Number(m[1])
+    const sec = Number(m[2])
+    const hasHours = m[3] != null
+    const tsSec = hasHours ? min * 3600 + sec * 60 + Number(m[3]) : min * 60 + sec
+    markers.push({
+      markerStart: m.index,
+      contentStart: m.index + m[0].length,
+      tsSec,
+      speaker: m[4].replace(/\s+/g, ' ').trim()
+    })
+  }
+  if (markers.length === 0) return null
+
+  const segments: TranscriptSegment[] = []
+  const push = (speaker: string, raw: string, startTime: number) => {
+    // Collapse the newlines/whitespace that join continuation lines within a turn.
+    const body = raw.replace(/\s+/g, ' ').trim()
+    if (body) {
+      segments.push({ speaker, text: body, startTime, endTime: startTime, confidence: 1, source })
+    }
+  }
+
+  // Any text before the first marker is a leading turn with the default speaker.
+  push(defaultSpeaker, text.slice(0, markers[0].markerStart), chunkStartSec)
+
+  for (let i = 0; i < markers.length; i++) {
+    const contentEnd = i + 1 < markers.length ? markers[i + 1].markerStart : text.length
+    push(markers[i].speaker, text.slice(markers[i].contentStart, contentEnd), chunkStartSec + markers[i].tsSec)
+  }
+
+  return segments.length > 0 ? segments : null
+}
+
+/**
+ * Parse a chunk's transcription text into speaker turns. Recognises turns of the
+ * form `[MM:SS] Speaker N: text` (the format the prompt requests), where the
+ * timestamp is relative to the chunk start and is offset by `chunkStartSec` to
+ * become an absolute recording time.
+ *
+ * Markers are recognised wherever they appear, not only at the start of a line:
+ * when a chunk comes back as one long paragraph with the markers inline, it is
+ * still split into one segment per turn. Well-formed line-per-turn output is a
+ * special case of the same split, so it keeps working. When the chunk has no
+ * `[..] Speaker N:` markers at all, the fallback line parser handles bare
+ * timestamps, `Speaker N:`/name labels, and continuation lines; failing that,
+ * the whole chunk becomes a single turn — content is preserved verbatim either
+ * way, nothing is dropped.
  */
 export function parseTurns(
   text: string,
@@ -259,6 +320,12 @@ export function parseTurns(
   defaultSpeaker: string,
   source: 'mic' | 'system'
 ): TranscriptSegment[] {
+  // Fast path: split on every inline `[ts] Speaker N:` marker across the whole
+  // text. This covers both the one-paragraph-with-inline-markers case and the
+  // clean line-per-turn case (newlines inside a turn collapse to spaces).
+  const inlineSegments = parseInlineTurns(text, chunkStartSec, defaultSpeaker, source)
+  if (inlineSegments) return inlineSegments
+
   const segments: TranscriptSegment[] = []
   const tsRe = /^\[?(\d{1,3}):(\d{2})(?::(\d{2}))?\]?\s+(.*)$/
   const speakerRe = /^(Speaker\s*\d+|[A-Z][^:\n]{0,40}?):\s+(.*)$/

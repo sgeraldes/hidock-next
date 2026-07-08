@@ -52,6 +52,19 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
       ±120 chars around it in logAnalysisFailure; (2) likely repair = strip
       raw control chars inside strings or jsonrepair-style tolerant parse;
       (3) if json-mime stays broken, demote it to the fallback slot.
+- [x] ISSUE-5 verified live: Rec43 re-transcribed 44,191 chars (was 32,249),
+      goodbyes present, 295 speaker segments covering full 60.1 min; Rec16
+      (previously hard-failed) now 10,669 words. Commits f34468aa, 9f8da3f4.
+- [~] ISSUE-7 (agent: fix-quality-round2): parseTurns splits only at line
+      starts — Rec43 chunk 1 is ONE segment (0–600s) with inline [MM:SS]
+      Speaker N markers unsplit. Split on markers anywhere in the text.
+- [~] ISSUE-8 (same agent): wiki NOT re-exported after re-transcription —
+      Rec43 wiki timestamp 03:30 predates 04:01 re-run, still has truncated
+      text. exportMeetingWiki must run on the re-transcription path too.
+- [~] ISSUE-9 (same agent): repair pass can't fix unbalanced brackets —
+      live failure "Expected ',' or ']' after array element at position 699",
+      payload ends `}\n}` (missing `]`). Add tail bracket-balancing to
+      repairJsonString.
 - [x] ISSUE-2 (design, Opus — after fix-analysis lands, shares index.ts):
       unified Office-365-style titlebar: frameless BrowserWindow with overlay
       window controls, app identity + global actions in the custom titlebar,
@@ -73,6 +86,15 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
   Gateway, Resource Mgmt, TSC Platform, WTS Transition), 1,905 captures after
   1,057-row dedupe. Feedback filed: "Alex" vs "Alex / Óscar" person dedupe,
   contact type always UNKNOWN.
+
+## Observations (not yet actionable)
+- json-mime analysis on very large prompts (27.8k tokens, Rec16) produced
+  CORRUPTED output (string closes then next line starts mid-word) — not an
+  escaping bug; repair can't fix. Plain-text fallback absorbed it. If this
+  recurs: order attempts by prompt size (plain-text first above ~20k tokens).
+- Flaky perf test: library-performance "switches view modes" 203.79ms vs
+  200ms budget once under full-suite load; passes in isolation. If it fails
+  again in a gate run, relax budget or isolate the timing.
 
 ## Watchlist (evaluate during waves)
 - Download/progress indicators quality (user flagged)

@@ -283,4 +283,63 @@ describe('parseTurns', () => {
     const segs = parseTurns('[01:02:03] Speaker 1: late in the call', 0, 'you', 'mic')
     expect(segs[0].startTime).toBe(3723)
   })
+
+  // ISSUE-7: Gemini sometimes returns a whole chunk as one paragraph with the
+  // `[MM:SS] Speaker N:` markers inline rather than one per line. Splitting only
+  // on line starts glued them into a single 0–600s segment (seen live on Rec43).
+  it('splits inline markers embedded in a single paragraph', () => {
+    const paragraph =
+      '[00:03] Speaker 1: hola qué tal [00:09] Speaker 2: bien y tú ' +
+      '[00:12] Speaker 1: todo bien gracias'
+    const segs = parseTurns(paragraph, 0, 'you', 'mic')
+    expect(segs).toHaveLength(3)
+    expect(segs[0]).toMatchObject({ speaker: 'Speaker 1', text: 'hola qué tal', startTime: 3 })
+    expect(segs[1]).toMatchObject({ speaker: 'Speaker 2', text: 'bien y tú', startTime: 9 })
+    expect(segs[2]).toMatchObject({ speaker: 'Speaker 1', text: 'todo bien gracias', startTime: 12 })
+  })
+
+  it('offsets inline-marker timestamps by chunkStartSec', () => {
+    const segs = parseTurns('[00:05] Speaker 1: uno [00:20] Speaker 2: dos', 600, 'you', 'mic')
+    expect(segs).toHaveLength(2)
+    expect(segs[0].startTime).toBe(605)
+    expect(segs[1].startTime).toBe(620)
+  })
+
+  it('handles a mix of newline-separated and inline markers', () => {
+    // First two turns are on their own lines; the third is inline after the second.
+    const mixed = '[00:01] Speaker 1: primero\n[00:05] Speaker 2: segundo [00:10] Speaker 1: tercero'
+    const segs = parseTurns(mixed, 0, 'you', 'mic')
+    expect(segs).toHaveLength(3)
+    expect(segs.map((s) => s.text)).toEqual(['primero', 'segundo', 'tercero'])
+    expect(segs.map((s) => s.speaker)).toEqual(['Speaker 1', 'Speaker 2', 'Speaker 1'])
+    expect(segs.map((s) => s.startTime)).toEqual([1, 5, 10])
+  })
+
+  it('inline split collapses continuation newlines within a turn', () => {
+    const segs = parseTurns('[00:05] Speaker 1: first part\nsecond part [00:20] Speaker 2: done', 0, 'you', 'mic')
+    expect(segs).toHaveLength(2)
+    expect(segs[0].text).toBe('first part second part')
+    expect(segs[1].text).toBe('done')
+  })
+
+  it('supports inline HH:MM:SS markers in a paragraph', () => {
+    const segs = parseTurns('[00:00:03] Speaker 1: early [01:02:03] Speaker 2: much later', 0, 'you', 'mic')
+    expect(segs).toHaveLength(2)
+    expect(segs[0].startTime).toBe(3)
+    expect(segs[1].startTime).toBe(3723)
+  })
+
+  it('keeps prose before the first inline marker as a leading default-speaker turn', () => {
+    const segs = parseTurns('intro sin marca [00:05] Speaker 1: con marca', 0, 'them', 'system')
+    expect(segs).toHaveLength(2)
+    expect(segs[0]).toMatchObject({ speaker: 'them', text: 'intro sin marca', startTime: 0 })
+    expect(segs[1]).toMatchObject({ speaker: 'Speaker 1', text: 'con marca', startTime: 5 })
+  })
+
+  it('still splits well-formed line-per-turn output (regression)', () => {
+    const segs = parseTurns('[00:03] Speaker 1: Hola\n[00:07] Speaker 2: Qué tal', 0, 'you', 'mic')
+    expect(segs).toHaveLength(2)
+    expect(segs[0]).toMatchObject({ speaker: 'Speaker 1', text: 'Hola', startTime: 3 })
+    expect(segs[1]).toMatchObject({ speaker: 'Speaker 2', text: 'Qué tal', startTime: 7 })
+  })
 })
