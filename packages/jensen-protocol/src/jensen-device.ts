@@ -333,6 +333,18 @@ export class JensenDevice {
   private currentOperationName: string | null = null
   private pendingPromises: Map<string, PendingCommand> = new Map()
 
+  // Serializes each public command's FULL lifecycle (send + await response or
+  // timeout). The queue above serializes *sends*; this additionally guarantees a
+  // second caller (e.g. the live-recording poll) cannot even begin a command
+  // until the first has fully settled. Without it, a command that times out
+  // while its (late) response is still in flight lets that response arrive while
+  // the NEXT command is current — matched against the wrong slot, it desyncs
+  // every command/response pair afterwards (the "unknown device / SN null /
+  // 0 files / download stuck at 0-2%" regression). Lifecycle ops (disconnect /
+  // reset / abortInFlight) deliberately bypass this so they can preempt a stuck
+  // command instead of waiting behind it.
+  private commandLock: Promise<void> = Promise.resolve()
+
   // === Continuous read loop (jensen.js: r[], k, y) ===
   private receiveChunks: DataView[] = []
   private readLoopRunning = false
@@ -895,10 +907,36 @@ export class JensenDevice {
   // ================================================================
 
   /**
+   * Run `fn` with exclusive access to the device so concurrent callers serialize
+   * instead of interleaving on the USB bus. Every public command funnels through
+   * here via sendCommand(). It is a promise chain (hand-rolled p-queue), so a
+   * failing/timing-out command never breaks the chain — the next command still
+   * runs. Lifecycle ops must NOT use this (they need to preempt a stuck command).
+   */
+  private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.commandLock.then(fn, fn)
+    this.commandLock = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
+  }
+
+  /**
+   * Public entry point for every command. Serialized through the command lock so
+   * a second command awaits the first's completion/timeout before it is even
+   * queued — the single-outstanding-command invariant the response matcher
+   * (by command id, no sequence correlation) depends on.
+   */
+  private sendCommand<T>(msg: JensenMessage, timeoutSec?: number, operationName?: string): Promise<T> {
+    return this.runExclusive(() => this.dispatchCommand<T>(msg, timeoutSec, operationName))
+  }
+
+  /**
    * Queue a command and return a promise for its result.
    * Matches jensen.js send(): assign seq, push to queue, call sendNext, return promise.
    */
-  private sendCommand<T>(msg: JensenMessage, timeoutSec?: number, operationName?: string): Promise<T> {
+  private dispatchCommand<T>(msg: JensenMessage, timeoutSec?: number, operationName?: string): Promise<T> {
     msg.sequence(this.sequenceId++)
     if (timeoutSec) msg.expireAfter(timeoutSec)
 
@@ -996,14 +1034,37 @@ export class JensenDevice {
 
   /**
    * Expire a command by resolving its promise with null.
-   * Matches jensen.js x(): resolve with null, delete from map.
+   *
+   * Beyond jensen.js x() (resolve null + delete), this also UNBLOCKS the queue
+   * when the timed-out command is the one in flight: it clears currentCommandTag
+   * and drops any partially received bytes, then advances. Without this a timeout
+   * left currentCommandTag set forever — every later command queued behind it and
+   * never sent (the permanent-wedge half of the poll desync). Dropping the read
+   * buffer also discards a late response for THIS command so it can't be parsed
+   * against the next command's slot. (Only short single-response commands set a
+   * timeout; listFiles/downloadFile use their own watchdogs, so nothing
+   * long-running is discarded here.)
    */
   private expireCommand(tag: string): void {
     if (shouldLog()) console.log(`[Jensen] timeout: ${tag}`)
     const pending = this.pendingPromises.get(tag)
-    if (!pending) return
-    pending.resolve(null)
-    this.pendingPromises.delete(tag)
+    if (pending) {
+      if (pending.timeout) clearTimeout(pending.timeout)
+      pending.resolve(null)
+      this.pendingPromises.delete(tag)
+    }
+
+    if (this.currentCommandTag === tag) {
+      this.currentCommandTag = null
+      this.currentOperationName = null
+      this.receiveChunks.length = 0
+      this.carryLen = 0
+      if (this.decodeTimer) {
+        clearTimeout(this.decodeTimer)
+        this.decodeTimer = null
+      }
+      this.sendNextCommand()
+    }
   }
 
   // ================================================================
@@ -1358,9 +1419,16 @@ export class JensenDevice {
       const lastDash = this.currentCommandTag.lastIndexOf('-')
       const prefix = this.currentCommandTag.substring(0, lastDash)
       if (prefix !== `cmd-${cmdId}`) {
-        // Mismatch — clear current tag (matches jensen.js: return void (h = null))
-        this.currentCommandTag = null
-        this.currentOperationName = null
+        // Stale/late response whose command id doesn't match the in-flight
+        // command — typically the response to a command that already timed out.
+        // DISCARD it and keep the current tag intact. jensen.js cleared the tag
+        // here, which made the NEXT genuine response match the wrong (now-empty)
+        // slot and desynced every command/response pair afterwards. Because
+        // commands are strictly serialized (see commandLock), the in-flight
+        // command's own response is the only one we should ever act on.
+        if (shouldLog()) {
+          console.log(`[Jensen] discarding stale response cmd=${cmdId} (in flight: ${this.currentCommandTag})`)
+        }
         return
       }
     } else {

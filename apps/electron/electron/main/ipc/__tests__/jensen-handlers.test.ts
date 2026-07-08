@@ -18,7 +18,7 @@
  * the hoist boundary.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // ---------------------------------------------------------------------------
 // Shared registries — populated by vi.mock factories at module load time
@@ -90,6 +90,8 @@ const mockJensen: any = {
   abortInFlight: vi.fn(),
   reset: vi.fn().mockResolvedValue(false),
   isConnected: vi.fn().mockReturnValue(false),
+  isOperationInProgress: vi.fn().mockReturnValue(false),
+  getRecordingFile: vi.fn().mockResolvedValue({ recording: null }),
   getModel: vi.fn().mockReturnValue('unknown'),
   isP1Device: vi.fn().mockReturnValue(false),
   getDeviceInfo: vi.fn().mockResolvedValue(null),
@@ -154,6 +156,13 @@ describe('registerJensenHandlers', () => {
     // Re-register handlers so mockHandlers is fully populated
     Object.keys(mockHandlers).forEach((k) => delete mockHandlers[k])
     registerJensenHandlers()
+  })
+
+  afterEach(() => {
+    // Stop the module-level recording poll between tests (ondisconnect clears its
+    // interval/kickoff timers) so a leaked timer can't fire in a later test.
+    mockJensen.ondisconnect?.()
+    vi.useRealTimers()
   })
 
   // -------------------------------------------------------------------------
@@ -586,6 +595,101 @@ describe('registerJensenHandlers', () => {
       await mockHandlers['jensen:disconnect'](makeEvent())
       const channels = broadcastSendCalls.map(([c]) => c)
       expect(channels).toContain('jensen:state-changed')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Live-recording poll discipline (regression: the CMD 18 poll that desynced
+  // the protocol). The poll must NOT run during the connect handshake, must
+  // skip while the bus is busy, and must back off after a timed-out read.
+  // -------------------------------------------------------------------------
+
+  describe('live-recording poll discipline', () => {
+    it('does NOT start the poll on connect — only after the first file-list scan', async () => {
+      vi.useFakeTimers()
+      mockJensen.isConnected.mockReturnValue(true)
+
+      // Device connects → handshake. The poll must stay dormant here (this window
+      // is exactly where a CMD 18 poll desynced the command/response pairing).
+      mockJensen.onconnect()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(mockJensen.getRecordingFile).not.toHaveBeenCalled()
+
+      // First file-list scan completes → poll is now allowed to start.
+      mockJensen.listFiles.mockResolvedValue([])
+      await mockHandlers['jensen:listFiles'](makeEvent())
+      await vi.advanceTimersByTimeAsync(2000) // past the ~1.5s kickoff
+      expect(mockJensen.getRecordingFile).toHaveBeenCalled()
+    })
+
+    it('skips the poll while the device is busy (mid-init / mid-scan)', async () => {
+      vi.useFakeTimers()
+      mockJensen.isConnected.mockReturnValue(true)
+      mockJensen.listFiles.mockResolvedValue([])
+      await mockHandlers['jensen:listFiles'](makeEvent())
+
+      // Busy → the kickoff and interval ticks must not issue getRecordingFile.
+      mockJensen.isOperationInProgress.mockReturnValue(true)
+      await vi.advanceTimersByTimeAsync(25_000)
+      expect(mockJensen.getRecordingFile).not.toHaveBeenCalled()
+
+      // Bus free → the next tick polls.
+      mockJensen.isOperationInProgress.mockReturnValue(false)
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(mockJensen.getRecordingFile).toHaveBeenCalled()
+    })
+
+    it('skips the poll while a download is in flight', async () => {
+      vi.useFakeTimers()
+      mockJensen.isConnected.mockReturnValue(true)
+      mockJensen.listFiles.mockResolvedValue([])
+      await mockHandlers['jensen:listFiles'](makeEvent())
+
+      // Start a download that stays pending → currentDownloadAbort is set.
+      let releaseDownload: (() => void) | undefined
+      mockJensen.downloadFile.mockImplementation(
+        () => new Promise<boolean>((resolve) => { releaseDownload = () => resolve(false) })
+      )
+      const dl = mockHandlers['jensen:downloadFile'](makeEvent(), { filename: 'a.hda', fileSize: 1000 })
+      await Promise.resolve() // let the handler set currentDownloadAbort
+
+      await vi.advanceTimersByTimeAsync(25_000)
+      expect(mockJensen.getRecordingFile).not.toHaveBeenCalled()
+
+      releaseDownload?.()
+      await dl
+    })
+
+    it('emits jensen:recording-changed when the active recording changes', async () => {
+      vi.useFakeTimers()
+      mockJensen.isConnected.mockReturnValue(true)
+      mockJensen.listFiles.mockResolvedValue([])
+      mockJensen.getRecordingFile.mockResolvedValue({ recording: '2025May13-160405-Rec59.hda' })
+
+      await mockHandlers['jensen:listFiles'](makeEvent())
+      await vi.advanceTimersByTimeAsync(2000)
+
+      const changed = broadcastSendCalls.find(([c]) => c === 'jensen:recording-changed')
+      expect(changed?.[1]).toEqual({ recording: '2025May13-160405-Rec59.hda' })
+    })
+
+    it('backs off to 60s after a timed-out read, then polls again at the longer interval', async () => {
+      vi.useFakeTimers()
+      mockJensen.isConnected.mockReturnValue(true)
+      mockJensen.listFiles.mockResolvedValue([])
+      mockJensen.getRecordingFile.mockResolvedValue(null) // simulate timeout
+
+      await mockHandlers['jensen:listFiles'](makeEvent())
+      await vi.advanceTimersByTimeAsync(2000) // kickoff fires → null → back off to 60s
+      expect(mockJensen.getRecordingFile).toHaveBeenCalledTimes(1)
+
+      // At the OLD 20s cadence a second poll would already have fired — it must not.
+      await vi.advanceTimersByTimeAsync(25_000)
+      expect(mockJensen.getRecordingFile).toHaveBeenCalledTimes(1)
+
+      // The backed-off 60s interval fires the next poll.
+      await vi.advanceTimersByTimeAsync(40_000)
+      expect(mockJensen.getRecordingFile).toHaveBeenCalledTimes(2)
     })
   })
 })

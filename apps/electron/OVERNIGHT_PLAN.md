@@ -114,6 +114,21 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
   contact type always UNKNOWN.
 
 ## Observations (not yet actionable)
+- ISSUE-16 (RESOLVED root cause, 2026-07-08 ~18:xx): device "failing to
+  connect" all afternoon = orphaned Electron main (PID from 12:39) wedged in
+  an uncompletable USB driver IRP after an app kill mid-transfer. Unkillable
+  by taskkill /F (kernel keeps the process until the IRP cancels). Drain
+  script blocked by its libusb handle (LIBUSB_ERROR_ACCESS). Resolution:
+  driver-level device restart (replug or elevated pnputil /restart-device).
+  PREVENTION: app-cycle stop must verify ALL electron processes exited (and
+  warn loudly if one persists); never kill the dev app during active USB
+  transfers — cancel the download session first (downloadService.cancelAll)
+  and wait for the pipeline to go idle.
+  CRITICAL CONSTRAINT (user-corrected): when the HiDock is the active USB
+  AUDIO device (docked speakerphone mode, e.g. live Teams call), a USB node
+  reset/replug CUTS THE LIVE CALL AUDIO — the meeting audio flows through
+  that link. Never reset the USB node while a meeting/recording is in
+  progress on the dock. Recovery actions wait for an idle window.
 - ISSUE-15 (1 occurrence, 2026-07-08 16:5x): Gemini RECITATION block failed a
   backlog transcription (chunk resembled copyrighted content — music/video in
   the meeting audio). no-silent-drop correctly failed loudly. Fix design when

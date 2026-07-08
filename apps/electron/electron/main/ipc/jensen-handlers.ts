@@ -72,23 +72,41 @@ function broadcast(channel: string, payload?: unknown): void {
 // broadcast `jensen:recording-changed` so the renderer can light up the "Recording
 // now" indicators.
 //
-// Interleaving safety (CLAUDE.md USB rules): a poll is SKIPPED whenever a file
-// transfer or list scan is in flight (device.isOperationInProgress() or an active
-// download abort), and it is issued through the same serializeDeviceOp chain as
-// every other device op — so it never races a connect/disconnect/scan on the bus.
-// The device's own command queue is the final backstop.
+// Poll discipline (this was the source of a protocol desync — see below):
+//  1. It does NOT start on connect. It starts only after the FIRST file-list
+//     scan completes (startRecordingPoll() is called from jensen:listFiles), so
+//     it can never fire during the connect handshake / device-info / initial
+//     scan. Kicking a 5s-timeout CMD 18 into that window is what desynced the
+//     command/response pairing (SN null, empty list, stalled downloads).
+//  2. It is SKIPPED (not queued) whenever a transfer or scan is in flight
+//     (device.isOperationInProgress() or an active download abort) — a skipped
+//     poll is free; a queued one would add latency to the transfer.
+//  3. On a timed-out / failed read it BACKS OFF to 60s so a slow or busy device
+//     isn't hammered; a healthy read restores the 20s cadence.
+// It is still issued through the serializeDeviceOp chain, and the device's own
+// command lock is the final backstop — a poll can never interleave on the bus.
 //
 // Inherent limit: this only works while the app is CONNECTED. A device recording
 // while the app is closed/disconnected is invisible until the next connect.
 // ---------------------------------------------------------------------------
 
 const RECORDING_POLL_INTERVAL_MS = 20_000
-const RECORDING_POLL_KICKOFF_MS = 3000
+const RECORDING_POLL_BACKOFF_MS = 60_000
+const RECORDING_POLL_KICKOFF_MS = 1500
 
 let recordingPollTimer: ReturnType<typeof setInterval> | null = null
 let recordingPollKickoff: ReturnType<typeof setTimeout> | null = null
+let recordingPollIntervalMs = RECORDING_POLL_INTERVAL_MS
 // undefined = unknown (never read yet); string = actively recording; null = idle.
 let lastRecordingFilename: string | null | undefined = undefined
+
+function scheduleRecordingPoll(intervalMs: number): void {
+  if (recordingPollTimer) clearInterval(recordingPollTimer)
+  recordingPollIntervalMs = intervalMs
+  recordingPollTimer = setInterval(() => {
+    void pollRecordingOnce()
+  }, intervalMs)
+}
 
 async function pollRecordingOnce(): Promise<void> {
   const device = getJensenDevice()
@@ -102,7 +120,20 @@ async function pollRecordingOnce(): Promise<void> {
   } catch {
     return
   }
-  if (!result) return // timeout / no device — keep the last known state
+
+  if (!result) {
+    // Timeout / transient failure — back off so we don't retry a struggling
+    // device every 20s (which risks repeated timeouts under heavy activity).
+    if (device.isConnected() && recordingPollIntervalMs !== RECORDING_POLL_BACKOFF_MS) {
+      scheduleRecordingPoll(RECORDING_POLL_BACKOFF_MS)
+    }
+    return // keep the last known state
+  }
+
+  // Healthy read — restore the normal cadence if we had backed off.
+  if (recordingPollIntervalMs !== RECORDING_POLL_INTERVAL_MS) {
+    scheduleRecordingPoll(RECORDING_POLL_INTERVAL_MS)
+  }
 
   const filename = result.recording && result.recording.length > 0 ? result.recording : null
   if (filename !== lastRecordingFilename) {
@@ -111,15 +142,14 @@ async function pollRecordingOnce(): Promise<void> {
   }
 }
 
+// Idempotent — safe to call after every scan. Starts the poll the first time the
+// device has fully initialized (a file-list scan has completed).
 function startRecordingPoll(): void {
   if (recordingPollTimer) return
   lastRecordingFilename = undefined
-  recordingPollTimer = setInterval(() => {
-    void pollRecordingOnce()
-  }, RECORDING_POLL_INTERVAL_MS)
-  // Early first read so the indicator appears without waiting a full interval —
-  // delayed a few seconds so it doesn't collide with the connect handshake
-  // (device-info / initial file-list scan). The busy-guard skips it if it does.
+  scheduleRecordingPoll(RECORDING_POLL_INTERVAL_MS)
+  // Early first read so the indicator appears without waiting a full interval.
+  // The busy-guard skips it if a follow-up op is still running.
   recordingPollKickoff = setTimeout(() => {
     void pollRecordingOnce()
   }, RECORDING_POLL_KICKOFF_MS)
@@ -134,6 +164,7 @@ function stopRecordingPoll(): void {
     clearTimeout(recordingPollKickoff)
     recordingPollKickoff = null
   }
+  recordingPollIntervalMs = RECORDING_POLL_INTERVAL_MS
   const wasRecording = !!lastRecordingFilename
   lastRecordingFilename = undefined
   // Clear the indicator on disconnect (a device unplugged mid-record must not
@@ -324,7 +355,13 @@ export function registerJensenHandlers(): void {
           event.sender.send('jensen:scan-progress', { current: filesFound, total: expectedFiles })
         }
       }
-      return await serializeDeviceOp(() => getJensenDevice().listFiles(onProgress))
+      const result = await serializeDeviceOp(() => getJensenDevice().listFiles(onProgress))
+      // Device has now fully initialized (device-info handshake + a completed
+      // file-list scan). Only NOW is it safe to start the live-recording poll —
+      // starting it during the connect handshake is what desynced the protocol.
+      // Idempotent: no-op on subsequent rescans.
+      if (result !== null && getJensenDevice().isConnected()) startRecordingPoll()
+      return result
     } catch {
       return null
     }
@@ -516,7 +553,10 @@ export function registerJensenHandlers(): void {
       versionCode: jensen.versionCode,
       versionNumber: jensen.versionNumber,
     })
-    startRecordingPoll()
+    // NOTE: the live-recording poll is intentionally NOT started here. It starts
+    // only after the first file-list scan completes (see the jensen:listFiles
+    // handler) so a CMD 18 poll can never fire during the connect handshake and
+    // desync the protocol.
   }
 
   jensen.ondisconnect = () => {

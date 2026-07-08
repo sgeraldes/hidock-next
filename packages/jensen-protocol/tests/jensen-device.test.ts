@@ -576,4 +576,120 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(device.ondisconnect).toBe(cb)
     expect(device.onconnect).toBe(cb)
   })
+
+  // --- Command serialization + desync resistance (regression: CMD 18 poll) ---
+  //
+  // A device connected over a bus that cannot multiplex requires ONE outstanding
+  // command at a time; the response matcher keys purely on command id, so a late
+  // response to a timed-out command must never be matched against the next
+  // command. These tests exercise the command lock + timeout unblocking +
+  // stale-response discard that make that safe.
+
+  it('serializes two concurrently-issued commands strictly on the wire (no interleave)', async () => {
+    const ep = makePollEndpoint()
+    const device = new JensenDevice(makeFakeUsb())
+    const dev = makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {}))
+    const transferOut = dev.transferOut as unknown as ReturnType<typeof vi.fn>
+    await device.tryConnect(dev)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    // Issue two commands WITHOUT awaiting the first — they must serialize.
+    const p1 = device.getDeviceInfo(5)
+    const p2 = device.getRecordingFile(5)
+
+    // Only the first command's send has gone out; the second is blocked on the lock.
+    await new Promise((r) => setTimeout(r, 0))
+    expect(transferOut).toHaveBeenCalledTimes(1)
+    // First byte pair is the sync marker; bytes 2-3 are the command id (big-endian).
+    const firstSend = transferOut.mock.calls[0][1] as Uint8Array
+    expect((firstSend[2] << 8) | firstSend[3]).toBe(CMD.GET_DEVICE_INFO)
+
+    // Answer command 1 → the lock releases and command 2 is sent.
+    ep.emit('data', makeResponsePacket(CMD.GET_DEVICE_INFO, 0, new Uint8Array(20)))
+    await p1
+    await new Promise((r) => setTimeout(r, 0))
+    expect(transferOut).toHaveBeenCalledTimes(2)
+    const secondSend = transferOut.mock.calls[1][1] as Uint8Array
+    expect((secondSend[2] << 8) | secondSend[3]).toBe(CMD.GET_RECORDING_FILE)
+
+    ep.emit('data', makeResponsePacket(CMD.GET_RECORDING_FILE, 1, new Uint8Array(0)))
+    await expect(p2).resolves.toEqual({ recording: null })
+
+    await device.disconnect()
+  })
+
+  it('a command timeout unblocks the queue (next command still sends)', async () => {
+    const ep = makePollEndpoint()
+    const device = new JensenDevice(makeFakeUsb())
+    const dev = makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {}))
+    const transferOut = dev.transferOut as unknown as ReturnType<typeof vi.fn>
+    await device.tryConnect(dev) // real timers (setup has a 300ms stabilization delay)
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    vi.useFakeTimers()
+    try {
+      // First command never gets a response → it must time out and release the lock.
+      const p1 = device.getRecordingFile(5)
+      const p2 = device.getDeviceInfo(5)
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(transferOut).toHaveBeenCalledTimes(1) // second still blocked on the lock
+
+      await vi.advanceTimersByTimeAsync(5000) // command 1 expires
+      await expect(p1).resolves.toBeNull()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(transferOut).toHaveBeenCalledTimes(2) // timeout unblocked the queue → second sent
+
+      // currentCommandTag must reflect command 2 (seq 1), not the expired command 1.
+      const secondSend = transferOut.mock.calls[1][1] as Uint8Array
+      expect((secondSend[2] << 8) | secondSend[3]).toBe(CMD.GET_DEVICE_INFO)
+      expect((device as unknown as { currentCommandTag: string | null }).currentCommandTag)
+        .toBe('cmd-1-1')
+
+      ep.emit('data', makeResponsePacket(CMD.GET_DEVICE_INFO, 1, new Uint8Array(20)))
+      await vi.advanceTimersByTimeAsync(20) // let the throttled parse run
+      await expect(p2).resolves.not.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('discards a late response for a timed-out command instead of desyncing the next', async () => {
+    const ep = makePollEndpoint()
+    const device = new JensenDevice(makeFakeUsb())
+    const dev = makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {}))
+    await device.tryConnect(dev) // real timers
+    ;(device as unknown as { startReadLoop: () => void }).startReadLoop()
+
+    vi.useFakeTimers()
+    try {
+      // Command 1 (the poll) times out with no response.
+      const p1 = device.getRecordingFile(5)
+      await vi.advanceTimersByTimeAsync(5000)
+      await expect(p1).resolves.toBeNull()
+
+      // Command 2 (init device-info) is now in flight.
+      const p2 = device.getDeviceInfo(10)
+      await vi.advanceTimersByTimeAsync(1)
+
+      // The device's LATE response to command 1 arrives while command 2 is current.
+      // The old behavior cleared command 2's tag here → command 2 then never
+      // resolved (its own response matched an empty slot). It must be discarded.
+      const staleName = '2025May13-160405-Rec59.hda'
+      const staleBody = new Uint8Array([...staleName].map((c) => c.charCodeAt(0)))
+      ep.emit('data', makeResponsePacket(CMD.GET_RECORDING_FILE, 0, staleBody))
+      await vi.advanceTimersByTimeAsync(20) // parse + dispatch the stale packet
+
+      // Command 2's genuine response then resolves it correctly — no desync.
+      const infoBody = new Uint8Array(20)
+      infoBody[0] = 5 // version byte
+      ep.emit('data', makeResponsePacket(CMD.GET_DEVICE_INFO, 1, infoBody))
+      await vi.advanceTimersByTimeAsync(20)
+      const info = await p2
+      expect(info).not.toBeNull()
+      expect(info?.versionCode).toBe('0.0.0')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

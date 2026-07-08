@@ -1529,9 +1529,10 @@ class HiDockDeviceService {
     // this without making the user wait 15s on a truly unresponsive device.
     if (this.initAborted) return
     this.updateStatus('getting-info', 'Reading device information...', 20)
+    let deviceInfo: DeviceInfo | null = null
     try {
-      await withTimeout(this.refreshDeviceInfo(), FIRST_CMD_TIMEOUT, new AbortController())
-      successCount++
+      deviceInfo = await withTimeout(this.refreshDeviceInfo(), FIRST_CMD_TIMEOUT, new AbortController())
+      if (deviceInfo) successCount++
     } catch (firstError) {
       if (isAbortError(firstError) && !this.initAborted) {
         this.logActivity('info', 'Device not ready', 'Retrying...')
@@ -1540,8 +1541,8 @@ class HiDockDeviceService {
 
         if (!this.initAborted) {
           try {
-            await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, new AbortController())
-            successCount++
+            deviceInfo = await withTimeout(this.refreshDeviceInfo(), INIT_STEP_TIMEOUT, new AbortController())
+            if (deviceInfo) successCount++
           } catch (retryError) {
             if (isAbortError(retryError)) timeoutCount++
             console.warn('[HiDockDevice] Failed to get device info (retry):', retryError)
@@ -1556,11 +1557,30 @@ class HiDockDeviceService {
       }
     }
 
-    // Check if we should abort due to too many timeouts
-    if (timeoutCount >= MAX_TIMEOUTS_BEFORE_FAIL) {
-      this.logActivity('error', 'Device initialization failed', 'Device is not responding. Please disconnect and reconnect your device.')
-      this.updateStatus('error', 'Device not responding - try reconnecting', 0)
+    // Device info is the one non-negotiable init step: without it we have no serial
+    // number, model or firmware, and every later command is unreliable. If it failed
+    // — a timeout OR a null response from a desynced device — FAIL THE CONNECT
+    // CLEANLY. Never sit in a half-connected "unknown / SN null" state: besides being
+    // dishonest, the USB handle stays open, so the next tryConnect short-circuits on
+    // "already connected" (isConnected() is true) and never re-initializes. Closing
+    // the handle here forces the next attempt to do a fresh open + setup, which — now
+    // that command serialization prevents the init desync — succeeds.
+    if (deviceInfo === null || timeoutCount >= MAX_TIMEOUTS_BEFORE_FAIL) {
+      this.logActivity('error', 'Device initialization failed', 'Could not read device info — reconnecting cleanly.')
       this.initializationComplete = false
+      this.state.connected = false
+      this.state.serialNumber = null
+      this.state.firmwareVersion = null
+      this.state.storage = null
+      this.state.settings = null
+      this.notifyStateChange()
+      try {
+        await this.jensen.disconnect()
+      } catch {
+        /* best effort — device may already be gone */
+      }
+      this.markConnectFailure(true)
+      this.notifyConnectionChange(false)
       return
     }
 
