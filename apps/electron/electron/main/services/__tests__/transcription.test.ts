@@ -584,4 +584,37 @@ describe('repairJsonString — bracket balancing (ISSUE-9)', () => {
     expect(parsed?.summary).toBe('Resumen')
     expect(parsed?.topics).toEqual(['a', 'b'])
   })
+
+  // Inverse of the missing-closer case: Gemini appends an EXTRA closer after
+  // otherwise-valid JSON. Live error: "Unexpected non-whitespace character after
+  // JSON at position 4485", tail `..."\n}\n}`.
+  it('drops an extra trailing } after a complete object', async () => {
+    const { repairJsonString } = await import('../transcription')
+    const broken = '{"summary":"ok","topics":["a"]}\n}'
+    expect(() => JSON.parse(broken)).toThrow()
+    expect(JSON.parse(repairJsonString(broken))).toEqual({ summary: 'ok', topics: ['a'] })
+  })
+
+  it('drops an extra trailing ] after a complete array', async () => {
+    const { repairJsonString } = await import('../transcription')
+    const broken = '["a","b"]]'
+    expect(() => JSON.parse(broken)).toThrow()
+    expect(JSON.parse(repairJsonString(broken))).toEqual(['a', 'b'])
+  })
+
+  it('drops text-after-JSON garbage once the root value has closed', async () => {
+    const { repairJsonString } = await import('../transcription')
+    const broken = '{"summary":"done"} Nota: comentario extra del modelo.'
+    expect(() => JSON.parse(broken)).toThrow()
+    expect(JSON.parse(repairJsonString(broken))).toEqual({ summary: 'done' })
+  })
+
+  it('flows through extractAnalysisJson for an extra trailing brace (the live tail)', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    const payload = '{"summary":"Resumen","language":"es"}\n}'
+    const parsed = extractAnalysisJson(payload)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.summary).toBe('Resumen')
+    expect(parsed?.language).toBe('es')
+  })
 })

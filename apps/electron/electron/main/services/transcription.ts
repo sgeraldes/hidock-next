@@ -1011,15 +1011,24 @@ Respond in JSON format:
  * as a top-level array closed with `}` instead of `]` (the live position-699
  * failure); a stray closer with nothing open is dropped; and at end-of-input any
  * still-open brackets are appended in innermost-first order (with a dangling
- * trailing comma stripped first). Balanced JSON is left untouched.
+ * trailing comma stripped first). Once the root value closes, anything after it
+ * is discarded — an extra trailing `}`/`]` or text-after-JSON garbage (the live
+ * "Unexpected non-whitespace character after JSON" failure). Balanced JSON is
+ * left untouched.
  */
 export function repairJsonString(input: string): string {
   let out = ''
   let inString = false
   // Expected closer for each still-open `{`/`[`, innermost last.
   const stack: string[] = []
+  // Set once the outermost bracket closes; everything after the root value is
+  // trailing garbage (stray closer, second object, prose) and is dropped.
+  let rootClosed = false
   for (let i = 0; i < input.length; i++) {
     const ch = input[i]
+
+    // Ignore anything after the root value has fully closed.
+    if (rootClosed) continue
 
     if (!inString) {
       if (ch === '"') {
@@ -1037,6 +1046,8 @@ export function repairJsonString(input: string): string {
         if (stack.length === 0) continue
         // Emit the closer the opener requires (corrects `}`/`]` mismatches).
         out += stack.pop()
+        // Root just closed — discard whatever follows.
+        if (stack.length === 0) rootClosed = true
         continue
       }
       if (ch === ',') {
