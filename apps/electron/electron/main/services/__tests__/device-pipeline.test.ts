@@ -485,7 +485,7 @@ describe('DevicePipelineService', () => {
     it('plug event connects when config.autoConnect is true at event time', async () => {
       const { usb, fireConnect } = makeUsb()
       const jensen = makeJensen()
-      let autoConnect = true
+      const autoConnect = true
       const svc = new DevicePipelineService(jensen, makeDownloadService(), {
         getConfig: () => ({ device: { autoConnect } }),
         usbEvents: usb

@@ -744,7 +744,7 @@ describe('GrowableBuffer', () => {
 
     it('integration: interleaved append and parse with compaction', () => {
       const buf = new GrowableBuffer()
-      let parsedSequences: number[] = []
+      const parsedSequences: number[] = []
 
       // Simulate USB transfer with many small messages causing compaction
       for (let batch = 0; batch < 100; batch++) {

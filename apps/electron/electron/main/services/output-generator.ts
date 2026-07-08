@@ -61,7 +61,7 @@ class OutputGeneratorService {
     }
 
     // Collect transcripts based on context
-    let transcripts: string[] = []
+    const transcripts: string[] = []
     let contextInfo: Record<string, string> = {}
 
     if (meetingId) {

@@ -783,7 +783,7 @@ export function Calendar() {
             <span>Syncing calendar...</span>
           </div>
         )}
-        /* List/Cards View */
+        {/* List/Cards View */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Bulk Actions Bar */}
           {selectedIds.size > 0 && (
