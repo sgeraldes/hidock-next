@@ -422,3 +422,50 @@ describe('SourceReader — metadata editing', () => {
   })
 
 })
+
+// ---------------------------------------------------------------------------
+// Hook-order stability (regression)
+//
+// The `transcriptSegments` useMemo once sat AFTER the "no recording selected"
+// early return. With no recording the placeholder rendered without that hook;
+// selecting a recording then added it, so React threw "Rendered more hooks than
+// during the previous render." The memo now runs unconditionally above the
+// early return, so hook count is stable across the null → selected transition.
+// ---------------------------------------------------------------------------
+describe('SourceReader — hook order stability (regression)', () => {
+  function makeTranscript() {
+    return {
+      id: 't-1',
+      recording_id: 'rec-1',
+      full_text: 'hola qué tal',
+      summary: 'resumen',
+      action_items: JSON.stringify(['hacer algo']),
+      speakers: JSON.stringify([{ speaker: 'Speaker 1', start: 0, end: 1, text: 'hola qué tal' }]),
+    } as any
+  }
+
+  it('does not throw a hooks-order error when switching from no recording to a selected one', () => {
+    const { rerender } = render(<SourceReader recording={null} />)
+    expect(screen.getByText(/no recording selected/i)).toBeInTheDocument()
+
+    // Selecting a recording that carries a transcript with `speakers` exercises
+    // the transcriptSegments memo — this is the exact transition that crashed.
+    expect(() =>
+      rerender(
+        <SourceReader recording={makeRecording({ title: 'Con transcript' })} transcript={makeTranscript()} />
+      )
+    ).not.toThrow()
+
+    expect(screen.getByTestId('transcript-viewer')).toBeInTheDocument()
+  })
+
+  it('does not throw when switching back from a selected recording to none', () => {
+    const { rerender } = render(
+      <SourceReader recording={makeRecording({ title: 'Con transcript' })} transcript={makeTranscript()} />
+    )
+    expect(screen.getByTestId('transcript-viewer')).toBeInTheDocument()
+
+    expect(() => rerender(<SourceReader recording={null} />)).not.toThrow()
+    expect(screen.getByText(/no recording selected/i)).toBeInTheDocument()
+  })
+})

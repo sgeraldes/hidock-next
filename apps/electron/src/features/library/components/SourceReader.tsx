@@ -203,6 +203,23 @@ export function SourceReader({
     }
   }, [metadataEdited, onTranscribe])
 
+  // Parse the stored speaker/timestamp segments (Gemini or local ASR write
+  // `speakers` as a JSON array of {speaker, start, end, text}). When present,
+  // the viewer renders structured turns instead of re-parsing the plain text.
+  // MUST stay above the early return: it guards on `transcript` (a prop), so it
+  // runs unconditionally and keeps hook order stable whether or not a recording
+  // is selected — otherwise selecting one adds a hook and React throws
+  // "Rendered more hooks than during the previous render."
+  const transcriptSegments = useMemo<StoredSegment[] | undefined>(() => {
+    if (!transcript?.speakers) return undefined
+    try {
+      const parsed = JSON.parse(transcript.speakers)
+      return Array.isArray(parsed) && parsed.length > 0 ? (parsed as StoredSegment[]) : undefined
+    } catch {
+      return undefined
+    }
+  }, [transcript?.speakers])
+
   if (!recording) {
     return (
       <div className="flex items-center justify-center h-full text-muted-foreground">
@@ -219,19 +236,6 @@ export function SourceReader({
   // Same title resolver the list row uses, so clicking a row and the detail
   // header always agree (no raw filename leaking through here).
   const { primaryText: displayTitle } = getDisplayTitle(recording, meeting, transcript)
-
-  // Parse the stored speaker/timestamp segments (Gemini or local ASR write
-  // `speakers` as a JSON array of {speaker, start, end, text}). When present,
-  // the viewer renders structured turns instead of re-parsing the plain text.
-  const transcriptSegments = useMemo<StoredSegment[] | undefined>(() => {
-    if (!transcript?.speakers) return undefined
-    try {
-      const parsed = JSON.parse(transcript.speakers)
-      return Array.isArray(parsed) && parsed.length > 0 ? (parsed as StoredSegment[]) : undefined
-    } catch {
-      return undefined
-    }
-  }, [transcript?.speakers])
 
   // Prefer the stored duration; fall back to the live decoded value for the
   // recording whose waveform is currently loaded.
