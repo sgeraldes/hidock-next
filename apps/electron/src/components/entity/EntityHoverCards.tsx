@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react'
 import { Loader2, Mail, Briefcase, CalendarDays, Users, Folder } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { formatDateTime } from '@/lib/utils'
+import { useMeetingParticipants, participantLabel } from '@/lib/meeting-participants'
+
+const HOVER_PARTICIPANT_LIMIT = 5
 
 /**
  * Hover-card bodies for entity mentions. Each fetches its own detail lazily —
@@ -141,6 +144,7 @@ export function ProjectHoverCard({ id, name }: { id: string; name: string }) {
 export function MeetingHoverCard({ id, name }: { id: string; name: string }) {
   const [meeting, setMeeting] = useState<Record<string, unknown> | null>(null)
   const [loading, setLoading] = useState(true)
+  const { participants, loading: participantsLoading } = useMeetingParticipants(id)
 
   useEffect(() => {
     let cancelled = false
@@ -180,6 +184,27 @@ export function MeetingHoverCard({ id, name }: { id: string; name: string }) {
           <span className="truncate">{organizer}</span>
         </p>
       )}
+      {/* Known participants (from meeting_contacts — transcript-extracted / manually added) */}
+      {!(participantsLoading && participants.length === 0) &&
+        (participants.length === 0 ? (
+          <p className="text-xs italic text-muted-foreground/70">No known participants</p>
+        ) : (
+          <div className="flex flex-wrap items-center gap-1 pt-0.5">
+            {participants.slice(0, HOVER_PARTICIPANT_LIMIT).map((p) => (
+              <span
+                key={p.id}
+                className="inline-flex items-center rounded-full bg-secondary px-2 py-0.5 text-[11px] text-secondary-foreground"
+              >
+                {participantLabel(p)}
+              </span>
+            ))}
+            {participants.length > HOVER_PARTICIPANT_LIMIT && (
+              <span className="text-[11px] text-muted-foreground">
+                +{participants.length - HOVER_PARTICIPANT_LIMIT} more
+              </span>
+            )}
+          </div>
+        ))}
     </div>
   )
 }

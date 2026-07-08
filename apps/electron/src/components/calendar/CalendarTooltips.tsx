@@ -7,8 +7,32 @@ import { Mic, Cloud, HardDrive, Check } from 'lucide-react'
 import { cn, formatTime } from '@/lib/utils'
 import type { CalendarRecording, CalendarMeetingOverlay, CalendarMeeting } from '@/lib/calendar-utils'
 import { formatDurationStr as formatDuration } from '@/lib/calendar-utils'
+import { useMeetingParticipants, participantFirstName } from '@/lib/meeting-participants'
 
 type RecordingLocation = 'device-only' | 'local-only' | 'both'
+
+const TOOLTIP_PARTICIPANT_LIMIT = 4
+
+/**
+ * Compact "Participants:" line fed by the known contacts for a meeting. Fetches
+ * lazily when the tooltip mounts (results cached module-side); renders nothing
+ * when the meeting id is missing or has no known participants.
+ */
+const ParticipantsLine = memo(function ParticipantsLine({ meetingId }: { meetingId: string | undefined }) {
+  const { participants } = useMeetingParticipants(meetingId)
+  if (!meetingId || participants.length === 0) return null
+  const names = participants.slice(0, TOOLTIP_PARTICIPANT_LIMIT).map(participantFirstName)
+  const extra = participants.length - names.length
+  return (
+    <div className="flex items-start gap-2">
+      <span className="text-muted-foreground">Participants:</span>
+      <span className="truncate">
+        {names.join(', ')}
+        {extra > 0 ? ` +${extra}` : ''}
+      </span>
+    </div>
+  )
+})
 
 /**
  * Status icon for recording location
@@ -102,6 +126,7 @@ export const RecordingTooltipContent = memo(function RecordingTooltipContent({ r
             {recording.linkedMeeting.organizer && (
               <div className="text-muted-foreground truncate">By: {recording.linkedMeeting.organizer}</div>
             )}
+            <ParticipantsLine meetingId={recording.linkedMeeting.id} />
           </div>
         </div>
       )}
@@ -142,6 +167,7 @@ export const MeetingOverlayTooltipContent = memo(function MeetingOverlayTooltipC
             <span className="truncate">{meeting.organizer}</span>
           </div>
         )}
+        <ParticipantsLine meetingId={meeting.id} />
         <div className="text-amber-500 italic mt-1">No recording captured</div>
       </div>
     </div>

@@ -619,6 +619,33 @@ export function MeetingDetail() {
                 </div>
               )}
 
+              {/* R1b: when the ICS feed stripped attendees but we know participants
+                  from transcripts / speaker assignments, surface them here.
+                  These ARE canonical contacts, so chips resolve to /person/:id. */}
+              {attendees.length === 0 && !isEditing && meetingContacts.length > 0 && (
+                <div>
+                  <p className="font-medium mb-2">
+                    Participants ({meetingContacts.length})
+                    <span className="ml-2 text-xs font-normal text-muted-foreground">From transcripts</span>
+                  </p>
+                  <div className="max-h-40 overflow-auto">
+                    <div className="flex flex-wrap gap-2">
+                      {meetingContacts.map((contact) => (
+                        <button
+                          key={contact.id}
+                          type="button"
+                          onClick={() => navigate(`/person/${contact.id}`)}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-secondary text-secondary-foreground rounded-full text-xs hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                          title={`View ${contact.name}`}
+                        >
+                          {contact.name || contact.email}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Description (editable) */}
               {(meeting.description || isEditing) && (
                 <div>

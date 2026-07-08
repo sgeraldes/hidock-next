@@ -19,6 +19,10 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { EntityMention } from '@/components/entity'
 import { TodayIdentitySuggestions } from '@/components/identity/TodayIdentitySuggestions'
 import { cn } from '@/lib/utils'
+import { fetchMeetingParticipants, participantFirstName } from '@/lib/meeting-participants'
+import type { Contact } from '@/types'
+
+const TODAY_PARTICIPANT_LIMIT = 4
 
 interface BriefingMeeting {
   id: string
@@ -82,6 +86,7 @@ export function Today() {
   const [data, setData] = useState<BriefingData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [participantsByMeeting, setParticipantsByMeeting] = useState<Record<string, Contact[]>>({})
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -103,6 +108,26 @@ export function Today() {
   useEffect(() => {
     load()
   }, [load])
+
+  // Fetch known participants for today's meetings once per briefing load, in
+  // parallel and tolerant of failures (empty results simply hide the line).
+  const todayMeetings = data?.todayMeetings
+  useEffect(() => {
+    if (!todayMeetings || todayMeetings.length === 0) {
+      setParticipantsByMeeting({})
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      const entries = await Promise.all(
+        todayMeetings.map(async (m) => [m.id, await fetchMeetingParticipants(m.id)] as const)
+      )
+      if (!cancelled) setParticipantsByMeeting(Object.fromEntries(entries))
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [todayMeetings])
 
   const latest = data?.recentKnowledge[0]
 
@@ -164,22 +189,35 @@ export function Today() {
               <p className="text-sm text-muted-foreground">No meetings scheduled today.</p>
             ) : (
               <div className="space-y-2">
-                {data.todayMeetings.map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={() => navigate(`/meeting/${m.id}`)}
-                    className="w-full flex items-center gap-3 rounded-lg border p-3 text-left hover:bg-muted/50 transition-colors"
-                  >
-                    <Clock className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                    <span className="text-sm font-medium w-24 flex-shrink-0">
-                      {formatTime(m.start_time)}–{formatTime(m.end_time)}
-                    </span>
-                    <span className="text-sm truncate flex-1">{m.subject}</span>
-                    {m.organizer_name && (
-                      <span className="text-xs text-muted-foreground truncate">{m.organizer_name}</span>
-                    )}
-                  </button>
-                ))}
+                {data.todayMeetings.map((m) => {
+                  const people = participantsByMeeting[m.id] ?? []
+                  const names = people.slice(0, TODAY_PARTICIPANT_LIMIT).map(participantFirstName)
+                  const extra = people.length - names.length
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => navigate(`/meeting/${m.id}`)}
+                      className="w-full flex items-center gap-3 rounded-lg border p-3 text-left hover:bg-muted/50 transition-colors"
+                    >
+                      <Clock className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                      <span className="text-sm font-medium w-24 flex-shrink-0">
+                        {formatTime(m.start_time)}–{formatTime(m.end_time)}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="text-sm truncate block">{m.subject}</span>
+                        {names.length > 0 && (
+                          <span className="text-xs text-muted-foreground truncate block">
+                            {names.join(', ')}
+                            {extra > 0 ? ` +${extra}` : ''}
+                          </span>
+                        )}
+                      </span>
+                      {m.organizer_name && (
+                        <span className="text-xs text-muted-foreground truncate flex-shrink-0">{m.organizer_name}</span>
+                      )}
+                    </button>
+                  )
+                })}
               </div>
             )}
           </CardContent>
