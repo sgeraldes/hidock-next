@@ -127,15 +127,28 @@ confidence badge on auto-created entities, alias list on PersonDetail.
       person/project/meeting hover cards; `useContactResolver`; wired into KnowledgeGraph,
       Chat source chips, Actionables recipients, Projects members, Today dates,
       MeetingDetail date-mention, Explore result cards, PersonDetail timeline)
-- [~] Round 2b — speaker discoverability (USER FEEDBACK 11:4x with screenshots,
-      agent r2b-speaker-discovery): hover cards on speaker labels (assigned →
-      full person metadata; unassigned → identify hint), assigned-speaker
-      actions (view person / change identity / reset to unidentified,
-      left-click + right-click), rich picker rows (avatar, role · company,
-      meeting count) — bare-name list useless with Sebas/Sebastián dupes.
-- [~] Round 3a — deep-edit backend (agent r3-edit-backend): v26
-      knowledge_projects junction, projects:merge, knowledge:setProjects,
-      action_items.assignee_contact_id, graph:resolvePerson.
+- [x] Round 2b — speaker discoverability (8ba977d5): hover cards on labels,
+      view/change/reset actions, rich picker rows. VERIFIED LIVE.
+- [x] Round 3a — deep-edit backend (b81608e2, v26): knowledge_projects,
+      projects:merge, knowledge:setProjects, assignee_contact_id,
+      graph:resolvePerson.
+- [x] Round 3b — projects as hubs (37f4c329, v29): rename inline, folder/url
+      metadata + open, issues/risks notes, actions-by-project, assignment
+      picker on Library captures.
+- [x] Round 4a — resolution engine (a221f363, v27): aliases, confidence
+      resolver in applyTranscriptEntities, identity_suggestions IPC, entity
+      events + graph-sync (LLM-free rename/merge surgery, debounced ingest).
+- [x] Round 4b — suggestions UI + quick merge (86ef6051): People Merge mode
+      (select two, keep/absorb, swap), review queue on People + Today card.
+- [x] Round 5 — discovery sweep (acb166b8 backend, 31650033 UI): Discover
+      buttons on People/Projects. VERIFIED LIVE: 146 pairs → 25 suggestions
+      (Eduardo=Edu 0.61, Oscar=Óscar 0.69, Sebastian=Sebastián 0.64…).
+      Merge-safety design in INTELLIGENCE.md §8 (merge_journal v30 follow-up).
+- [x] C0 — entity-type foundation (acb166b8, v28): artifacts table + registry
+      (md/txt/json/image via Gemini multimodal; pdf pending a text lib),
+      import → capture → embeddings, Library file-import.
+- [x] Platform: freeze fix (debounced sql.js persistence) + download
+      connectivity gating + newest-first download ordering (37f4c329).
 - [ ] Enhancement queue: accent/diacritic-normalized auto-merge (Oscar=Óscar
       safe); diminutive suggestions (Sebas→Sebastián) as UI hints, never auto.
       Also: recency-first queue landed with 774c4904 (recency principle).

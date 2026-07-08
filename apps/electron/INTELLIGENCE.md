@@ -121,10 +121,17 @@ rounds land). **Identity** = mentions resolve to canonical ids.
 | TitleBar | 90 | n/a | 60 | n/a | connect pill live (056fb4b7) |
 | Connectors (framework) | 0 | 0 | 0 | 0 | designed (CONNECTORS.md); C1=PDF vertical queued |
 
-**Pipeline-level identity coverage:** resolution 35 (Round 4 pending), alias
-memory 0 (designed), suggestion queue 0 (designed), graph liveness 20
-(manual), propagation 55 (contacts canonical; assignee/owner/recipients/
-graph-nodes still name-strings).
+**Pipeline-level identity coverage (re-scored after Rounds 3b/4/5 + C0,
+2026-07-08 ~13:30):** resolution 80 (confidence resolver live in
+applyTranscriptEntities; connector signals pending), alias memory 85 (live,
+auto-populated; alias list UI pending), suggestion queue 85 (live: review
+queue + Discover sweep, verified 25 real suggestions), graph liveness 65
+(entity events + LLM-free surgery + debounced auto-ingest; nodes still
+name-keyed → R4c), propagation 70 (attendee/email propagation + events;
+recipients/owner strings remain). Projects surface re-score: click 70,
+edit 80 (rename/folder/url/notes/assignment), discover 60, identity 65.
+People: edit 75 (quick merge + suggestions). Platform: freeze fixed
+(debounced persistence), downloads gated on connectivity + newest-first.
 
 ## 6. Prioritization (derived from §5, lowest×highest-value first)
 
