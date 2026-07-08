@@ -3,6 +3,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, within, fireEvent, waitFor } from '@testing-library/react'
 import { People } from '../People'
 import { MemoryRouter } from 'react-router-dom'
+import { toast } from '@/components/ui/toaster'
+
+// Mock toast to avoid store side effects and to assert on discovery results.
+vi.mock('@/components/ui/toaster', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() }
+}))
 
 const mockGetAll = vi.fn().mockResolvedValue({
   success: true,
@@ -66,7 +72,11 @@ global.window.electronAPI = {
   identity: {
     getSuggestions: vi.fn().mockResolvedValue({ success: true, data: [] }),
     acceptSuggestion: vi.fn().mockResolvedValue({ success: true }),
-    rejectSuggestion: vi.fn().mockResolvedValue({ success: true })
+    rejectSuggestion: vi.fn().mockResolvedValue({ success: true }),
+    discoverContacts: vi.fn().mockResolvedValue({
+      success: true,
+      data: { candidatePairs: 12, suggestionsCreated: 3, autoMergeable: 1 }
+    })
   }
 } as any
 
@@ -398,5 +408,65 @@ describe('People Page', () => {
     // Instruction banner is shown and the card is selected (not navigated away)
     expect(screen.getByText(/Merge mode:/)).toBeInTheDocument()
     expect(screen.getByText('Mario')).toBeInTheDocument()
+  })
+
+  // Discovery sweep — button calls the IPC, shows a result toast, and refetches suggestions
+  it('discover: clicking Discover calls identity.discoverContacts and toasts the result', async () => {
+    render(
+      <MemoryRouter>
+        <People />
+      </MemoryRouter>
+    )
+    await screen.findByText('Mario')
+
+    const discoverBtn = screen.getByRole('button', { name: /Discover/ })
+    fireEvent.click(discoverBtn)
+
+    await waitFor(() =>
+      expect((global.window.electronAPI as any).identity.discoverContacts).toHaveBeenCalled()
+    )
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        'Discovery complete',
+        expect.stringContaining('12 candidate pairs analyzed, 3 new suggestions, 1 high-confidence')
+      )
+    )
+  })
+
+  it('discover: refetches the identity suggestions queue after a run', async () => {
+    render(
+      <MemoryRouter>
+        <People />
+      </MemoryRouter>
+    )
+    await screen.findByText('Mario')
+
+    const getSuggestions = (global.window.electronAPI as any).identity.getSuggestions
+    // Called once on mount by the suggestions section.
+    await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole('button', { name: /Discover/ }))
+
+    // reload() from the section handle triggers a second fetch.
+    await waitFor(() => expect(getSuggestions.mock.calls.length).toBeGreaterThanOrEqual(2))
+  })
+
+  it('discover: surfaces an error toast and re-enables the button on failure', async () => {
+    ;(global.window.electronAPI as any).identity.discoverContacts.mockResolvedValueOnce({
+      success: false,
+      error: 'boom'
+    })
+    render(
+      <MemoryRouter>
+        <People />
+      </MemoryRouter>
+    )
+    await screen.findByText('Mario')
+
+    fireEvent.click(screen.getByRole('button', { name: /Discover/ }))
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Discovery failed', 'boom'))
+    // Button returns to its idle label (not stuck on "Discovering…")
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Discover$/ })).toBeEnabled())
   })
 })

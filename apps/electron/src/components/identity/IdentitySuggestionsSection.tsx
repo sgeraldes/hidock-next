@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { forwardRef, useImperativeHandle, useState } from 'react'
 import { ChevronDown, ChevronRight, Check, X, Sparkles, Users } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -26,17 +26,34 @@ function evidenceSummary(suggestion: IdentitySuggestion): string {
   return parts.join(' · ')
 }
 
+/** Imperative handle so a parent (e.g. a "Discover" button) can refetch the queue. */
+export interface IdentitySuggestionsSectionHandle {
+  reload: () => void
+}
+
+interface IdentitySuggestionsSectionProps {
+  /** When set, only suggestions of this kind are shown (e.g. 'project' on the Projects page). */
+  kind?: 'person' | 'project'
+}
+
 /**
- * Collapsible "Identity suggestions" review queue for the People page. Renders
- * only when at least one pending suggestion exists. Each card asks whether a
- * candidate name is the same as a known entity, with confidence + evidence and
- * optimistic Accept / Reject.
+ * Collapsible "Identity suggestions" review queue. Renders only when at least one
+ * pending suggestion exists (optionally filtered to a single `kind`). Each card asks
+ * whether a candidate name is the same as a known entity, with confidence + evidence
+ * and optimistic Accept / Reject. Exposes a `reload` handle via ref.
  */
-export function IdentitySuggestionsSection() {
-  const { suggestions, loading, targetNames, accept, reject } = useIdentitySuggestions()
+export const IdentitySuggestionsSection = forwardRef<
+  IdentitySuggestionsSectionHandle,
+  IdentitySuggestionsSectionProps
+>(function IdentitySuggestionsSection({ kind }, ref) {
+  const { suggestions, loading, targetNames, reload, accept, reject } = useIdentitySuggestions()
   const [expanded, setExpanded] = useState(true)
 
-  if (loading || suggestions.length === 0) return null
+  useImperativeHandle(ref, () => ({ reload }), [reload])
+
+  const visible = kind ? suggestions.filter((s) => s.kind === kind) : suggestions
+
+  if (loading || visible.length === 0) return null
 
   return (
     <section className="mb-6" aria-label="Identity suggestions">
@@ -52,7 +69,7 @@ export function IdentitySuggestionsSection() {
           <ChevronRight className="h-4 w-4 text-muted-foreground" />
         )}
         <Sparkles className="h-4 w-4 text-amber-500" />
-        <span className="text-sm font-semibold">Identity suggestions ({suggestions.length})</span>
+        <span className="text-sm font-semibold">Identity suggestions ({visible.length})</span>
         <span className="text-xs text-muted-foreground hidden sm:inline">
           — possible duplicate names to confirm
         </span>
@@ -60,7 +77,7 @@ export function IdentitySuggestionsSection() {
 
       {expanded && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {suggestions.map((s) => {
+          {visible.map((s) => {
             const tier = confidenceTier(s.confidence)
             const targetName = targetNames[s.target_id]
             const summary = evidenceSummary(s)
@@ -109,6 +126,6 @@ export function IdentitySuggestionsSection() {
       )}
     </section>
   )
-}
+})
 
 export default IdentitySuggestionsSection

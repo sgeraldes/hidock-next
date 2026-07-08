@@ -21,7 +21,8 @@ import {
   ExternalLink,
   AlertTriangle,
   ShieldAlert,
-  Pencil
+  Pencil,
+  Sparkles
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -47,6 +48,10 @@ import {
 } from '@/components/ui/alert-dialog'
 import type { Project } from '@/types/knowledge'
 import { EntityMention } from '@/components/entity'
+import {
+  IdentitySuggestionsSection,
+  type IdentitySuggestionsSectionHandle
+} from '@/components/identity/IdentitySuggestionsSection'
 
 /** Resolved member info for display in the project detail */
 interface ProjectMember {
@@ -117,6 +122,10 @@ export function Projects() {
   const [newIssue, setNewIssue] = useState('')
   const [newRisk, setNewRisk] = useState('')
 
+  // Discovery sweep: analyze projects for possible duplicates → new suggestions.
+  const [discovering, setDiscovering] = useState(false)
+  const suggestionsRef = useRef<IdentitySuggestionsSectionHandle>(null)
+
   const navigate = useNavigate()
 
   // Debounce: skip firing on initial mount
@@ -163,6 +172,28 @@ export function Projects() {
     }, 300)
     return () => clearTimeout(timer)
   }, [loadProjects])
+
+  const handleDiscover = useCallback(async () => {
+    setDiscovering(true)
+    try {
+      const result = await window.electronAPI.identity.discoverProjects()
+      if (result.success && result.data) {
+        const { candidatePairs, suggestionsCreated, autoMergeable } = result.data
+        toast.success(
+          'Discovery complete',
+          `${candidatePairs} candidate pairs analyzed, ${suggestionsCreated} new ${suggestionsCreated === 1 ? 'suggestion' : 'suggestions'}, ${autoMergeable} high-confidence`
+        )
+        suggestionsRef.current?.reload()
+      } else {
+        toast.error('Discovery failed', result.error || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to discover projects:', error)
+      toast.error('Discovery failed', error instanceof Error ? error.message : 'An unexpected error occurred')
+    } finally {
+      setDiscovering(false)
+    }
+  }, [])
 
   // Projects are already filtered server-side by searchQuery and statusFilter
   const filteredProjects = projects
@@ -459,10 +490,23 @@ export function Projects() {
         <div className="p-4 border-b space-y-4">
           <div className="flex items-center justify-between">
             <h1 className="text-xl font-bold">Projects</h1>
-            <Button onClick={openCreateDialog} size="sm" className="h-8 gap-1">
-              <Plus className="h-4 w-4" />
-              New
-            </Button>
+            <div className="flex items-center gap-1">
+              <Button
+                onClick={handleDiscover}
+                disabled={discovering}
+                size="sm"
+                variant="outline"
+                className="h-8 gap-1"
+                title="Analyze projects for possible duplicates"
+              >
+                <Sparkles className={cn("h-4 w-4", discovering && "animate-pulse")} />
+                {discovering ? 'Discovering…' : 'Discover'}
+              </Button>
+              <Button onClick={openCreateDialog} size="sm" className="h-8 gap-1">
+                <Plus className="h-4 w-4" />
+                New
+              </Button>
+            </div>
           </div>
 
           <div className="relative">
@@ -550,13 +594,17 @@ export function Projects() {
 
       {/* Main Detail Area */}
       <main className="flex-1 flex flex-col min-w-0">
+        {/* Project identity suggestions (self-hides when empty; populated by Discover) */}
+        <div className="px-8 pt-6 empty:hidden">
+          <IdentitySuggestionsSection kind="project" ref={suggestionsRef} />
+        </div>
         {activeProject && detailLoading ? (
           <div className="flex-1 flex flex-col items-center justify-center">
             <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground mb-4" />
             <p className="text-sm text-muted-foreground">Loading project details...</p>
           </div>
         ) : activeProject ? (
-          <div className="flex flex-col h-full overflow-hidden animate-in fade-in slide-in-from-right-2 duration-300">
+          <div className="flex flex-col flex-1 min-h-0 overflow-hidden animate-in fade-in slide-in-from-right-2 duration-300">
             {/* Header */}
             <header className="border-b px-8 py-6 h-[120px] flex items-center justify-between">
               <div className="flex items-center gap-4 min-w-0">

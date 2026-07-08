@@ -16,13 +16,17 @@ import {
   Trash2,
   GitMerge,
   ArrowLeftRight,
+  Sparkles,
   X
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
-import { IdentitySuggestionsSection } from '@/components/identity/IdentitySuggestionsSection'
+import {
+  IdentitySuggestionsSection,
+  type IdentitySuggestionsSectionHandle
+} from '@/components/identity/IdentitySuggestionsSection'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -60,6 +64,10 @@ export function People() {
   const [selectedForMerge, setSelectedForMerge] = useState<Person[]>([])
   const [keeperId, setKeeperId] = useState<string | null>(null)
   const [merging, setMerging] = useState(false)
+
+  // Discovery sweep: analyze contacts for possible duplicates → new suggestions.
+  const [discovering, setDiscovering] = useState(false)
+  const suggestionsRef = useRef<IdentitySuggestionsSectionHandle>(null)
 
   // Debounce: skip firing on initial mount
   const isFirstMount = useRef(true)
@@ -204,6 +212,28 @@ export function People() {
     }
   }, [keeper, loser, loadPeople, currentPage])
 
+  const handleDiscover = useCallback(async () => {
+    setDiscovering(true)
+    try {
+      const result = await window.electronAPI.identity.discoverContacts()
+      if (result.success && result.data) {
+        const { candidatePairs, suggestionsCreated, autoMergeable } = result.data
+        toast.success(
+          'Discovery complete',
+          `${candidatePairs} candidate pairs analyzed, ${suggestionsCreated} new ${suggestionsCreated === 1 ? 'suggestion' : 'suggestions'}, ${autoMergeable} high-confidence`
+        )
+        suggestionsRef.current?.reload()
+      } else {
+        toast.error('Discovery failed', result.error || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to discover contacts:', error)
+      toast.error('Discovery failed', error instanceof Error ? error.message : 'An unexpected error occurred')
+    } finally {
+      setDiscovering(false)
+    }
+  }, [])
+
   const sortedPeople = useMemo(() => {
     const sorted = [...people]
     switch (sortBy) {
@@ -256,6 +286,16 @@ export function People() {
             <Button variant="outline" size="sm" onClick={() => loadPeople(currentPage)}>
               <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
               Refresh
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleDiscover}
+              disabled={discovering}
+              title="Analyze contacts for possible duplicates"
+            >
+              <Sparkles className={cn("h-4 w-4 mr-2", discovering && "animate-pulse")} />
+              {discovering ? 'Discovering…' : 'Discover'}
             </Button>
             <Button
               size="sm"
@@ -333,7 +373,7 @@ export function People() {
       <div className="flex-1 overflow-auto p-6">
         <div className="max-w-5xl mx-auto">
           {/* Identity suggestions review queue (self-hides when empty) */}
-          {!mergeMode && <IdentitySuggestionsSection />}
+          {!mergeMode && <IdentitySuggestionsSection ref={suggestionsRef} />}
 
           {/* Merge-mode instruction banner */}
           {mergeMode && (

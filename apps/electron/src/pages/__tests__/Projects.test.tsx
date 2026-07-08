@@ -1,8 +1,14 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { Projects } from '../Projects'
 import { MemoryRouter } from 'react-router-dom'
+import { toast } from '@/components/ui/toaster'
+
+// Mock toast to avoid store side effects and to assert on discovery results.
+vi.mock('@/components/ui/toaster', () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() }
+}))
 
 const mockGetAll = vi.fn().mockResolvedValue({
   success: true,
@@ -50,6 +56,16 @@ global.window.electronAPI = {
     getById: vi.fn().mockResolvedValue({
       success: true,
       data: { contact: { id: 'p1', name: 'Alice Smith', type: 'team' }, meetings: [] }
+    })
+  },
+  // Identity suggestions section loads on mount; default to an empty queue.
+  identity: {
+    getSuggestions: vi.fn().mockResolvedValue({ success: true, data: [] }),
+    acceptSuggestion: vi.fn().mockResolvedValue({ success: true }),
+    rejectSuggestion: vi.fn().mockResolvedValue({ success: true }),
+    discoverProjects: vi.fn().mockResolvedValue({
+      success: true,
+      data: { candidatePairs: 8, suggestionsCreated: 2, autoMergeable: 0 }
     })
   }
 } as any
@@ -262,5 +278,67 @@ describe('Projects Page', () => {
 
     // contacts.getById should have been called for member resolution
     expect(mockContactGetById).toHaveBeenCalledWith('p1')
+  })
+
+  // Discovery sweep — button calls the IPC and toasts the result
+  it('discover: clicking Discover calls identity.discoverProjects and toasts the result', async () => {
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+    await screen.findByText('Project Alpha')
+
+    fireEvent.click(screen.getByRole('button', { name: /Discover/ }))
+
+    await waitFor(() =>
+      expect((global.window.electronAPI as any).identity.discoverProjects).toHaveBeenCalled()
+    )
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        'Discovery complete',
+        expect.stringContaining('8 candidate pairs analyzed, 2 new suggestions, 0 high-confidence')
+      )
+    )
+  })
+
+  // The Projects suggestions section is filtered to kind='project' only
+  it('renders only project-kind identity suggestions in the filtered section', async () => {
+    ;(global.window.electronAPI as any).identity.getSuggestions.mockResolvedValueOnce({
+      success: true,
+      data: [
+        {
+          id: 'sg-person',
+          kind: 'person',
+          candidate_name: 'PersonCandidate',
+          target_id: 'c9',
+          confidence: 0.7,
+          evidence: null,
+          status: 'pending',
+          created_at: '2026-07-08T10:00:00Z'
+        },
+        {
+          id: 'sg-project',
+          kind: 'project',
+          candidate_name: 'ProjectCandidate',
+          target_id: 'pr9',
+          confidence: 0.75,
+          evidence: null,
+          status: 'pending',
+          created_at: '2026-07-08T10:00:00Z'
+        }
+      ]
+    })
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    // The project-kind suggestion is rendered (candidate name is wrapped in typographic quotes)...
+    expect(await screen.findByText(/ProjectCandidate/)).toBeInTheDocument()
+    // ...while the person-kind suggestion is filtered out.
+    expect(screen.queryByText(/PersonCandidate/)).not.toBeInTheDocument()
   })
 })
