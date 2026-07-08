@@ -57,7 +57,7 @@ describe('ChatLLMService routing', () => {
 
   describe('getStatus', () => {
     it('reports gemini when an API key is configured (regardless of Ollama)', async () => {
-      mockConfig.transcription.geminiApiKey = 'key-123'
+      mockConfig.transcription.geminiApiKey = 'key-123' // pragma: allowlist secret
       mockOllamaIsAvailable.mockResolvedValue(false)
 
       const status = await getChatLLMService().getStatus()
@@ -83,7 +83,7 @@ describe('ChatLLMService routing', () => {
 
   describe('generate', () => {
     it('uses Gemini when a key is configured and does not touch Ollama', async () => {
-      mockConfig.transcription.geminiApiKey = 'key-123'
+      mockConfig.transcription.geminiApiKey = 'key-123' // pragma: allowlist secret
 
       const answer = await getChatLLMService().generate(
         [{ role: 'user', content: 'hello' }],
@@ -100,7 +100,7 @@ describe('ChatLLMService routing', () => {
     })
 
     it('maps assistant turns to Gemini "model" role and strips leading model turns', async () => {
-      mockConfig.transcription.geminiApiKey = 'key-123'
+      mockConfig.transcription.geminiApiKey = 'key-123' // pragma: allowlist secret
 
       await getChatLLMService().generate([
         { role: 'assistant', content: 'earlier reply' }, // leading model turn — must be dropped
@@ -124,7 +124,7 @@ describe('ChatLLMService routing', () => {
     })
 
     it('falls back to Ollama when the Gemini call throws', async () => {
-      mockConfig.transcription.geminiApiKey = 'key-123'
+      mockConfig.transcription.geminiApiKey = 'key-123' // pragma: allowlist secret
       mockGenerateContent.mockRejectedValue(new Error('rate limit'))
       mockOllamaChat.mockResolvedValue('ollama answer')
 
@@ -144,7 +144,7 @@ describe('ChatLLMService routing', () => {
     })
 
     it('passes an abort signal through to Gemini', async () => {
-      mockConfig.transcription.geminiApiKey = 'key-123'
+      mockConfig.transcription.geminiApiKey = 'key-123' // pragma: allowlist secret
       const controller = new AbortController()
 
       await getChatLLMService().generate([{ role: 'user', content: 'hi' }], {
