@@ -71,7 +71,9 @@ export function autoLinkRecordingsToMeetings(): number {
     }))
     .filter((m) => Number.isFinite(m.start) && Number.isFinite(m.end))
 
-  let linked = 0
+  // Collect updates first, then apply in ONE transaction — per-row run()
+  // persists the whole sql.js database to disk on every call.
+  const updates: Array<{ recordingId: string; meetingId: string }> = []
   for (const rec of recordings) {
     const recStart = new Date(rec.date_recorded).getTime()
     if (!Number.isFinite(recStart)) continue
@@ -84,15 +86,21 @@ export function autoLinkRecordingsToMeetings(): number {
         best = { id: m.id, overlap: o }
       }
     }
+    if (best) updates.push({ recordingId: rec.id, meetingId: best.id })
+  }
 
-    if (best) {
-      run(
-        `UPDATE recordings SET meeting_id = ?, correlation_confidence = 0.7, correlation_method = 'time_overlap'
-         WHERE id = ? AND meeting_id IS NULL`,
-        [best.id, rec.id]
-      )
-      linked++
-    }
+  let linked = 0
+  if (updates.length > 0) {
+    runInTransaction(() => {
+      for (const u of updates) {
+        run(
+          `UPDATE recordings SET meeting_id = ?, correlation_confidence = 0.7, correlation_method = 'time_overlap'
+           WHERE id = ? AND meeting_id IS NULL`,
+          [u.meetingId, u.recordingId]
+        )
+        linked++
+      }
+    })
   }
 
   if (linked > 0) console.log(`[OrgReconciler] Auto-linked ${linked} recordings to meetings by time overlap`)
@@ -196,22 +204,107 @@ export function repairEscapedMeetingText(): number {
      WHERE description LIKE '%\\n%' OR subject LIKE '%\\,%' OR location LIKE '%\\,%'`
   )
   let repaired = 0
-  for (const row of rows) {
-    const subject = unescapeIcsText(row.subject || '')
-    const description = row.description ? unescapeIcsText(row.description) : row.description
-    const location = row.location ? unescapeIcsText(row.location) : row.location
-    if (subject !== row.subject || description !== row.description || location !== row.location) {
-      run(`UPDATE meetings SET subject = ?, description = ?, location = ? WHERE id = ?`, [
-        subject,
-        description ?? null,
-        location ?? null,
-        row.id
-      ])
-      repaired++
+  runInTransaction(() => {
+    for (const row of rows) {
+      const subject = unescapeIcsText(row.subject || '')
+      const description = row.description ? unescapeIcsText(row.description) : row.description
+      const location = row.location ? unescapeIcsText(row.location) : row.location
+      if (subject !== row.subject || description !== row.description || location !== row.location) {
+        run(`UPDATE meetings SET subject = ?, description = ?, location = ? WHERE id = ?`, [
+          subject,
+          description ?? null,
+          location ?? null,
+          row.id
+        ])
+        repaired++
+      }
     }
-  }
+  })
   if (repaired > 0) console.log(`[OrgReconciler] Unescaped ICS text on ${repaired} meetings`)
   return repaired
+}
+
+/**
+ * Persist people + project extracted from a transcript by the AI analysis.
+ * The published Outlook ICS feed carries no attendee data, so transcripts are
+ * the primary source of "who was in this meeting". Projects are matched by
+ * name (case-insensitive) or created when the model proposes a new one.
+ */
+export function applyTranscriptEntities(opts: {
+  meetingId?: string
+  participants?: Array<{ name: string; role?: string }>
+  project?: { name: string; is_new?: boolean }
+}): { contacts: number; projectLinked: boolean } {
+  let contacts = 0
+  let projectLinked = false
+
+  runInTransaction(() => {
+    const now = new Date().toISOString()
+
+    for (const person of opts.participants ?? []) {
+      const name = (person.name || '').trim()
+      if (!name || name.length < 2 || /^speaker\s*\d*$/i.test(name)) continue
+
+      let contact = queryOne<{ id: string; role?: string }>(
+        `SELECT id, role FROM contacts WHERE LOWER(name) = LOWER(?)`,
+        [name]
+      )
+      if (!contact) {
+        const id = randomUUID()
+        run(
+          `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count)
+           VALUES (?, ?, 'unknown', ?, ?, ?, 0)`,
+          [id, name, person.role ?? null, now, now]
+        )
+        contact = { id }
+        contacts++
+      } else if (person.role && !contact.role) {
+        run(`UPDATE contacts SET role = ? WHERE id = ?`, [person.role, contact.id])
+      }
+
+      if (opts.meetingId) {
+        const link = queryOne<{ meeting_id: string }>(
+          `SELECT meeting_id FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?`,
+          [opts.meetingId, contact.id]
+        )
+        if (!link) {
+          run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, 'attendee')`, [
+            opts.meetingId,
+            contact.id
+          ])
+        }
+        run(
+          `UPDATE contacts SET
+             meeting_count = (SELECT COUNT(1) FROM meeting_contacts mc WHERE mc.contact_id = contacts.id),
+             last_seen_at = ?
+           WHERE id = ?`,
+          [now, contact.id]
+        )
+      }
+    }
+
+    const projectName = (opts.project?.name || '').trim()
+    if (projectName) {
+      let project = queryOne<{ id: string }>(`SELECT id FROM projects WHERE LOWER(name) = LOWER(?)`, [projectName])
+      if (!project) {
+        const id = randomUUID()
+        run(`INSERT INTO projects (id, name, status) VALUES (?, ?, 'active')`, [id, projectName])
+        project = { id }
+      }
+      if (opts.meetingId) {
+        const link = queryOne<{ meeting_id: string }>(
+          `SELECT meeting_id FROM meeting_projects WHERE meeting_id = ? AND project_id = ?`,
+          [opts.meetingId, project.id]
+        )
+        if (!link) {
+          run(`INSERT INTO meeting_projects (meeting_id, project_id) VALUES (?, ?)`, [opts.meetingId, project.id])
+        }
+        projectLinked = true
+      }
+    }
+  })
+
+  return { contacts, projectLinked }
 }
 
 /** Full reconciliation pass — run after calendar syncs and at startup. */

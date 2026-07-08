@@ -104,6 +104,7 @@ import {
   cancelPendingTranscriptions,
   run,
   queryOne,
+  queryAll,
   acquireTranscriptionLock,
   releaseTranscriptionLock,
   clearStaleTranscriptionLock,
@@ -524,6 +525,10 @@ interface TranscriptAnalysis {
   selected_meeting_id?: string
   meeting_confidence?: number
   selection_reason?: string
+  /** People speaking or mentioned in the call (the ICS feed carries no attendees). */
+  participants?: Array<{ name: string; role?: string }>
+  /** Project this meeting belongs to — matched against existing projects or proposed new. */
+  project?: { name: string; is_new?: boolean }
 }
 
 async function transcribeWithGemini(
@@ -855,6 +860,11 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
    "selection_reason": "why you selected or rejected this meeting"`
   }
 
+  // Existing projects so the model links to them instead of inventing variants
+  const existingProjects = queryAll<{ name: string }>(
+    `SELECT name FROM projects WHERE status = 'active' ORDER BY name LIMIT 50`
+  ).map((p) => p.name)
+
   const analysisPrompt = `Analyze this meeting transcript and provide:
 1. A brief summary (2-3 sentences)
 2. A list of action items mentioned (as a JSON array of strings)
@@ -865,6 +875,13 @@ ${candidateMeetings.map((m, i) => `   ${i + 1}. "${m.subject}" (ID: ${m.id})`).j
    - Questions should be SPECIFIC to the content (e.g., "What was decided about the Q3 marketing budget?")
    - Avoid generic questions (e.g., "What was discussed?" or "Tell me more")
    - Questions should help users quickly understand key decisions, action items, and outcomes
+7. Participants: people speaking or clearly mentioned as involved (first names are fine).
+   For each: name, and role if inferable (e.g. "telecom specialist", "PM", "client").
+   Do NOT invent people; only include names actually appearing in the conversation.
+8. Project: which project/initiative this meeting belongs to.
+   ${existingProjects.length > 0 ? `Existing projects (match one of these EXACTLY if it fits): ${existingProjects.join(' | ')}` : 'No projects exist yet.'}
+   If none fits, propose a short new project name (2-5 words, e.g. "DFX5 Gateway" or client name) and set is_new true.
+   If the call is personal or clearly not project work, omit the project field.
 
 IMPORTANT: Respond in the SAME LANGUAGE as the transcript. If the transcript is in Spanish, write the summary, action items, topics, key points, title, and questions in Spanish. If English, respond in English.
 ${meetingSelectionSection}
@@ -880,7 +897,9 @@ Respond in JSON format:
   "key_points": ["...", "..."],
   "title_suggestion": "Brief Descriptive Title (3-8 words)",
   "question_suggestions": ["Specific question about decision 1?", "Specific question about action item 2?", "..."],
-  "language": "es" or "en"${candidateMeetings.length > 0 ? `,
+  "language": "es" or "en",
+  "participants": [{"name": "...", "role": "..."}],
+  "project": {"name": "...", "is_new": false}${candidateMeetings.length > 0 ? `,
   "selected_meeting_id": "...",
   "meeting_confidence": 0.0,
   "selection_reason": "..."` : ''}
@@ -1061,6 +1080,28 @@ Meeting ${i + 1}: "${m.subject}"
   } catch (error) {
     console.error('[Actionable Detection] Failed to create actionables:', error)
     // Don't fail the transcription if actionable detection fails
+  }
+
+  // Persist people + project the analysis extracted from the conversation
+  // (the ICS feed has no attendee data — the transcript is the source).
+  try {
+    const { applyTranscriptEntities } = await import('./org-reconciler')
+    const linkedMeetingId =
+      (analysis.selected_meeting_id && analysis.selected_meeting_id !== 'none'
+        ? analysis.selected_meeting_id
+        : undefined) ?? recording.meeting_id ?? getRecordingById(recordingId)?.meeting_id
+    const applied = applyTranscriptEntities({
+      meetingId: linkedMeetingId ?? undefined,
+      participants: analysis.participants,
+      project: analysis.project
+    })
+    if (applied.contacts > 0 || applied.projectLinked) {
+      console.log(
+        `[OrgReconciler] Transcript entities: +${applied.contacts} people${applied.projectLinked ? ', project linked' : ''}`
+      )
+    }
+  } catch (e) {
+    console.error('[OrgReconciler] Transcript entity extraction failed:', e)
   }
 
   // Export the per-meeting wiki page (plain markdown knowledge base readable
