@@ -5,7 +5,7 @@
 import { ipcMain } from 'electron'
 import { getRAGService, RAGResponse } from '../services/rag'
 import { getVectorStore } from '../services/vector-store'
-import { getOllamaService } from '../services/ollama'
+import { getChatLLMService } from '../services/chat-llm'
 import { success, error, Result } from '../types/api'
 import { RAGFilterSchema } from '../validation/common'
 import type { RAGFilter, RAGStatus, RAGChatResponse } from '../types/api'
@@ -33,20 +33,23 @@ function extractMeetingIdsFromFilter(filter: RAGFilter): string[] | undefined {
 export function registerRAGHandlers(): void {
   const rag = getRAGService()
   const vectorStore = getVectorStore()
-  const ollama = getOllamaService()
 
   // Check if RAG is ready (new Result pattern)
   ipcMain.handle('rag:status', async (): Promise<Result<RAGStatus>> => {
     try {
-      const ollamaAvailable = await ollama.isAvailable()
+      // Chat is Gemini-first with Ollama fallback — availability reflects EITHER
+      // a configured Gemini key OR a reachable Ollama (see chat-llm.ts).
+      const chatStatus = await getChatLLMService().getStatus()
       const docCount = vectorStore.getDocumentCount()
       const meetingCount = vectorStore.getMeetingCount()
 
       return success({
-        ollamaAvailable,
+        backend: chatStatus.backend,
+        chatAvailable: chatStatus.backend !== 'none',
+        ollamaAvailable: chatStatus.ollamaAvailable,
         documentCount: docCount,
         meetingCount: meetingCount,
-        ready: ollamaAvailable && docCount > 0
+        ready: chatStatus.backend !== 'none' && docCount > 0
       })
     } catch (err) {
       console.error('rag:status error:', err)

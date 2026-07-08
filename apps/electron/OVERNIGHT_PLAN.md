@@ -66,9 +66,13 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
 - [x] ISSUE-10 (found by orchestrator UI test): hooks-order crash selecting a
       recording — transcriptSegments useMemo below the early return. Fixed +
       2 regression tests (39dd65af). VERIFIED LIVE.
-- [~] ISSUE-11 (agent: fix-quality-round2): flaky perf budget test
-      (library-performance "switches view modes", 200ms wall-clock) failed 2
-      full-suite gate runs tonight, passes in isolation. Making deterministic.
+- [x] ISSUE-11: flaky perf budget test — now times only the synchronous
+      click→commit; waitFor untimed; suite green 2× consecutively (5ef9cb48).
+- [~] ISSUE-12 (agent: fix-assistant-gemini; found by orchestrator user-test):
+      Assistant chat is the LAST Ollama-only path — page shows "Ollama
+      offline", input disabled, core "ask your knowledge" feature dead.
+      Making it Gemini-first with Ollama fallback (mirror output-generator/
+      embeddings pattern) + availability badge reflects active backend.
 - [x] ISSUE-2 (design, Opus — after fix-analysis lands, shares index.ts):
       unified Office-365-style titlebar: frameless BrowserWindow with overlay
       window controls, app identity + global actions in the custom titlebar,

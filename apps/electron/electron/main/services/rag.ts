@@ -5,6 +5,8 @@
 
 import { getVectorStore, SearchResult } from './vector-store'
 import { getOllamaService, OllamaChatMessage } from './ollama'
+import { getChatLLMService } from './chat-llm'
+import { getEmbeddingsService } from './embeddings'
 import { getDatabase, queryOne, escapeLikePattern } from './database'
 import { Result, success, error } from '../types/api'
 
@@ -118,12 +120,14 @@ class RAGService {
   private activeControllers: Map<string, AbortController> = new Map()
 
   async isReady(): Promise<{ ready: boolean; reason?: string }> {
-    const ollama = getOllamaService()
     const vectorStore = getVectorStore()
 
-    const ollamaAvailable = await ollama.isAvailable()
-    if (!ollamaAvailable) {
-      return { ready: false, reason: 'Ollama is not running. Start Ollama to use the chat feature.' }
+    const chatStatus = await getChatLLMService().getStatus()
+    if (chatStatus.backend === 'none') {
+      return {
+        ready: false,
+        reason: 'No chat backend available. Add a Gemini API key in Settings or start Ollama.'
+      }
     }
 
     const docCount = vectorStore.getDocumentCount()
@@ -167,7 +171,6 @@ class RAGService {
     message: string,
     meetingFilter?: string
   ): Promise<RAGResponse> {
-    const ollama = getOllamaService()
     const vectorStore = getVectorStore()
 
     // Validate that sessionId corresponds to a valid conversation
@@ -216,7 +219,7 @@ class RAGService {
     if (context.meetingId) {
       // Search within specific meeting
       const docs = await vectorStore.searchByMeeting(context.meetingId)
-      const queryEmbedding = await ollama.generateEmbedding(message)
+      const queryEmbedding = await getEmbeddingsService().generateEmbedding(message)
       if (queryEmbedding) {
         // Re-rank by actual query relevance using cosine similarity
         searchResults = docs.map((doc) => {
@@ -323,8 +326,9 @@ class RAGService {
     // Add raw message to conversation history (after building messages to avoid duplicate)
     context.conversationHistory.push({ role: 'user', content: message })
 
-    // B-CHAT-005: Generate response with abort signal support
-    const answer = await ollama.chat(messages, {
+    // B-CHAT-005: Generate response with abort signal support.
+    // Gemini-first (config.chat.geminiModel) with Ollama fallback — see chat-llm.ts.
+    const answer = await getChatLLMService().generate(messages, {
       systemPrompt: SYSTEM_PROMPT,
       temperature: 0.7,
       maxTokens: 1024,
@@ -355,7 +359,6 @@ class RAGService {
   }
 
   async summarizeMeeting(meetingId: string): Promise<string | null> {
-    const ollama = getOllamaService()
     const vectorStore = getVectorStore()
 
     // Get all chunks for this meeting
@@ -381,11 +384,10 @@ class RAGService {
 Meeting transcript:
 ${transcript.substring(0, 8000)}` // Limit context size
 
-    return ollama.generate(prompt)
+    return getChatLLMService().generateText(prompt)
   }
 
   async findActionItems(meetingId?: string): Promise<string | null> {
-    const ollama = getOllamaService()
     const vectorStore = getVectorStore()
 
     let docs
@@ -416,7 +418,7 @@ Format as a numbered list.
 Meeting transcripts:
 ${transcript.substring(0, 8000)}`
 
-    return ollama.generate(prompt)
+    return getChatLLMService().generateText(prompt)
   }
 
   /**

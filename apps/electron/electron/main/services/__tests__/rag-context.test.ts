@@ -11,9 +11,27 @@ const mockOllamaService = {
   generateEmbedding: vi.fn().mockResolvedValue([0.1, 0.2])
 }
 
+// Chat now routes through chat-llm (Gemini-first, Ollama fallback), not ollama.chat directly.
+const mockChatLLMService = {
+  getStatus: vi.fn().mockResolvedValue({ backend: 'ollama', geminiConfigured: false, ollamaAvailable: true }),
+  generate: vi.fn().mockResolvedValue('AI Response'),
+  generateText: vi.fn().mockResolvedValue('AI Response')
+}
+
 // Mock dependencies (except database)
 vi.mock('../ollama', () => ({
   getOllamaService: vi.fn(() => mockOllamaService)
+}))
+
+vi.mock('../chat-llm', () => ({
+  getChatLLMService: vi.fn(() => mockChatLLMService)
+}))
+
+vi.mock('../embeddings', () => ({
+  getEmbeddingsService: vi.fn(() => ({
+    generateEmbedding: vi.fn().mockResolvedValue([0.1, 0.2]),
+    generateEmbeddings: vi.fn().mockResolvedValue([[0.1, 0.2]])
+  }))
 }))
 
 vi.mock('../vector-store', () => ({
@@ -73,9 +91,9 @@ describe('RAGService Context Injection', () => {
     
     await rag.chat('session-1', 'What is in the context?')
 
-    expect(mockOllamaService.chat).toHaveBeenCalled()
-    
-    const lastCall = vi.mocked(mockOllamaService.chat).mock.calls[0]
+    expect(mockChatLLMService.generate).toHaveBeenCalled()
+
+    const lastCall = vi.mocked(mockChatLLMService.generate).mock.calls[0]
     const messages = lastCall[0]
     const userMessage = messages[messages.length - 1].content
     expect(userMessage).toContain('Full transcript text from knowledge capture')

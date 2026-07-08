@@ -345,6 +345,11 @@ export interface ExtendedRAGAPI {
  * RAG service status
  */
 export interface RAGStatus {
+  /** Backend that will serve chat requests: 'gemini' | 'ollama' | 'none'. */
+  backend: 'gemini' | 'ollama' | 'none'
+  /** True when a chat backend (Gemini key or reachable Ollama) is available. */
+  chatAvailable: boolean
+  /** Retained for backward compatibility; true when local Ollama is reachable. */
   ollamaAvailable: boolean
   documentCount: number
   meetingCount: number

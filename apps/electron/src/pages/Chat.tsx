@@ -69,6 +69,8 @@ interface VectorChunk {
 }
 
 interface RAGStatus {
+  backend?: 'gemini' | 'ollama' | 'none'
+  chatAvailable?: boolean
   ollamaAvailable: boolean
   documentCount: number
   meetingCount: number
@@ -81,6 +83,18 @@ interface Source {
   subject?: string
   timestamp?: string
   score: number
+}
+
+// Human-readable label for the active chat backend shown in the status badge.
+function backendLabel(backend?: 'gemini' | 'ollama' | 'none'): string {
+  switch (backend) {
+    case 'gemini':
+      return 'Gemini'
+    case 'ollama':
+      return 'Ollama'
+    default:
+      return 'AI'
+  }
 }
 
 export function Chat() {
@@ -414,15 +428,19 @@ export function Chat() {
   }
 
   const checkRAGStatus = async () => {
+    const unavailable: RAGStatus = {
+      backend: 'none',
+      chatAvailable: false,
+      ollamaAvailable: false,
+      documentCount: 0,
+      meetingCount: 0,
+      ready: false
+    }
     try {
       const result = await window.electronAPI.rag.status()
-      if (result.success) {
-        setStatus(result.data)
-      } else {
-        setStatus({ ollamaAvailable: false, documentCount: 0, meetingCount: 0, ready: false })
-      }
+      setStatus(result.success ? result.data : unavailable)
     } catch (error) {
-      setStatus({ ollamaAvailable: false, documentCount: 0, meetingCount: 0, ready: false })
+      setStatus(unavailable)
     }
   }
 
@@ -643,7 +661,7 @@ export function Chat() {
         const errorMsg = await window.electronAPI.assistant.addMessage(
           activeConversation.id,
           'assistant',
-          'Sorry, I encountered an error processing your request. Please make sure Ollama is running and try again.'
+          'Sorry, I encountered an error processing your request. Please check that a Gemini API key is set in Settings (or that Ollama is running) and try again.'
         )
         setMessages((prev) => [...prev, errorMsg])
         setFailedMessageIds(prev => new Set(prev).add(errorMsg.id))
@@ -910,12 +928,12 @@ export function Chat() {
                 {status.ready ? (
                   <div className="hidden sm:flex items-center gap-1.5 text-green-600 dark:text-green-400 bg-green-500/10 px-2 py-1 rounded-full border border-green-500/20">
                     <CheckCircle2 className="h-3.5 w-3.5" />
-                    <span>{status.documentCount} chunks indexed</span>
+                    <span>{backendLabel(status.backend)} · {status.documentCount} chunks</span>
                   </div>
-                ) : !status.ollamaAvailable ? (
+                ) : status.backend === 'none' ? (
                   <div className="hidden sm:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
                     <AlertCircle className="h-3.5 w-3.5" />
-                    <span>Ollama offline</span>
+                    <span>AI offline</span>
                   </div>
                 ) : (
                   <div className="hidden sm:flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded-full border border-yellow-500/20">
@@ -1251,7 +1269,9 @@ export function Chat() {
                 placeholder={
                   status?.ready
                     ? 'Ask me anything about your knowledge base...'
-                    : 'Index meetings to enable AI conversations'
+                    : status?.backend === 'none'
+                      ? 'Add a Gemini API key in Settings to enable AI chat'
+                      : 'Index meetings to enable AI conversations'
                 }
                 value={input}
                 onChange={(e) => {
