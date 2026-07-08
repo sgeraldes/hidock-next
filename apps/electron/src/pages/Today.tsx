@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Sun,
@@ -18,7 +18,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { EntityMention, MeetingHoverCard } from '@/components/entity'
+import { EntityMention, MeetingHoverCard, meetingHoverWillHaveContent } from '@/components/entity'
 import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
 import { TodayIdentitySuggestions } from '@/components/identity/TodayIdentitySuggestions'
 import { cn } from '@/lib/utils'
@@ -283,9 +283,7 @@ export function Today() {
                   const badgeLabel = inProgress
                     ? formatMinutesLeft(timing?.minutes ?? 0)
                     : formatMinutesUntil(timing?.minutes ?? 0)
-                  return (
-                    <HoverCard key={m.id}>
-                      <HoverCardTrigger asChild>
+                  const rowButton = (
                         <button
                           onClick={() => navigate(`/meeting/${m.id}`)}
                           className={cn(
@@ -374,11 +372,16 @@ export function Today() {
                             </span>
                           )}
                         </button>
-                      </HoverCardTrigger>
+                  )
+                  return meetingHoverWillHaveContent(m, ['title', 'time']) ? (
+                    <HoverCard key={m.id}>
+                      <HoverCardTrigger asChild>{rowButton}</HoverCardTrigger>
                       <HoverCardContent align="start">
-                        <MeetingHoverCard id={m.id} name={m.subject} />
+                        <MeetingHoverCard id={m.id} name={m.subject} visibleFields={['title', 'time']} />
                       </HoverCardContent>
                     </HoverCard>
+                  ) : (
+                    <Fragment key={m.id}>{rowButton}</Fragment>
                   )
                 })}
               </div>

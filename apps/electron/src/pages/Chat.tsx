@@ -1232,7 +1232,7 @@ export function Chat() {
                                     </button>
                                   </HoverCardTrigger>
                                   <HoverCardContent>
-                                    <MeetingHoverCard id={source.meetingId} name={source.subject || 'Reference'} />
+                                    <MeetingHoverCard id={source.meetingId} name={source.subject || 'Reference'} visibleFields={['title']} />
                                   </HoverCardContent>
                                 </HoverCard>
                               )

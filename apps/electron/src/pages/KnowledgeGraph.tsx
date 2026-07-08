@@ -476,7 +476,7 @@ export function KnowledgeGraph() {
                         {attendeesResults.map((row, i) => (
                           <tr key={row.personId} className={cn('border-b last:border-0', i % 2 === 0 ? 'bg-background' : 'bg-muted/20')}>
                             <td className="px-4 py-2.5 font-medium">
-                              <EntityMention type="person" id={resolveByName(row.person)?.id} name={row.person} />
+                              <EntityMention type="person" id={resolveByName(row.person)?.id} name={row.person} visibleFields={['name', 'meetings']} />
                             </td>
                             <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{row.meetings}</td>
                           </tr>

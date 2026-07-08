@@ -616,7 +616,13 @@ export interface ElectronAPI {
     getSuggestions: (
       status?: 'pending' | 'accepted' | 'rejected'
     ) => Promise<{ success: boolean; data?: any[]; error?: string }>
-    acceptSuggestion: (id: string) => Promise<{ success: boolean; data?: any; error?: string }>
+    acceptSuggestion: (
+      id: string
+    ) => Promise<{
+      success: boolean
+      data?: { id: string; status: string; mergeJournalId?: string | null; supersededCount?: number }
+      error?: string
+    }>
     rejectSuggestion: (id: string) => Promise<{ success: boolean; data?: any; error?: string }>
     discoverContacts: () => Promise<{
       success: boolean
@@ -634,6 +640,17 @@ export interface ElectronAPI {
     getMergeImpact: (
       request: { kind: 'contact' | 'project'; keeperId: string; loserId: string }
     ) => Promise<Result<{ keeper: number; loser: number }>>
+    getMentionSnippets: (
+      name: string,
+      limit?: number
+    ) => Promise<{
+      success: boolean
+      data?: {
+        snippets: Array<{ recordingId: string; title: string; date: string | null; snippet: string }>
+        recordingIds: string[]
+      }
+      error?: string
+    }>
   }
 
   // Domain Events - Event-driven architecture
@@ -1063,7 +1080,9 @@ const electronAPI: ElectronAPI = {
     discoverContacts: () => callIPC('identity:discoverContacts'),
     discoverProjects: () => callIPC('identity:discoverProjects'),
     getMergeJournal: (request) => callIPC('identity:getMergeJournal', request),
-    getMergeImpact: (request) => callIPC('identity:getMergeImpact', request)
+    getMergeImpact: (request) => callIPC('identity:getMergeImpact', request),
+    getMentionSnippets: (name: string, limit?: number) =>
+      callIPC('identity:getMentionSnippets', { name, limit })
   },
 
   // Domain Event Listener

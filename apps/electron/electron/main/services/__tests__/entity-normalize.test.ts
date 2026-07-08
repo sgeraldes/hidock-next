@@ -11,7 +11,8 @@ import {
   looksLikeEmail,
   isGenericSpeakerLabel,
   levenshtein,
-  fuzzyNameScore
+  fuzzyNameScore,
+  isOppositeGenderSpanishPair
 } from '../entity-normalize'
 
 describe('normalizeName', () => {
@@ -80,5 +81,34 @@ describe('fuzzyNameScore', () => {
   })
   it('never exceeds the fuzzy band', () => {
     expect(fuzzyNameScore('a', 'b')).toBeLessThanOrEqual(0.8)
+  })
+
+  it('docks opposite-gender Spanish pairs below a plain edit-1 match', () => {
+    // Fernando/Fernanda differ only in the final a↔o — an edit distance of 1 that
+    // would otherwise score 0.78; the gender penalty drops it by 0.25.
+    const plain = fuzzyNameScore('fernanro', 'fernando') // lev 1, not a gender pair
+    expect(plain).toBeCloseTo(0.78, 5)
+    const gendered = fuzzyNameScore('fernando', 'fernanda')
+    expect(gendered).toBeCloseTo(0.53, 5)
+    expect(gendered).toBeLessThan(plain)
+    // Below the 0.6·name discovery contribution needed to clear the 0.5 bar alone.
+    expect(0.6 * gendered).toBeLessThan(0.5)
+  })
+})
+
+describe('isOppositeGenderSpanishPair', () => {
+  it('flags single-token a↔o pairs', () => {
+    expect(isOppositeGenderSpanishPair('fernando', 'fernanda')).toBe(true)
+    expect(isOppositeGenderSpanishPair('sergio', 'sergia')).toBe(true)
+    expect(isOppositeGenderSpanishPair('mario', 'maria')).toBe(true)
+  })
+  it('flags the swap inside an otherwise-identical full name', () => {
+    expect(isOppositeGenderSpanishPair('fernando garcia', 'fernanda garcia')).toBe(true)
+  })
+  it('does not flag genuine typos or unrelated names', () => {
+    expect(isOppositeGenderSpanishPair('sebastian', 'sebastan')).toBe(false) // dropped letter, not a/o
+    expect(isOppositeGenderSpanishPair('carlos', 'carlas')).toBe(false) // ends s, not a/o
+    expect(isOppositeGenderSpanishPair('ana', 'ano')).toBe(true) // short but valid a/o swap
+    expect(isOppositeGenderSpanishPair('fernando lopez', 'fernanda garcia')).toBe(false) // two tokens differ
   })
 })

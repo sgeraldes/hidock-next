@@ -35,6 +35,7 @@ export {
   isGenericSpeakerLabel,
   levenshtein,
   fuzzyNameScore,
+  isOppositeGenderSpanishPair,
 } from './entity-normalize'
 
 export interface ResolveContext {

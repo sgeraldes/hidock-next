@@ -161,6 +161,26 @@ describe('identity-discovery — contacts', () => {
     expect(Number(suggestions()[0].confidence)).toBeGreaterThanOrEqual(0.95)
   })
 
+  it('does not suggest an opposite-gender Spanish pair on name alone', () => {
+    // Fernando/Fernanda share a name bucket and are an edit-distance-1 match, but the
+    // gender penalty keeps the name-only composite under the suggestion threshold.
+    addContact('c-fo', 'Fernando', { meetings: 2 })
+    addContact('c-fa', 'Fernanda', { meetings: 2 })
+
+    const res = discoverContactMerges()
+    expect(res.candidatePairs).toBeGreaterThanOrEqual(1)
+    expect(res.suggestionsCreated).toBe(0)
+  })
+
+  it('still suggests an opposite-gender pair when a shared email corroborates it', () => {
+    addContact('c-fo', 'Fernando', { email: 'f.pair@dfx5.com', meetings: 2 })
+    addContact('c-fa', 'Fernanda', { email: 'f.pair@dfx5.com', meetings: 1 })
+
+    const res = discoverContactMerges()
+    expect(res.suggestionsCreated).toBe(1)
+    expect(JSON.parse(suggestions()[0].evidence).emailMatch).toBe('exact')
+  })
+
   it('does not pair clearly-unrelated names (no shared bucket)', () => {
     addContact('c-alice', 'Alice Johnson', { role: 'Designer', meetings: 3 })
     addContact('c-bob', 'Bob Smith', { role: 'Engineer', meetings: 3 })

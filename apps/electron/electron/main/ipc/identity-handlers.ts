@@ -16,14 +16,21 @@ import {
   rejectIdentitySuggestion,
   getMergeJournal,
   getMergeImpact,
+  getMentionSnippets,
   IdentitySuggestion,
-  MergeJournalEntry
+  AcceptSuggestionResult,
+  MergeJournalEntry,
+  MentionResult
 } from '../services/database'
 import { discoverContactMerges, discoverProjectMerges, DiscoveryResult } from '../services/identity-discovery'
 import { success, error, Result } from '../types/api'
 
 const StatusSchema = z.enum(['pending', 'accepted', 'rejected'])
 const IdSchema = z.string().min(1).max(200)
+const MentionSnippetsRequestSchema = z.object({
+  name: z.string().min(1).max(200),
+  limit: z.number().int().min(1).max(10).optional()
+})
 const KindSchema = z.enum(['contact', 'project'])
 const MergeJournalRequestSchema = z.object({ kind: KindSchema, keeperId: IdSchema })
 const MergeImpactRequestSchema = z.object({ kind: KindSchema, keeperId: IdSchema, loserId: IdSchema })
@@ -52,7 +59,7 @@ export function registerIdentityHandlers(): void {
   /**
    * Accept a suggestion: alias + link the pairing, mark accepted.
    */
-  ipcMain.handle('identity:acceptSuggestion', async (_, id: unknown): Promise<Result<IdentitySuggestion>> => {
+  ipcMain.handle('identity:acceptSuggestion', async (_, id: unknown): Promise<Result<AcceptSuggestionResult>> => {
     try {
       const parsed = IdSchema.safeParse(id)
       if (!parsed.success) {
@@ -78,6 +85,24 @@ export function registerIdentityHandlers(): void {
     } catch (err) {
       console.error('identity:rejectSuggestion error:', err)
       return error('DATABASE_ERROR', 'Failed to reject identity suggestion', err)
+    }
+  })
+
+  /**
+   * Primary-source evidence for a name: transcript excerpts where it literally
+   * occurs, plus every recording id that contains it (so the renderer can detect
+   * two names co-occurring in one conversation). { name, limit? }.
+   */
+  ipcMain.handle('identity:getMentionSnippets', async (_, request?: unknown): Promise<Result<MentionResult>> => {
+    try {
+      const parsed = MentionSnippetsRequestSchema.safeParse(request)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid mention snippets request', parsed.error.format())
+      }
+      return success(getMentionSnippets(parsed.data.name, parsed.data.limit ?? 2))
+    } catch (err) {
+      console.error('identity:getMentionSnippets error:', err)
+      return error('DATABASE_ERROR', 'Failed to fetch mention snippets', err)
     }
   })
 

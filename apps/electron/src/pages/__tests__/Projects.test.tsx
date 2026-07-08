@@ -336,8 +336,9 @@ describe('Projects Page', () => {
       </MemoryRouter>
     )
 
-    // The project-kind suggestion is rendered (candidate name is wrapped in typographic quotes)...
-    expect(await screen.findByText(/ProjectCandidate/)).toBeInTheDocument()
+    // The project-kind suggestion is rendered (its name appears on the profile chip
+    // and in the "becomes an alias" survivor line)...
+    expect((await screen.findAllByText(/ProjectCandidate/)).length).toBeGreaterThan(0)
     // ...while the person-kind suggestion is filtered out.
     expect(screen.queryByText(/PersonCandidate/)).not.toBeInTheDocument()
   })

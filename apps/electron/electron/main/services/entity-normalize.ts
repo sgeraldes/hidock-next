@@ -62,23 +62,68 @@ function sharesWord(a: string, b: string): boolean {
   return aw.some((w) => bw.includes(w))
 }
 
+/** How much an opposite-gender Spanish name pair is docked from its fuzzy score. */
+const GENDER_PAIR_PENALTY = 0.25
+
+/** True when two ≥3-char tokens are identical but for a final a↔o (Sergio/Sergia). */
+function isGenderVowelSwap(a: string, b: string): boolean {
+  if (a.length !== b.length || a.length < 3) return false
+  const al = a[a.length - 1]
+  const bl = b[b.length - 1]
+  const swapped = (al === 'a' && bl === 'o') || (al === 'o' && bl === 'a')
+  return swapped && a.slice(0, -1) === b.slice(0, -1)
+}
+
+/**
+ * Two normalized names that differ in exactly one token, where that token is an
+ * opposite-gender Spanish pair (Fernando/Fernanda, Sergio/Sergia, and the same
+ * swap inside an otherwise-identical full name). These read as a near-miss to a
+ * pure edit-distance check but are almost always *different people*, so callers
+ * dock the fuzzy score to keep them out of the auto-suggest band.
+ */
+export function isOppositeGenderSpanishPair(aNorm: string, bNorm: string): boolean {
+  if (!aNorm || !bNorm) return false
+  const at = aNorm.split(' ')
+  const bt = bNorm.split(' ')
+  if (at.length !== bt.length) return false
+  let diffs = 0
+  let gendered = false
+  for (let i = 0; i < at.length; i++) {
+    if (at[i] === bt[i]) continue
+    if (++diffs > 1) return false
+    gendered = isGenderVowelSwap(at[i], bt[i])
+  }
+  return diffs === 1 && gendered
+}
+
 /**
  * Fuzzy similarity of two already-normalized names, returning a base confidence
  * in the 0.6–0.8 band (0 = not a fuzzy match). Rules (INTELLIGENCE.md §2):
  * Levenshtein ≤2, or a prefix/contained-word overlap on the normalized names.
  * The caller adds a context boost and applies the tier thresholds.
+ *
+ * Opposite-gender Spanish pairs (Fernando/Fernanda) match by edit distance but
+ * are docked {@link GENDER_PAIR_PENALTY} so they fall below the suggestion bar
+ * unless another signal (email/graph) independently corroborates the pairing.
  */
 export function fuzzyNameScore(aNorm: string, bNorm: string): number {
   if (!aNorm || !bNorm) return 0
-  if (aNorm === bNorm) return 0.8
 
-  const dist = levenshtein(aNorm, bNorm)
-  if (dist === 1) return 0.78
-  if (dist === 2) return 0.7
+  let score: number
+  if (aNorm === bNorm) {
+    score = 0.8
+  } else {
+    const dist = levenshtein(aNorm, bNorm)
+    const minLen = Math.min(aNorm.length, bNorm.length)
+    if (dist === 1) score = 0.78
+    else if (dist === 2) score = 0.7
+    else if (minLen >= 3 && (aNorm.startsWith(bNorm) || bNorm.startsWith(aNorm))) score = 0.68
+    else if (sharesWord(aNorm, bNorm)) score = 0.62
+    else return 0
+  }
 
-  const minLen = Math.min(aNorm.length, bNorm.length)
-  if (minLen >= 3 && (aNorm.startsWith(bNorm) || bNorm.startsWith(aNorm))) return 0.68
-  if (sharesWord(aNorm, bNorm)) return 0.62
-
-  return 0
+  if (isOppositeGenderSpanishPair(aNorm, bNorm)) {
+    score = Math.max(0, score - GENDER_PAIR_PENALTY)
+  }
+  return score
 }

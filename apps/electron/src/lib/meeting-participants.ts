@@ -97,6 +97,16 @@ export function useMeetingParticipants(meetingId: string | null | undefined): {
   return { participants, loading }
 }
 
+/**
+ * Synchronous read of the participant cache — for callers (e.g. a hover-card
+ * suppression pre-check) that must decide *before* mounting whether known
+ * participants exist. Returns undefined when the meeting hasn't been fetched yet
+ * (unknown), and an array (possibly empty) once a fetch has resolved.
+ */
+export function getCachedMeetingParticipants(meetingId: string | null | undefined): Contact[] | undefined {
+  return meetingId ? cache.get(meetingId) : undefined
+}
+
 /** First name (or email fallback) for a compact participant label. */
 export function participantFirstName(contact: Contact): string {
   const source = (contact.name || contact.email || '').trim()

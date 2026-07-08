@@ -771,7 +771,7 @@ export function PersonDetail() {
                             </Card>
                           </HoverCardTrigger>
                           <HoverCardContent>
-                            <MeetingHoverCard id={meeting.id} name={meeting.subject} />
+                            <MeetingHoverCard id={meeting.id} name={meeting.subject} visibleFields={['title', 'time']} />
                           </HoverCardContent>
                         </HoverCard>
                       ))

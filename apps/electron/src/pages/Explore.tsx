@@ -400,7 +400,7 @@ export function Explore() {
                             </Card>
                           </HoverCardTrigger>
                           <HoverCardContent>
-                            <PersonHoverCard id={p.id} name={p.name || ''} />
+                            <PersonHoverCard id={p.id} name={p.name || ''} visibleFields={['name', 'type']} />
                           </HoverCardContent>
                         </HoverCard>
                       ))}
@@ -442,7 +442,7 @@ export function Explore() {
                             </Card>
                           </HoverCardTrigger>
                           <HoverCardContent>
-                            <ProjectHoverCard id={pr.id} name={pr.name || ''} />
+                            <ProjectHoverCard id={pr.id} name={pr.name || ''} visibleFields={['name', 'status']} />
                           </HoverCardContent>
                         </HoverCard>
                       ))}

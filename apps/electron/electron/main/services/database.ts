@@ -2737,6 +2737,77 @@ export function searchTranscripts(query: string): Transcript[] {
   )
 }
 
+/** One transcript excerpt where a name literally occurs — the primary source a
+ *  reviewer reads to decide identity. */
+export interface MentionSnippet {
+  recordingId: string
+  title: string
+  date: string | null
+  snippet: string
+}
+
+/** Result of {@link getMentionSnippets}: capped excerpts + the FULL set of recording
+ *  ids whose transcript contains the name (so co-presence can be intersected exactly). */
+export interface MentionResult {
+  snippets: MentionSnippet[]
+  recordingIds: string[]
+}
+
+/** Collapse whitespace and cut a ~`radius`-char window around the first case-insensitive
+ *  hit of `name`, adding ellipses. Falls back to the head of the text if no hit. */
+export function extractSnippet(text: string, name: string, radius = 60): string {
+  const clean = (text || '').replace(/\s+/g, ' ').trim()
+  if (!clean) return ''
+  const idx = clean.toLowerCase().indexOf(name.trim().toLowerCase())
+  if (idx < 0) {
+    return clean.length > radius * 2 ? clean.slice(0, radius * 2) + '…' : clean
+  }
+  const start = Math.max(0, idx - radius)
+  const end = Math.min(clean.length, idx + name.trim().length + radius)
+  return (start > 0 ? '…' : '') + clean.slice(start, end) + (end < clean.length ? '…' : '')
+}
+
+/**
+ * Primary-source evidence for a candidate name: transcript excerpts where the name
+ * literally occurs (capped at `limit`, newest first) plus the full set of recording
+ * ids that contain it. LIKE wildcards in the name are escaped ({@link escapeLikePattern}).
+ * The renderer intersects two names' `recordingIds` to detect co-presence (both names
+ * in one conversation → likely different people).
+ */
+export function getMentionSnippets(name: string, limit = 2): MentionResult {
+  const trimmed = (name || '').trim()
+  if (!trimmed) return { snippets: [], recordingIds: [] }
+  const pattern = `%${escapeLikePattern(trimmed)}%`
+
+  const idRows = queryAll<{ recording_id: string }>(
+    `SELECT recording_id FROM transcripts WHERE full_text LIKE ? ESCAPE '\\'`,
+    [pattern]
+  )
+  const recordingIds = idRows.map((r) => r.recording_id)
+
+  const cap = Math.max(1, Math.min(Math.floor(limit) || 2, 10))
+  const rows = queryAll<{ recording_id: string; full_text: string; title: string | null; date: string | null }>(
+    `SELECT t.recording_id AS recording_id, t.full_text AS full_text,
+            COALESCE(t.title_suggestion, m.subject, r.filename) AS title,
+            r.date_recorded AS date
+       FROM transcripts t
+       JOIN recordings r ON r.id = t.recording_id
+       LEFT JOIN meetings m ON m.id = r.meeting_id
+      WHERE t.full_text LIKE ? ESCAPE '\\'
+      ORDER BY r.date_recorded DESC
+      LIMIT ?`,
+    [pattern, cap]
+  )
+
+  const snippets = rows.map((row) => ({
+    recordingId: row.recording_id,
+    title: row.title ?? 'Untitled recording',
+    date: row.date,
+    snippet: extractSnippet(row.full_text, trimmed)
+  }))
+  return { snippets, recordingIds }
+}
+
 // Embedding queries
 export interface Embedding {
   id: string
@@ -4617,27 +4688,116 @@ export function getIdentitySuggestions(status?: 'pending' | 'accepted' | 'reject
   return queryAll<IdentitySuggestion>('SELECT * FROM identity_suggestions ORDER BY confidence DESC, created_at DESC')
 }
 
+/** Outcome of accepting a suggestion — the row plus undo/cascade metadata. */
+export interface AcceptSuggestionResult extends IdentitySuggestion {
+  /** merge_journal id when the accept merged two existing entities (undo handle); null for alias-only accepts. */
+  mergeJournalId: string | null
+  /** How many other pending suggestions were auto-rejected because the merge deleted their loser/keeper. */
+  supersededCount: number
+}
+
+/** Every merge_journal id for a keeper — snapshot before a merge to spot the row it writes. */
+function mergeJournalIdsFor(kind: MergeKind, keeperId: string): Set<string> {
+  return new Set(
+    queryAll<{ id: string }>('SELECT id FROM merge_journal WHERE kind = ? AND keeper_id = ?', [kind, keeperId]).map(
+      (r) => r.id
+    )
+  )
+}
+
 /**
- * Accept an identity suggestion: write the candidate name as a 'manual' alias
- * (confidence 1.0) of the target entity and perform the link — for a person,
- * attach to the evidence.meetingId meeting; for a project, tag that meeting.
- * Sets the suggestion status to 'accepted'. One transaction.
+ * Auto-reject the OTHER pending suggestions a just-completed merge rendered moot:
+ * any suggestion that targets the now-deleted `loserId` (its keeper is gone) or
+ * proposes merging that same loser again (evidence.loserId). Flips them to
+ * 'rejected' with evidence.superseded=true — a status change ONLY, never a
+ * rejected-alias block, so a legitimate future pairing is not poisoned. Excludes
+ * `exceptId` (the suggestion being accepted). Caller runs this inside a transaction.
+ */
+export function supersedeSuggestionsForMergedLoser(
+  kind: 'person' | 'project',
+  loserId: string,
+  exceptId: string
+): number {
+  const pending = queryAll<IdentitySuggestion>(
+    "SELECT * FROM identity_suggestions WHERE status = 'pending' AND kind = ? AND id != ?",
+    [kind, exceptId]
+  )
+  let superseded = 0
+  for (const s of pending) {
+    let ev: Record<string, unknown> = {}
+    try {
+      ev = s.evidence ? (JSON.parse(s.evidence) as Record<string, unknown>) : {}
+    } catch {
+      ev = {}
+    }
+    if (s.target_id !== loserId && ev.loserId !== loserId) continue
+    ev.superseded = true
+    runNoSave("UPDATE identity_suggestions SET status = 'rejected', evidence = ? WHERE id = ?", [
+      JSON.stringify(ev),
+      s.id
+    ])
+    superseded++
+  }
+  return superseded
+}
+
+/**
+ * Accept an identity suggestion. Two shapes:
+ *
+ *  - **Discovery** (evidence carries a `loserId` for a real, still-present entity):
+ *    the suggestion pairs two existing entities (keeper = `target_id`), so accepting
+ *    MERGES the loser into the keeper via {@link mergeContacts}/{@link mergeProjects}.
+ *    The merge writes a merge_journal row — its id is returned as `mergeJournalId`
+ *    so the UI can offer Undo — and any sibling suggestions the merge invalidated are
+ *    superseded ({@link supersedeSuggestionsForMergedLoser}).
+ *
+ *  - **Alias** (no resolvable loser — a raw mention): write `candidate_name` as a
+ *    'manual' alias (confidence 1.0) of the target and attach the evidence meeting.
+ *    `mergeJournalId` is null.
+ *
+ * Sets the suggestion status to 'accepted'.
  *
  * @throws if the suggestion does not exist.
  */
-export function acceptIdentitySuggestion(id: string): IdentitySuggestion {
-  return runInTransaction(() => {
-    const s = queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])
-    if (!s) throw new Error(`Identity suggestion ${id} not found`)
+export function acceptIdentitySuggestion(id: string): AcceptSuggestionResult {
+  const s = queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])
+  if (!s) throw new Error(`Identity suggestion ${id} not found`)
 
-    let meetingId: string | undefined
-    try {
-      const ev = s.evidence ? (JSON.parse(s.evidence) as { meetingId?: string }) : {}
-      meetingId = ev.meetingId
-    } catch {
-      // malformed evidence JSON — proceed without a meeting link
-    }
+  let evidence: { meetingId?: string; loserId?: string } = {}
+  try {
+    evidence = s.evidence ? JSON.parse(s.evidence) : {}
+  } catch {
+    // malformed evidence — treat as a bare alias accept
+  }
 
+  const jkind: MergeKind = s.kind === 'person' ? 'contact' : 'project'
+  const loserId = evidence.loserId
+  const table = s.kind === 'person' ? 'contacts' : 'projects'
+  const loserExists =
+    !!loserId &&
+    loserId !== s.target_id &&
+    !!queryOne<{ id: string }>(`SELECT id FROM ${table} WHERE id = ?`, [loserId])
+
+  if (loserExists) {
+    const before = mergeJournalIdsFor(jkind, s.target_id)
+    if (s.kind === 'person') mergeContacts(s.target_id, loserId!)
+    else mergeProjects(s.target_id, loserId!)
+    const after = queryAll<{ id: string }>(
+      'SELECT id FROM merge_journal WHERE kind = ? AND keeper_id = ? ORDER BY created_at DESC',
+      [jkind, s.target_id]
+    )
+    const mergeJournalId = after.find((r) => !before.has(r.id))?.id ?? null
+
+    const { row, supersededCount } = runInTransaction(() => {
+      const count = supersedeSuggestionsForMergedLoser(s.kind, loserId!, id)
+      runNoSave("UPDATE identity_suggestions SET status = 'accepted' WHERE id = ?", [id])
+      return { row: queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!, supersededCount: count }
+    })
+    return { ...row, mergeJournalId, supersededCount }
+  }
+
+  const row = runInTransaction(() => {
+    const meetingId = evidence.meetingId
     if (s.kind === 'person') {
       upsertContactAliasNoSave(s.target_id, s.candidate_name, 'manual', 1.0)
       if (meetingId) {
@@ -4657,10 +4817,10 @@ export function acceptIdentitySuggestion(id: string): IdentitySuggestion {
         ])
       }
     }
-
     runNoSave("UPDATE identity_suggestions SET status = 'accepted' WHERE id = ?", [id])
     return queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!
   })
+  return { ...row, mergeJournalId: null, supersededCount: 0 }
 }
 
 /**

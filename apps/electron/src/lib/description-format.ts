@@ -147,12 +147,29 @@ const SEPARATOR_ONLY_RE = /^[\s*_=~–—-]+$/
  * stripped of any leading bullet marker. Empty when nothing meaningful remains.
  */
 export function firstMeaningfulLine(description: string | null | undefined): string {
-  if (!description) return ''
+  return meaningfulDescriptionLines(description, 1)[0] ?? ''
+}
+
+/**
+ * The first {@link limit} human-meaningful lines of a description — the agenda
+ * summary a hover card shows instead of repeating the meeting title. Same
+ * meaningfulness filter as {@link firstMeaningfulLine} (skips separator/rule
+ * junk, strips leading bullet markers), just accumulating multiple lines.
+ */
+export function meaningfulDescriptionLines(
+  description: string | null | undefined,
+  limit = 4
+): string[] {
+  if (!description) return []
+  const out: string[] = []
   for (const line of normalizeDescriptionLines(description)) {
     const text = line.replace(/^-\s+/, '').trim()
-    if (text && !SEPARATOR_ONLY_RE.test(text)) return text
+    if (text && !SEPARATOR_ONLY_RE.test(text)) {
+      out.push(text)
+      if (out.length >= limit) break
+    }
   }
-  return ''
+  return out
 }
 
 // Known video-conferencing hosts whose links are worth surfacing as "Join".
