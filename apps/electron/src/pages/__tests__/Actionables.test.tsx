@@ -3,6 +3,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { Actionables } from '../Actionables'
 import { MemoryRouter } from 'react-router-dom'
+import { resetContactResolverCache } from '@/components/entity'
+
+const mockContactsGetAll = vi.fn().mockResolvedValue({
+  success: true,
+  data: { contacts: [{ id: 'c-alice', name: 'Alice', email: 'alice@example.com', type: 'team' }], total: 1 }
+})
 
 // Mock Electron API
 const mockGetAll = vi.fn().mockResolvedValue([
@@ -50,6 +56,7 @@ const mockGetByActionableId = vi.fn().mockResolvedValue({
 
 beforeEach(() => {
   vi.clearAllMocks()
+  resetContactResolverCache()
   global.window.electronAPI = {
     actionables: {
       getAll: mockGetAll,
@@ -60,6 +67,9 @@ beforeEach(() => {
       generate: vi.fn().mockResolvedValue({ success: true, data: { content: 'Test', templateId: 'meeting_minutes', generatedAt: new Date().toISOString() } }),
       copyToClipboard: mockCopyToClipboard,
       getByActionableId: mockGetByActionableId
+    },
+    contacts: {
+      getAll: mockContactsGetAll
     }
   } as any
 })
@@ -121,6 +131,26 @@ describe('Actionables Page', () => {
     // This is a unit test for the clipboard flow
     // The copyToClipboard function uses toast for success/failure
     expect(mockCopyToClipboard).not.toHaveBeenCalled()
+  })
+
+  // R2: suggested recipients resolve to a navigable person mention
+  it('should render suggested recipients as resolved person mentions', async () => {
+    render(
+      <MemoryRouter>
+        <Actionables />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Send meeting minutes')
+
+    // Reveal all statuses so the in_progress item (with a recipient) is visible.
+    fireEvent.click(screen.getByText('all'))
+    await waitFor(() => expect(screen.getByText('Interview feedback')).toBeInTheDocument())
+
+    // alice@example.com resolves (by email) to the contact "Alice", shown as a
+    // clickable person mention.
+    const mention = await screen.findByRole('button', { name: /open person alice/i })
+    expect(mention).toBeInTheDocument()
   })
 
   // C-ACT-M07: Error banner is positioned as a floating bar and only shows on generation error

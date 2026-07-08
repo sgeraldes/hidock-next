@@ -45,6 +45,8 @@ import {
   SelectContent,
   SelectItem
 } from '@/components/ui/select'
+import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { MeetingHoverCard } from '@/components/entity'
 import { formatDateTime } from '@/lib/utils'
 import type { Person, PersonType } from '@/types/knowledge'
 import type { Meeting } from '@/types'
@@ -597,22 +599,29 @@ export function PersonDetail() {
                       </div>
                     ) : (
                       meetings.map((meeting) => (
-                        <Card key={meeting.id} className="group hover:border-primary/30 transition-all cursor-pointer overflow-hidden shadow-sm" onClick={() => navigate(`/meeting/${meeting.id}`)}>
-                          <div className="flex items-stretch h-full">
-                            <div className="w-1 bg-muted group-hover:bg-primary transition-colors" />
-                            <div className="flex-1 p-4">
-                              <div className="flex items-start justify-between">
-                                <div>
-                                  <h3 className="text-sm font-semibold group-hover:text-primary transition-colors">{meeting.subject}</h3>
-                                  <p className="text-xs text-muted-foreground mt-1">
-                                    {formatDateTime(meeting.start_time)}
-                                  </p>
+                        <HoverCard key={meeting.id}>
+                          <HoverCardTrigger asChild>
+                            <Card className="group hover:border-primary/30 transition-all cursor-pointer overflow-hidden shadow-sm" onClick={() => navigate(`/meeting/${meeting.id}`)}>
+                              <div className="flex items-stretch h-full">
+                                <div className="w-1 bg-muted group-hover:bg-primary transition-colors" />
+                                <div className="flex-1 p-4">
+                                  <div className="flex items-start justify-between">
+                                    <div>
+                                      <h3 className="text-sm font-semibold group-hover:text-primary transition-colors">{meeting.subject}</h3>
+                                      <p className="text-xs text-muted-foreground mt-1">
+                                        {formatDateTime(meeting.start_time)}
+                                      </p>
+                                    </div>
+                                    <ExternalLink className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                                  </div>
                                 </div>
-                                <ExternalLink className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                               </div>
-                            </div>
-                          </div>
-                        </Card>
+                            </Card>
+                          </HoverCardTrigger>
+                          <HoverCardContent>
+                            <MeetingHoverCard id={meeting.id} name={meeting.subject} />
+                          </HoverCardContent>
+                        </HoverCard>
                       ))
                     )}
                   </div>

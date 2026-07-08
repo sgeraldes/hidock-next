@@ -21,6 +21,7 @@ import { MeetingActionables } from '@/components/MeetingActionables'
 import { useAudioControls } from '@/components/OperationController'
 import { useUIStore } from '@/store/useUIStore'
 import { toast } from '@/components/ui/toaster'
+import { EntityMention } from '@/components/entity'
 import type { MeetingDetails } from '@/types'
 
 const ATTENDEES_COLLAPSED_LIMIT = 8
@@ -467,12 +468,16 @@ export function MeetingDetail() {
                       </span>
                     )}
                   </p>
-                  <p className="text-sm text-muted-foreground">
-                    {durationMins} minutes
+                  <p className="text-sm text-muted-foreground flex items-center gap-1.5 flex-wrap">
+                    <span>{durationMins} minutes</span>
                     {isValidDate && (
                       <>
-                        {' \u00b7 '}
-                        {safeFormatDate(startDate, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                        <span aria-hidden>{'\u00b7'}</span>
+                        <EntityMention
+                          type="date"
+                          date={meeting.start_time}
+                          name={safeFormatDate(startDate, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                        />
                       </>
                     )}
                   </p>

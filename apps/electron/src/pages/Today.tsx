@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { EntityMention } from '@/components/entity'
 import { cn } from '@/lib/utils'
 
 interface BriefingMeeting {
@@ -311,14 +312,25 @@ export function Today() {
               ) : (
                 <div className="space-y-2">
                   {data.recentKnowledge.map((k) => (
-                    <button
+                    <div
                       key={k.recordingId}
-                      onClick={() => navigate('/library', { state: { selectedId: k.recordingId } })}
-                      className="w-full rounded-lg border p-3 text-left hover:bg-muted/50 transition-colors"
+                      className="w-full rounded-lg border p-3 hover:bg-muted/50 transition-colors flex items-center justify-between gap-3"
                     >
-                      <div className="text-sm font-medium truncate">{k.title}</div>
-                      <div className="text-xs text-muted-foreground">{formatDay(k.dateRecorded)}</div>
-                    </button>
+                      <button
+                        onClick={() => navigate('/library', { state: { selectedId: k.recordingId } })}
+                        className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+                      >
+                        <div className="text-sm font-medium truncate">{k.title}</div>
+                      </button>
+                      {k.dateRecorded && (
+                        <EntityMention
+                          type="date"
+                          date={k.dateRecorded}
+                          name={formatDay(k.dateRecorded)}
+                          className="shrink-0"
+                        />
+                      )}
+                    </div>
                   ))}
                 </div>
               )}

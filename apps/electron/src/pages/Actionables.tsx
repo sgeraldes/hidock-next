@@ -31,6 +31,7 @@ import {
 } from '@/components/ui/dialog'
 import { cn, formatDateTime } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
+import { EntityMention, useContactResolver } from '@/components/entity'
 import type { Actionable, ActionableStatus } from '@/types/knowledge'
 import type { OutputTemplateId } from '@/types'
 
@@ -67,6 +68,7 @@ const PAGE_SIZE = 20
 export function Actionables() {
   const location = useLocation()
   const navigate = useNavigate()
+  const { resolveRecipient } = useContactResolver()
   const [actionables, setActionables] = useState<Actionable[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState<ActionableStatus | 'all'>('pending')
@@ -446,9 +448,19 @@ export function Actionables() {
                             </div>
                           )}
                           {actionable.suggestedRecipients.length > 0 && (
-                            <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-medium bg-muted/50 px-2 py-0.5 rounded-full">
-                              <Users className="h-3 w-3" />
-                              <span>{actionable.suggestedRecipients.length} recipients</span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <Users className="h-3 w-3 text-muted-foreground" />
+                              {actionable.suggestedRecipients.map((recipient, ri) => {
+                                const contact = resolveRecipient(recipient)
+                                return (
+                                  <EntityMention
+                                    key={`${recipient}-${ri}`}
+                                    type="person"
+                                    id={contact?.id}
+                                    name={contact?.name || recipient}
+                                  />
+                                )
+                              })}
                             </div>
                           )}
                         </div>

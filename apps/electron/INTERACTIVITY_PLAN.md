@@ -85,7 +85,10 @@ Canonical entity + id-based mentions:
 - [x] Round 1a — backend (commit 774c4904; migration v25 verified live)
 - [x] Round 1b — UI (commit 2c2c54a8; speaker popover VERIFIED LIVE — 329
       speaker buttons on Rec43, popover lists full contact roster)
-- [~] Round 2 — mentions everywhere (agent r2-entity-mentions running)
+- [x] Round 2 — mentions everywhere (primitives: badge, hover-card; `<EntityMention>` +
+      person/project/meeting hover cards; `useContactResolver`; wired into KnowledgeGraph,
+      Chat source chips, Actionables recipients, Projects members, Today dates,
+      MeetingDetail date-mention, Explore result cards, PersonDetail timeline)
 - [ ] Round 3 — deep editability
 - [ ] Enhancement queue: accent/diacritic-normalized auto-merge (Oscar=Óscar
       safe); diminutive suggestions (Sebas→Sebastián) as UI hints, never auto.

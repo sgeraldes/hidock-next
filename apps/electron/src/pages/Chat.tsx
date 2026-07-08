@@ -45,6 +45,8 @@ import {
 } from '@/components/ui/alert-dialog'
 import { toast } from '@/components/ui/toaster'
 import { ContextPicker } from '@/components/ContextPicker'
+import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { MeetingHoverCard } from '@/components/entity'
 import { cn, getRelativeTime } from '@/lib/utils'
 import type { Message, Conversation, KnowledgeCapture } from '@/types/knowledge'
 
@@ -1207,17 +1209,43 @@ export function Chat() {
                       {/* Sources for AI responses */}
                       {message.role === 'assistant' && msgSources.length > 0 && (
                         <div className="flex flex-wrap gap-2 mt-1">
-                          {msgSources.slice(0, 3).map((source, idx) => (
-                            <div
-                              key={idx}
-                              className="group/source relative"
-                            >
-                              <div className="flex items-center gap-1.5 text-[10px] px-2 py-1 bg-muted rounded-full border border-border/50 hover:bg-muted/80 cursor-default transition-colors">
+                          {msgSources.slice(0, 3).map((source, idx) => {
+                            const chipInner = (
+                              <>
                                 <FileText className="h-3 w-3 text-muted-foreground" />
                                 <span className="max-w-[120px] truncate">{source.subject || 'Reference'}</span>
+                              </>
+                            )
+                            // Sources with a meeting id deep-link to the meeting + show a
+                            // hover card; sources without one stay informational chips.
+                            if (source.meetingId) {
+                              return (
+                                <HoverCard key={idx}>
+                                  <HoverCardTrigger asChild>
+                                    <button
+                                      type="button"
+                                      onClick={() => navigate(`/meeting/${source.meetingId}`)}
+                                      aria-label={`Open meeting ${source.subject || 'Reference'}`}
+                                      className="flex items-center gap-1.5 text-[10px] px-2 py-1 bg-muted rounded-full border border-border/50 hover:bg-muted/80 hover:underline transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                    >
+                                      {chipInner}
+                                    </button>
+                                  </HoverCardTrigger>
+                                  <HoverCardContent>
+                                    <MeetingHoverCard id={source.meetingId} name={source.subject || 'Reference'} />
+                                  </HoverCardContent>
+                                </HoverCard>
+                              )
+                            }
+                            return (
+                              <div
+                                key={idx}
+                                className="flex items-center gap-1.5 text-[10px] px-2 py-1 bg-muted rounded-full border border-border/50 transition-colors"
+                              >
+                                {chipInner}
                               </div>
-                            </div>
-                          ))}
+                            )
+                          })}
                         </div>
                       )}
                     </div>

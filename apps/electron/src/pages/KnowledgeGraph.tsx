@@ -16,6 +16,34 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { toast } from '@/components/ui/toaster'
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/store/ui/useUIStore'
+import { EntityMention, useContactResolver } from '@/components/entity'
+
+/**
+ * Graph meeting nodes carry their meeting id + label under `props` (which may be
+ * a JSON string). Normalize both the legacy {meetingId,meetingLabel} shape and
+ * the raw GraphNode shape so mentions render a real label and navigable id.
+ */
+function normalizeGraphMeeting(m: {
+  meetingId?: string
+  meetingLabel?: string
+  date?: string
+  label?: string
+  props?: unknown
+}): { id?: string; label: string; date?: string } {
+  let props = m?.props as { meetingId?: string; date?: string } | undefined
+  if (typeof props === 'string') {
+    try {
+      props = JSON.parse(props)
+    } catch {
+      props = undefined
+    }
+  }
+  return {
+    id: m?.meetingId ?? props?.meetingId,
+    label: m?.meetingLabel ?? m?.label ?? props?.meetingId ?? 'Meeting',
+    date: m?.date ?? props?.date
+  }
+}
 
 // ---------- Types ----------------------------------------------------------
 
@@ -156,6 +184,7 @@ function StatsHeader({
 
 export function KnowledgeGraph() {
   const qaEnabled = useUIStore((s) => s.qaLogsEnabled)
+  const { resolveByName } = useContactResolver()
 
   // Stats
   const [stats, setStats] = useState<GraphStats | null>(null)
@@ -446,7 +475,9 @@ export function KnowledgeGraph() {
                       <tbody>
                         {attendeesResults.map((row, i) => (
                           <tr key={row.personId} className={cn('border-b last:border-0', i % 2 === 0 ? 'bg-background' : 'bg-muted/20')}>
-                            <td className="px-4 py-2.5 font-medium">{row.person}</td>
+                            <td className="px-4 py-2.5 font-medium">
+                              <EntityMention type="person" id={resolveByName(row.person)?.id} name={row.person} />
+                            </td>
                             <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{row.meetings}</td>
                           </tr>
                         ))}
@@ -498,7 +529,9 @@ export function KnowledgeGraph() {
                       <tbody>
                         {skillResults.map((row, i) => (
                           <tr key={row.personId} className={cn('border-b last:border-0', i % 2 === 0 ? 'bg-background' : 'bg-muted/20')}>
-                            <td className="px-4 py-2.5 font-medium">{row.person}</td>
+                            <td className="px-4 py-2.5 font-medium">
+                              <EntityMention type="person" id={resolveByName(row.person)?.id} name={row.person} />
+                            </td>
                             <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground font-mono">{row.weight.toFixed(2)}</td>
                           </tr>
                         ))}
@@ -540,8 +573,13 @@ export function KnowledgeGraph() {
                       {profileResult.personLabel.charAt(0).toUpperCase()}
                     </div>
                     <div>
-                      <p className="font-semibold">{profileResult.personLabel}</p>
-                      <p className="text-xs text-muted-foreground font-mono">{profileResult.personId}</p>
+                      <EntityMention
+                        type="person"
+                        id={resolveByName(profileResult.personLabel)?.id}
+                        name={profileResult.personLabel}
+                        className="text-sm"
+                      />
+                      <p className="text-xs text-muted-foreground font-mono mt-0.5">{profileResult.personId}</p>
                     </div>
                   </div>
 
@@ -555,16 +593,19 @@ export function KnowledgeGraph() {
                         <p className="text-xs text-muted-foreground">None</p>
                       ) : (
                         <ul className="space-y-1">
-                          {profileResult.meetings.map((m, i) => (
-                            <li key={m.meetingId ?? i} className="text-sm truncate text-foreground/80" title={m.meetingLabel}>
-                              {m.meetingLabel}
-                              {m.date && (
-                                <span className="ml-1 text-[10px] text-muted-foreground">
-                                  {new Date(m.date).toLocaleDateString()}
-                                </span>
-                              )}
-                            </li>
-                          ))}
+                          {profileResult.meetings.map((m, i) => {
+                            const mtg = normalizeGraphMeeting(m)
+                            return (
+                              <li key={mtg.id ?? i} className="flex items-center gap-1 text-sm">
+                                <EntityMention type="meeting" id={mtg.id} name={mtg.label} />
+                                {mtg.date && (
+                                  <span className="text-[10px] text-muted-foreground">
+                                    {new Date(mtg.date).toLocaleDateString()}
+                                  </span>
+                                )}
+                              </li>
+                            )
+                          })}
                         </ul>
                       )}
                     </div>
