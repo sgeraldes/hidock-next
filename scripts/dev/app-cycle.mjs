@@ -121,8 +121,47 @@ function cmdStop(flags) {
     // Confirm it's actually down.
     const stillUp = await isCdpUp()
     process.stdout.write(stillUp ? 'WARNING: CDP still reachable — a listener may have survived.\n' : 'Stopped: CDP no longer reachable.\n')
+    // ISSUE-16 prevention: on Windows the npm→electron-vite→electron.exe tree kill
+    // routinely leaks the Electron MAIN process, which keeps the HiDock USB claim
+    // and blocks every later connect. Verify and clean repo-scoped orphans.
+    const orphans = repoElectronOrphans()
+    if (orphans.length) {
+      process.stdout.write(`Electron orphans from THIS repo detected: ${orphans.map((o) => o.pid).join(', ')} — terminating.\n`)
+      terminateRepoOrphans(orphans)
+    } else {
+      process.stdout.write('No repo electron orphans.\n')
+    }
     process.exit(0)
   })()
+}
+
+// --- repo-scoped Electron orphan handling (ISSUE-16) ---------------------------
+// Only ever considers electron.exe whose executable path is INSIDE this repo's
+// node_modules — it is structurally incapable of touching any other process.
+const REPO_ELECTRON = path.resolve(path.join(import.meta.dirname, '..', '..', 'apps', 'electron', 'node_modules', 'electron', 'dist', 'electron.exe')).toLowerCase()
+
+function repoElectronOrphans() {
+  try {
+    const out = execFileSync('powershell', ['-NoProfile', '-Command',
+      "Get-Process electron -ErrorAction SilentlyContinue | Select-Object Id,Path | ConvertTo-Json -Compress"], { encoding: 'utf8' })
+    if (!out.trim()) return []
+    const rows = JSON.parse(out)
+    const list = Array.isArray(rows) ? rows : [rows]
+    return list
+      .filter((r) => r && r.Path && path.resolve(r.Path).toLowerCase() === REPO_ELECTRON)
+      .map((r) => ({ pid: r.Id }))
+  } catch { return [] }
+}
+
+function terminateRepoOrphans(orphans) {
+  for (const { pid } of orphans) {
+    try {
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      process.stdout.write(`  terminated ${pid}\n`)
+    } catch (e) {
+      process.stdout.write(`  ${pid}: ${(e.stdout || e.message || '').toString().trim()} (an IRP-stuck zombie needs a USB node reset)\n`)
+    }
+  }
 }
 
 async function cmdWait(flags) {
