@@ -166,6 +166,45 @@ describe('expandMeetingOccurrences', () => {
     expect(rows).toHaveLength(97)
   })
 
+  it('folds a materialized single-instance VEVENT into the RRULE slot (no twin)', () => {
+    // Some Outlook-published feeds emit a standalone VEVENT for a near-term
+    // occurrence (same UID, no RRULE, no RECURRENCE-ID) alongside the master's
+    // RRULE. That must yield ONE row for the slot, not a bare-uid twin next to
+    // the `uid::slot` occurrence.
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'BEGIN:VEVENT',
+      `UID:${DAILY_UID}`,
+      'SUMMARY:DEVOPs | Daily',
+      'DTSTART:20260701T220000Z',
+      'DTEND:20260701T223000Z',
+      'RRULE:FREQ=DAILY',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      `UID:${DAILY_UID}`,
+      'SUMMARY:DEVOPs | Daily (materialized)',
+      'DTSTART:20260708T220000Z',
+      'DTEND:20260708T223000Z',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n')
+
+    const rows = expandMeetingOccurrences(parseICS(ics), now)
+
+    // Exactly one row for the Jul-08 slot, keyed `uid::slot` (not a bare twin),
+    // and the materialized VEVENT's data wins for that slot.
+    const jul8 = rows.filter((r) => r.start_time === '2026-07-08T22:00:00.000Z')
+    expect(jul8).toHaveLength(1)
+    expect(jul8[0].id).toBe(`${DAILY_UID}::2026-07-08T22:00:00.000Z`)
+    expect(jul8[0].subject).toBe('DEVOPs | Daily (materialized)')
+    // The only bare-uid row is the master's own DTSTART occurrence (Jul 1).
+    const bare = rows.filter((r) => r.id === DAILY_UID)
+    expect(bare).toHaveLength(1)
+    expect(bare[0].start_time).toBe('2026-07-01T22:00:00.000Z')
+    // Replaced, not added — same count as the plain series.
+    expect(rows).toHaveLength(97)
+  })
+
   it('produces identical ids across two parses (stable identity → UPSERT)', () => {
     const first = expandMeetingOccurrences(parseICS(dailyIcs()), now)
     const second = expandMeetingOccurrences(parseICS(dailyIcs()), now)

@@ -18,6 +18,7 @@ import {
   run,
   runInTransaction,
   mergeContacts,
+  meetingBaseUid,
   insertIdentitySuggestion,
   getAllRecordingPreassignments,
   type RecordingPreassignment
@@ -681,12 +682,163 @@ export function mergeDuplicateContacts(): number {
   return removed
 }
 
+interface DuplicateMeetingRow {
+  id: string
+  subject: string
+  start_time: string
+  end_time: string
+  is_recurring: number
+  recurrence_rule?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+/**
+ * Choose which row in a duplicate meeting-occurrence group to keep. Preference:
+ *   1. has a linked recording (never orphan a recording's attribution)
+ *   2. bare-uid id (matches the sync-time remap's canonical target → convergence)
+ *   3. oldest created_at (the original record other rows may reference)
+ * Pure so the selection rules can be unit-tested without a database.
+ */
+export function pickKeeperMeeting<T extends { id: string; created_at?: string | null }>(
+  rows: T[],
+  linkedMeetingIds: Set<string> = new Set()
+): T {
+  const hasRec = (r: T) => linkedMeetingIds.has(r.id)
+  const isBare = (r: T) => !r.id.includes('::')
+  return [...rows].sort((a, b) => {
+    const ar = hasRec(a) ? 1 : 0
+    const br = hasRec(b) ? 1 : 0
+    if (ar !== br) return br - ar
+    const ab = isBare(a) ? 1 : 0
+    const bb = isBare(b) ? 1 : 0
+    if (ab !== bb) return bb - ab
+    const ac = a.created_at || ''
+    const bc = b.created_at || ''
+    if (ac !== bc) return ac < bc ? -1 : 1 // oldest first
+    return 0
+  })[0]
+}
+
+/**
+ * Collapse duplicate meeting rows that describe the SAME real occurrence of a
+ * recurring series. The recurrence-expansion rollout (commit 1e5125c6) changed
+ * the occurrence id scheme from a bare `uid` to `uid::slotISO`; for a series
+ * whose master DTSTART sits outside the expansion window, the stale
+ * pre-expansion bare-uid row and the new `uid::slotISO` row both survived, so the
+ * meeting appeared twice on the same slot.
+ *
+ * Rows group by base uid + start_time; any group with >1 row is a twin set. Keep
+ * the row with linked recordings (or the bare-uid / oldest row), repoint every
+ * child FK off the losers onto the keeper, refresh the keeper's content from the
+ * most recently synced row, then delete the losers. Idempotent — a second run
+ * finds no groups. sql.js does not enforce ON DELETE CASCADE, so child rows are
+ * repointed explicitly rather than relying on the foreign keys.
+ */
+export function mergeDuplicateMeetingOccurrences(): number {
+  const meetings = queryAll<DuplicateMeetingRow>(
+    `SELECT id, subject, start_time, end_time, is_recurring, recurrence_rule, created_at, updated_at FROM meetings`
+  )
+  if (meetings.length === 0) return 0
+
+  const groups = new Map<string, DuplicateMeetingRow[]>()
+  for (const m of meetings) {
+    const key = `${meetingBaseUid(m.id)} ${m.start_time}`
+    const list = groups.get(key)
+    if (list) list.push(m)
+    else groups.set(key, [m])
+  }
+  const dupGroups = [...groups.values()].filter((g) => g.length > 1)
+  if (dupGroups.length === 0) return 0
+
+  // Which meetings have a recording linked — drives keeper selection so a
+  // recording's meeting_id is never left pointing at a deleted row.
+  const linkedMeetingIds = new Set(
+    queryAll<{ meeting_id: string }>(
+      `SELECT DISTINCT meeting_id FROM recordings WHERE meeting_id IS NOT NULL`
+    ).map((r) => r.meeting_id)
+  )
+  // Some meeting-referencing tables are created lazily; skip any that don't exist
+  // yet rather than aborting the whole transaction.
+  const existingTables = new Set(
+    queryAll<{ name: string }>(`SELECT name FROM sqlite_master WHERE type = 'table'`).map((r) => r.name)
+  )
+
+  let mergedGroups = 0
+  let removedRows = 0
+
+  runInTransaction(() => {
+    for (const group of dupGroups) {
+      const keeper = pickKeeperMeeting(group, linkedMeetingIds)
+      const losers = group.filter((r) => r.id !== keeper.id)
+      if (losers.length === 0) continue
+
+      for (const loser of losers) {
+        // Plain meeting_id columns — straight repoint.
+        run(`UPDATE recordings SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])
+        if (existingTables.has('knowledge_captures')) {
+          run(`UPDATE knowledge_captures SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])
+        }
+        if (existingTables.has('follow_ups')) {
+          run(`UPDATE follow_ups SET scheduled_meeting_id = ? WHERE scheduled_meeting_id = ?`, [
+            keeper.id,
+            loser.id
+          ])
+        }
+        if (existingTables.has('recording_preassignments')) {
+          run(`UPDATE recording_preassignments SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])
+        }
+        // Composite-key link tables — move what won't collide, drop leftovers.
+        run(`UPDATE OR IGNORE meeting_contacts SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])
+        run(`DELETE FROM meeting_contacts WHERE meeting_id = ?`, [loser.id])
+        run(`UPDATE OR IGNORE meeting_projects SET meeting_id = ? WHERE meeting_id = ?`, [keeper.id, loser.id])
+        run(`DELETE FROM meeting_projects WHERE meeting_id = ?`, [loser.id])
+        run(`UPDATE OR IGNORE recording_meeting_candidates SET meeting_id = ? WHERE meeting_id = ?`, [
+          keeper.id,
+          loser.id
+        ])
+        run(`DELETE FROM recording_meeting_candidates WHERE meeting_id = ?`, [loser.id])
+      }
+
+      // Refresh the keeper's content from the most recently synced row in the
+      // group so the surviving row reflects the latest feed (a stale bare-uid row
+      // kept for its FKs otherwise shows pre-expansion subject / is_recurring).
+      const best = [...group].sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))[0]
+      if (best && best.id !== keeper.id) {
+        run(
+          `UPDATE meetings SET subject = ?, start_time = ?, end_time = ?, is_recurring = ?,
+             recurrence_rule = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [best.subject, best.start_time, best.end_time, best.is_recurring, best.recurrence_rule ?? null, keeper.id]
+        )
+      }
+
+      for (const loser of losers) {
+        run(`DELETE FROM meetings WHERE id = ?`, [loser.id])
+        removedRows++
+      }
+      mergedGroups++
+    }
+  })
+
+  if (mergedGroups > 0) {
+    console.log(
+      `[OrgReconciler] Merged ${mergedGroups} duplicate meeting-occurrence groups (removed ${removedRows} rows)`
+    )
+  }
+  return mergedGroups
+}
+
 /** Full reconciliation pass — run after calendar syncs and at startup. */
 export function reconcileOrganization(): void {
   try {
     repairEscapedMeetingText()
   } catch (e) {
     console.error('[OrgReconciler] text repair failed:', e)
+  }
+  try {
+    mergeDuplicateMeetingOccurrences()
+  } catch (e) {
+    console.error('[OrgReconciler] duplicate meeting-occurrence merge failed:', e)
   }
   try {
     mergeDuplicateRecordings()

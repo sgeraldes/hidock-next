@@ -2122,6 +2122,55 @@ export function runMany(sql: string, items: any[][]): void {
 }
 
 /**
+ * Base UID of a meeting occurrence id: `uid::slotISO` → `uid`; a bare `uid` is
+ * returned unchanged. Every occurrence of one recurring ICS series shares a base
+ * uid, so this is the family key used to reconcile occurrences across id schemes.
+ */
+export function meetingBaseUid(id: string): string {
+  const i = id.indexOf('::')
+  return i === -1 ? id : id.slice(0, i)
+}
+
+/**
+ * Remap incoming occurrence ids onto an existing canonical row that already
+ * describes the SAME real slot under a different id (same base uid + same
+ * start_time). This pins a recurring-series occurrence to the row already
+ * carrying its foreign keys (recordings.meeting_id, meeting_contacts,
+ * meeting_projects) instead of inserting an id-scheme twin.
+ *
+ * This is the sync-time half of the duplicate-occurrence fix: a stale
+ * pre-expansion bare-uid row (`uid`) and a new expanded row (`uid::slotISO`)
+ * describe the same meeting; without this remap, every sync would re-insert the
+ * `uid::slotISO` twin next to the bare-uid row the cleanup pass keeps.
+ *
+ * Pure: `existing` is a snapshot of {id, start_time}. An incoming id that already
+ * matches an existing row is left as-is (it will UPDATE that row in place).
+ * Exported for unit testing.
+ */
+export function remapOccurrenceIdsToExisting<T extends { id: string; start_time: string }>(
+  incoming: T[],
+  existing: Array<{ id: string; start_time: string }>
+): T[] {
+  const existingIds = new Set(existing.map((e) => e.id))
+  // (baseUid, start_time) → canonical existing id. Prefer a bare-uid row as the
+  // canonical target so this matches the cleanup keeper preference and converges.
+  const SEP = ' '
+  const canonicalBySlot = new Map<string, string>()
+  for (const e of existing) {
+    const key = meetingBaseUid(e.id) + SEP + e.start_time
+    const current = canonicalBySlot.get(key)
+    if (current === undefined || (current.includes('::') && !e.id.includes('::'))) {
+      canonicalBySlot.set(key, e.id)
+    }
+  }
+  return incoming.map((m) => {
+    if (existingIds.has(m.id)) return m
+    const canonical = canonicalBySlot.get(meetingBaseUid(m.id) + SEP + m.start_time)
+    return canonical && canonical !== m.id ? { ...m, id: canonical } : m
+  })
+}
+
+/**
  * Batch upsert multiple meetings atomically.
  * Used by calendar sync to ensure all-or-nothing behavior.
  * If any meeting fails to upsert, the entire batch is rolled back.
@@ -2129,8 +2178,15 @@ export function runMany(sql: string, items: any[][]): void {
 export function upsertMeetingsBatch(meetings: Omit<Meeting, 'created_at' | 'updated_at'>[]): void {
   if (meetings.length === 0) return
 
+  // Reconcile occurrence ids against existing rows so a recurring occurrence
+  // updates the row already holding its FKs rather than inserting a twin.
+  const existingSlots = queryAll<{ id: string; start_time: string }>(
+    'SELECT id, start_time FROM meetings'
+  )
+  const reconciled = remapOccurrenceIdsToExisting(meetings, existingSlots)
+
   runInTransaction(() => {
-    for (const meeting of meetings) {
+    for (const meeting of reconciled) {
       const existing = getMeetingById(meeting.id)
 
       if (existing) {
@@ -4855,6 +4911,36 @@ export function upsertContactAlias(contactId: string, aliasName: string, source:
      VALUES (?, ?, ?, ?, ?, ?)`,
     [randomUUID(), norm, contactId, source, confidence, new Date().toISOString()]
   )
+}
+
+/** A stored alias for a contact (the "Also known as" names folded onto a person). */
+export interface ContactAlias {
+  alias: string
+  source: AliasSource | null
+  confidence: number | null
+  created_at: string
+}
+
+/**
+ * Every "also known as" alias for a contact, newest first, excluding rejected
+ * ('Different person…') blocks — those are negative memory, not a name the
+ * person is known by. Backs identity:getAliases for the PersonDetail chip row.
+ * Returns [] if the table is absent (pre-v27 on-disk DB) rather than throwing.
+ */
+export function getContactAliases(contactId: string): ContactAlias[] {
+  const id = (contactId || '').trim()
+  if (!id) return []
+  try {
+    return queryAll<ContactAlias>(
+      `SELECT alias_norm AS alias, source, confidence, created_at
+         FROM contact_aliases
+        WHERE contact_id = ? AND (source IS NULL OR source <> 'rejected')
+        ORDER BY created_at DESC`,
+      [id]
+    )
+  } catch {
+    return []
+  }
 }
 
 /** Upsert a project alias, no auto-save (for use inside a transaction). */

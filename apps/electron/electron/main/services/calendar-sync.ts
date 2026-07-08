@@ -328,12 +328,19 @@ function occurrenceId(uid: string, slotMs: number, masterStartMs: number): strin
 /**
  * Expand a recurring master (plus its RECURRENCE-ID overrides and EXDATE
  * exclusions) into per-occurrence meeting rows within the sync window.
+ *
+ * `materializedInstances` are same-UID VEVENTs that carry neither an RRULE nor a
+ * RECURRENCE-ID — some Outlook-published ICS feeds emit a standalone VEVENT for a
+ * near-term occurrence *in addition* to the master's RRULE. They are folded into
+ * the per-slot map keyed on their DTSTART so a slot the RRULE already covers
+ * yields ONE row (preferring the materialized data), never a bare-uid twin.
  */
 function expandMaster(
   master: CalendarEvent,
   overrides: CalendarEvent[],
   windowStartMs: number,
-  windowEndMs: number
+  windowEndMs: number,
+  materializedInstances: CalendarEvent[] = []
 ): Omit<Meeting, 'created_at' | 'updated_at'>[] {
   const rows: Omit<Meeting, 'created_at' | 'updated_at'>[] = []
   const uid = master.uid
@@ -345,6 +352,13 @@ function expandMaster(
   const overrideBySlot = new Map<number, CalendarEvent>()
   for (const o of overrides) {
     if (o.recurrenceId) overrideBySlot.set(o.recurrenceId.getTime(), o)
+  }
+  // Materialized instances are keyed on their DTSTART. A RECURRENCE-ID override
+  // for the same slot always wins over a bare materialized instance.
+  const materializedBySlot = new Map<number, CalendarEvent>()
+  for (const mi of materializedInstances) {
+    const slot = mi.startTime.getTime()
+    if (!overrideBySlot.has(slot)) materializedBySlot.set(slot, mi)
   }
 
   // Returns the next occurrence instant, or null when the rule is exhausted.
@@ -376,6 +390,17 @@ function expandMaster(
         })
       )
     }
+    for (const [slot, mi] of materializedBySlot) {
+      rows.push(
+        buildMeetingRow(mi, {
+          id: occurrenceId(uid, slot, masterStartMs),
+          startTime: mi.startTime,
+          endTime: mi.endTime,
+          isRecurring: true,
+          recurrenceRule,
+        })
+      )
+    }
     return rows
   }
 
@@ -398,13 +423,27 @@ function expandMaster(
         capped = true
         break
       }
+      // Prefer a RECURRENCE-ID override, then a bare materialized instance, then
+      // the plain RRULE projection — so a slot described by several VEVENTs still
+      // yields exactly one row (the most specific data wins).
       const override = overrideBySlot.get(slotMs)
+      const materialized = materializedBySlot.get(slotMs)
       if (override) {
         rows.push(
           buildMeetingRow(override, {
             id: occurrenceId(uid, slotMs, masterStartMs),
             startTime: override.startTime,
             endTime: override.endTime,
+            isRecurring: true,
+            recurrenceRule,
+          })
+        )
+      } else if (materialized) {
+        rows.push(
+          buildMeetingRow(materialized, {
+            id: occurrenceId(uid, slotMs, masterStartMs),
+            startTime: materialized.startTime,
+            endTime: materialized.endTime,
             isRecurring: true,
             recurrenceRule,
           })
@@ -445,6 +484,26 @@ function expandMaster(
           recurrenceRule,
         })
       )
+      emittedSlots.add(slotMs)
+    }
+  }
+
+  // Materialized instances the iterator never landed on (their DTSTART is not on
+  // the RRULE cadence, or lies past the stepped range) still need a row when in
+  // window — keyed on their DTSTART so they dedupe with any RRULE slot.
+  for (const [slotMs, mi] of materializedBySlot) {
+    if (emittedSlots.has(slotMs)) continue
+    if (slotMs >= windowStartMs && slotMs <= windowEndMs && !exdateSet.has(slotMs)) {
+      rows.push(
+        buildMeetingRow(mi, {
+          id: occurrenceId(uid, slotMs, masterStartMs),
+          startTime: mi.startTime,
+          endTime: mi.endTime,
+          isRecurring: true,
+          recurrenceRule,
+        })
+      )
+      emittedSlots.add(slotMs)
     }
   }
 
@@ -490,14 +549,12 @@ export function expandMeetingOccurrences(
     }
 
     const overrides = group.filter((e) => e.recurrenceId)
-    rows.push(...expandMaster(master, overrides, windowStartMs, windowEndMs))
-
-    // Any stray same-uid events that are neither the master nor overrides are
-    // emitted unchanged so nothing is silently dropped.
-    for (const e of group) {
-      if (e === master || e.recurrenceId) continue
-      rows.push(calendarEventToMeetingRow(e))
-    }
+    // Same-uid VEVENTs that are neither the master nor RECURRENCE-ID overrides
+    // are materialized single-instance occurrences the feed emitted alongside the
+    // RRULE. Fold them into the expansion (keyed by slot) so they never produce a
+    // bare-uid twin of an occurrence the RRULE already covers.
+    const materializedInstances = group.filter((e) => e !== master && !e.recurrenceId)
+    rows.push(...expandMaster(master, overrides, windowStartMs, windowEndMs, materializedInstances))
   }
 
   return rows
