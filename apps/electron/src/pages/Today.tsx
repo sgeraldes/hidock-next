@@ -12,6 +12,8 @@ import {
   Terminal,
   Clock,
   BookOpen,
+  Video,
+  Mic,
   Settings as SettingsIcon
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -20,6 +22,11 @@ import { EntityMention } from '@/components/entity'
 import { TodayIdentitySuggestions } from '@/components/identity/TodayIdentitySuggestions'
 import { cn } from '@/lib/utils'
 import { fetchMeetingParticipants, participantFirstName } from '@/lib/meeting-participants'
+import {
+  classifyMeetingTimings,
+  formatMinutesLeft,
+  formatMinutesUntil
+} from '@/lib/meeting-timing'
 import type { Contact } from '@/types'
 
 const TODAY_PARTICIPANT_LIMIT = 4
@@ -30,7 +37,26 @@ interface BriefingMeeting {
   start_time: string
   end_time: string
   location?: string
+  description?: string
+  meeting_url?: string
   organizer_name?: string
+}
+
+/** A meeting is "online" when it carries a join URL or a Teams/Zoom-style location. */
+function isOnlineMeeting(m: BriefingMeeting): boolean {
+  if (m.meeting_url) return true
+  const loc = m.location?.toLowerCase() ?? ''
+  return /teams|zoom|meet\.google|webex|http/.test(loc)
+}
+
+/** First non-empty line of a description, for the row's secondary line. */
+function descriptionLead(description?: string): string {
+  if (!description) return ''
+  for (const line of description.replace(/\r\n?/g, '\n').split('\n')) {
+    const trimmed = line.replace(/^[*\-•·]\s*/, '').trim()
+    if (trimmed) return trimmed
+  }
+  return ''
 }
 
 interface BriefingRecentItem {
@@ -87,6 +113,15 @@ export function Today() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [participantsByMeeting, setParticipantsByMeeting] = useState<Record<string, Contact[]>>({})
+  const [recordingByMeeting, setRecordingByMeeting] = useState<Record<string, boolean>>({})
+  // Live clock so relative "in X min" badges and the next-meeting highlight stay
+  // accurate; ticks every 30s (WCAG reduced-motion is unaffected — it's data,
+  // not animation).
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 30_000)
+    return () => clearInterval(id)
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -128,6 +163,39 @@ export function Today() {
       cancelled = true
     }
   }, [todayMeetings])
+
+  // Whether each meeting already has a linked recording, so the row can show a
+  // "recorded" indicator. Tolerant of a missing/failing API (empty = no badge).
+  useEffect(() => {
+    if (!todayMeetings || todayMeetings.length === 0) {
+      setRecordingByMeeting({})
+      return
+    }
+    const getForMeeting = window.electronAPI?.recordings?.getForMeeting
+    if (!getForMeeting) {
+      setRecordingByMeeting({})
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      const entries = await Promise.all(
+        todayMeetings.map(async (m) => {
+          try {
+            const recs = await getForMeeting(m.id)
+            return [m.id, Array.isArray(recs) && recs.length > 0] as const
+          } catch {
+            return [m.id, false] as const
+          }
+        })
+      )
+      if (!cancelled) setRecordingByMeeting(Object.fromEntries(entries))
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [todayMeetings])
+
+  const timings = classifyMeetingTimings(data?.todayMeetings ?? [], now)
 
   const latest = data?.recentKnowledge[0]
 
@@ -193,27 +261,88 @@ export function Today() {
                   const people = participantsByMeeting[m.id] ?? []
                   const names = people.slice(0, TODAY_PARTICIPANT_LIMIT).map(participantFirstName)
                   const extra = people.length - names.length
+                  const timing = timings.get(m.id)
+                  const cancelled = timing?.state === 'cancelled'
+                  const past = timing?.state === 'past'
+                  const inProgress = timing?.state === 'in_progress'
+                  const upcoming = timing?.state === 'upcoming'
+                  const isFocus = timing?.isFocus ?? false
+                  const online = isOnlineMeeting(m)
+                  const hasRecording = recordingByMeeting[m.id]
+                  const dimmed = past || cancelled
+                  // Secondary line: participants, else description lead, else location.
+                  const secondary =
+                    names.length > 0
+                      ? `${names.join(', ')}${extra > 0 ? ` +${extra}` : ''}`
+                      : descriptionLead(m.description) || m.location || ''
                   return (
                     <button
                       key={m.id}
                       onClick={() => navigate(`/meeting/${m.id}`)}
-                      className="w-full flex items-center gap-3 rounded-lg border p-3 text-left hover:bg-muted/50 transition-colors"
+                      className={cn(
+                        'group w-full flex items-center gap-3 rounded-lg border p-3 text-left',
+                        'transition-all duration-150 ease-out hover:bg-muted/60 hover:shadow-sm hover:-translate-y-px',
+                        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                        (inProgress || isFocus) && 'border-primary/40 bg-primary/[0.04] ring-1 ring-primary/10',
+                        dimmed && 'opacity-60'
+                      )}
                     >
-                      <Clock className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                      <span className="text-sm font-medium w-24 flex-shrink-0">
+                      <Clock
+                        className={cn(
+                          'h-4 w-4 flex-shrink-0',
+                          inProgress || isFocus ? 'text-primary' : 'text-foreground/60'
+                        )}
+                      />
+                      <span
+                        className={cn(
+                          'text-sm font-medium w-24 flex-shrink-0 text-foreground/80',
+                          cancelled && 'line-through'
+                        )}
+                      >
                         {formatTime(m.start_time)}–{formatTime(m.end_time)}
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="text-sm truncate block">{m.subject}</span>
-                        {names.length > 0 && (
-                          <span className="text-xs text-muted-foreground truncate block">
-                            {names.join(', ')}
-                            {extra > 0 ? ` +${extra}` : ''}
+                        <span className="flex items-center gap-1.5">
+                          <span
+                            className={cn(
+                              'text-sm font-medium text-foreground truncate',
+                              cancelled && 'line-through text-foreground/70'
+                            )}
+                          >
+                            {m.subject}
                           </span>
+                          {online && (
+                            <Video
+                              className="h-3.5 w-3.5 text-foreground/50 flex-shrink-0"
+                              aria-label="Online meeting"
+                            />
+                          )}
+                          {hasRecording && (
+                            <Mic
+                              className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-500 flex-shrink-0"
+                              aria-label="Recording linked"
+                            />
+                          )}
+                        </span>
+                        {secondary && (
+                          <span className="text-xs text-foreground/60 truncate block">{secondary}</span>
                         )}
                       </span>
-                      {m.organizer_name && (
-                        <span className="text-xs text-muted-foreground truncate flex-shrink-0">{m.organizer_name}</span>
+                      {(inProgress || upcoming) && !cancelled && (
+                        <span
+                          className={cn(
+                            'text-xs whitespace-nowrap rounded-full px-2 py-0.5 flex-shrink-0',
+                            inProgress
+                              ? 'bg-primary/10 text-primary font-medium'
+                              : isFocus
+                                ? 'bg-primary/10 text-primary font-medium'
+                                : 'text-foreground/55'
+                          )}
+                        >
+                          {inProgress
+                            ? formatMinutesLeft(timing?.minutes ?? 0)
+                            : formatMinutesUntil(timing?.minutes ?? 0)}
+                        </span>
                       )}
                     </button>
                   )

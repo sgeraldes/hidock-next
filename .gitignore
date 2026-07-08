@@ -204,3 +204,6 @@ logs/security/
 
 # graphify knowledge-graph output (generated)
 graphify-out/
+
+# dev CDP toolkit — transient screenshot (scripts/dev/cdp.mjs screenshot)
+scripts/dev/.last-screenshot.png

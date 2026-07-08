@@ -1,9 +1,16 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Clock, MapPin, Users, Mic, FileText, Play, X, Edit, Check, Loader2, Link, Unlink, ChevronDown, ChevronUp, AlertCircle, Plus } from 'lucide-react'
-import { Button } from '@/components/ui/button'
+import { ArrowLeft, Clock, MapPin, Users, Mic, FileText, Play, X, Edit, Check, Loader2, Link, Unlink, ChevronDown, ChevronUp, AlertCircle, Plus, Video } from 'lucide-react'
+import { Button, buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { parseDescriptionBlocks, extractMeetingUrl, type DescToken } from '@/lib/description-format'
+import {
+  toDateInputValue,
+  toTimeInputValue,
+  combineDateTimeToISO,
+  diffMeetingTimes
+} from '@/lib/meeting-edit'
 import {
   Dialog,
   DialogContent,
@@ -13,7 +20,7 @@ import {
   DialogFooter,
   DialogClose
 } from '@/components/ui/dialog'
-import { formatDateTime, formatDuration } from '@/lib/utils'
+import { formatDateTime, formatDuration, cn } from '@/lib/utils'
 import { parseAttendees, parseJsonArray } from '@/types'
 import type { Contact } from '@/types'
 import { AudioPlayer } from '@/components/AudioPlayer'
@@ -57,6 +64,25 @@ function safeGetTimezoneName(date: Date): string {
   } catch {
     return ''
   }
+}
+
+/** Render a formatted description line's tokens, linkifying embedded URLs. */
+function renderTokens(tokens: DescToken[]): ReactNode {
+  return tokens.map((token, i) =>
+    token.kind === 'link' ? (
+      <a
+        key={i}
+        href={token.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-primary hover:underline [overflow-wrap:anywhere]"
+      >
+        {token.value}
+      </a>
+    ) : (
+      <span key={i}>{token.value}</span>
+    )
+  )
 }
 
 export function MeetingDetail() {
@@ -195,6 +221,17 @@ export function MeetingDetail() {
       if (editForm.organizer_email !== (details.meeting.organizer_email || '')) {
         updates.organizer_email = editForm.organizer_email || null
       }
+
+      // Date / start / end editing — diff by instant and validate end > start.
+      const timeDiff = diffMeetingTimes(
+        { start_time: details.meeting.start_time, end_time: details.meeting.end_time },
+        { start_time: editForm.start_time, end_time: editForm.end_time }
+      )
+      if (!timeDiff.ok) {
+        toast.error('Invalid time', timeDiff.error)
+        return
+      }
+      Object.assign(updates, timeDiff.updates)
 
       if (Object.keys(updates).length === 0) {
         setIsEditing(false)
@@ -395,6 +432,50 @@ export function MeetingDetail() {
 
   const { meeting, recordings } = details
   const attendees = parseAttendees(meeting.attendees)
+
+  // Join link: the dedicated field, else the first Teams/Zoom/Meet URL that a
+  // Teams invite embeds inside the description body.
+  const joinUrl = meeting.meeting_url || extractMeetingUrl(meeting.description)
+
+  // Parsed description blocks (bullets normalized, URLs linkified) for display.
+  const descriptionBlocks = parseDescriptionBlocks(meeting.description)
+
+  // Native date/time input values derived from the edit form's ISO strings.
+  const startDateValue = toDateInputValue(editForm.start_time)
+  const startTimeValue = toTimeInputValue(editForm.start_time)
+  const endTimeValue = toTimeInputValue(editForm.end_time)
+
+  // Apply a changed date to both start and end (meetings are same-day here).
+  const handleDateChange = (value: string) => {
+    setEditForm((prev) => ({
+      ...prev,
+      start_time: combineDateTimeToISO(value, toTimeInputValue(prev.start_time)) || prev.start_time,
+      end_time: combineDateTimeToISO(value, toTimeInputValue(prev.end_time)) || prev.end_time
+    }))
+  }
+  const handleStartTimeChange = (value: string) => {
+    setEditForm((prev) => ({
+      ...prev,
+      start_time: combineDateTimeToISO(toDateInputValue(prev.start_time), value) || prev.start_time
+    }))
+  }
+  const handleEndTimeChange = (value: string) => {
+    setEditForm((prev) => ({
+      ...prev,
+      end_time:
+        combineDateTimeToISO(toDateInputValue(prev.end_time) || toDateInputValue(prev.start_time), value) ||
+        prev.end_time
+    }))
+  }
+
+  // Live duration from the edit form so the user sees it update as they type.
+  const editStartMs = new Date(editForm.start_time).getTime()
+  const editEndMs = new Date(editForm.end_time).getTime()
+  const editDurationMins =
+    Number.isFinite(editStartMs) && Number.isFinite(editEndMs)
+      ? Math.round((editEndMs - editStartMs) / 60000)
+      : 0
+
   const startDate = new Date(meeting.start_time)
   const endDate = new Date(meeting.end_time)
   // C-MTG-005: Guard against invalid dates producing NaN
@@ -426,6 +507,17 @@ export function MeetingDetail() {
           <p className="text-sm text-muted-foreground">{formatDateTime(meeting.start_time)}</p>
         </div>
         <div className="flex items-center gap-2">
+          {!isEditing && joinUrl && (
+            <a
+              href={joinUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={cn(buttonVariants({ size: 'sm', variant: 'default' }))}
+            >
+              <Video className="h-4 w-4 mr-2" />
+              Join meeting
+            </a>
+          )}
           {isEditing ? (
             <>
               <Button size="sm" variant="default" onClick={handleSaveEdit}>
@@ -455,33 +547,73 @@ export function MeetingDetail() {
               <CardTitle className="text-lg">Meeting Details</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="flex items-center gap-3">
-                <Clock className="h-5 w-5 text-muted-foreground" />
-                <div>
-                  {/* C-MTG-003: Timezone-aware time display using safe formatters */}
-                  <p className="font-medium">
-                    {safeFormatTime(startDate, { hour: '2-digit', minute: '2-digit' })} -{' '}
-                    {safeFormatTime(endDate, { hour: '2-digit', minute: '2-digit' })}
-                    {isValidDate && (
-                      <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                        {safeGetTimezoneName(startDate)}
-                      </span>
-                    )}
-                  </p>
-                  <p className="text-sm text-muted-foreground flex items-center gap-1.5 flex-wrap">
-                    <span>{durationMins} minutes</span>
-                    {isValidDate && (
-                      <>
-                        <span aria-hidden>{'\u00b7'}</span>
-                        <EntityMention
+              <div className="flex items-start gap-3">
+                <Clock className="h-5 w-5 text-muted-foreground mt-0.5" />
+                {isEditing ? (
+                  <div className="flex-1 space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                        Date
+                        <Input
                           type="date"
-                          date={meeting.start_time}
-                          name={safeFormatDate(startDate, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                          value={startDateValue}
+                          onChange={(e) => handleDateChange(e.target.value)}
+                          aria-label="Meeting date"
+                          className="w-40 h-8"
                         />
-                      </>
-                    )}
-                  </p>
-                </div>
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                        Start
+                        <Input
+                          type="time"
+                          value={startTimeValue}
+                          onChange={(e) => handleStartTimeChange(e.target.value)}
+                          aria-label="Start time"
+                          className="w-28 h-8"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                        End
+                        <Input
+                          type="time"
+                          value={endTimeValue}
+                          onChange={(e) => handleEndTimeChange(e.target.value)}
+                          aria-label="End time"
+                          className="w-28 h-8"
+                        />
+                      </label>
+                    </div>
+                    <p className={cn('text-xs', editDurationMins > 0 ? 'text-muted-foreground' : 'text-destructive')}>
+                      {editDurationMins > 0 ? `${editDurationMins} minutes` : 'End time must be after start time'}
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    {/* C-MTG-003: Timezone-aware time display using safe formatters */}
+                    <p className="font-medium">
+                      {safeFormatTime(startDate, { hour: '2-digit', minute: '2-digit' })} -{' '}
+                      {safeFormatTime(endDate, { hour: '2-digit', minute: '2-digit' })}
+                      {isValidDate && (
+                        <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                          {safeGetTimezoneName(startDate)}
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-sm text-muted-foreground flex items-center gap-1.5 flex-wrap">
+                      <span>{durationMins} minutes</span>
+                      {isValidDate && (
+                        <>
+                          <span aria-hidden>{'\u00b7'}</span>
+                          <EntityMention
+                            type="date"
+                            date={meeting.start_time}
+                            name={safeFormatDate(startDate, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+                          />
+                        </>
+                      )}
+                    </p>
+                  </div>
+                )}
               </div>
 
               {(meeting.location || isEditing) && (
@@ -646,7 +778,7 @@ export function MeetingDetail() {
                 </div>
               )}
 
-              {/* Description (editable) */}
+              {/* Description (editable) — ICS pseudo-markdown normalized on display */}
               {(meeting.description || isEditing) && (
                 <div>
                   <p className="font-medium mb-1">Description</p>
@@ -657,24 +789,27 @@ export function MeetingDetail() {
                       className="text-sm w-full border rounded px-3 py-2 bg-background min-h-[80px]"
                       placeholder="Meeting description..."
                     />
-                  ) : (
-                    <p className="text-sm text-muted-foreground whitespace-pre-wrap [overflow-wrap:anywhere] max-h-64 overflow-y-auto">
-                      {meeting.description}
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {meeting.meeting_url && (
-                <div>
-                  <a
-                    href={meeting.meeting_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-primary hover:underline text-sm"
-                  >
-                    Join Meeting Link
-                  </a>
+                  ) : descriptionBlocks.length > 0 ? (
+                    <div className="text-sm text-muted-foreground [overflow-wrap:anywhere] max-h-64 overflow-y-auto space-y-2">
+                      {descriptionBlocks.map((block, bi) =>
+                        block.type === 'list' ? (
+                          <ul key={bi} className="list-disc pl-5 space-y-1">
+                            {block.lines.map((tokens, li) => (
+                              <li key={li}>{renderTokens(tokens)}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p key={bi}>
+                            {block.lines.map((tokens, li) => (
+                              <span key={li} className="block">
+                                {renderTokens(tokens)}
+                              </span>
+                            ))}
+                          </p>
+                        )
+                      )}
+                    </div>
+                  ) : null}
                 </div>
               )}
             </CardContent>
