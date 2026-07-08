@@ -495,7 +495,14 @@ Only include detections with confidence >= 0.6.`
       return []
     }
 
-    const detections = JSON.parse(jsonMatch[0]) as ActionableDetection[]
+    // Repair the same unescaped-inner-quote / raw-control-char malformations
+    // Gemini emits here as in the analysis path (this is where the live
+    // "Expected ',' or '}' after property value at position 1309" was seen).
+    const detections = tryParseJson<ActionableDetection[]>(jsonMatch[0])
+    if (!detections) {
+      console.warn(`[Actionable Detection] Unparseable JSON: ${describeJsonParseError(responseText)}`)
+      return []
+    }
 
     // Filter out low-confidence detections
     const filtered = detections.filter(d => d.confidence >= 0.6)
@@ -987,11 +994,106 @@ Respond in JSON format:
 }
 
 /**
+ * Repair the two malformations Gemini's JSON-mode reliably produces on real
+ * (especially Spanish) transcripts, neither of which it escapes: unescaped
+ * inner double-quotes inside string values (e.g. `dijo "no" y ...`) and raw
+ * control characters (newline/tab) inside string values. Also strips trailing
+ * commas. Single left-to-right scan tracking string context.
+ *
+ * Inner-quote heuristic: a `"` seen inside a string is treated as the string's
+ * closing quote only when the next non-whitespace char is structural
+ * (`, } ] :` or end-of-input); otherwise it is an unescaped inner quote and
+ * gets escaped. This is the documented signature of the failures observed live
+ * (`SyntaxError: Expected ',' or '}' after property value`).
+ */
+function repairJsonString(input: string): string {
+  let out = ''
+  let inString = false
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i]
+
+    if (!inString) {
+      if (ch === '"') {
+        inString = true
+        out += ch
+        continue
+      }
+      if (ch === ',') {
+        // Drop a trailing comma: `,` followed only by whitespace then `}`/`]`.
+        let j = i + 1
+        while (j < input.length && /\s/.test(input[j])) j++
+        if (input[j] === '}' || input[j] === ']') continue
+      }
+      out += ch
+      continue
+    }
+
+    // Inside a string.
+    if (ch === '\\') {
+      // Preserve an existing escape sequence verbatim (this char + the next).
+      out += ch
+      if (i + 1 < input.length) {
+        out += input[i + 1]
+        i++
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      // Closing quote only if the next non-whitespace char is structural.
+      let j = i + 1
+      while (j < input.length && /\s/.test(input[j])) j++
+      const next = input[j]
+      if (next === undefined || next === ',' || next === '}' || next === ']' || next === ':') {
+        inString = false
+        out += ch
+      } else {
+        out += '\\"'
+      }
+      continue
+    }
+
+    const code = ch.charCodeAt(0)
+    if (code < 0x20) {
+      // Raw control character inside a string — escape it.
+      if (ch === '\n') out += '\\n'
+      else if (ch === '\r') out += '\\r'
+      else if (ch === '\t') out += '\\t'
+      else out += '\\u' + code.toString(16).padStart(4, '0')
+      continue
+    }
+
+    out += ch
+  }
+  return out
+}
+
+/**
+ * Parse a JSON candidate, retrying once through repairJsonString() when the
+ * strict parse fails. Shared by the analysis and actionable-detection paths so
+ * both benefit from the same Gemini-quirk repair. Returns null only when even
+ * the repaired text is unparseable.
+ */
+function tryParseJson<T>(candidate: string): T | null {
+  try {
+    return JSON.parse(candidate) as T
+  } catch {
+    try {
+      return JSON.parse(repairJsonString(candidate)) as T
+    } catch {
+      return null
+    }
+  }
+}
+
+/**
  * Extract the analysis object from a Gemini response body. Tolerates a
  * ```json fenced block, any fenced block, or a bare brace-matched object
- * (the plain-text fallback and the JSON-mime path both flow through here).
+ * (the plain-text fallback and the JSON-mime path both flow through here),
+ * and repairs the unescaped-inner-quote / raw-control-char malformations
+ * Gemini's JSON mode emits on real transcripts.
  */
-function extractAnalysisJson(text: string): TranscriptAnalysis | null {
+export function extractAnalysisJson(text: string): TranscriptAnalysis | null {
   if (!text) return null
   const fencedInner = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
   const candidates = [
@@ -1000,13 +1102,41 @@ function extractAnalysisJson(text: string): TranscriptAnalysis | null {
     text.match(/\{[\s\S]*\}/)?.[0]
   ].filter((c): c is string => Boolean(c))
   for (const candidate of candidates) {
-    try {
-      return JSON.parse(candidate) as TranscriptAnalysis
-    } catch {
-      // Try the next candidate.
-    }
+    const parsed = tryParseJson<TranscriptAnalysis>(candidate)
+    if (parsed) return parsed
   }
   return null
+}
+
+/**
+ * Build a one-line diagnostic for an unparseable analysis payload: the strict
+ * JSON.parse error and the ±120 chars around the position it reports, so any
+ * future failure is debuggable from a single log line. Uses the same candidate
+ * extraction as extractAnalysisJson so the reported position lines up.
+ */
+function describeJsonParseError(text: string): string {
+  if (!text) return 'empty response body'
+  const fencedInner = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]
+  // Widest brace/bracket span, so object ({…}) and array ([…]) payloads both line up.
+  const braceMatch = (s: string) => s.match(/[[{][\s\S]*[}\]]/)?.[0]
+  const candidate =
+    (fencedInner && braceMatch(fencedInner)) ??
+    fencedInner ??
+    braceMatch(text) ??
+    text
+  try {
+    JSON.parse(candidate)
+    return 'candidate parsed cleanly on retry (transient?)'
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    const pos = Number(msg.match(/position (\d+)/)?.[1])
+    if (Number.isFinite(pos)) {
+      const start = Math.max(0, pos - 120)
+      const end = Math.min(candidate.length, pos + 120)
+      return `${msg} | context[${start}:${end}]=${JSON.stringify(candidate.slice(start, end))}`
+    }
+    return msg
+  }
 }
 
 /**
@@ -1024,7 +1154,8 @@ function logAnalysisFailure(label: string, response: unknown, text: string): voi
   const usage = r?.usageMetadata ? JSON.stringify(r.usageMetadata) : 'n/a'
   console.warn(
     `[Analysis] Failed to parse Gemini analysis (${label}): finishReason=${finishReason}, ` +
-    `usage=${usage}, text[0:300]=${JSON.stringify((text || '').slice(0, 300))}`
+    `usage=${usage}, parseError=${describeJsonParseError(text)}, ` +
+    `text[0:300]=${JSON.stringify((text || '').slice(0, 300))}`
   )
 }
 

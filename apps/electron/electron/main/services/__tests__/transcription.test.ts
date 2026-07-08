@@ -436,3 +436,93 @@ describe('Transcription Service', () => {
     })
   })
 })
+
+describe('extractAnalysisJson — Gemini JSON repair', () => {
+  it('parses already-valid JSON unchanged (fast path)', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    const valid = JSON.stringify({
+      summary: 'El equipo revisó el presupuesto.',
+      action_items: ['Enviar el informe'],
+      topics: ['presupuesto'],
+      language: 'es'
+    })
+    const parsed = extractAnalysisJson(valid)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.summary).toBe('El equipo revisó el presupuesto.')
+    expect(parsed?.action_items).toEqual(['Enviar el informe'])
+  })
+
+  it('repairs an unescaped inner double-quote inside a string value', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    // Gemini json-mode emits Spanish text with raw inner quotes it fails to escape.
+    // This is the exact SSTOP/valid-head payload seen in the live logs.
+    const payload = `{
+  "summary": "El cliente dijo "no" y el equipo siguió adelante con la propuesta",
+  "action_items": ["Redactar el documento de diseño"],
+  "topics": ["propuesta comercial"],
+  "language": "es"
+}`
+    // Sanity: the raw payload must genuinely be invalid JSON (proves repair, not luck).
+    expect(() => JSON.parse(payload)).toThrow()
+
+    const parsed = extractAnalysisJson(payload)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.summary).toBe('El cliente dijo "no" y el equipo siguió adelante con la propuesta')
+    expect(parsed?.action_items).toEqual(['Redactar el documento de diseño'])
+    expect(parsed?.language).toBe('es')
+  })
+
+  it('repairs multiple inner quotes across several string values', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    const payload = `{
+  "summary": "Se mencionó el proyecto "Fénix" varias veces",
+  "action_items": ["Escribir la nota titulada "Resumen final""],
+  "language": "es"
+}`
+    const parsed = extractAnalysisJson(payload)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.summary).toBe('Se mencionó el proyecto "Fénix" varias veces')
+    expect(parsed?.action_items).toEqual(['Escribir la nota titulada "Resumen final"'])
+  })
+
+  it('repairs raw control characters (newline/tab) inside a string value', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    // Raw newline (0x0A) and tab (0x09) inside a string are illegal in JSON.
+    const payload = '{\n  "summary": "Primera línea\nSegunda línea\tcon tab",\n  "language": "es"\n}'
+    expect(() => JSON.parse(payload)).toThrow()
+
+    const parsed = extractAnalysisJson(payload)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.summary).toBe('Primera línea\nSegunda línea\tcon tab')
+  })
+
+  it('strips a trailing comma before a closing brace/bracket', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    const payload = `{
+  "summary": "Resumen breve",
+  "topics": ["uno", "dos",],
+  "language": "es",
+}`
+    expect(() => JSON.parse(payload)).toThrow()
+
+    const parsed = extractAnalysisJson(payload)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.topics).toEqual(['uno', 'dos'])
+    expect(parsed?.summary).toBe('Resumen breve')
+  })
+
+  it('repairs an inner quote inside a ```json fenced block', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    const payload = '```json\n{\n  "summary": "Dijo "hola" al entrar",\n  "language": "es"\n}\n```'
+    const parsed = extractAnalysisJson(payload)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.summary).toBe('Dijo "hola" al entrar')
+  })
+
+  it('returns null for genuinely unparseable input', async () => {
+    const { extractAnalysisJson } = await import('../transcription')
+    expect(extractAnalysisJson('this is not json at all, just prose')).toBeNull()
+    expect(extractAnalysisJson('')).toBeNull()
+    expect(extractAnalysisJson('{ "summary": ')).toBeNull()
+  })
+})
