@@ -11,7 +11,24 @@ import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useAppStore } from '@/store/useAppStore'
 import { shouldLogQa } from '@/services/qa-monitor'
 import { checkAutoSyncAllowed, waitForConfig, waitForDeviceReady } from '@/utils/autoSyncGuard'
-import { requestScopedDownloads } from '@/hooks/useDownloadOrchestrator'
+import { requestScopedDownloads, drainDownloadQueue } from '@/hooks/useDownloadOrchestrator'
+
+/**
+ * Defect B (auto-download not triggering on connect): decide whether the auto-sync
+ * trigger may latch (it fires at most once per connect). We must only latch once we
+ * actually hold a device file list to act on. The device emits 'ready' BEFORE the
+ * file-list scan (handleConnect fetches info/storage/settings/time only). If we
+ * latched on that first 'ready' — when the list is still empty — the later 'ready'
+ * fired after the scan would be skipped by the once-guard, so auto-download would
+ * never queue the device files.
+ *   - recordings available            → latch (we can reconcile now)
+ *   - device genuinely reports 0 files → latch (nothing to sync, safe)
+ *   - list empty but device has files  → DON'T latch (scan not ready; retry next 'ready')
+ */
+export function shouldLatchAutoSync(recordingsLength: number, deviceRecordingCount: number): boolean {
+  if (recordingsLength > 0) return true
+  return deviceRecordingCount <= 0
+}
 
 export function useDeviceSubscriptions() {
   const deviceService = getHiDockDeviceService()
@@ -75,11 +92,10 @@ export function useDeviceSubscriptions() {
       if (status.step !== 'ready') return
       if (autoSyncTriggeredRef.current) return
 
-      const { allowed, reason } = checkAutoSyncAllowed()
-      if (!allowed) {
-        if (shouldLogQa()) console.log(`[useDeviceSubscriptions] Auto-sync skipped on ready: ${reason}`)
-        return
-      }
+      // NOTE: we no longer bail here when auto-download is off. Even with the toggle
+      // off, a device-only file the user explicitly queued while disconnected (defect A)
+      // must fire on connect. The work-check (auto-download OR queued downloads) happens
+      // inside the debounce so we never run an unnecessary file-list scan.
 
       // spec-007: Clear existing debounce timer
       if (syncDebounceTimerRef.current) {
@@ -89,11 +105,25 @@ export function useDeviceSubscriptions() {
 
       // spec-007: Debounce sync by 2 seconds
       syncDebounceTimerRef.current = setTimeout(async () => {
-        // Lock IMMEDIATELY to prevent re-entry from status changes during listRecordings
-        autoSyncTriggeredRef.current = true
-
         try {
           if (shouldLogQa()) console.log('[useDeviceSubscriptions] Auto-sync triggered after 2s debounce')
+
+          // Is there anything to do? auto-download reconcile OR already-queued downloads.
+          const { allowed } = checkAutoSyncAllowed()
+          let pendingFilenames: string[] = []
+          try {
+            const dl = await window.electronAPI.downloadService.getState()
+            pendingFilenames = dl.queue
+              .filter((i: { status: string }) => i.status === 'pending')
+              .map((i: { filename: string }) => i.filename)
+          } catch { /* treat as none */ }
+          const hasPendingDownloads = pendingFilenames.length > 0
+
+          if (!allowed && !hasPendingDownloads) {
+            // Nothing to do — do NOT latch, so a later config change / queued download
+            // can still trigger on a subsequent 'ready'.
+            return
+          }
 
           // BUG-007 FIX: File list may not be cached yet after handleConnect (it only
           // gets device info/storage/settings/time). Fetch it now so auto-sync has data.
@@ -106,13 +136,21 @@ export function useDeviceSubscriptions() {
             } catch (listError) {
               console.error('[useDeviceSubscriptions] Failed to fetch file list:', listError)
               deviceService.log('error', 'File list fetch failed', listError instanceof Error ? listError.message : 'Unknown error')
-              // Reset flag to allow retry on next connect
-              autoSyncTriggeredRef.current = false
-              return
+              return // leave latch false so the next 'ready' retries
             }
           }
 
-          if (recordings.length > 0) {
+          // Defect B: only latch once we actually hold a real file list (or the device
+          // genuinely has zero files). If the scan hasn't produced data yet, bail WITHOUT
+          // latching so the 'ready' fired after the scan completes can retry.
+          if (!shouldLatchAutoSync(recordings.length, deviceService.getState().recordingCount)) {
+            if (shouldLogQa()) console.log('[useDeviceSubscriptions] File list not ready yet — will retry on next ready')
+            return
+          }
+          autoSyncTriggeredRef.current = true
+
+          // Auto-download reconcile — only when the user enabled it.
+          if (allowed && recordings.length > 0) {
             // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching
             const reconcileResults = await window.electronAPI.downloadService.getFilesToSync(
               recordings.map(rec => ({
@@ -144,6 +182,19 @@ export function useDeviceSubscriptions() {
             } else {
               deviceService.log('success', 'All files synced', 'No new recordings to download')
             }
+          }
+
+          // Defect A: drain already-queued (scoped) pending downloads regardless of the
+          // auto-download toggle — the user explicitly asked for these while disconnected.
+          // Safe here: the file-list scan above has completed, so the download loop won't
+          // collide with it on the USB bus.
+          if (hasPendingDownloads) {
+            if (shouldLogQa()) console.log('[useDeviceSubscriptions] Draining queued downloads on connect')
+            // Re-register scope so items persisted across an app restart (in-memory scope
+            // lost) still process when auto-download is off. These were only ever queued by
+            // an explicit user action, so honoring them on connect is the intended behavior.
+            requestScopedDownloads(pendingFilenames)
+            drainDownloadQueue()
           }
         } catch (error) {
           console.error('[useDeviceSubscriptions] Auto-sync failed:', error)
@@ -222,8 +273,6 @@ export function useDeviceSubscriptions() {
 
       if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial auto-sync check (device pre-connected)')
 
-      autoSyncTriggeredRef.current = true
-
       let recordings = deviceService.getCachedRecordings()
       if (recordings.length === 0 && deviceService.getState().recordingCount > 0) {
         if (shouldLogQa()) console.log('[useDeviceSubscriptions] No cached recordings for initial sync, fetching file list...')
@@ -232,10 +281,17 @@ export function useDeviceSubscriptions() {
           recordings = await deviceService.listRecordings()
         } catch (listError) {
           console.error('[useDeviceSubscriptions] Initial file list fetch failed:', listError)
-          autoSyncTriggeredRef.current = false
-          return
+          return // leave latch false so a later 'ready' retries
         }
       }
+
+      // Defect B: latch only once we hold a real file list (or the device truly has 0 files),
+      // so a premature run before the scan can't permanently suppress auto-download.
+      if (!shouldLatchAutoSync(recordings.length, deviceService.getState().recordingCount)) {
+        if (shouldLogQa()) console.log('[useDeviceSubscriptions] Initial file list not ready yet — deferring to status-change trigger')
+        return
+      }
+      autoSyncTriggeredRef.current = true
 
       if (recordings.length > 0) {
         // DL-06 FIX: Use proper reconciliation logic from download service instead of simple filename matching

@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Folder,
+  FolderOpen,
   Search,
   Plus,
   RefreshCw,
@@ -8,12 +10,18 @@ import {
   Trash2,
   Archive,
   CheckCircle2,
+  CircleDot,
   FileText,
   Bot,
   Users,
   Edit,
   Check,
-  X
+  X,
+  Globe,
+  ExternalLink,
+  AlertTriangle,
+  ShieldAlert,
+  Pencil
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -46,6 +54,29 @@ interface ProjectMember {
   name: string
   type: string
 }
+
+/** Project issue / risk / note (v29). */
+interface ProjectNote {
+  id: string
+  project_id: string
+  kind: 'issue' | 'risk' | 'note'
+  content: string
+  status: 'open' | 'resolved'
+  created_at: string
+  resolved_at: string | null
+}
+
+/** Actionable linked to a project (v29). */
+interface ProjectActionable {
+  id: string
+  type: string
+  title: string
+  description: string | null
+  sourceKnowledgeId: string
+  status: string
+  confidence: number | null
+  createdAt: string
+}
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 
@@ -69,6 +100,24 @@ export function Projects() {
   // Inline description editing state
   const [isEditingDescription, setIsEditingDescription] = useState(false)
   const [editDescription, setEditDescription] = useState('')
+
+  // Inline name editing state (R3b rename)
+  const [isEditingName, setIsEditingName] = useState(false)
+  const [editName, setEditName] = useState('')
+
+  // Metadata: folder-on-disk + webpage (R3b)
+  const [isEditingFolder, setIsEditingFolder] = useState(false)
+  const [editFolder, setEditFolder] = useState('')
+  const [isEditingUrl, setIsEditingUrl] = useState(false)
+  const [editUrl, setEditUrl] = useState('')
+
+  // Issues / risks + actionables (R3b)
+  const [notes, setNotes] = useState<ProjectNote[]>([])
+  const [actionables, setActionables] = useState<ProjectActionable[]>([])
+  const [newIssue, setNewIssue] = useState('')
+  const [newRisk, setNewRisk] = useState('')
+
+  const navigate = useNavigate()
 
   // Debounce: skip firing on initial mount
   const isFirstMount = useRef(true)
@@ -171,12 +220,33 @@ export function Projects() {
     setDeleteDialogOpen(false)
   }
 
+  // Load a project's issues/risks/notes and linked actionables (R3b)
+  const loadProjectExtras = useCallback(async (projectId: string) => {
+    try {
+      const [notesRes, actionablesRes] = await Promise.all([
+        window.electronAPI.projects.getNotes({ projectId }),
+        window.electronAPI.projects.getActionables(projectId)
+      ])
+      setNotes(notesRes.success ? notesRes.data : [])
+      setActionables(actionablesRes.success ? actionablesRes.data : [])
+    } catch (err) {
+      console.error('Failed to load project extras:', err)
+      setNotes([])
+      setActionables([])
+    }
+  }, [])
+
   // Load project details with knowledgeIds/personIds when selected
   const handleSelectProject = async (project: Project) => {
     setActiveProject(project)
     setProjectMembers([])
+    setNotes([])
+    setActionables([])
     setDetailLoading(true)
     setIsEditingDescription(false)
+    setIsEditingName(false)
+    setIsEditingFolder(false)
+    setIsEditingUrl(false)
     try {
       const result = await window.electronAPI.projects.getById(project.id)
       if (result.success && result.data.project) {
@@ -188,9 +258,14 @@ export function Projects() {
           status: p.status || 'active',
           createdAt: p.created_at || p.createdAt || new Date().toISOString(),
           knowledgeIds: p.knowledgeIds,
-          personIds: p.personIds
+          personIds: p.personIds,
+          folderPath: p.folderPath ?? p.folder_path ?? null,
+          url: p.url ?? null
         }
         setActiveProject(detailed)
+        setEditFolder(detailed.folderPath || '')
+        setEditUrl(detailed.url || '')
+        void loadProjectExtras(detailed.id)
 
         // Resolve person names from IDs in parallel (fixes N+1 query)
         if (detailed.personIds && detailed.personIds.length > 0) {
@@ -238,6 +313,144 @@ export function Projects() {
     }
     setIsEditingDescription(false)
   }
+
+  // Apply a partial update to the active project, syncing local + list state.
+  const applyProjectUpdate = useCallback(async (patch: Partial<Project>): Promise<boolean> => {
+    if (!activeProject) return false
+    try {
+      const result = await window.electronAPI.projects.update({ id: activeProject.id, ...patch } as any)
+      if (result.success) {
+        const updated: Project = { ...activeProject, ...patch }
+        setActiveProject(updated)
+        setProjects(prev => prev.map(p => (p.id === activeProject.id ? { ...p, ...patch } : p)))
+        return true
+      }
+      toast.error('Failed to update project')
+      return false
+    } catch (err) {
+      console.error('Failed to update project:', err)
+      toast.error('Failed to update project', err instanceof Error ? err.message : 'An unexpected error occurred')
+      return false
+    }
+  }, [activeProject])
+
+  // Rename (inline)
+  const handleSaveName = async () => {
+    const trimmed = editName.trim()
+    if (!activeProject || !trimmed || trimmed === activeProject.name) {
+      setIsEditingName(false)
+      return
+    }
+    if (await applyProjectUpdate({ name: trimmed })) {
+      toast.success('Project renamed', `Now "${trimmed}".`)
+    }
+    setIsEditingName(false)
+  }
+
+  // Folder path (inline + Browse)
+  const handleSaveFolder = async () => {
+    if (!activeProject) return
+    const value = editFolder.trim()
+    if (value === (activeProject.folderPath || '')) {
+      setIsEditingFolder(false)
+      return
+    }
+    if (await applyProjectUpdate({ folderPath: value || null })) {
+      toast.success('Folder updated')
+    }
+    setIsEditingFolder(false)
+  }
+
+  const handleBrowseFolder = async () => {
+    try {
+      const result = await window.electronAPI.storage.selectFolder?.(activeProject?.folderPath || undefined)
+      if (result?.success && result.data) {
+        setEditFolder(result.data)
+        if (await applyProjectUpdate({ folderPath: result.data })) {
+          toast.success('Folder updated')
+        }
+        setIsEditingFolder(false)
+      }
+    } catch (err) {
+      console.error('Failed to pick folder:', err)
+      toast.error('Failed to pick folder')
+    }
+  }
+
+  const handleOpenFolder = async () => {
+    if (!activeProject) return
+    try {
+      const result = await window.electronAPI.projects.openFolder(activeProject.id)
+      if (!result.success) {
+        toast.error('Cannot open folder', (result as any).error?.message || 'Folder is not set or does not exist.')
+      }
+    } catch (err) {
+      console.error('Failed to open folder:', err)
+      toast.error('Failed to open folder')
+    }
+  }
+
+  // Webpage URL (inline)
+  const handleSaveUrl = async () => {
+    if (!activeProject) return
+    const value = editUrl.trim()
+    if (value === (activeProject.url || '')) {
+      setIsEditingUrl(false)
+      return
+    }
+    if (await applyProjectUpdate({ url: value || null })) {
+      toast.success('URL updated')
+    }
+    setIsEditingUrl(false)
+  }
+
+  // Issues / risks / notes CRUD
+  const handleAddNote = async (kind: 'issue' | 'risk', content: string) => {
+    if (!activeProject) return
+    const trimmed = content.trim()
+    if (!trimmed) return
+    try {
+      const result = await window.electronAPI.projects.addNote({ projectId: activeProject.id, kind, content: trimmed })
+      if (result.success) {
+        setNotes(prev => [result.data, ...prev])
+        if (kind === 'issue') setNewIssue('')
+        else setNewRisk('')
+      } else {
+        toast.error(`Failed to add ${kind}`)
+      }
+    } catch (err) {
+      console.error(`Failed to add ${kind}:`, err)
+      toast.error(`Failed to add ${kind}`)
+    }
+  }
+
+  const handleToggleNote = async (note: ProjectNote) => {
+    const nextStatus = note.status === 'open' ? 'resolved' : 'open'
+    try {
+      const result = await window.electronAPI.projects.updateNote({ id: note.id, status: nextStatus })
+      if (result.success) {
+        setNotes(prev => prev.map(n => (n.id === note.id ? result.data : n)))
+      }
+    } catch (err) {
+      console.error('Failed to update note:', err)
+      toast.error('Failed to update')
+    }
+  }
+
+  const handleDeleteNote = async (id: string) => {
+    try {
+      const result = await window.electronAPI.projects.deleteNote({ id })
+      if (result.success) {
+        setNotes(prev => prev.filter(n => n.id !== id))
+      }
+    } catch (err) {
+      console.error('Failed to delete note:', err)
+      toast.error('Failed to delete')
+    }
+  }
+
+  const issues = notes.filter(n => n.kind === 'issue')
+  const risks = notes.filter(n => n.kind === 'risk')
 
   return (
     <div className="flex h-full bg-background">
@@ -351,7 +564,39 @@ export function Projects() {
                   <Folder className="h-7 w-7 text-primary" />
                 </div>
                 <div className="min-w-0">
-                  <h2 className="text-2xl font-bold truncate">{activeProject.name}</h2>
+                  {isEditingName ? (
+                    <div className="flex items-center gap-2">
+                      <Input
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveName()
+                          if (e.key === 'Escape') setIsEditingName(false)
+                        }}
+                        className="text-2xl font-bold h-auto py-1"
+                        autoFocus
+                        aria-label="Project name"
+                      />
+                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleSaveName} aria-label="Save name" title="Save (Enter)">
+                        <Check className="h-4 w-4" />
+                      </Button>
+                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setIsEditingName(false)} aria-label="Cancel rename" title="Cancel (Escape)">
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="group flex items-center gap-2">
+                      <h2 className="text-2xl font-bold truncate" title={activeProject.name}>{activeProject.name}</h2>
+                      <button
+                        onClick={() => { setEditName(activeProject.name); setIsEditingName(true) }}
+                        className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity p-1 rounded hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                        aria-label="Edit project name"
+                        title="Rename project"
+                      >
+                        <Pencil className="h-4 w-4 text-muted-foreground" />
+                      </button>
+                    </div>
+                  )}
                   <div className="flex items-center gap-3 mt-1">
                     <span className={cn(
                       "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border",
@@ -441,10 +686,193 @@ export function Projects() {
                         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Actions</p>
                         <CheckCircle2 className="h-4 w-4 text-primary" />
                       </div>
-                      <p className="text-2xl font-bold mt-2">{'\u2014'}</p>
+                      <p className="text-2xl font-bold mt-2">{actionables.length || '\u2014'} {actionables.length ? 'Items' : ''}</p>
                     </CardContent>
                   </Card>
                 </div>
+
+                {/* Location & Links (folder-on-disk + webpage) */}
+                <Card className="bg-muted/5">
+                  <CardContent className="p-6 space-y-5">
+                    <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Location & Links</h3>
+
+                    {/* Folder on disk */}
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                        <Folder className="h-3.5 w-3.5" />
+                        Folder on disk
+                      </div>
+                      {isEditingFolder ? (
+                        <div className="flex items-center gap-2">
+                          <Input
+                            value={editFolder}
+                            onChange={(e) => setEditFolder(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') handleSaveFolder()
+                              if (e.key === 'Escape') { setEditFolder(activeProject.folderPath || ''); setIsEditingFolder(false) }
+                            }}
+                            placeholder="C:\\path\\to\\repo"
+                            className="h-8 text-sm font-mono"
+                            autoFocus
+                          />
+                          <Button variant="outline" size="sm" className="h-8 gap-1 shrink-0" onClick={handleBrowseFolder}>
+                            <FolderOpen className="h-3.5 w-3.5" /> Browse
+                          </Button>
+                          <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={handleSaveFolder} aria-label="Save folder">
+                            <Check className="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={() => { setEditFolder(activeProject.folderPath || ''); setIsEditingFolder(false) }} aria-label="Cancel">
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          {activeProject.folderPath ? (
+                            <>
+                              <button
+                                onClick={handleOpenFolder}
+                                className="flex items-center gap-2 min-w-0 flex-1 text-sm font-mono text-left hover:text-primary transition-colors"
+                                title="Open folder in file explorer"
+                              >
+                                <FolderOpen className="h-4 w-4 shrink-0 text-primary" />
+                                <span className="truncate">{activeProject.folderPath}</span>
+                              </button>
+                              <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => { setEditFolder(activeProject.folderPath || ''); setIsEditingFolder(true) }} aria-label="Edit folder" title="Edit folder">
+                                <Edit className="h-3.5 w-3.5 text-muted-foreground" />
+                              </Button>
+                            </>
+                          ) : (
+                            <Button variant="outline" size="sm" className="h-8 gap-1 text-xs" onClick={() => { setEditFolder(''); setIsEditingFolder(true) }}>
+                              <Plus className="h-3.5 w-3.5" /> Set folder path
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Webpage URL */}
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                        <Globe className="h-3.5 w-3.5" />
+                        Webpage
+                      </div>
+                      {isEditingUrl ? (
+                        <div className="flex items-center gap-2">
+                          <Input
+                            value={editUrl}
+                            onChange={(e) => setEditUrl(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') handleSaveUrl()
+                              if (e.key === 'Escape') { setEditUrl(activeProject.url || ''); setIsEditingUrl(false) }
+                            }}
+                            placeholder="https://example.com"
+                            className="h-8 text-sm"
+                            autoFocus
+                          />
+                          <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={handleSaveUrl} aria-label="Save URL">
+                            <Check className="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" onClick={() => { setEditUrl(activeProject.url || ''); setIsEditingUrl(false) }} aria-label="Cancel">
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          {activeProject.url ? (
+                            <>
+                              <a
+                                href={activeProject.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="flex items-center gap-2 min-w-0 flex-1 text-sm text-primary hover:underline"
+                                title={activeProject.url}
+                              >
+                                <ExternalLink className="h-4 w-4 shrink-0" />
+                                <span className="truncate">{activeProject.url}</span>
+                              </a>
+                              <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={() => { setEditUrl(activeProject.url || ''); setIsEditingUrl(true) }} aria-label="Edit URL" title="Edit URL">
+                                <Edit className="h-3.5 w-3.5 text-muted-foreground" />
+                              </Button>
+                            </>
+                          ) : (
+                            <Button variant="outline" size="sm" className="h-8 gap-1 text-xs" onClick={() => { setEditUrl(''); setIsEditingUrl(true) }}>
+                              <Plus className="h-3.5 w-3.5" /> Add webpage URL
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Issues & Risks */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <NoteList
+                    title="Issues"
+                    icon={<AlertTriangle className="h-4 w-4 text-amber-500" />}
+                    items={issues}
+                    newValue={newIssue}
+                    onNewValueChange={setNewIssue}
+                    onAdd={() => handleAddNote('issue', newIssue)}
+                    onToggle={handleToggleNote}
+                    onDelete={handleDeleteNote}
+                    placeholder="Add an issue..."
+                  />
+                  <NoteList
+                    title="Risks"
+                    icon={<ShieldAlert className="h-4 w-4 text-rose-500" />}
+                    items={risks}
+                    newValue={newRisk}
+                    onNewValueChange={setNewRisk}
+                    onAdd={() => handleAddNote('risk', newRisk)}
+                    onToggle={handleToggleNote}
+                    onDelete={handleDeleteNote}
+                    placeholder="Add a risk..."
+                  />
+                </div>
+
+                {/* Action items by project */}
+                <Card className="bg-muted/5">
+                  <CardContent className="p-6 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="h-4 w-4 text-primary" />
+                        <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">Action Items</h3>
+                      </div>
+                      {actionables.length > 0 && (
+                        <span className="text-xs text-muted-foreground">{actionables.length}</span>
+                      )}
+                    </div>
+                    {actionables.length === 0 ? (
+                      <p className="text-sm text-muted-foreground italic">No action items linked to this project yet.</p>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {actionables.map((a) => (
+                          <button
+                            key={a.id}
+                            onClick={() => navigate('/actionables')}
+                            className="w-full flex items-center gap-3 p-2.5 rounded-lg text-left hover:bg-muted transition-colors group"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-medium truncate group-hover:text-primary transition-colors">{a.title}</p>
+                              <p className="text-[10px] text-muted-foreground mt-0.5">{new Date(a.createdAt).toLocaleDateString()}</p>
+                            </div>
+                            <span className={cn(
+                              "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border shrink-0",
+                              a.status === 'shared' || a.status === 'generated'
+                                ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
+                                : a.status === 'dismissed'
+                                  ? "bg-slate-500/10 text-slate-600 border-slate-500/20"
+                                  : "bg-amber-500/10 text-amber-600 border-amber-500/20"
+                            )}>
+                              {a.status}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
 
                 {/* Description (inline editable) */}
                 <div className="space-y-3">
@@ -620,4 +1048,84 @@ export function Projects() {
     </div>
   )
 }
+/** Compact add/toggle/delete list for a project's issues or risks (R3b). */
+interface NoteListProps {
+  title: string
+  icon: ReactNode
+  items: ProjectNote[]
+  newValue: string
+  onNewValueChange: (value: string) => void
+  onAdd: () => void
+  onToggle: (note: ProjectNote) => void
+  onDelete: (id: string) => void
+  placeholder: string
+}
+
+function NoteList({ title, icon, items, newValue, onNewValueChange, onAdd, onToggle, onDelete, placeholder }: NoteListProps) {
+  const openCount = items.filter(i => i.status === 'open').length
+  return (
+    <Card className="bg-muted/5">
+      <CardContent className="p-5 space-y-3">
+        <div className="flex items-center gap-2">
+          {icon}
+          <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">{title}</h3>
+          {openCount > 0 && (
+            <span className="ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">{openCount} open</span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Input
+            value={newValue}
+            onChange={(e) => onNewValueChange(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') onAdd() }}
+            placeholder={placeholder}
+            className="h-8 text-sm"
+          />
+          <Button size="icon" variant="outline" className="h-8 w-8 shrink-0" onClick={onAdd} disabled={!newValue.trim()} aria-label={`Add ${title}`}>
+            <Plus className="h-4 w-4" />
+          </Button>
+        </div>
+
+        {items.length === 0 ? (
+          <p className="text-xs text-muted-foreground italic py-1">No {title.toLowerCase()} yet.</p>
+        ) : (
+          <div className="space-y-1">
+            {items.map((item) => (
+              <div key={item.id} className="group flex items-center gap-2 py-1">
+                <button
+                  onClick={() => onToggle(item)}
+                  className="shrink-0"
+                  aria-label={item.status === 'open' ? 'Mark resolved' : 'Reopen'}
+                  title={item.status === 'open' ? 'Mark resolved' : 'Reopen'}
+                >
+                  {item.status === 'resolved' ? (
+                    <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                  ) : (
+                    <CircleDot className="h-4 w-4 text-muted-foreground hover:text-primary transition-colors" />
+                  )}
+                </button>
+                <span className={cn(
+                  "text-sm flex-1 min-w-0",
+                  item.status === 'resolved' && "line-through text-muted-foreground"
+                )}>
+                  {item.content}
+                </span>
+                <button
+                  onClick={() => onDelete(item.id)}
+                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity shrink-0 text-muted-foreground hover:text-destructive"
+                  aria-label={`Delete ${title}`}
+                  title="Delete"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 export default Projects

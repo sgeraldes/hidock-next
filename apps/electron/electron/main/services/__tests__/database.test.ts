@@ -61,12 +61,26 @@ vi.mock('fs', () => {
   const fsMock = {
     existsSync: vi.fn(() => false),
     readFileSync: vi.fn(() => Buffer.from('fake')),
-    writeFileSync: vi.fn()
+    writeFileSync: vi.fn(),
+    // The engine's synchronous saveDatabase() writes to a temp file then renames
+    // (atomic, crash-safe), so renameSync must exist on the mock.
+    renameSync: vi.fn()
   }
   return {
     ...fsMock,
     default: fsMock
   }
+})
+
+// The engine's debounced async save uses fs/promises; stub it so a fired timer
+// never touches the real disk during tests.
+vi.mock('fs/promises', () => {
+  const p = {
+    writeFile: vi.fn(async () => {}),
+    rename: vi.fn(async () => {}),
+    unlink: vi.fn(async () => {})
+  }
+  return { ...p, default: p }
 })
 
 vi.mock('../file-storage', () => ({
@@ -258,9 +272,18 @@ describe('Database Service', () => {
         const fsMock = {
           existsSync: vi.fn(() => false),
           readFileSync: vi.fn(() => Buffer.from('fake')),
-          writeFileSync: vi.fn()
+          writeFileSync: vi.fn(),
+          renameSync: vi.fn()
         }
         return { ...fsMock, default: fsMock }
+      })
+      vi.doMock('fs/promises', () => {
+        const p = {
+          writeFile: vi.fn(async () => {}),
+          rename: vi.fn(async () => {}),
+          unlink: vi.fn(async () => {})
+        }
+        return { ...p, default: p }
       })
       vi.doMock('../file-storage', () => ({
         getDatabasePath: vi.fn(() => '/tmp/test-hidock.db')
@@ -806,25 +829,167 @@ describe('Database Service', () => {
       expect(allAlterSqls.some((s: string) => s.includes('created_output_id'))).toBe(true)
       expect(allAlterSqls.some((s: string) => s.includes('saved_as_insight_id'))).toBe(true)
     })
+
+    it('migration v29 adds projects.folder_path/url and creates project_notes', async () => {
+      const fs = await import('fs')
+      ;(fs.existsSync as any).mockReturnValue(false)
+
+      ;(mockDatabase.exec as any).mockImplementation((sql: string) => {
+        if (sql.includes('PRAGMA table_info(projects)')) {
+          // projects WITHOUT folder_path / url
+          return [{ values: [
+            [0, 'id', 'TEXT', 0, null, 1],
+            [1, 'name', 'TEXT', 0, null, 0],
+            [2, 'description', 'TEXT', 0, null, 0],
+            [3, 'status', 'TEXT', 0, null, 0],
+            [4, 'created_at', 'TEXT', 0, null, 0]
+          ] }]
+        }
+        if (sql.includes('PRAGMA table_info')) {
+          return FULL_COLUMNS_PRAGMA
+        }
+        if (sql.includes('schema_version')) {
+          return [{ values: [[28]] }]
+        }
+        return []
+      })
+
+      const dbModule = await import('../database')
+      await dbModule.initializeDatabase()
+
+      const runSqls = mockDatabase.run.mock.calls
+        .map((c: any[]) => c[0])
+        .filter((s: any): s is string => typeof s === 'string')
+
+      expect(runSqls.some((s: string) => s.includes('ALTER TABLE projects ADD COLUMN folder_path'))).toBe(true)
+      expect(runSqls.some((s: string) => s.includes('ALTER TABLE projects ADD COLUMN url'))).toBe(true)
+      expect(runSqls.some((s: string) => s.includes('CREATE TABLE IF NOT EXISTS project_notes'))).toBe(true)
+    })
+  })
+
+  // =========================================================================
+  // Project notes + project actionables (v29)
+  // =========================================================================
+  describe('Project notes & actionables (v29)', () => {
+    it('addProjectNote inserts and returns the created row', async () => {
+      const dbModule = await initTestDatabase()
+
+      const mockNote = {
+        id: 'n1', project_id: 'p1', kind: 'issue', content: 'Broken login',
+        status: 'open', created_at: '2026-07-08T00:00:00Z', resolved_at: null
+      }
+      setQueryResults([mockNote])
+
+      const result = dbModule.addProjectNote('p1', 'issue', 'Broken login')
+
+      expect(result).toEqual(mockNote)
+      const insert = mockDatabase.run.mock.calls.find(
+        (c: any[]) => typeof c[0] === 'string' && (c[0] as string).includes('INSERT INTO project_notes')
+      )
+      expect(insert).toBeDefined()
+    })
+
+    it('getProjectNotes filters by kind when provided', async () => {
+      const dbModule = await initTestDatabase()
+      setQueryResults([
+        { id: 'n1', project_id: 'p1', kind: 'risk', content: 'A', status: 'open', created_at: 'x', resolved_at: null },
+        { id: 'n2', project_id: 'p1', kind: 'risk', content: 'B', status: 'resolved', created_at: 'y', resolved_at: 'z' }
+      ])
+
+      const result = dbModule.getProjectNotes('p1', 'risk')
+
+      expect(result).toHaveLength(2)
+      expect(mockStmt.bind).toHaveBeenCalledWith(['p1', 'risk'])
+    })
+
+    it('getProjectNotes queries all kinds when kind omitted', async () => {
+      const dbModule = await initTestDatabase()
+      setQueryResults([])
+
+      dbModule.getProjectNotes('p1')
+
+      expect(mockStmt.bind).toHaveBeenCalledWith(['p1'])
+    })
+
+    it('updateProjectNote stamps resolved_at when resolving', async () => {
+      const dbModule = await initTestDatabase()
+      const existing = { id: 'n1', project_id: 'p1', kind: 'issue', content: 'A', status: 'open', created_at: 'x', resolved_at: null }
+      const updated = { ...existing, status: 'resolved', resolved_at: '2026-07-08T00:00:00Z' }
+      scriptQueryOneResults([existing, updated])
+
+      const result = dbModule.updateProjectNote('n1', { status: 'resolved' })
+
+      expect(result.status).toBe('resolved')
+      const update = mockDatabase.run.mock.calls.find(
+        (c: any[]) => typeof c[0] === 'string' && (c[0] as string).includes('UPDATE project_notes SET') && (c[0] as string).includes('resolved_at')
+      )
+      expect(update).toBeDefined()
+    })
+
+    it('updateProjectNote throws when the note does not exist', async () => {
+      const dbModule = await initTestDatabase()
+      scriptQueryOneResults([undefined])
+
+      expect(() => dbModule.updateProjectNote('missing', { content: 'x' })).toThrow(/not found/)
+    })
+
+    it('deleteProjectNote issues a DELETE', async () => {
+      const dbModule = await initTestDatabase()
+
+      dbModule.deleteProjectNote('n1')
+
+      const del = mockDatabase.run.mock.calls.find(
+        (c: any[]) => typeof c[0] === 'string' && (c[0] as string).includes('DELETE FROM project_notes')
+      )
+      expect(del).toBeDefined()
+      expect(del?.[1]).toEqual(['n1'])
+    })
+
+    it('getActionablesForProject unions the meeting + direct knowledge paths', async () => {
+      const dbModule = await initTestDatabase()
+      setQueryResults([
+        { id: 'a1', type: 'email', title: 'Follow up', description: null, source_knowledge_id: 'k1', status: 'pending', confidence: 0.9, created_at: 'x' }
+      ])
+
+      const result = dbModule.getActionablesForProject('p1')
+
+      expect(result).toHaveLength(1)
+      // The union subquery reaches actionables through both meeting_projects and knowledge_projects.
+      const prepared = mockDatabase.prepare.mock.calls
+        .map((c: any[]) => c[0] as string)
+        .find((s: string) => s.includes('FROM actionables'))
+      expect(prepared).toBeDefined()
+      expect(prepared).toContain('UNION')
+      expect(prepared).toContain('meeting_projects')
+      expect(prepared).toContain('knowledge_projects')
+      expect(mockStmt.bind).toHaveBeenCalledWith(['p1', 'p1'])
+    })
   })
 
   // =========================================================================
   // Additional: saveDatabase, closeDatabase, run helpers
   // =========================================================================
   describe('saveDatabase()', () => {
-    it('should export database and write to disk', async () => {
+    it('should export database and write atomically (temp file + rename)', async () => {
       const dbModule = await initTestDatabase()
       const fs = await import('fs')
 
       ;(fs.writeFileSync as any).mockClear()
+      ;(fs.renameSync as any).mockClear()
       mockDatabase.export.mockClear()
 
       dbModule.saveDatabase()
 
       expect(mockDatabase.export).toHaveBeenCalled()
+      // Atomic, crash-safe persistence: write to `${dbPath}.tmp`, then rename
+      // over the live file so a crash mid-write cannot corrupt the database.
       expect(fs.writeFileSync).toHaveBeenCalledWith(
-        '/tmp/test-hidock.db',
+        '/tmp/test-hidock.db.tmp',
         expect.any(Buffer)
+      )
+      expect(fs.renameSync).toHaveBeenCalledWith(
+        '/tmp/test-hidock.db.tmp',
+        '/tmp/test-hidock.db'
       )
     })
   })
@@ -887,7 +1052,7 @@ describe('Database Service', () => {
   })
 
   describe('run()', () => {
-    it('should run SQL and save the database', async () => {
+    it('runs SQL immediately without a per-call full-DB write (debounced persistence)', async () => {
       const dbModule = await initTestDatabase()
       const fs = await import('fs')
 
@@ -897,14 +1062,24 @@ describe('Database Service', () => {
 
       dbModule.run('INSERT INTO recordings (id, filename) VALUES (?, ?)', ['test-id', 'test.hda'])
 
+      // The SQL executes synchronously.
       expect(mockDatabase.run).toHaveBeenCalledWith(
         'INSERT INTO recordings (id, filename) VALUES (?, ?)',
         ['test-id', 'test.hda']
       )
 
-      // Should auto-save after run()
-      expect(mockDatabase.export).toHaveBeenCalled()
-      expect(fs.writeFileSync).toHaveBeenCalled()
+      // Persistence is DEBOUNCED — run() must NOT export+write the entire
+      // database on the hot path. Doing so on every write of a large DB is what
+      // froze the main thread under bulk download. The debounced async write
+      // firing is covered by the @hidock/database engine tests; here we only
+      // assert the hot-path contract.
+      expect(mockDatabase.export).not.toHaveBeenCalled()
+      expect(fs.writeFileSync).not.toHaveBeenCalled()
+
+      // An explicit flush still persists synchronously (durability-critical path).
+      dbModule.saveDatabase()
+      expect(mockDatabase.export).toHaveBeenCalledTimes(1)
+      expect(fs.writeFileSync).toHaveBeenCalledTimes(1)
     })
   })
 

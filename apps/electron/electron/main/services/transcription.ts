@@ -104,6 +104,7 @@ import {
   cancelPendingTranscriptions,
   run,
   runInTransaction,
+  saveDatabase,
   queryOne,
   queryAll,
   acquireTranscriptionLock,
@@ -1471,6 +1472,11 @@ Meeting ${i + 1}: "${m.subject}"
   insertTranscript(transcript)
   // AI-13: Use standard enum value 'complete' (not 'transcribed')
   updateRecordingTranscriptionStatus(recordingId, 'complete')
+  // Durability: a completed transcript is an expensive artifact (API cost + time).
+  // The default run() path is debounced/async, so force a synchronous flush here
+  // to guarantee it survives a crash. This is infrequent (once per transcription)
+  // and does not contribute to the bulk-write freeze.
+  saveDatabase()
 
   // Auto-update recording title if we have a title suggestion
   if (analysis.title_suggestion) {

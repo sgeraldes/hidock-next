@@ -19,6 +19,10 @@ import type { Meeting } from '@/types'
 // ---------------------------------------------------------------------------
 const mockKnowledgeUpdate = vi.fn().mockResolvedValue({ success: true })
 const mockSelectMeeting = vi.fn().mockResolvedValue({ success: true })
+// Projects assignment (v29)
+const mockGetForKnowledge = vi.fn().mockResolvedValue({ success: true, data: [] })
+const mockGetAllProjects = vi.fn().mockResolvedValue({ success: true, data: { projects: [{ id: 'pr1', name: 'Alpha' }], total: 1 } })
+const mockSetProjects = vi.fn().mockResolvedValue({ success: true })
 
 // Silence @radix-ui portal issues in jsdom
 vi.mock('@radix-ui/react-portal', () => ({
@@ -139,6 +143,12 @@ beforeEach(() => {
     value: {
       knowledge: {
         update: mockKnowledgeUpdate,
+        setProjects: mockSetProjects,
+      },
+      projects: {
+        getForKnowledge: mockGetForKnowledge,
+        getAll: mockGetAllProjects,
+        openFolder: vi.fn().mockResolvedValue({ success: true }),
       },
       recordings: {
         selectMeeting: mockSelectMeeting,
@@ -421,6 +431,43 @@ describe('SourceReader — metadata editing', () => {
     expect(screen.queryByTestId('confirm-dialog')).not.toBeInTheDocument()
   })
 
+})
+
+// ---------------------------------------------------------------------------
+// Projects assignment picker (v29)
+// ---------------------------------------------------------------------------
+describe('SourceReader — projects assignment', () => {
+  it('loads assigned projects for a captured recording', async () => {
+    mockGetForKnowledge.mockResolvedValueOnce({ success: true, data: [{ id: 'pr1', name: 'Alpha' }] })
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1' })
+    render(<SourceReader recording={rec} />)
+
+    expect(await screen.findByText('Alpha')).toBeInTheDocument()
+    expect(mockGetForKnowledge).toHaveBeenCalledWith('kc-1')
+  })
+
+  it('does not render the projects row without a knowledgeCaptureId', () => {
+    const rec = makeRecording({ knowledgeCaptureId: undefined })
+    render(<SourceReader recording={rec} />)
+
+    expect(screen.queryByRole('button', { name: /assign project/i })).not.toBeInTheDocument()
+  })
+
+  it('assigning a project via the picker calls knowledge.setProjects', async () => {
+    const rec = makeRecording({ knowledgeCaptureId: 'kc-1' })
+    render(<SourceReader recording={rec} />)
+
+    // Open the picker popover
+    fireEvent.click(screen.getByRole('button', { name: /assign project/i }))
+
+    // Click the Alpha option (loaded via projects.getAll)
+    const option = await screen.findByRole('button', { name: /alpha/i })
+    fireEvent.click(option)
+
+    await waitFor(() => {
+      expect(mockSetProjects).toHaveBeenCalledWith({ knowledgeCaptureId: 'kc-1', projectIds: ['pr1'] })
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

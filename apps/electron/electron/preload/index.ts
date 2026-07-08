@@ -79,6 +79,29 @@ import type {
 } from '../../src/types/knowledge'
 import type { PipelineState } from '../main/types/device-pipeline'
 
+/** Project issue / risk / note (v29). */
+interface ProjectNote {
+  id: string
+  project_id: string
+  kind: 'issue' | 'risk' | 'note'
+  content: string
+  status: 'open' | 'resolved'
+  created_at: string
+  resolved_at: string | null
+}
+
+/** Actionable linked to a project (v29). */
+interface ProjectActionable {
+  id: string
+  type: string
+  title: string
+  description: string | null
+  sourceKnowledgeId: string
+  status: string
+  confidence: number | null
+  createdAt: string
+}
+
 // Type definitions for the API
 export interface ElectronAPI {
   // App
@@ -133,6 +156,12 @@ export interface ElectronAPI {
     getForMeeting: (meetingId: string) => Promise<Result<Project[]>>
     merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Project>>
     getForKnowledge: (knowledgeCaptureId: string) => Promise<Result<Project[]>>
+    getNotes: (request: { projectId: string; kind?: 'issue' | 'risk' | 'note' }) => Promise<Result<ProjectNote[]>>
+    addNote: (request: { projectId: string; kind: 'issue' | 'risk' | 'note'; content: string }) => Promise<Result<ProjectNote>>
+    updateNote: (request: { id: string; content?: string; status?: 'open' | 'resolved' }) => Promise<Result<ProjectNote>>
+    deleteNote: (request: { id: string }) => Promise<Result<void>>
+    getActionables: (projectId: string) => Promise<Result<ProjectActionable[]>>
+    openFolder: (projectId: string) => Promise<Result<void>>
   }
 
   // Database - Recordings
@@ -628,7 +657,13 @@ const electronAPI: ElectronAPI = {
     untagMeeting: (request) => callIPC('projects:untagMeeting', request),
     getForMeeting: (meetingId) => callIPC('projects:getForMeeting', meetingId),
     merge: (request) => callIPC('projects:merge', request),
-    getForKnowledge: (knowledgeCaptureId) => callIPC('projects:getForKnowledge', knowledgeCaptureId)
+    getForKnowledge: (knowledgeCaptureId) => callIPC('projects:getForKnowledge', knowledgeCaptureId),
+    getNotes: (request) => callIPC('projects:getNotes', request),
+    addNote: (request) => callIPC('projects:addNote', request),
+    updateNote: (request) => callIPC('projects:updateNote', request),
+    deleteNote: (request) => callIPC('projects:deleteNote', request),
+    getActionables: (projectId) => callIPC('projects:getActionables', projectId),
+    openFolder: (projectId) => callIPC('projects:openFolder', projectId)
   },
 
   recordings: {

@@ -20,6 +20,8 @@ function tempDbPath(name: string): string {
   return join(tmpdir(), `hidock-db-engine-test-${name}.sqlite`)
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
   CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, name TEXT);
@@ -32,6 +34,9 @@ describe('DatabaseEngine', () => {
   afterEach(() => {
     for (const p of paths) {
       if (existsSync(p)) rmSync(p, { force: true })
+      // The atomic save writes to `${path}.tmp` then renames — clean up any that
+      // a disposed-skip path may have left behind.
+      if (existsSync(`${p}.tmp`)) rmSync(`${p}.tmp`, { force: true })
     }
     paths.length = 0
   })
@@ -47,6 +52,8 @@ describe('DatabaseEngine', () => {
     schemaVersion?: number
     migrations?: Record<number, () => void>
     repairPhase?: () => void
+    saveDebounceMs?: number
+    saveMaxWaitMs?: number
   }) {
     return {
       initSqlJs,
@@ -55,6 +62,8 @@ describe('DatabaseEngine', () => {
       schema: SCHEMA,
       migrations: opts.migrations ?? {},
       repairPhase: opts.repairPhase,
+      saveDebounceMs: opts.saveDebounceMs,
+      saveMaxWaitMs: opts.saveMaxWaitMs,
     }
   }
 
@@ -197,5 +206,79 @@ describe('DatabaseEngine', () => {
   it('getDatabase throws before initialize', () => {
     const engine = makeEngine('uninit')
     expect(() => engine.getDatabase()).toThrow('Database not initialized')
+  })
+
+  describe('debounced persistence', () => {
+    it('run() does not write synchronously; rapid writes coalesce into one async save', async () => {
+      const engine = makeEngine('debounce', { saveDebounceMs: 20, saveMaxWaitMs: 500 })
+      await engine.initialize() // one synchronous save at init
+      const base = engine.getPhysicalSaveCount()
+
+      for (let i = 0; i < 20; i++) {
+        engine.run('INSERT INTO items (id, name) VALUES (?, ?)', [`k${i}`, `v${i}`])
+      }
+      // The hot path did NOT perform a physical write per statement.
+      expect(engine.getPhysicalSaveCount()).toBe(base)
+
+      await sleep(80)
+      // The whole burst collapsed into exactly one physical write.
+      expect(engine.getPhysicalSaveCount()).toBe(base + 1)
+
+      // Durability: reopening from disk sees all 20 rows.
+      engine.closeDatabase()
+      const reopened = new DatabaseEngine(makeEngineConfig({ path: tempDbPath('debounce') }))
+      await reopened.initialize()
+      expect(reopened.queryAll('SELECT * FROM items')).toHaveLength(20)
+      reopened.closeDatabase()
+    })
+
+    it('saveDatabase() flushes synchronously and cancels the pending debounced write', async () => {
+      // Long debounce: the timer would not fire on its own during the test.
+      const engine = makeEngine('flush', { saveDebounceMs: 10_000 })
+      await engine.initialize()
+      const base = engine.getPhysicalSaveCount()
+
+      engine.run('INSERT INTO items (id, name) VALUES (?, ?)', ['a', 'A'])
+      expect(engine.getPhysicalSaveCount()).toBe(base) // still debounced
+
+      engine.saveDatabase()
+      expect(engine.getPhysicalSaveCount()).toBe(base + 1) // synchronous flush happened
+
+      // The pending timer was cancelled — no extra write later.
+      await sleep(40)
+      expect(engine.getPhysicalSaveCount()).toBe(base + 1)
+      engine.closeDatabase()
+    })
+
+    it('flushes within saveMaxWaitMs under a sustained write stream (no starvation)', async () => {
+      const engine = makeEngine('maxwait', { saveDebounceMs: 30, saveMaxWaitMs: 80 })
+      await engine.initialize()
+      const base = engine.getPhysicalSaveCount()
+
+      // Write every ~20ms (< debounce) for longer than maxWait, so the debounce
+      // timer alone would keep getting pushed out and never fire.
+      const stopAt = Date.now() + 160
+      let i = 0
+      while (Date.now() < stopAt) {
+        engine.run('INSERT INTO items (id, name) VALUES (?, ?)', [`k${i}`, `v${i++}`])
+        await sleep(20)
+      }
+      // The max-wait bound must have forced at least one flush mid-stream.
+      expect(engine.getPhysicalSaveCount()).toBeGreaterThanOrEqual(base + 1)
+      engine.closeDatabase()
+    })
+
+    it('closeDatabase() persists the latest state and suppresses further scheduled writes', async () => {
+      const engine = makeEngine('close', { saveDebounceMs: 50 })
+      await engine.initialize()
+
+      engine.run('INSERT INTO items (id, name) VALUES (?, ?)', ['z', 'Z'])
+      engine.closeDatabase() // synchronous final flush + dispose
+
+      const reopened = new DatabaseEngine(makeEngineConfig({ path: tempDbPath('close') }))
+      await reopened.initialize()
+      expect(reopened.queryOne('SELECT * FROM items WHERE id = ?', ['z'])).toBeDefined()
+      reopened.closeDatabase()
+    })
   })
 })

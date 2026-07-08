@@ -11,7 +11,8 @@ vi.mock('@/components/ui/toaster', () => ({
 vi.mock('@/hooks/useDownloadOrchestrator', () => ({
   cancelDownloads: vi.fn(),
   cancelDownloadsComplete: vi.fn(),
-  requestScopedDownloads: vi.fn()
+  requestScopedDownloads: vi.fn(),
+  markDownloadPriority: vi.fn()
 }))
 
 // Mock transcription store

@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 28
+const SCHEMA_VERSION = 29
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -376,13 +376,30 @@ CREATE TABLE IF NOT EXISTS contacts (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- User-created projects for organizing meetings
+-- User-created projects for organizing meetings. Projects are full hubs (v29):
+-- folder_path binds a project to a location on disk (repo, docs folder), url binds
+-- it to a webpage. project_notes below holds its issues/risks/notes.
 CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
     status TEXT CHECK(status IN ('active', 'archived')) DEFAULT 'active',
+    folder_path TEXT,
+    url TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Project issues / risks / free-form notes (v29). Each row is one item tracked
+-- against a project. Issues and risks toggle open↔resolved, notes are informational.
+CREATE TABLE IF NOT EXISTS project_notes (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    kind TEXT CHECK(kind IN ('issue', 'risk', 'note')),
+    content TEXT NOT NULL,
+    status TEXT CHECK(status IN ('open', 'resolved')) DEFAULT 'open',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
 -- Junction table: Meeting-Contact relationship
@@ -488,6 +505,7 @@ CREATE INDEX IF NOT EXISTS idx_meeting_contacts_contact ON meeting_contacts(cont
 CREATE INDEX IF NOT EXISTS idx_transcript_speakers_recording ON transcript_speakers(recording_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_meeting ON meeting_projects(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_project ON meeting_projects(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_notes_project_kind ON project_notes(project_id, kind);
 CREATE INDEX IF NOT EXISTS idx_knowledge_projects_knowledge ON knowledge_projects(knowledge_capture_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_projects_project ON knowledge_projects(project_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_recording ON recording_meeting_candidates(recording_id);
@@ -1594,6 +1612,50 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v28 complete')
+  },
+  29: () => {
+    // v29: Projects as full hubs.
+    //  - projects.folder_path / projects.url: bind a project to a location on
+    //    disk and a webpage.
+    //  - project_notes: issues / risks / notes tracked against a project.
+    // Idempotent: guarded ALTER + CREATE TABLE IF NOT EXISTS.
+    console.log('Running migration to schema v29: project folder_path/url + project_notes')
+    const database = getDatabase()
+
+    try {
+      const info = database.exec('PRAGMA table_info(projects)')
+      if (info.length > 0 && info[0].values) {
+        const cols = info[0].values.map((row: unknown[]) => row[1])
+        if (!cols.includes('folder_path')) {
+          database.run('ALTER TABLE projects ADD COLUMN folder_path TEXT')
+        }
+        if (!cols.includes('url')) {
+          database.run('ALTER TABLE projects ADD COLUMN url TEXT')
+        }
+      }
+    } catch (e) {
+      console.warn('[Migration v29] projects folder_path/url failed:', e)
+    }
+
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS project_notes (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          kind TEXT CHECK(kind IN ('issue', 'risk', 'note')),
+          content TEXT NOT NULL,
+          status TEXT CHECK(status IN ('open', 'resolved')) DEFAULT 'open',
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          resolved_at TEXT,
+          FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_project_notes_project_kind ON project_notes(project_id, kind)')
+    } catch (e) {
+      console.warn('[Migration v29] project_notes failed:', e)
+    }
+
+    console.log('Migration v29 complete')
   }
 
 }
@@ -1775,6 +1837,35 @@ function repairPhase(): void {
     console.log('[Database] Repairing action_items: adding assignee_contact_id')
     try { database.run('ALTER TABLE action_items ADD COLUMN assignee_contact_id TEXT') } catch (e) {}
   }
+
+  // Repair projects (v29): force-add folder_path/url if missing.
+  const projectCols = getTableColumns(database, 'projects')
+  if (projectCols.length > 0) {
+    for (const col of ['folder_path', 'url']) {
+      if (!projectCols.includes(col)) {
+        console.log(`[Database] Repairing projects: adding ${col}`)
+        try { database.run(`ALTER TABLE projects ADD COLUMN ${col} TEXT`) } catch (e) {}
+      }
+    }
+  }
+
+  // Repair project_notes (v29): force-create so an older on-disk DB that skipped
+  // the migration still gets it before any note write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS project_notes (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        kind TEXT CHECK(kind IN ('issue', 'risk', 'note')),
+        content TEXT NOT NULL,
+        status TEXT CHECK(status IN ('open', 'resolved')) DEFAULT 'open',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        resolved_at TEXT,
+        FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+      )
+    `)
+    database.run('CREATE INDEX IF NOT EXISTS idx_project_notes_project_kind ON project_notes(project_id, kind)')
+  } catch (e) { /* table already exists */ }
 
   // Repair chat_messages (AI-15: columns referenced by assistant mapper)
   const chatMsgInfo = database.exec("PRAGMA table_info(chat_messages)")
@@ -3362,7 +3453,20 @@ export interface Project {
   name: string
   description: string | null
   status: string
+  folder_path: string | null
+  url: string | null
   created_at: string
+}
+
+/** One issue / risk / note tracked against a project (v29). */
+export interface ProjectNote {
+  id: string
+  project_id: string
+  kind: 'issue' | 'risk' | 'note'
+  content: string
+  status: 'open' | 'resolved'
+  created_at: string
+  resolved_at: string | null
 }
 
 export interface MeetingProject {
@@ -3405,29 +3509,45 @@ export function getProjectById(id: string): Project | undefined {
   return queryOne<Project>('SELECT * FROM projects WHERE id = ?', [id])
 }
 
-export function createProject(project: Omit<Project, 'created_at'>): Project {
+export function createProject(project: Omit<Project, 'created_at' | 'folder_path' | 'url'>): Project {
   run(
     'INSERT INTO projects (id, name, description, status) VALUES (?, ?, ?, ?)',
     [project.id, project.name, project.description, project.status || 'active']
   )
-  return { ...project, created_at: new Date().toISOString() }
+  return { ...project, folder_path: null, url: null, created_at: new Date().toISOString() }
 }
 
-export function updateProject(id: string, name?: string, description?: string, status?: string): void {
+export interface ProjectUpdateFields {
+  name?: string
+  description?: string | null
+  status?: string
+  folderPath?: string | null
+  url?: string | null
+}
+
+export function updateProject(id: string, fields: ProjectUpdateFields): void {
   const updates: string[] = []
   const params: unknown[] = []
 
-  if (name !== undefined) {
+  if (fields.name !== undefined) {
     updates.push('name = ?')
-    params.push(name)
+    params.push(fields.name)
   }
-  if (description !== undefined) {
+  if (fields.description !== undefined) {
     updates.push('description = ?')
-    params.push(description)
+    params.push(fields.description)
   }
-  if (status !== undefined) {
+  if (fields.status !== undefined) {
     updates.push('status = ?')
-    params.push(status)
+    params.push(fields.status)
+  }
+  if (fields.folderPath !== undefined) {
+    updates.push('folder_path = ?')
+    params.push(fields.folderPath)
+  }
+  if (fields.url !== undefined) {
+    updates.push('url = ?')
+    params.push(fields.url)
   }
 
   if (updates.length > 0) {
@@ -3574,6 +3694,100 @@ export function getProjectsForKnowledge(knowledgeCaptureId: string): Project[] {
      WHERE kp.knowledge_capture_id = ?
      ORDER BY p.name`,
     [knowledgeCaptureId]
+  )
+}
+
+// =============================================================================
+// Project notes: issues / risks / notes (v29)
+// =============================================================================
+
+/** Notes for a project, optionally filtered by kind. Open items first, newest first. */
+export function getProjectNotes(projectId: string, kind?: 'issue' | 'risk' | 'note'): ProjectNote[] {
+  if (kind) {
+    return queryAll<ProjectNote>(
+      `SELECT * FROM project_notes WHERE project_id = ? AND kind = ?
+       ORDER BY (status = 'open') DESC, created_at DESC`,
+      [projectId, kind]
+    )
+  }
+  return queryAll<ProjectNote>(
+    `SELECT * FROM project_notes WHERE project_id = ?
+     ORDER BY (status = 'open') DESC, created_at DESC`,
+    [projectId]
+  )
+}
+
+/** Add a note to a project. Returns the created row. */
+export function addProjectNote(projectId: string, kind: 'issue' | 'risk' | 'note', content: string): ProjectNote {
+  const id = randomUUID()
+  const createdAt = new Date().toISOString()
+  run(
+    `INSERT INTO project_notes (id, project_id, kind, content, status, created_at)
+     VALUES (?, ?, ?, ?, 'open', ?)`,
+    [id, projectId, kind, content, createdAt]
+  )
+  return queryOne<ProjectNote>('SELECT * FROM project_notes WHERE id = ?', [id])!
+}
+
+/**
+ * Update a project note's content and/or status. Setting status to 'resolved'
+ * stamps resolved_at; reopening clears it. Returns the updated row.
+ *
+ * @throws if the note does not exist.
+ */
+export function updateProjectNote(
+  id: string,
+  fields: { content?: string; status?: 'open' | 'resolved' }
+): ProjectNote {
+  const existing = queryOne<ProjectNote>('SELECT * FROM project_notes WHERE id = ?', [id])
+  if (!existing) throw new Error(`Project note ${id} not found`)
+
+  const updates: string[] = []
+  const params: unknown[] = []
+
+  if (fields.content !== undefined) {
+    updates.push('content = ?')
+    params.push(fields.content)
+  }
+  if (fields.status !== undefined) {
+    updates.push('status = ?')
+    params.push(fields.status)
+    updates.push('resolved_at = ?')
+    params.push(fields.status === 'resolved' ? new Date().toISOString() : null)
+  }
+
+  if (updates.length > 0) {
+    params.push(id)
+    run(`UPDATE project_notes SET ${updates.join(', ')} WHERE id = ?`, params)
+  }
+
+  return queryOne<ProjectNote>('SELECT * FROM project_notes WHERE id = ?', [id])!
+}
+
+/** Delete a project note. */
+export function deleteProjectNote(id: string): void {
+  run('DELETE FROM project_notes WHERE id = ?', [id])
+}
+
+/**
+ * Actionables whose source knowledge links to a project (v29). Reuses the same
+ * two-path union as getKnowledgeIdsForProject (transitive project→meeting→
+ * recording→capture, plus direct knowledge_projects), then selects actionables
+ * on source_knowledge_id. Newest first.
+ */
+export function getActionablesForProject(projectId: string): Record<string, unknown>[] {
+  return queryAll<Record<string, unknown>>(
+    `SELECT DISTINCT a.* FROM actionables a
+     WHERE a.source_knowledge_id IN (
+       SELECT kc.id FROM knowledge_captures kc
+       JOIN recordings r ON kc.source_recording_id = r.id
+       JOIN meeting_projects mp ON r.meeting_id = mp.meeting_id
+       WHERE mp.project_id = ?
+       UNION
+       SELECT knowledge_capture_id FROM knowledge_projects WHERE project_id = ?
+     )
+     ORDER BY a.created_at DESC`,
+    [projectId, projectId]
   )
 }
 

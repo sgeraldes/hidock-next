@@ -3,10 +3,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { registerProjectsHandlers } from '../projects-handlers'
 import { ipcMain } from 'electron'
 
-// Mock electron ipcMain
+// Mock electron ipcMain + shell
 vi.mock('electron', () => ({
   ipcMain: {
     handle: vi.fn()
+  },
+  shell: {
+    openPath: vi.fn(async () => '')
   }
 }))
 
@@ -30,6 +33,13 @@ vi.mock('../../services/database', () => ({
   getTopicsForProjectMeetings: vi.fn(),
   getKnowledgeIdsForProject: vi.fn(),
   getPersonIdsForProject: vi.fn(),
+  mergeProjects: vi.fn(),
+  getProjectsForKnowledge: vi.fn(),
+  getProjectNotes: vi.fn(),
+  addProjectNote: vi.fn(),
+  updateProjectNote: vi.fn(),
+  deleteProjectNote: vi.fn(),
+  getActionablesForProject: vi.fn(),
   getDatabase: vi.fn(() => ({
     prepare: vi.fn(() => ({
       bind: vi.fn(),
@@ -116,5 +126,114 @@ describe('Projects IPC Handlers', () => {
     expect(result.success).toBe(true)
     expect(result.data.project.knowledgeIds).toEqual(['k1', 'k2'])
     expect(result.data.project.personIds).toEqual(['p1'])
+  })
+
+  const PROJECT_ID = '550e8400-e29b-41d4-a716-446655440000'
+  const NOTE_ID = '660e8400-e29b-41d4-a716-446655440111'
+
+  function getHandler(channel: string) {
+    return vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === channel)?.[1]
+  }
+
+  it('registers the v29 hub handlers', () => {
+    registerProjectsHandlers()
+    for (const channel of [
+      'projects:getNotes',
+      'projects:addNote',
+      'projects:updateNote',
+      'projects:deleteNote',
+      'projects:getActionables',
+      'projects:openFolder'
+    ]) {
+      expect(ipcMain.handle).toHaveBeenCalledWith(channel, expect.any(Function))
+    }
+  })
+
+  it('rename + folderPath flow through projects:update', async () => {
+    const { getProjectById, updateProject } = await import('../../services/database')
+    vi.mocked(getProjectById).mockReturnValue({
+      id: PROJECT_ID, name: 'Renamed', description: null, status: 'active',
+      folder_path: 'C:/repo', url: null, created_at: '2026-01-01'
+    } as any)
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:update')
+    const result = await handler?.({} as any, { id: PROJECT_ID, name: 'Renamed', folderPath: 'C:/repo' }) as any
+
+    expect(result.success).toBe(true)
+    expect(result.data.name).toBe('Renamed')
+    expect(result.data.folderPath).toBe('C:/repo')
+    expect(updateProject).toHaveBeenCalledWith(PROJECT_ID, expect.objectContaining({ name: 'Renamed', folderPath: 'C:/repo' }))
+  })
+
+  it('addNote creates a project note', async () => {
+    const { getProjectById, addProjectNote } = await import('../../services/database')
+    vi.mocked(getProjectById).mockReturnValue({ id: PROJECT_ID, name: 'P', description: null, status: 'active', folder_path: null, url: null, created_at: 'x' } as any)
+    const note = { id: NOTE_ID, project_id: PROJECT_ID, kind: 'issue', content: 'Bug', status: 'open', created_at: 'x', resolved_at: null }
+    vi.mocked(addProjectNote).mockReturnValue(note as any)
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:addNote')
+    const result = await handler?.({} as any, { projectId: PROJECT_ID, kind: 'issue', content: 'Bug' }) as any
+
+    expect(result.success).toBe(true)
+    expect(result.data).toEqual(note)
+    expect(addProjectNote).toHaveBeenCalledWith(PROJECT_ID, 'issue', 'Bug')
+  })
+
+  it('updateNote toggles status', async () => {
+    const { updateProjectNote } = await import('../../services/database')
+    const resolved = { id: NOTE_ID, project_id: PROJECT_ID, kind: 'issue', content: 'Bug', status: 'resolved', created_at: 'x', resolved_at: 'y' }
+    vi.mocked(updateProjectNote).mockReturnValue(resolved as any)
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:updateNote')
+    const result = await handler?.({} as any, { id: NOTE_ID, status: 'resolved' }) as any
+
+    expect(result.success).toBe(true)
+    expect(result.data.status).toBe('resolved')
+    expect(updateProjectNote).toHaveBeenCalledWith(NOTE_ID, expect.objectContaining({ status: 'resolved' }))
+  })
+
+  it('getNotes returns the project notes', async () => {
+    const { getProjectNotes } = await import('../../services/database')
+    vi.mocked(getProjectNotes).mockReturnValue([
+      { id: NOTE_ID, project_id: PROJECT_ID, kind: 'risk', content: 'R', status: 'open', created_at: 'x', resolved_at: null }
+    ] as any)
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:getNotes')
+    const result = await handler?.({} as any, { projectId: PROJECT_ID, kind: 'risk' }) as any
+
+    expect(result.success).toBe(true)
+    expect(result.data).toHaveLength(1)
+    expect(getProjectNotes).toHaveBeenCalledWith(PROJECT_ID, 'risk')
+  })
+
+  it('getActionables maps DB rows to the renderer shape', async () => {
+    const { getActionablesForProject } = await import('../../services/database')
+    vi.mocked(getActionablesForProject).mockReturnValue([
+      { id: 'a1', type: 'email', title: 'Follow up', description: null, source_knowledge_id: 'k1', status: 'pending', confidence: 0.9, created_at: '2026-07-08' }
+    ] as any)
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:getActionables')
+    const result = await handler?.({} as any, PROJECT_ID) as any
+
+    expect(result.success).toBe(true)
+    expect(result.data[0]).toMatchObject({ id: 'a1', title: 'Follow up', status: 'pending', sourceKnowledgeId: 'k1' })
+    expect(getActionablesForProject).toHaveBeenCalledWith(PROJECT_ID)
+  })
+
+  it('openFolder rejects a project with no folder path', async () => {
+    const { getProjectById } = await import('../../services/database')
+    vi.mocked(getProjectById).mockReturnValue({ id: PROJECT_ID, name: 'P', description: null, status: 'active', folder_path: null, url: null, created_at: 'x' } as any)
+
+    registerProjectsHandlers()
+    const handler = getHandler('projects:openFolder')
+    const result = await handler?.({} as any, PROJECT_ID) as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('VALIDATION_ERROR')
   })
 })

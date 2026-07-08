@@ -1,7 +1,7 @@
 import { useCallback } from 'react'
 import { toast } from '@/components/ui/toaster'
 import { useTranscriptionStore } from '@/store/features/useTranscriptionStore'
-import { cancelDownloads, cancelDownloadsComplete, requestScopedDownloads } from '@/hooks/useDownloadOrchestrator'
+import { cancelDownloads, cancelDownloadsComplete, requestScopedDownloads, markDownloadPriority } from '@/hooks/useDownloadOrchestrator'
 import type { UnifiedRecording } from '@/types/unified-recording'
 import { hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import type { AppConfig } from '@/types'
@@ -197,6 +197,8 @@ export function useOperations() {
       // Slice 1: register the explicit scope BEFORE enqueueing so the orchestrator
       // only downloads this file (not the whole pending queue) when auto-download is off.
       requestScopedDownloads([recording.deviceFilename])
+      // Defect C: a single explicit download jumps ahead of the recency-ordered backlog.
+      markDownloadPriority([recording.deviceFilename])
       await window.electronAPI.downloadService.queueDownloads([{
         filename: recording.deviceFilename,
         size: recording.size,

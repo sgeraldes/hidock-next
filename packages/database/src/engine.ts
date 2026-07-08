@@ -16,7 +16,8 @@
  */
 
 import type { Database as SqlJsDatabase } from 'sql.js'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs'
+import { writeFile, rename, unlink } from 'fs/promises'
 
 export type { SqlJsDatabase }
 
@@ -52,6 +53,18 @@ export interface DatabaseEngineConfig {
    * migrations. The app force-adds any columns the code requires (idempotent).
    */
   repairPhase?: () => void
+  /**
+   * Debounce window (ms) for the async persistence triggered by run()/runMany()/
+   * transaction commits. Rapid writes within this window coalesce into a single
+   * physical write instead of one full-DB export+write per statement. Default 1000.
+   */
+  saveDebounceMs?: number
+  /**
+   * Upper bound (ms) on how long a pending write may be deferred while writes
+   * keep arriving. Guarantees a flush even under a sustained write stream (e.g. a
+   * bulk download). Default 5000.
+   */
+  saveMaxWaitMs?: number
 }
 
 /** Column names for a table (empty if the table does not exist). */
@@ -81,7 +94,38 @@ export class DatabaseEngine {
   // transaction is active", masking the real error.
   private inTransaction = false
 
-  constructor(private readonly config: DatabaseEngineConfig) {}
+  // --- Debounced async persistence state ---
+  // Persisting a large sql.js database means export() (a full in-memory copy)
+  // followed by a write of the whole file. Doing that synchronously on every
+  // run() blocks the Electron main thread and, under a burst of writes (bulk
+  // download + transcription), freezes the app. Instead, run() marks the DB
+  // dirty and schedules a single coalesced async write.
+  private readonly saveDebounceMs: number
+  private readonly saveMaxWaitMs: number
+  private saveTimer: ReturnType<typeof setTimeout> | null = null
+  private dirty = false
+  private firstDirtyAt = 0
+  // In-flight async write (null when idle). A new schedule waits for it to
+  // settle rather than overlapping two writes to the same file.
+  private saving: Promise<void> | null = null
+  // Set once closeDatabase() runs: blocks any further scheduled writes and lets
+  // an in-flight async write skip its rename (the synchronous close write is
+  // authoritative).
+  private disposed = false
+  // Instrumentation for tests: counts physical writes actually performed.
+  private physicalSaveCount = 0
+  // Monotonic ordering guard: each physical write is tagged with a sequence
+  // number captured when its snapshot is taken. A write only commits (renames
+  // into place) if its snapshot is newer than the last committed one, so a
+  // slow in-flight async write can never clobber a newer synchronous flush
+  // (e.g. the transcript-completion flush) that raced ahead of it.
+  private saveSeq = 0
+  private committedSeq = 0
+
+  constructor(private readonly config: DatabaseEngineConfig) {
+    this.saveDebounceMs = config.saveDebounceMs ?? 1000
+    this.saveMaxWaitMs = config.saveMaxWaitMs ?? 5000
+  }
 
   /**
    * Safe database initialization — the 4-phase boot sequence. Idempotent:
@@ -177,11 +221,96 @@ export class DatabaseEngine {
     }
   }
 
+  /**
+   * Persist the database to disk NOW, synchronously. Cancels any pending
+   * debounced write and clears the dirty flag. Use at durability-critical
+   * points (initialize, close, after saving an expensive artifact) — the
+   * high-frequency run() path uses scheduleSave() instead.
+   *
+   * Writes to a temp file then renames, so a crash mid-write cannot leave a
+   * torn/corrupt database file in place.
+   */
   saveDatabase(): void {
-    if (this.db && this.dbPath) {
-      const data = this.db.export()
-      writeFileSync(this.dbPath, Buffer.from(data))
+    if (!this.db || !this.dbPath) return
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer)
+      this.saveTimer = null
     }
+    this.dirty = false
+    this.firstDirtyAt = 0
+    const seq = ++this.saveSeq
+    const data = this.db.export()
+    const tmp = `${this.dbPath}.tmp`
+    writeFileSync(tmp, Buffer.from(data))
+    renameSync(tmp, this.dbPath)
+    this.committedSeq = Math.max(this.committedSeq, seq)
+    this.physicalSaveCount++
+  }
+
+  /**
+   * Mark the DB dirty and schedule a coalesced async write. Multiple calls
+   * within saveDebounceMs collapse into one write; a sustained stream is still
+   * flushed at least every saveMaxWaitMs. Never blocks the caller.
+   */
+  private scheduleSave(): void {
+    if (this.disposed || !this.db || !this.dbPath) return
+    this.dirty = true
+    const now = Date.now()
+    if (this.firstDirtyAt === 0) this.firstDirtyAt = now
+
+    // Past the max-wait budget: let the already-scheduled timer fire (don't keep
+    // pushing it out). If none is scheduled, fall through and schedule now.
+    if (this.saveTimer && now - this.firstDirtyAt >= this.saveMaxWaitMs) return
+
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    this.saveTimer = setTimeout(() => {
+      void this.persistDirty()
+    }, this.saveDebounceMs)
+    // Don't let a pending save keep the process alive on its own; quit paths
+    // flush synchronously via saveDatabase()/closeDatabase().
+    if (typeof this.saveTimer.unref === 'function') this.saveTimer.unref()
+  }
+
+  /** Timer callback: perform the debounced async write (temp file + rename). */
+  private async persistDirty(): Promise<void> {
+    this.saveTimer = null
+    // A write is already in flight; it will reschedule if still dirty on finish.
+    if (this.saving) return
+    if (this.disposed || !this.dirty || !this.db || !this.dbPath) return
+
+    // Snapshot the current DB state synchronously, then clear dirty. Writes that
+    // arrive during the async write re-set dirty and get their own flush.
+    const seq = ++this.saveSeq
+    const data = this.db.export()
+    this.dirty = false
+    this.firstDirtyAt = 0
+    const dbPath = this.dbPath
+    const tmp = `${dbPath}.tmp`
+
+    this.saving = (async () => {
+      try {
+        await writeFile(tmp, Buffer.from(data))
+        if (this.disposed || seq < this.committedSeq) {
+          // A newer write (a synchronous flush/close, or a later async save)
+          // already committed; drop this now-stale snapshot rather than
+          // reverting the file to older state.
+          await unlink(tmp).catch(() => {})
+          return
+        }
+        await rename(tmp, dbPath)
+        this.committedSeq = Math.max(this.committedSeq, seq)
+        this.physicalSaveCount++
+      } catch (e) {
+        // Keep the DB marked dirty so the next scheduleSave() retries.
+        this.dirty = true
+        console.error('[Database] Async save failed:', (e as Error).message)
+        await unlink(tmp).catch(() => {})
+      } finally {
+        this.saving = null
+        if (this.dirty && !this.disposed) this.scheduleSave()
+      }
+    })()
+    await this.saving
   }
 
   getDatabase(): SqlJsDatabase {
@@ -193,6 +322,9 @@ export class DatabaseEngine {
 
   closeDatabase(): void {
     if (this.db) {
+      // Block/neutralize any pending or in-flight async write, then flush the
+      // authoritative final state synchronously before closing the handle.
+      this.disposed = true
       this.saveDatabase()
       this.db.close()
       this.db = null
@@ -221,7 +353,7 @@ export class DatabaseEngine {
     // Persisting (db.export) mid-transaction ends the active transaction in
     // sql.js, which then breaks the enclosing COMMIT/ROLLBACK. Inside a
     // transaction, defer the save to the single COMMIT.
-    if (!this.inTransaction) this.saveDatabase()
+    if (!this.inTransaction) this.scheduleSave()
   }
 
   /** run() variant that does not persist — for use inside a transaction. */
@@ -244,7 +376,7 @@ export class DatabaseEngine {
     try {
       const result = fn()
       database.run('COMMIT')
-      this.saveDatabase()
+      this.scheduleSave()
       return result
     } catch (error) {
       // Defensive: never let a failed ROLLBACK mask the original error.
@@ -267,6 +399,11 @@ export class DatabaseEngine {
       stmt.reset()
     }
     stmt.free()
-    if (!this.inTransaction) this.saveDatabase()
+    if (!this.inTransaction) this.scheduleSave()
+  }
+
+  /** Test-only: number of physical writes to disk performed so far. */
+  getPhysicalSaveCount(): number {
+    return this.physicalSaveCount
   }
 }

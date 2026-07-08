@@ -18,8 +18,12 @@ import { useUIStore } from '@/store/useUIStore'
 import { AudioPlayer } from '@/components/AudioPlayer'
 import { UnifiedRecording, hasLocalPath, isDeviceOnly } from '@/types/unified-recording'
 import { Transcript, Meeting, parseJsonArray } from '@/types'
-import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, AudioLines, MoreHorizontal } from 'lucide-react'
+import { Calendar, Download, Trash2, Wand2, RefreshCw, Play, Square, Pencil, Check, Edit2, Link, X, ExternalLink, FolderOpen, AudioLines, MoreHorizontal, Folder, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+
+/** Minimal project shape the assignment picker needs (id + name). */
+type PickerProject = { id: string; name: string }
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -34,7 +38,7 @@ import {
 import { toast } from '@/components/ui/toaster'
 import { RecordingLinkDialog } from '@/components/RecordingLinkDialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
-import { formatDateTime, formatDuration, formatBytes } from '@/lib/utils'
+import { formatDateTime, formatDuration, formatBytes, cn } from '@/lib/utils'
 
 const CATEGORY_OPTIONS = [
   { value: 'meeting', label: 'Meeting' },
@@ -374,6 +378,14 @@ export function SourceReader({
             </div>
           </div>
 
+          {/* Projects assignment (only for captured recordings) */}
+          {recording.knowledgeCaptureId && (
+            <div className="mt-4">
+              <p className="text-xs font-medium text-muted-foreground mb-1.5">Projects</p>
+              <ProjectAssignmentRow knowledgeCaptureId={recording.knowledgeCaptureId} />
+            </div>
+          )}
+
           {/* Linked Meeting */}
           {meeting && (
             <div className="mt-4 flex items-center gap-2 p-3 bg-muted/30 border rounded-lg">
@@ -626,6 +638,120 @@ export function SourceReader({
           setShowTranscribeWarning(false)
         }}
       />
+    </div>
+  )
+}
+
+/**
+ * Projects assignment for a captured recording. Shows chips of assigned projects
+ * (projects.getForKnowledge) and a popover picker of all projects with checkboxes
+ * (knowledge.setProjects persists the change). Own component so its hooks stay
+ * isolated from SourceReader's conditional early return.
+ */
+function ProjectAssignmentRow({ knowledgeCaptureId }: { knowledgeCaptureId: string }) {
+  const [assigned, setAssigned] = useState<PickerProject[]>([])
+  const [allProjects, setAllProjects] = useState<PickerProject[]>([])
+  const [open, setOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  const loadAssigned = useCallback(async () => {
+    try {
+      const res = await window.electronAPI.projects.getForKnowledge(knowledgeCaptureId)
+      setAssigned(res.success ? res.data : [])
+    } catch (err) {
+      console.error('Failed to load assigned projects:', err)
+      setAssigned([])
+    }
+  }, [knowledgeCaptureId])
+
+  useEffect(() => {
+    loadAssigned()
+  }, [loadAssigned])
+
+  const loadAll = useCallback(async () => {
+    try {
+      const res = await window.electronAPI.projects.getAll({ status: 'all' })
+      if (res.success) setAllProjects(res.data.projects)
+    } catch (err) {
+      console.error('Failed to load projects:', err)
+    }
+  }, [])
+
+  const assignedIds = new Set(assigned.map((p) => p.id))
+
+  const toggleProject = useCallback(async (projectId: string) => {
+    const nextIds = new Set(assignedIds)
+    if (nextIds.has(projectId)) nextIds.delete(projectId)
+    else nextIds.add(projectId)
+    setSaving(true)
+    try {
+      const res = await window.electronAPI.knowledge.setProjects({
+        knowledgeCaptureId,
+        projectIds: Array.from(nextIds)
+      })
+      if (res.success) {
+        setAssigned(allProjects.filter((p) => nextIds.has(p.id)))
+      } else {
+        toast.error('Failed to update projects')
+      }
+    } catch (err) {
+      console.error('Failed to set projects:', err)
+      toast.error('Failed to update projects')
+    } finally {
+      setSaving(false)
+    }
+  }, [assignedIds, allProjects, knowledgeCaptureId])
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {assigned.map((p) => (
+        <span
+          key={p.id}
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs border border-primary/20"
+        >
+          <Folder className="h-3 w-3" />
+          {p.name}
+        </span>
+      ))}
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next)
+          if (next) loadAll()
+        }}
+      >
+        <PopoverTrigger asChild>
+          <Button variant="outline" size="sm" className="h-6 gap-1 text-xs" title="Assign to projects">
+            <Plus className="h-3 w-3" />
+            {assigned.length === 0 ? 'Assign project' : 'Edit'}
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-64 p-2">
+          <p className="text-xs font-semibold text-muted-foreground px-2 py-1">Assign to projects</p>
+          <div className="max-h-64 overflow-auto">
+            {allProjects.length === 0 ? (
+              <p className="text-xs text-muted-foreground px-2 py-2">No projects yet.</p>
+            ) : (
+              allProjects.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => toggleProject(p.id)}
+                  disabled={saving}
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-left text-sm hover:bg-muted transition-colors disabled:opacity-50"
+                >
+                  <span className={cn(
+                    "flex h-4 w-4 items-center justify-center rounded border shrink-0",
+                    assignedIds.has(p.id) ? "bg-primary border-primary text-primary-foreground" : "border-muted-foreground/40"
+                  )}>
+                    {assignedIds.has(p.id) && <Check className="h-3 w-3" />}
+                  </span>
+                  <span className="truncate">{p.name}</span>
+                </button>
+              ))
+            )}
+          </div>
+        </PopoverContent>
+      </Popover>
     </div>
   )
 }

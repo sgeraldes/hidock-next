@@ -112,9 +112,9 @@ describe('migration v26 objects', () => {
     expect(cols).toContain('assignee_contact_id')
   })
 
-  it('is at schema version 28', () => {
+  it('is at schema version 29', () => {
     const row = queryOne<{ version: number }>('SELECT version FROM schema_version ORDER BY version DESC LIMIT 1')
-    expect(row?.version).toBe(28)
+    expect(row?.version).toBe(29)
   })
 })
 
