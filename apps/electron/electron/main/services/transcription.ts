@@ -557,7 +557,12 @@ async function transcribeWithGemini(
     language: config.transcription.language,
     context: meetingContext || undefined,
     // GeminiEngine reads filePath from options for MIME type detection
-    filePath
+    filePath,
+    // Real per-chunk progress (long recordings are transcribed in ~10-minute
+    // segments) — replaces the fake ticker that sat at 90% for minutes.
+    onProgress: (done: number, total: number) => {
+      progressCallback?.('transcribing', Math.min(45, 20 + Math.round((done / total) * 25)))
+    }
   } as Parameters<typeof engine.transcribe>[1] & { filePath: string })) {
     if (segment.text) segments.push(segment.text)
   }
