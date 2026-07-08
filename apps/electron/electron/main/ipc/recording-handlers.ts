@@ -248,6 +248,19 @@ export function registerRecordingHandlers(): void {
         throw new Error(result.error.issues[0]?.message || 'Invalid request')
       }
 
+      // Same provider prerequisite gate as recordings:addToQueue — fail with a
+      // clean, actionable error instead of throwing deep inside the engine.
+      const config = getConfig()
+      if ((config.transcription.provider || 'gemini') === 'gemini' && !config.transcription.geminiApiKey) {
+        throw new Error('Transcription API key not configured. Please add your API key in Settings.')
+      }
+      if (config.transcription.provider === 'local-asr') {
+        const runnerPath = join(config.transcription.localAsrPath || '', 'mcp_runner.py')
+        if (!config.transcription.localAsrPath || !existsSync(runnerPath)) {
+          throw new Error('Local ASR runner not found. Check the ASR MCP path in Settings.')
+        }
+      }
+
       await transcribeManually(result.data.recordingId)
     } catch (error) {
       console.error('recordings:transcribe error:', error)

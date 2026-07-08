@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { RefreshCw, AlertCircle } from 'lucide-react'
 import { toast } from '@/components/ui/toaster'
+import { getHiDockDeviceService } from '@/services/hidock-device'
 import { useUnifiedRecordings } from '@/hooks/useUnifiedRecordings'
 import {
   UnifiedRecording,
@@ -577,13 +578,22 @@ export function Library() {
     const errors: Array<{ filename: string; error: any }> = []
 
     try {
-      // Step 1: Delete all recordings on server FIRST
+      // Step 1: Delete all recordings on server FIRST.
+      // Device-only entries have a synthetic (non-UUID) id and no local file —
+      // recordings.delete() silently no-ops for them, so they must be deleted
+      // over USB by device filename instead.
+      const deviceService = getHiDockDeviceService()
       for (let i = 0; i < selectedRecordings.length; i++) {
         const recording = selectedRecordings[i]
         setBulkProgress({ current: i + 1, total: selectedRecordings.length })
 
         try {
-          await window.electronAPI.recordings.delete(recording.id)
+          if (isDeviceOnly(recording)) {
+            const ok = await deviceService.deleteRecording(recording.deviceFilename)
+            if (!ok) throw new Error('Device deletion failed')
+          } else {
+            await window.electronAPI.recordings.delete(recording.id)
+          }
         } catch (e) {
           console.error('Failed to delete:', recording.filename, e)
           errors.push({ filename: recording.filename, error: e })
@@ -637,11 +647,18 @@ export function Library() {
     })
   }, [filteredRecordings, selectedIds, executeBulkDelete])
 
-  // B-LIB-006: Extracted device delete execution
+  // B-LIB-006: Extracted device delete execution.
+  // Deletes over USB by device filename — recordings.delete() only removes the
+  // LOCAL file and silently no-ops on device-only synthetic ids, so it must
+  // never be the device-deletion path.
   const executeDeleteFromDevice = useCallback(async (recording: UnifiedRecording) => {
+    if (!('deviceFilename' in recording)) return
     setDeleting(recording.id)
     try {
-      await window.electronAPI.recordings.delete(recording.id)
+      const ok = await getHiDockDeviceService().deleteRecording(recording.deviceFilename)
+      if (!ok) throw new Error('Device deletion failed')
+      // Local copies are intentionally kept — the next device scan reconciles
+      // the row to local-only via markRecordingsNotOnDevice.
       await refresh(false)
     } catch (e) {
       console.error('Failed to delete from device:', e)
