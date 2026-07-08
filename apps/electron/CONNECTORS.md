@@ -1,11 +1,58 @@
-# CONNECTORS.md — External-System Connector Framework
+# CONNECTORS.md — Entity Types & External-System Connectors
 
-*Design captured 2026-07-08 from Sebastián's directive. Connectors turn the app
-from a self-contained recorder into a super-interconnected knowledge platform.
-Companion docs: INTELLIGENCE.md (entity/graph architecture), GOAL.md (product
-principles).*
+*Design captured 2026-07-08 from Sebastián's directive (layering corrected
+same day). Companion docs: INTELLIGENCE.md (entity/graph architecture),
+GOAL.md (product principles).*
 
-## The idea
+## Layering (the architecture, not just connections)
+
+```
+Layer 0 — ENTITY TYPES (format extensions)          ← the foundation
+  pdf, image, svg, md, txt, json, wav/mp3 (audio), video, docx/pptx…
+  Each type registers: storage layout, metadata schema, text/content
+  extraction, chunking strategy, preview/renderer, optional enrichment.
+
+Layer 1 — PIPELINE (type-dispatched, deterministic)
+  ingest → extract (per type) → chunk → embed → graph → suggestions.
+  NO LLM in the retrieval/sync path. LLMs are optional post-processing
+  stages (cleaning, summarization, image description) — never the
+  mechanism that fetches or stores.
+
+Layer 2 — CONNECTORS (feeders)
+  MCP-backed or native. A connector syncs external containers on a
+  schedule (cursors, deltas, cheap deterministic API pagination) and
+  emits ITEMS OF REGISTERED ENTITY TYPES. Slack emits md-like message
+  logs AND images; GitHub emits md files; Android emits audio + contacts.
+  Connectors DEPEND on entity types — a connector cannot deliver a
+  format the type registry doesn't know how to store/extract/render.
+
+Layer 3 — INTELLIGENCE (existing)
+  canonical entities, resolver, aliases, suggestions, living graph.
+```
+
+**Why this split matters:** bringing Slack is not "an MCP." It is (a) a
+scheduled, LLM-free sync loop pulling message deltas and files, (b) mapping
+them onto entity types the library already understands (md conversation logs,
+image attachments with their own storage/metadata), and (c) only THEN optional
+LLM housekeeping. The type system is shared; ten connectors reuse the same
+image handling.
+
+### Entity-type registry (Layer 0 data model)
+- `artifact_types` are code-registered (not DB): `{kind, mimes[], store(),
+  extractText(), chunk(), preview(), enrich?()}`.
+- `artifacts(id, knowledge_capture_id, kind, mime, storage_path, size,
+  content_hash, extracted_text, metadata JSON, source_connector_id?,
+  source_ref?, created_at)` — every concrete file/blob. A capture can own
+  many artifacts (a Slack channel capture owns thousands of message-log
+  segments + image artifacts; a recording capture owns its wav + transcript).
+- Storage layout: `<dataRoot>/artifacts/<kind>/<hash-prefix>/<id>.<ext>`;
+  dedup by content_hash.
+- Enrichment examples (optional, queued, budgeted): image → Gemini multimodal
+  description/tags; pdf → structure-aware section extraction; audio →
+  existing transcription pipeline (audio is just the first entity type that
+  was ever implemented).
+
+## Connectors (Layer 2)
 
 A **connector** plugs an external system into the intelligence layer through
 four capability surfaces. A connector may implement any subset:
@@ -98,19 +145,26 @@ suggestions). Signals (GitHub webhooks/polling) go straight to the event bus
 
 ## Rollout
 
-1. **C1 — Framework + PDF connector** (after Round 4a lands; migration v28):
-   connector host, interfaces, connectors/connector_sources/contact_identities
-   tables, Settings UI skeleton, PDF vertical end-to-end (file → capture →
-   chunks → embeddings → graph → searchable/askable).
-2. **C2 — MCP client host + Slack** (channels as living captures, send-message
-   action, identity metadata on hover cards).
+0. **C0 — Entity-type foundation** (after Round 4a lands; migration v28):
+   artifact type registry + `artifacts` table + storage layout + type-
+   dispatched extract/chunk stages. First registered types: md, txt, pdf,
+   image (audio already exists as the legacy path — refactor it INTO the
+   registry, don't duplicate). Library renders artifacts per type.
+1. **C1 — PDF + image verticals end-to-end** (drop a PDF/image into the
+   library → artifact → extraction (pdf text; image via Gemini multimodal
+   description) → chunks → embeddings → graph → searchable/askable).
+2. **C2 — Connector host + Slack** (scheduled LLM-free delta sync via the
+   local MCP server; channels as living md captures + image artifacts;
+   send-message action; identity metadata on hover cards).
 3. **C3 — M365 identity (email autocomplete in People/attendees) + BambooHR
    enrichment.**
-4. **C4 — GitHub sources + signals** (project metadata from commits).
+4. **C4 — GitHub sources + signals** (md files; commits → project metadata +
+   contributor edges).
 5. Then per catalog by demand.
 
 ## Status
-- [ ] C1 framework + PDF (queued behind Round 4a — shares database.ts)
-- [ ] C2 MCP host + Slack
+- [ ] C0 entity-type foundation (queued behind Round 4a — shares database.ts)
+- [ ] C1 PDF + image verticals
+- [ ] C2 connector host + Slack
 - [ ] C3 M365 + BambooHR identity
 - [ ] C4 GitHub
