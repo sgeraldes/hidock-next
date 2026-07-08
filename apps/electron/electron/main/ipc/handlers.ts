@@ -20,6 +20,7 @@ import { registerMeetingsHandlers } from './meetings-handlers'
 import { registerJensenHandlers } from './jensen-handlers'
 import { registerKnowledgeGraphHandlers } from './knowledge-graph-handlers'
 import { registerDevicePipelineHandlers } from './device-pipeline-handlers'
+import { registerBriefingHandlers } from './briefing-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -48,6 +49,7 @@ export function registerIpcHandlers(): void {
   // uses the old device path; this only exposes get-state/actions + event bridge.
   // It does NOT call initAutoConnect (no competing USB connect listener).
   registerDevicePipelineHandlers()
+  registerBriefingHandlers()
 
   console.log('All IPC handlers registered')
 }

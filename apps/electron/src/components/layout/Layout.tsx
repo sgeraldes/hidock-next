@@ -20,7 +20,8 @@ import {
   Terminal,
   ChevronDown,
   ChevronUp,
-  Network
+  Network,
+  Sun
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -54,6 +55,7 @@ const navigationSections: NavigationSection[] = [
   {
     title: 'KNOWLEDGE',
     items: [
+      { name: 'Today', href: '/today', icon: Sun },
       { name: 'Library', href: '/library', icon: BookOpen },
       { name: 'Assistant', href: '/assistant', icon: Bot },
       { name: 'Explore', href: '/explore', icon: Compass },

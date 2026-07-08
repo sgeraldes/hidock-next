@@ -11,6 +11,7 @@ import { lazyWithRetry } from '@/lib/lazyWithRetry'
 
 // Lazy load all page components for code splitting
 // Each page becomes a separate chunk, reducing initial bundle size
+const Today = lazyWithRetry(() => import('@/pages/Today'))
 const Calendar = lazyWithRetry(() => import('@/pages/Calendar'))
 const MeetingDetail = lazyWithRetry(() => import('@/pages/MeetingDetail'))
 const Chat = lazyWithRetry(() => import('@/pages/Chat'))
@@ -77,7 +78,17 @@ function App(): React.ReactElement {
       <Layout>
         <NavigationLogger />
         <Routes>
-          <Route path="/" element={<Navigate to="/library" replace />} />
+          <Route path="/" element={<Navigate to="/today" replace />} />
+          <Route
+            path="/today"
+            element={
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingSpinner message="Loading your day..." />}>
+                  <Today />
+                </Suspense>
+              </ErrorBoundary>
+            }
+          />
           <Route
             path="/calendar"
             element={

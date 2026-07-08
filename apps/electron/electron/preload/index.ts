@@ -171,6 +171,11 @@ export interface ElectronAPI {
     search: (query: string) => Promise<any[]>
   }
 
+  // Today briefing (single round-trip payload for the Today page)
+  briefing: {
+    get: () => Promise<{ success: boolean; data?: any; error?: string }>
+  }
+
   // Database - Queue
   queue: {
     getItems: (status?: string) => Promise<any[]>
@@ -617,6 +622,10 @@ const electronAPI: ElectronAPI = {
     getByRecordingId: (recordingId) => callIPC('db:get-transcript', recordingId),
     getByRecordingIds: (recordingIds) => callIPC('db:get-transcripts-by-recording-ids', recordingIds),
     search: (query) => callIPC('db:search-transcripts', query)
+  },
+
+  briefing: {
+    get: () => callIPC('briefing:get')
   },
 
   queue: {
