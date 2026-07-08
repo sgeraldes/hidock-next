@@ -17,6 +17,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { EntityMention } from '@/components/entity'
+import { TodayIdentitySuggestions } from '@/components/identity/TodayIdentitySuggestions'
 import { cn } from '@/lib/utils'
 
 interface BriefingMeeting {
@@ -243,6 +244,9 @@ export function Today() {
             </CardContent>
           </Card>
         )}
+
+        {/* Identity suggestions (renders only when the queue is non-empty) */}
+        <TodayIdentitySuggestions />
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Pending actions */}

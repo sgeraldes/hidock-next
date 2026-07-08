@@ -13,11 +13,16 @@ import {
   ChevronRight,
   Filter,
   UserPlus,
-  Trash2
+  Trash2,
+  GitMerge,
+  ArrowLeftRight,
+  X
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
+import { IdentitySuggestionsSection } from '@/components/identity/IdentitySuggestionsSection'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -49,6 +54,12 @@ export function People() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null)
   const [sortBy, setSortBy] = useState<'name' | 'lastSeen' | 'interactions'>('name')
+
+  // Quick-merge selection mode: pick exactly two contacts, then fold one into the other.
+  const [mergeMode, setMergeMode] = useState(false)
+  const [selectedForMerge, setSelectedForMerge] = useState<Person[]>([])
+  const [keeperId, setKeeperId] = useState<string | null>(null)
+  const [merging, setMerging] = useState(false)
 
   // Debounce: skip firing on initial mount
   const isFirstMount = useRef(true)
@@ -127,6 +138,72 @@ export function People() {
     setDeleteTarget(null)
   }, [deleteTarget, loadPeople, currentPage])
 
+  // --- Quick merge ---
+
+  const toggleMergeMode = useCallback(() => {
+    setMergeMode((prev) => {
+      if (prev) {
+        // Leaving merge mode — clear any pending selection.
+        setSelectedForMerge([])
+        setKeeperId(null)
+      }
+      return !prev
+    })
+  }, [])
+
+  const toggleSelectForMerge = useCallback((person: Person) => {
+    setSelectedForMerge((prev) => {
+      if (prev.some((p) => p.id === person.id)) {
+        return prev.filter((p) => p.id !== person.id)
+      }
+      if (prev.length >= 2) return prev // cap at exactly two
+      return [...prev, person]
+    })
+  }, [])
+
+  // Default the keeper to the contact with more interactions whenever two are picked.
+  useEffect(() => {
+    if (selectedForMerge.length === 2) {
+      const [a, b] = selectedForMerge
+      setKeeperId(a.interactionCount >= b.interactionCount ? a.id : b.id)
+    } else {
+      setKeeperId(null)
+    }
+  }, [selectedForMerge])
+
+  const swapKeeper = useCallback(() => {
+    setKeeperId((current) => {
+      if (selectedForMerge.length !== 2) return current
+      const other = selectedForMerge.find((p) => p.id !== current)
+      return other ? other.id : current
+    })
+  }, [selectedForMerge])
+
+  const keeper = selectedForMerge.find((p) => p.id === keeperId) ?? null
+  const loser = selectedForMerge.find((p) => p.id !== keeperId) ?? null
+
+  const handleConfirmMerge = useCallback(async () => {
+    if (!keeper || !loser) return
+    setMerging(true)
+    try {
+      const result = await window.electronAPI.contacts.merge({ keeperId: keeper.id, loserId: loser.id })
+      if (result.success) {
+        toast.success('Contacts merged', `${loser.name} was merged into ${keeper.name}.`)
+        setMergeMode(false)
+        setSelectedForMerge([])
+        setKeeperId(null)
+        await loadPeople(currentPage)
+      } else {
+        toast.error('Failed to merge contacts', (result as any).error?.message || 'Unknown error')
+      }
+    } catch (error) {
+      console.error('Failed to merge contacts:', error)
+      toast.error('Failed to merge contacts', error instanceof Error ? error.message : 'An unexpected error occurred')
+    } finally {
+      setMerging(false)
+    }
+  }, [keeper, loser, loadPeople, currentPage])
+
   const sortedPeople = useMemo(() => {
     const sorted = [...people]
     switch (sortBy) {
@@ -167,7 +244,7 @@ export function People() {
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="relative flex flex-col h-full">
       {/* Header */}
       <header className="border-b px-6 py-4">
         <div className="flex items-center justify-between">
@@ -179,6 +256,16 @@ export function People() {
             <Button variant="outline" size="sm" onClick={() => loadPeople(currentPage)}>
               <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
               Refresh
+            </Button>
+            <Button
+              size="sm"
+              variant={mergeMode ? 'default' : 'outline'}
+              onClick={toggleMergeMode}
+              title="Select two people to merge"
+              aria-pressed={mergeMode}
+            >
+              <GitMerge className="h-4 w-4 mr-2" />
+              {mergeMode ? 'Cancel merge' : 'Merge'}
             </Button>
             <Button
               size="sm"
@@ -245,6 +332,22 @@ export function People() {
       {/* Content */}
       <div className="flex-1 overflow-auto p-6">
         <div className="max-w-5xl mx-auto">
+          {/* Identity suggestions review queue (self-hides when empty) */}
+          {!mergeMode && <IdentitySuggestionsSection />}
+
+          {/* Merge-mode instruction banner */}
+          {mergeMode && (
+            <div className="mb-4 rounded-lg border border-primary/30 bg-primary/[0.04] px-4 py-3 text-sm">
+              <span className="font-medium">Merge mode:</span> pick two people to combine into one.
+              {' '}
+              {selectedForMerge.length === 0
+                ? 'Select the first person.'
+                : selectedForMerge.length === 1
+                ? 'Select one more.'
+                : 'Review the direction below, then confirm.'}
+            </div>
+          )}
+
           {/* Result count indicator */}
           {!loading && totalCount > 0 && (
             <p className="text-xs text-muted-foreground mb-4">
@@ -270,11 +373,18 @@ export function People() {
           ) : (
             <div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {sortedPeople.map((person) => (
+              {sortedPeople.map((person) => {
+                const isSelected = selectedForMerge.some((p) => p.id === person.id)
+                return (
                 <Card
                   key={person.id}
-                  className="group hover:border-primary/50 transition-all cursor-pointer overflow-hidden shadow-sm hover:shadow-md"
-                  onClick={() => navigate(`/person/${person.id}`)}
+                  className={cn(
+                    "group transition-all cursor-pointer overflow-hidden shadow-sm hover:shadow-md",
+                    mergeMode ? "hover:border-primary/70" : "hover:border-primary/50",
+                    isSelected && "ring-2 ring-primary border-primary"
+                  )}
+                  onClick={() => (mergeMode ? toggleSelectForMerge(person) : navigate(`/person/${person.id}`))}
+                  aria-pressed={mergeMode ? isSelected : undefined}
                 >
                   <CardHeader className="pb-3 bg-muted/5 group-hover:bg-muted/10 transition-colors">
                     <div className="flex items-start justify-between">
@@ -296,16 +406,27 @@ export function People() {
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 w-7 p-0 hover:bg-destructive/10 hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-                          onClick={(e) => handleDeleteClick(person.id, person.name, e)}
-                          title="Delete contact"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                        <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
+                        {mergeMode ? (
+                          <Checkbox
+                            checked={isSelected}
+                            tabIndex={-1}
+                            aria-label={`Select ${person.name} to merge`}
+                            className="pointer-events-none"
+                          />
+                        ) : (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 w-7 p-0 hover:bg-destructive/10 hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                              onClick={(e) => handleDeleteClick(person.id, person.name, e)}
+                              title="Delete contact"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                            <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
+                          </>
+                        )}
                       </div>
                     </div>
                   </CardHeader>
@@ -355,7 +476,8 @@ export function People() {
                     )}
                   </CardContent>
                 </Card>
-              ))}
+                )
+              })}
             </div>
 
             {/* Pagination controls */}
@@ -388,6 +510,47 @@ export function People() {
           )}
         </div>
       </div>
+
+      {/* Floating merge action bar — appears once exactly two people are selected */}
+      {mergeMode && keeper && loser && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 w-[min(640px,calc(100%-2rem))]">
+          <div className="flex flex-col sm:flex-row items-center gap-3 rounded-xl border bg-background/95 backdrop-blur shadow-lg px-4 py-3">
+            <div className="flex items-center gap-2 text-sm min-w-0 flex-1">
+              <GitMerge className="h-4 w-4 text-primary flex-shrink-0" />
+              <span className="text-muted-foreground">Keep</span>
+              <span className="font-semibold truncate max-w-[120px]" title={keeper.name}>{keeper.name}</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0 flex-shrink-0"
+                onClick={swapKeeper}
+                title="Swap merge direction"
+                aria-label="Swap merge direction"
+              >
+                <ArrowLeftRight className="h-4 w-4" />
+              </Button>
+              <span className="text-muted-foreground">absorb</span>
+              <span className="font-semibold truncate max-w-[120px] line-through decoration-muted-foreground/50" title={loser.name}>
+                {loser.name}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <Button variant="outline" size="sm" onClick={toggleMergeMode} disabled={merging}>
+                <X className="h-4 w-4 mr-1" />
+                Cancel
+              </Button>
+              <Button size="sm" onClick={handleConfirmMerge} disabled={merging}>
+                {merging ? (
+                  <RefreshCw className="h-4 w-4 mr-1 animate-spin" />
+                ) : (
+                  <GitMerge className="h-4 w-4 mr-1" />
+                )}
+                Confirm merge
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete Confirmation AlertDialog (replaces confirm()) */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
