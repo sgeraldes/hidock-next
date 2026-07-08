@@ -303,6 +303,36 @@ function buildRecordingMap(
     }
   }
 
+  // Surface capture-only items (C0 artifacts): knowledge captures with no source
+  // recording — e.g. imported PDFs/images/notes — have no device/local audio row,
+  // so emit a synthetic local-only entry keyed by capture id. Captures tied to a
+  // recording (sourceRecordingId set) are already represented above.
+  for (const capture of knowledgeCaptures) {
+    if (capture.sourceRecordingId) continue
+    const key = `capture:${capture.id}`
+    if (recordingMap.has(key)) continue
+    const dateSource = capture.capturedAt || capture.createdAt || new Date().toISOString()
+    const recording: LocalOnlyRecording = {
+      id: capture.id,
+      filename: capture.title || 'Untitled',
+      size: 0,
+      duration: 0,
+      dateRecorded: new Date(dateSource),
+      transcriptionStatus: mapTranscriptionStatus(undefined, capture.status ?? undefined),
+      location: 'local-only',
+      localPath: '',
+      syncStatus: 'synced',
+      isImported: true,
+      knowledgeCaptureId: capture.id,
+      title: capture.title,
+      quality: capture.quality,
+      category: capture.category ?? undefined,
+      status: capture.status ?? undefined,
+      summary: capture.summary ?? undefined
+    }
+    recordingMap.set(key, recording)
+  }
+
   // Sort by date (newest first)
   return Array.from(recordingMap.values()).sort(
     (a, b) => b.dateRecorded.getTime() - a.dateRecorded.getTime()

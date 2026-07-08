@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 27
+const SCHEMA_VERSION = 28
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -566,6 +566,29 @@ CREATE TABLE IF NOT EXISTS identity_suggestions (
 CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id);
 CREATE INDEX IF NOT EXISTS idx_project_aliases_project ON project_aliases(project_id);
 CREATE INDEX IF NOT EXISTS idx_identity_suggestions_status ON identity_suggestions(status);
+
+-- Entity-type artifacts (C0 / v28). Every concrete imported file/blob (pdf, md,
+-- txt, json, image…). A knowledge_capture can own many artifacts. Text is
+-- extracted per registered entity type (artifact-types.ts); dedup by content_hash.
+CREATE TABLE IF NOT EXISTS artifacts (
+    id TEXT PRIMARY KEY,
+    knowledge_capture_id TEXT,
+    kind TEXT NOT NULL,
+    mime TEXT,
+    storage_path TEXT,
+    size INTEGER,
+    content_hash TEXT,
+    extracted_text TEXT,
+    metadata TEXT,
+    source_connector_id TEXT,
+    source_ref TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_capture ON artifacts(knowledge_capture_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind);
+CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash ON artifacts(content_hash);
 
 `
 
@@ -1537,6 +1560,40 @@ const MIGRATIONS: Record<number, () => void> = {
     }
 
     console.log('Migration v27 complete')
+  },
+  28: () => {
+    // v28: Entity-type foundation (C0). `artifacts` table holds every concrete
+    // imported file/blob keyed to a knowledge_capture. Idempotent: CREATE TABLE
+    // IF NOT EXISTS + guarded indexes.
+    console.log('Running migration to schema v28: artifacts (entity-type foundation)')
+    const database = getDatabase()
+
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS artifacts (
+          id TEXT PRIMARY KEY,
+          knowledge_capture_id TEXT,
+          kind TEXT NOT NULL,
+          mime TEXT,
+          storage_path TEXT,
+          size INTEGER,
+          content_hash TEXT,
+          extracted_text TEXT,
+          metadata TEXT,
+          source_connector_id TEXT,
+          source_ref TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_capture ON artifacts(knowledge_capture_id)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash ON artifacts(content_hash)')
+    } catch (e) {
+      console.warn('[Migration v28] Failed:', e)
+    }
+
+    console.log('Migration v28 complete')
   }
 
 }
@@ -1686,6 +1743,31 @@ function repairPhase(): void {
     database.run('CREATE INDEX IF NOT EXISTS idx_project_aliases_project ON project_aliases(project_id)')
     database.run('CREATE INDEX IF NOT EXISTS idx_identity_suggestions_status ON identity_suggestions(status)')
   } catch (e) { /* tables already exist */ }
+
+  // Repair artifacts table (v28): force-create so an older on-disk DB that
+  // skipped the migration still gets it before any importArtifact write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS artifacts (
+        id TEXT PRIMARY KEY,
+        knowledge_capture_id TEXT,
+        kind TEXT NOT NULL,
+        mime TEXT,
+        storage_path TEXT,
+        size INTEGER,
+        content_hash TEXT,
+        extracted_text TEXT,
+        metadata TEXT,
+        source_connector_id TEXT,
+        source_ref TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (knowledge_capture_id) REFERENCES knowledge_captures(id) ON DELETE CASCADE
+      )
+    `)
+    database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_capture ON artifacts(knowledge_capture_id)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind)')
+    database.run('CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash ON artifacts(content_hash)')
+  } catch (e) { /* table already exists */ }
 
   // Repair action_items (v26): force-add assignee_contact_id if missing.
   const actionItemCols = getTableColumns(database, 'action_items')

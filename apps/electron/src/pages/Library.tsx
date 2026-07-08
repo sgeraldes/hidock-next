@@ -505,6 +505,19 @@ export function Library() {
     }
   }
 
+  const handleImportFile = async () => {
+    try {
+      const result = await window.electronAPI.artifacts.pickAndImport()
+      if (result.success) {
+        if (result.data.length > 0) await refresh(false)
+      } else {
+        console.error('Failed to import file:', result.error)
+      }
+    } catch (e) {
+      console.error('Failed to import file:', e)
+    }
+  }
+
   const handleAskAssistant = useCallback(
     (recording: UnifiedRecording) => {
       navigate('/assistant', { state: { contextId: recording.knowledgeCaptureId || recording.id } })
@@ -884,6 +897,7 @@ export function Library() {
         bulkProcessing={bulkProcessing}
         bulkProgress={bulkProgress}
         onAddRecording={handleAddRecording}
+        onImportFile={handleImportFile}
         onOpenFolder={openRecordingsFolder}
         onBulkDownload={handleBulkDownload}
         onBulkProcess={handleBulkProcess}

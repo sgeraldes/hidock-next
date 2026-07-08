@@ -65,7 +65,8 @@ import type {
   TagMeetingRequest,
   OutputTemplate,
   GenerateOutputRequest,
-  GenerateOutputResponse
+  GenerateOutputResponse,
+  ArtifactsAPI
 } from '../main/types/api'
 import type { Contact, ContactWithMeetings, Project, ProjectWithMeetings } from '../main/types/database'
 import type { MigrationAPI } from './migration-types'
@@ -466,6 +467,9 @@ export interface ElectronAPI {
     onProgress: (callback: (progress: { message: string; progress: number }) => void) => () => void
   }
 
+  // Artifacts - entity-type foundation (C0): import files as captures
+  artifacts: ArtifactsAPI
+
   // Migration - Database schema migration to V11 (Knowledge Captures)
   migration: MigrationAPI
 
@@ -548,6 +552,16 @@ export interface ElectronAPI {
     ) => Promise<{ success: boolean; data?: any[]; error?: string }>
     acceptSuggestion: (id: string) => Promise<{ success: boolean; data?: any; error?: string }>
     rejectSuggestion: (id: string) => Promise<{ success: boolean; data?: any; error?: string }>
+    discoverContacts: () => Promise<{
+      success: boolean
+      data?: { candidatePairs: number; suggestionsCreated: number; autoMergeable: number }
+      error?: string
+    }>
+    discoverProjects: () => Promise<{
+      success: boolean
+      data?: { candidatePairs: number; suggestionsCreated: number; autoMergeable: number }
+      error?: string
+    }>
   }
 
   // Domain Events - Event-driven architecture
@@ -737,6 +751,13 @@ const electronAPI: ElectronAPI = {
     getAll: () => callIPC('deviceCache:getAll'),
     saveAll: (files) => callIPC('deviceCache:saveAll', files),
     clear: () => callIPC('deviceCache:clear')
+  },
+
+  artifacts: {
+    import: (filePaths) => callIPC('artifacts:import', filePaths),
+    pickAndImport: () => callIPC('artifacts:pickAndImport'),
+    getForCapture: (knowledgeCaptureId) => callIPC('artifacts:getForCapture', knowledgeCaptureId),
+    openInFolder: (id) => callIPC('artifacts:openInFolder', id)
   },
 
   migration: {
@@ -958,7 +979,9 @@ const electronAPI: ElectronAPI = {
   identity: {
     getSuggestions: (status?: 'pending' | 'accepted' | 'rejected') => callIPC('identity:getSuggestions', status),
     acceptSuggestion: (id: string) => callIPC('identity:acceptSuggestion', id),
-    rejectSuggestion: (id: string) => callIPC('identity:rejectSuggestion', id)
+    rejectSuggestion: (id: string) => callIPC('identity:rejectSuggestion', id),
+    discoverContacts: () => callIPC('identity:discoverContacts'),
+    discoverProjects: () => callIPC('identity:discoverProjects')
   },
 
   // Domain Event Listener

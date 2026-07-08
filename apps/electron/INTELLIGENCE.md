@@ -152,3 +152,43 @@ Every change: `npm run typecheck` + `npm run lint` (0 errors) +
 `npm run test:run` green, then live verification in the running app (CDP/
 screenshot), then commit+push. Issues live in OVERNIGHT_PLAN.md (session log)
 and this file (architecture); rounds tracked in INTERACTIVITY_PLAN.md.
+
+## 8. Merge safety & reversibility (design — v29 follow-up)
+
+Merges are destructive folds (`mergeContacts`/`mergeProjects`): child FKs are
+repointed and the loser row is deleted. Discovery (Round 4b) proposes them but
+never executes — the user clicks. To make that click *reversible*, a merge must
+record what it did.
+
+**`merge_journal` table (v29 follow-up — NOT yet added; a schema-owner adds it):**
+
+| Column | Purpose |
+|---|---|
+| `id` | journal entry id |
+| `kind` | `'person'` \| `'project'` |
+| `keeper_id` | surviving entity |
+| `loser_snapshot` | JSON of the deleted loser row (all columns) — enough to recreate it |
+| `manifest` | JSON `{ table → [pk...] }`: exactly the child rows this merge repointed loser→keeper (e.g. `meeting_contacts`, `transcript_speakers`, `*_aliases`) |
+| `created_at` | ISO timestamp |
+
+The merge writes one journal row inside the same transaction as the fold.
+
+**`contacts:unmerge(journalId)` semantics:**
+1. Recreate the loser from `loser_snapshot` (re-INSERT with its original id).
+2. Repoint back *exactly* the rows in `manifest` (keeper→loser) — no more, no less.
+3. Rows linked to the keeper **after** the merge are NOT in the manifest, so they
+   stay with the keeper and are returned as a **manual-review list**. This is the
+   "a meeting got wrongly attached to the merged person — find it and reassign it"
+   flow the user described: unmerge restores the split, then the user moves the
+   one stray link by hand rather than the system guessing.
+4. Delete the alias rows the merge created (folded loser-name → keeper) and the
+   journal entry. Recompute counts on both entities.
+
+**Pre-merge warning heuristic:** if BOTH entities are heavily linked (each with
+> N links across `meeting_contacts`/`transcript_speakers`/`meeting_projects`;
+start N≈10), the merge dialog requires the user to **type the loser's name** to
+confirm — a wrong merge of two well-established entities is the expensive mistake,
+and unmerge's manual-review step is the safety net, not a substitute for the gate.
+
+Discovery's `evidence.autoMergeable` flag never bypasses this — it only pre-selects
+the card; execution is always an explicit, journaled, reversible click.

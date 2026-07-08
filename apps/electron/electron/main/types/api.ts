@@ -297,6 +297,37 @@ export interface GetMeetingsResponse {
 }
 
 // =============================================================================
+// Artifacts API Types (C0 entity-type foundation)
+// =============================================================================
+
+/** Slim view of an artifacts row returned to the renderer (no full text blob). */
+export interface ArtifactSummary {
+  id: string
+  knowledgeCaptureId: string | null
+  kind: string
+  mime: string | null
+  size: number | null
+  storagePath: string | null
+  hasText: boolean
+  metadata: Record<string, unknown> | null
+  createdAt: string
+}
+
+/** Import outcome for one file: the summary plus dedup + indexing info. */
+export interface ArtifactImportSummary extends ArtifactSummary {
+  deduped: boolean
+  indexedChunks: number
+}
+
+/** Artifacts namespace for electronAPI */
+export interface ArtifactsAPI {
+  import: (filePaths: string[]) => Promise<Result<ArtifactImportSummary[]>>
+  pickAndImport: () => Promise<Result<ArtifactImportSummary[]>>
+  getForCapture: (knowledgeCaptureId: string) => Promise<Result<ArtifactSummary[]>>
+  openInFolder: (id: string) => Promise<Result<void>>
+}
+
+// =============================================================================
 // Preload API Type Exports
 // =============================================================================
 

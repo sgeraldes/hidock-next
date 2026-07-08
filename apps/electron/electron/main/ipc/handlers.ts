@@ -24,6 +24,7 @@ import { registerDevicePipelineHandlers } from './device-pipeline-handlers'
 import { registerBriefingHandlers } from './briefing-handlers'
 import { registerActionItemsHandlers } from './action-items-handlers'
 import { registerIdentityHandlers } from './identity-handlers'
+import { registerArtifactHandlers } from './artifact-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -56,6 +57,7 @@ export function registerIpcHandlers(): void {
   registerBriefingHandlers()
   registerActionItemsHandlers()
   registerIdentityHandlers()
+  registerArtifactHandlers()
 
   console.log('All IPC handlers registered')
 }

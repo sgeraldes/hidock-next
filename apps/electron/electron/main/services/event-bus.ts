@@ -58,12 +58,24 @@ export interface TranscriptReadyEvent extends DomainEvent {
   }
 }
 
+/** An imported artifact finished extraction/indexing — Layer-1 pipeline hook (C0/v28). */
+export interface ArtifactReadyEvent extends DomainEvent {
+  type: 'entity:artifact-ready'
+  payload: {
+    artifactId: string
+    knowledgeCaptureId: string
+    kind: string
+    indexedChunks: number
+  }
+}
+
 export type KnownDomainEvent =
   | QualityAssessedEvent
   | StorageTierAssignedEvent
   | RecordingCleanupSuggestedEvent
   | ContactChangedEvent
   | TranscriptReadyEvent
+  | ArtifactReadyEvent
 
 /**
  * Sanitize event payload before broadcasting to renderer process

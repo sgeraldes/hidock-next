@@ -1,4 +1,4 @@
-import { Plus, FolderOpen, Download, Zap, RefreshCw, LayoutGrid, List } from 'lucide-react'
+import { Plus, FileUp, FolderOpen, Download, Zap, RefreshCw, LayoutGrid, List } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 
 interface LibraryHeaderProps {
@@ -19,6 +19,7 @@ interface LibraryHeaderProps {
   bulkProcessing: boolean
   bulkProgress: { current: number; total: number }
   onAddRecording: () => void
+  onImportFile: () => void
   onOpenFolder: () => void
   onBulkDownload: () => void
   onBulkProcess: () => void
@@ -36,6 +37,7 @@ export function LibraryHeader({
   bulkProcessing,
   bulkProgress,
   onAddRecording,
+  onImportFile,
   onOpenFolder,
   onBulkDownload,
   onBulkProcess,
@@ -63,6 +65,10 @@ export function LibraryHeader({
           <Button variant="outline" size="sm" onClick={onAddRecording} title="Import audio file">
             <Plus className="h-4 w-4 mr-2" />
             Add Capture
+          </Button>
+          <Button variant="outline" size="sm" onClick={onImportFile} title="Import a document or image (PDF, MD, TXT, JSON, PNG, JPG, SVG, WEBP)">
+            <FileUp className="h-4 w-4 mr-2" />
+            Import File
           </Button>
           <Button variant="outline" size="sm" onClick={onOpenFolder}>
             <FolderOpen className="h-4 w-4 mr-2" />

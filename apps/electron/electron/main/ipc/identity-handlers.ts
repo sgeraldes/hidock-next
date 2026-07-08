@@ -16,6 +16,7 @@ import {
   rejectIdentitySuggestion,
   IdentitySuggestion
 } from '../services/database'
+import { discoverContactMerges, discoverProjectMerges, DiscoveryResult } from '../services/identity-discovery'
 import { success, error, Result } from '../types/api'
 
 const StatusSchema = z.enum(['pending', 'accepted', 'rejected'])
@@ -71,6 +72,32 @@ export function registerIdentityHandlers(): void {
     } catch (err) {
       console.error('identity:rejectSuggestion error:', err)
       return error('DATABASE_ERROR', 'Failed to reject identity suggestion', err)
+    }
+  })
+
+  /**
+   * Discovery sweep over the People corpus: scores existing contact pairs and
+   * writes identity_suggestions for probable duplicates. Long-running (invoked
+   * explicitly from the People "Discovery" action); returns a DiscoveryResult.
+   */
+  ipcMain.handle('identity:discoverContacts', async (): Promise<Result<DiscoveryResult>> => {
+    try {
+      return success(discoverContactMerges())
+    } catch (err) {
+      console.error('identity:discoverContacts error:', err)
+      return error('DATABASE_ERROR', 'Failed to run contact discovery sweep', err)
+    }
+  })
+
+  /**
+   * Discovery sweep over the Projects corpus (name + shared-meeting/graph overlap).
+   */
+  ipcMain.handle('identity:discoverProjects', async (): Promise<Result<DiscoveryResult>> => {
+    try {
+      return success(discoverProjectMerges())
+    } catch (err) {
+      console.error('identity:discoverProjects error:', err)
+      return error('DATABASE_ERROR', 'Failed to run project discovery sweep', err)
     }
   })
 }
