@@ -9,8 +9,8 @@
  * Shows a placeholder message when no recording is selected.
  */
 
-import { useState, useEffect, useCallback } from 'react'
-import { TranscriptViewer } from './TranscriptViewer'
+import { useState, useEffect, useCallback, useMemo } from 'react'
+import { TranscriptViewer, type StoredSegment } from './TranscriptViewer'
 import { TranscriptionStatusBadge } from './TranscriptionStatusBadge'
 import { StatusIcon } from './StatusIcon'
 import { getDisplayTitle } from '@/features/library/utils/getDisplayTitle'
@@ -219,6 +219,19 @@ export function SourceReader({
   // Same title resolver the list row uses, so clicking a row and the detail
   // header always agree (no raw filename leaking through here).
   const { primaryText: displayTitle } = getDisplayTitle(recording, meeting, transcript)
+
+  // Parse the stored speaker/timestamp segments (Gemini or local ASR write
+  // `speakers` as a JSON array of {speaker, start, end, text}). When present,
+  // the viewer renders structured turns instead of re-parsing the plain text.
+  const transcriptSegments = useMemo<StoredSegment[] | undefined>(() => {
+    if (!transcript?.speakers) return undefined
+    try {
+      const parsed = JSON.parse(transcript.speakers)
+      return Array.isArray(parsed) && parsed.length > 0 ? (parsed as StoredSegment[]) : undefined
+    } catch {
+      return undefined
+    }
+  }, [transcript?.speakers])
 
   // Prefer the stored duration; fall back to the live decoded value for the
   // recording whose waveform is currently loaded.
@@ -550,6 +563,7 @@ export function SourceReader({
         {transcript ? (
           <TranscriptViewer
             transcript={transcript.full_text}
+            segments={transcriptSegments}
             currentTimeMs={currentTimeMs}
             onSeek={onSeek || (() => {})}
             showSummary={true}

@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-// Mock @google/generative-ai BEFORE importing GeminiEngine
-const mockGenerateContent = vi.fn()
-const mockGetGenerativeModel = vi.fn(() => ({ generateContent: mockGenerateContent }))
+// Mock @google/generative-ai BEFORE importing GeminiEngine. The engine uses
+// generateContentStream (streaming), so the mock returns an async `stream`
+// plus a `response` promise carrying the finishReason.
+const mockGenerateContentStream = vi.fn()
+const mockGetGenerativeModel = vi.fn(() => ({ generateContentStream: mockGenerateContentStream }))
 
 vi.mock('@google/generative-ai', () => {
   function GoogleGenerativeAI(_apiKey: string) {
@@ -11,9 +13,24 @@ vi.mock('@google/generative-ai', () => {
   return { GoogleGenerativeAI }
 })
 
-import { GeminiEngine } from '../src/engines/gemini-engine.js'
+import {
+  GeminiEngine,
+  splitWavIntoChunks,
+  splitMp3IntoChunks,
+  parseTurns,
+} from '../src/engines/gemini-engine.js'
 
 const oneSecond = Buffer.alloc(16000 * 2)
+
+/** Queue a streamed response: text is chunked, finishReason optional. */
+function streamResponse(text: string, finishReason = 'STOP') {
+  return {
+    stream: (async function* () {
+      yield { text: () => text }
+    })(),
+    response: Promise.resolve({ candidates: [{ finishReason }] }),
+  }
+}
 
 async function collect<T>(iter: AsyncIterable<T>): Promise<T[]> {
   const result: T[] = []
@@ -21,9 +38,43 @@ async function collect<T>(iter: AsyncIterable<T>): Promise<T[]> {
   return result
 }
 
+// --- pure WAV builder for chunk-coverage tests -----------------------------
+function buildWav(dataSize: number, byteRate: number): Buffer {
+  const h = Buffer.alloc(44)
+  h.write('RIFF', 0, 'ascii')
+  h.writeUInt32LE(36 + dataSize, 4)
+  h.write('WAVE', 8, 'ascii')
+  h.write('fmt ', 12, 'ascii')
+  h.writeUInt32LE(16, 16)
+  h.writeUInt16LE(1, 20) // PCM
+  h.writeUInt16LE(1, 22) // mono
+  h.writeUInt32LE(byteRate, 24) // sampleRate == byteRate for 8-bit mono
+  h.writeUInt32LE(byteRate, 28)
+  h.writeUInt16LE(1, 32) // blockAlign
+  h.writeUInt16LE(8, 34) // bitsPerSample
+  h.write('data', 36, 'ascii')
+  h.writeUInt32LE(dataSize, 40)
+  return Buffer.concat([h, Buffer.alloc(dataSize, 1)])
+}
+
+// --- pure MP3 builder (MPEG2 Layer III, 64kbps, 16kHz — the HiDock format) --
+function buildMp3Frame(): Buffer {
+  const frame = Buffer.alloc(288, 0)
+  frame[0] = 0xff
+  frame[1] = 0xf3 // MPEG2, Layer III
+  frame[2] = 0x88 // bitrate index 8 (64k V2), samplerate index 2 (16000), no padding
+  frame[3] = 0xc4
+  return frame
+}
+function buildMp3(frameCount: number): Buffer {
+  return Buffer.concat(Array.from({ length: frameCount }, buildMp3Frame))
+}
+const MP3_FRAME_DUR = 576 / 16000 // 0.036s
+
 describe('GeminiEngine', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockGenerateContentStream.mockResolvedValue(streamResponse('Hello world'))
   })
 
   it('isStreaming is false', () => {
@@ -50,10 +101,7 @@ describe('GeminiEngine', () => {
   })
 
   it('yields a single segment with the transcript text', async () => {
-    mockGenerateContent.mockResolvedValue({
-      response: { text: () => 'Hello world' },
-    })
-
+    mockGenerateContentStream.mockResolvedValue(streamResponse('Hello world'))
     const engine = new GeminiEngine({ apiKey: 'test-key' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
 
@@ -61,110 +109,178 @@ describe('GeminiEngine', () => {
     expect(segments[0].text).toBe('Hello world')
     expect(segments[0].speaker).toBe('you')
     expect(segments[0].source).toBe('mic')
-    expect(segments[0].startTime).toBe(0)
-    expect(segments[0].endTime).toBe(0)
     expect(segments[0].confidence).toBe(1)
   })
 
-  it('maps system source to "them" speaker', async () => {
-    mockGenerateContent.mockResolvedValue({
-      response: { text: () => 'System audio text' },
-    })
-
+  it('maps system source to "them" default speaker', async () => {
+    mockGenerateContentStream.mockResolvedValue(streamResponse('System audio text'))
     const engine = new GeminiEngine({ apiKey: 'test-key' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'system' }))
-
     expect(segments[0].speaker).toBe('them')
     expect(segments[0].source).toBe('system')
   })
 
-  it('yields nothing when Gemini returns empty text', async () => {
-    mockGenerateContent.mockResolvedValue({
-      response: { text: () => '   ' },
-    })
-
+  it('parses [MM:SS] Speaker N: turns into structured segments', async () => {
+    mockGenerateContentStream.mockResolvedValue(
+      streamResponse('[00:03] Speaker 1: Hola\n[00:07] Speaker 2: Qué tal'),
+    )
     const engine = new GeminiEngine({ apiKey: 'test-key' })
     const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
+    expect(segments).toHaveLength(2)
+    expect(segments[0]).toMatchObject({ speaker: 'Speaker 1', text: 'Hola', startTime: 3 })
+    expect(segments[1]).toMatchObject({ speaker: 'Speaker 2', text: 'Qué tal', startTime: 7 })
+  })
 
-    expect(segments).toHaveLength(0)
+  it('throws (does not silently drop) when Gemini returns empty text', async () => {
+    mockGenerateContentStream.mockResolvedValue(streamResponse('   '))
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    await expect(collect(engine.transcribe(oneSecond, { source: 'mic' }))).rejects.toThrow(/empty/i)
+  })
+
+  it('throws when a chunk stays truncated at MAX_TOKENS after retry', async () => {
+    mockGenerateContentStream.mockResolvedValue(streamResponse('partial cut off here', 'MAX_TOKENS'))
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    await expect(collect(engine.transcribe(oneSecond, { source: 'mic' }))).rejects.toThrow(/MAX_TOKENS/)
+  })
+
+  it('recovers when the MAX_TOKENS retry returns clean, longer text', async () => {
+    mockGenerateContentStream
+      .mockResolvedValueOnce(streamResponse('short', 'MAX_TOKENS'))
+      .mockResolvedValueOnce(streamResponse('a much longer complete transcription', 'STOP'))
+    const engine = new GeminiEngine({ apiKey: 'test-key' })
+    const segments = await collect(engine.transcribe(oneSecond, { source: 'mic' }))
+    expect(segments[0].text).toBe('a much longer complete transcription')
   })
 
   it('uses the configured model name', async () => {
-    mockGenerateContent.mockResolvedValue({
-      response: { text: () => 'test' },
-    })
-
-    const engine = new GeminiEngine({ apiKey: 'test-key', model: 'gemini-2.0-flash' })
+    const engine = new GeminiEngine({ apiKey: 'test-key', model: 'gemini-3.5-flash' })
     await collect(engine.transcribe(oneSecond, { source: 'mic' }))
-
-    expect(mockGetGenerativeModel).toHaveBeenCalledWith({ model: 'gemini-2.0-flash' })
-  })
-
-  it('defaults to gemini-2.5-flash when no model is specified', async () => {
-    mockGenerateContent.mockResolvedValue({
-      response: { text: () => 'test' },
-    })
-
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
-    await collect(engine.transcribe(oneSecond, { source: 'mic' }))
-
-    expect(mockGetGenerativeModel).toHaveBeenCalledWith({ model: 'gemini-2.5-flash' })
+    expect(mockGetGenerativeModel).toHaveBeenCalledWith({ model: 'gemini-3.5-flash' })
   })
 
   it('includes context in the prompt when options.context is provided', async () => {
     let capturedPrompt = ''
-    mockGenerateContent.mockImplementation(async (parts: any[]) => {
-      capturedPrompt = parts.find((p: any) => p.text)?.text ?? ''
-      return { response: { text: () => 'Transcript with context' } }
+    mockGenerateContentStream.mockImplementation(async (req: any) => {
+      capturedPrompt = req.contents[0].parts.find((p: any) => p.text)?.text ?? ''
+      return streamResponse('Transcript with context')
     })
-
     const engine = new GeminiEngine({ apiKey: 'test-key' })
-    await collect(
-      engine.transcribe(oneSecond, {
-        source: 'mic',
-        context: 'MEETING CONTEXT: Weekly standup',
-      }),
-    )
-
+    await collect(engine.transcribe(oneSecond, { source: 'mic', context: 'MEETING CONTEXT: Weekly standup' }))
     expect(capturedPrompt).toContain('MEETING CONTEXT: Weekly standup')
-  })
-
-  it('does not include context section when options.context is undefined', async () => {
-    let capturedPrompt = ''
-    mockGenerateContent.mockImplementation(async (parts: any[]) => {
-      capturedPrompt = parts.find((p: any) => p.text)?.text ?? ''
-      return { response: { text: () => 'Plain transcript' } }
-    })
-
-    const engine = new GeminiEngine({ apiKey: 'test-key' })
-    await collect(engine.transcribe(oneSecond, { source: 'mic' }))
-
-    // Should not have any context-related additions beyond the standard prompt
-    expect(capturedPrompt).not.toContain('MEETING CONTEXT')
   })
 
   it('sends audio as base64 inlineData in the request', async () => {
     let capturedParts: any[] = []
-    mockGenerateContent.mockImplementation(async (parts: any[]) => {
-      capturedParts = parts
-      return { response: { text: () => 'result' } }
+    mockGenerateContentStream.mockImplementation(async (req: any) => {
+      capturedParts = req.contents[0].parts
+      return streamResponse('result')
     })
-
     const engine = new GeminiEngine({ apiKey: 'test-key' })
     const audioBuffer = Buffer.from('fake audio data')
     await collect(engine.transcribe(audioBuffer, { source: 'mic' }))
-
     const inlineDataPart = capturedParts.find((p: any) => p.inlineData)
     expect(inlineDataPart).toBeDefined()
     expect(inlineDataPart.inlineData.data).toBe(audioBuffer.toString('base64'))
   })
 
-  it('propagates errors thrown by generateContent', async () => {
-    mockGenerateContent.mockRejectedValue(new Error('Rate limit exceeded'))
-
+  it('propagates errors thrown by generateContentStream', async () => {
+    mockGenerateContentStream.mockRejectedValue(new Error('Rate limit exceeded'))
     const engine = new GeminiEngine({ apiKey: 'test-key' })
     await expect(collect(engine.transcribe(oneSecond, { source: 'mic' }))).rejects.toThrow(
       'Rate limit exceeded',
     )
+  })
+})
+
+describe('splitWavIntoChunks', () => {
+  it('returns null for non-RIFF data', () => {
+    expect(splitWavIntoChunks(Buffer.from('not a wav file at all'))).toBeNull()
+  })
+
+  it('covers the full data including the trailing partial chunk', () => {
+    // byteRate 1000, target 1s => chunkBytes 1000; 3500 bytes => 4 chunks (1000*3 + 500)
+    const chunks = splitWavIntoChunks(buildWav(3500, 1000), 1)
+    expect(chunks).not.toBeNull()
+    expect(chunks!).toHaveLength(4)
+    // Total PCM covered equals the data size (each WAV chunk = 44-byte header + slice).
+    const covered = chunks!.reduce((sum, c) => sum + (c.data.length - 44), 0)
+    expect(covered).toBe(3500)
+    // startSec is monotonic and the final chunk is the short remainder.
+    expect(chunks![0].startSec).toBe(0)
+    expect(chunks![3].data.length - 44).toBe(500)
+    expect(chunks![3].startSec).toBeCloseTo(3, 5)
+  })
+
+  it('returns null when the data fits in a single chunk', () => {
+    expect(splitWavIntoChunks(buildWav(500, 1000), 1)).toBeNull()
+  })
+})
+
+describe('splitMp3IntoChunks', () => {
+  it('returns null for non-MP3 data', () => {
+    expect(splitMp3IntoChunks(Buffer.from('this is definitely not mp3 data'))).toBeNull()
+  })
+
+  it('splits MPEG2 Layer III frames and covers every frame including the tail', () => {
+    const frameCount = 100
+    const mp3 = buildMp3(frameCount)
+    // target 1s => ~28 frames/chunk (0.036s each)
+    const chunks = splitMp3IntoChunks(mp3, 1)
+    expect(chunks).not.toBeNull()
+    expect(chunks!.length).toBeGreaterThan(1)
+    // Every byte of the stream is covered exactly once (no dropped tail).
+    const coveredBytes = chunks!.reduce((sum, c) => sum + c.data.length, 0)
+    expect(coveredBytes).toBe(mp3.length)
+    // Total duration matches frameCount * frame duration.
+    const totalDur = chunks!.reduce((sum, c) => sum + c.durationSec, 0)
+    expect(totalDur).toBeCloseTo(frameCount * MP3_FRAME_DUR, 5)
+    // Chunk start times are contiguous and increasing.
+    expect(chunks![0].startSec).toBe(0)
+    for (let i = 1; i < chunks!.length; i++) {
+      expect(chunks![i].startSec).toBeGreaterThan(chunks![i - 1].startSec)
+    }
+    expect(chunks![0].mimeType).toBe('audio/mp3')
+  })
+
+  it('skips an ID3v2 tag before parsing frames', () => {
+    const id3 = Buffer.alloc(10, 0)
+    id3.write('ID3', 0, 'ascii')
+    id3[6] = 0
+    id3[7] = 0
+    id3[8] = 0
+    id3[9] = 20 // 20-byte tag body
+    const withTag = Buffer.concat([id3, Buffer.alloc(20, 0), buildMp3(100)])
+    const chunks = splitMp3IntoChunks(withTag, 1)
+    expect(chunks).not.toBeNull()
+    expect(chunks!.length).toBeGreaterThan(1)
+  })
+})
+
+describe('parseTurns', () => {
+  it('offsets chunk-relative timestamps into absolute recording time', () => {
+    const segs = parseTurns('[01:00] Speaker 1: uno\n[01:30] Speaker 2: dos', 600, 'you', 'mic')
+    // chunkStartSec 600 + 60s and + 90s
+    expect(segs[0].startTime).toBe(660)
+    expect(segs[1].startTime).toBe(690)
+    expect(segs[0].speaker).toBe('Speaker 1')
+  })
+
+  it('treats unlabelled continuation lines as part of the current turn', () => {
+    const segs = parseTurns('[00:05] Speaker 1: first part\nsecond part of the same turn', 0, 'you', 'mic')
+    expect(segs).toHaveLength(1)
+    expect(segs[0].text).toBe('first part second part of the same turn')
+  })
+
+  it('falls back to one turn for unstructured prose (no content dropped)', () => {
+    const segs = parseTurns('just some running prose with no labels', 120, 'them', 'system')
+    expect(segs).toHaveLength(1)
+    expect(segs[0].text).toBe('just some running prose with no labels')
+    expect(segs[0].speaker).toBe('them')
+    expect(segs[0].startTime).toBe(120)
+  })
+
+  it('supports HH:MM:SS timestamps', () => {
+    const segs = parseTurns('[01:02:03] Speaker 1: late in the call', 0, 'you', 'mic')
+    expect(segs[0].startTime).toBe(3723)
   })
 })

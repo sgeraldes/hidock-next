@@ -39,7 +39,20 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
       (b) transcript renders as one flat blob: no turns/timestamps/speakers.
       Fix: chunk-coverage/no-silent-drop in gemini-engine, [MM:SS] Speaker N
       turn structure stored as segments, turn-based renderer with fallback.
-- [~] ISSUE-2 (design, Opus — after fix-analysis lands, shares index.ts):
+- [ ] ISSUE-6 (queued; root-cause after ISSUE-5 lands — same file
+      transcription.ts): json-mime analysis attempt consistently fails to
+      parse even with finishReason=STOP and valid-looking JSON head (seen on
+      both 9k-token and 2.4k-token Spanish prompts). Fallback masks it at 2×
+      API cost. Suspect unescaped control chars in Gemini json-mode string
+      values or a bug in extractAnalysisJson. Evidence: two [Analysis] log
+      events 07:0x, wave 3 — now 3/3 failures (9k, 2.4k, 9.1k prompts), i.e.
+      deterministic. Read-only code review: extractAnalysisJson does greedy
+      {…} match + bare JSON.parse; parse error message/position is swallowed.
+      Fix brief: (1) capture JSON.parse e.message (has exact position) + the
+      ±120 chars around it in logAnalysisFailure; (2) likely repair = strip
+      raw control chars inside strings or jsonrepair-style tolerant parse;
+      (3) if json-mime stays broken, demote it to the fallback slot.
+- [x] ISSUE-2 (design, Opus — after fix-analysis lands, shares index.ts):
       unified Office-365-style titlebar: frameless BrowserWindow with overlay
       window controls, app identity + global actions in the custom titlebar,
       remove duplicated "HiDock Next" sidebar header. User-requested.

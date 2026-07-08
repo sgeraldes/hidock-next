@@ -51,4 +51,29 @@ describe('TranscriptViewer speaker parsing', () => {
     render(<TranscriptViewer transcript={'Just some narration without any speaker labels.'} onSeek={noop} />)
     expect(screen.getByText(/Just some narration/)).toBeInTheDocument()
   })
+
+  it('breaks a long unstructured blob into multiple paragraphs (not one wall)', () => {
+    // A single line with no newlines and many sentences (an old-style transcript).
+    const blob = Array.from({ length: 20 }, (_, i) => `This is sentence number ${i} in the call.`).join(' ')
+    const { container } = render(<TranscriptViewer transcript={blob} onSeek={noop} />)
+    // The plain-text fallback should emit more than one <p> for a long blob.
+    const paragraphs = container.querySelectorAll('p.whitespace-pre-wrap')
+    expect(paragraphs.length).toBeGreaterThan(1)
+  })
+})
+
+describe('TranscriptViewer stored segments', () => {
+  it('renders structured turns from the segments prop with speaker labels', () => {
+    const segments = [
+      { speaker: 'Speaker 1', start: 3, end: 7, text: 'Hola, buenos días.' },
+      { speaker: 'Speaker 2', start: 7, end: 12, text: 'Buenos días a todos.' }
+    ]
+    render(<TranscriptViewer transcript={'ignored plain text'} segments={segments} onSeek={noop} />)
+    expect(screen.getByText('Speaker 1')).toBeInTheDocument()
+    expect(screen.getByText('Speaker 2')).toBeInTheDocument()
+    expect(screen.getByText(/Hola, buenos días/)).toBeInTheDocument()
+    expect(screen.getByText(/Buenos días a todos/)).toBeInTheDocument()
+    // The plain transcript text must not be used when segments are present.
+    expect(screen.queryByText('ignored plain text')).not.toBeInTheDocument()
+  })
 })

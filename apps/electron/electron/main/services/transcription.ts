@@ -562,10 +562,11 @@ async function transcribeWithGemini(
 
   progressCallback?.('transcribing', 20)
 
-  // Collect the single segment yielded by GeminiEngine.
-  // We pass filePath via the extended options so the engine can detect the MIME type,
-  // and meetingContext via options.context for prompt enrichment.
-  const segments: string[] = []
+  // Collect the speaker-turn segments yielded by GeminiEngine. Each segment is
+  // one turn with an absolute timestamp and (usually) a "Speaker N" label.
+  // We pass filePath via the extended options so the engine can detect the MIME
+  // type, and meetingContext via options.context for prompt enrichment.
+  const segments: Array<{ speaker: string; start: number; end: number; text: string }> = []
   for await (const segment of engine.transcribe(audioBuffer, {
     source: 'mic',
     language: config.transcription.language,
@@ -578,22 +579,39 @@ async function transcribeWithGemini(
       progressCallback?.('transcribing', Math.min(45, 20 + Math.round((done / total) * 25)))
     }
   } as Parameters<typeof engine.transcribe>[1] & { filePath: string })) {
-    if (segment.text) segments.push(segment.text)
+    const text = segment.text?.trim()
+    if (text) {
+      segments.push({
+        speaker: segment.speaker,
+        start: segment.startTime,
+        end: segment.endTime,
+        text
+      })
+    }
   }
-
-  const fullText = segments.join('\n')
 
   // An empty transcript is a failure, not a success — persisting it would mark
   // the recording 'complete' with no usable content and block re-transcription.
-  if (!fullText.trim()) {
+  if (segments.length === 0) {
     throw new Error('Gemini returned an empty transcript')
   }
+
+  // Each turn's end is the next turn's start (the engine yields start-only).
+  for (let i = 0; i < segments.length; i++) {
+    segments[i].end = segments[i + 1]?.start ?? segments[i].start
+  }
+
+  // full_text stays plain (no timestamps) for search / analysis / embeddings —
+  // one readable turn per line with its speaker label. The timestamped segment
+  // structure is stored separately in `speakers` for the transcript viewer.
+  const fullText = segments.map((s) => (s.speaker ? `${s.speaker}: ${s.text}` : s.text)).join('\n')
 
   return {
     fullText,
     provider: 'gemini',
     model: modelName,
-    language: config.transcription.language || 'unknown'
+    language: config.transcription.language || 'unknown',
+    speakers: JSON.stringify(segments)
   }
 }
 

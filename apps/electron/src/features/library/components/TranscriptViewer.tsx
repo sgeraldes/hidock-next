@@ -10,6 +10,14 @@ import { useEffect, useRef, useMemo, useState } from 'react'
 import { TimeAnchor } from './TimeAnchor'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 
+/** Stored transcript segment (from the `speakers` JSON column). Times in seconds. */
+export interface StoredSegment {
+  speaker?: string
+  start: number
+  end?: number
+  text: string
+}
+
 interface TranscriptViewerProps {
   transcript: string
   currentTimeMs?: number
@@ -18,6 +26,12 @@ interface TranscriptViewerProps {
   showActionItems?: boolean
   summary?: string
   actionItems?: string[]
+  /**
+   * Pre-parsed speaker/timestamp segments (e.g. from Gemini's structured
+   * output or local ASR). When present, these are rendered directly as turns
+   * instead of re-parsing the plain `transcript` string.
+   */
+  segments?: StoredSegment[]
 }
 
 interface TranscriptSegment {
@@ -25,6 +39,45 @@ interface TranscriptSegment {
   endMs?: number
   text: string
   speaker?: string
+}
+
+/**
+ * Break a plain, unstructured transcript into readable paragraphs so an
+ * old-style single-blob transcript (no newlines, no speaker labels) doesn't
+ * render as one unbroken wall of text. Splits on existing newlines first, then
+ * subdivides any long run into ~sentence groups.
+ */
+function toParagraphs(text: string): string[] {
+  const paragraphs: string[] = []
+  for (const block of text.split(/\n+/).map((b) => b.trim()).filter(Boolean)) {
+    if (block.length <= 600) {
+      paragraphs.push(block)
+      continue
+    }
+    const sentences = block.match(/[^.!?]+(?:[.!?]+|$)/g) ?? [block]
+    let current = ''
+    for (const sentence of sentences) {
+      current += sentence
+      if (current.length >= 350) {
+        paragraphs.push(current.trim())
+        current = ''
+      }
+    }
+    if (current.trim()) paragraphs.push(current.trim())
+  }
+  return paragraphs.length > 0 ? paragraphs : [text.trim()]
+}
+
+/** Map stored (seconds-based) segments to the viewer's internal ms-based shape. */
+function fromStoredSegments(stored: StoredSegment[]): TranscriptSegment[] {
+  return stored
+    .filter((s) => s.text?.trim())
+    .map((s) => ({
+      startMs: Math.round((s.start || 0) * 1000),
+      endMs: s.end != null ? Math.round(s.end * 1000) : undefined,
+      speaker: s.speaker,
+      text: s.text.trim()
+    }))
 }
 
 /**
@@ -167,7 +220,8 @@ export function TranscriptViewer({
   showSummary = true,
   showActionItems = true,
   summary,
-  actionItems
+  actionItems,
+  segments: storedSegments
 }: TranscriptViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const activeSegmentRef = useRef<HTMLDivElement>(null)
@@ -176,8 +230,17 @@ export function TranscriptViewer({
   const [actionItemsExpanded, setActionItemsExpanded] = useState(true)
   const [transcriptExpanded, setTranscriptExpanded] = useState(true)
 
-  // Parse transcript into segments (timestamped or speaker-turn based)
-  const { segments, hasTimestamps } = useMemo(() => parseTranscriptSegments(transcript), [transcript])
+  // Prefer pre-parsed segments (timestamped speaker turns) when available;
+  // otherwise parse the plain transcript string (timestamped or speaker-turn based).
+  const { segments, hasTimestamps } = useMemo(() => {
+    if (storedSegments && storedSegments.length > 0) {
+      const mapped = fromStoredSegments(storedSegments)
+      if (mapped.length > 0) {
+        return { segments: mapped, hasTimestamps: mapped.some((s) => s.startMs > 0) }
+      }
+    }
+    return parseTranscriptSegments(transcript)
+  }, [storedSegments, transcript])
 
   // Find current segment index based on currentTimeMs (only meaningful with timestamps)
   const currentSegmentIndex = useMemo(() => {
@@ -301,7 +364,13 @@ export function TranscriptViewer({
                 ))}
               </div>
             ) : (
-              <p className="text-sm whitespace-pre-wrap leading-relaxed">{transcript}</p>
+              <div className="space-y-2">
+                {toParagraphs(transcript).map((para, i) => (
+                  <p key={i} className="text-sm whitespace-pre-wrap leading-relaxed [overflow-wrap:anywhere]">
+                    {para}
+                  </p>
+                ))}
+              </div>
             )}
           </div>
         )}
