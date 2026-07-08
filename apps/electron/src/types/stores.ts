@@ -246,7 +246,7 @@ export interface ChatStore {
 // Output Store
 // =============================================================================
 
-export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items'
+export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items' | 'claude_code_prompt'
 
 export interface OutputTemplate {
   id: OutputTemplateId

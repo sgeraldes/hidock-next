@@ -288,7 +288,7 @@ export interface MeetingWithAssociations extends Meeting {
 /**
  * Available output template identifiers
  */
-export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items'
+export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items' | 'claude_code_prompt'
 
 /**
  * Output template definition

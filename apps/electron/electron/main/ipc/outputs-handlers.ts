@@ -5,8 +5,10 @@
  * Includes server-side rate limiting (B-ACT-001).
  */
 
-import { ipcMain, clipboard, dialog, BrowserWindow } from 'electron'
-import { writeFileSync } from 'fs'
+import { ipcMain, clipboard, dialog, BrowserWindow, shell } from 'electron'
+import { writeFileSync, mkdirSync, existsSync } from 'fs'
+import { join } from 'path'
+import { getTranscriptsPath } from '../services/file-storage'
 import { getOutputGeneratorService } from '../services/output-generator'
 import { success, error, Result } from '../types/api'
 import { GenerateOutputRequestSchema } from '../validation/outputs'
@@ -85,6 +87,29 @@ export function registerOutputsHandlers(): void {
 
         const result = await generator.generate(parsed.data)
 
+        // Auto-export the output to the transcripts workspace so it's
+        // immediately usable outside the app (e.g. fed to a coding agent).
+        let savedPath: string | undefined
+        try {
+          const outputsDir = join(getTranscriptsPath(), 'outputs')
+          if (!existsSync(outputsDir)) {
+            mkdirSync(outputsDir, { recursive: true })
+          }
+          const date = new Date().toISOString().slice(0, 10)
+          const titleLine = result.content.split('\n').find((l) => l.trim().length > 0) ?? ''
+          const slug = titleLine
+            .replace(/^#+\s*/, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 60) || parsed.data.templateId
+          savedPath = join(outputsDir, `${date}-${parsed.data.templateId}-${slug}.md`)
+          writeFileSync(savedPath, result.content, 'utf-8')
+        } catch (exportErr) {
+          console.error('outputs:generate auto-export failed:', exportErr)
+          savedPath = undefined
+        }
+
         // If actionableId was provided, link the result
         if (parsed.data.actionableId) {
           try {
@@ -108,7 +133,8 @@ export function registerOutputsHandlers(): void {
         return success({
           content: result.content,
           templateId: result.templateId,
-          generatedAt: result.generatedAt
+          generatedAt: result.generatedAt,
+          savedPath
         })
       } catch (err) {
         console.error('outputs:generate error:', err)
@@ -189,6 +215,28 @@ export function registerOutputsHandlers(): void {
       } catch (err) {
         console.error('outputs:saveToFile error:', err)
         return error('INTERNAL_ERROR', 'Failed to save file', err)
+      }
+    }
+  )
+
+  /**
+   * Reveal an exported output file in the OS file manager
+   */
+  ipcMain.handle(
+    'outputs:openInFolder',
+    async (_, filePath: unknown): Promise<Result<void>> => {
+      try {
+        if (typeof filePath !== 'string' || !filePath) {
+          return error('VALIDATION_ERROR', 'filePath must be a non-empty string')
+        }
+        if (!existsSync(filePath)) {
+          return error('NOT_FOUND', `File not found: ${filePath}`)
+        }
+        shell.showItemInFolder(filePath)
+        return success(undefined)
+      } catch (err) {
+        console.error('outputs:openInFolder error:', err)
+        return error('INTERNAL_ERROR', 'Failed to open folder', err)
       }
     }
   )

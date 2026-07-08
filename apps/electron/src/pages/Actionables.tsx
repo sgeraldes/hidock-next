@@ -81,6 +81,7 @@ export function Actionables() {
     templateId: string
     generatedAt: string
     sourceId?: string
+    savedPath?: string
   } | null>(null)
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [showOutputModal, setShowOutputModal] = useState(false)
@@ -388,7 +389,8 @@ export function Actionables() {
                       "w-1.5 transition-colors",
                       getStatusBarColor(actionable.status)
                     )} />
-                    <div className="flex-1 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                    {/* min-w-0 lets the title truncate instead of pushing the action buttons out of the card */}
+                    <div className="flex-1 min-w-0 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
                           {getStatusIcon(actionable.status)}
@@ -679,6 +681,21 @@ export function Actionables() {
               >
                 <FileText className="h-4 w-4 mr-2" />
                 View Source
+              </Button>
+            )}
+            {generatedOutput?.savedPath && (
+              <Button
+                variant="outline"
+                onClick={async () => {
+                  const res = await window.electronAPI.outputs.openInFolder(generatedOutput.savedPath!)
+                  if (!res.success) {
+                    toast.error('Open failed', res.error?.message || 'Could not open folder')
+                  }
+                }}
+                title={generatedOutput.savedPath}
+              >
+                <FileText className="h-4 w-4 mr-2" />
+                Show Saved File
               </Button>
             )}
             <Button

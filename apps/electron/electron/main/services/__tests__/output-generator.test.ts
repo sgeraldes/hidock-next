@@ -22,6 +22,13 @@ vi.mock('../ollama', () => ({
   }))
 }))
 
+// No Gemini key configured → generator falls back to the mocked Ollama path
+vi.mock('../config', () => ({
+  getConfig: vi.fn(() => ({
+    transcription: { geminiApiKey: '', geminiModel: 'gemini-3.5-flash' }
+  }))
+}))
+
 describe('OutputGeneratorService', () => {
   beforeEach(() => {
     vi.clearAllMocks()

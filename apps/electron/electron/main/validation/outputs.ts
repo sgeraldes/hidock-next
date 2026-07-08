@@ -18,7 +18,8 @@ export const OutputTemplateIdSchema = z.enum([
   'meeting_minutes',
   'interview_feedback',
   'project_status',
-  'action_items'
+  'action_items',
+  'claude_code_prompt'
 ])
 
 // =============================================================================
@@ -33,8 +34,10 @@ export const GenerateOutputRequestSchema = z.object({
   meetingId: UUIDSchema.optional(),
   projectId: UUIDSchema.optional(),
   contactId: UUIDSchema.optional(),
-  knowledgeCaptureId: UUIDSchema.optional(),
-  actionableId: UUIDSchema.optional()
+  // Knowledge capture ids may be a capture id or (legacy fallback) a recording
+  // UUID; actionable ids use the `act_<ts>_<rand>` format — not UUIDs.
+  knowledgeCaptureId: z.string().min(1).optional(),
+  actionableId: z.string().min(1).optional()
 }).refine(
   (data) => data.meetingId || data.projectId || data.contactId || data.knowledgeCaptureId,
   { message: 'At least one context (meetingId, projectId, contactId, or knowledgeCaptureId) must be provided' }

@@ -235,7 +235,7 @@ export interface TagMeetingRequest {
 /**
  * Available output template identifiers
  */
-export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items'
+export type OutputTemplateId = 'meeting_minutes' | 'interview_feedback' | 'project_status' | 'action_items' | 'claude_code_prompt'
 
 /**
  * Output template definition
@@ -266,6 +266,8 @@ export interface GenerateOutputResponse {
   content: string
   templateId: OutputTemplateId
   generatedAt: string
+  /** Absolute path of the auto-exported markdown file, when export succeeded */
+  savedPath?: string
 }
 
 // =============================================================================

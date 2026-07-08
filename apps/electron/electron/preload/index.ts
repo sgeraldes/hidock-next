@@ -266,6 +266,7 @@ export interface ElectronAPI {
     getByActionableId: (actionableId: string) => Promise<Result<GenerateOutputResponse | null>>
     copyToClipboard: (content: string) => Promise<Result<void>>
     saveToFile: (content: string, suggestedName?: string) => Promise<Result<string>>
+    openInFolder: (filePath: string) => Promise<Result<void>>
   }
 
   // RAG Chatbot (extended with Result pattern)
@@ -711,7 +712,8 @@ const electronAPI: ElectronAPI = {
     generate: (request) => callIPC('outputs:generate', request),
     getByActionableId: (actionableId) => callIPC('outputs:getByActionableId', actionableId),
     copyToClipboard: (content) => callIPC('outputs:copyToClipboard', content),
-    saveToFile: (content, suggestedName) => callIPC('outputs:saveToFile', content, suggestedName)
+    saveToFile: (content, suggestedName) => callIPC('outputs:saveToFile', content, suggestedName),
+    openInFolder: (filePath) => callIPC('outputs:openInFolder', filePath)
   },
 
   rag: {

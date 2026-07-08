@@ -11,8 +11,26 @@ vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
   clipboard: { writeText: vi.fn() },
   dialog: { showSaveDialog: vi.fn() },
-  BrowserWindow: { fromWebContents: vi.fn() }
+  BrowserWindow: { fromWebContents: vi.fn() },
+  shell: { showItemInFolder: vi.fn() }
 }))
+
+// Mock file-storage (imports config → electron app at module level)
+vi.mock('../../services/file-storage', () => ({
+  getTranscriptsPath: vi.fn(() => '/tmp/transcripts')
+}))
+
+// Mock fs for the auto-export path
+vi.mock('fs', async () => {
+  const actual = await vi.importActual<typeof import('fs')>('fs')
+  return {
+    ...actual,
+    default: actual,
+    writeFileSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    existsSync: vi.fn(() => true)
+  }
+})
 
 // Mock database
 vi.mock('../../services/database', () => ({
