@@ -138,7 +138,8 @@ vi.mock('../../services/transcription', () => ({
   stopTranscriptionProcessor: vi.fn(),
   cancelTranscription: vi.fn(),
   cancelAllTranscriptions: vi.fn(),
-  processQueueManually: vi.fn().mockResolvedValue(undefined)
+  processQueueManually: vi.fn().mockResolvedValue(undefined),
+  markUserPriority: vi.fn()
 }))
 
 // Mock config service

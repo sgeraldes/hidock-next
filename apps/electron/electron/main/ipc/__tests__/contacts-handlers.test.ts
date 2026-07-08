@@ -22,6 +22,7 @@ vi.mock('../../services/database', () => ({
   deleteContact: vi.fn(),
   getMeetingsForContact: vi.fn(),
   getContactsForMeeting: vi.fn(),
+  mergeContacts: vi.fn(),
   getDatabase: vi.fn(() => ({
     prepare: vi.fn(() => ({
       bind: vi.fn(),
@@ -146,6 +147,46 @@ describe('Contacts IPC Handlers', () => {
     registerContactsHandlers()
     const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:delete')?.[1]
     const result = await handler?.({} as any, '550e8400-e29b-41d4-a716-446655440000') as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('NOT_FOUND')
+  })
+
+  const KEEPER = '550e8400-e29b-41d4-a716-446655440000'
+  const LOSER = '660e8400-e29b-41d4-a716-446655440001'
+
+  it('should merge two contacts (contacts:merge)', async () => {
+    const { getContactById, mergeContacts } = await import('../../services/database')
+    vi.mocked(getContactById).mockReturnValue({ id: KEEPER, name: 'K', tags: null } as any)
+    vi.mocked(mergeContacts).mockReturnValue({ id: KEEPER, name: 'K', tags: null } as any)
+
+    registerContactsHandlers()
+    expect(ipcMain.handle).toHaveBeenCalledWith('contacts:merge', expect.any(Function))
+
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:merge')?.[1]
+    const result = await handler?.({} as any, { keeperId: KEEPER, loserId: LOSER }) as any
+
+    expect(result.success).toBe(true)
+    expect(result.data.id).toBe(KEEPER)
+    expect(mergeContacts).toHaveBeenCalledWith(KEEPER, LOSER)
+  })
+
+  it('should reject merging a contact into itself', async () => {
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:merge')?.[1]
+    const result = await handler?.({} as any, { keeperId: KEEPER, loserId: KEEPER }) as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('should return NOT_FOUND when a merge target is missing', async () => {
+    const { getContactById } = await import('../../services/database')
+    vi.mocked(getContactById).mockReturnValue(undefined)
+
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(call => call[0] === 'contacts:merge')?.[1]
+    const result = await handler?.({} as any, { keeperId: KEEPER, loserId: LOSER }) as any
 
     expect(result.success).toBe(false)
     expect(result.error.code).toBe('NOT_FOUND')

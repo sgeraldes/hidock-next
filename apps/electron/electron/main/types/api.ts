@@ -307,6 +307,15 @@ export interface ContactsAPI {
   getAll: (request?: GetContactsRequest) => Promise<Result<GetContactsResponse>>
   getById: (id: string) => Promise<Result<ContactWithMeetings>>
   update: (request: UpdateContactRequest) => Promise<Result<Contact>>
+  merge: (request: MergeContactsRequest) => Promise<Result<Person>>
+}
+
+/**
+ * Request to merge one contact into another (keeper survives)
+ */
+export interface MergeContactsRequest {
+  keeperId: string
+  loserId: string
 }
 
 /**

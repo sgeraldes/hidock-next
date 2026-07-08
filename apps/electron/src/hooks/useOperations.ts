@@ -85,7 +85,8 @@ export function useOperations() {
 
     try {
       await window.electronAPI.recordings.updateStatus(recording.id, 'pending')
-      const queueItemId = await window.electronAPI.recordings.addToQueue(recording.id)
+      // Single explicit request → priority: jumps ahead of the recency-ordered backlog.
+      const queueItemId = await window.electronAPI.recordings.addToQueue(recording.id, true)
       if (!queueItemId) {
         toast({ title: 'Failed to queue transcription', description: 'Could not add to queue', variant: 'error' })
         return false
@@ -145,6 +146,8 @@ export function useOperations() {
     for (const recording of eligible) {
       try {
         await window.electronAPI.recordings.updateStatus(recording.id, 'pending')
+        // Bulk: no priority flag — these sort by recording date (newest first),
+        // so a single explicit request can still jump ahead of the whole batch.
         const queueItemId = await window.electronAPI.recordings.addToQueue(recording.id)
         if (queueItemId) {
           addToQueue(queueItemId, recording.id, recording.filename)

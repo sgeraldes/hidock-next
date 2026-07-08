@@ -31,7 +31,8 @@ import {
   stopTranscriptionProcessor,
   cancelTranscription,
   cancelAllTranscriptions,
-  processQueueManually
+  processQueueManually,
+  markUserPriority
 } from '../services/transcription'
 import { getQueueItems, addToQueue, updateQueueItem } from '../services/database'
 import { getConfig } from '../services/config'
@@ -554,8 +555,11 @@ export function registerRecordingHandlers(): void {
     }
   })
 
-  // Add a recording to the transcription queue
-  ipcMain.handle('recordings:addToQueue', async (_, recordingId: string) => {
+  // Add a recording to the transcription queue.
+  // `priority` is set by the single-click "Transcribe" path (one recording, an
+  // explicit user request) so it jumps ahead of the recency-ordered backlog.
+  // Bulk enqueue omits it, so bulk items sort purely by recording date.
+  ipcMain.handle('recordings:addToQueue', async (_, recordingId: string, priority?: boolean) => {
     try {
       // Validate provider prerequisites before queueing
       const config = getConfig()
@@ -586,6 +590,7 @@ export function registerRecordingHandlers(): void {
       }
 
       const queueItemId = addToQueue(recording.id)
+      if (priority) markUserPriority(recording.id)
       updateRecordingTranscriptionStatus(recording.id, 'queued')
       // spec-005: Trigger immediate queue processing after adding
       processQueueManually()
@@ -634,6 +639,7 @@ export function registerRecordingHandlers(): void {
         }
 
         const queueItemId = addToQueue(recording.id, provider)
+        markUserPriority(recording.id) // explicit single-recording reprocess
         updateRecordingTranscriptionStatus(recording.id, 'queued')
         processQueueManually()
         return { success: true, queueItemId }
@@ -670,6 +676,7 @@ export function registerRecordingHandlers(): void {
       }
 
       const queueItemId = addToQueue(recording.id)
+      markUserPriority(recording.id) // explicit user retry jumps the backlog
       updateRecordingTranscriptionStatus(recording.id, 'pending')
       processQueueManually()
       return { success: true, queueItemId }

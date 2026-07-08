@@ -12,7 +12,7 @@
  */
 
 import { unescapeIcsText } from '@hidock/calendar-sync'
-import { queryAll, queryOne, run, runInTransaction } from './database'
+import { queryAll, queryOne, run, runInTransaction, mergeContacts } from './database'
 import { randomUUID } from 'crypto'
 
 interface MeetingRow {
@@ -472,6 +472,87 @@ export function mergeDuplicateRecordings(): number {
   return mergedGroups
 }
 
+interface DuplicateContactRow {
+  id: string
+  name: string
+  email?: string | null
+  role?: string | null
+  company?: string | null
+  meeting_count?: number | null
+  created_at?: string | null
+}
+
+/**
+ * Choose which contact in a duplicate group to keep. Preference order:
+ *   1. has an email (the strongest identity anchor)
+ *   2. has a role or company (enriched)
+ *   3. most meeting_count (most-connected)
+ *   4. oldest created_at (the original record)
+ * Pure so the selection rules can be unit-tested without a database.
+ */
+export function pickKeeperContact<T extends DuplicateContactRow>(rows: T[]): T {
+  const notEmpty = (v?: string | null) => !!(v && v.trim())
+  const hasEmail = (r: T) => notEmpty(r.email)
+  const hasRoleOrCompany = (r: T) => notEmpty(r.role) || notEmpty(r.company)
+  return [...rows].sort((a, b) => {
+    const ae = hasEmail(a) ? 1 : 0
+    const be = hasEmail(b) ? 1 : 0
+    if (ae !== be) return be - ae
+    const arc = hasRoleOrCompany(a) ? 1 : 0
+    const brc = hasRoleOrCompany(b) ? 1 : 0
+    if (arc !== brc) return brc - arc
+    const am = a.meeting_count ?? 0
+    const bm = b.meeting_count ?? 0
+    if (am !== bm) return bm - am
+    const ac = a.created_at || ''
+    const bc = b.created_at || ''
+    if (ac !== bc) return ac < bc ? -1 : 1 // oldest first
+    return 0
+  })[0]
+}
+
+/**
+ * Auto-merge unambiguous duplicate contacts. Two contacts are merged ONLY when
+ * they share a non-empty lower-cased email, OR an exact lower-cased name —
+ * never on fuzzy/partial similarity. Email groups are collapsed first, then
+ * name groups (recomputed after the email pass), reusing mergeContacts per pair.
+ * Returns the number of contacts removed by merging.
+ */
+export function mergeDuplicateContacts(): number {
+  let removed = 0
+
+  const collapseGroups = (keyOf: (c: DuplicateContactRow) => string | null): void => {
+    const contacts = queryAll<DuplicateContactRow>(
+      'SELECT id, name, email, role, company, meeting_count, created_at FROM contacts'
+    )
+    const groups = new Map<string, DuplicateContactRow[]>()
+    for (const c of contacts) {
+      const key = keyOf(c)
+      if (!key) continue
+      const list = groups.get(key)
+      if (list) list.push(c)
+      else groups.set(key, [c])
+    }
+    for (const group of groups.values()) {
+      if (group.length < 2) continue
+      const keeper = pickKeeperContact(group)
+      for (const loser of group) {
+        if (loser.id === keeper.id) continue
+        mergeContacts(keeper.id, loser.id)
+        removed++
+      }
+    }
+  }
+
+  collapseGroups((c) => (c.email && c.email.trim() ? c.email.trim().toLowerCase() : null))
+  collapseGroups((c) => (c.name && c.name.trim() ? c.name.trim().toLowerCase() : null))
+
+  if (removed > 0) {
+    console.log(`[OrgReconciler] Merged ${removed} duplicate contacts (email/name match)`)
+  }
+  return removed
+}
+
 /** Full reconciliation pass — run after calendar syncs and at startup. */
 export function reconcileOrganization(): void {
   try {
@@ -493,5 +574,10 @@ export function reconcileOrganization(): void {
     upsertContactsFromMeetings()
   } catch (e) {
     console.error('[OrgReconciler] contacts upsert failed:', e)
+  }
+  try {
+    mergeDuplicateContacts()
+  } catch (e) {
+    console.error('[OrgReconciler] duplicate contact merge failed:', e)
   }
 }

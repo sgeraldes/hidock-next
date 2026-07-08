@@ -618,3 +618,7 @@ describe('repairJsonString — bracket balancing (ISSUE-9)', () => {
     expect(parsed?.language).toBe('es')
   })
 })
+
+// Recency-first queue ordering (orderPendingForProcessing) is covered in the
+// lightweight queue-ordering.test.ts — kept separate so those tests don't share
+// this file's worker, which OOMs at collection under Node 26 / vitest 4.

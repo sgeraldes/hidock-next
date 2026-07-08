@@ -73,7 +73,8 @@ import type {
   KnowledgeCapture,
   Actionable,
   Conversation,
-  Message
+  Message,
+  Person
 } from '../../src/types/knowledge'
 import type { PipelineState } from '../main/types/device-pipeline'
 
@@ -104,7 +105,9 @@ export interface ElectronAPI {
     getById: (id: string) => Promise<any>
     getByIds: (ids: string[]) => Promise<Record<string, any>>
     getDetails: (id: string) => Promise<any>
-    update: (request: { id: string; subject?: string; start_time?: string; end_time?: string; location?: string | null; description?: string | null }) => Promise<Result<any>>
+    update: (request: { id: string; subject?: string; start_time?: string; end_time?: string; location?: string | null; description?: string | null; organizer_name?: string | null; organizer_email?: string | null }) => Promise<Result<any>>
+    addAttendee: (request: { meetingId: string; name?: string; email?: string }) => Promise<Result<Contact>>
+    removeAttendee: (request: { meetingId: string; contactId: string }) => Promise<Result<void>>
   }
 
   // Contacts
@@ -113,6 +116,7 @@ export interface ElectronAPI {
     getById: (id: string) => Promise<Result<ContactWithMeetings>>
     update: (request: UpdateContactRequest) => Promise<Result<Contact>>
     delete: (id: string) => Promise<Result<void>>
+    merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Person>>
     getForMeeting: (meetingId: string) => Promise<Result<Contact[]>>
   }
 
@@ -154,7 +158,7 @@ export interface ElectronAPI {
     addExternalByPath: (filePath: string) => Promise<{ success: boolean; recording?: any; error?: string }>
     // Transcription
     transcribe: (recordingId: string) => Promise<void>
-    addToQueue: (recordingId: string) => Promise<string | false>
+    addToQueue: (recordingId: string, priority?: boolean) => Promise<string | false>
     reprocessWith: (recordingId: string, provider: 'gemini' | 'local-asr' | 'vibevoice') => Promise<{ success: boolean; queueItemId?: string; error?: string }>
     processQueue: () => Promise<boolean>
     getTranscriptionStatus: () => Promise<{ isProcessing: boolean; pendingCount: number; processingCount: number }>
@@ -169,6 +173,9 @@ export interface ElectronAPI {
     getByRecordingId: (recordingId: string) => Promise<any>
     getByRecordingIds: (recordingIds: string[]) => Promise<Record<string, any>>
     search: (query: string) => Promise<any[]>
+    assignSpeaker: (request: { recordingId: string; speakerLabel: string; contactId?: string; newName?: string }) => Promise<Result<Contact>>
+    getSpeakerMap: (request: { recordingId: string }) => Promise<Result<Array<{ speaker_label: string; contact_id: string; name: string }>>>
+    unassignSpeaker: (request: { recordingId: string; speakerLabel: string }) => Promise<Result<void>>
   }
 
   // Today briefing (single round-trip payload for the Today page)
@@ -565,7 +572,9 @@ const electronAPI: ElectronAPI = {
     getById: (id) => callIPC('db:get-meeting', id),
     getByIds: (ids) => callIPC('db:get-meetings-by-ids', ids),
     getDetails: (id) => callIPC('db:get-meeting-details', id),
-    update: (request) => callIPC('meetings:update', request)
+    update: (request) => callIPC('meetings:update', request),
+    addAttendee: (request) => callIPC('meetings:addAttendee', request),
+    removeAttendee: (request) => callIPC('meetings:removeAttendee', request)
   },
 
   contacts: {
@@ -573,6 +582,7 @@ const electronAPI: ElectronAPI = {
     getById: (id) => callIPC('contacts:getById', id),
     update: (request) => callIPC('contacts:update', request),
     delete: (id) => callIPC('contacts:delete', id),
+    merge: (request) => callIPC('contacts:merge', request),
     getForMeeting: (meetingId) => callIPC('contacts:getForMeeting', meetingId)
   },
 
@@ -608,7 +618,7 @@ const electronAPI: ElectronAPI = {
     addExternalByPath: (filePath: string) => callIPC('recordings:addExternalByPath', filePath),
     // Transcription
     transcribe: (recordingId) => callIPC('recordings:transcribe', recordingId),
-    addToQueue: (recordingId) => callIPC('recordings:addToQueue', recordingId),
+    addToQueue: (recordingId, priority) => callIPC('recordings:addToQueue', recordingId, priority),
     reprocessWith: (recordingId, provider) => callIPC('recordings:reprocessWith', { recordingId, provider }),
     processQueue: () => callIPC('recordings:processQueue'),
     getTranscriptionStatus: () => callIPC('recordings:getTranscriptionStatus'),
@@ -621,7 +631,10 @@ const electronAPI: ElectronAPI = {
   transcripts: {
     getByRecordingId: (recordingId) => callIPC('db:get-transcript', recordingId),
     getByRecordingIds: (recordingIds) => callIPC('db:get-transcripts-by-recording-ids', recordingIds),
-    search: (query) => callIPC('db:search-transcripts', query)
+    search: (query) => callIPC('db:search-transcripts', query),
+    assignSpeaker: (request) => callIPC('transcripts:assignSpeaker', request),
+    getSpeakerMap: (request) => callIPC('transcripts:getSpeakerMap', request),
+    unassignSpeaker: (request) => callIPC('transcripts:unassignSpeaker', request)
   },
 
   briefing: {

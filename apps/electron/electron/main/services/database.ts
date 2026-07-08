@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto'
 import { getDatabasePath } from './file-storage'
 import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
 
-const SCHEMA_VERSION = 24
+const SCHEMA_VERSION = 25
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -392,6 +392,19 @@ CREATE TABLE IF NOT EXISTS meeting_contacts (
     FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
 );
 
+-- Speaker identity map: binds a transcript speaker label (e.g. "Speaker 1")
+-- to a canonical contact, per recording (v25).
+CREATE TABLE IF NOT EXISTS transcript_speakers (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    speaker_label TEXT NOT NULL,
+    contact_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(recording_id, speaker_label),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+);
+
 -- Junction table: Meeting-Project relationship
 CREATE TABLE IF NOT EXISTS meeting_projects (
     meeting_id TEXT NOT NULL,
@@ -458,6 +471,7 @@ CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name);
 CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_meeting ON meeting_contacts(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_contact ON meeting_contacts(contact_id);
+CREATE INDEX IF NOT EXISTS idx_transcript_speakers_recording ON transcript_speakers(recording_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_meeting ON meeting_projects(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_project ON meeting_projects(project_id);
 CREATE INDEX IF NOT EXISTS idx_recording_candidates_recording ON recording_meeting_candidates(recording_id);
@@ -1343,6 +1357,32 @@ const MIGRATIONS: Record<number, () => void> = {
     } catch (e) {
       console.warn('[Migration v24] Failed:', e)
     }
+  },
+
+  25: () => {
+    // v25: Add transcript_speakers — binds a transcript speaker label to a
+    // canonical contact per recording. Idempotent (CREATE TABLE IF NOT EXISTS).
+    console.log('Running migration to schema v25: Adding transcript_speakers table')
+    const database = getDatabase()
+
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS transcript_speakers (
+          id TEXT PRIMARY KEY,
+          recording_id TEXT NOT NULL,
+          speaker_label TEXT NOT NULL,
+          contact_id TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(recording_id, speaker_label),
+          FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+          FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_transcript_speakers_recording ON transcript_speakers(recording_id)')
+      console.log('Migration v25 complete: transcript_speakers table ready')
+    } catch (e) {
+      console.warn('[Migration v25] Failed:', e)
+    }
   }
 
 }
@@ -1416,6 +1456,24 @@ function repairPhase(): void {
       }
     }
   }
+
+  // Repair transcript_speakers (v25): a new table has no columns to ALTER, but
+  // force-create it here so an older on-disk DB that skipped the migration still
+  // gets it before any assignSpeaker write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS transcript_speakers (
+        id TEXT PRIMARY KEY,
+        recording_id TEXT NOT NULL,
+        speaker_label TEXT NOT NULL,
+        contact_id TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(recording_id, speaker_label),
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+      )
+    `)
+  } catch (e) { /* table already exists */ }
 
   // Repair chat_messages (AI-15: columns referenced by assistant mapper)
   const chatMsgInfo = database.exec("PRAGMA table_info(chat_messages)")
@@ -1606,8 +1664,8 @@ export interface Meeting {
   start_time: string
   end_time: string
   location?: string | null
-  organizer_name?: string
-  organizer_email?: string
+  organizer_name?: string | null
+  organizer_email?: string | null
   attendees?: string
   description?: string | null
   is_recurring: number
@@ -1641,7 +1699,7 @@ export function getMeetingById(id: string): Meeting | undefined {
   return queryOne<Meeting>('SELECT * FROM meetings WHERE id = ?', [id])
 }
 
-export function updateMeeting(id: string, updates: Partial<Pick<Meeting, 'subject' | 'start_time' | 'end_time' | 'location' | 'description'>>): void {
+export function updateMeeting(id: string, updates: Partial<Pick<Meeting, 'subject' | 'start_time' | 'end_time' | 'location' | 'description' | 'organizer_name' | 'organizer_email'>>): void {
   const fields: string[] = []
   const params: unknown[] = []
 
@@ -1650,6 +1708,8 @@ export function updateMeeting(id: string, updates: Partial<Pick<Meeting, 'subjec
   if (updates.end_time !== undefined) { fields.push('end_time = ?'); params.push(updates.end_time); }
   if (updates.location !== undefined) { fields.push('location = ?'); params.push(updates.location); }
   if (updates.description !== undefined) { fields.push('description = ?'); params.push(updates.description); }
+  if (updates.organizer_name !== undefined) { fields.push('organizer_name = ?'); params.push(updates.organizer_name); }
+  if (updates.organizer_email !== undefined) { fields.push('organizer_email = ?'); params.push(updates.organizer_email); }
 
   if (fields.length === 0) return
 
@@ -2291,18 +2351,22 @@ export function addToQueue(recordingId: string, provider?: string): string {
   return id
 }
 
-export function getQueueItems(status?: string): (QueueItem & { filename?: string })[] {
-  // Sort by priority: lower retry_count first (fresh items before retries), then FIFO by created_at
+export function getQueueItems(status?: string): (QueueItem & { filename?: string; date_recorded?: string })[] {
+  // Recency-first: newest recording (date_recorded) first, so a fresh recording
+  // preempts a month-old backlog. Tiebreak FIFO by queue created_at. The
+  // transcription service re-orders pending items to hoist user-explicit
+  // requests ahead of this backlog (see orderPendingForProcessing); the
+  // date_recorded column is returned so it can do so without a second query.
   const sql = `
-    SELECT tq.*, r.filename
+    SELECT tq.*, r.filename, r.date_recorded
     FROM transcription_queue tq
     LEFT JOIN recordings r ON tq.recording_id = r.id
     ${status ? 'WHERE tq.status = ?' : ''}
-    ORDER BY tq.retry_count ASC, tq.created_at ASC`
+    ORDER BY r.date_recorded DESC, tq.created_at ASC`
   if (status) {
-    return queryAll<QueueItem & { filename?: string }>(sql, [status])
+    return queryAll<QueueItem & { filename?: string; date_recorded?: string }>(sql, [status])
   }
-  return queryAll<QueueItem & { filename?: string }>(sql)
+  return queryAll<QueueItem & { filename?: string; date_recorded?: string }>(sql)
 }
 
 export function updateQueueItem(id: string, status: string, errorMessage?: string): void {
@@ -2697,6 +2761,267 @@ export function linkContactToMeeting(meetingId: string, contactId: string, role:
     'INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)',
     [meetingId, contactId, role]
   )
+}
+
+/** Parse a contact.tags JSON string into a string array (empty on malformed). */
+function parseContactTags(tags: string | null | undefined): string[] {
+  if (!tags) return []
+  try {
+    const parsed = JSON.parse(tags)
+    return Array.isArray(parsed) ? parsed.filter((t) => typeof t === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/** Recompute a contact's meeting_count from its meeting_contacts links. */
+function recomputeContactMeetingCount(contactId: string): void {
+  runNoSave(
+    'UPDATE contacts SET meeting_count = (SELECT COUNT(1) FROM meeting_contacts WHERE contact_id = ?) WHERE id = ?',
+    [contactId, contactId]
+  )
+}
+
+/**
+ * Merge two contacts into one. The keeper survives; the loser's relationships
+ * are repointed and its useful fields folded in, then the loser row is deleted.
+ * Runs atomically in a single transaction.
+ *
+ * Folding rules (keeper wins): email/role/company/notes filled from the loser
+ * only when the keeper's is empty; type taken from the loser only when the
+ * keeper's is 'unknown'; tags = union; first/last_seen widened to span both;
+ * meeting_count recomputed from the merged meeting links.
+ *
+ * @throws if the ids are equal or either contact does not exist.
+ */
+export function mergeContacts(keeperId: string, loserId: string): Contact {
+  if (keeperId === loserId) {
+    throw new Error('Cannot merge a contact into itself')
+  }
+
+  return runInTransaction(() => {
+    const keeper = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [keeperId])
+    const loser = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [loserId])
+    if (!keeper) throw new Error(`Keeper contact ${keeperId} not found`)
+    if (!loser) throw new Error(`Loser contact ${loserId} not found`)
+
+    // Repoint meeting_contacts (PK: meeting_id, contact_id). Move links that
+    // won't collide with the keeper's, then drop leftover collisions.
+    runNoSave('UPDATE OR IGNORE meeting_contacts SET contact_id = ? WHERE contact_id = ?', [keeperId, loserId])
+    runNoSave('DELETE FROM meeting_contacts WHERE contact_id = ?', [loserId])
+
+    // Repoint transcript_speakers. Its UNIQUE is (recording_id, speaker_label),
+    // unaffected by contact_id, so a plain update never collides.
+    runNoSave('UPDATE transcript_speakers SET contact_id = ? WHERE contact_id = ?', [keeperId, loserId])
+
+    // Fold fields onto the keeper.
+    const notEmpty = (v: string | null | undefined) => !!(v && v.trim())
+    const email = notEmpty(keeper.email) ? keeper.email : loser.email ?? null
+    const role = notEmpty(keeper.role) ? keeper.role : loser.role ?? null
+    const company = notEmpty(keeper.company) ? keeper.company : loser.company ?? null
+    const notes = notEmpty(keeper.notes) ? keeper.notes : loser.notes ?? null
+    const type = keeper.type && keeper.type !== 'unknown' ? keeper.type : loser.type || 'unknown'
+    const tags = [...new Set([...parseContactTags(keeper.tags), ...parseContactTags(loser.tags)])]
+    const firstSeen = [keeper.first_seen_at, loser.first_seen_at].filter(Boolean).sort()[0] ?? keeper.first_seen_at
+    const lastSeen = [keeper.last_seen_at, loser.last_seen_at].filter(Boolean).sort().slice(-1)[0] ?? keeper.last_seen_at
+
+    runNoSave(
+      `UPDATE contacts SET email = ?, role = ?, company = ?, notes = ?, type = ?, tags = ?,
+         first_seen_at = ?, last_seen_at = ? WHERE id = ?`,
+      [email, role, company, notes, type, tags.length ? JSON.stringify(tags) : null, firstSeen, lastSeen, keeperId]
+    )
+
+    runNoSave('DELETE FROM contacts WHERE id = ?', [loserId])
+    recomputeContactMeetingCount(keeperId)
+
+    return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [keeperId])!
+  })
+}
+
+// =============================================================================
+// Transcript speaker identity (v25)
+// =============================================================================
+
+export interface SpeakerMapEntry {
+  speaker_label: string
+  contact_id: string
+  name: string
+}
+
+/** Speaker-label → contact map for a recording (joined to the contact name). */
+export function getSpeakerMap(recordingId: string): SpeakerMapEntry[] {
+  return queryAll<SpeakerMapEntry>(
+    `SELECT ts.speaker_label, ts.contact_id, c.name
+     FROM transcript_speakers ts
+     JOIN contacts c ON c.id = ts.contact_id
+     WHERE ts.recording_id = ?
+     ORDER BY ts.speaker_label`,
+    [recordingId]
+  )
+}
+
+/**
+ * Bind a transcript speaker label to a contact. Provide either an existing
+ * contactId or a newName (upserted by case-insensitive name). Writes the map
+ * row (replacing any prior binding for the label) and, when the recording is
+ * linked to a meeting, links the contact to that meeting. Returns the contact.
+ *
+ * @throws if neither contactId nor newName is usable, or contactId is unknown.
+ */
+export function assignSpeaker(
+  recordingId: string,
+  speakerLabel: string,
+  opts: { contactId?: string; newName?: string }
+): Contact {
+  return runInTransaction(() => {
+    let contact: Contact | undefined
+
+    if (opts.contactId) {
+      contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [opts.contactId])
+      if (!contact) throw new Error(`Contact ${opts.contactId} not found`)
+    } else if (opts.newName && opts.newName.trim()) {
+      const name = opts.newName.trim()
+      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+      if (!contact) {
+        const id = randomUUID()
+        const now = new Date().toISOString()
+        runNoSave(
+          `INSERT INTO contacts (id, name, type, first_seen_at, last_seen_at, meeting_count)
+           VALUES (?, ?, 'unknown', ?, ?, 0)`,
+          [id, name, now, now]
+        )
+        contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
+      }
+    } else {
+      throw new Error('assignSpeaker requires a contactId or a newName')
+    }
+
+    // UNIQUE(recording_id, speaker_label) makes this an upsert of the binding.
+    runNoSave(
+      'INSERT OR REPLACE INTO transcript_speakers (id, recording_id, speaker_label, contact_id) VALUES (?, ?, ?, ?)',
+      [randomUUID(), recordingId, speakerLabel, contact.id]
+    )
+
+    const rec = queryOne<{ meeting_id?: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [recordingId])
+    if (rec?.meeting_id) {
+      runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+        rec.meeting_id,
+        contact.id,
+        'attendee'
+      ])
+      recomputeContactMeetingCount(contact.id)
+    }
+
+    return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contact.id])!
+  })
+}
+
+/** Remove a speaker-label → contact binding for a recording. */
+export function unassignSpeaker(recordingId: string, speakerLabel: string): void {
+  run('DELETE FROM transcript_speakers WHERE recording_id = ? AND speaker_label = ?', [recordingId, speakerLabel])
+}
+
+// =============================================================================
+// Meeting attendee editing (v25)
+// =============================================================================
+
+/**
+ * Regenerate a meeting's attendees JSON as a projection of its meeting_contacts
+ * links (organizer-role rows excluded — the organizer lives in its own columns).
+ * Uses runNoSave so it can compose inside an enclosing transaction.
+ */
+function regenerateMeetingAttendeesJson(meetingId: string): void {
+  const rows = queryAll<{ name: string; email: string | null }>(
+    `SELECT c.name, c.email
+     FROM meeting_contacts mc
+     JOIN contacts c ON c.id = mc.contact_id
+     WHERE mc.meeting_id = ? AND mc.role != 'organizer'
+     ORDER BY c.name`,
+    [meetingId]
+  )
+  const attendees = rows.map((r) => ({ name: r.name, email: r.email ?? undefined }))
+  runNoSave('UPDATE meetings SET attendees = ?, updated_at = ? WHERE id = ?', [
+    JSON.stringify(attendees),
+    new Date().toISOString(),
+    meetingId
+  ])
+}
+
+/**
+ * Add an attendee to a meeting. Upserts the contact (matched by email first,
+ * then by case-insensitive name), propagating a newly-supplied email onto a
+ * name-matched contact that lacked one — and mirror-upgrading an email-matched
+ * placeholder's name (matching org-reconciler's upsertContactsFromMeetings).
+ * Links the contact via meeting_contacts and regenerates the attendees JSON.
+ *
+ * @throws if the meeting is missing or neither name nor email is provided.
+ */
+export function addMeetingAttendee(meetingId: string, payload: { name?: string; email?: string }): Contact {
+  return runInTransaction(() => {
+    const meeting = queryOne<{ id: string }>('SELECT id FROM meetings WHERE id = ?', [meetingId])
+    if (!meeting) throw new Error(`Meeting ${meetingId} not found`)
+
+    const email = payload.email?.trim().toLowerCase() || null
+    const name = payload.name?.trim() || null
+    if (!email && !name) throw new Error('addMeetingAttendee requires a name or an email')
+
+    let contact: Contact | undefined
+    if (email) {
+      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(email) = ?', [email])
+    }
+    if (!contact && name) {
+      contact = queryOne<Contact>('SELECT * FROM contacts WHERE LOWER(name) = LOWER(?)', [name])
+    }
+
+    if (!contact) {
+      const id = randomUUID()
+      const now = new Date().toISOString()
+      runNoSave(
+        `INSERT INTO contacts (id, name, email, type, first_seen_at, last_seen_at, meeting_count)
+         VALUES (?, ?, ?, 'unknown', ?, ?, 0)`,
+        [id, name || (email ? email.split('@')[0] : 'Unknown'), email, now, now]
+      )
+      contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [id])!
+    } else {
+      // Propagate newly-supplied identity onto the matched contact.
+      const patch: string[] = []
+      const params: unknown[] = []
+      if (email && !(contact.email && contact.email.trim())) {
+        patch.push('email = ?')
+        params.push(email)
+      }
+      const placeholderName = contact.email ? contact.email.split('@')[0] : null
+      const nameIsPlaceholder = !contact.name || (placeholderName !== null && contact.name === placeholderName)
+      if (name && name !== contact.name && nameIsPlaceholder) {
+        patch.push('name = ?')
+        params.push(name)
+      }
+      if (patch.length > 0) {
+        params.push(contact.id)
+        runNoSave(`UPDATE contacts SET ${patch.join(', ')} WHERE id = ?`, params)
+        contact = queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contact.id])!
+      }
+    }
+
+    runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+      meetingId,
+      contact.id,
+      'attendee'
+    ])
+    regenerateMeetingAttendeesJson(meetingId)
+    recomputeContactMeetingCount(contact.id)
+
+    return queryOne<Contact>('SELECT * FROM contacts WHERE id = ?', [contact.id])!
+  })
+}
+
+/** Remove an attendee link from a meeting and regenerate its attendees JSON. */
+export function removeMeetingAttendee(meetingId: string, contactId: string): void {
+  runInTransaction(() => {
+    runNoSave('DELETE FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?', [meetingId, contactId])
+    regenerateMeetingAttendeesJson(meetingId)
+    recomputeContactMeetingCount(contactId)
+  })
 }
 
 // =============================================================================

@@ -12,6 +12,7 @@ import {
   deleteContact,
   getMeetingsForContact,
   getContactsForMeeting,
+  mergeContacts,
   Contact
 } from '../services/database'
 import { success, error, Result } from '../types/api'
@@ -19,7 +20,8 @@ import {
   GetContactsRequestSchema,
   GetContactByIdRequestSchema,
   UpdateContactRequestSchema,
-  DeleteContactRequestSchema
+  DeleteContactRequestSchema,
+  MergeContactsRequestSchema
 } from '../validation/contacts'
 import type { Person } from '@/types/knowledge'
 import type { Meeting } from '../services/database'
@@ -153,6 +155,39 @@ export function registerContactsHandlers(): void {
       } catch (err) {
         console.error('contacts:delete error:', err)
         return error('DATABASE_ERROR', 'Failed to delete contact', err)
+      }
+    }
+  )
+
+  /**
+   * Merge one contact into another. The keeper survives; the loser's links are
+   * repointed, useful fields folded in, and the loser row deleted.
+   */
+  ipcMain.handle(
+    'contacts:merge',
+    async (_, request: unknown): Promise<Result<Person>> => {
+      try {
+        const parsed = MergeContactsRequestSchema.safeParse(request)
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid merge request', parsed.error.format())
+        }
+
+        const { keeperId, loserId } = parsed.data
+        if (keeperId === loserId) {
+          return error('VALIDATION_ERROR', 'Cannot merge a contact into itself')
+        }
+        if (!getContactById(keeperId)) {
+          return error('NOT_FOUND', `Keeper contact ${keeperId} not found`)
+        }
+        if (!getContactById(loserId)) {
+          return error('NOT_FOUND', `Loser contact ${loserId} not found`)
+        }
+
+        const merged = mergeContacts(keeperId, loserId)
+        return success(mapToPerson(merged))
+      } catch (err) {
+        console.error('contacts:merge error:', err)
+        return error('DATABASE_ERROR', 'Failed to merge contacts', err)
       }
     }
   )

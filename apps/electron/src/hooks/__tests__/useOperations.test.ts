@@ -172,7 +172,8 @@ describe('useOperations', () => {
 
       expect(success).toBe(true)
       expect(mockUpdateStatus).toHaveBeenCalledWith('rec-3', 'pending')
-      expect(mockAddToQueueIPC).toHaveBeenCalledWith('rec-3')
+      // Single explicit request is enqueued with priority=true (jumps the backlog).
+      expect(mockAddToQueueIPC).toHaveBeenCalledWith('rec-3', true)
       expect(mockAddToQueue).toHaveBeenCalledWith('queue-item-1', 'rec-3', 'eligible.wav')
     })
 
@@ -214,7 +215,7 @@ describe('useOperations', () => {
       })
 
       expect(success).toBe(true)
-      expect(mockAddToQueueIPC).toHaveBeenCalledWith('rec-local')
+      expect(mockAddToQueueIPC).toHaveBeenCalledWith('rec-local', true)
     })
   })
 

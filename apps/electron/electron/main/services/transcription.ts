@@ -154,8 +154,68 @@ export function stopTranscriptionProcessor(): void {
 
 let cancelRequested = false
 
+/**
+ * Recency-first transcription ordering.
+ *
+ * Recording ids the user *explicitly* asked to transcribe — a single
+ * "Transcribe" click, a VibeVoice reprocess, or a manual retry — are held here
+ * so they jump ahead of the whole date-ordered backlog (rule 1), FIFO among
+ * themselves. Auto-transcribe and bulk enqueues are NOT marked, so they fall
+ * under the recording-date ordering (rule 2) instead.
+ *
+ * In-memory (never persisted) by design: a restart drops the "the user wanted
+ * this one first" hint, after which the queue is ordered purely by recency,
+ * which is the correct fallback. Keyed by recording_id (not queue-row id) so it
+ * survives a queue row being deleted and re-added on retry.
+ */
+const userPriorityIds = new Set<string>()
+
+export function markUserPriority(recordingId: string): void {
+  userPriorityIds.add(recordingId)
+}
+
+export function clearUserPriority(recordingId: string): void {
+  userPriorityIds.delete(recordingId)
+}
+
+type OrderableQueueItem = {
+  recording_id: string
+  created_at: string
+  date_recorded?: string | null
+}
+
+/**
+ * Order pending queue items for processing (recency-first). Pure + deterministic
+ * so the picker can re-run it on every dequeue:
+ *
+ *   1. User-explicit requests first, FIFO among themselves (queue created_at ASC).
+ *   2. Everything else by the recording's content date (date_recorded) DESC, so
+ *      yesterday's meeting beats last month's regardless of when it was enqueued.
+ *      Tiebreak: queue created_at ASC. Undated recordings sort last.
+ *
+ * Because it re-runs per dequeue, an item enqueued later with a newer
+ * date_recorded (e.g. a recording detected mid-backlog) preempts older waiting
+ * items automatically.
+ */
+export function orderPendingForProcessing<T extends OrderableQueueItem>(items: T[]): T[] {
+  const cmpCreatedAsc = (a: T, b: T) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)
+  // NULL/empty date → '' → smallest → sorts last under DESC.
+  const dateVal = (v?: string | null) => v ?? ''
+  return [...items].sort((a, b) => {
+    const aPri = userPriorityIds.has(a.recording_id) ? 0 : 1
+    const bPri = userPriorityIds.has(b.recording_id) ? 0 : 1
+    if (aPri !== bPri) return aPri - bPri
+    if (aPri === 0) return cmpCreatedAsc(a, b) // both user-explicit → FIFO
+    const da = dateVal(a.date_recorded)
+    const db = dateVal(b.date_recorded)
+    if (da !== db) return da < db ? 1 : -1 // date_recorded DESC
+    return cmpCreatedAsc(a, b)
+  })
+}
+
 export function cancelTranscription(recordingId: string): void {
   removeFromQueueByRecordingId(recordingId)
+  clearUserPriority(recordingId)
   updateRecordingTranscriptionStatus(recordingId, 'none')
   notifyRenderer('transcription:cancelled', { recordingId })
 }
@@ -163,6 +223,7 @@ export function cancelTranscription(recordingId: string): void {
 export function cancelAllTranscriptions(): number {
   cancelRequested = true
   const count = cancelPendingTranscriptions()
+  userPriorityIds.clear()
   notifyRenderer('transcription:all-cancelled', { count })
   // cancelRequested is reset at the end of processQueue (after the loop breaks)
   // rather than on a timer, to avoid the race where the flag resets before
@@ -291,18 +352,27 @@ async function processQueue(): Promise<void> {
       }
     }
 
-    const pendingItems = getQueueItems('pending')
-    if (pendingItems.length === 0) {
+    if (getQueueItems('pending').length === 0) {
       return
     }
 
     isProcessing = true
 
-    for (const item of pendingItems) {
-      if (cancelRequested) {
-        console.log('Transcription cancelled by user')
-        break
-      }
+    // Re-pick the highest-priority pending item on every iteration (rather than
+    // iterating a one-time snapshot) so ordering applies per dequeue: an item
+    // enqueued mid-drain with a newer date_recorded — or a user-explicit
+    // request — preempts older items still waiting. `processedThisRun` guarantees
+    // termination: each queue row is handled at most once per run even if its
+    // status write doesn't remove it from the pending set (mocked DB in tests, or
+    // a failed write in prod), while a newly-enqueued row (new id) is still
+    // eligible to preempt.
+    const processedThisRun = new Set<string>()
+    while (!cancelRequested) {
+      const item = orderPendingForProcessing(getQueueItems('pending')).find(
+        (i) => !processedThisRun.has(i.id)
+      )
+      if (!item) break
+      processedThisRun.add(item.id)
 
       try {
         updateQueueItem(item.id, 'processing')
@@ -350,6 +420,7 @@ async function processQueue(): Promise<void> {
 
         updateQueueProgress(item.id, 100) // spec-014: mark complete
         updateQueueItem(item.id, 'completed')
+        clearUserPriority(item.recording_id) // request satisfied — drop priority hint
         notifyRenderer('transcription:completed', { queueItemId: item.id, recordingId: item.recording_id })
         const { emitActivityLog: emitDone } = await import('./activity-log')
         const recDone = getRecordingById(item.recording_id)
@@ -361,6 +432,10 @@ async function processQueue(): Promise<void> {
         updateQueueItem(item.id, 'failed', errorMessage)
         // AI-13: Use standard enum value 'error' (not 'failed')
         updateRecordingTranscriptionStatus(item.recording_id, 'error')
+        // Drop the priority hint: a subsequent auto-retry is background work and
+        // should sort by recency. An explicit user retry re-marks it (see the
+        // transcription:retry IPC handler).
+        clearUserPriority(item.recording_id)
         notifyRenderer('transcription:failed', {
           queueItemId: item.id,
           recordingId: item.recording_id,
@@ -378,6 +453,9 @@ async function processQueue(): Promise<void> {
       }
     }
 
+    if (cancelRequested) {
+      console.log('Transcription cancelled by user')
+    }
     isProcessing = false
     // AI-11: Reset cancel flag after loop exits, not on a timer
     cancelRequested = false

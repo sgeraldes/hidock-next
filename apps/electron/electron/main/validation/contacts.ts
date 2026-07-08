@@ -47,6 +47,14 @@ export const DeleteContactRequestSchema = z.object({
 })
 
 /**
+ * Merge contacts request — fold the loser into the keeper.
+ */
+export const MergeContactsRequestSchema = z.object({
+  keeperId: UUIDSchema,
+  loserId: UUIDSchema
+})
+
+/**
  * Contact role in a meeting
  */
 export const ContactRoleSchema = z.enum(['organizer', 'attendee'])
@@ -81,6 +89,7 @@ export type GetContactsRequest = z.infer<typeof GetContactsRequestSchema>
 export type GetContactByIdRequest = z.infer<typeof GetContactByIdRequestSchema>
 export type UpdateContactRequest = z.infer<typeof UpdateContactRequestSchema>
 export type DeleteContactRequest = z.infer<typeof DeleteContactRequestSchema>
+export type MergeContactsRequest = z.infer<typeof MergeContactsRequestSchema>
 export type ContactRole = z.infer<typeof ContactRoleSchema>
 export type MeetingContact = z.infer<typeof MeetingContactSchema>
 export type ContactCreate = z.infer<typeof ContactCreateSchema>

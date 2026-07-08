@@ -110,6 +110,12 @@ all code fixes are implemented by Opus 4.8 coding agents and verified live.
   contact type always UNKNOWN.
 
 ## Observations (not yet actionable)
+- ISSUE-14 (queued; transcription.ts busy with fix-queue-priority agent): new
+  json-mime malformation class — DANGLING KEY then duplicated key
+  (`"participants":\n  "participants": [],` — key emitted with no value,
+  re-emitted next line). repairJsonString can't fix; fallback absorbed it.
+  Repair rule to add: key token followed by another key token → drop the
+  dangling key. Seen 10:5x wave 6, small English prompt (563 tokens).
 - json-mime analysis on very large prompts (27.8k tokens, Rec16) produced
   CORRUPTED output (string closes then next line starts mid-word) — not an
   escaping bug; repair can't fix. Plain-text fallback absorbed it. If this
