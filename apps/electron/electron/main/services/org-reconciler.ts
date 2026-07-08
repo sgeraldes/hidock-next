@@ -12,7 +12,16 @@
  */
 
 import { unescapeIcsText } from '@hidock/calendar-sync'
-import { queryAll, queryOne, run, runInTransaction, mergeContacts, insertIdentitySuggestion } from './database'
+import {
+  queryAll,
+  queryOne,
+  run,
+  runInTransaction,
+  mergeContacts,
+  insertIdentitySuggestion,
+  getAllRecordingPreassignments,
+  type RecordingPreassignment
+} from './database'
 import { resolveContact, resolveProject } from './entity-resolver'
 import { isGenericSpeakerLabel } from './entity-normalize'
 import { randomUUID } from 'crypto'
@@ -35,11 +44,21 @@ interface MeetingRow {
 
 interface RecordingRow {
   id: string
+  filename?: string
   date_recorded: string
   duration_seconds?: number
   file_size?: number
   meeting_id?: string
 }
+
+/**
+ * correlation_method marking a recording the user explicitly forced STANDALONE
+ * (via a live-recording pre-assignment with meeting_id = NULL). Rows with this
+ * method are excluded from time-overlap auto-linking on every subsequent pass, so
+ * the "don't link me to any meeting" choice sticks after the preassignment row is
+ * consumed.
+ */
+const STANDALONE_METHOD = 'user_preassign_standalone'
 
 /** Estimated duration for recordings without one (seconds). */
 const DEFAULT_RECORDING_DURATION = 30 * 60
@@ -57,18 +76,30 @@ function overlapMs(aStart: number, aEnd: number, bStart: number, bEnd: number): 
  * as candidates in recording_meeting_candidates.
  */
 export function autoLinkRecordingsToMeetings(): number {
+  // Exclude rows the user forced standalone — their choice must survive every
+  // reconcile pass, even after the preassignment row is consumed.
   const recordings = queryAll<RecordingRow>(
-    `SELECT id, date_recorded, duration_seconds, file_size, meeting_id
+    `SELECT id, filename, date_recorded, duration_seconds, file_size, meeting_id
      FROM recordings
-     WHERE meeting_id IS NULL AND date_recorded IS NOT NULL`
+     WHERE meeting_id IS NULL AND date_recorded IS NOT NULL
+       AND (correlation_method IS NULL OR correlation_method != '${STANDALONE_METHOD}')`
   )
   if (recordings.length === 0) return 0
+
+  // User pre-assignments (attribution chosen IN ADVANCE while the device was still
+  // recording), keyed by base filename so a .hda device name matches the .wav/.mp3
+  // local name. These WIN over time-overlap: an explicit meeting forces that link;
+  // an explicit NULL forces standalone. Each is consumed (deleted) once applied.
+  const preassignments = getAllRecordingPreassignments()
+  const preassignByBase = new Map<string, RecordingPreassignment>()
+  for (const pa of preassignments) {
+    preassignByBase.set(baseRecordingName(pa.filename).toLowerCase(), pa)
+  }
 
   const meetings = queryAll<MeetingRow>(
     `SELECT id, subject, start_time, end_time FROM meetings`
   )
-  if (meetings.length === 0) return 0
-
+  const meetingIds = new Set(meetings.map((m) => m.id))
   const meetingWindows = meetings
     .map((m) => ({
       id: m.id,
@@ -77,10 +108,32 @@ export function autoLinkRecordingsToMeetings(): number {
     }))
     .filter((m) => Number.isFinite(m.start) && Number.isFinite(m.end))
 
-  // Collect updates first, then apply in ONE transaction — per-row run()
+  // Collect the work first, then apply in ONE transaction — per-row run()
   // persists the whole sql.js database to disk on every call.
-  const updates: Array<{ recordingId: string; meetingId: string }> = []
+  const overlapUpdates: Array<{ recordingId: string; meetingId: string }> = []
+  const preassignUpdates: Array<{ recordingId: string; meetingId: string }> = []
+  const standaloneMarks: string[] = []
+  const consumedFilenames = new Set<string>()
+
   for (const rec of recordings) {
+    // Pre-assignment first — it overrides time-overlap for this recording.
+    const pa = rec.filename ? preassignByBase.get(baseRecordingName(rec.filename).toLowerCase()) : undefined
+    if (pa) {
+      consumedFilenames.add(pa.filename)
+      if (pa.meeting_id && meetingIds.has(pa.meeting_id)) {
+        // Explicit meeting wins over any time overlap.
+        preassignUpdates.push({ recordingId: rec.id, meetingId: pa.meeting_id })
+        continue
+      }
+      if (pa.meeting_id === null) {
+        // Explicit standalone — block time-overlap linking now and forever.
+        standaloneMarks.push(rec.id)
+        continue
+      }
+      // meeting_id points at a meeting that no longer exists — fall through to
+      // time-overlap (still consume the stale preassignment).
+    }
+
     const recStart = new Date(rec.date_recorded).getTime()
     if (!Number.isFinite(recStart)) continue
     const recEnd = recStart + (rec.duration_seconds || DEFAULT_RECORDING_DURATION) * 1000
@@ -92,24 +145,54 @@ export function autoLinkRecordingsToMeetings(): number {
         best = { id: m.id, overlap: o }
       }
     }
-    if (best) updates.push({ recordingId: rec.id, meetingId: best.id })
+    if (best) overlapUpdates.push({ recordingId: rec.id, meetingId: best.id })
   }
+
+  const hasWork =
+    overlapUpdates.length > 0 ||
+    preassignUpdates.length > 0 ||
+    standaloneMarks.length > 0 ||
+    consumedFilenames.size > 0
+  if (!hasWork) return 0
 
   let linked = 0
-  if (updates.length > 0) {
-    runInTransaction(() => {
-      for (const u of updates) {
-        run(
-          `UPDATE recordings SET meeting_id = ?, correlation_confidence = 0.7, correlation_method = 'time_overlap'
-           WHERE id = ? AND meeting_id IS NULL`,
-          [u.meetingId, u.recordingId]
-        )
-        linked++
-      }
-    })
-  }
+  runInTransaction(() => {
+    for (const u of preassignUpdates) {
+      run(
+        `UPDATE recordings SET meeting_id = ?, correlation_confidence = 1.0, correlation_method = 'user_preassign'
+         WHERE id = ? AND meeting_id IS NULL`,
+        [u.meetingId, u.recordingId]
+      )
+      linked++
+    }
+    for (const id of standaloneMarks) {
+      run(
+        `UPDATE recordings SET correlation_method = '${STANDALONE_METHOD}'
+         WHERE id = ? AND meeting_id IS NULL`,
+        [id]
+      )
+    }
+    for (const u of overlapUpdates) {
+      run(
+        `UPDATE recordings SET meeting_id = ?, correlation_confidence = 0.7, correlation_method = 'time_overlap'
+         WHERE id = ? AND meeting_id IS NULL`,
+        [u.meetingId, u.recordingId]
+      )
+      linked++
+    }
+    // Consume every preassignment we applied (explicit link, standalone, or stale).
+    for (const filename of consumedFilenames) {
+      run(`DELETE FROM recording_preassignments WHERE filename = ?`, [filename])
+    }
+  })
 
-  if (linked > 0) console.log(`[OrgReconciler] Auto-linked ${linked} recordings to meetings by time overlap`)
+  if (linked > 0 || standaloneMarks.length > 0) {
+    console.log(
+      `[OrgReconciler] Auto-linked ${linked} recordings ` +
+      `(${preassignUpdates.length} pre-assigned, ${overlapUpdates.length} time-overlap, ` +
+      `${standaloneMarks.length} forced standalone)`
+    )
+  }
   return linked
 }
 

@@ -255,6 +255,47 @@ describe('JensenDevice (transport-agnostic core)', () => {
     expect(device.isConnected()).toBe(false)
   })
 
+  // --- getRecordingFile (CMD 18) — live-recording status read ---
+
+  it('getRecordingFile() resolves with the active recording filename', async () => {
+    const ep = makePollEndpoint()
+    const device = new JensenDevice(makeFakeUsb())
+    await device.tryConnect(makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {})))
+
+    const promise = device.getRecordingFile()
+    // Let transferOut resolve so the read loop (startPoll + 'data' listener) is armed.
+    await new Promise((r) => setTimeout(r, 0))
+
+    const name = '2025May13-160405-Rec59.hda'
+    const body = new Uint8Array([...name].map((c) => c.charCodeAt(0)))
+    ep.emit('data', makeResponsePacket(CMD.GET_RECORDING_FILE, 0, body))
+
+    await expect(promise).resolves.toEqual({ recording: name, name })
+
+    await device.disconnect()
+  })
+
+  it('getRecordingFile() resolves with recording:null when the device is idle (empty body)', async () => {
+    const ep = makePollEndpoint()
+    const device = new JensenDevice(makeFakeUsb())
+    await device.tryConnect(makePollDevice(ep, vi.fn(async () => {}), vi.fn(async () => {})))
+
+    const promise = device.getRecordingFile()
+    await new Promise((r) => setTimeout(r, 0))
+
+    // Empty body = device not currently recording.
+    ep.emit('data', makeResponsePacket(CMD.GET_RECORDING_FILE, 0, new Uint8Array(0)))
+
+    await expect(promise).resolves.toEqual({ recording: null })
+
+    await device.disconnect()
+  })
+
+  it('getRecordingFile() returns null when no device is connected', async () => {
+    const device = new JensenDevice(makeFakeUsb())
+    expect(await device.getRecordingFile()).toBeNull()
+  })
+
   it('reset() stops the native poll BEFORE issuing device.reset() (no mid-poll wedge)', async () => {
     const ep = makePollEndpoint()
     const reset = vi.fn(async () => {})

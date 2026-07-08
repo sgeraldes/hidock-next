@@ -61,6 +61,11 @@ interface AppState {
   // indicators remain hidden.
   deviceRecording: boolean
 
+  // Filename of the recording the device is CURRENTLY capturing (from the CMD 18
+  // poll), or null when idle. Drives the Today "Recording now" live card and its
+  // attribution UI. Set alongside `deviceRecording` from the recording-changed push.
+  activeRecordingFilename: string | null
+
   // Device sync state (for sidebar indicator)
   deviceSyncing: boolean
   deviceSyncProgress: { current: number; total: number } | null
@@ -100,6 +105,7 @@ interface AppState {
   // Device state actions (updated by OperationController)
   setDeviceState: (state: HiDockDeviceState) => void
   setDeviceRecording: (recording: boolean) => void
+  setActiveRecordingFilename: (filename: string | null) => void
   setConnectionStatus: (status: ConnectionStatus) => void
   addActivityLogEntry: (entry: ActivityLogEntry) => void
   addActivityLogBatch: (entries: ActivityLogEntry[]) => void
@@ -167,6 +173,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   connectionStatus: { step: 'idle', message: 'Not connected' },
   activityLog: [],
   deviceRecording: false,
+  activeRecordingFilename: null,
 
   // Device sync initial state
   deviceSyncing: false,
@@ -256,6 +263,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Device state actions
   setDeviceState: (deviceState) => set({ deviceState }),
   setDeviceRecording: (deviceRecording) => set({ deviceRecording }),
+  setActiveRecordingFilename: (activeRecordingFilename) => set({ activeRecordingFilename }),
   setConnectionStatus: (connectionStatus) => set({ connectionStatus }),
   addActivityLogEntry: (entry) => set((state) => {
     // Validate entry before adding (prevents corruption from invalid entries)

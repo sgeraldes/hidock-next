@@ -1682,6 +1682,24 @@ export class JensenDevice {
     }
   }
 
+  /**
+   * Query the file the device is CURRENTLY recording (CMD 18). Resolves with the
+   * in-progress recording's filename, or `{ recording: null }` when the device is
+   * idle (not capturing). This is a passive status read — safe to poll while the
+   * device sits idle — but it MUST NOT be issued during a file transfer or list
+   * scan (it would interleave on the USB bus); the caller is responsible for that
+   * guard. Returns `null` only on timeout or when no device is connected.
+   */
+  async getRecordingFile(timeout = 5): Promise<{ recording: string | null } | null> {
+    if (!this.device) return null
+    try {
+      return await this.sendCommand<{ recording: string | null } | null>(
+        new JensenMessage(CMD.GET_RECORDING_FILE), timeout, 'getRecordingFile')
+    } catch {
+      return null
+    }
+  }
+
   async getCardInfo(timeout = 10): Promise<CardInfo | null> {
     if (this.versionNumber !== null && this.versionNumber < 327733) return null
     try {

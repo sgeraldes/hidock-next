@@ -4,6 +4,7 @@ import {
   isCancelledSubject,
   formatMinutesUntil,
   formatMinutesLeft,
+  formatMinutesSinceEnd,
   type TimeableMeeting
 } from '../meeting-timing'
 
@@ -102,6 +103,37 @@ describe('classifyMeetingTimings', () => {
     expect(timings.get('next')?.isFocus).toBe(true)
   })
 
+  it('marks a recently-ended meeting as ran_over with minutes since end', () => {
+    const meetings = [
+      m('ranover', 'Retro Belcorp', -66, 60), // ended 6 min ago
+      m('longpast', 'Morning review', -120, 30) // ended 90 min ago
+    ]
+    const timings = classifyMeetingTimings(meetings, now)
+    expect(timings.get('ranover')?.state).toBe('ran_over')
+    expect(timings.get('ranover')?.minutes).toBe(6)
+    expect(timings.get('longpast')?.state).toBe('past')
+  })
+
+  it('keeps a ran_over meeting subtle (does not steal focus from the next upcoming)', () => {
+    const meetings = [
+      m('ranover', 'Retro Belcorp', -66, 60), // ended 6 min ago
+      m('next', 'Client call', 10, 30)
+    ]
+    const timings = classifyMeetingTimings(meetings, now)
+    expect(timings.get('ranover')?.isFocus).toBe(false)
+    expect(timings.get('next')?.isFocus).toBe(true)
+  })
+
+  it('treats a meeting exactly at the ran_over boundary as ran_over, and beyond it as past', () => {
+    const meetings = [
+      m('edge', 'Edge', -80, 60), // ended exactly 20 min ago → ran_over
+      m('beyond', 'Beyond', -81, 60) // ended 21 min ago → past
+    ]
+    const timings = classifyMeetingTimings(meetings, now)
+    expect(timings.get('edge')?.state).toBe('ran_over')
+    expect(timings.get('beyond')?.state).toBe('past')
+  })
+
   it('does not crash on unparseable timestamps', () => {
     const meetings: TimeableMeeting[] = [{ id: 'bad', subject: 'Mystery', start_time: 'nope', end_time: 'nope' }]
     const timings = classifyMeetingTimings(meetings, now)
@@ -123,5 +155,12 @@ describe('relative time formatting', () => {
     expect(formatMinutesLeft(12)).toBe('Now · 12 min left')
     expect(formatMinutesLeft(60)).toBe('Now · 1 h left')
     expect(formatMinutesLeft(0)).toBe('Now · wrapping up')
+  })
+
+  it('formats minutes-since-end for ran-over meetings', () => {
+    expect(formatMinutesSinceEnd(6)).toBe('ended 6 min ago')
+    expect(formatMinutesSinceEnd(60)).toBe('ended 1 h ago')
+    expect(formatMinutesSinceEnd(75)).toBe('ended 1 h 15 min ago')
+    expect(formatMinutesSinceEnd(0)).toBe('just ended')
   })
 })

@@ -12,7 +12,12 @@ import { renderHook, act } from '@testing-library/react'
 
 // --- Mock the store selectors with mutable state we control per test ---
 let deviceStateMock = { connected: false, model: 'unknown' as string }
-let connectionStatusMock = { step: 'idle' as string, message: '' }
+let connectionStatusMock: {
+  step: string
+  message: string
+  connectFailed?: boolean
+  devicePresent?: boolean
+} = { step: 'idle', message: '' }
 
 vi.mock('@/store/useAppStore', () => ({
   useDeviceState: () => deviceStateMock,
@@ -88,6 +93,39 @@ describe('useDeviceConnection — status mapping', () => {
     const { result } = renderHook(() => useDeviceConnection())
     expect(result.current.deviceModel).toBe('Device')
     expect(result.current.label).toBe('Device')
+  })
+})
+
+describe('useDeviceConnection — failed state (honest pill)', () => {
+  it('maps failed with a busy hint when a connect attempt failed and a device is present', () => {
+    connectionStatusMock = { step: 'idle', message: 'Connection failed', connectFailed: true, devicePresent: true }
+    const { result } = renderHook(() => useDeviceConnection())
+    expect(result.current.status).toBe('failed')
+    expect(result.current.isFailed).toBe(true)
+    expect(result.current.label).toBe('Connection failed — retry')
+    expect(result.current.failedHint).toBe('Device may be busy (recording?)')
+  })
+
+  it('maps failed with a generic hint when no device was present', () => {
+    connectionStatusMock = { step: 'idle', message: 'Connection failed', connectFailed: true, devicePresent: false }
+    const { result } = renderHook(() => useDeviceConnection())
+    expect(result.current.status).toBe('failed')
+    expect(result.current.failedHint).toBe('Could not reach the HiDock')
+  })
+
+  it('a successful connection supersedes a stale failed flag', () => {
+    deviceStateMock = { connected: true, model: 'hidock-h1e' }
+    connectionStatusMock = { step: 'ready', message: 'ready', connectFailed: true }
+    const { result } = renderHook(() => useDeviceConnection())
+    expect(result.current.status).toBe('connected')
+    expect(result.current.isFailed).toBe(false)
+  })
+
+  it('an in-progress retry supersedes the failed flag (shows connecting)', () => {
+    connectionStatusMock = { step: 'requesting', message: 'Requesting…', connectFailed: true }
+    const { result } = renderHook(() => useDeviceConnection())
+    expect(result.current.status).toBe('connecting')
+    expect(result.current.isFailed).toBe(false)
   })
 })
 

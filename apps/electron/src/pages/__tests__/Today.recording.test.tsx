@@ -70,3 +70,51 @@ describe('Today — live recording indicator', () => {
     expect(screen.queryByText('Recording')).not.toBeInTheDocument()
   })
 })
+
+describe('Today — ran-over meeting', () => {
+  function briefingWithRanOverMeeting() {
+    const now = Date.now()
+    const iso = (offsetMin: number) => new Date(now + offsetMin * 60000).toISOString()
+    return {
+      // Ended 6 minutes ago (scheduled 40→-6). A recording that began mid-meeting
+      // is still running, so this is "running over".
+      todayMeetings: [
+        { id: 'm1', subject: 'Retro Belcorp', start_time: iso(-40), end_time: iso(-6), description: '' }
+      ],
+      recentKnowledge: [],
+      pendingActionables: [],
+      calendar: { configured: true, syncEnabled: true, lastSyncAt: null },
+      stats: { transcribedCount: 0, indexedChunks: 0, pendingActionables: 0 }
+    }
+  }
+
+  it('shows "ended X min ago" for a just-ended meeting when not recording', async () => {
+    global.window.electronAPI = {
+      briefing: { get: vi.fn().mockResolvedValue({ success: true, data: briefingWithRanOverMeeting() }) },
+      recordings: { getForMeeting: vi.fn().mockResolvedValue([]) }
+    } as any
+    useAppStore.setState({ deviceRecording: false, activeRecordingFilename: null })
+    renderToday()
+
+    expect(await screen.findByText('Retro Belcorp')).toBeInTheDocument()
+    expect(screen.getByText(/ended \d+ min ago/)).toBeInTheDocument()
+    expect(screen.queryByText(/Running over/)).not.toBeInTheDocument()
+  })
+
+  it('shows "Running over · recording continues" when a recording started during the meeting', async () => {
+    global.window.electronAPI = {
+      briefing: { get: vi.fn().mockResolvedValue({ success: true, data: briefingWithRanOverMeeting() }) },
+      recordings: { getForMeeting: vi.fn().mockResolvedValue([]), getPreassignment: vi.fn().mockResolvedValue({ success: true, data: null }) }
+    } as any
+    // A recording that started 20 min ago — inside the -40→-6 window.
+    const startedAt = new Date(Date.now() - 20 * 60000)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const fname = `${startedAt.getFullYear()}${pad(startedAt.getMonth() + 1)}${pad(startedAt.getDate())}${pad(startedAt.getHours())}${pad(startedAt.getMinutes())}${pad(startedAt.getSeconds())}REC001.hda`
+    useAppStore.setState({ deviceRecording: true, activeRecordingFilename: fname })
+    renderToday()
+
+    // The row badge carries the unique "running over" phrase (the subject also
+    // appears in the live card as an attribution candidate, so assert on this).
+    expect(await screen.findByText('Running over · recording continues')).toBeInTheDocument()
+  })
+})

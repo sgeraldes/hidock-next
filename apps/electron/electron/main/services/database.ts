@@ -7,7 +7,7 @@ import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/dat
 import { normalizeName, isGenericSpeakerLabel } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 30
+const SCHEMA_VERSION = 31
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -460,6 +460,18 @@ CREATE TABLE IF NOT EXISTS recording_meeting_candidates (
     FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
     UNIQUE(recording_id, meeting_id)
+);
+
+-- Recording pre-assignments (v31): user's IN-ADVANCE attribution choice for a
+-- recording the device is CURRENTLY capturing, keyed by the live device filename.
+--   meeting_id = <id>  → force-link to this meeting when the file is downloaded
+--   meeting_id = NULL  → force STANDALONE (block time-overlap auto-link)
+-- Consumed (deleted) by autoLinkRecordingsToMeetings once applied.
+CREATE TABLE IF NOT EXISTS recording_preassignments (
+    filename TEXT PRIMARY KEY,
+    meeting_id TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
 );
 
 -- Device files cache - persists device file list for offline viewing
@@ -1699,6 +1711,26 @@ const MIGRATIONS: Record<number, () => void> = {
       console.warn('[Migration v30] merge_journal failed:', e)
     }
     console.log('Migration v30 complete')
+  },
+
+  31: () => {
+    // v31: recording_preassignments — the user's in-advance attribution choice for
+    // the recording the device is currently capturing (see schema comment).
+    console.log('Running migration to schema v31: recording_preassignments')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS recording_preassignments (
+          filename TEXT PRIMARY KEY,
+          meeting_id TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+        )
+      `)
+    } catch (e) {
+      console.warn('[Migration v31] recording_preassignments failed:', e)
+    }
+    console.log('Migration v31 complete')
   }
 
 }
@@ -1772,6 +1804,19 @@ function repairPhase(): void {
       }
     }
   }
+
+  // Repair recording_preassignments (v31): force-create so an older on-disk DB
+  // that skipped the migration still gets it before any preassign write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS recording_preassignments (
+        filename TEXT PRIMARY KEY,
+        meeting_id TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+      )
+    `)
+  } catch (e) { /* table already exists */ }
 
   // Repair transcript_speakers (v25): a new table has no columns to ALTER, but
   // force-create it here so an older on-disk DB that skipped the migration still
@@ -2543,6 +2588,47 @@ export function markRecordingDownloaded(
     [id, localBasename, filename, localPath, opts?.fileSize ?? null, opts?.dateRecorded ?? now, now]
   )
   return id
+}
+
+// ---------------------------------------------------------------------------
+// Recording pre-assignments (v31) — in-advance attribution for the live capture.
+// Keyed by the device's in-progress filename. A NULL meeting_id means the user
+// explicitly marked the recording standalone (block time-overlap auto-link).
+// ---------------------------------------------------------------------------
+
+export interface RecordingPreassignment {
+  filename: string
+  meeting_id: string | null
+  created_at?: string
+}
+
+/** Store (or replace) the user's attribution choice for a live recording filename. */
+export function setRecordingPreassignment(filename: string, meetingId: string | null): void {
+  run(
+    `INSERT OR REPLACE INTO recording_preassignments (filename, meeting_id, created_at)
+     VALUES (?, ?, CURRENT_TIMESTAMP)`,
+    [filename, meetingId]
+  )
+}
+
+/** Read the attribution choice for a filename, or undefined when none is set. */
+export function getRecordingPreassignment(filename: string): RecordingPreassignment | undefined {
+  return queryOne<RecordingPreassignment>(
+    `SELECT filename, meeting_id, created_at FROM recording_preassignments WHERE filename = ?`,
+    [filename]
+  )
+}
+
+/** Remove an attribution choice (also called once it has been applied on download). */
+export function clearRecordingPreassignment(filename: string): void {
+  run(`DELETE FROM recording_preassignments WHERE filename = ?`, [filename])
+}
+
+/** All pending attribution choices — used by the auto-linker to consume them. */
+export function getAllRecordingPreassignments(): RecordingPreassignment[] {
+  return queryAll<RecordingPreassignment>(
+    `SELECT filename, meeting_id, created_at FROM recording_preassignments`
+  )
 }
 
 // Delete recording file from local storage (keeps metadata if transcribed)

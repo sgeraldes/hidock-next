@@ -21,6 +21,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { EntityMention, MeetingHoverCard, meetingHoverWillHaveContent } from '@/components/entity'
 import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
 import { TodayIdentitySuggestions } from '@/components/identity/TodayIdentitySuggestions'
+import { LiveRecordingCard, parseRecordingStart } from '@/components/LiveRecordingCard'
 import { cn } from '@/lib/utils'
 import { firstMeaningfulLine } from '@/lib/description-format'
 import { useAppStore } from '@/store'
@@ -28,7 +29,8 @@ import { fetchMeetingParticipants, participantFirstName } from '@/lib/meeting-pa
 import {
   classifyMeetingTimings,
   formatMinutesLeft,
-  formatMinutesUntil
+  formatMinutesUntil,
+  formatMinutesSinceEnd
 } from '@/lib/meeting-timing'
 import type { Contact } from '@/types'
 
@@ -110,13 +112,32 @@ export function Today() {
   // Live device-recording flag (see useAppStore.deviceRecording TODO). Scalar → no
   // useShallow needed. Stays false until a device-status read path sets it.
   const deviceRecording = useAppStore((s) => s.deviceRecording)
+  const activeRecordingFilename = useAppStore((s) => s.activeRecordingFilename)
   // Live clock so relative "in X min" badges and the next-meeting highlight stay
   // accurate; ticks every 15s (WCAG reduced-motion is unaffected — it's data,
   // not animation).
+  //
+  // CRITICAL: Chromium throttles/pauses setInterval in a backgrounded or occluded
+  // renderer window. While the user is in their actual meeting the HiDock window
+  // sits in the background, so the interval stops firing and `now` freezes at
+  // roughly when the window was last foregrounded — leaving a started meeting stuck
+  // showing "in X min". Refreshing `now` on visibilitychange/focus makes the clock
+  // correct the instant the user looks at the window, independent of the throttled
+  // interval.
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 15_000)
-    return () => clearInterval(id)
+    const tick = () => setNow(new Date())
+    const id = setInterval(tick, 15_000)
+    const onVisible = () => {
+      if (!document.hidden) tick()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', tick)
+    return () => {
+      clearInterval(id)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', tick)
+    }
   }, [])
 
   const load = useCallback(async () => {
@@ -193,6 +214,32 @@ export function Today() {
 
   const timings = classifyMeetingTimings(data?.todayMeetings ?? [], now)
 
+  // When the device is recording, where did the current capture start? Used to
+  // decide whether a just-ended ("ran over") meeting is still the one being
+  // recorded — the recording began inside its scheduled window.
+  const recordingStart =
+    deviceRecording && activeRecordingFilename ? parseRecordingStart(activeRecordingFilename) : null
+
+  const recordingStartedDuring = (m: BriefingMeeting): boolean => {
+    if (!recordingStart) return false
+    const start = new Date(m.start_time).getTime()
+    const end = new Date(m.end_time).getTime()
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return false
+    const t = recordingStart.getTime()
+    return t >= start && t <= end
+  }
+
+  // Attribution candidates for the live "Recording now" card: meetings in progress,
+  // PLUS a meeting that just ran over but whose window the current recording started
+  // in (it's almost certainly still that meeting). In-progress first so the card
+  // ranks a live meeting above one that has technically ended.
+  const attributionCandidates = [
+    ...(data?.todayMeetings ?? []).filter((m) => timings.get(m.id)?.state === 'in_progress'),
+    ...(data?.todayMeetings ?? []).filter(
+      (m) => timings.get(m.id)?.state === 'ran_over' && recordingStartedDuring(m)
+    )
+  ]
+
   const latest = data?.recentKnowledge[0]
 
   const generateFor = (sourceId: string, templateId: string) => {
@@ -231,6 +278,12 @@ export function Today() {
           </Card>
         )}
 
+        {/* Live "Recording now" card — renders only while the device is capturing */}
+        <LiveRecordingCard
+          inProgressMeetings={attributionCandidates}
+          allMeetings={data?.todayMeetings ?? []}
+        />
+
         {/* Today's meetings */}
         <Card>
           <CardHeader className="pb-3">
@@ -264,6 +317,9 @@ export function Today() {
                   const past = timing?.state === 'past'
                   const inProgress = timing?.state === 'in_progress'
                   const upcoming = timing?.state === 'upcoming'
+                  // Ran over: scheduled end passed within the last ~20 min. Still current
+                  // (not dimmed like a fully-past meeting).
+                  const ranOver = timing?.state === 'ran_over'
                   const isFocus = timing?.isFocus ?? false
                   const isNextUp = timing?.isNextUp ?? false
                   // The soonest upcoming meeting while another is in progress — gets a
@@ -274,6 +330,10 @@ export function Today() {
                   // Live capture: the HiDock is recording and this is the meeting in
                   // progress it's most likely capturing (the focused running meeting).
                   const recording = inProgress && isFocus && deviceRecording
+                  // Running over: the meeting's slot ended but the device is still
+                  // recording a capture that began during it — treat as still ongoing.
+                  const runningOver = ranOver && deviceRecording && recordingStartedDuring(m)
+                  // Ran-over meetings are NOT dimmed — they're still the current context.
                   const dimmed = past || cancelled
                   // Secondary line: participants, else first meaningful description line, else location.
                   const secondary =
@@ -282,7 +342,11 @@ export function Today() {
                       : firstMeaningfulLine(m.description) || m.location || ''
                   const badgeLabel = inProgress
                     ? formatMinutesLeft(timing?.minutes ?? 0)
-                    : formatMinutesUntil(timing?.minutes ?? 0)
+                    : ranOver
+                      ? runningOver
+                        ? 'Running over · recording continues'
+                        : formatMinutesSinceEnd(timing?.minutes ?? 0)
+                      : formatMinutesUntil(timing?.minutes ?? 0)
                   const rowButton = (
                         <button
                           onClick={() => navigate(`/meeting/${m.id}`)}
@@ -291,6 +355,7 @@ export function Today() {
                             'transition-all duration-150 ease-out hover:bg-muted/60 hover:shadow-sm hover:-translate-y-px',
                             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                             (inProgress || isFocus) && 'border-primary/40 bg-primary/[0.04] ring-1 ring-primary/10',
+                            runningOver && 'border-red-500/40 bg-red-500/[0.04] ring-1 ring-red-500/10',
                             secondaryEmphasis && 'border-primary/25 ring-1 ring-primary/[0.06]',
                             dimmed && 'opacity-60'
                           )}
@@ -331,7 +396,7 @@ export function Today() {
                                   aria-label="Recording linked"
                                 />
                               )}
-                              {recording && (
+                              {(recording || runningOver) && (
                                 <span
                                   className="flex items-center gap-1 flex-shrink-0 rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-600 dark:text-red-500"
                                   aria-label="Recording in progress"
@@ -345,20 +410,24 @@ export function Today() {
                               <span className="text-xs text-foreground/60 truncate block">{secondary}</span>
                             )}
                           </span>
-                          {(inProgress || upcoming) && !cancelled && (
+                          {(inProgress || upcoming || ranOver) && !cancelled && (
                             <span
                               className={cn(
                                 'flex items-center gap-1.5 text-xs whitespace-nowrap rounded-full px-2 py-0.5 flex-shrink-0',
-                                inProgress || isFocus || isNextUp
-                                  ? 'bg-primary/10 text-primary font-medium'
-                                  : 'text-foreground/55'
+                                runningOver
+                                  ? 'bg-red-500/10 text-red-600 dark:text-red-500 font-medium'
+                                  : inProgress || isFocus || isNextUp
+                                    ? 'bg-primary/10 text-primary font-medium'
+                                    : ranOver
+                                      ? 'text-foreground/50'
+                                      : 'text-foreground/55'
                               )}
                             >
-                              {inProgress && (
+                              {(inProgress || runningOver) && (
                                 <span
                                   className={cn(
                                     'h-1.5 w-1.5 rounded-full flex-shrink-0 animate-pulse motion-reduce:animate-none',
-                                    recording ? 'bg-red-500' : 'bg-primary'
+                                    recording || runningOver ? 'bg-red-500' : 'bg-primary'
                                   )}
                                 />
                               )}

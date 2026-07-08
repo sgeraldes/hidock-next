@@ -222,6 +222,10 @@ export interface ElectronAPI {
     getCandidates: (recordingId: string) => Promise<{ success: boolean; data: any[]; error?: string }>
     getMeetingsNearDate: (date: string) => Promise<{ success: boolean; data: any[]; error?: string }>
     selectMeeting: (recordingId: string, meetingId: string | null) => Promise<{ success: boolean; error?: string }>
+    // Live-recording pre-assignment (attribution set IN ADVANCE, keyed by device filename)
+    preassign: (filename: string, meetingId: string | null) => Promise<{ success: boolean; error?: string }>
+    getPreassignment: (filename: string) => Promise<{ success: boolean; data: { filename: string; meeting_id: string | null; created_at?: string } | null; error?: string }>
+    clearPreassignment: (filename: string) => Promise<{ success: boolean; error?: string }>
     // External file import
     addExternal: () => Promise<{ success: boolean; recording?: any; error?: string }>
     addExternalByPath: (filePath: string) => Promise<{ success: boolean; recording?: any; error?: string }>
@@ -581,6 +585,7 @@ export interface ElectronAPI {
     onDownloadProgress: (callback: (data: { filename: string; bytesReceived: number; totalBytes: number }) => void) => () => void
     onDownloadChunk: (callback: (data: { filename: string; data: Uint8Array }) => void) => () => void
     onScanProgress: (callback: (data: { current: number; total: number }) => void) => () => void
+    onRecordingChanged: (callback: (data: { recording: string | null }) => void) => () => void
   }
 
   // Device Pipeline API (Slice 4) — INERT main→renderer state projection.
@@ -751,6 +756,10 @@ const electronAPI: ElectronAPI = {
     getCandidates: (recordingId) => callIPC('recordings:getCandidates', recordingId),
     getMeetingsNearDate: (date) => callIPC('recordings:getMeetingsNearDate', date),
     selectMeeting: (recordingId, meetingId) => callIPC('recordings:selectMeeting', recordingId, meetingId),
+    // Live-recording pre-assignment
+    preassign: (filename: string, meetingId: string | null) => callIPC('recordings:preassign', filename, meetingId),
+    getPreassignment: (filename: string) => callIPC('recordings:getPreassignment', filename),
+    clearPreassignment: (filename: string) => callIPC('recordings:clearPreassignment', filename),
     // External file import
     addExternal: () => callIPC('recordings:addExternal'),
     addExternalByPath: (filePath: string) => callIPC('recordings:addExternalByPath', filePath),
@@ -1042,6 +1051,13 @@ const electronAPI: ElectronAPI = {
       const handler = (_event: any, data: any) => callback(data)
       ipcRenderer.on('jensen:scan-progress', handler)
       return () => ipcRenderer.removeListener('jensen:scan-progress', handler)
+    },
+    // Live-recording signal: `recording` is the in-progress capture's filename, or
+    // null when the device goes idle / disconnects. Pushed by the main-process poll.
+    onRecordingChanged: (callback: (data: { recording: string | null }) => void) => {
+      const handler = (_event: any, data: any) => callback(data)
+      ipcRenderer.on('jensen:recording-changed', handler)
+      return () => ipcRenderer.removeListener('jensen:recording-changed', handler)
     },
   },
 

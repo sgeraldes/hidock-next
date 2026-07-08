@@ -64,6 +64,84 @@ function broadcast(channel: string, payload?: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
+// Live-recording poll
+//
+// The HiDock exposes no push notification for its physical record button, so we
+// poll GET_RECORDING_FILE (CMD 18) while connected. The device answers with the
+// in-progress recording's filename, or an empty body when idle. On change we
+// broadcast `jensen:recording-changed` so the renderer can light up the "Recording
+// now" indicators.
+//
+// Interleaving safety (CLAUDE.md USB rules): a poll is SKIPPED whenever a file
+// transfer or list scan is in flight (device.isOperationInProgress() or an active
+// download abort), and it is issued through the same serializeDeviceOp chain as
+// every other device op — so it never races a connect/disconnect/scan on the bus.
+// The device's own command queue is the final backstop.
+//
+// Inherent limit: this only works while the app is CONNECTED. A device recording
+// while the app is closed/disconnected is invisible until the next connect.
+// ---------------------------------------------------------------------------
+
+const RECORDING_POLL_INTERVAL_MS = 20_000
+const RECORDING_POLL_KICKOFF_MS = 3000
+
+let recordingPollTimer: ReturnType<typeof setInterval> | null = null
+let recordingPollKickoff: ReturnType<typeof setTimeout> | null = null
+// undefined = unknown (never read yet); string = actively recording; null = idle.
+let lastRecordingFilename: string | null | undefined = undefined
+
+async function pollRecordingOnce(): Promise<void> {
+  const device = getJensenDevice()
+  if (!device.isConnected()) return
+  // Do NOT interleave with an in-flight transfer / scan on the USB bus.
+  if (device.isOperationInProgress() || currentDownloadAbort) return
+
+  let result: { recording: string | null } | null = null
+  try {
+    result = await serializeDeviceOp(() => device.getRecordingFile())
+  } catch {
+    return
+  }
+  if (!result) return // timeout / no device — keep the last known state
+
+  const filename = result.recording && result.recording.length > 0 ? result.recording : null
+  if (filename !== lastRecordingFilename) {
+    lastRecordingFilename = filename
+    broadcast('jensen:recording-changed', { recording: filename })
+  }
+}
+
+function startRecordingPoll(): void {
+  if (recordingPollTimer) return
+  lastRecordingFilename = undefined
+  recordingPollTimer = setInterval(() => {
+    void pollRecordingOnce()
+  }, RECORDING_POLL_INTERVAL_MS)
+  // Early first read so the indicator appears without waiting a full interval —
+  // delayed a few seconds so it doesn't collide with the connect handshake
+  // (device-info / initial file-list scan). The busy-guard skips it if it does.
+  recordingPollKickoff = setTimeout(() => {
+    void pollRecordingOnce()
+  }, RECORDING_POLL_KICKOFF_MS)
+}
+
+function stopRecordingPoll(): void {
+  if (recordingPollTimer) {
+    clearInterval(recordingPollTimer)
+    recordingPollTimer = null
+  }
+  if (recordingPollKickoff) {
+    clearTimeout(recordingPollKickoff)
+    recordingPollKickoff = null
+  }
+  const wasRecording = !!lastRecordingFilename
+  lastRecordingFilename = undefined
+  // Clear the indicator on disconnect (a device unplugged mid-record must not
+  // leave a stale "Recording now" card).
+  if (wasRecording) broadcast('jensen:recording-changed', { recording: null })
+}
+
+// ---------------------------------------------------------------------------
 // Handler registration
 // ---------------------------------------------------------------------------
 
@@ -438,9 +516,11 @@ export function registerJensenHandlers(): void {
       versionCode: jensen.versionCode,
       versionNumber: jensen.versionNumber,
     })
+    startRecordingPoll()
   }
 
   jensen.ondisconnect = () => {
+    stopRecordingPoll()
     broadcast('jensen:disconnect-event')
     broadcast('jensen:state-changed', {
       connected: false,

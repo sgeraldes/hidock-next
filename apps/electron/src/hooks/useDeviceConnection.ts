@@ -22,7 +22,7 @@ import { useDeviceState, useConnectionStatus } from '@/store/useAppStore'
 import { getHiDockDeviceService } from '@/services/hidock-device'
 import { toast } from '@/components/ui/toaster'
 
-export type DeviceConnectionStatus = 'connected' | 'connecting' | 'disconnected'
+export type DeviceConnectionStatus = 'connected' | 'connecting' | 'disconnected' | 'failed'
 
 /**
  * Shared across every hook instance: guarantees a single USB connect attempt is
@@ -44,10 +44,14 @@ export interface UseDeviceConnection {
   isConnected: boolean
   isConnecting: boolean
   isDisconnected: boolean
+  /** A prior connect attempt failed (device present-but-unreachable). */
+  isFailed: boolean
   /** Formatted device model when connected (e.g. "H1E"), otherwise null. */
   deviceModel: string | null
   /** Human label for the control: model name / "Connecting…" / "Connect device". */
   label: string
+  /** Extra context for the failed state (e.g. the device-busy hint), else null. */
+  failedHint: string | null
   /** Kick off one connect attempt. Returns whether it succeeded. Never retries. */
   connect: () => Promise<boolean>
   /** Disconnect the device. */
@@ -70,13 +74,24 @@ export function useDeviceConnection(
   const storeConnecting = step !== 'idle' && step !== 'ready' && step !== 'error'
   const isConnected = deviceState.connected
   const isConnecting = !isConnected && (storeConnecting || pending)
-  const isDisconnected = !isConnected && !isConnecting
+  // A just-failed connect attempt (device present-but-unreachable). Superseded the
+  // moment a retry starts (isConnecting) or a connect succeeds.
+  const isFailed = !isConnected && !isConnecting && !!connectionStatus.connectFailed
+  const isDisconnected = !isConnected && !isConnecting && !isFailed
 
   const status: DeviceConnectionStatus = isConnected
     ? 'connected'
     : isConnecting
       ? 'connecting'
-      : 'disconnected'
+      : isFailed
+        ? 'failed'
+        : 'disconnected'
+
+  const failedHint = isFailed
+    ? connectionStatus.devicePresent
+      ? 'Device may be busy (recording?)'
+      : 'Could not reach the HiDock'
+    : null
 
   const deviceModel = isConnected
     ? deviceState.model && deviceState.model !== 'unknown'
@@ -88,7 +103,9 @@ export function useDeviceConnection(
     ? deviceModel ?? 'Device'
     : isConnecting
       ? 'Connecting…'
-      : 'Connect device'
+      : isFailed
+        ? 'Connection failed — retry'
+        : 'Connect device'
 
   const connect = useCallback(async (): Promise<boolean> => {
     const service = getHiDockDeviceService()
@@ -145,8 +162,10 @@ export function useDeviceConnection(
     isConnected,
     isConnecting,
     isDisconnected,
+    isFailed,
     deviceModel,
     label,
+    failedHint,
     connect,
     disconnect
   }

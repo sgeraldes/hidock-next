@@ -40,6 +40,8 @@ export function useDeviceSubscriptions() {
   const setConnectionStatus = useAppStore((s) => s.setConnectionStatus)
   const addActivityLogEntry = useAppStore((s) => s.addActivityLogEntry)
   const setDeviceSyncState = useAppStore((s) => s.setDeviceSyncState)
+  const setDeviceRecording = useAppStore((s) => s.setDeviceRecording)
+  const setActiveRecordingFilename = useAppStore((s) => s.setActiveRecordingFilename)
 
   // SM-M02: Use refs for store actions to prevent stale closures in long-lived subscriptions.
   // The deviceSubscriptionsInitialized guard means the effect won't re-run when these
@@ -241,6 +243,36 @@ export function useDeviceSubscriptions() {
   // SM-M02: Dependencies are stable (deviceService is singleton), refs handle action freshness
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceService])
+
+  // ---- Live-recording signal (CMD 18 poll → jensen:recording-changed push) ----
+  //
+  // The main process polls the device for its in-progress recording and pushes
+  // { recording: filename|null } on change. Mirror it into the store so the Today
+  // page can show the live "Recording now" card and attribution UI. Also clears on
+  // device disconnect (the main-process poll broadcasts null, and we defensively
+  // clear on the disconnect event too).
+  useEffect(() => {
+    const onRecordingChanged = window.electronAPI?.jensen?.onRecordingChanged
+    const onDisconnect = window.electronAPI?.jensen?.onDisconnect
+    if (!onRecordingChanged) return
+
+    const unsubRecording = onRecordingChanged((data) => {
+      const filename = data?.recording ?? null
+      if (shouldLogQa()) console.log('[useDeviceSubscriptions] Recording-changed:', filename)
+      setDeviceRecording(!!filename)
+      setActiveRecordingFilename(filename)
+    })
+
+    const unsubDisc = onDisconnect?.(() => {
+      setDeviceRecording(false)
+      setActiveRecordingFilename(null)
+    })
+
+    return () => {
+      unsubRecording()
+      unsubDisc?.()
+    }
+  }, [setDeviceRecording, setActiveRecordingFilename])
 
   // ---- Initial auto-sync for pre-connected devices ----
 

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { PanelLeft, Search, CheckCircle2, Loader2, Usb, ChevronDown, LogOut, ArrowRight } from 'lucide-react'
+import { PanelLeft, Search, CheckCircle2, Loader2, Usb, ChevronDown, LogOut, ArrowRight, AlertTriangle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useDeviceConnection } from '@/hooks/useDeviceConnection'
 import { useAppStore } from '@/store'
@@ -45,7 +45,7 @@ interface TitleBarProps {
 export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
   const navigate = useNavigate()
   // Shared with the Device Sync page — same status source, same connect action.
-  const { status, label: connectionLabel, connect, disconnect } = useDeviceConnection()
+  const { status, label: connectionLabel, failedHint, connect, disconnect } = useDeviceConnection()
   // Live device-recording flag (see useAppStore.deviceRecording TODO). Stays false
   // until a device-status read path sets it, so the red dot only shows when recording.
   const deviceRecording = useAppStore((s) => s.deviceRecording)
@@ -102,6 +102,7 @@ export function TitleBar({ sidebarOpen, onToggleSidebar }: TitleBarProps) {
       <ConnectionControl
         status={status}
         label={connectionLabel}
+        failedHint={failedHint}
         recording={deviceRecording}
         onConnect={() => void connect()}
         onDisconnect={() => void disconnect()}
@@ -115,8 +116,10 @@ const PILL_BASE =
   'titlebar-no-drag flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400'
 
 interface ConnectionControlProps {
-  status: 'connected' | 'connecting' | 'disconnected'
+  status: 'connected' | 'connecting' | 'disconnected' | 'failed'
   label: string
+  /** Extra hint for the failed state (e.g. "Device may be busy (recording?)"). */
+  failedHint?: string | null
   /** Device is actively capturing a recording — shows a red pulsing dot on the pill. */
   recording: boolean
   onConnect: () => void
@@ -125,14 +128,17 @@ interface ConnectionControlProps {
 }
 
 /**
- * Three-state device pill:
+ * Four-state device pill:
  *  - disconnected → button labelled "Connect device"; click = one connect attempt.
  *  - connecting   → disabled pill with a spinner (no click).
+ *  - failed       → amber "Connection failed — retry"; click = one retry. Honest
+ *                   after a failed auto/manual connect instead of reverting to the
+ *                   neutral "Connect device".
  *  - connected    → dropdown trigger (model + connected styling); a bare click
  *                   opens a menu (Go to Sync / Disconnect) rather than
  *                   disconnecting, so it can't be hit by accident.
  */
-function ConnectionControl({ status, label, recording, onConnect, onDisconnect, onGoToSync }: ConnectionControlProps) {
+function ConnectionControl({ status, label, failedHint, recording, onConnect, onDisconnect, onGoToSync }: ConnectionControlProps) {
   if (status === 'connecting') {
     return (
       <button
@@ -156,6 +162,20 @@ function ConnectionControl({ status, label, recording, onConnect, onDisconnect, 
         className={cn(PILL_BASE, 'border-slate-700 bg-slate-800/70 text-slate-400 hover:bg-slate-700 hover:text-slate-200')}
       >
         <Usb className="h-3.5 w-3.5" />
+        <span className="hidden md:inline">{label}</span>
+      </button>
+    )
+  }
+
+  if (status === 'failed') {
+    return (
+      <button
+        type="button"
+        onClick={onConnect}
+        title={failedHint ? `${failedHint} — click to retry` : 'Connection failed — click to retry'}
+        className={cn(PILL_BASE, 'border-amber-700/50 bg-amber-900/40 text-amber-300 hover:bg-amber-900/60')}
+      >
+        <AlertTriangle className="h-3.5 w-3.5" />
         <span className="hidden md:inline">{label}</span>
       </button>
     )

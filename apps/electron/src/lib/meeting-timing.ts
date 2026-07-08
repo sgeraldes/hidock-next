@@ -7,13 +7,23 @@
  * meeting to highlight — the one currently running, or the next one to start.
  */
 
-export type MeetingTimingState = 'cancelled' | 'past' | 'in_progress' | 'upcoming'
+export type MeetingTimingState = 'cancelled' | 'past' | 'ran_over' | 'in_progress' | 'upcoming'
+
+/**
+ * A meeting whose scheduled end has passed but by no more than this counts as
+ * "ran over" — meetings routinely run past their slot, and (especially while the
+ * device is still recording) it's almost certainly still the current context. It
+ * renders subtly ("ended X min ago"), stays an attribution candidate, and is not
+ * dimmed like a fully-past meeting. Past this window it becomes plain `past`.
+ */
+export const RAN_OVER_WINDOW_MS = 20 * 60 * 1000
 
 export interface MeetingTiming {
   state: MeetingTimingState
   /**
    * For `upcoming`: whole minutes until the meeting starts.
    * For `in_progress`: whole minutes until the meeting ends.
+   * For `ran_over`: whole minutes since the meeting's scheduled end.
    * `0` for past/cancelled or when the timestamps are unparseable.
    */
   minutes: number
@@ -73,7 +83,14 @@ export function classifyMeetingTimings<T extends TimeableMeeting>(
     const validEnd = Number.isFinite(end)
 
     if (validEnd && end <= nowMs) {
-      result.set(m.id, { state: 'past', minutes: 0, isFocus: false, isNextUp: false })
+      // Recently ended → "ran over" (subtle, still current); older → fully past.
+      const sinceEnd = nowMs - end
+      if (sinceEnd <= RAN_OVER_WINDOW_MS) {
+        const minutes = Math.max(0, Math.ceil(sinceEnd / 60000))
+        result.set(m.id, { state: 'ran_over', minutes, isFocus: false, isNextUp: false })
+      } else {
+        result.set(m.id, { state: 'past', minutes: 0, isFocus: false, isNextUp: false })
+      }
     } else if (validStart && start <= nowMs && (!validEnd || nowMs < end)) {
       const minutes = validEnd ? Math.max(0, Math.ceil((end - nowMs) / 60000)) : 0
       result.set(m.id, { state: 'in_progress', minutes, isFocus: false, isNextUp: false })
@@ -118,6 +135,15 @@ export function formatMinutesUntil(minutes: number): string {
   const h = Math.floor(minutes / 60)
   const m = minutes % 60
   return m === 0 ? `in ${h} h` : `in ${h} h ${m} min`
+}
+
+/** "ended 6 min ago" label for a meeting that just ran over. */
+export function formatMinutesSinceEnd(minutes: number): string {
+  if (minutes <= 0) return 'just ended'
+  if (minutes < 60) return `ended ${minutes} min ago`
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  return m === 0 ? `ended ${h} h ago` : `ended ${h} h ${m} min ago`
 }
 
 /** "Now · 12 min left" label for a meeting in progress. */

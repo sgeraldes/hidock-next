@@ -12,8 +12,12 @@ import {
   getMeetingsNearDate,
   insertRecording,
   resolveRecordingId,
+  setRecordingPreassignment,
+  getRecordingPreassignment,
+  clearRecordingPreassignment,
   type Recording,
-  type Transcript
+  type Transcript,
+  type RecordingPreassignment
 } from '../services/database'
 import { getRecordingFiles, deleteRecording as deleteRecordingFile, getRecordingsPath } from '../services/file-storage'
 import { copyFileSync, existsSync, statSync } from 'fs'
@@ -743,6 +747,66 @@ export function registerRecordingHandlers(): void {
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' }
     }
   })
+
+  // -------------------------------------------------------------------------
+  // Recording pre-assignments (v31) — in-advance attribution for the live capture.
+  // The Today "Recording now" card writes these keyed by the device's in-progress
+  // filename; autoLinkRecordingsToMeetings consumes them when the file is downloaded.
+  // -------------------------------------------------------------------------
+
+  // Set (or clear, when meetingId is explicitly null) the attribution for a live
+  // recording filename. meetingId === null means "force standalone".
+  ipcMain.handle(
+    'recordings:preassign',
+    async (_, filename: unknown, meetingId: unknown): Promise<{ success: boolean; error?: string }> => {
+      try {
+        if (typeof filename !== 'string' || !filename) {
+          return { success: false, error: 'Invalid filename' }
+        }
+        if (meetingId !== null && (typeof meetingId !== 'string' || !meetingId)) {
+          return { success: false, error: 'Invalid meetingId (expected string or null)' }
+        }
+        setRecordingPreassignment(filename, meetingId as string | null)
+        return { success: true }
+      } catch (error) {
+        console.error('recordings:preassign error:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+      }
+    }
+  )
+
+  // Read the current attribution for a filename (null data = none set).
+  ipcMain.handle(
+    'recordings:getPreassignment',
+    async (_, filename: unknown): Promise<{ success: boolean; data: RecordingPreassignment | null; error?: string }> => {
+      try {
+        if (typeof filename !== 'string' || !filename) {
+          return { success: false, data: null, error: 'Invalid filename' }
+        }
+        return { success: true, data: getRecordingPreassignment(filename) ?? null }
+      } catch (error) {
+        console.error('recordings:getPreassignment error:', error)
+        return { success: false, data: null, error: error instanceof Error ? error.message : 'Unknown error' }
+      }
+    }
+  )
+
+  // Remove an attribution (e.g. user reverts to automatic time-overlap linking).
+  ipcMain.handle(
+    'recordings:clearPreassignment',
+    async (_, filename: unknown): Promise<{ success: boolean; error?: string }> => {
+      try {
+        if (typeof filename !== 'string' || !filename) {
+          return { success: false, error: 'Invalid filename' }
+        }
+        clearRecordingPreassignment(filename)
+        return { success: true }
+      } catch (error) {
+        console.error('recordings:clearPreassignment error:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+      }
+    }
+  )
 
   console.log('Recording IPC handlers registered')
 }
