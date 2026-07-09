@@ -58,11 +58,17 @@ Late-night wave (all landed, gated, pushed, live-verified on the real app):
   protected tables, rotating boot backups (hidock.db.bak-<date>, keep 3).
   DB snapshot kept at F:\HiDock-Next-Data\data\hidock.db.snapshot-2026-07-08-2355.
 
-Next from the user's audit: Today follow-up card = day digest (13-meeting day
-under-served by single recentKnowledge[0] card; show meeting subject+time
-alongside transcript title). Suite at 2,258.
+- 6d1f6265 Today's follow-ups DAY DIGEST: replaces the single ambiguous
+  recentKnowledge[0] card — today's recorded meetings newest-first, each with
+  CALENDAR subject+time chip + transcript title + action counts, expandable;
+  honest "N still processing"; fallback "Latest analyzed meeting" heading
+  with the chip. Live-verified (fallback path — 0 recordings after midnight);
+  digest list surfaces with the next recorded day. Suite at 2,270.
 
-NOTHING in flight. Tree clean, all pushed through 58d1f98d.
+ALL user-audit items from 2026-07-08 are addressed. Remaining work is gated
+on user decisions (Context Graph priority vs. connectors, Process-All budget,
+old-transcript upgrades). NOTHING in flight. Tree clean, pushed through
+6d1f6265 (+ this docs commit).
 
 ## 2. DEVICE STATE
 
