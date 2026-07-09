@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Mic, RefreshCw, Play, X, LayoutGrid, Square, CheckSquare, FileText, Trash2, List, FileAudio, Download } from 'lucide-react'
+import { Mic, RefreshCw, Play, X, LayoutGrid, Square, CheckSquare, FileText, Trash2, List, FileAudio, Download, Link2Off } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn, formatTime, isToday, formatDuration } from '@/lib/utils'
 import {
@@ -62,7 +62,7 @@ import {
   computeVisibleHourRange,
   recordingCategory,
   formatUnmatchedRecordingMeta,
-  UNMATCHED_RECORDING_LABEL,
+  recordingBlockTitle,
 } from '@/lib/calendar-utils'
 
 // Helper functions for date/time formatting in list views
@@ -171,9 +171,14 @@ export function Calendar() {
   const [deleting, setDeleting] = useState<string | null>(null)
   const [transcribing, setTranscribing] = useState<string | null>(null)
 
-  // State for recording link dialog
+  // State for recording link dialog. Carries the recording's transcript-derived
+  // title/summary so the assignment surface can lead with what the recording IS.
   const [linkDialogRecording, setLinkDialogRecording] = useState<
-    Pick<Recording, 'id' | 'filename' | 'date_recorded' | 'duration_seconds'> | null
+    | (Pick<Recording, 'id' | 'filename' | 'date_recorded' | 'duration_seconds'> & {
+        title?: string | null
+        summary?: string | null
+      })
+    | null
   >(null)
 
   // Load config on mount - must complete BEFORE first sync
@@ -493,12 +498,15 @@ export function Calendar() {
     if (recording.linkedMeeting) {
       navigate(`/meeting/${recording.linkedMeeting.id}`)
     } else {
-      // Open link dialog for orphan recordings
+      // Open link dialog for orphan recordings, passing what the recording IS so
+      // the dialog can lead with title/summary and offer candidate meetings.
       setLinkDialogRecording({
         id: recording.id,
         filename: recording.filename,
         date_recorded: recording.startTime.toISOString(),
-        duration_seconds: recording.durationSeconds
+        duration_seconds: recording.durationSeconds,
+        title: recording.title,
+        summary: recording.summary
       })
     }
   }
@@ -1432,8 +1440,9 @@ export function Calendar() {
                       const linked = recording.linkedMeeting
                       const isUnmatched = !linked
                       const category = recordingCategory(recording)
-                      // Matched → meeting subject; unmatched → a human label (filename lives in the tooltip)
-                      const displayLabel = linked ? linked.subject : UNMATCHED_RECORDING_LABEL
+                      // Matched → meeting subject; unlinked → the recording's own title
+                      // (or "Recording · <time>"), never the raw device filename.
+                      const displayLabel = recordingBlockTitle(recording)
                       // Outlook-style conflict columns for overlapping recordings
                       const layout = recordingColumnsByDay[key]?.get(recording.id) ?? { col: 0, cols: 1 }
 
@@ -1455,7 +1464,10 @@ export function Calendar() {
                           }}
                         >
                           <div className="flex items-start gap-1 h-full">
-                            {!isUnmatched && (
+                            {isUnmatched ? (
+                              // Unlinked-state glyph — this recording matched no meeting.
+                              <Link2Off className="mt-0.5 h-3 w-3 flex-shrink-0 opacity-80" aria-hidden="true" />
+                            ) : (
                               <span
                                 className={cn('mt-1 h-2 w-2 flex-shrink-0 rounded-full', CATEGORY_DOT[category])}
                                 aria-hidden="true"

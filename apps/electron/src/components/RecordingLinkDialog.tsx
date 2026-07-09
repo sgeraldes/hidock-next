@@ -12,11 +12,20 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { cn, formatDuration, formatTime, formatDateTime } from '@/lib/utils'
+import { sortMeetingsByProximity } from '@/lib/calendar-utils'
 import { toast } from '@/components/ui/toaster'
 import type { Recording, Meeting, MeetingCandidate } from '@/types'
 
 interface RecordingLinkDialogProps {
-  recording: Pick<Recording, 'id' | 'filename' | 'date_recorded' | 'duration_seconds'> | null
+  // title/summary are optional enrichment: when present (e.g. a transcribed but
+  // unlinked recording) the header leads with what the recording IS instead of
+  // only its device filename.
+  recording:
+    | (Pick<Recording, 'id' | 'filename' | 'date_recorded' | 'duration_seconds'> & {
+        title?: string | null
+        summary?: string | null
+      })
+    | null
   meeting?: Meeting
   open: boolean
   onClose: () => void
@@ -87,7 +96,11 @@ export function RecordingLinkDialog({
         }
 
         setCandidates(candidatesResult.data)
-        setNearbyMeetings(nearbyResult.success ? nearbyResult.data : [])
+        // Rank the fallback list nearest-in-time first, so the closest meeting
+        // to the recording is the top candidate to assign.
+        setNearbyMeetings(
+          nearbyResult.success ? sortMeetingsByProximity(nearbyResult.data, recording.date_recorded) : []
+        )
 
         if (meetingRecordings) {
           setLinkedRecordings((meetingRecordings as Recording[]).filter(r => r.id !== recording.id))
@@ -214,7 +227,19 @@ export function RecordingLinkDialog({
             {meeting ? 'Meeting Details' : (hasCandidates ? 'Verify Recording Match' : 'Link Recording to Meeting')}
           </DialogTitle>
           <DialogDescription className="text-sm space-y-1">
-            <span className="font-medium block truncate">{recording.filename}</span>
+            {/* Lead with what the recording IS (title/summary) when known; the raw
+                filename drops to a quiet secondary line. */}
+            {recording.title ? (
+              <>
+                <span className="font-medium block truncate text-foreground">{recording.title}</span>
+                {recording.summary && (
+                  <span className="text-muted-foreground line-clamp-2 block">{recording.summary}</span>
+                )}
+                <span className="text-xs text-muted-foreground/70 block truncate font-mono">{recording.filename}</span>
+              </>
+            ) : (
+              <span className="font-medium block truncate">{recording.filename}</span>
+            )}
             {recording.duration_seconds && (
               <span className="text-muted-foreground">
                 Duration: {formatDuration(recording.duration_seconds)}

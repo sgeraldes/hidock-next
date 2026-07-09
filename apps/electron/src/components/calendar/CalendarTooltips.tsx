@@ -3,7 +3,7 @@
  */
 
 import { memo } from 'react'
-import { Mic, Cloud, HardDrive, Check } from 'lucide-react'
+import { Mic, Cloud, HardDrive, Check, Link2Off } from 'lucide-react'
 import { cn, formatTime } from '@/lib/utils'
 import type { CalendarRecording, CalendarMeetingOverlay, CalendarMeeting } from '@/lib/calendar-utils'
 import { formatDurationStr as formatDuration } from '@/lib/calendar-utils'
@@ -52,10 +52,20 @@ export const StatusIcon = memo(function StatusIcon({ location }: { location: Rec
  * Recording-centric tooltip (RECORDING INFO FIRST, meeting as metadata)
  */
 export const RecordingTooltipContent = memo(function RecordingTooltipContent({ recording }: { recording: CalendarRecording }) {
+  const title = recording.title?.trim()
+  const summary = recording.summary?.trim()
   return (
     <div className="space-y-2 max-w-[280px]">
-      {/* RECORDING INFO - PRIMARY */}
-      <div className="space-y-1">
+      {/* WHAT IT IS - lead with the transcript-derived identity when known */}
+      {(title || summary) && (
+        <div className="space-y-1 pb-1">
+          {title && <div className="font-semibold text-foreground leading-snug">{title}</div>}
+          {summary && <div className="text-xs text-muted-foreground line-clamp-2">{summary}</div>}
+        </div>
+      )}
+
+      {/* RECORDING INFO */}
+      <div className={cn('space-y-1', (title || summary) && 'border-t pt-2')}>
         <div className="font-semibold text-foreground flex items-center gap-2">
           <Mic className="h-4 w-4 text-emerald-500" />
           Recording
@@ -133,7 +143,10 @@ export const RecordingTooltipContent = memo(function RecordingTooltipContent({ r
 
       {!recording.linkedMeeting && (
         <div className="pt-2 border-t border-dashed">
-          <div className="text-xs text-muted-foreground italic">No matching meeting found</div>
+          <div className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+            <Link2Off className="h-3 w-3" aria-hidden="true" />
+            Not linked to a meeting
+          </div>
         </div>
       )}
 

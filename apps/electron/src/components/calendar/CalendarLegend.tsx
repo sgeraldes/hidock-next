@@ -8,7 +8,7 @@
  * dashed "scheduled but not recorded" ghost state.
  */
 
-import { Info, Mic, Cloud, HardDrive, Check } from 'lucide-react'
+import { Info, Mic, Cloud, HardDrive, Check, Link2Off } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { MEETING_CATEGORY_LABELS } from '@/lib/meeting-timing'
@@ -59,8 +59,13 @@ export function CalendarLegend() {
               <span className="text-foreground/70">Recorded (badge on the block)</span>
             </div>
             <div className="flex items-center gap-2 text-xs">
-              <span className={cn('h-3 w-6 shrink-0 rounded', UNMATCHED_BLOCK)} aria-hidden="true" />
-              <span className="text-foreground/70">Unmatched recording — click to review</span>
+              <span
+                className={cn('flex h-3 w-6 shrink-0 items-center justify-center rounded', UNMATCHED_BLOCK)}
+                aria-hidden="true"
+              >
+                <Link2Off className="h-2 w-2" />
+              </span>
+              <span className="text-foreground/70">Not linked to a meeting — click to assign</span>
             </div>
             <div className="flex items-center gap-2 text-xs">
               <span

@@ -7,7 +7,7 @@ describe('CalendarLegend', () => {
     render(<CalendarLegend />)
 
     // Closed by default — the content is not mounted.
-    expect(screen.queryByText('Unmatched recording — click to review')).not.toBeInTheDocument()
+    expect(screen.queryByText('Not linked to a meeting — click to assign')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /calendar legend/i }))
 
@@ -18,7 +18,7 @@ describe('CalendarLegend', () => {
 
     // Recording states: recorded badge, the unmatched block, the ghost/dashed state.
     expect(screen.getByText('Recorded (badge on the block)')).toBeInTheDocument()
-    expect(screen.getByText('Unmatched recording — click to review')).toBeInTheDocument()
+    expect(screen.getByText('Not linked to a meeting — click to assign')).toBeInTheDocument()
     expect(screen.getByText('Scheduled — not recorded')).toBeInTheDocument()
 
     // Location glyph meanings.

@@ -124,13 +124,29 @@ describe('Calendar — design language', () => {
     expect(block?.className).not.toContain('bg-emerald-500')
   })
 
-  it('labels an unmatched recording humanly, keeping the device filename out of the block', () => {
+  it('labels an unlinked recording by its transcript title, keeping the device filename out of the block', () => {
     renderCalendar([
-      recording({ id: 'r2', filename: '2026Jul08-140719-Rec46.hda', dateRecorded: at(14), duration: 720 })
+      recording({
+        id: 'r2',
+        filename: '2026Jul08-140719-Rec46.hda',
+        dateRecorded: at(14),
+        duration: 720,
+        title: 'Cierre de Proyecto y Acciones de Retrospectiva'
+      })
     ])
 
-    expect(screen.getByText('Unmatched recording')).toBeInTheDocument()
-    // The raw filename must not be the visible block label (it lives in the tooltip).
+    expect(screen.getByText('Cierre de Proyecto y Acciones de Retrospectiva')).toBeInTheDocument()
+    // Never "Unmatched recording", never the raw filename, on the block.
+    expect(screen.queryByText('Unmatched recording')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Rec46\.hda/)).not.toBeInTheDocument()
+  })
+
+  it('falls back to "Recording · <time>" for an untitled unlinked recording (not the filename)', () => {
+    renderCalendar([
+      recording({ id: 'r2b', filename: '2026Jul08-140719-Rec46.hda', dateRecorded: at(14), duration: 720 })
+    ])
+
+    expect(screen.getByText(/^Recording · /)).toBeInTheDocument()
     expect(screen.queryByText(/Rec46\.hda/)).not.toBeInTheDocument()
   })
 
@@ -139,6 +155,6 @@ describe('Calendar — design language', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /calendar legend/i }))
     expect(screen.getByText('Recurring / team')).toBeInTheDocument()
-    expect(screen.getByText('Unmatched recording — click to review')).toBeInTheDocument()
+    expect(screen.getByText('Not linked to a meeting — click to assign')).toBeInTheDocument()
   })
 })

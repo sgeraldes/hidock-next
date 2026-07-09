@@ -21,6 +21,10 @@ export interface CalendarRecording {
   durationSeconds: number
   location: 'device-only' | 'local-only' | 'both'
   transcriptionStatus: 'none' | 'pending' | 'processing' | 'complete' | 'error'
+  // Transcript-derived identity (present once analyzed) — what the recording IS,
+  // so the calendar can show it instead of a machine filename.
+  title?: string
+  summary?: string
   // Linked meeting metadata (optional)
   linkedMeeting?: {
     id: string
@@ -446,6 +450,8 @@ export function buildCalendarRecordings(
       durationSeconds: recording.duration || 0,
       location: recording.location,
       transcriptionStatus: recording.transcriptionStatus,
+      title: recording.title,
+      summary: recording.summary,
       linkedMeeting: linkedMeetingData
         ? {
             id: linkedMeetingData.id,
@@ -482,18 +488,46 @@ export function recordingCategory(recording: CalendarRecording): MeetingCategory
   return categorizeMeeting({ subject: recording.linkedMeeting.subject })
 }
 
-/** Primary block label for a recording that matched no calendar meeting. */
-export const UNMATCHED_RECORDING_LABEL = 'Unmatched recording'
+/** The honest, specific state name for a recording with no linked meeting. */
+export const UNLINKED_STATE_LABEL = 'Not linked to a meeting'
 
 /**
- * Sub-label for an unmatched recording block: "<duration> · <start time>", e.g.
- * "12m · 2:07 PM". The raw device filename (e.g. "2026Jul08-140719-Rec46.hda")
- * is intentionally NOT surfaced here — it belongs in the hover tooltip.
+ * Primary block label. A linked recording shows its meeting's subject; an unlinked
+ * one shows what it IS — its transcript-derived title — falling back to
+ * "Recording · <start time>" when it has no title yet. The raw device filename
+ * (e.g. "2026Jul08-140719-Rec46.hda") is NEVER surfaced as the label.
+ */
+export function recordingBlockTitle(recording: CalendarRecording): string {
+  if (recording.linkedMeeting) return recording.linkedMeeting.subject
+  const title = recording.title?.trim()
+  if (title) return title
+  const time = recording.startTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+  return `Recording · ${time}`
+}
+
+/**
+ * Sub-label for an unlinked recording block: "<duration> · <start time>", e.g.
+ * "12m · 2:07 PM".
  */
 export function formatUnmatchedRecordingMeta(recording: CalendarRecording): string {
   const duration = formatDurationStr(recording.durationSeconds)
   const time = recording.startTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
   return `${duration} · ${time}`
+}
+
+/**
+ * Rank candidate meetings for assignment by how close their start is to a
+ * recording's time — the nearest meeting first. Pure and side-effect-free so the
+ * assignment dialog's fallback list is decidably ordered (content-based ranking,
+ * e.g. speaker/attendee overlap, is a separate future step).
+ */
+export function sortMeetingsByProximity<T extends { start_time: string }>(meetings: T[], refIso: string): T[] {
+  const ref = new Date(refIso).getTime()
+  const distance = (m: T) => {
+    const t = new Date(m.start_time).getTime()
+    return Number.isFinite(t) && Number.isFinite(ref) ? Math.abs(t - ref) : Number.POSITIVE_INFINITY
+  }
+  return [...meetings].sort((a, b) => distance(a) - distance(b))
 }
 
 /**

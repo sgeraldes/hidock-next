@@ -8,7 +8,8 @@ import {
   formatDurationStr,
   recordingCategory,
   formatUnmatchedRecordingMeta,
-  UNMATCHED_RECORDING_LABEL,
+  recordingBlockTitle,
+  sortMeetingsByProximity,
   type CalendarRecording,
   type CalendarMeetingOverlay,
 } from '../calendar-utils'
@@ -416,12 +417,45 @@ describe('recordingCategory', () => {
   })
 })
 
-describe('formatUnmatchedRecordingMeta / UNMATCHED_RECORDING_LABEL', () => {
-  it('uses a human label, not the device filename', () => {
-    expect(UNMATCHED_RECORDING_LABEL).toBe('Unmatched recording')
-    expect(UNMATCHED_RECORDING_LABEL).not.toMatch(/\.hda$/i)
+describe('recordingBlockTitle', () => {
+  const linked = (subject: string): CalendarRecording => ({
+    ...makeRecording(9, 0, 10, 0),
+    linkedMeeting: {
+      id: 'm1',
+      subject,
+      startTime: new Date(2026, 2, 2, 9, 0, 0),
+      endTime: new Date(2026, 2, 2, 10, 0, 0),
+      location: null,
+      organizer: null,
+    },
   })
 
+  it('shows the meeting subject when linked', () => {
+    expect(recordingBlockTitle(linked('Weekly sync'))).toBe('Weekly sync')
+  })
+
+  it('shows the transcript-derived title for an unlinked recording (never the filename)', () => {
+    const rec: CalendarRecording = {
+      ...makeRecording(14, 7, 14, 19),
+      filename: '2026Jul08-140719-Rec46.hda',
+      title: 'Cierre de Proyecto y Acciones de Retrospectiva',
+    }
+    expect(recordingBlockTitle(rec)).toBe('Cierre de Proyecto y Acciones de Retrospectiva')
+    expect(recordingBlockTitle(rec)).not.toContain('.hda')
+  })
+
+  it('falls back to "Recording · <time>" (not the filename) when untitled', () => {
+    const rec: CalendarRecording = {
+      ...makeRecording(14, 7, 14, 19),
+      filename: '2026Jul08-140719-Rec46.hda',
+    }
+    const label = recordingBlockTitle(rec)
+    expect(label).toMatch(/^Recording · \d{1,2}:\d{2}/)
+    expect(label).not.toContain('.hda')
+  })
+})
+
+describe('formatUnmatchedRecordingMeta', () => {
   it('formats duration + start time (no filename)', () => {
     const rec: CalendarRecording = {
       ...makeRecording(14, 7, 14, 19),
@@ -431,5 +465,27 @@ describe('formatUnmatchedRecordingMeta / UNMATCHED_RECORDING_LABEL', () => {
     expect(meta).toContain('12m')
     expect(meta).toMatch(/\d{1,2}:\d{2}/) // e.g. "2:07 PM"
     expect(meta).not.toContain('.hda')
+  })
+})
+
+describe('sortMeetingsByProximity', () => {
+  it('orders candidate meetings by closeness to the recording time', () => {
+    const ref = '2026-03-02T14:00:00.000Z'
+    const meetings = [
+      { id: 'far', start_time: '2026-03-02T09:00:00.000Z' },
+      { id: 'near', start_time: '2026-03-02T13:45:00.000Z' },
+      { id: 'mid', start_time: '2026-03-02T16:00:00.000Z' },
+    ]
+    expect(sortMeetingsByProximity(meetings, ref).map((m) => m.id)).toEqual(['near', 'mid', 'far'])
+  })
+
+  it('does not mutate the input array', () => {
+    const meetings = [
+      { id: 'a', start_time: '2026-03-02T16:00:00.000Z' },
+      { id: 'b', start_time: '2026-03-02T13:45:00.000Z' },
+    ]
+    const copy = [...meetings]
+    sortMeetingsByProximity(meetings, '2026-03-02T14:00:00.000Z')
+    expect(meetings).toEqual(copy)
   })
 })
