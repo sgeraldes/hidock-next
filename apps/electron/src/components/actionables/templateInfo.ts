@@ -73,3 +73,28 @@ export function getTemplateInfo(templateId?: string | null): TemplateInfo {
   if (!templateId) return UNKNOWN_TEMPLATE
   return TEMPLATE_INFO[templateId] ?? UNKNOWN_TEMPLATE
 }
+
+/**
+ * Human-readable label for an actionable's `type` enum. The raw values are
+ * snake_case detection keys (e.g. `follow_up_work`, `decision_log`); rendering
+ * them directly leaks the enum ("FOLLOW UP_WORK"). This maps the known types to
+ * proper words and falls back to a title-cased de-underscored form for any
+ * value not yet enumerated, so a new detection type never shows a raw key.
+ */
+const ACTIONABLE_TYPE_LABELS: Record<string, string> = {
+  meeting_minutes: 'Meeting minutes',
+  interview_feedback: 'Interview feedback',
+  status_report: 'Status report',
+  decision_log: 'Decision log',
+  action_items: 'Action items',
+  research_summary: 'Research summary',
+  follow_up_work: 'Follow-up'
+}
+
+export function humanizeActionableType(type?: string | null): string {
+  if (!type) return 'Suggestion'
+  const known = ACTIONABLE_TYPE_LABELS[type]
+  if (known) return known
+  const words = type.replace(/_/g, ' ').trim()
+  return words.charAt(0).toUpperCase() + words.slice(1)
+}

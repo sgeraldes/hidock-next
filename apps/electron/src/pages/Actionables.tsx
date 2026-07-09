@@ -34,29 +34,28 @@ import { cn, formatDateTime } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 import { EntityMention, useContactResolver } from '@/components/entity'
 import { ActionableDetail } from '@/components/actionables/ActionableDetail'
-import { getTemplateInfo } from '@/components/actionables/templateInfo'
+import { getTemplateInfo, humanizeActionableType } from '@/components/actionables/templateInfo'
 import type { Actionable, ActionableStatus } from '@/types/knowledge'
 import type { OutputTemplateId } from '@/types'
 
-// C-ACT-006: Simple loading skeleton for initial load
+// C-ACT-006: Simple loading skeleton for initial load. Mirrors the real card's
+// no-stripe treatment (elevation + hairline border), so the transition to loaded
+// content doesn't shift the layout.
 function ActionableSkeleton() {
   return (
     <div className="space-y-4">
       {[1, 2, 3].map((i) => (
-        <Card key={i} className="overflow-hidden animate-pulse">
-          <div className="flex items-stretch min-h-[100px]">
-            <div className="w-1.5 bg-muted" />
-            <div className="flex-1 p-5 space-y-3">
-              <div className="flex items-center gap-2">
-                <div className="h-4 w-4 rounded-full bg-muted" />
-                <div className="h-3 w-20 bg-muted rounded" />
-              </div>
-              <div className="h-5 w-3/4 bg-muted rounded" />
-              <div className="h-3 w-1/2 bg-muted rounded" />
-              <div className="flex gap-2 mt-2">
-                <div className="h-5 w-28 bg-muted rounded-full" />
-                <div className="h-5 w-24 bg-muted rounded-full" />
-              </div>
+        <Card key={i} className="overflow-hidden animate-pulse shadow-sm">
+          <div className="min-h-[100px] p-5 space-y-3">
+            <div className="flex items-center gap-2">
+              <div className="h-4 w-4 rounded-full bg-muted" />
+              <div className="h-3 w-20 bg-muted rounded" />
+            </div>
+            <div className="h-5 w-3/4 bg-muted rounded" />
+            <div className="h-3 w-1/2 bg-muted rounded" />
+            <div className="flex gap-2 mt-2">
+              <div className="h-5 w-28 bg-muted rounded-full" />
+              <div className="h-5 w-24 bg-muted rounded-full" />
             </div>
           </div>
         </Card>
@@ -356,14 +355,18 @@ export function Actionables() {
     }
   }
 
-  // C-ACT-003: Consistent status bar color mapping (all statuses covered)
-  const getStatusBarColor = (status: ActionableStatus): string => {
+  // Status semantics carried by a WHOLE-CARD wash instead of a side-stripe
+  // (thick colored left borders are banned in this design language). The tint is
+  // intentionally faint (~4%) so it reads as status context, not an alarm — the
+  // colored status icon does the loud signalling. Both themes verified for
+  // contrast against `bg-card`.
+  const getStatusTint = (status: ActionableStatus): string => {
     switch (status) {
-      case 'pending': return 'bg-amber-500'
-      case 'in_progress': return 'bg-blue-500'
-      case 'generated': return 'bg-emerald-500'
-      case 'shared': return 'bg-violet-500'
-      case 'dismissed': return 'bg-slate-300'
+      case 'pending': return 'bg-amber-500/[0.05] dark:bg-amber-400/[0.04]'
+      case 'in_progress': return 'bg-blue-500/[0.05] dark:bg-blue-400/[0.04]'
+      case 'generated': return 'bg-emerald-500/[0.05] dark:bg-emerald-400/[0.04]'
+      case 'shared': return 'bg-violet-500/[0.05] dark:bg-violet-400/[0.04]'
+      case 'dismissed': return 'bg-muted/30'
     }
   }
 
@@ -421,16 +424,21 @@ export function Actionables() {
             </Card>
           ) : (
             <div className="space-y-4">
-              {paginatedActionables.map((actionable) => (
-                <Card key={actionable.id} className="group overflow-hidden hover:border-primary/30 transition-all shadow-sm">
-                  <div className="flex items-stretch min-h-[100px]">
-                    {/* C-ACT-003: Consistent status bar colors for all statuses */}
-                    <div className={cn(
-                      "w-1.5 transition-colors",
-                      getStatusBarColor(actionable.status)
-                    )} />
+              {paginatedActionables.map((actionable, index) => (
+                <Card
+                  key={actionable.id}
+                  style={{ animationDelay: `${Math.min(index, 6) * 45}ms` }}
+                  className={cn(
+                    // Standard card treatment: hairline border + shadow-sm elevation
+                    // + hover lift (`.lift`), no side-stripe. Entrance rises in with a
+                    // staggered delay (reduced-motion collapses it via the global CSS).
+                    "group animate-rise-in lift overflow-hidden border shadow-sm",
+                    getStatusTint(actionable.status)
+                  )}
+                >
+                  <div className="min-h-[100px]">
                     {/* min-w-0 lets the title truncate instead of pushing the action buttons out of the card */}
-                    <div className="flex-1 min-w-0 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                    <div className="min-w-0 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                       <div className="flex-1 min-w-0">
                         {/* Clickable title area toggles the inline detail panel.
                             Kept separate from the recipients row below so those
@@ -443,7 +451,7 @@ export function Actionables() {
                         >
                           <div className="flex items-center gap-2 mb-1">
                             {getStatusIcon(actionable.status)}
-                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{actionable.type.replace('_', ' ')}</span>
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{humanizeActionableType(actionable.type)}</span>
                             <ChevronDown className={cn(
                               "h-3.5 w-3.5 text-muted-foreground transition-transform ml-auto sm:ml-0",
                               expandedId === actionable.id && "rotate-180"
@@ -468,15 +476,24 @@ export function Actionables() {
                             <span>{formatDateTime(actionable.createdAt)}</span>
                           </div>
                           {actionable.confidence && actionable.status === 'pending' && (
-                            <div className="flex items-center gap-1 text-[10px] font-medium bg-muted/50 px-2 py-0.5 rounded-full">
-                              <Sparkles className="h-3 w-3 text-amber-500" />
-                              <span className={cn(
-                                actionable.confidence >= 0.8 ? "text-emerald-600" :
-                                actionable.confidence >= 0.6 ? "text-amber-600" :
-                                "text-red-600"
-                              )}>
-                                {Math.round(actionable.confidence * 100)}% confidence
-                              </span>
+                            // Confidence carries hierarchy through weight + tint, not
+                            // alarm colors: a strong signal (>=80%) reads as a solid
+                            // emerald pill, a moderate one quiets to a neutral chip, and
+                            // a weak one recedes into muted text — so 95% visibly
+                            // outranks 70% on a squint test without shouting "error".
+                            <div className={cn(
+                              "flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full",
+                              actionable.confidence >= 0.8
+                                ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 font-semibold"
+                                : actionable.confidence >= 0.6
+                                  ? "bg-muted/60 text-foreground/70 font-medium"
+                                  : "bg-muted/40 text-muted-foreground font-normal"
+                            )}>
+                              <Sparkles className={cn(
+                                "h-3 w-3",
+                                actionable.confidence >= 0.8 ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"
+                              )} />
+                              <span>{Math.round(actionable.confidence * 100)}% confidence</span>
                             </div>
                           )}
                           {actionable.suggestedRecipients.length > 0 && (
@@ -671,7 +688,7 @@ export function Actionables() {
 
       {/* C-ACT-M07: Error banner positioned at bottom to avoid overlapping header/nav */}
       {generationError && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-center justify-between gap-4 max-w-2xl w-full shadow-lg">
+        <div className="animate-rise-in fixed bottom-4 left-1/2 -translate-x-1/2 z-40 px-4 py-3 bg-destructive/10 border border-destructive/20 rounded-xl flex items-center justify-between gap-4 max-w-2xl w-full shadow-lg">
           <div className="flex items-center gap-2 flex-1">
             <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
             <span className="text-sm text-destructive font-medium">{generationError}</span>
@@ -690,7 +707,7 @@ export function Actionables() {
       {/* Loading Overlay - AC-08 FIX: Dynamic text based on template type */}
       {generating && (
         <div className="fixed inset-0 bg-background/80 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="text-center space-y-4 bg-card p-8 rounded-lg shadow-lg border">
+          <div className="animate-rise-in text-center space-y-4 bg-card p-8 rounded-xl shadow-lg border">
             <Loader2 className="h-12 w-12 animate-spin mx-auto text-primary" />
             <div>
               <h3 className="text-lg font-semibold mb-1">

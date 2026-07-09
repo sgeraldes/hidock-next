@@ -161,8 +161,10 @@ describe('Actionables Page', () => {
     // Click on 'all' filter to see all actionables
     fireEvent.click(screen.getByText('all'))
 
+    // Target the card title heading — the humanized type eyebrow now also reads
+    // "Interview feedback", so scope to the heading role to disambiguate.
     await waitFor(() => {
-      expect(screen.getByText('Interview feedback')).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Interview feedback' })).toBeInTheDocument()
     })
 
     // Check for the Processing button
@@ -190,7 +192,7 @@ describe('Actionables Page', () => {
 
     // Reveal all statuses so the in_progress item (with a recipient) is visible.
     fireEvent.click(screen.getByText('all'))
-    await waitFor(() => expect(screen.getByText('Interview feedback')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Interview feedback' })).toBeInTheDocument())
 
     // alice@example.com resolves (by email) to the contact "Alice", shown as a
     // clickable person mention.
@@ -237,9 +239,12 @@ describe('Actionables Page', () => {
 
     fireEvent.click(title)
 
-    // "Will generate" section names the concrete output and format
+    // "Will generate" section names the concrete output and format. "Meeting
+    // minutes" now appears twice (the humanized type eyebrow + the Will-generate
+    // template name), so assert it renders rather than requiring a single match;
+    // the format string is unique to the Will-generate section.
     await screen.findByText('Will generate')
-    expect(screen.getByText('Meeting minutes')).toBeInTheDocument()
+    expect(screen.getAllByText('Meeting minutes').length).toBeGreaterThan(0)
     expect(screen.getByText('Markdown document')).toBeInTheDocument()
 
     // Source is fetched and rendered as a navigable meeting mention
