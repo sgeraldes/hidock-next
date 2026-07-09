@@ -305,6 +305,12 @@ export interface ConnectorConfigField {
   help?: string
   /** Default value applied when the field is unset. */
   default?: string | number | boolean
+  /**
+   * Additive: when true, this field belongs to the "advanced" setup path and the
+   * UI keeps it collapsed by default. Used when a shipped default credential lets
+   * the connector work with zero configuration (see `ConnectorDescriptor.setupOptional`).
+   */
+  advanced?: boolean
 }
 
 export type ConnectorCapabilityKind = 'identity' | 'sources' | 'actions' | 'signals'
@@ -325,6 +331,21 @@ export interface ConnectorDescriptor {
   configFields: ConnectorConfigField[]
   /** Which capability surfaces this connector offers. */
   capabilityKinds: ConnectorCapabilityKind[]
+  /**
+   * Additive: when true the host allows N independent instances (accounts) of
+   * this connector type, each with its own config/secrets/status/cursor namespace
+   * keyed by instance id (`<type>` for the first/legacy instance, `<type>:<uuid>`
+   * for the rest). Default/omitted = single instance keyed by descriptor.id
+   * (backward-compatible — Slack stays single-instance).
+   */
+  multiInstance?: boolean
+  /**
+   * Additive: when true a shipped default credential lets the connector work with
+   * ZERO user configuration. The Settings card then hides the registration
+   * walkthrough + `advanced` fields behind a disclosure toggle and offers a
+   * one-click Connect. When false/omitted the walkthrough is shown inline.
+   */
+  setupOptional?: boolean
 }
 
 /** Flat map of a connector's config values. */
@@ -333,6 +354,13 @@ export type ConnectorConfig = Record<string, string | number | boolean>
 export interface ConnectorConnectOptions {
   /** True for a user-initiated connect that may drive an interactive flow. */
   interactive?: boolean
+  /**
+   * Additive: preferred interactive auth method when a connector offers more than
+   * one (e.g. M365 defaults to 'auth-code' via the system browser, with
+   * 'device-code' as a headless fallback). Connectors that offer a single method
+   * ignore it.
+   */
+  authMode?: 'auth-code' | 'device-code'
 }
 
 export interface Connector {
@@ -394,6 +422,20 @@ export interface StoredConnectorState {
   config: ConnectorConfig
   lastSyncAt: string | null
   sources: Record<string, StoredSourceState>
+  /**
+   * Additive: instance metadata for multi-instance connectors. `type` is the
+   * descriptor id this instance belongs to; `label` is the user-facing account
+   * name. Absent for legacy single-instance state (the host infers `type` from
+   * the id scheme `<type>` / `<type>:<uuid>`).
+   */
+  type?: string
+  label?: string
+}
+
+/** Additive: instance metadata persisted so accounts survive restart pre-config. */
+export interface ConnectorInstanceMeta {
+  type: string
+  label: string
 }
 
 export interface ConnectorStateStore {
@@ -406,6 +448,18 @@ export interface ConnectorStateStore {
   setLastSyncAt(id: string, iso: string | null): void
   getSourceState(id: string, containerId: string): StoredSourceState
   setSourceState(id: string, containerId: string, patch: Partial<StoredSourceState>): void
+  /**
+   * Additive (optional): enumerate every persisted instance id. Required for
+   * multi-instance connectors to rehydrate their accounts on boot. Stores that
+   * omit it fall back to the single default instance (id === descriptor.id).
+   */
+  listInstanceIds?(): string[]
+  /** Additive (optional): persist instance metadata (type + label). */
+  setInstanceMeta?(id: string, meta: ConnectorInstanceMeta): void
+  /** Additive (optional): read persisted instance metadata, if any. */
+  getInstanceMeta?(id: string): ConnectorInstanceMeta | null
+  /** Additive (optional): purge all state + secrets for an instance. */
+  removeInstance?(id: string): void
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -446,6 +500,16 @@ export interface ConnectorSourceView extends SourceContainer {
 
 export interface ConnectorSummary {
   descriptor: ConnectorDescriptor
+  /**
+   * Instance id this summary describes. Equals `descriptor.id` for
+   * single-instance connectors; `<type>:<uuid>` for extra multi-instance
+   * accounts. Always set (additive — older callers can ignore it).
+   */
+  instanceId: string
+  /** User-facing account label (defaults to the descriptor displayName). */
+  label: string
+  /** True when the connector type allows multiple accounts (from the descriptor). */
+  multiInstance: boolean
   status: ConnectorStatus
   /** Config fields with current (redacted-for-secrets) values. */
   fields: ConnectorConfigFieldView[]

@@ -61,14 +61,17 @@ export function getConnectorHost(): ConnectorHost {
  */
 export async function initConnectors(): Promise<void> {
   const h = getConnectorHost()
-  for (const descriptor of h.listDescriptors()) {
+  // Iterate INSTANCES (accounts), not types — a multi-instance connector like
+  // M365 may have several accounts, each needing its own silent resume.
+  for (const instanceId of h.listInstances()) {
     try {
-      const status = h.getStatus(descriptor.id)
-      // Only auto-connect ones that look configured (avoid device-code prompts here).
+      const status = h.getStatus(instanceId)
+      // Only auto-connect ones that look configured (never interactive here, so
+      // no browser popup / device-code prompt fires on startup).
       if (status.state === 'disconnected') {
         // A silent connect: M365 no-ops to auth-needed if no cached token;
         // Slack validates its token. Errors are swallowed (best-effort).
-        await h.connect(descriptor.id).catch(() => {})
+        await h.connect(instanceId).catch(() => {})
       }
     } catch {
       /* best-effort */

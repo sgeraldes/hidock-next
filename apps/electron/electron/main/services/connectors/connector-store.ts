@@ -17,6 +17,7 @@ import { join } from 'path'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import type {
   ConnectorConfig,
+  ConnectorInstanceMeta,
   ConnectorStateStore,
   StoredConnectorState,
   StoredSourceState,
@@ -155,6 +156,39 @@ export class ConnectorStore implements ConnectorStateStore {
     const current = this.getSourceState(id, containerId)
     this.ensure(id).sources[containerId] = { ...current, ...patch }
     this.persist()
+  }
+
+  // ── Multi-instance surface (ConnectorStateStore optional methods) ────────────
+
+  /** Every persisted instance id (used to rehydrate multi-instance accounts). */
+  listInstanceIds(): string[] {
+    this.load()
+    return Object.keys(this.data)
+  }
+
+  /** Persist instance metadata (type + user-facing label). */
+  setInstanceMeta(id: string, meta: ConnectorInstanceMeta): void {
+    const state = this.ensure(id)
+    state.type = meta.type
+    state.label = meta.label
+    this.persist()
+  }
+
+  /** Read persisted instance metadata, or null for legacy/unlabeled state. */
+  getInstanceMeta(id: string): ConnectorInstanceMeta | null {
+    this.load()
+    const state = this.data[id]
+    if (!state || !state.type) return null
+    return { type: state.type, label: state.label ?? state.type }
+  }
+
+  /** Purge all state + secrets for an instance (used by removeInstance). */
+  removeInstance(id: string): void {
+    this.load()
+    if (this.data[id]) {
+      delete this.data[id]
+      this.persist()
+    }
   }
 
   /** Test helper: reset in-memory + on-disk state. */

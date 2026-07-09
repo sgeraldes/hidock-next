@@ -6,12 +6,25 @@
  * the ingestion sink. One interface, two transports (mcp/native) — the host
  * treats them identically. Kept free of Electron/OS deps: persistence is an
  * injected `ConnectorStateStore`, so it is fully unit-testable.
+ *
+ * Instances vs types
+ * ------------------
+ * A connector TYPE is a registered (descriptor, factory) pair keyed by
+ * `descriptor.id` ('m365', 'slack'). A connector INSTANCE is a live configured
+ * account, keyed by an INSTANCE id. For single-instance types the instance id
+ * equals the type id (backward-compatible). Multi-instance types
+ * (`descriptor.multiInstance`) may have N accounts: the first/legacy account
+ * keeps the plain type id, extras use `<type>:<uuid>`. All per-instance state
+ * (config, secrets, MSAL cache, status, cursors) is namespaced by instance id
+ * in the store, so accounts never collide. Every public method's `id` parameter
+ * is an INSTANCE id.
  */
 import type {
   Connector,
   ConnectorConfig,
   ConnectorContext,
   ConnectorConfigFieldView,
+  ConnectorConnectOptions,
   ConnectorDescriptor,
   ConnectorFactory,
   ConnectorStateStore,
@@ -34,6 +47,13 @@ function initialStatus(lastSyncAt: string | null): ConnectorStatus {
   return { state: 'disconnected', lastSyncAt: lastSyncAt ?? undefined }
 }
 
+/** Random suffix for a new instance id. Prefers the Web Crypto UUID (Node 18+). */
+function newInstanceSuffix(): string {
+  const g = globalThis as { crypto?: { randomUUID?: () => string } }
+  if (typeof g.crypto?.randomUUID === 'function') return g.crypto.randomUUID()
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
 export interface ConnectorHostOptions {
   store: ConnectorStateStore
   sink?: IngestionSink
@@ -46,11 +66,17 @@ export class ConnectorHost {
   private sink?: IngestionSink
   private readonly log: (message: string, extra?: unknown) => void
 
+  // Keyed by TYPE (descriptor.id).
   private factories = new Map<string, ConnectorFactory>()
   private descriptors = new Map<string, ConnectorDescriptor>()
+
+  // Keyed by INSTANCE id.
+  private instanceType = new Map<string, string>()
+  private instanceLabels = new Map<string, string>()
   private instances = new Map<string, Connector>()
   private statuses = new Map<string, ConnectorStatus>()
   private timers = new Map<string, ReturnType<typeof setInterval>>()
+
   private listeners = new Set<ConnectorStatusListener>()
 
   constructor(opts: ConnectorHostOptions) {
@@ -73,17 +99,65 @@ export class ConnectorHost {
   register(descriptor: ConnectorDescriptor, factory: ConnectorFactory): void {
     this.descriptors.set(descriptor.id, descriptor)
     this.factories.set(descriptor.id, factory)
-    if (!this.statuses.has(descriptor.id)) {
-      this.statuses.set(descriptor.id, initialStatus(this.store.getState(descriptor.id).lastSyncAt))
+    this.loadInstances(descriptor)
+  }
+
+  /** Rehydrate a type's instances from the store (or seed the default instance). */
+  private loadInstances(descriptor: ConnectorDescriptor): void {
+    const type = descriptor.id
+    if (descriptor.multiInstance) {
+      const persisted = this.store.listInstanceIds?.() ?? []
+      const own = persisted.filter((id) => this.idBelongsToType(id, type))
+      if (own.length === 0) {
+        // Seed the default/legacy instance keyed by the type id. This preserves
+        // any pre-existing single-instance state written under `type` and gives
+        // the UI a first account to Connect without an explicit "Add account".
+        this.registerInstance(type, type, descriptor.displayName)
+      } else {
+        for (const id of own) {
+          const meta = this.store.getInstanceMeta?.(id)
+          this.registerInstance(id, type, meta?.label ?? descriptor.displayName)
+        }
+      }
+    } else {
+      this.registerInstance(type, type, descriptor.displayName)
     }
   }
 
+  private idBelongsToType(id: string, type: string): boolean {
+    return id === type || id.startsWith(`${type}:`)
+  }
+
+  private registerInstance(instanceId: string, type: string, label: string): void {
+    this.instanceType.set(instanceId, type)
+    this.instanceLabels.set(instanceId, label)
+    if (!this.statuses.has(instanceId)) {
+      this.statuses.set(instanceId, initialStatus(this.store.getState(instanceId).lastSyncAt))
+    }
+  }
+
+  /** True if `id` is a known connector type OR a known instance id. */
   hasConnector(id: string): boolean {
-    return this.factories.has(id)
+    return this.factories.has(id) || this.instanceType.has(id)
   }
 
   listDescriptors(): ConnectorDescriptor[] {
     return [...this.descriptors.values()]
+  }
+
+  /** All live instance ids, in registration/insertion order. */
+  listInstances(): string[] {
+    return [...this.instanceType.keys()]
+  }
+
+  private descriptorFor(id: string): ConnectorDescriptor | undefined {
+    const type = this.instanceType.get(id)
+    return type ? this.descriptors.get(type) : undefined
+  }
+
+  private labelFor(id: string): string {
+    const meta = this.store.getInstanceMeta?.(id)
+    return meta?.label ?? this.instanceLabels.get(id) ?? this.descriptorFor(id)?.displayName ?? id
   }
 
   private context(id: string): ConnectorContext {
@@ -99,7 +173,7 @@ export class ConnectorHost {
 
   /** Config merged with descriptor field defaults. */
   private effectiveConfig(id: string): ConnectorConfig {
-    const descriptor = this.descriptors.get(id)
+    const descriptor = this.descriptorFor(id)
     const stored = this.store.getConfig(id)
     const merged: ConnectorConfig = {}
     for (const field of descriptor?.configFields ?? []) {
@@ -117,7 +191,8 @@ export class ConnectorHost {
   private instance(id: string): Connector {
     let inst = this.instances.get(id)
     if (!inst) {
-      const factory = this.factories.get(id)
+      const type = this.instanceType.get(id)
+      const factory = type ? this.factories.get(type) : undefined
       if (!factory) throw new Error(`Unknown connector: ${id}`)
       inst = factory(this.context(id))
       this.instances.set(id, inst)
@@ -147,7 +222,7 @@ export class ConnectorHost {
   }
 
   private fieldViews(id: string): ConnectorConfigFieldView[] {
-    const descriptor = this.descriptors.get(id)
+    const descriptor = this.descriptorFor(id)
     const stored = this.store.getConfig(id)
     return (descriptor?.configFields ?? []).map((field) => {
       if (field.secret) {
@@ -159,11 +234,11 @@ export class ConnectorHost {
   }
 
   list(): ConnectorSummary[] {
-    return this.listDescriptors().map((d) => this.summary(d.id))
+    return this.listInstances().map((id) => this.summary(id))
   }
 
   summary(id: string): ConnectorSummary {
-    const descriptor = this.descriptors.get(id)
+    const descriptor = this.descriptorFor(id)
     if (!descriptor) throw new Error(`Unknown connector: ${id}`)
     const state = this.store.getState(id)
     const inst = this.instances.get(id)
@@ -177,7 +252,62 @@ export class ConnectorHost {
           lastSyncAt: s.lastSyncAt,
         }))
       : undefined
-    return { descriptor, status: this.getStatus(id), fields: this.fieldViews(id), sources }
+    return {
+      descriptor,
+      instanceId: id,
+      label: this.labelFor(id),
+      multiInstance: Boolean(descriptor.multiInstance),
+      status: this.getStatus(id),
+      fields: this.fieldViews(id),
+      sources,
+    }
+  }
+
+  /**
+   * Add a new account (instance) for a multi-instance connector type. Returns
+   * the summary for the freshly created instance (state 'disconnected').
+   */
+  addInstance(type: string, label?: string): ConnectorSummary {
+    const descriptor = this.descriptors.get(type)
+    if (!descriptor) throw new Error(`Unknown connector type: ${type}`)
+    if (!descriptor.multiInstance) throw new Error(`Connector '${type}' does not support multiple accounts`)
+    const instanceId = this.instanceType.has(type) ? `${type}:${newInstanceSuffix()}` : type
+    const finalLabel = (label && label.trim()) || this.nextDefaultLabel(descriptor)
+    this.registerInstance(instanceId, type, finalLabel)
+    // Persist so the account survives a restart even before any config/secret.
+    this.store.setInstanceMeta?.(instanceId, { type, label: finalLabel })
+    this.patchStatus(instanceId, { state: 'disconnected', message: undefined })
+    return this.summary(instanceId)
+  }
+
+  /** Suggest a label for the Nth account of a type ("Name", "Name (2)", …). */
+  private nextDefaultLabel(descriptor: ConnectorDescriptor): string {
+    const count = this.listInstances().filter((id) => this.instanceType.get(id) === descriptor.id).length
+    return count === 0 ? descriptor.displayName : `${descriptor.displayName} (${count + 1})`
+  }
+
+  /** Rename an instance (multi-instance accounts). */
+  setInstanceLabel(id: string, label: string): ConnectorSummary {
+    if (!this.instanceType.has(id)) throw new Error(`Unknown connector instance: ${id}`)
+    const trimmed = label.trim() || this.instanceLabels.get(id) || id
+    this.instanceLabels.set(id, trimmed)
+    const type = this.instanceType.get(id)!
+    this.store.setInstanceMeta?.(id, { type, label: trimmed })
+    return this.summary(id)
+  }
+
+  /** Remove an account (instance) of a multi-instance connector type. */
+  async removeInstance(id: string): Promise<void> {
+    const type = this.instanceType.get(id)
+    if (!type) throw new Error(`Unknown connector instance: ${id}`)
+    const descriptor = this.descriptors.get(type)
+    if (!descriptor?.multiInstance) throw new Error(`Connector '${type}' does not support removing accounts`)
+    await this.disconnect(id) // stops schedule + inst.disconnect (clears its secrets)
+    this.instances.delete(id)
+    this.statuses.delete(id)
+    this.instanceType.delete(id)
+    this.instanceLabels.delete(id)
+    this.store.removeInstance?.(id)
   }
 
   /**
@@ -186,7 +316,7 @@ export class ConnectorHost {
    * "leave unchanged" so redacted round-trips don't wipe stored secrets.
    */
   async configure(id: string, values: Record<string, string | number | boolean>): Promise<void> {
-    const descriptor = this.descriptors.get(id)
+    const descriptor = this.descriptorFor(id)
     if (!descriptor) throw new Error(`Unknown connector: ${id}`)
     const plain: ConnectorConfig = {}
     for (const field of descriptor.configFields) {
@@ -206,7 +336,7 @@ export class ConnectorHost {
 
   /** True when all required (non-secret) fields have values and required secrets are set. */
   private requiredConfigSatisfied(id: string): boolean {
-    const descriptor = this.descriptors.get(id)
+    const descriptor = this.descriptorFor(id)
     if (!descriptor) return false
     const config = this.effectiveConfig(id)
     for (const field of descriptor.configFields) {
@@ -221,7 +351,7 @@ export class ConnectorHost {
     return true
   }
 
-  async connect(id: string, opts?: { interactive?: boolean }): Promise<ConnectorStatus> {
+  async connect(id: string, opts?: ConnectorConnectOptions): Promise<ConnectorStatus> {
     const inst = this.instance(id)
     this.patchStatus(id, { state: 'connecting', message: 'Connecting…' })
     try {
@@ -337,36 +467,36 @@ export class ConnectorHost {
     }
   }
 
-  /** Aggregate autocomplete across all connected identity-capable connectors. */
+  /** Aggregate autocomplete across all connected identity-capable instances. */
   async searchPeople(query: string, limit = 10): Promise<ExternalPerson[]> {
     const results: ExternalPerson[] = []
-    for (const descriptor of this.descriptors.values()) {
-      const inst = this.instances.get(descriptor.id)
+    for (const id of this.instanceType.keys()) {
+      const inst = this.instances.get(id)
       const identity = inst?.capabilities.identity
       if (!identity) continue
-      if (this.getStatus(descriptor.id).state !== 'connected') continue
+      if (this.getStatus(id).state !== 'connected') continue
       try {
         results.push(...(await identity.searchPeople(query)))
       } catch (err) {
-        this.log(`[connector:${descriptor.id}] searchPeople failed`, err)
+        this.log(`[connector:${id}] searchPeople failed`, err)
       }
       if (results.length >= limit) break
     }
     return results.slice(0, limit)
   }
 
-  /** First non-null enrichment across connected identity connectors. */
+  /** First non-null enrichment across connected identity instances. */
   async enrich(contact: Contact): Promise<Enrichment | null> {
-    for (const descriptor of this.descriptors.values()) {
-      const inst = this.instances.get(descriptor.id)
+    for (const id of this.instanceType.keys()) {
+      const inst = this.instances.get(id)
       const identity = inst?.capabilities.identity
       if (!identity) continue
-      if (this.getStatus(descriptor.id).state !== 'connected') continue
+      if (this.getStatus(id).state !== 'connected') continue
       try {
         const enriched = await identity.enrich(contact)
         if (enriched) return enriched
       } catch (err) {
-        this.log(`[connector:${descriptor.id}] enrich failed`, err)
+        this.log(`[connector:${id}] enrich failed`, err)
       }
     }
     return null

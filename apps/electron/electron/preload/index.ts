@@ -633,8 +633,12 @@ export interface ElectronAPI {
     list: () => Promise<ConnectorSummary[]>
     get: (id: string) => Promise<ConnectorSummary>
     configure: (id: string, values: Record<string, string | number | boolean>) => Promise<ConnectorSummary>
-    connect: (id: string) => Promise<ConnectorSummary>
+    connect: (id: string, authMode?: 'auth-code' | 'device-code') => Promise<ConnectorSummary>
     disconnect: (id: string) => Promise<ConnectorSummary>
+    // Multi-instance: add / remove / rename accounts of a connector type.
+    addInstance: (type: string, label?: string) => Promise<ConnectorSummary>
+    removeInstance: (id: string) => Promise<ConnectorSummary[]>
+    setInstanceLabel: (id: string, label: string) => Promise<ConnectorSummary>
     listContainers: (id: string) => Promise<SourceContainer[]>
     setSourceEnabled: (id: string, containerId: string, enabled: boolean) => Promise<ConnectorSummary>
     sync: (id: string, containerId?: string) => Promise<IngestionOutcome>
@@ -1083,8 +1087,11 @@ const electronAPI: ElectronAPI = {
     list: () => callIPC('connectors:list'),
     get: (id) => callIPC('connectors:get', id),
     configure: (id, values) => callIPC('connectors:configure', id, values),
-    connect: (id) => callIPC('connectors:connect', id),
+    connect: (id, authMode) => callIPC('connectors:connect', id, authMode),
     disconnect: (id) => callIPC('connectors:disconnect', id),
+    addInstance: (type, label) => callIPC('connectors:addInstance', type, label),
+    removeInstance: (id) => callIPC('connectors:removeInstance', id),
+    setInstanceLabel: (id, label) => callIPC('connectors:setInstanceLabel', id, label),
     listContainers: (id) => callIPC('connectors:listContainers', id),
     setSourceEnabled: (id, containerId, enabled) => callIPC('connectors:setSourceEnabled', id, containerId, enabled),
     sync: (id, containerId) => callIPC('connectors:sync', id, containerId),

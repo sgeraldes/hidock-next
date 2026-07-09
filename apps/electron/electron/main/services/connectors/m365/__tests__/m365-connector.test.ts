@@ -46,12 +46,22 @@ const CAL_PAGE_2 = {
 }
 
 describe('M365Connector — descriptor', () => {
-  it('advertises identity + sources and a device-code auth with setup steps', () => {
+  it('advertises identity + sources, oauth auth, multi-instance, and setup steps', () => {
     expect(m365Descriptor.id).toBe('m365')
     expect(m365Descriptor.capabilityKinds).toEqual(expect.arrayContaining(['identity', 'sources']))
-    expect(m365Descriptor.auth.kind).toBe('device-code')
+    expect(m365Descriptor.auth.kind).toBe('oauth')
+    expect(m365Descriptor.multiInstance).toBe(true)
     expect((m365Descriptor.auth.setupSteps ?? []).length).toBeGreaterThan(3)
     expect(m365Descriptor.configFields.map((f) => f.key)).toEqual(['clientId', 'tenant'])
+  })
+
+  it('with no shipped default: clientId is required and setup is NOT optional', () => {
+    // The shipped default client id is empty by default (placeholder), so the
+    // full "register your own app" walkthrough applies.
+    expect(m365Descriptor.setupOptional).toBe(false)
+    const clientId = m365Descriptor.configFields.find((f) => f.key === 'clientId')!
+    expect(clientId.required).toBe(true)
+    expect(clientId.advanced).toBeFalsy()
   })
 })
 
@@ -155,17 +165,44 @@ describe('M365Connector — lifecycle', () => {
     expect(runDeviceCode).not.toHaveBeenCalled()
   })
 
-  it('interactive connect with no cached token runs device-code and surfaces the prompt in status.detail', async () => {
+  it('interactive connect DEFAULTS to the browser (auth-code) flow and surfaces the auth URL', async () => {
     const ctx = fakeCtx({ clientId: 'abc' })
+    const runDeviceCode = vi.fn()
+    const runAuthCode = vi.fn(async (onPrompt: any) => {
+      onPrompt({ url: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?x=1', message: 'Opening browser…' })
+    })
+    const connector = new M365Connector(ctx, { trySilentToken: async () => null, runAuthCode, runDeviceCode })
+    const status = await connector.connect({ interactive: true })
+    expect(status.state).toBe('connected')
+    expect(runAuthCode).toHaveBeenCalledTimes(1)
+    expect(runDeviceCode).not.toHaveBeenCalled()
+    const connecting = ctx.statuses.find((s) => s.state === 'connecting')
+    expect(connecting?.detail?.mode).toBe('auth-code')
+    expect(connecting?.detail?.authUrl).toContain('login.microsoftonline.com')
+  })
+
+  it('interactive connect with authMode "device-code" runs device-code and surfaces the code prompt', async () => {
+    const ctx = fakeCtx({ clientId: 'abc' })
+    const runAuthCode = vi.fn()
     const runDeviceCode = vi.fn(async (onPrompt: any) => {
       onPrompt({ verificationUri: 'https://microsoft.com/devicelogin', userCode: 'ABCD-1234', message: 'Go sign in' })
     })
-    const connector = new M365Connector(ctx, { trySilentToken: async () => null, runDeviceCode })
-    const status = await connector.connect({ interactive: true })
+    const connector = new M365Connector(ctx, { trySilentToken: async () => null, runDeviceCode, runAuthCode })
+    const status = await connector.connect({ interactive: true, authMode: 'device-code' })
     expect(status.state).toBe('connected')
+    expect(runDeviceCode).toHaveBeenCalledTimes(1)
+    expect(runAuthCode).not.toHaveBeenCalled()
     const connecting = ctx.statuses.find((s) => s.state === 'connecting')
+    expect(connecting?.detail?.mode).toBe('device-code')
     expect(connecting?.detail?.userCode).toBe('ABCD-1234')
     expect(connecting?.detail?.verificationUri).toContain('devicelogin')
+  })
+
+  it('uses the instance id from ctx.connectorId (multi-instance provenance)', async () => {
+    const ctx = fakeCtx({ clientId: 'abc' })
+    ;(ctx as { connectorId: string }).connectorId = 'm365:acct-2'
+    const connector = new M365Connector(ctx, {})
+    expect(connector.id).toBe('m365:acct-2')
   })
 
   it('silent (non-interactive) connect with no cached token reports auth-needed and NEVER runs device-code', async () => {

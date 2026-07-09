@@ -33,9 +33,10 @@ export function registerConnectorsHandlers(): void {
     return host.summary(id)
   })
 
-  // User-initiated connect: interactive (may drive device-code sign-in).
-  ipcMain.handle('connectors:connect', async (_e, id: string) => {
-    await host.connect(id, { interactive: true })
+  // User-initiated connect: interactive. `authMode` selects the browser
+  // (auth-code, default) vs the device-code fallback for headless machines.
+  ipcMain.handle('connectors:connect', async (_e, id: string, authMode?: 'auth-code' | 'device-code') => {
+    await host.connect(id, { interactive: true, authMode })
     return host.summary(id)
   })
 
@@ -43,6 +44,16 @@ export function registerConnectorsHandlers(): void {
     await host.disconnect(id)
     return host.summary(id)
   })
+
+  // Multi-instance (multiple accounts of one connector type).
+  ipcMain.handle('connectors:addInstance', (_e, type: string, label?: string) => host.addInstance(type, label))
+
+  ipcMain.handle('connectors:removeInstance', async (_e, id: string) => {
+    await host.removeInstance(id)
+    return host.list()
+  })
+
+  ipcMain.handle('connectors:setInstanceLabel', (_e, id: string, label: string) => host.setInstanceLabel(id, label))
 
   ipcMain.handle('connectors:listContainers', (_e, id: string) => host.listContainers(id))
 
