@@ -596,14 +596,6 @@ export interface ElectronAPI {
     onStatusChanged: (callback: (payload: { id: string; status: ConnectorStatus }) => void) => () => void
   }
 
-  // Transcript upgrade — triage + reformat old flat transcripts (b91270b7)
-  transcriptUpgrade: {
-    scan: (req?: { threshold?: number }) => Promise<Result<any>>
-    run: (req?: { threshold?: number }) => Promise<Result<any>>
-    getStatus: (req?: { threshold?: number }) => Promise<Result<any>>
-    getRecommended: () => Promise<Result<string[]>>
-  }
-
   // Migration - Database schema migration to V11 (Knowledge Captures)
   migration: MigrationAPI
 
@@ -1036,13 +1028,6 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.on('connectors:status-changed', handler)
       return () => ipcRenderer.removeListener('connectors:status-changed', handler)
     }
-  },
-
-  transcriptUpgrade: {
-    scan: (req) => callIPC('transcript-upgrade:scan', req),
-    run: (req) => callIPC('transcript-upgrade:run', req),
-    getStatus: (req) => callIPC('transcript-upgrade:getStatus', req),
-    getRecommended: () => callIPC('transcript-upgrade:getRecommended')
   },
 
   migration: {
