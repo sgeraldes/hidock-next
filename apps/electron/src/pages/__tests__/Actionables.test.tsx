@@ -2,8 +2,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { Actionables } from '../Actionables'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { resetContactResolverCache } from '@/components/entity'
+
+/** Probe that renders the current pathname so navigation can be asserted. */
+function LocationProbe() {
+  const location = useLocation()
+  return <div data-testid="location">{location.pathname}</div>
+}
+
+function renderActionables() {
+  return render(
+    <MemoryRouter initialEntries={['/actionables']}>
+      <Routes>
+        <Route path="/actionables" element={<Actionables />} />
+        <Route path="*" element={<LocationProbe />} />
+      </Routes>
+    </MemoryRouter>
+  )
+}
 
 const mockContactsGetAll = vi.fn().mockResolvedValue({
   success: true,
@@ -45,8 +62,33 @@ const mockGetAll = vi.fn().mockResolvedValue([
     sourceKnowledgeId: 'kc-3',
     suggestedTemplate: 'project_status',
     artifactId: 'out-1'
+  },
+  {
+    id: 'a4',
+    title: 'Hand off follow-up work to Claude Code',
+    type: 'claude_code_prompt',
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+    suggestedRecipients: [],
+    confidence: 0.7,
+    sourceKnowledgeId: 'kc-4',
+    suggestedTemplate: 'claude_code_prompt'
   }
 ])
+
+// Source lookup used by the expanded detail panel (ActionableDetail).
+const mockKnowledgeGetById = vi.fn().mockImplementation(async (id: string) => {
+  if (id === 'kc-1') {
+    return {
+      id: 'kc-1',
+      title: 'Weekly sync',
+      meetingId: 'm-1',
+      sourceRecordingId: 'r-1',
+      capturedAt: new Date('2026-06-01T10:00:00Z').toISOString()
+    }
+  }
+  return { id, title: 'Some capture', meetingId: null, sourceRecordingId: 'r-9', capturedAt: null }
+})
 
 const mockCopyToClipboard = vi.fn().mockResolvedValue({ success: true })
 const mockGetByActionableId = vi.fn().mockResolvedValue({
@@ -70,6 +112,9 @@ beforeEach(() => {
     },
     contacts: {
       getAll: mockContactsGetAll
+    },
+    knowledge: {
+      getById: mockKnowledgeGetById
     }
   } as any
 })
@@ -167,5 +212,54 @@ describe('Actionables Page', () => {
     // Note: 'Dismiss' text exists on actionable cards, so we check for the error-specific element
     const errorBanner = document.querySelector('.bg-destructive\\/10')
     expect(errorBanner).toBeNull()
+  })
+
+  // Decidability: the approve button states the concrete outcome per template.
+  it('should label the approve button with the concrete template action', async () => {
+    renderActionables()
+
+    await screen.findByText('Send meeting minutes')
+
+    // meeting_minutes → "Generate meeting minutes"
+    expect(screen.getByText('Generate meeting minutes')).toBeInTheDocument()
+    // claude_code_prompt → "Generate Claude Code prompt"
+    expect(screen.getByText('Generate Claude Code prompt')).toBeInTheDocument()
+  })
+
+  // Decidability: clicking a card expands full context + the "Will generate" target.
+  it('should expand a card to reveal full context and the generate target', async () => {
+    renderActionables()
+
+    const title = await screen.findByText('Send meeting minutes')
+
+    // Not expanded yet — detail sections absent
+    expect(screen.queryByText('Will generate')).not.toBeInTheDocument()
+
+    fireEvent.click(title)
+
+    // "Will generate" section names the concrete output and format
+    await screen.findByText('Will generate')
+    expect(screen.getByText('Meeting minutes')).toBeInTheDocument()
+    expect(screen.getByText('Markdown document')).toBeInTheDocument()
+
+    // Source is fetched and rendered as a navigable meeting mention
+    const sourceLink = await screen.findByRole('button', { name: /open meeting weekly sync/i })
+    expect(sourceLink).toBeInTheDocument()
+    expect(mockKnowledgeGetById).toHaveBeenCalledWith('kc-1')
+  })
+
+  // The expanded source link navigates to the source meeting.
+  it('should navigate to the source meeting when the source link is clicked', async () => {
+    renderActionables()
+
+    const title = await screen.findByText('Send meeting minutes')
+    fireEvent.click(title)
+
+    const sourceLink = await screen.findByRole('button', { name: /open meeting weekly sync/i })
+    fireEvent.click(sourceLink)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('location').textContent).toBe('/meeting/m-1')
+    })
   })
 })

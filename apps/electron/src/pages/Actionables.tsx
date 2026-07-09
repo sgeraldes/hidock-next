@@ -17,7 +17,8 @@ import {
   AlertCircle,
   Copy,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  ChevronDown
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -32,6 +33,8 @@ import {
 import { cn, formatDateTime } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
 import { EntityMention, useContactResolver } from '@/components/entity'
+import { ActionableDetail } from '@/components/actionables/ActionableDetail'
+import { getTemplateInfo } from '@/components/actionables/templateInfo'
 import type { Actionable, ActionableStatus } from '@/types/knowledge'
 import type { OutputTemplateId } from '@/types'
 
@@ -75,6 +78,13 @@ export function Actionables() {
 
   // C-ACT-005: Pagination state
   const [currentPage, setCurrentPage] = useState(1)
+
+  // Card detail expansion — clicking a card's title area toggles an inline
+  // detail panel (evidence at the decision point). Only one open at a time.
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const toggleExpanded = useCallback((id: string) => {
+    setExpandedId((prev) => (prev === id ? null : id))
+  }, [])
 
   // Generation state
   const [generating, setGenerating] = useState(false)
@@ -422,14 +432,36 @@ export function Actionables() {
                     {/* min-w-0 lets the title truncate instead of pushing the action buttons out of the card */}
                     <div className="flex-1 min-w-0 p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          {getStatusIcon(actionable.status)}
-                          <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{actionable.type.replace('_', ' ')}</span>
-                        </div>
-                        <h3 className="text-lg font-bold leading-tight truncate pr-4">{actionable.title}</h3>
-                        {actionable.description && (
-                          <p className="text-sm text-muted-foreground mt-1 line-clamp-1 italic pr-4">"{actionable.description}"</p>
-                        )}
+                        {/* Clickable title area toggles the inline detail panel.
+                            Kept separate from the recipients row below so those
+                            person chips remain independently clickable. */}
+                        <button
+                          type="button"
+                          onClick={() => toggleExpanded(actionable.id)}
+                          aria-expanded={expandedId === actionable.id}
+                          className="text-left w-full group/exp rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <div className="flex items-center gap-2 mb-1">
+                            {getStatusIcon(actionable.status)}
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">{actionable.type.replace('_', ' ')}</span>
+                            <ChevronDown className={cn(
+                              "h-3.5 w-3.5 text-muted-foreground transition-transform ml-auto sm:ml-0",
+                              expandedId === actionable.id && "rotate-180"
+                            )} />
+                          </div>
+                          <h3
+                            className={cn(
+                              "text-lg font-bold leading-tight pr-4 group-hover/exp:text-primary transition-colors",
+                              expandedId === actionable.id ? "whitespace-normal" : "truncate"
+                            )}
+                            title={actionable.title}
+                          >
+                            {actionable.title}
+                          </h3>
+                          {actionable.description && expandedId !== actionable.id && (
+                            <p className="text-sm text-muted-foreground mt-1 line-clamp-1 italic pr-4">"{actionable.description}"</p>
+                          )}
+                        </button>
                         <div className="flex items-center gap-3 mt-3">
                           <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-medium bg-muted/50 px-2 py-0.5 rounded-full">
                             <Clock className="h-3 w-3" />
@@ -464,6 +496,11 @@ export function Actionables() {
                             </div>
                           )}
                         </div>
+
+                        {/* Inline detail panel — full context at the decision point */}
+                        {expandedId === actionable.id && (
+                          <ActionableDetail actionable={actionable} resolveRecipient={resolveRecipient} />
+                        )}
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0 w-full sm:w-auto border-t sm:border-0 pt-4 sm:pt-0">
                         {actionable.status === 'pending' && (
@@ -480,7 +517,9 @@ export function Actionables() {
                               ) : (
                                 <Sparkles className="h-4 w-4" />
                               )}
-                              {loadingActionableIds.has(actionable.id) ? 'Generating...' : 'Approve & Generate'}
+                              {loadingActionableIds.has(actionable.id)
+                                ? 'Generating...'
+                                : getTemplateInfo(actionable.suggestedTemplate).actionLabel}
                             </Button>
                             <Button
                               onClick={() => handleDismiss(actionable.id)}
@@ -655,14 +694,7 @@ export function Actionables() {
             <Loader2 className="h-12 w-12 animate-spin mx-auto text-primary" />
             <div>
               <h3 className="text-lg font-semibold mb-1">
-                Generating {
-                  currentGeneratingTemplate === 'meeting_minutes' ? 'Meeting Minutes' :
-                  currentGeneratingTemplate === 'interview_feedback' ? 'Interview Feedback' :
-                  currentGeneratingTemplate === 'project_status' ? 'Project Status' :
-                  currentGeneratingTemplate === 'action_items' ? 'Action Items' :
-                  currentGeneratingTemplate === 'claude_code_prompt' ? 'Claude Code Handoff' :
-                  'Output'
-                }...
+                Generating {getTemplateInfo(currentGeneratingTemplate).name}...
               </h3>
               <p className="text-sm text-muted-foreground">This may take a few moments...</p>
             </div>
@@ -680,7 +712,7 @@ export function Actionables() {
           <DialogHeader>
             <DialogTitle>Regenerate Output?</DialogTitle>
             <DialogDescription>
-              This will create a new output using the {confirmRegenerate?.suggestedTemplate || 'meeting_minutes'} template, replacing the previous result.
+              This will create a new {getTemplateInfo(confirmRegenerate?.suggestedTemplate).name} ({getTemplateInfo(confirmRegenerate?.suggestedTemplate).format}), replacing the previous result.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2">
@@ -706,7 +738,7 @@ export function Actionables() {
           <DialogHeader>
             <DialogTitle>Generated Output</DialogTitle>
             <DialogDescription>
-              Generated using {generatedOutput?.templateId?.replace(/_/g, ' ')} template
+              {getTemplateInfo(generatedOutput?.templateId).name}
               {/* C-ACT-008: Show timestamp on generated output */}
               {generatedOutput?.generatedAt && (
                 <span className="ml-2 text-xs text-muted-foreground">
