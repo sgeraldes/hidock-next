@@ -95,6 +95,26 @@ export function detectTranscriptFormat(input: TranscriptContentInput): FormatDet
   }
 }
 
+/**
+ * Format class, derivable purely from the transcript's own columns — so no
+ * triage state needs to be stored anywhere:
+ *   - 'structured'  : full_text already carries turns (real ASR output).
+ *   - 'reformatted' : full_text is flat but `speakers` carries turns — i.e. a
+ *                     transcript this pipeline already upgraded (the reformat
+ *                     writes turns to `speakers` and leaves full_text flat).
+ *   - 'legacy'      : neither carries turns — still needs upgrading.
+ * Because a successful reformat flips a row from 'legacy' to 'reformatted', the
+ * detection itself is the idempotency guard: re-running never re-picks a done row.
+ */
+export type TranscriptFormatClass = 'structured' | 'reformatted' | 'legacy'
+
+export function classifyTranscriptFormat(input: TranscriptContentInput): TranscriptFormatClass {
+  const d = detectTranscriptFormat(input)
+  if (d.hasTextStructure) return 'structured'
+  if (d.hasStoredStructure) return 'reformatted'
+  return 'legacy'
+}
+
 // ---------------------------------------------------------------------------
 // Importance scoring (LLM-free)
 // ---------------------------------------------------------------------------

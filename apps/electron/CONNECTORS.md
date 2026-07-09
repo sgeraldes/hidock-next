@@ -163,8 +163,26 @@ suggestions). Signals (GitHub webhooks/polling) go straight to the event bus
 5. Then per catalog by demand.
 
 ## Status
-- [ ] C0 entity-type foundation (queued behind Round 4a — shares database.ts)
+- [x] C0 entity-type foundation (artifact registry + `artifacts` table + `importArtifact`)
 - [ ] C1 PDF + image verticals
-- [ ] C2 connector host + Slack
-- [ ] C3 M365 + BambooHR identity
+- [x] C2 connector host + Slack — `@hidock/connectors` (contract + `ConnectorHost`
+      registry + injected `ConnectorStateStore`); Slack in `@hidock/connectors-slack`;
+      host wiring + ingestion sink + `connectors:*` IPC + Settings → Connectors UI in
+      `apps/electron`. BambooHR/Kantata identity still pending.
+- [x] C3 M365 identity + sources — `services/connectors/m365` (MSAL device-code,
+      calendar+contacts delta sync with attendee emails, `/me/people` search+enrich).
+      BambooHR enrichment still pending.
 - [ ] C4 GitHub
+
+### Implementation notes (C2/C3, landed 2026-07-09)
+- Placement: **shared contract + registry** live in `packages/connectors`
+  (Electron-free; persistence is an injected `ConnectorStateStore`). App-specific
+  pieces (store, ingestion sink, M365 connector, IPC, UI) live in
+  `apps/electron/electron/main/services/connectors` + `ipc/connectors-handlers.ts`.
+- Secrets: Electron `safeStorage` (DPAPI/Keychain) via `connectors.json`, never the DB.
+- `SourceItem.entity` (optional) carries structured meeting/contact for the sink;
+  Slack emits message/image items → artifact-service. One emission type, two routes.
+- M365 needs the user to register their own Entra app (public client; "Allow public
+  client flows" = Yes; delegated Calendars.Read/Contacts.Read/People.Read/User.Read).
+  There is no safe well-known public client id to piggyback — the Settings UI walks
+  them through the registration.

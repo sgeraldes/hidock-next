@@ -3,9 +3,11 @@
  *
  * Runs against a real in-memory sql.js DB with '../database' mocked to delegate
  * query/run to it, and '../chat-llm' mocked so the reformat path uses a fake
- * model. Covers: assess-and-persist counts + flagging, the text-only reformat
- * write (speakers updated, full_text preserved), lowest-priority gating behind
- * the audio queue, and recommended-recording surfacing.
+ * model. The service keeps NO triage state — everything is computed on the fly
+ * and the only write is the reformatted turns into transcripts.speakers. Covers:
+ * on-the-fly counts + flagging, the text-only reformat write (speakers updated,
+ * full_text preserved, row flips out of 'legacy'), lowest-priority gating behind
+ * the audio queue, and flagged-recording surfacing.
  *
  * @vitest-environment node
  */
@@ -43,7 +45,7 @@ vi.mock('../chat-llm', () => ({
 }))
 
 import {
-  assessAndPersistAll,
+  runUpgrade,
   scanOldTranscripts,
   reformatOne,
   kickReformatProcessing,
@@ -67,12 +69,6 @@ function seedSchema(): void {
     CREATE TABLE knowledge_captures (id TEXT PRIMARY KEY, category TEXT);
     CREATE TABLE meeting_projects (meeting_id TEXT, project_id TEXT);
     CREATE TABLE knowledge_projects (knowledge_capture_id TEXT, project_id TEXT);
-    CREATE TABLE transcript_triage (
-      transcript_id TEXT PRIMARY KEY, recording_id TEXT, is_legacy_format INTEGER DEFAULT 0,
-      triage_score INTEGER, triage_band TEXT, triage_signals TEXT,
-      recommended_retranscription INTEGER DEFAULT 0, reformat_status TEXT DEFAULT 'none',
-      reformat_error TEXT, reformatted_at TEXT, assessed_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
   `)
 }
 
@@ -114,8 +110,8 @@ function addTranscript(opts: {
   }
 }
 
-function triageRow(transcriptId: string): any {
-  return rowsFrom(dbInstance.exec(`SELECT * FROM transcript_triage WHERE transcript_id = ?`, [transcriptId]))[0]
+function transcriptRow(id: string): any {
+  return rowsFrom(dbInstance.exec(`SELECT full_text, speakers FROM transcripts WHERE id = ?`, [id]))[0]
 }
 
 beforeEach(async () => {
@@ -136,7 +132,7 @@ afterEach(async () => {
   dbInstance = null
 })
 
-describe('assessAndPersistAll — triage counts, flagging, queueing', () => {
+describe('scan / runUpgrade — on-the-fly triage counts + flagging', () => {
   beforeEach(() => {
     // A flat, low-importance transcript → reformat band.
     addTranscript({
@@ -154,11 +150,20 @@ describe('assessAndPersistAll — triage counts, flagging, queueing', () => {
       actionItems: JSON.stringify(['a', 'b', 'c', 'd']),
       topics: JSON.stringify(['x', 'y', 'z', 'w']),
       recording: { date: new Date().toISOString(), meetingId: 'm1', captureId: 'c1' },
-      meeting: { attendees: JSON.stringify([{ email: 'a@acme.com' }, { email: 'b@client.com' }]), organizerEmail: 'me@acme.com' },
+      meeting: {
+        attendees: JSON.stringify([{ email: 'a@acme.com' }, { email: 'b@client.com' }]),
+        organizerEmail: 'me@acme.com'
+      },
       capture: { category: 'interview' }
     })
     dbInstance.run(`INSERT INTO meeting_projects (meeting_id, project_id) VALUES ('m1','p1')`)
-    // A structured (non-legacy) transcript → ignored.
+    // An already-reformatted transcript: flat full_text but speakers carry turns.
+    addTranscript({
+      id: 't-reformatted',
+      fullText: 'bloque plano ya reformateado en turnos guardados en speakers',
+      speakers: JSON.stringify([{ speaker: 'Speaker 1', start: 0, text: 'bloque plano' }])
+    })
+    // A genuinely structured transcript (full_text carries speaker lines).
     addTranscript({
       id: 't-structured',
       fullText: 'Speaker 1: hola\nSpeaker 2: qué tal',
@@ -166,129 +171,106 @@ describe('assessAndPersistAll — triage counts, flagging, queueing', () => {
     })
   })
 
-  it('counts legacy/reformat/recommended correctly and ignores structured transcripts', () => {
-    queueBusy = true // keep the worker from processing during assertions
-    const res = assessAndPersistAll()
+  it('counts legacy/reformat/recommended/alreadyReformatted and ignores structured rows', () => {
+    const res = scanOldTranscripts()
+    expect(res.totalTranscripts).toBe(4)
     expect(res.legacyTotal).toBe(2)
     expect(res.toReformat).toBe(1)
     expect(res.recommendedRetranscription).toBe(1)
-    expect(res.totalTranscripts).toBe(3)
+    expect(res.alreadyReformatted).toBe(1)
   })
 
-  it('queues the low-importance transcript for reformat and flags the high-importance one', () => {
-    queueBusy = true
-    assessAndPersistAll()
-
-    const low = triageRow('t-flat-low')
-    expect(low.is_legacy_format).toBe(1)
-    expect(low.reformat_status).toBe('queued')
-    expect(low.recommended_retranscription).toBe(0)
-
-    const high = triageRow('t-flat-high')
-    expect(high.recommended_retranscription).toBe(1)
-    expect(high.triage_band).toBe('recommend-retranscribe')
-    expect(high.reformat_status).toBe('none') // recommended band is NOT auto-reformatted
-
-    const structured = triageRow('t-structured')
-    expect(structured.is_legacy_format).toBe(0)
+  it('scanOldTranscripts writes nothing (speakers untouched)', () => {
+    scanOldTranscripts()
+    expect(transcriptRow('t-flat-low').speakers).toBeNull()
   })
 
-  it('scanOldTranscripts is read-only (no triage rows written)', () => {
-    const res = scanOldTranscripts()
+  it('runUpgrade returns the same counts and does not auto-reformat the flagged band', () => {
+    queueBusy = true // keep the worker from processing during assertions
+    const res = runUpgrade()
     expect(res.legacyTotal).toBe(2)
-    expect(rowsFrom(dbInstance.exec(`SELECT COUNT(*) AS c FROM transcript_triage`))[0].c).toBe(0)
+    expect(res.toReformat).toBe(1)
+    expect(res.recommendedRetranscription).toBe(1)
+    // The high-importance row is flagged, never text-reformatted.
+    expect(transcriptRow('t-flat-high').speakers).toBeNull()
+  })
+
+  it('getRecommendedRecordingIds returns only the flagged legacy recordings', () => {
+    expect(getRecommendedRecordingIds()).toEqual(['rec-t-flat-high'])
+  })
+
+  it('a custom (low) threshold flags more transcripts for re-transcription', () => {
+    // At threshold 5 the low-importance flat row also clears the bar.
+    const res = scanOldTranscripts(5)
+    expect(res.recommendedRetranscription).toBe(2)
+    expect(res.toReformat).toBe(0)
   })
 })
 
-describe('reformatOne — text-only reformat write', () => {
+describe('reformatOne — text-only reformat write + idempotency', () => {
   beforeEach(() => {
     addTranscript({ id: 't1', fullText: 'hola qué tal bien y tú aquí seguimos trabajando en el proyecto' })
-    dbInstance.run(
-      `INSERT INTO transcript_triage (transcript_id, recording_id, is_legacy_format, reformat_status)
-       VALUES ('t1','rec-t1',1,'queued')`
-    )
   })
 
-  it('writes reformatted speaker turns into speakers and preserves full_text', async () => {
+  it('writes reformatted speaker turns into speakers, preserves full_text, and flips out of legacy', async () => {
     mockGenerate.mockResolvedValue(
       '[{"speaker":"Speaker 1","text":"hola qué tal"},{"speaker":"Speaker 2","text":"bien y tú"}]'
     )
-    const result = await reformatOne('t1')
-    expect(result).toBe('done')
+    expect(await reformatOne('t1')).toBe('done')
 
-    const t = rowsFrom(dbInstance.exec(`SELECT full_text, speakers FROM transcripts WHERE id = 't1'`))[0]
+    const t = transcriptRow('t1')
     expect(t.full_text).toBe('hola qué tal bien y tú aquí seguimos trabajando en el proyecto') // untouched
     const segs = JSON.parse(t.speakers)
     expect(segs).toHaveLength(2)
     expect(segs[0]).toMatchObject({ speaker: 'Speaker 1', start: 0, text: 'hola qué tal' })
 
-    const row = triageRow('t1')
-    expect(row.reformat_status).toBe('done')
-    expect(row.reformatted_at).toBeTruthy()
+    // Idempotency: the row is no longer legacy, so a re-scan won't re-pick it.
+    const res = scanOldTranscripts()
+    expect(res.legacyTotal).toBe(0)
+    expect(res.alreadyReformatted).toBe(1)
   })
 
-  it('marks failed (and records the error) when the model call throws', async () => {
+  it('marks failed and leaves speakers untouched when the model call throws', async () => {
     mockGenerate.mockRejectedValue(new Error('quota exceeded'))
-    const result = await reformatOne('t1')
-    expect(result).toBe('failed')
-    const row = triageRow('t1')
-    expect(row.reformat_status).toBe('failed')
-    expect(row.reformat_error).toContain('quota')
+    expect(await reformatOne('t1')).toBe('failed')
+    expect(transcriptRow('t1').speakers).toBeNull()
   })
 
-  it('keeps the block text as a plain turn when the model returns nothing usable', async () => {
+  it('fails (does not persist) when the model returns no labelled turns', async () => {
     mockGenerate.mockResolvedValue('[]')
-    const result = await reformatOne('t1')
-    expect(result).toBe('done')
-    const t = rowsFrom(dbInstance.exec(`SELECT speakers FROM transcripts WHERE id = 't1'`))[0]
-    const segs = JSON.parse(t.speakers)
-    expect(segs).toHaveLength(1)
-    expect(segs[0].text).toContain('hola qué tal')
+    expect(await reformatOne('t1')).toBe('failed')
+    // Unlabelled/degenerate output would still render flat — must not be stored.
+    expect(transcriptRow('t1').speakers).toBeNull()
   })
 })
 
 describe('kickReformatProcessing — lowest-priority gating behind the audio queue', () => {
   beforeEach(() => {
-    addTranscript({ id: 't1', fullText: 'texto plano para reformatear' })
-    dbInstance.run(
-      `INSERT INTO transcript_triage (transcript_id, recording_id, is_legacy_format, reformat_status)
-       VALUES ('t1','rec-t1',1,'queued')`
-    )
+    addTranscript({ id: 't1', fullText: 'texto plano para reformatear sin estructura alguna' })
     mockGenerate.mockResolvedValue('[{"speaker":"Speaker 1","text":"texto plano para reformatear"}]')
   })
 
   it('does NOT reformat while the audio queue is busy', async () => {
     queueBusy = true
-    void kickReformatProcessing(5000)
+    void kickReformatProcessing(60, 5000)
     await vi.advanceTimersByTimeAsync(12000) // two poll cycles
     expect(mockGenerate).not.toHaveBeenCalled()
-    expect(triageRow('t1').reformat_status).toBe('queued')
+    expect(transcriptRow('t1').speakers).toBeNull()
   })
 
   it('reformats once the audio queue is idle', async () => {
     queueBusy = false
-    await kickReformatProcessing(5000)
+    await kickReformatProcessing(60, 5000)
     expect(mockGenerate).toHaveBeenCalledTimes(1)
-    expect(triageRow('t1').reformat_status).toBe('done')
+    expect(transcriptRow('t1').speakers).not.toBeNull()
   })
 })
 
-describe('getRecommendedRecordingIds / getUpgradeStatus', () => {
-  it('returns recording ids flagged for re-transcription', () => {
-    dbInstance.run(
-      `INSERT INTO transcript_triage (transcript_id, recording_id, recommended_retranscription) VALUES ('t1','rec-1',1)`
-    )
-    dbInstance.run(
-      `INSERT INTO transcript_triage (transcript_id, recording_id, recommended_retranscription) VALUES ('t2','rec-2',0)`
-    )
-    expect(getRecommendedRecordingIds()).toEqual(['rec-1'])
-  })
-
-  it('reports a reformat-status breakdown', () => {
-    dbInstance.run(
-      `INSERT INTO transcript_triage (transcript_id, recording_id, is_legacy_format, reformat_status) VALUES ('t1','rec-1',1,'queued')`
-    )
+describe('getUpgradeStatus', () => {
+  it('reports scan counts plus the worker-active flag', () => {
+    addTranscript({ id: 't1', fullText: 'un bloque plano sin estructura para reformatear' })
     const status = getUpgradeStatus()
-    expect(status.reformat.queued).toBe(1)
+    expect(status.legacyTotal).toBe(1)
+    expect(status.reformattingActive).toBe(false)
   })
 })

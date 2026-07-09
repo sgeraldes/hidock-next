@@ -13,7 +13,7 @@ import { z } from 'zod'
 import { success, error, Result } from '../types/api'
 import {
   scanOldTranscripts,
-  assessAndPersistAll,
+  runUpgrade,
   getUpgradeStatus,
   getRecommendedRecordingIds,
   DEFAULT_TRIAGE_THRESHOLD,
@@ -40,7 +40,7 @@ export function registerTranscriptUpgradeHandlers(): void {
 
   ipcMain.handle('transcript-upgrade:run', async (_, request: unknown): Promise<Result<ScanResult>> => {
     try {
-      return success(assessAndPersistAll(resolveThreshold(request)))
+      return success(runUpgrade(resolveThreshold(request)))
     } catch (err) {
       console.error('transcript-upgrade:run error:', err)
       return error('DATABASE_ERROR', 'Failed to run transcript upgrade', err)
@@ -56,9 +56,9 @@ export function registerTranscriptUpgradeHandlers(): void {
     }
   })
 
-  ipcMain.handle('transcript-upgrade:getRecommended', async (): Promise<Result<string[]>> => {
+  ipcMain.handle('transcript-upgrade:getRecommended', async (_, request: unknown): Promise<Result<string[]>> => {
     try {
-      return success(getRecommendedRecordingIds())
+      return success(getRecommendedRecordingIds(resolveThreshold(request)))
     } catch (err) {
       console.error('transcript-upgrade:getRecommended error:', err)
       return error('DATABASE_ERROR', 'Failed to get recommended recordings', err)

@@ -1,7 +1,7 @@
 /**
  * Transcript-upgrade service.
  *
- * Old-format transcripts (~278 in the corpus) were produced before the
+ * Old-format transcripts (~200 in the corpus) were produced before the
  * speaker-turns pipeline and are stored as flat paragraphs. Re-transcribing all
  * of them from audio is expensive, so this service instead:
  *
@@ -13,16 +13,20 @@
  *   4. FLAGS the important band for a (user-initiated) audio re-transcription
  *      instead of auto-enqueuing the costly job.
  *
- * State lives in the `transcript_triage` table (added to the DB schema, created
- * every boot — no SCHEMA_VERSION bump). The reformat worker is gated behind the
- * audio transcription queue being idle, so it is strictly lowest-priority and
- * never competes with the live transcription backlog.
+ * NO new tables and NO schema migration: everything is computed on the fly from
+ * existing columns, and the ONLY write is the reformatted turns into the
+ * existing `transcripts.speakers` column. A successful reformat flips a row from
+ * 'legacy' to 'reformatted' (see classifyTranscriptFormat), so the detection
+ * itself is the idempotency guard — re-running never re-picks a finished row.
+ *
+ * The reformat worker is gated behind the audio transcription queue being idle,
+ * so it is strictly lowest-priority and never competes with the live backlog.
  */
 
 import { getChatLLMService } from './chat-llm'
 import { queryAll, queryOne, run, runInTransaction, saveDatabase, getQueueItems } from './database'
 import {
-  detectTranscriptFormat,
+  classifyTranscriptFormat,
   scoreImportance,
   bandForScore,
   countDecisionCues,
@@ -55,32 +59,30 @@ interface JoinedTranscriptRow {
   capture_category: string | null
 }
 
-/** One transcript's full triage assessment (in-memory; not yet persisted). */
+/** One transcript's triage assessment (in-memory; never persisted). */
 export interface TriageAssessment {
   transcriptId: string
   recordingId: string
-  isLegacy: boolean
+  formatClass: 'structured' | 'reformatted' | 'legacy'
   score: number
   band: 'recommend-retranscribe' | 'reformat'
-  signals: ImportanceSignals & { breakdown: Record<string, number> }
 }
 
 export interface ScanResult {
   /** Every transcript with a stored full_text that was examined. */
   totalTranscripts: number
-  /** Flat (old-format) transcripts found. */
+  /** Flat (old-format) transcripts still needing work. */
   legacyTotal: number
   /** Legacy transcripts below threshold — to be text-reformatted. */
   toReformat: number
-  /** Legacy transcripts at/above threshold — recommended for re-transcription. */
+  /** Legacy transcripts at/above threshold — flagged for re-transcription. */
   recommendedRetranscription: number
-  /** Legacy transcripts already reformatted (won't be reprocessed). */
+  /** Transcripts this pipeline already reformatted (flat full_text + turns). */
   alreadyReformatted: number
   threshold: number
 }
 
 export interface UpgradeStatus extends ScanResult {
-  reformat: { none: number; queued: number; processing: number; done: number; failed: number }
   reformattingActive: boolean
 }
 
@@ -176,14 +178,14 @@ function ageDaysFrom(dateRecorded: string | null): number | undefined {
   return Math.max(0, Math.floor((Date.now() - t) / 86400000))
 }
 
-/** Assess one transcript: detect format + compute importance. */
+/** Assess one transcript: classify format + compute importance. */
 function assess(
   row: JoinedTranscriptRow,
   projects: { meetingIds: Set<string>; captureIds: Set<string> },
   threshold: number
 ): TriageAssessment {
   const fullText = row.full_text || ''
-  const detection = detectTranscriptFormat({ fullText, speakers: row.speakers })
+  const formatClass = classifyTranscriptFormat({ fullText, speakers: row.speakers })
   const { count: attendeeCount, hasExternal } = attendeeSignals(row.attendees, row.organizer_email)
 
   const hasProjectLink =
@@ -203,183 +205,99 @@ function assess(
     decisionCueMatches: countDecisionCues(fullText)
   }
 
-  const { score, breakdown } = scoreImportance(signals)
+  const { score } = scoreImportance(signals)
   return {
     transcriptId: row.transcript_id,
     recordingId: row.recording_id,
-    isLegacy: detection.isLegacy,
+    formatClass,
     score,
-    band: bandForScore(score, threshold),
-    signals: { ...signals, breakdown }
+    band: bandForScore(score, threshold)
+  }
+}
+
+/** Assess every transcript with usable text (skips empty full_text). */
+function assessAll(threshold: number): TriageAssessment[] {
+  const rows = loadTranscriptRows()
+  const projects = loadProjectLinkSets()
+  const out: TriageAssessment[] = []
+  for (const row of rows) {
+    if (!row.full_text || !row.full_text.trim()) continue
+    out.push(assess(row, projects, threshold))
+  }
+  return out
+}
+
+/** Roll a list of assessments up into the scan counts. `total` is the row count. */
+function tally(total: number, assessments: TriageAssessment[], threshold: number): ScanResult {
+  let legacyTotal = 0
+  let toReformat = 0
+  let recommended = 0
+  let alreadyReformatted = 0
+  for (const a of assessments) {
+    if (a.formatClass === 'reformatted') alreadyReformatted++
+    if (a.formatClass !== 'legacy') continue
+    legacyTotal++
+    if (a.band === 'recommend-retranscribe') recommended++
+    else toReformat++
+  }
+  return {
+    totalTranscripts: total,
+    legacyTotal,
+    toReformat,
+    recommendedRetranscription: recommended,
+    alreadyReformatted,
+    threshold
   }
 }
 
 // ---------------------------------------------------------------------------
-// Public: scan (read-only) + assess-and-persist
+// Public: scan (read-only), run (kicks reformats), flag surfacing
 // ---------------------------------------------------------------------------
-
-/** Existing reformat status keyed by transcript id (so a scan won't recount
- *  transcripts already reformatted). */
-function loadReformatStatus(): Map<string, string> {
-  const map = new Map<string, string>()
-  try {
-    for (const r of queryAll<{ transcript_id: string; reformat_status: string }>(
-      `SELECT transcript_id, reformat_status FROM transcript_triage`
-    )) {
-      map.set(r.transcript_id, r.reformat_status)
-    }
-  } catch {
-    /* triage table absent (older boot) — treated as none */
-  }
-  return map
-}
 
 /**
- * READ-ONLY dry run: detect + triage every transcript and return counts. Does
- * not write to the database, so it is safe to call against the live DB.
+ * READ-ONLY dry run: classify + triage every transcript and return counts. Does
+ * not write anything, so it is safe to call against the live DB.
  */
 export function scanOldTranscripts(threshold = DEFAULT_TRIAGE_THRESHOLD): ScanResult {
   const rows = loadTranscriptRows()
   const projects = loadProjectLinkSets()
-  const existingStatus = loadReformatStatus()
-
-  let legacyTotal = 0
-  let toReformat = 0
-  let recommended = 0
-  let alreadyReformatted = 0
-
+  const assessments: TriageAssessment[] = []
   for (const row of rows) {
     if (!row.full_text || !row.full_text.trim()) continue
-    const a = assess(row, projects, threshold)
-    if (!a.isLegacy) continue
-    legacyTotal++
-    if (existingStatus.get(a.transcriptId) === 'done') {
-      alreadyReformatted++
-      continue
-    }
-    if (a.band === 'recommend-retranscribe') recommended++
-    else toReformat++
+    assessments.push(assess(row, projects, threshold))
   }
-
-  return {
-    totalTranscripts: rows.length,
-    legacyTotal,
-    toReformat,
-    recommendedRetranscription: recommended,
-    alreadyReformatted,
-    threshold
-  }
+  return tally(rows.length, assessments, threshold)
 }
 
 /**
- * Assess every transcript and PERSIST the triage: upsert one `transcript_triage`
- * row per transcript, set `recommended_retranscription` for the important band,
- * and mark the reformat band 'queued' (unless already done/queued). Then kick the
- * lowest-priority reformat worker. Returns the same shape as a scan.
+ * Kick the upgrade: no persistence beyond the reformats themselves. Returns the
+ * same counts as a scan, then fires the lowest-priority reformat worker for the
+ * flat, below-threshold band. The important band is left flagged (surfaced via
+ * getRecommendedRecordingIds) for a user-initiated audio re-transcription.
  */
-export function assessAndPersistAll(threshold = DEFAULT_TRIAGE_THRESHOLD): ScanResult {
-  const rows = loadTranscriptRows()
-  const projects = loadProjectLinkSets()
-  const existingStatus = loadReformatStatus()
-
-  let legacyTotal = 0
-  let toReformat = 0
-  let recommended = 0
-  let alreadyReformatted = 0
-
-  runInTransaction(() => {
-    for (const row of rows) {
-      if (!row.full_text || !row.full_text.trim()) continue
-      const a = assess(row, projects, threshold)
-
-      const prior = existingStatus.get(a.transcriptId)
-      const recommendedFlag = a.isLegacy && a.band === 'recommend-retranscribe' ? 1 : 0
-
-      // Decide the reformat status. Only flat transcripts in the reformat band
-      // get queued; done/processing are preserved; everything else is 'none'.
-      let reformatStatus = 'none'
-      if (a.isLegacy && a.band === 'reformat') {
-        reformatStatus = prior === 'done' || prior === 'processing' ? prior : 'queued'
-      } else if (prior) {
-        reformatStatus = prior // keep a prior status even if no longer eligible
-      }
-
-      run(
-        `INSERT INTO transcript_triage
-           (transcript_id, recording_id, is_legacy_format, triage_score, triage_band,
-            triage_signals, recommended_retranscription, reformat_status, assessed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-         ON CONFLICT(transcript_id) DO UPDATE SET
-           recording_id = excluded.recording_id,
-           is_legacy_format = excluded.is_legacy_format,
-           triage_score = excluded.triage_score,
-           triage_band = excluded.triage_band,
-           triage_signals = excluded.triage_signals,
-           recommended_retranscription = excluded.recommended_retranscription,
-           reformat_status = excluded.reformat_status,
-           assessed_at = CURRENT_TIMESTAMP`,
-        [
-          a.transcriptId,
-          a.recordingId,
-          a.isLegacy ? 1 : 0,
-          a.score,
-          a.band,
-          JSON.stringify(a.signals),
-          recommendedFlag,
-          reformatStatus
-        ]
-      )
-
-      if (!a.isLegacy) continue
-      legacyTotal++
-      if (prior === 'done') alreadyReformatted++
-      else if (recommendedFlag) recommended++
-      else toReformat++
-    }
-  })
-
-  saveDatabase()
-
-  // Fire-and-forget the lowest-priority reformat worker.
-  void kickReformatProcessing()
-
-  return {
-    totalTranscripts: rows.length,
-    legacyTotal,
-    toReformat,
-    recommendedRetranscription: recommended,
-    alreadyReformatted,
-    threshold
-  }
+export function runUpgrade(threshold = DEFAULT_TRIAGE_THRESHOLD): ScanResult {
+  const result = scanOldTranscripts(threshold)
+  void kickReformatProcessing(threshold)
+  return result
 }
 
-/** Recording ids flagged for a user-initiated audio re-transcription. */
-export function getRecommendedRecordingIds(): string[] {
-  try {
-    return queryAll<{ recording_id: string }>(
-      `SELECT recording_id FROM transcript_triage WHERE recommended_retranscription = 1`
-    ).map((r) => r.recording_id)
-  } catch {
-    return []
-  }
+/** Recording ids of the flat transcripts flagged for audio re-transcription. */
+export function getRecommendedRecordingIds(threshold = DEFAULT_TRIAGE_THRESHOLD): string[] {
+  return assessAll(threshold)
+    .filter((a) => a.formatClass === 'legacy' && a.band === 'recommend-retranscribe')
+    .map((a) => a.recordingId)
 }
 
-/** Current upgrade status: scan counts + reformat-status breakdown. */
+/** Transcript ids of the flat, below-threshold band — the reformat work list. */
+function getReformatTranscriptIds(threshold: number): string[] {
+  return assessAll(threshold)
+    .filter((a) => a.formatClass === 'legacy' && a.band === 'reformat')
+    .map((a) => a.transcriptId)
+}
+
+/** Current upgrade status: scan counts + whether the worker is draining. */
 export function getUpgradeStatus(threshold = DEFAULT_TRIAGE_THRESHOLD): UpgradeStatus {
-  const scan = scanOldTranscripts(threshold)
-  const reformat = { none: 0, queued: 0, processing: 0, done: 0, failed: 0 }
-  try {
-    for (const r of queryAll<{ reformat_status: string; c: number }>(
-      `SELECT reformat_status, COUNT(*) AS c FROM transcript_triage GROUP BY reformat_status`
-    )) {
-      if (r.reformat_status in reformat) {
-        ;(reformat as Record<string, number>)[r.reformat_status] = r.c
-      }
-    }
-  } catch {
-    /* triage table absent */
-  }
-  return { ...scan, reformat, reformattingActive: reformatting }
+  return { ...scanOldTranscripts(threshold), reformattingActive: reformatting }
 }
 
 // ---------------------------------------------------------------------------
@@ -401,19 +319,28 @@ function audioQueueBusy(): boolean {
   }
 }
 
-/** Reformat one transcript's stored text into speaker turns via the cheap text
- *  model, writing the result into `speakers` (full_text untouched). Exported for
- *  direct unit testing with a mocked chat-llm. */
-export async function reformatOne(transcriptId: string): Promise<'done' | 'failed' | 'skipped'> {
-  const row = queryOne<{ full_text: string | null }>(
-    `SELECT full_text FROM transcripts WHERE id = ?`,
+/** Whether a transcript is still a flat/legacy row right now (so a drain never
+ *  re-reformats one that a prior pass already upgraded). */
+function isStillLegacy(transcriptId: string): boolean {
+  const row = queryOne<{ full_text: string | null; speakers: string | null }>(
+    `SELECT full_text, speakers FROM transcripts WHERE id = ?`,
     [transcriptId]
   )
+  if (!row || !row.full_text || !row.full_text.trim()) return false
+  return classifyTranscriptFormat({ fullText: row.full_text, speakers: row.speakers }) === 'legacy'
+}
+
+/**
+ * Reformat one transcript's stored text into speaker turns via the cheap text
+ * model, writing the result into `speakers` (full_text untouched). Exported for
+ * direct unit testing with a mocked chat-llm. Returns 'done' on a successful
+ * write, 'failed' on an LLM/empty error (row stays legacy and is retried on the
+ * next run), or 'skipped' when the transcript has no text.
+ */
+export async function reformatOne(transcriptId: string): Promise<'done' | 'failed' | 'skipped'> {
+  const row = queryOne<{ full_text: string | null }>(`SELECT full_text FROM transcripts WHERE id = ?`, [transcriptId])
   const fullText = row?.full_text || ''
-  if (!fullText.trim()) {
-    markReformat(transcriptId, 'failed', 'empty full_text')
-    return 'failed'
-  }
+  if (!fullText.trim()) return 'skipped'
 
   const blocks = splitIntoReformatBlocks(fullText)
   const svc = getChatLLMService()
@@ -428,7 +355,10 @@ export async function reformatOne(transcriptId: string): Promise<'done' | 'faile
         maxTokens: 8192
       })
     } catch (e) {
-      markReformat(transcriptId, 'failed', e instanceof Error ? e.message : 'LLM call failed')
+      console.warn(
+        `[TranscriptUpgrade] reformat LLM call failed for ${transcriptId}:`,
+        e instanceof Error ? e.message : e
+      )
       return 'failed'
     }
     const parsed = parseReformatResponse(response || '')
@@ -441,63 +371,51 @@ export async function reformatOne(transcriptId: string): Promise<'done' | 'faile
     }
   }
 
-  // Guard: never persist an empty/degenerate result (which would render nothing).
   const usable = segments.filter((s) => s.text && s.text.trim())
-  if (usable.length === 0) {
-    markReformat(transcriptId, 'failed', 'no usable segments produced')
+  // Never persist a degenerate result. Also require at least one speaker label —
+  // an all-unlabelled, start-0 result would still render as a flat blob and would
+  // NOT flip the row out of 'legacy', so it would be re-picked forever.
+  if (usable.length === 0 || !usable.some((s) => s.speaker && s.speaker.trim())) {
+    console.warn(`[TranscriptUpgrade] reformat produced no structured turns for ${transcriptId}; leaving as-is`)
     return 'failed'
   }
 
   runInTransaction(() => {
     run(`UPDATE transcripts SET speakers = ? WHERE id = ?`, [JSON.stringify(usable), transcriptId])
-    run(
-      `UPDATE transcript_triage SET reformat_status = 'done', reformat_error = NULL, reformatted_at = CURRENT_TIMESTAMP WHERE transcript_id = ?`,
-      [transcriptId]
-    )
   })
   saveDatabase()
   return 'done'
 }
 
-/** Update only the triage row's reformat status (own transaction). */
-function markReformat(transcriptId: string, status: string, error?: string): void {
-  run(
-    `UPDATE transcript_triage SET reformat_status = ?, reformat_error = ? WHERE transcript_id = ?`,
-    [status, error ?? null, transcriptId]
-  )
-  saveDatabase()
-}
-
-/** Next queued transcript to reformat (oldest assessment first). */
-function nextQueuedTranscriptId(): string | undefined {
-  return queryOne<{ transcript_id: string }>(
-    `SELECT transcript_id FROM transcript_triage WHERE reformat_status = 'queued' ORDER BY assessed_at ASC LIMIT 1`
-  )?.transcript_id
-}
-
 /**
- * Drain the reformat queue one transcript at a time, always yielding to the audio
- * transcription backlog: while audio is busy it sleeps and re-checks, so reformat
- * work only proceeds in the gaps. Reentrancy-guarded — a second call is a no-op
- * while one drain is in flight. Never throws.
+ * Drain the reformat work list one transcript at a time, always yielding to the
+ * audio transcription backlog: while audio is busy it sleeps and re-checks, so
+ * reformat work only proceeds in the gaps. The list is snapshotted once at the
+ * start; each item is re-verified as still-legacy right before processing.
+ * Reentrancy-guarded — a second call is a no-op while one drain is in flight.
+ * Never throws.
  */
-export async function kickReformatProcessing(pollMs = 30000): Promise<void> {
+export async function kickReformatProcessing(
+  threshold = DEFAULT_TRIAGE_THRESHOLD,
+  pollMs = 30000
+): Promise<void> {
   if (reformatting) return
   reformatting = true
   reformatStopRequested = false
   try {
-    while (!reformatStopRequested) {
-      const next = nextQueuedTranscriptId()
-      if (!next) break
+    const ids = getReformatTranscriptIds(threshold)
+    let i = 0
+    while (i < ids.length && !reformatStopRequested) {
       if (audioQueueBusy()) {
         await sleep(pollMs)
         continue
       }
+      const id = ids[i]
+      i++
       try {
-        run(`UPDATE transcript_triage SET reformat_status = 'processing' WHERE transcript_id = ?`, [next])
-        await reformatOne(next)
+        if (isStillLegacy(id)) await reformatOne(id)
       } catch (e) {
-        markReformat(next, 'failed', e instanceof Error ? e.message : 'reformat failed')
+        console.warn(`[TranscriptUpgrade] reformat failed for ${id}:`, e instanceof Error ? e.message : e)
       }
     }
   } finally {

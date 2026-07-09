@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   detectTranscriptFormat,
+  classifyTranscriptFormat,
   storedSegmentsAreStructured,
   fullTextIsStructured,
   parseStoredSegments,
@@ -66,6 +67,21 @@ describe('detectTranscriptFormat — old-format predicate (inverse of the reader
   it('treats a reformatted transcript (speakers with labels, start 0) as no-longer-legacy', () => {
     const speakers = JSON.stringify([{ speaker: 'Speaker 1', start: 0, text: 'párrafo uno' }])
     expect(detectTranscriptFormat({ fullText: 'párrafo uno', speakers }).isLegacy).toBe(false)
+  })
+})
+
+describe('classifyTranscriptFormat — legacy / reformatted / structured (stateless idempotency)', () => {
+  it('classifies a flat blob as legacy', () => {
+    expect(classifyTranscriptFormat({ fullText: 'bloque plano sin nada', speakers: null })).toBe('legacy')
+  })
+
+  it('classifies flat full_text + stored turns as reformatted (already upgraded by us)', () => {
+    const speakers = JSON.stringify([{ speaker: 'Speaker 1', start: 0, text: 'bloque plano' }])
+    expect(classifyTranscriptFormat({ fullText: 'bloque plano sin nada', speakers })).toBe('reformatted')
+  })
+
+  it('classifies full_text with speaker lines as structured (real ASR output)', () => {
+    expect(classifyTranscriptFormat({ fullText: 'Speaker 1: hola\nSpeaker 2: chau', speakers: null })).toBe('structured')
   })
 })
 
