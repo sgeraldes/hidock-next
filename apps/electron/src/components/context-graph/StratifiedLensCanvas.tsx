@@ -6,8 +6,8 @@ import { computeStratifiedLayout, type BandRect } from './layout'
 
 type GNode = ContextLensNode & NodeObject
 interface GLink {
-  source: string
-  target: string
+  source: string | GNode
+  target: string | GNode
   type: string
   weight: number
 }
@@ -16,6 +16,29 @@ interface GLink {
 const MIN_HIT_PX = 11
 /** Below this zoom, only the focused/hovered/highlighted labels show. */
 const LABEL_ZOOM_THRESHOLD = 1.4
+/** Node radius clamp (graph units) — degree must never produce viewport-sized circles. */
+const NODE_R_MIN = 4
+const NODE_R_MAX = 14
+/** Modest emphasis for the lens center (well under 1.5× the cap). */
+const CENTER_EMPHASIS = 1.3
+
+/** Sqrt-scaled, HARD-CLAMPED radius. Uncapped degree sizing let a ~400-degree
+ *  hub cover a quarter of the viewport; the clamp compresses the distribution.
+ *  Exported for regression tests. */
+export function baseRadius(degree: number): number {
+  return Math.min(NODE_R_MAX, Math.max(NODE_R_MIN, 3.5 + Math.sqrt(degree || 0) * 1.2))
+}
+
+/** force-graph rebinds link endpoints to node OBJECTS — resolve either form.
+ *  Exported for regression tests. */
+export function endpointId(v: string | { id: string }): string {
+  return typeof v === 'object' && v !== null ? v.id : v
+}
+
+/** Labels go into force-graph's HTML tooltip — escape user data. */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
 
 interface StratifiedLensCanvasProps {
   data: ContextLensData
@@ -35,7 +58,8 @@ interface StratifiedLensCanvasProps {
  * evidence, top → down) and ordered left→right by time. No physics settle — the
  * layout is deterministic, so the picture itself reads as reasoning. Zoom/pan,
  * click-to-select, double-click-to-recenter, hover rings, a guaranteed minimum
- * hit target, provenance dimming, and age decay all live here.
+ * hit target, full-text hover tooltips, provenance dimming, and age decay all
+ * live here.
  */
 export function StratifiedLensCanvas({
   data,
@@ -92,6 +116,17 @@ export function StratifiedLensCanvas({
     }
   }, [data])
 
+  /** Painted radius: clamped base × gentle age decay (+ center emphasis). */
+  const paintedRadius = useCallback(
+    (node: GNode): number => {
+      const rec = recency(node.dateMs)
+      let r = baseRadius(node.degree) * (0.8 + 0.2 * rec)
+      if (node.id === data.center) r *= CENTER_EMPHASIS
+      return r
+    },
+    [recency, data.center]
+  )
+
   // A fresh dataset re-fits the view.
   useEffect(() => {
     didFitRef.current = false
@@ -120,22 +155,48 @@ export function StratifiedLensCanvas({
 
   const hasHighlight = !!highlightIds && highlightIds.size > 0
 
-  // --- Band backgrounds + labels (drawn beneath the nodes) ------------------
+  // --- Band backgrounds: four flat translucent rects + one hairline separator
+  // per boundary, drawn ONCE per frame (onRenderFramePre) in graph space,
+  // beneath the links and nodes. State is save/restored so nothing leaks.
   const paintBands = useCallback(
     (ctx: CanvasRenderingContext2D, globalScale: number) => {
-      for (const band of bands as BandRect[]) {
+      const rects = bands as BandRect[]
+      if (rects.length === 0) return
+      ctx.save()
+
+      const left = xExtent.min
+      const right = xExtent.max
+      for (const band of rects) {
         const style = STRATUM_STYLES[band.stratum]
         ctx.fillStyle = isDark ? style.bgDark : style.bgLight
-        ctx.fillRect(xExtent.min, band.yTop, xExtent.max - xExtent.min, band.yBottom - band.yTop)
-
-        // Zoom-compensated band tag pinned to the band's left edge → stable size.
-        const fontSize = Math.max(13 / globalScale, 3)
-        ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`
-        ctx.textAlign = 'left'
-        ctx.textBaseline = 'middle'
-        ctx.fillStyle = isDark ? style.labelDark : style.labelLight
-        ctx.fillText(style.label.toUpperCase(), xExtent.min + 8 / globalScale, band.yCenter)
+        ctx.fillRect(left, band.yTop, right - left, band.yBottom - band.yTop)
       }
+
+      // One hairline separator per interior band boundary (screen-constant 1px).
+      ctx.strokeStyle = isDark ? 'rgba(148,163,184,0.22)' : 'rgba(100,116,139,0.22)'
+      ctx.lineWidth = 1 / globalScale
+      for (let i = 1; i < rects.length; i++) {
+        const y = rects[i].yTop
+        ctx.beginPath()
+        ctx.moveTo(left, y)
+        ctx.lineTo(right, y)
+        ctx.stroke()
+      }
+
+      // Band tags pinned to the left edge. Font is zoom-compensated but clamped
+      // so a zoomed-out view can't blow the tag up past the band itself.
+      const bandHeight = rects[0].yBottom - rects[0].yTop
+      const fontSize = Math.min(Math.max(13 / globalScale, 3), bandHeight * 0.22)
+      ctx.font = `600 ${fontSize}px Inter, system-ui, sans-serif`
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'middle'
+      for (const band of rects) {
+        const style = STRATUM_STYLES[band.stratum]
+        ctx.fillStyle = isDark ? style.labelDark : style.labelLight
+        ctx.fillText(style.label.toUpperCase(), left + 8 / globalScale, band.yCenter)
+      }
+
+      ctx.restore()
     },
     [bands, xExtent, isDark]
   )
@@ -145,11 +206,11 @@ export function StratifiedLensCanvas({
       const x = node.x ?? 0
       const y = node.y ?? 0
       const rec = recency(node.dateMs) // 0 (old) … 1 (new)
-      // Age decay: newer nodes a touch larger. Degree still drives base size.
-      const radius = (3 + Math.sqrt(node.degree || 0) * 1.5) * (0.72 + 0.28 * rec)
+      const radius = paintedRadius(node)
       const bright = !hasHighlight || highlightIds!.has(node.id)
       const isFocus = node.id === focusId
       const isHover = node.id === hoverId
+      const isCenter = node.id === data.center
 
       // Alpha: dim non-path nodes hard; otherwise fade old nodes gently.
       ctx.globalAlpha = bright ? 0.55 + 0.45 * rec : 0.1
@@ -158,6 +219,15 @@ export function StratifiedLensCanvas({
       ctx.fillStyle = colorForType(node.type, isDark)
       ctx.fill()
 
+      // The lens center reads as the anchor via a standing ring, not raw size.
+      if (isCenter && bright) {
+        ctx.globalAlpha = 0.85
+        ctx.lineWidth = 1.5 / globalScale
+        ctx.strokeStyle = colorForType(node.type, isDark)
+        ctx.beginPath()
+        ctx.arc(x, y, radius + 3.5 / globalScale, 0, 2 * Math.PI)
+        ctx.stroke()
+      }
       if (isHover && bright) {
         ctx.globalAlpha = 0.9
         ctx.lineWidth = 2 / globalScale
@@ -189,20 +259,30 @@ export function StratifiedLensCanvas({
       }
       ctx.globalAlpha = 1
     },
-    [focusId, hoverId, hasHighlight, highlightIds, isDark, recency]
+    [focusId, hoverId, hasHighlight, highlightIds, isDark, recency, paintedRadius, data.center]
   )
 
-  // Minimum hit target in SCREEN space → clickable at any zoom.
+  // Pointer area: minimum SCREEN-space hit target (clickable at any zoom), plus
+  // coverage of the label text zone so hovering a truncated label still raises
+  // the full-text tooltip.
   const paintPointerArea = useCallback(
     (node: GNode, color: string, ctx: CanvasRenderingContext2D, globalScale: number) => {
-      const base = 3 + Math.sqrt(node.degree || 0) * 1.5 + 2
-      const radius = Math.max(base, MIN_HIT_PX / globalScale)
+      const x = node.x ?? 0
+      const y = node.y ?? 0
+      const radius = Math.max(paintedRadius(node) + 2, MIN_HIT_PX / globalScale)
       ctx.fillStyle = color
       ctx.beginPath()
-      ctx.arc(node.x ?? 0, node.y ?? 0, radius, 0, 2 * Math.PI)
+      ctx.arc(x, y, radius, 0, 2 * Math.PI)
       ctx.fill()
+
+      if (globalScale > LABEL_ZOOM_THRESHOLD) {
+        const fontSize = Math.max(11 / globalScale, 2)
+        const label = node.label.length > 26 ? `${node.label.slice(0, 25)}…` : node.label
+        const w = label.length * fontSize * 0.62
+        ctx.fillRect(x - w / 2, y + paintedRadius(node) + 1, w, fontSize + 2)
+      }
     },
-    []
+    [paintedRadius]
   )
 
   const handleClick = useCallback(
@@ -233,16 +313,16 @@ export function StratifiedLensCanvas({
         onRenderFramePre={paintBands}
         nodeCanvasObject={paintNode}
         nodePointerAreaPaint={paintPointerArea}
-        nodeLabel={(n: GNode) => `${n.label} · ${n.type}`}
+        nodeLabel={(n: GNode) => `${escapeHtml(n.label)} · ${n.type.replace(/_/g, ' ')}`}
         linkColor={(l: GLink) => {
           if (hasHighlight) {
-            const on = highlightIds!.has(l.source as unknown as string) && highlightIds!.has(l.target as unknown as string)
-            if (!on) return isDark ? 'rgba(148,163,184,0.08)' : 'rgba(100,116,139,0.08)'
+            const on = highlightIds!.has(endpointId(l.source)) && highlightIds!.has(endpointId(l.target))
+            if (!on) return isDark ? 'rgba(148,163,184,0.06)' : 'rgba(100,116,139,0.06)'
             return isDark ? 'rgba(226,232,240,0.55)' : 'rgba(51,65,85,0.55)'
           }
-          return isDark ? 'rgba(148,163,184,0.22)' : 'rgba(100,116,139,0.28)'
+          return isDark ? 'rgba(148,163,184,0.15)' : 'rgba(100,116,139,0.18)'
         }}
-        linkWidth={(l: GLink) => Math.min(0.5 + (l.weight || 1) * 0.25, 2.5)}
+        linkWidth={(l: GLink) => Math.min(0.4 + (l.weight || 1) * 0.2, 1.8)}
         linkDirectionalParticles={0}
         // Positions are pinned (fx/fy) → no settle. Zero ticks = deterministic.
         cooldownTicks={0}

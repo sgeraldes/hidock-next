@@ -18,6 +18,14 @@ interface GLink {
  */
 const LABEL_ZOOM_THRESHOLD = 1.8
 
+/**
+ * Sqrt-scaled, HARD-CLAMPED node radius (graph units). Uncapped degree sizing
+ * let a several-hundred-degree hub cover a quarter of the viewport.
+ */
+function nodeRadius(degree: number): number {
+  return Math.min(14, Math.max(4, 3 + Math.sqrt(degree || 0) * 1.2))
+}
+
 interface ContextGraphCanvasProps {
   data: ContextGraphData
   /** Node to spotlight (centers + zooms on it, draws a ring). */
@@ -101,7 +109,7 @@ export function ContextGraphCanvas({
     (node: GNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
       const x = node.x ?? 0
       const y = node.y ?? 0
-      const radius = 3 + Math.sqrt(node.degree || 0) * 1.6
+      const radius = nodeRadius(node.degree)
       const bright = !hasHighlight || highlightIds!.has(node.id)
       const isFocus = node.id === focusId
 
@@ -137,7 +145,7 @@ export function ContextGraphCanvas({
 
   const paintPointerArea = useCallback(
     (node: GNode, color: string, ctx: CanvasRenderingContext2D) => {
-      const radius = 3 + Math.sqrt(node.degree || 0) * 1.6 + 2
+      const radius = nodeRadius(node.degree) + 2
       ctx.fillStyle = color
       ctx.beginPath()
       ctx.arc(node.x ?? 0, node.y ?? 0, radius, 0, 2 * Math.PI)

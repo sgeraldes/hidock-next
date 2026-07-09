@@ -74,13 +74,48 @@ describe('computeStratifiedLayout: time ordering (x axis)', () => {
     expect(xb).toBeLessThan(xc)
   })
 
-  it('enforces a minimum horizontal gap between neighbours', () => {
-    // Three meetings on the SAME day would collide without the sweep.
-    const nodes = [n('a', 'evidence', 5), n('b', 'evidence', 5), n('c', 'evidence', 5)]
+  it('never collides two nodes: same sub-row keeps the min gap, positions are unique', () => {
+    // Five meetings on the SAME day would collide without collision handling.
+    const nodes = [0, 1, 2, 3, 4].map((i) => n(`m${i}`, 'evidence', 5))
     const { positions } = computeStratifiedLayout(nodes, { nodeGap: 50 })
-    const xs = ['a', 'b', 'c'].map((id) => positions.get(id)!.x).sort((p, q) => p - q)
-    expect(xs[1] - xs[0]).toBeGreaterThanOrEqual(50 - 1e-9)
-    expect(xs[2] - xs[1]).toBeGreaterThanOrEqual(50 - 1e-9)
+    // Group by sub-row (y); within a row, horizontal gaps must be >= nodeGap.
+    const byRow = new Map<number, number[]>()
+    for (const nd of nodes) {
+      const p = positions.get(nd.id)!
+      if (!byRow.has(p.y)) byRow.set(p.y, [])
+      byRow.get(p.y)!.push(p.x)
+    }
+    for (const xs of byRow.values()) {
+      xs.sort((p, q) => p - q)
+      for (let i = 1; i < xs.length; i++) {
+        expect(xs[i] - xs[i - 1]).toBeGreaterThanOrEqual(50 - 1e-9)
+      }
+    }
+    // No two nodes share the exact same (x, y).
+    const keys = nodes.map((nd) => {
+      const p = positions.get(nd.id)!
+      return `${p.x}|${p.y}`
+    })
+    expect(new Set(keys).size).toBe(keys.length)
+  })
+
+  it('bounds the horizontal extent for dense bands (no scanline aspect ratio)', () => {
+    // 120 same-day meetings: an unbounded rightward sweep grew ~5,500 units wide
+    // (vs ~960 tall), squashing inter-band edges into horizontal moiré noise.
+    // Multi-row wrapping must keep the used width in the same order as `width`.
+    const nodes = Array.from({ length: 120 }, (_, i) => n(`m${i}`, 'evidence', 5))
+    const { positions, minX, maxX, bands } = computeStratifiedLayout(nodes, {
+      width: 1100,
+      nodeGap: 46,
+    })
+    expect(maxX - minX).toBeLessThanOrEqual(1100 * 1.5)
+    // All nodes still inside their band.
+    const band = bands.find((b) => b.stratum === 'evidence')!
+    for (const nd of nodes) {
+      const y = positions.get(nd.id)!.y
+      expect(y).toBeGreaterThanOrEqual(band.yTop)
+      expect(y).toBeLessThanOrEqual(band.yBottom)
+    }
   })
 
   it('undated nodes sort to the far left (oldest)', () => {
@@ -98,6 +133,26 @@ describe('computeStratifiedLayout: time ordering (x axis)', () => {
     const { positions } = computeStratifiedLayout(nodes)
     // The decision and the same-day meeting share the time scale → equal x.
     expect(positions.get('decision')!.x).toBeCloseTo(positions.get('meeting')!.x, 5)
+  })
+})
+
+describe('node radius clamp (defect: unbounded degree sizing)', () => {
+  it('clamps radius into a sane range regardless of degree', async () => {
+    const { baseRadius } = await import('../StratifiedLensCanvas')
+    // A ~400-degree hub used to cover a quarter of the viewport.
+    expect(baseRadius(400)).toBeLessThanOrEqual(14)
+    expect(baseRadius(10_000)).toBeLessThanOrEqual(14)
+    // Leaves never vanish.
+    expect(baseRadius(0)).toBeGreaterThanOrEqual(4)
+    expect(baseRadius(1)).toBeGreaterThanOrEqual(4)
+    // Still monotonic in degree below the cap (sqrt compression).
+    expect(baseRadius(9)).toBeGreaterThan(baseRadius(1))
+  })
+
+  it('endpointId resolves both string ids and rebound node objects', async () => {
+    const { endpointId } = await import('../StratifiedLensCanvas')
+    expect(endpointId('person:alice')).toBe('person:alice')
+    expect(endpointId({ id: 'person:alice' })).toBe('person:alice')
   })
 })
 

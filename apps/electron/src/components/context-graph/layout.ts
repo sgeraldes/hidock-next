@@ -46,25 +46,32 @@ export interface LayoutOptions {
   bandHeight?: number
   /** Horizontal span the time axis maps onto (graph units). */
   width?: number
-  /** Minimum horizontal gap between two nodes in a band (graph units). */
+  /** Minimum horizontal gap between two nodes sharing a sub-row (graph units). */
   nodeGap?: number
-  /** Vertical stagger between the two sub-rows within a band (graph units). */
-  rowGap?: number
 }
 
 const DEFAULTS = {
   bandHeight: 240,
   width: 1100,
   nodeGap: 46,
-  rowGap: 56,
 } as const
+
+/** Vertical padding inside a band so nodes never sit on the band edges. */
+const BAND_INNER_PAD = 42
 
 /**
  * Compute fixed positions for a set of lens nodes. Nodes are grouped into their
- * stratum band (row) and ordered left→right by effective date within the band.
- * A left-to-right sweep enforces a minimum horizontal gap, which — because it
- * preserves the date sort order — guarantees x is monotonic in dateMs within a
- * band. Undated nodes sort oldest (leftmost).
+ * stratum band and ordered left→right by effective date within the band.
+ *
+ * Dense bands wrap onto MULTIPLE sub-rows (round-robin in time order) instead of
+ * sweeping unboundedly to the right — this keeps the overall aspect ratio sane.
+ * An unbounded sweep let a 100-node band grow ~5,000 units wide against ~960
+ * tall; after zoom-to-fit every inter-band edge rendered as a near-horizontal
+ * line, and hundreds of them stacked into moiré "scanline" noise across the
+ * whole canvas. Bounding the width keeps edges visibly diagonal, so flows
+ * between bands read as flows. Within each sub-row a left-to-right min-gap
+ * sweep de-collides while preserving the date sort, so x stays monotonic in
+ * dateMs per sub-row. Undated nodes sort oldest (leftmost). Fully deterministic.
  */
 export function computeStratifiedLayout(
   nodes: LayoutInputNode[],
@@ -73,7 +80,6 @@ export function computeStratifiedLayout(
   const bandHeight = opts.bandHeight ?? DEFAULTS.bandHeight
   const width = opts.width ?? DEFAULTS.width
   const nodeGap = opts.nodeGap ?? DEFAULTS.nodeGap
-  const rowGap = opts.rowGap ?? DEFAULTS.rowGap
 
   const positions = new Map<string, { x: number; y: number }>()
 
@@ -109,15 +115,25 @@ export function computeStratifiedLayout(
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
     })
 
-    let prevX = -Infinity
+    // Enough sub-rows that the band's nodes fit within ~width (min 2 for label
+    // breathing room when the band has more than one node).
+    const capacity = Math.max(1, Math.floor(width / nodeGap))
+    const rowCount = Math.max(
+      bandNodes.length > 1 ? 2 : 1,
+      Math.ceil(bandNodes.length / capacity)
+    )
+    const usable = bandHeight - BAND_INNER_PAD * 2
+    const rowY = (r: number): number =>
+      rowCount === 1 ? band.yCenter : band.yTop + BAND_INNER_PAD + (usable * r) / (rowCount - 1)
+
+    const rowLastX = new Array<number>(rowCount).fill(-Infinity)
     bandNodes.forEach((n, i) => {
+      const r = i % rowCount // round-robin in time order
       const baseX = scaleX(n.dateMs)
-      // Enforce a min gap in sort order → x stays monotonic in dateMs.
-      const x = Math.max(baseX, prevX + nodeGap)
-      prevX = x
-      // Two-row stagger keeps labels from colliding while staying in the band.
-      const y = band.yCenter + (i % 2 === 0 ? -rowGap / 2 : rowGap / 2)
-      positions.set(n.id, { x, y })
+      // Per-row min-gap sweep in sort order → x monotonic in dateMs per sub-row.
+      const x = Math.max(baseX, rowLastX[r] + nodeGap)
+      rowLastX[r] = x
+      positions.set(n.id, { x, y: rowY(r) })
       if (x < minX) minX = x
       if (x > maxX) maxX = x
     })
