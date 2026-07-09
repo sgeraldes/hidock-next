@@ -8,13 +8,173 @@
 import { ipcMain, clipboard, dialog, BrowserWindow, shell } from 'electron'
 import { writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
+import { spawn, spawnSync } from 'child_process'
 import { getTranscriptsPath } from '../services/file-storage'
 import { getOutputGeneratorService } from '../services/output-generator'
 import { success, error, Result } from '../types/api'
 import { GenerateOutputRequestSchema } from '../validation/outputs'
 import type { OutputTemplate, GenerateOutputResponse } from '../types/api'
 import { run, runInTransaction, queryOne } from '../services/database'
+import { getConfig, updateConfig } from '../services/config'
 import { randomUUID } from 'crypto'
+
+/**
+ * Result of a "Open in Claude Code" launch request. `needsFolder` asks the
+ * renderer to pick a working directory and retry with an explicit `cwd`.
+ */
+export interface LaunchClaudeCodeResult {
+  launched: boolean
+  needsFolder?: boolean
+  cwd?: string
+}
+
+/**
+ * Write a generated output to the transcripts workspace as a Markdown file so
+ * it's immediately usable outside the app (e.g. handed to a coding agent).
+ * Returns the absolute path, or undefined if the export failed (non-fatal).
+ */
+export function exportOutputToFile(content: string, templateId: string): string | undefined {
+  try {
+    const outputsDir = join(getTranscriptsPath(), 'outputs')
+    if (!existsSync(outputsDir)) {
+      mkdirSync(outputsDir, { recursive: true })
+    }
+    const date = new Date().toISOString().slice(0, 10)
+    const titleLine = content.split('\n').find((l) => l.trim().length > 0) ?? ''
+    const slug =
+      titleLine
+        .replace(/^#+\s*/, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60) || templateId
+    const savedPath = join(outputsDir, `${date}-${templateId}-${slug}.md`)
+    writeFileSync(savedPath, content, 'utf-8')
+    return savedPath
+  } catch (exportErr) {
+    console.error('exportOutputToFile failed:', exportErr)
+    return undefined
+  }
+}
+
+/**
+ * Resolve the on-disk project folder bound to an actionable's source, if any.
+ * An actionable's `source_knowledge_id` is either a knowledge_captures id or a
+ * recording id; a project is reachable either directly (knowledge_projects) or
+ * via the recording's meeting (meeting_projects). Returns the first project
+ * folder_path found, or null.
+ */
+export function resolveProjectFolderForActionable(actionableId: string): string | null {
+  const actionable = queryOne<{ source_knowledge_id: string | null }>(
+    'SELECT source_knowledge_id FROM actionables WHERE id = ?',
+    [actionableId]
+  )
+  const skid = actionable?.source_knowledge_id
+  if (!skid) return null
+
+  // 1. Direct knowledge → project assignment (source_knowledge_id is a capture id)
+  const viaKnowledge = queryOne<{ folder_path: string | null }>(
+    `SELECT p.folder_path FROM knowledge_projects kp
+       JOIN projects p ON p.id = kp.project_id
+      WHERE kp.knowledge_capture_id = ?
+        AND p.folder_path IS NOT NULL AND p.folder_path != ''
+      LIMIT 1`,
+    [skid]
+  )
+  if (viaKnowledge?.folder_path) return viaKnowledge.folder_path
+
+  // 2. Via the recording's meeting. Resolve the recording id: prefer the
+  //    capture's source_recording_id, else treat source_knowledge_id as one.
+  const kc = queryOne<{ source_recording_id: string | null }>(
+    'SELECT source_recording_id FROM knowledge_captures WHERE id = ?',
+    [skid]
+  )
+  const recordingId = kc?.source_recording_id || skid
+  const viaMeeting = queryOne<{ folder_path: string | null }>(
+    `SELECT p.folder_path FROM recordings r
+       JOIN meeting_projects mp ON mp.meeting_id = r.meeting_id
+       JOIN projects p ON p.id = mp.project_id
+      WHERE r.id = ?
+        AND p.folder_path IS NOT NULL AND p.folder_path != ''
+      LIMIT 1`,
+    [recordingId]
+  )
+  return viaMeeting?.folder_path || null
+}
+
+/**
+ * Locate the Claude Code CLI on PATH. Returns the first resolved path, or null
+ * if `claude` is not installed / not on PATH.
+ */
+export function findClaudeCli(): string | null {
+  try {
+    const finder = process.platform === 'win32' ? 'where' : 'which'
+    const res = spawnSync(finder, ['claude'], { encoding: 'utf-8' })
+    if (res.status === 0 && typeof res.stdout === 'string' && res.stdout.trim()) {
+      const first = res.stdout
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .find(Boolean)
+      return first || null
+    }
+  } catch {
+    /* ignore — treated as "not found" */
+  }
+  return null
+}
+
+/**
+ * Open a new terminal window running `claude` in `cwd` with `prompt` as the
+ * initial instruction. Windows: prefer Windows Terminal (wt.exe), fall back to
+ * `cmd /c start`. Detached so it outlives the app; failures are logged only.
+ */
+export function launchClaudeTerminal(cwd: string, prompt: string): void {
+  if (process.platform === 'win32') {
+    try {
+      const child = spawn('wt.exe', ['-w', 'new', '-d', cwd, 'claude', prompt], {
+        detached: true,
+        stdio: 'ignore'
+      })
+      child.on('error', () => spawnCmdFallback(cwd, prompt))
+      child.unref()
+      return
+    } catch {
+      spawnCmdFallback(cwd, prompt)
+      return
+    }
+  }
+  if (process.platform === 'darwin') {
+    // Best-effort: open Terminal.app and run claude in the target directory.
+    const script = `tell application "Terminal" to do script "cd ${shellQuote(cwd)} && claude ${shellQuote(prompt)}"`
+    const child = spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' })
+    child.on('error', (e) => console.error('osascript launch failed:', e))
+    child.unref()
+    return
+  }
+  // Linux best-effort: common terminal emulator.
+  const child = spawn(
+    'x-terminal-emulator',
+    ['-e', `bash -lc 'cd ${shellQuote(cwd)} && claude ${shellQuote(prompt)}'`],
+    { detached: true, stdio: 'ignore' }
+  )
+  child.on('error', (e) => console.error('x-terminal-emulator launch failed:', e))
+  child.unref()
+}
+
+function spawnCmdFallback(cwd: string, prompt: string): void {
+  const child = spawn('cmd.exe', ['/c', 'start', 'HiDock Handoff', 'cmd', '/k', 'claude', prompt], {
+    cwd,
+    detached: true,
+    stdio: 'ignore'
+  })
+  child.on('error', (e) => console.error('cmd start fallback failed:', e))
+  child.unref()
+}
+
+/** Minimal POSIX single-quote escaping for shell strings (mac/linux paths). */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
 
 // B-ACT-001: Server-side rate limiting — sliding window per actionable/knowledge capture
 const RATE_LIMIT_WINDOW_MS = 60_000 // 1 minute
@@ -89,26 +249,7 @@ export function registerOutputsHandlers(): void {
 
         // Auto-export the output to the transcripts workspace so it's
         // immediately usable outside the app (e.g. fed to a coding agent).
-        let savedPath: string | undefined
-        try {
-          const outputsDir = join(getTranscriptsPath(), 'outputs')
-          if (!existsSync(outputsDir)) {
-            mkdirSync(outputsDir, { recursive: true })
-          }
-          const date = new Date().toISOString().slice(0, 10)
-          const titleLine = result.content.split('\n').find((l) => l.trim().length > 0) ?? ''
-          const slug = titleLine
-            .replace(/^#+\s*/, '')
-            .toLowerCase()
-            .replace(/[^a-z0-9]+/g, '-')
-            .replace(/^-+|-+$/g, '')
-            .slice(0, 60) || parsed.data.templateId
-          savedPath = join(outputsDir, `${date}-${parsed.data.templateId}-${slug}.md`)
-          writeFileSync(savedPath, result.content, 'utf-8')
-        } catch (exportErr) {
-          console.error('outputs:generate auto-export failed:', exportErr)
-          savedPath = undefined
-        }
+        const savedPath = exportOutputToFile(result.content, parsed.data.templateId)
 
         // If actionableId was provided, link the result
         if (parsed.data.actionableId) {
@@ -290,6 +431,87 @@ export function registerOutputsHandlers(): void {
       } catch (err) {
         console.error('outputs:getByActionableId error:', err)
         return error('INTERNAL_ERROR', 'Failed to get output for actionable', err)
+      }
+    }
+  )
+
+  /**
+   * Open the generated handoff in a new Claude Code terminal session.
+   *
+   * cwd resolution order: explicit `cwd` (from a renderer folder pick) →
+   * the source meeting's project folder → the configured handoffDirectory →
+   * ask the renderer to pick a folder (`needsFolder: true`).
+   *
+   * The handoff Markdown must exist on disk; if only `content` is supplied it is
+   * materialized via exportOutputToFile so previously-generated outputs still work.
+   */
+  ipcMain.handle(
+    'outputs:launchClaudeCode',
+    async (_, rawArgs: unknown): Promise<Result<LaunchClaudeCodeResult>> => {
+      try {
+        const args = (rawArgs && typeof rawArgs === 'object' ? rawArgs : {}) as {
+          filePath?: unknown
+          content?: unknown
+          templateId?: unknown
+          actionableId?: unknown
+          cwd?: unknown
+        }
+        const actionableId = typeof args.actionableId === 'string' ? args.actionableId : undefined
+        const explicitCwd = typeof args.cwd === 'string' && args.cwd.trim() ? args.cwd : undefined
+
+        // Resolve the handoff file: use the supplied path if it exists, else
+        // materialize it from content (covers re-opening a stored output).
+        let filePath = typeof args.filePath === 'string' && args.filePath ? args.filePath : undefined
+        if (!filePath || !existsSync(filePath)) {
+          const content = typeof args.content === 'string' ? args.content : undefined
+          const templateId = typeof args.templateId === 'string' ? args.templateId : 'claude_code_prompt'
+          if (content) {
+            filePath = exportOutputToFile(content, templateId)
+          }
+        }
+        if (!filePath || !existsSync(filePath)) {
+          return error('NOT_FOUND', 'The handoff file could not be found. Re-generate it and try again.')
+        }
+
+        // Resolve the working directory.
+        let cwd: string | null = explicitCwd ?? null
+        if (cwd) {
+          // The user picked this folder — remember it for next time (non-fatal).
+          try {
+            await updateConfig('integrations', { handoffDirectory: cwd })
+          } catch (cfgErr) {
+            console.warn('outputs:launchClaudeCode: failed to persist handoffDirectory:', cfgErr)
+          }
+        }
+        if (!cwd && actionableId) {
+          cwd = resolveProjectFolderForActionable(actionableId)
+        }
+        if (!cwd) {
+          const configured = getConfig().integrations?.handoffDirectory
+          if (configured && existsSync(configured)) cwd = configured
+        }
+        if (!cwd) {
+          // No folder known — let the renderer prompt for one and retry.
+          return success({ launched: false, needsFolder: true })
+        }
+        if (!existsSync(cwd)) {
+          return error('NOT_FOUND', `The handoff folder does not exist: ${cwd}`)
+        }
+
+        // Claude Code CLI must be installed.
+        if (!findClaudeCli()) {
+          return error(
+            'SERVICE_UNAVAILABLE',
+            'Claude Code CLI not found on PATH. Install it and make sure `claude` runs in your terminal.'
+          )
+        }
+
+        const prompt = `Read the handoff prompt in "${filePath}" and carry out the follow-up work it describes. Start by reading that file.`
+        launchClaudeTerminal(cwd, prompt)
+        return success({ launched: true, cwd })
+      } catch (err) {
+        console.error('outputs:launchClaudeCode error:', err)
+        return error('INTERNAL_ERROR', 'Failed to launch Claude Code', err)
       }
     }
   )

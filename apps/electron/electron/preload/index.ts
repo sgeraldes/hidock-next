@@ -360,6 +360,13 @@ export interface ElectronAPI {
     copyToClipboard: (content: string) => Promise<Result<void>>
     saveToFile: (content: string, suggestedName?: string) => Promise<Result<string>>
     openInFolder: (filePath: string) => Promise<Result<void>>
+    launchClaudeCode: (args: {
+      filePath?: string
+      content?: string
+      templateId?: string
+      actionableId?: string
+      cwd?: string
+    }) => Promise<Result<{ launched: boolean; needsFolder?: boolean; cwd?: string }>>
   }
 
   // RAG Chatbot (extended with Result pattern)
@@ -912,7 +919,8 @@ const electronAPI: ElectronAPI = {
     getByActionableId: (actionableId) => callIPC('outputs:getByActionableId', actionableId),
     copyToClipboard: (content) => callIPC('outputs:copyToClipboard', content),
     saveToFile: (content, suggestedName) => callIPC('outputs:saveToFile', content, suggestedName),
-    openInFolder: (filePath) => callIPC('outputs:openInFolder', filePath)
+    openInFolder: (filePath) => callIPC('outputs:openInFolder', filePath),
+    launchClaudeCode: (args) => callIPC('outputs:launchClaudeCode', args)
   },
 
   rag: {

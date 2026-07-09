@@ -18,7 +18,8 @@ import {
   Copy,
   ChevronLeft,
   ChevronRight,
-  ChevronDown
+  ChevronDown,
+  Terminal
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -94,7 +95,10 @@ export function Actionables() {
     generatedAt: string
     sourceId?: string
     savedPath?: string
+    actionableId?: string
   } | null>(null)
+  // Tracks whether an "Open in Claude Code" launch is in flight (disables the CTA)
+  const [launchingClaude, setLaunchingClaude] = useState(false)
   const [generationError, setGenerationError] = useState<string | null>(null)
   const [showOutputModal, setShowOutputModal] = useState(false)
   const [generationHistory, setGenerationHistory] = useState<number[]>([])
@@ -107,7 +111,7 @@ export function Actionables() {
   // C-ACT-004: Client-side output cache to avoid redundant fetches
   // C-ACT-M02: Cache has max size limit to prevent memory leaks in long sessions
   const OUTPUT_CACHE_MAX_SIZE = 50
-  const outputCacheRef = useRef<Map<string, { content: string; templateId: string; generatedAt: string; sourceId?: string }>>(new Map())
+  const outputCacheRef = useRef<Map<string, { content: string; templateId: string; generatedAt: string; sourceId?: string; savedPath?: string; actionableId?: string }>>(new Map())
 
   // C-ACT-007: Confirmation dialog state for regeneration
   const [confirmRegenerate, setConfirmRegenerate] = useState<Actionable | null>(null)
@@ -132,7 +136,7 @@ export function Actionables() {
   const [cancellableActionableId, setCancellableActionableId] = useState<string | undefined>(undefined)
 
   // C-ACT-M02: Cache insertion helper with size eviction
-  const cacheOutput = useCallback((id: string, output: { content: string; templateId: string; generatedAt: string; sourceId?: string }) => {
+  const cacheOutput = useCallback((id: string, output: { content: string; templateId: string; generatedAt: string; sourceId?: string; savedPath?: string; actionableId?: string }) => {
     const cache = outputCacheRef.current
     // Evict oldest entries when cache exceeds max size
     if (cache.size >= OUTPUT_CACHE_MAX_SIZE) {
@@ -210,6 +214,48 @@ export function Actionables() {
       }
     } catch (error: any) {
       toast.error('Copy failed', error?.message || 'Failed to copy to clipboard')
+    }
+  }
+
+  // "Open in Claude Code" — launches a Claude Code terminal session pointed at
+  // the handoff prompt. The main process resolves the working directory (source
+  // project folder → configured handoff folder); if none is known it replies
+  // needsFolder and we prompt the user to pick one, then retry with it.
+  const openInClaudeCode = async () => {
+    const output = generatedOutput
+    if (!output?.content) return
+    setLaunchingClaude(true)
+    try {
+      const attempt = (cwd?: string) =>
+        window.electronAPI.outputs.launchClaudeCode({
+          filePath: output.savedPath,
+          content: output.content,
+          templateId: output.templateId,
+          actionableId: output.actionableId,
+          cwd
+        })
+
+      let res = await attempt()
+
+      // No working directory known — ask the user to choose one, then retry.
+      if (res.success && res.data?.needsFolder) {
+        const pick = await window.electronAPI.storage.selectFolder?.()
+        if (!pick?.success || !pick.data) {
+          toast.info('Cancelled', 'Pick a folder to open Claude Code in.')
+          return
+        }
+        res = await attempt(pick.data)
+      }
+
+      if (res.success && res.data?.launched) {
+        toast.success('Opening Claude Code', res.data.cwd ? `Launched in ${res.data.cwd}` : 'Terminal opened.')
+      } else if (!res.success) {
+        toast.error('Could not open Claude Code', res.error?.message || 'Unknown error')
+      }
+    } catch (error: any) {
+      toast.error('Could not open Claude Code', error?.message || 'An unexpected error occurred')
+    } finally {
+      setLaunchingClaude(false)
     }
   }
 
@@ -294,15 +340,39 @@ export function Actionables() {
       if (nonce !== generationNonceRef.current) return // cancelled — discard
 
       if (result.success) {
-        const output = { ...result.data, sourceId: actionable.sourceKnowledgeId }
+        const output = { ...result.data, sourceId: actionable.sourceKnowledgeId, actionableId: actionable.id }
         // C-ACT-004: Cache the generated output
         cacheOutput(actionable.id, output)
         setGeneratedOutput(output)
         setShowOutputModal(true)
 
-        // Update actionable status to generated
+        // Update actionable status to generated (idempotent on the main side —
+        // outputs:generate already moves it to 'generated' when actionableId is set)
         await window.electronAPI.actionables.updateStatus(actionable.id, 'generated')
         await loadActionables()
+
+        // Post-generation feedback: confirm completion with the saved filename
+        // and a one-click way to open it. The item now leaves the Pending list.
+        const savedPath = output.savedPath
+        const filename = savedPath ? savedPath.replace(/^.*[\\/]/, '') : undefined
+        toast.success(
+          'Output generated',
+          filename ? `Saved as ${filename}` : 'The document is ready.',
+          savedPath
+            ? {
+                action: {
+                  label: 'Open file',
+                  onClick: () => {
+                    window.electronAPI.outputs.openInFolder(savedPath).then((res) => {
+                      if (!res.success) {
+                        toast.error('Open failed', res.error?.message || 'Could not open the file')
+                      }
+                    })
+                  }
+                }
+              }
+            : undefined
+        )
       } else {
         const errorMsg = result.error?.message || 'Failed to generate output'
         toast.error('Generation failed', errorMsg)
@@ -587,7 +657,7 @@ export function Actionables() {
                                 const result = await window.electronAPI.outputs.getByActionableId(actionable.id)
 
                                 if (result.success && result.data) {
-                                  const output = { ...result.data, sourceId: actionable.sourceKnowledgeId }
+                                  const output = { ...result.data, sourceId: actionable.sourceKnowledgeId, actionableId: actionable.id }
                                   // C-ACT-004: Cache the fetched output
                                   cacheOutput(actionable.id, output)
                                   setGeneratedOutput(output)
@@ -602,7 +672,7 @@ export function Actionables() {
                                     knowledgeCaptureId: actionable.sourceKnowledgeId
                                   })
                                   if (genResult.success) {
-                                    const output = { ...genResult.data, sourceId: actionable.sourceKnowledgeId }
+                                    const output = { ...genResult.data, sourceId: actionable.sourceKnowledgeId, actionableId: actionable.id }
                                     cacheOutput(actionable.id, output)
                                     setGeneratedOutput(output)
                                     setShowOutputModal(true)
@@ -768,6 +838,23 @@ export function Actionables() {
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{generatedOutput?.content || ''}</ReactMarkdown>
           </div>
           <DialogFooter className="gap-2">
+            {generatedOutput?.templateId === 'claude_code_prompt' && (
+              // Primary CTA for the Claude Code handoff — closes the loop by
+              // launching a Claude Code session pointed at the generated prompt.
+              <Button
+                onClick={openInClaudeCode}
+                disabled={launchingClaude}
+                className="gap-2 sm:mr-auto"
+                title="Opens Claude Code in the source project folder (or a folder you choose) and hands off this prompt"
+              >
+                {launchingClaude ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Terminal className="h-4 w-4" />
+                )}
+                Open in Claude Code
+              </Button>
+            )}
             {generatedOutput?.sourceId && (
               <Button
                 variant="outline"

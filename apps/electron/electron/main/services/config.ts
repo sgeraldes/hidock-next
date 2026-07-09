@@ -68,6 +68,11 @@ export interface AppConfig {
     autoConnect: boolean
     autoDownload: boolean
   }
+  integrations: {
+    // Default working directory for the "Open in Claude Code" handoff when the
+    // source meeting has no project folder. Remembered after the user picks one.
+    handoffDirectory: string
+  }
   ui: {
     theme: 'light' | 'dark' | 'system'
     defaultView: 'week' | 'month'
@@ -121,6 +126,9 @@ const DEFAULT_CONFIG: AppConfig = {
   device: {
     autoConnect: true,
     autoDownload: true
+  },
+  integrations: {
+    handoffDirectory: ''
   },
   ui: {
     theme: 'system',

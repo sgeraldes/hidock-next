@@ -39,6 +39,19 @@ vi.mock('../../services/database', () => ({
   queryOne: vi.fn()
 }))
 
+// Mock config (outputs-handlers imports it for the launch channel; config.ts
+// touches electron.app at module load, which this suite's electron mock omits)
+vi.mock('../../services/config', () => ({
+  getConfig: vi.fn(() => ({ integrations: { handoffDirectory: '' } })),
+  updateConfig: vi.fn().mockResolvedValue(undefined)
+}))
+
+// Mock child_process (launch channel uses spawn/spawnSync)
+vi.mock('child_process', () => ({
+  spawn: vi.fn(() => ({ on: vi.fn(), unref: vi.fn() })),
+  spawnSync: vi.fn(() => ({ status: 0, stdout: '' }))
+}))
+
 // Mock output generator
 vi.mock('../../services/output-generator', () => ({
   getOutputGeneratorService: () => ({

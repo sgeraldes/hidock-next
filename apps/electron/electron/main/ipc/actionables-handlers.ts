@@ -35,6 +35,15 @@ export function registerActionablesHandlers(): void {
         return { success: false, error: `Actionable ${id} not found` }
       }
 
+      // Idempotent: setting the status it already has is a no-op success. The
+      // approve flow calls updateStatus('generated') as a safety net after
+      // outputs:generate has already set 'generated' inside its transaction;
+      // without this, that redundant call hit the "generated → generated"
+      // invalid-transition branch and returned a spurious error.
+      if (actionable.status === status) {
+        return { success: true }
+      }
+
       // C-ACT-001: Relaxed status transition validation
       // Allow pending->generated for direct completion, generated->pending for re-processing
       const validTransitions: Record<string, string[]> = {
