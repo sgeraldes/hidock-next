@@ -103,7 +103,27 @@ through cde8f755; schema now v35; suite 2,375):
 Data noise spotted: surname-fragment contacts ("Sergio Tado" ≈ mangled
 Hurtado) — normal merge-flow candidates.
 
-NOTHING in flight. Pushed through cde8f755.
+## 2026-07-09 daytime (all landed/gated/pushed through 5439e9d0):
+- **Context Graph v2** (78f5411c + 0895760c + 5b125395): the user's "Pollock"
+  critique → lens-first entry (Your context / Person / Project / Decision /
+  This week), stratified reasoning bands (Decisions/Work/People/Meetings),
+  shared time axis, provenance trails w/ narrative panel, per-stratum budgets
+  with honest "20 of 806" counts, moiré + sizing fixes. VERIFIED LIVE.
+- **P1 SCALING FIX** (5439e9d0): transcription.ts flushed the FULL ~570MB DB
+  synchronously after EVERY transcript → main-process starvation (empty CDP,
+  splash-stuck boot, one "Array buffer allocation failed", one "database is
+  locked" restart race). Now: adaptive size-scaled flush intervals
+  (<50MB none / ≥60s / ≥300s), flushNow() escape hatch, every-10-transcripts
+  durability gate, flush cost logging (warn >3s). VERIFIED: CDP stable 3/3
+  under active backlog. REAL FIX PENDING USER DECISION: better-sqlite3/WAL
+  migration (on the ops dashboard as a decision item).
+- Ops dashboard artifact for the user (auto-republished each loop tick):
+  status strip, waves, agent roster w/ health, roadmap, clickable
+  waiting-on-you items with step-by-step instructions.
+- Worktree isolation is now the dispatch norm (2 shared-tree git races on
+  07-08 night; zero since).
+
+Backlog: ~1,150 queued, draining. NOTHING in flight. Pushed through 5439e9d0.
 
 ## 2. DEVICE STATE
 
