@@ -664,12 +664,21 @@ export interface ContextLensNode extends ContextGraphNode {
   dateMs: number | null
 }
 
+/** Per-stratum totals-in-scope vs. shown after the lens node budget. */
+export interface ContextLensStratumCount {
+  stratum: string
+  total: number
+  shown: number
+}
+
 export interface ContextLensData {
   center: string | null
   nodes: ContextLensNode[]
   edges: Array<{ id: string; source: string; target: string; type: string; weight: number }>
   /** Newest activity in the lens — the reference the time chips measure back from. */
   referenceMs: number | null
+  /** Per-stratum totals-vs-shown — drives the "20 of 214" truncation affordance. */
+  strata: ContextLensStratumCount[]
 }
 
 /** A one-line entity descriptor for the lens center / provenance nodes. */
@@ -707,7 +716,12 @@ function toLensDTO(lens: LensGraph): ContextLensData {
     type: e.type,
     weight: e.weight,
   }))
-  return { center: lens.center?.id ?? null, nodes, edges, referenceMs: lens.referenceMs }
+  const strata: ContextLensStratumCount[] = lens.strata.map((s) => ({
+    stratum: s.stratum,
+    total: s.total,
+    shown: s.shown,
+  }))
+  return { center: lens.center?.id ?? null, nodes, edges, referenceMs: lens.referenceMs, strata }
 }
 
 /**
@@ -724,7 +738,7 @@ export function queryLens(
   let centerNodeId: string | null = null
   if (centerEntityId) {
     centerNodeId = resolveEntityToNodeId(centerEntityId)
-    if (!centerNodeId) return { center: null, nodes: [], edges: [], referenceMs: null }
+    if (!centerNodeId) return { center: null, nodes: [], edges: [], referenceMs: null, strata: [] }
   }
   return toLensDTO(lensGraph(store, centerNodeId, opts))
 }

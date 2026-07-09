@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, Suspense, lazy } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, Suspense, lazy } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Network,
@@ -29,6 +29,7 @@ import type {
   ContextLensNode,
   Provenance,
   ProvenanceEntity,
+  Stratum,
 } from '@/components/context-graph/types'
 import { LensPicker, type LensSelection, type LensSearchHit } from '@/components/context-graph/LensPicker'
 
@@ -44,7 +45,7 @@ interface GraphStats {
 }
 
 const EMPTY_GRAPH: ContextGraphData = { center: null, nodes: [], edges: [] }
-const EMPTY_LENS: ContextLensData = { center: null, nodes: [], edges: [], referenceMs: null }
+const EMPTY_LENS: ContextLensData = { center: null, nodes: [], edges: [], referenceMs: null, strata: [] }
 
 // Atlas overview caps (the whole-graph secondary view).
 const OVERVIEW_BASE_LIMIT = 150
@@ -123,6 +124,14 @@ export function ContextGraph() {
   const [suggestions, setSuggestions] = useState<ContextGraphNode[]>([])
   const [showSuggestions, setShowSuggestions] = useState(false)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Per-stratum counts (shown vs. in-scope) for the band rail truncation affordance.
+  const lensStrataByBand = useMemo(() => {
+    const m = new Map<Stratum, { shown: number; total: number }>()
+    for (const s of lens.strata ?? []) m.set(s.stratum as Stratum, { shown: s.shown, total: s.total })
+    return m
+  }, [lens.strata])
+  const lensTruncated = useMemo(() => (lens.strata ?? []).some((s) => s.total > s.shown), [lens.strata])
 
   const log = useCallback(
     (...args: unknown[]) => {
@@ -587,18 +596,41 @@ export function ContextGraph() {
                 </div>
               )}
 
-              {/* Band rail — reasoning strata, top→down */}
-              <div className="absolute top-3 left-3 hidden sm:flex flex-col gap-1 rounded-lg border bg-background/85 backdrop-blur px-3 py-2 text-[11px] max-w-[40%]">
+              {/* Band rail — reasoning strata, top→down. Each band reports how many
+                  nodes it shows out of how many are in scope, so a capped band reads
+                  "Decisions · 20 of 214" rather than silently truncating. */}
+              <div className="absolute top-3 left-3 hidden sm:flex flex-col gap-1 rounded-lg border bg-background/85 backdrop-blur px-3 py-2 text-[11px] max-w-[46%]">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-0.5">
                   Reasoning strata
                 </span>
-                {STRATA_ORDER.map((s) => (
-                  <span key={s} className="flex items-center gap-1.5 text-foreground">
-                    <span className="h-2 w-2 rounded-sm shrink-0" style={{ backgroundColor: isDark ? STRATUM_STYLES[s].bgDark : STRATUM_STYLES[s].bgLight, outline: `1px solid ${isDark ? '#334155' : '#cbd5e1'}` }} />
-                    <strong className="font-medium">{STRATUM_STYLES[s].label}</strong>
-                    <span className="text-muted-foreground truncate">— {STRATUM_STYLES[s].hint}</span>
+                {STRATA_ORDER.map((s) => {
+                  const count = lensStrataByBand.get(s)
+                  const truncated = !!count && count.total > count.shown
+                  return (
+                    <span key={s} className="flex items-center gap-1.5 text-foreground">
+                      <span
+                        className="h-2 w-2 rounded-sm shrink-0"
+                        style={{ backgroundColor: isDark ? STRATUM_STYLES[s].bgDark : STRATUM_STYLES[s].bgLight, outline: `1px solid ${isDark ? '#334155' : '#cbd5e1'}` }}
+                      />
+                      <strong className="font-medium">{STRATUM_STYLES[s].label}</strong>
+                      {count ? (
+                        <span
+                          className={cn('tabular-nums shrink-0', truncated ? 'text-amber-600 dark:text-amber-400 font-medium' : 'text-muted-foreground')}
+                          title={truncated ? `Showing the ${count.shown} most recent of ${count.total} ${STRATUM_STYLES[s].label.toLowerCase()}` : undefined}
+                        >
+                          · {truncated ? `${count.shown} of ${count.total}` : count.shown}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground truncate">— {STRATUM_STYLES[s].hint}</span>
+                      )}
+                    </span>
+                  )
+                })}
+                {lensTruncated && (
+                  <span className="mt-1 pt-1 border-t border-border/60 text-[10px] leading-snug text-muted-foreground">
+                    Showing the most recent slice — narrow the time range or open Atlas for everything.
                   </span>
-                ))}
+                )}
               </div>
             </>
           ) : (

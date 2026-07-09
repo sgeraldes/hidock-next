@@ -37,6 +37,7 @@ export {
   STRATA,
   STRATUM_OF,
   DAY_MS,
+  LENS_STRATUM_BUDGET,
 } from './queries.js'
 export type {
   AttendeeResult,
@@ -48,6 +49,7 @@ export type {
   SubGraph,
   PruneResult,
   Stratum,
+  StratumCount,
   LensNode,
   LensGraph,
   LensOptions,

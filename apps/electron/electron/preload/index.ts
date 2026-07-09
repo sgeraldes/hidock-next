@@ -111,12 +111,20 @@ interface ContextLensNode extends ContextGraphNode {
   dateMs: number | null
 }
 
+/** Per-stratum totals-in-scope vs. shown after the lens node budget. */
+interface ContextLensStratumCount {
+  stratum: 'strategic' | 'operational' | 'people' | 'evidence'
+  total: number
+  shown: number
+}
+
 /** A stratified, time-aware lens payload. */
 interface ContextLensData {
   center: string | null
   nodes: ContextLensNode[]
   edges: Array<{ id: string; source: string; target: string; type: string; weight: number }>
   referenceMs: number | null
+  strata: ContextLensStratumCount[]
 }
 
 /** A one-line entity descriptor (lens center / provenance node). */

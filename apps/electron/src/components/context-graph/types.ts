@@ -34,12 +34,26 @@ export interface ContextLensNode extends ContextGraphNode {
   dateMs: number | null
 }
 
+/** Per-stratum totals-in-scope vs. shown after the lens node budget. */
+export interface ContextLensStratumCount {
+  stratum: Stratum
+  /** Nodes of this stratum in scope after the time-window filter, before the budget. */
+  total: number
+  /** Nodes of this stratum actually shown after the budget. */
+  shown: number
+}
+
 export interface ContextLensData {
   center: string | null
   nodes: ContextLensNode[]
   edges: ContextGraphEdge[]
   /** Newest activity in the lens — the reference the time chips measure back from. */
   referenceMs: number | null
+  /**
+   * Per-stratum totals-vs-shown — drives the "20 of 214" truncation affordance
+   * in the band rail. Empty when the lens is empty.
+   */
+  strata: ContextLensStratumCount[]
 }
 
 /** A one-line entity descriptor (lens center / provenance node). */

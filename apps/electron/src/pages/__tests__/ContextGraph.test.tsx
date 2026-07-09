@@ -71,6 +71,12 @@ const lens = {
     { ...meetingNode, stratum: 'evidence', dateMs: DATE },
   ],
   edges: [{ id: 'e1', source: marioNode.id, target: meetingNode.id, type: 'ATTENDED', weight: 1 }],
+  strata: [
+    { stratum: 'strategic', total: 0, shown: 0 },
+    { stratum: 'operational', total: 0, shown: 0 },
+    { stratum: 'people', total: 1, shown: 1 },
+    { stratum: 'evidence', total: 1, shown: 1 },
+  ],
 }
 const marioProvenance = {
   node: { id: marioNode.id, type: 'person', label: 'Mario', contactId: 'c-mario', dateMs: DATE },
@@ -223,7 +229,7 @@ describe('ContextGraph page — lens first', () => {
       contextGraph: {
         getGraph: vi.fn().mockResolvedValue({ success: true, data: { center: null, nodes: [], edges: [] } }),
         defaultCenter: vi.fn().mockResolvedValue({ success: true, data: null }),
-        getLens: vi.fn().mockResolvedValue({ success: true, data: { center: null, nodes: [], edges: [], referenceMs: null } }),
+        getLens: vi.fn().mockResolvedValue({ success: true, data: { center: null, nodes: [], edges: [], referenceMs: null, strata: [] } }),
       },
     }) as any
 

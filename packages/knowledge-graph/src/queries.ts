@@ -359,6 +359,34 @@ export interface LensNode extends GraphNodeWithDegree {
   dateMs: number | null
 }
 
+/**
+ * Per-stratum node budget for a lens. A lens is a *context view* — a readable
+ * slice of a person's recent work, a few dozen nodes — NOT a chart of the whole
+ * month. Without a budget the default "your context · 30d" lens stacks hundreds
+ * of nodes per time bucket into solid vertical bars. The budget caps each band so
+ * the structure stays legible; the honest per-stratum totals (see
+ * {@link StratumCount}) drive a "20 of 214" truncation affordance in the UI.
+ *
+ * Chosen deliberately (strategy is the scarce signal; work needs slightly more
+ * room; people and evidence anchor the picture):
+ *   strategic (decisions + risks) 20 · operational (work) 25 · people 20 · evidence (meetings) 20
+ */
+export const LENS_STRATUM_BUDGET: Record<Stratum, number> = {
+  strategic: 20,
+  operational: 25,
+  people: 20,
+  evidence: 20,
+}
+
+/** How many nodes a stratum held in scope (before budget) vs. how many are shown. */
+export interface StratumCount {
+  stratum: Stratum
+  /** Nodes of this stratum in scope after the time-window filter, before the budget. */
+  total: number
+  /** Nodes of this stratum actually kept after the budget. */
+  shown: number
+}
+
 export interface LensGraph {
   /** The seed entity the lens is centered on (undefined for a whole-graph lens). */
   center: GraphNode | undefined
@@ -371,6 +399,12 @@ export interface LensGraph {
    * for historical data instead of silently empty.
    */
   referenceMs: number | null
+  /**
+   * Per-stratum totals-in-scope vs. shown after the budget. Ordered by
+   * {@link STRATA} (top→down). Lets the renderer show "Decisions · 20 of 214"
+   * instead of silently truncating.
+   */
+  strata: StratumCount[]
 }
 
 export interface LensOptions {
@@ -421,10 +455,69 @@ function annotateLens(sub: SubGraph): LensNode[] {
 }
 
 /**
+ * Deterministic budget ordering: newest first (dated before undated), then by
+ * degree (more connected first), then by id — so identical scopes always pick the
+ * identical slice regardless of DB row order.
+ */
+function compareForBudget(a: LensNode, b: LensNode): number {
+  if (a.dateMs !== b.dateMs) {
+    if (a.dateMs == null) return 1
+    if (b.dateMs == null) return -1
+    return b.dateMs - a.dateMs
+  }
+  if (a.degree !== b.degree) return b.degree - a.degree
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+}
+
+/**
+ * Cap each stratum to its {@link LENS_STRATUM_BUDGET}, keeping the newest nodes
+ * (see {@link compareForBudget}). The lens center is always kept, even when its
+ * band is over budget. Returns the kept nodes plus per-stratum totals-vs-shown.
+ */
+function applyStratumBudget(
+  nodes: LensNode[],
+  centerId: string | null
+): { nodes: LensNode[]; strata: StratumCount[] } {
+  const byStratum = new Map<Stratum, LensNode[]>()
+  for (const s of STRATA) byStratum.set(s, [])
+  for (const n of nodes) byStratum.get(n.stratum)!.push(n)
+
+  const kept: LensNode[] = []
+  const strata: StratumCount[] = []
+  for (const s of STRATA) {
+    const group = byStratum.get(s)!
+    const total = group.length
+    const budget = LENS_STRATUM_BUDGET[s]
+    const sorted = [...group].sort(compareForBudget)
+
+    const picked: LensNode[] = []
+    const pickedIds = new Set<string>()
+    // The center is non-negotiable — keep it first even if oldest.
+    for (const n of sorted) {
+      if (n.id === centerId) {
+        picked.push(n)
+        pickedIds.add(n.id)
+      }
+    }
+    for (const n of sorted) {
+      if (picked.length >= budget) break
+      if (pickedIds.has(n.id)) continue
+      picked.push(n)
+      pickedIds.add(n.id)
+    }
+
+    kept.push(...picked)
+    strata.push({ stratum: s, total, shown: picked.length })
+  }
+  return { nodes: kept, strata }
+}
+
+/**
  * Build a stratified, time-aware lens. When `centerId` is given, the lens is that
  * node's neighborhood; when null, it's the top-degree slice of the whole graph.
- * Nodes are annotated with stratum + effective date, and optionally filtered to a
- * recent time window (measured back from the newest activity in the lens).
+ * Nodes are annotated with stratum + effective date, optionally filtered to a
+ * recent time window (measured back from the newest activity in the lens), then
+ * capped to a per-stratum budget so the view stays a readable context slice.
  */
 export function lensGraph(
   store: KnowledgeGraphStore,
@@ -455,10 +548,17 @@ export function lensGraph(
     )
   }
 
+  // Per-stratum budget: cap each band to a readable slice (newest-first). Applied
+  // AFTER scoping + the time-window filter, BEFORE edge pruning.
+  const centerNodeId = sub.center?.id ?? null
+  const budgeted = applyStratumBudget(nodes, centerNodeId)
+  nodes = budgeted.nodes
+
+  // Edges follow the budget — keep only those between two shown nodes.
   const kept = new Set(nodes.map((n) => n.id))
   const edges = sub.edges.filter((e) => kept.has(e.source_id) && kept.has(e.target_id))
 
-  return { center: sub.center, nodes, edges, referenceMs }
+  return { center: sub.center, nodes, edges, referenceMs, strata: budgeted.strata }
 }
 
 /**

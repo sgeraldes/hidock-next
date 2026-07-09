@@ -18,6 +18,7 @@ import {
   STRATA,
   STRATUM_OF,
   DAY_MS,
+  LENS_STRATUM_BUDGET,
 } from '../src/queries.js'
 import type { ExtractionResult, ExtractionMeta } from '../src/extract.js'
 
@@ -241,6 +242,98 @@ describe('Lens: default center selection', () => {
     paths.push(dbPath)
     store.upsertNode({ type: 'topic', label: 'Lonely' })
     expect(pickDefaultCenter(store)).toBeUndefined()
+  })
+})
+
+describe('Lens: per-stratum node budget', () => {
+  const paths: string[] = []
+  afterEach(() => {
+    for (const p of paths) if (existsSync(p)) rmSync(p, { force: true })
+    paths.length = 0
+  })
+
+  /** Seed `n` meetings dated 2026-01-01 … 2026-01-<n> (M-01 oldest … newest). */
+  function seedMeetings(store: KnowledgeGraphStore, n: number): string[] {
+    const ids: string[] = []
+    for (let i = 1; i <= n; i++) {
+      const dd = String(i).padStart(2, '0')
+      ids.push(store.upsertNode({ type: 'meeting', label: `M-${dd}`, props: { date: `2026-01-${dd}` } }))
+    }
+    return ids
+  }
+
+  it('exposes a positive budget for every stratum', () => {
+    for (const s of STRATA) expect(LENS_STRATUM_BUDGET[s]).toBeGreaterThan(0)
+  })
+
+  it('caps a stratum to its budget and reports total-vs-shown', async () => {
+    const { store, dbPath } = await makeStore('budget-cap')
+    paths.push(dbPath)
+    seedMeetings(store, 30) // 30 meetings → evidence band, budget 20
+
+    const lens = lensGraph(store, null, { cap: 500, windowDays: null })
+    const evidence = lens.nodes.filter((n) => n.stratum === 'evidence')
+    expect(evidence).toHaveLength(LENS_STRATUM_BUDGET.evidence)
+
+    const count = lens.strata.find((s) => s.stratum === 'evidence')!
+    expect(count.total).toBe(30)
+    expect(count.shown).toBe(LENS_STRATUM_BUDGET.evidence)
+    // Bands under budget report shown === total.
+    const emptyBands = lens.strata.filter((s) => s.stratum !== 'evidence')
+    expect(emptyBands.every((s) => s.shown === s.total)).toBe(true)
+  })
+
+  it('keeps the NEWEST nodes when a band is over budget', async () => {
+    const { store, dbPath } = await makeStore('budget-newest')
+    paths.push(dbPath)
+    seedMeetings(store, 30)
+
+    const lens = lensGraph(store, null, { cap: 500, windowDays: null })
+    const shown = new Set(lens.nodes.filter((n) => n.stratum === 'evidence').map((n) => n.label))
+    // Newest 20 (days 11–30) kept; oldest 10 (days 1–10) dropped.
+    for (let i = 11; i <= 30; i++) expect(shown.has(`M-${String(i).padStart(2, '0')}`)).toBe(true)
+    for (let i = 1; i <= 10; i++) expect(shown.has(`M-${String(i).padStart(2, '0')}`)).toBe(false)
+  })
+
+  it('prunes edges to only those between shown nodes', async () => {
+    const { store, dbPath } = await makeStore('budget-edges')
+    paths.push(dbPath)
+    const topic = store.upsertNode({ type: 'topic', label: 'Hub' })
+    const ids = seedMeetings(store, 30)
+    for (const m of ids) store.upsertEdge({ sourceId: m, targetId: topic, type: 'ABOUT' })
+
+    const lens = lensGraph(store, null, { cap: 500, windowDays: null })
+    const kept = new Set(lens.nodes.map((n) => n.id))
+    expect(lens.edges.every((e) => kept.has(e.source_id) && kept.has(e.target_id))).toBe(true)
+    // 30 ABOUT edges collapse to only the 20 shown meetings' edges.
+    expect(lens.edges).toHaveLength(20)
+  })
+
+  it('always keeps the lens center even when its band is over budget and it is oldest', async () => {
+    const { store, dbPath } = await makeStore('budget-center')
+    paths.push(dbPath)
+    const topic = store.upsertNode({ type: 'topic', label: 'Hub' })
+    const ids = seedMeetings(store, 30) // M-01 oldest … M-30 newest
+    for (const m of ids) store.upsertEdge({ sourceId: m, targetId: topic, type: 'ABOUT' })
+    const oldest = ids[0]
+
+    const lens = lensGraph(store, oldest, { hops: 2, windowDays: null })
+    expect(lens.center?.id).toBe(oldest)
+    // Center kept despite being the oldest in an over-budget band…
+    expect(lens.nodes.some((n) => n.id === oldest)).toBe(true)
+    expect(lens.nodes.filter((n) => n.stratum === 'evidence')).toHaveLength(20)
+    // …at the cost of one newer meeting (center + 19 newest = 20 shown).
+    expect(lens.nodes.some((n) => n.label === 'M-02')).toBe(false)
+  })
+
+  it('is deterministic — identical scope yields identical picks', async () => {
+    const { store, dbPath } = await makeStore('budget-determinism')
+    paths.push(dbPath)
+    seedMeetings(store, 30)
+
+    const a = lensGraph(store, null, { cap: 500, windowDays: null })
+    const b = lensGraph(store, null, { cap: 500, windowDays: null })
+    expect(a.nodes.map((n) => n.id)).toEqual(b.nodes.map((n) => n.id))
   })
 })
 
