@@ -123,4 +123,65 @@ describe('entity-resolver', () => {
     expect(r.id).toBe('p-atlas')
     expect(r.method).toBe('alias')
   })
+
+  describe('ambiguous bare first names', () => {
+    beforeEach(() => {
+      dbInstance.run(`
+        INSERT INTO contacts (id, name, email) VALUES
+          ('c-sh', 'Sergio Hurtado', NULL),
+          ('c-sr', 'Sergio Reyes', NULL);
+      `)
+    })
+
+    it('never auto-links a bare first name matching two surname-bearers (no context)', () => {
+      const r = resolveContact('Sergio')
+      expect(r.ambiguous).toBe(true)
+      expect(r.method).toBe('ambiguous-bucket')
+      expect(r.confidence).toBeLessThan(0.5)
+      expect(r.id).toBeNull() // no literal "Sergio" contact exists to return
+    })
+
+    it('splits by attendee context when exactly one candidate attended', () => {
+      dbInstance.run("INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES ('m1', 'c-sh', 'attendee')")
+      const r = resolveContact('Sergio', { meetingId: 'm1' })
+      expect(r).toEqual({ id: 'c-sh', confidence: 0.85, method: 'attendee-context' })
+    })
+
+    it('stays ambiguous when two candidates both attended (cannot decide)', () => {
+      dbInstance.run(`
+        INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES
+          ('m1', 'c-sh', 'attendee'), ('m1', 'c-sr', 'attendee');
+      `)
+      const r = resolveContact('Sergio', { meetingId: 'm1' })
+      expect(r.ambiguous).toBe(true)
+      expect(r.method).toBe('ambiguous-bucket')
+    })
+
+    it('treats a nickname (Sergi) as the same ambiguous bucket', () => {
+      const r = resolveContact('Sergi')
+      expect(r.ambiguous).toBe(true)
+    })
+
+    it('returns the existing bucket contact (flagged) when a literal bare-name row exists', () => {
+      dbInstance.run("INSERT INTO contacts (id, name, email) VALUES ('c-bucket', 'Sergio', NULL)")
+      const r = resolveContact('Sergio')
+      expect(r.ambiguous).toBe(true)
+      expect(r.id).toBe('c-bucket')
+      expect(r.confidence).toBeLessThan(0.5)
+    })
+
+    it('does NOT flag a bare name that matches only one surname-bearer', () => {
+      // Only "Oscar Ruiz" bears the Oscar first name → not a bucket.
+      const r = resolveContact('Oscar')
+      expect(r.ambiguous).toBeUndefined()
+    })
+
+    it('a user-settled positive alias wins over the ambiguity guard', () => {
+      dbInstance.run("INSERT INTO contact_aliases (id, alias_norm, contact_id, source, confidence) VALUES ('a1', 'sergio', 'c-sh', 'manual', 1.0)")
+      const r = resolveContact('Sergio')
+      expect(r.id).toBe('c-sh')
+      expect(r.method).toBe('alias')
+      expect(r.ambiguous).toBeUndefined()
+    })
+  })
 })

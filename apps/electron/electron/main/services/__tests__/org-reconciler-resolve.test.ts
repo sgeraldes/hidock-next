@@ -13,10 +13,16 @@ const run = vi.fn()
 const queryOne = vi.fn(() => undefined)
 const queryAll = vi.fn(() => [])
 const insertIdentitySuggestion = vi.fn()
+const getMentionResolution = vi.fn<() => { decided: boolean; contactId: string | null }>(() => ({
+  decided: false,
+  contactId: null
+}))
+const recordMentionResolutionNoSave = vi.fn()
 interface ResolveResult {
   id: string | null
   confidence: number
   method: string
+  ambiguous?: boolean
 }
 const resolveContact = vi.fn<(name: string, ctx?: unknown) => ResolveResult>()
 const resolveProject = vi.fn<(name: string, ctx?: unknown) => ResolveResult>()
@@ -27,7 +33,13 @@ vi.mock('../database', () => ({
   run: (...a: any[]) => (run as any)(...a),
   runInTransaction: (fn: () => unknown) => fn(),
   mergeContacts: vi.fn(),
-  insertIdentitySuggestion: (...a: any[]) => (insertIdentitySuggestion as any)(...a)
+  insertIdentitySuggestion: (...a: any[]) => (insertIdentitySuggestion as any)(...a),
+  getMentionResolution: (...a: any[]) => (getMentionResolution as any)(...a),
+  recordMentionResolutionNoSave: (...a: any[]) => (recordMentionResolutionNoSave as any)(...a),
+  getAmbiguousBuckets: vi.fn(() => []),
+  getBucketResolution: vi.fn(() => null),
+  getAllRecordingPreassignments: vi.fn(() => []),
+  meetingBaseUid: (id: string) => id
 }))
 
 vi.mock('../entity-resolver', () => ({
@@ -47,6 +59,7 @@ describe('applyTranscriptEntities — resolver thresholds', () => {
     vi.clearAllMocks()
     queryOne.mockReturnValue(undefined)
     queryAll.mockReturnValue([])
+    getMentionResolution.mockReturnValue({ decided: false, contactId: null })
     resolveProject.mockReturnValue({ id: null, confidence: 0, method: 'none' })
   })
 
@@ -116,5 +129,59 @@ describe('applyTranscriptEntities — resolver thresholds', () => {
     expect(res.projectLinked).toBe(true)
     expect(runsMatching('INSERT INTO projects')).toBe(0)
     expect(runsMatching('INSERT INTO meeting_projects')).toBe(1)
+  })
+
+  describe('ambiguous buckets + per-recording resolution', () => {
+    it('keeps an ambiguous mention in an existing bucket without creating or suggesting', () => {
+      resolveContact.mockReturnValue({ id: 'c-bucket', confidence: 0.4, method: 'ambiguous-bucket', ambiguous: true })
+      const res = applyTranscriptEntities({ meetingId: 'm1', participants: [{ name: 'Sergio' }] })
+
+      expect(res.contacts).toBe(0)
+      expect(insertIdentitySuggestion).not.toHaveBeenCalled()
+      expect(runsMatching('INSERT INTO contacts')).toBe(0)
+      expect(runsMatching('INSERT INTO meeting_contacts')).toBe(1) // linked to the bucket
+    })
+
+    it('creates the bucket once when no literal bare-name contact exists yet', () => {
+      resolveContact.mockReturnValue({ id: null, confidence: 0.4, method: 'ambiguous-bucket', ambiguous: true })
+      const res = applyTranscriptEntities({ meetingId: 'm1', participants: [{ name: 'Sergio' }] })
+
+      expect(res.contacts).toBe(1)
+      expect(insertIdentitySuggestion).not.toHaveBeenCalled()
+      expect(runsMatching('INSERT INTO contacts')).toBe(1)
+    })
+
+    it('honors a stored per-recording resolution over the resolver', () => {
+      getMentionResolution.mockReturnValue({ decided: true, contactId: 'c-real' })
+      const res = applyTranscriptEntities({
+        meetingId: 'm1',
+        recordingId: 'r1',
+        participants: [{ name: 'Sergio' }]
+      })
+
+      expect(resolveContact).not.toHaveBeenCalled()
+      expect(res.contacts).toBe(0)
+      expect(runsMatching('INSERT INTO meeting_contacts')).toBe(1)
+    })
+
+    it('leaves the mention unattributed when a stored resolution is Unclear', () => {
+      getMentionResolution.mockReturnValue({ decided: true, contactId: null })
+      const res = applyTranscriptEntities({
+        meetingId: 'm1',
+        recordingId: 'r1',
+        participants: [{ name: 'Sergio' }]
+      })
+
+      expect(res.contacts).toBe(0)
+      expect(runsMatching('INSERT INTO contacts')).toBe(0)
+      expect(runsMatching('INSERT INTO meeting_contacts')).toBe(0)
+    })
+
+    it('remembers an attendee-context split for a recording', () => {
+      resolveContact.mockReturnValue({ id: 'c-sh', confidence: 0.85, method: 'attendee-context' })
+      applyTranscriptEntities({ meetingId: 'm1', recordingId: 'r1', participants: [{ name: 'Sergio' }] })
+
+      expect(recordMentionResolutionNoSave).toHaveBeenCalledWith('r1', 'Sergio', 'c-sh', 'attendee-context', 0.85)
+    })
   })
 })

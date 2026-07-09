@@ -229,6 +229,21 @@ describe('identity-discovery — contacts', () => {
     expect(second.suggestionsCreated).toBe(0)
     expect(suggestions()).toHaveLength(1)
   })
+
+  it('never proposes merging a real person into an ambiguous bare-first-name bucket', () => {
+    // "Sergio" fits two distinct surname-bearers → a bucket, not a mergeable person.
+    addContact('c-bucket', 'Sergio', { meetings: 5 })
+    addContact('c-sh', 'Sergio Hurtado', { meetings: 2 })
+    addContact('c-sr', 'Sergio Reyes', { meetings: 2 })
+
+    discoverContactMerges()
+    const rows = suggestions()
+    // No suggestion should pair the bucket with either real Sergio (candidate or target).
+    const bucketPairs = rows.filter(
+      (s) => s.target_id === 'c-bucket' || s.candidate_name === 'Sergio'
+    )
+    expect(bucketPairs).toHaveLength(0)
+  })
 })
 
 describe('identity-discovery — projects', () => {

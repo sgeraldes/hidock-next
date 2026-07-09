@@ -44,6 +44,8 @@ import { groupSuggestions, TIER_LABEL, type SuggestionTier } from './groupSugges
 import { computeCoMention, mentionKey, mentionStatus, type MentionResult } from './mentionEvidence'
 import { computeSharedContext, type PersonContext, type SideContext } from './personContext'
 import { MergeIntoDialog } from './MergeIntoDialog'
+import { useAmbiguousBuckets } from './useAmbiguousBuckets'
+import { ResolvePerMeetingCard } from './ResolvePerMeetingCard'
 
 /** Confidence → badge styling. ≥80 emerald, 50–79 amber. */
 function confidenceBadge(confidence: number | null): { label: string; className: string } {
@@ -650,21 +652,51 @@ export const IdentitySuggestionsSection = forwardRef<
   const [expanded, setExpanded] = useState(true)
   const navigate = useNavigate()
 
-  useImperativeHandle(ref, () => ({ reload }), [reload])
+  // Ambiguous mention buckets are a person-only concept — skip them on the Projects page.
+  const showBuckets = kind !== 'project'
+  const {
+    buckets,
+    loading: bucketsLoading,
+    fetchResolution,
+    resolve: resolveMention,
+    reload: reloadBuckets
+  } = useAmbiguousBuckets(showBuckets)
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      reload: () => {
+        reload()
+        reloadBuckets()
+      }
+    }),
+    [reload, reloadBuckets]
+  )
 
   const openRecording = (recordingId: string) => navigate('/library', { state: { selectedId: recordingId } })
   const openProfile = (id: string) => navigate(`/person/${id}`)
 
   const visible = kind ? suggestions.filter((s) => s.kind === kind) : suggestions
 
-  const groups = useMemo(() => groupSuggestions(visible), [visible])
+  // A merge card whose keeper is itself an ambiguous bucket would merge distinct real
+  // people INTO the bucket — wrong. Those are handled by the "Resolve per meeting"
+  // cards, so drop any (possibly stale) merge group targeting a bucket.
+  const bucketIds = useMemo(() => new Set(buckets.map((b) => b.contactId)), [buckets])
+  const groups = useMemo(
+    () => groupSuggestions(visible).filter((g) => !bucketIds.has(g.targetId)),
+    [visible, bucketIds]
+  )
 
   const nameFor = (s: IdentitySuggestion): string => {
     const ev = parseEvidence(s.evidence)
     return targetNames[s.target_id] || ev.keeperName || (s.kind === 'person' ? 'this person' : 'this project')
   }
 
-  if (loading || visible.length === 0) return null
+  const hasBuckets = showBuckets && buckets.length > 0
+  const hasMergeGroups = !loading && groups.length > 0
+  if ((loading || groups.length === 0) && (bucketsLoading || !hasBuckets)) return null
+
+  const totalCount = groups.length + (hasBuckets ? buckets.length : 0)
 
   let lastTier: SuggestionTier | null = null
 
@@ -682,15 +714,37 @@ export const IdentitySuggestionsSection = forwardRef<
           <ChevronRight className="h-4 w-4 text-muted-foreground" />
         )}
         <Sparkles className="h-4 w-4 text-amber-500" />
-        <span className="text-sm font-semibold">Identity suggestions ({visible.length})</span>
+        <span className="text-sm font-semibold">Identity suggestions ({totalCount})</span>
         <span className="text-xs text-muted-foreground hidden sm:inline">
-          — possible duplicate names to confirm
+          — names to confirm or resolve
         </span>
       </button>
 
       {expanded && (
         <div className="space-y-3">
-          {groups.map((group) => {
+          {hasBuckets && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 pt-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Shared first names — resolve per meeting
+                </span>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+              {buckets.map((bucket) => (
+                <ResolvePerMeetingCard
+                  key={bucket.contactId}
+                  bucket={bucket}
+                  fetchResolution={fetchResolution}
+                  resolve={resolveMention}
+                  onOpenRecording={openRecording}
+                  onResolved={reloadBuckets}
+                />
+              ))}
+            </div>
+          )}
+
+          {hasMergeGroups &&
+            groups.map((group) => {
             const keeperName = nameFor(group.candidates[0])
             const keeperProfile = profiles[group.targetId]
             const keeperMentions = mentions[mentionKey(keeperName)]

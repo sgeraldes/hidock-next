@@ -20,14 +20,20 @@ import {
   getMentionSnippets,
   getPersonContext,
   getContactAliases,
+  getAmbiguousBuckets,
+  getBucketResolution,
+  resolveMention,
   IdentitySuggestion,
   AcceptSuggestionResult,
   MergeJournalEntry,
   MentionResult,
   PersonContext,
-  ContactAlias
+  ContactAlias,
+  AmbiguousBucket,
+  BucketResolution
 } from '../services/database'
 import { discoverContactMerges, discoverProjectMerges, DiscoveryResult } from '../services/identity-discovery'
+import { autoSplitAmbiguousBuckets } from '../services/org-reconciler'
 import { success, error, Result } from '../types/api'
 
 const StatusSchema = z.enum(['pending', 'accepted', 'rejected'])
@@ -40,6 +46,13 @@ const PersonContextRequestSchema = IdSchema
 const KindSchema = z.enum(['contact', 'project'])
 const MergeJournalRequestSchema = z.object({ kind: KindSchema, keeperId: IdSchema })
 const MergeImpactRequestSchema = z.object({ kind: KindSchema, keeperId: IdSchema, loserId: IdSchema })
+const ResolveMentionRequestSchema = z.object({
+  recordingId: IdSchema,
+  sourceName: z.string().min(1).max(200),
+  // null = the user marked this recording's mention "Unclear" (leave unattributed).
+  contactId: IdSchema.nullable(),
+  method: z.string().min(1).max(40).optional()
+})
 
 export function registerIdentityHandlers(): void {
   /**
@@ -234,4 +247,69 @@ export function registerIdentityHandlers(): void {
       }
     }
   )
+
+  /**
+   * Ambiguous mention buckets: bare first names ("Sergio") that denote several
+   * distinct real people, with per-bucket resolution progress. Drives the
+   * "Resolve per meeting" cards in the identity queue.
+   */
+  ipcMain.handle('identity:getAmbiguousBuckets', async (): Promise<Result<AmbiguousBucket[]>> => {
+    try {
+      return success(getAmbiguousBuckets())
+    } catch (err) {
+      console.error('identity:getAmbiguousBuckets error:', err)
+      return error('DATABASE_ERROR', 'Failed to fetch ambiguous buckets', err)
+    }
+  })
+
+  /**
+   * Full per-recording resolution view for one bucket: the candidate real people,
+   * and each recording with the system's best guess + the signal behind it.
+   */
+  ipcMain.handle('identity:getBucketResolution', async (_, contactId: unknown): Promise<Result<BucketResolution | null>> => {
+    try {
+      const parsed = IdSchema.safeParse(contactId)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid contact id', parsed.error.format())
+      }
+      return success(getBucketResolution(parsed.data))
+    } catch (err) {
+      console.error('identity:getBucketResolution error:', err)
+      return error('DATABASE_ERROR', 'Failed to fetch bucket resolution', err)
+    }
+  })
+
+  /**
+   * Assign (or clear, with contactId=null) the real person a bucket mention denotes
+   * in ONE recording. Non-destructive: records the decision and links that recording's
+   * meeting to the chosen person; the bucket is never merged.
+   */
+  ipcMain.handle('identity:resolveMention', async (_, request?: unknown): Promise<Result<{ ok: true }>> => {
+    try {
+      const parsed = ResolveMentionRequestSchema.safeParse(request)
+      if (!parsed.success) {
+        return error('VALIDATION_ERROR', 'Invalid resolve-mention request', parsed.error.format())
+      }
+      const { recordingId, sourceName, contactId, method } = parsed.data
+      resolveMention(recordingId, sourceName, contactId, method ?? 'manual', 1.0)
+      return success({ ok: true })
+    } catch (err) {
+      console.error('identity:resolveMention error:', err)
+      return error('DATABASE_ERROR', 'Failed to resolve mention', err)
+    }
+  })
+
+  /**
+   * Maintenance sweep: auto-resolve every bucket recording whose signal is
+   * unambiguous (sole speaker or sole matching attendee), leaving the rest for the
+   * user. Returns how many buckets were seen and how many mentions were split.
+   */
+  ipcMain.handle('identity:autoSplitBuckets', async (): Promise<Result<{ buckets: number; resolved: number }>> => {
+    try {
+      return success(autoSplitAmbiguousBuckets())
+    } catch (err) {
+      console.error('identity:autoSplitBuckets error:', err)
+      return error('DATABASE_ERROR', 'Failed to auto-split buckets', err)
+    }
+  })
 }

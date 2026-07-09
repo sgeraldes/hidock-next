@@ -56,6 +56,9 @@ import type { Person, PersonType } from '@/types/knowledge'
 import type { Meeting } from '@/types'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/toaster'
+import { ResolvePerMeetingCard } from '@/components/identity/ResolvePerMeetingCard'
+import type { AmbiguousBucketSummary, BucketResolution } from '@/components/identity/useAmbiguousBuckets'
+import { Users } from 'lucide-react'
 
 const PERSON_TYPES: PersonType[] = ['team', 'candidate', 'customer', 'external', 'unknown']
 
@@ -141,6 +144,11 @@ export function PersonDetail() {
   const [unmergeTarget, setUnmergeTarget] = useState<MergeHistoryEntry | null>(null)
   const [unmerging, setUnmerging] = useState(false)
   const [orphanReview, setOrphanReview] = useState<{ loserName: string; orphans: OrphanLink[] } | null>(null)
+
+  // Ambiguous-bucket state: when this contact is a bare first name denoting several
+  // real people, offer per-recording resolution instead of pretending it's one person.
+  const [bucket, setBucket] = useState<BucketResolution | null>(null)
+  const [showResolve, setShowResolve] = useState(false)
 
   // B-PPL-002: Wrapped in useCallback to satisfy dependency arrays
   const loadDetails = useCallback(async () => {
@@ -357,6 +365,49 @@ export function PersonDetail() {
     // Keyed on the target id only — the mergeTarget object is otherwise stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, mergeTarget?.id])
+
+  // Detect whether this contact is an ambiguous bucket (bare first name → several people).
+  const loadBucket = useCallback(async () => {
+    if (!id) return
+    try {
+      const res = await window.electronAPI.identity.getBucketResolution?.(id)
+      setBucket(res?.success ? ((res.data as BucketResolution | null) ?? null) : null)
+    } catch {
+      setBucket(null)
+    }
+  }, [id])
+
+  useEffect(() => {
+    loadBucket()
+  }, [loadBucket])
+
+  // Feed the reused ResolvePerMeetingCard: it wants a summary + fetch/resolve closures.
+  const bucketSummary: AmbiguousBucketSummary | null = useMemo(() => {
+    if (!bucket) return null
+    const resolvedCount = bucket.recordings.filter((r) => r.resolved).length
+    return {
+      contactId: bucket.contactId,
+      name: bucket.name,
+      candidates: bucket.candidates,
+      recordingCount: bucket.recordings.length,
+      resolvedCount,
+      pendingCount: bucket.recordings.length - resolvedCount
+    }
+  }, [bucket])
+
+  const fetchBucketResolution = useCallback(async (): Promise<BucketResolution | null> => {
+    if (!id) return null
+    const res = await window.electronAPI.identity.getBucketResolution?.(id)
+    return res?.success ? ((res.data as BucketResolution | null) ?? null) : null
+  }, [id])
+
+  const resolveBucketMention = useCallback(
+    async (recordingId: string, sourceName: string, contactId: string | null, method = 'manual'): Promise<boolean> => {
+      const res = await window.electronAPI.identity.resolveMention?.({ recordingId, sourceName, contactId, method })
+      return !!res?.success
+    },
+    []
+  )
 
   // Both sides heavily linked → require typing the loser's name before merging.
   const highStakesMerge =
@@ -585,6 +636,38 @@ export function PersonDetail() {
       {/* Main Content */}
       <div className="flex-1 overflow-auto">
         <div className="max-w-5xl mx-auto p-6 space-y-6">
+          {bucketSummary && bucketSummary.recordingCount > 0 && (
+            <div className="space-y-3">
+              <div className="flex flex-col gap-2 rounded-lg border border-blue-500/30 bg-blue-500/[0.06] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-2">
+                  <Users className="h-4 w-4 mt-0.5 flex-shrink-0 text-blue-500" />
+                  <p className="text-sm">
+                    This may be several people —{' '}
+                    <span className="font-medium">{bucketSummary.resolvedCount} resolved</span>,{' '}
+                    <span className="font-medium">{bucketSummary.pendingCount} pending</span>.
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 border-blue-500/40 text-blue-600 hover:bg-blue-500/10 dark:text-blue-300"
+                  onClick={() => setShowResolve((v) => !v)}
+                  aria-expanded={showResolve}
+                >
+                  {showResolve ? 'Hide' : 'Resolve'}
+                </Button>
+              </div>
+              {showResolve && (
+                <ResolvePerMeetingCard
+                  bucket={bucketSummary}
+                  fetchResolution={fetchBucketResolution}
+                  resolve={resolveBucketMention}
+                  onOpenRecording={(recordingId) => navigate('/library', { state: { selectedId: recordingId } })}
+                  onResolved={loadBucket}
+                />
+              )}
+            </div>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {/* Left Column: Info Card */}
             <div className="space-y-6 animate-rise-in">

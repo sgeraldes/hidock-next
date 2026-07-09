@@ -30,7 +30,7 @@
 
 import { queryAll, queryOne, insertIdentitySuggestion } from './database'
 import type { Contact, Project } from './database'
-import { normalizeName, accentFoldedKey, fuzzyNameScore } from './entity-normalize'
+import { normalizeName, accentFoldedKey, fuzzyNameScore, detectAmbiguousName } from './entity-normalize'
 import { nameRarity, type Rarity } from './name-rarity'
 
 // ---------------------------------------------------------------------------
@@ -383,12 +383,25 @@ export function discoverContactMerges(): DiscoveryResult {
   const tokenBearers = buildTokenBearers(contacts)
   const mentionsOf = makeMentionCounter()
 
+  // Ambiguous mention buckets ("Sergio" = several real people): never propose merging
+  // a distinct surname-bearer INTO the bucket (or the bucket into one of them). Those
+  // are resolved per recording, not merged. Precompute each bucket's match set once.
+  const contactList = contacts.map((c) => ({ id: c.id, name: c.name }))
+  const bucketMatchIds = new Map<string, Set<string>>()
+  for (const c of contactList) {
+    const amb = detectAmbiguousName(c.name, contactList, c.id)
+    if (amb.ambiguous) bucketMatchIds.set(c.id, new Set(amb.matches.map((m) => m.id)))
+  }
+  const isBucketMergePair = (aId: string, bId: string): boolean =>
+    !!bucketMatchIds.get(aId)?.has(bId) || !!bucketMatchIds.get(bId)?.has(aId)
+
   const pairs = candidatePairsFrom(contacts.map((c) => ({ id: c.id, name: c.name, email: c.email })))
 
   for (const [i, j] of pairs) {
     const a = contacts[i]
     const b = contacts[j]
     if (isSettled(a.id, a.name, b.id, b.name, aliasKeys)) continue
+    if (isBucketMergePair(a.id, b.id)) continue
     result.candidatePairs++
 
     // --- signals ---

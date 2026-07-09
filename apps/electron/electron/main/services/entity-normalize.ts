@@ -149,3 +149,92 @@ export function fuzzyNameScore(aNorm: string, bNorm: string): number {
   }
   return score
 }
+
+// ---------------------------------------------------------------------------
+// Ambiguous-name ("mention bucket") detection
+// ---------------------------------------------------------------------------
+//
+// A bare first name or nickname ("Sergio", "Sergi", "Santi") is NOT a person — it
+// is an unresolved MENTION BUCKET when the corpus holds several distinct
+// surname-bearing people it could denote (Sergio Hurtado, Sergio Reyes). Merging
+// those real people into the bucket, or the bucket into one of them, is wrong for
+// roughly half the mentions. These pure helpers let the resolver, the discovery
+// sweep, and the DB layer agree on what counts as an ambiguous bucket.
+
+/** Accent-folded whitespace tokens of a name (lowercased, marks stripped, ≥1 char). */
+export function nameTokens(name: string): string[] {
+  return accentFoldedKey(name).split(' ').filter(Boolean)
+}
+
+/** A name is a single token when it has exactly one whitespace-delimited word. */
+export function isSingleToken(name: string): boolean {
+  return nameTokens(name).length === 1
+}
+
+/** A name "bears a surname" when it carries ≥2 tokens (a first name plus more). */
+export function hasSurname(name: string): boolean {
+  return nameTokens(name).length >= 2
+}
+
+/**
+ * Whether a bare first-name/nickname token identifies the first name of a full name.
+ * Accent-folded; matches when the full name's first token equals the bucket token, or
+ * one is a prefix of the other — a Spanish nickname is a prefix of the full first
+ * name (Sergi→Sergio, Santi→Santiago, Sebas→Sebastián). Requires ≥3 chars on each so
+ * a two-letter fragment never collides half the directory.
+ */
+export function firstNameNicknameMatch(bucketToken: string, fullName: string): boolean {
+  const b = stripDiacritics(normalizeName(bucketToken))
+  const first = nameTokens(fullName)[0] || ''
+  if (b.length < 3 || first.length < 3) return false
+  return b === first || first.startsWith(b) || b.startsWith(first)
+}
+
+export interface AmbiguityMatch {
+  id: string
+  name: string
+}
+
+export interface AmbiguityResult {
+  /** True when the name is a single-token/nickname matching ≥2 distinct surname bearers. */
+  ambiguous: boolean
+  /** Accent-folded bucket token (empty when the name is not a single token). */
+  token: string
+  /** The distinct surname-bearing contacts the bucket first name fits, by id. */
+  matches: AmbiguityMatch[]
+}
+
+/** Minimum token length for a bucket to be considered (guards against "Al"/"Jo"). */
+const MIN_BUCKET_TOKEN = 3
+
+/**
+ * Classify a name against a contact corpus as an ambiguous mention bucket. Pure:
+ * it takes the candidate list so it can be unit-tested and shared by the resolver,
+ * discovery, and the DB layer without a cycle. A name is an ambiguous bucket when
+ * it is a single token (or nickname prefix) that {@link firstNameNicknameMatch}es
+ * ≥2 DISTINCT surname-bearing contacts. Distinctness is by accent-folded full name
+ * (so duplicate rows of one person do not manufacture ambiguity); `selfId` excludes
+ * the bucket's own row.
+ */
+export function detectAmbiguousName(
+  name: string,
+  contacts: Array<{ id: string; name: string }>,
+  selfId?: string
+): AmbiguityResult {
+  if (!isSingleToken(name)) return { ambiguous: false, token: '', matches: [] }
+  const token = nameTokens(name)[0] || ''
+  if (token.length < MIN_BUCKET_TOKEN) return { ambiguous: false, token, matches: [] }
+
+  const matches: AmbiguityMatch[] = []
+  const seenNames = new Set<string>()
+  for (const c of contacts) {
+    if (selfId && c.id === selfId) continue
+    if (!hasSurname(c.name)) continue
+    if (!firstNameNicknameMatch(token, c.name)) continue
+    const key = accentFoldedKey(c.name)
+    if (seenNames.has(key)) continue
+    seenNames.add(key)
+    matches.push({ id: c.id, name: c.name })
+  }
+  return { ambiguous: matches.length >= 2, token, matches }
+}

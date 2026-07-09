@@ -4,10 +4,10 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { getDatabasePath } from './file-storage'
 import { DatabaseEngine, getTableColumns, type SqlJsDatabase } from '@hidock/database'
-import { normalizeName, isGenericSpeakerLabel } from './entity-normalize'
+import { normalizeName, isGenericSpeakerLabel, detectAmbiguousName } from './entity-normalize'
 import { getEventBus } from './event-bus'
 
-const SCHEMA_VERSION = 32
+const SCHEMA_VERSION = 35
 
 const SCHEMA = `
 -- Calendar events from ICS
@@ -427,6 +427,25 @@ CREATE TABLE IF NOT EXISTS transcript_speakers (
     FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
 );
 
+-- Mention resolutions: per-recording assignment of an ambiguous bucket name
+-- (a bare first name like "Sergio" that could be several people) to the real
+-- contact it denotes IN THAT recording. source_name is the raw spoken/extracted
+-- name; resolved_contact_id is the chosen person (NULL = user marked it Unclear).
+-- One decision per (recording, name) so a re-analysis honors it instead of
+-- re-bucketing. See detectAmbiguousName + the "Resolve per meeting" surface.
+CREATE TABLE IF NOT EXISTS mention_resolutions (
+    id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    resolved_contact_id TEXT,
+    method TEXT,
+    confidence REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(recording_id, source_name),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY (resolved_contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+);
+
 -- Junction table: Meeting-Project relationship
 CREATE TABLE IF NOT EXISTS meeting_projects (
     meeting_id TEXT NOT NULL,
@@ -517,6 +536,8 @@ CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_meeting ON meeting_contacts(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_contacts_contact ON meeting_contacts(contact_id);
 CREATE INDEX IF NOT EXISTS idx_transcript_speakers_recording ON transcript_speakers(recording_id);
+CREATE INDEX IF NOT EXISTS idx_mention_resolutions_recording ON mention_resolutions(recording_id);
+CREATE INDEX IF NOT EXISTS idx_mention_resolutions_contact ON mention_resolutions(resolved_contact_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_meeting ON meeting_projects(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_meeting_projects_project ON meeting_projects(project_id);
 CREATE INDEX IF NOT EXISTS idx_project_notes_project_kind ON project_notes(project_id, kind);
@@ -1760,6 +1781,36 @@ const MIGRATIONS: Record<number, () => void> = {
       }
     }
     console.log('Migration v32 complete')
+  },
+
+  // v33 reserved (connectors), v34 reserved (transcript-triage) — see other agents.
+
+  35: () => {
+    // v35: mention_resolutions — per-recording assignment of an ambiguous bucket
+    // name (bare first name matching several distinct people) to the real contact.
+    console.log('Running migration to schema v35: mention_resolutions')
+    const database = getDatabase()
+    try {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS mention_resolutions (
+          id TEXT PRIMARY KEY,
+          recording_id TEXT NOT NULL,
+          source_name TEXT NOT NULL,
+          resolved_contact_id TEXT,
+          method TEXT,
+          confidence REAL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(recording_id, source_name),
+          FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+          FOREIGN KEY (resolved_contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_mention_resolutions_recording ON mention_resolutions(recording_id)')
+      database.run('CREATE INDEX IF NOT EXISTS idx_mention_resolutions_contact ON mention_resolutions(resolved_contact_id)')
+    } catch (e) {
+      console.warn('[Migration v35] mention_resolutions failed:', e)
+    }
+    console.log('Migration v35 complete')
   }
 
 }
@@ -1881,6 +1932,25 @@ function repairPhase(): void {
       )
     `)
   } catch (e) { /* table already exists */ }
+
+  // Repair mention_resolutions (v35): force-create so an older on-disk DB that
+  // skipped the migration still gets it before any resolveMention write. Idempotent.
+  try {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS mention_resolutions (
+        id TEXT PRIMARY KEY,
+        recording_id TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        resolved_contact_id TEXT,
+        method TEXT,
+        confidence REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(recording_id, source_name),
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (resolved_contact_id) REFERENCES contacts(id) ON DELETE SET NULL
+      )
+    `)
+  } catch { /* table already exists */ }
 
   // Repair knowledge_projects (v26): force-create so an older on-disk DB that
   // skipped the migration still gets it before any setProjects write. Idempotent.
@@ -5265,6 +5335,279 @@ export function rejectIdentitySuggestion(id: string): IdentitySuggestion {
 
     runNoSave("UPDATE identity_suggestions SET status = 'rejected' WHERE id = ?", [id])
     return queryOne<IdentitySuggestion>('SELECT * FROM identity_suggestions WHERE id = ?', [id])!
+  })
+}
+
+// =============================================================================
+// Ambiguous mention buckets + per-recording resolution
+// =============================================================================
+//
+// A bare first name ("Sergio") linked to dozens of recordings is not a person — it
+// is an unresolved bucket denoting several real people (detectAmbiguousName). These
+// helpers surface those buckets and let a recording's mention be pinned to the real
+// contact it means, one recording at a time, without a corpus-wide merge/alias.
+
+export interface AmbiguousCandidate {
+  id: string
+  name: string
+}
+
+/** A recording that mentions a bucket name, with the system's best guess at who it is. */
+export interface BucketRecording {
+  recordingId: string
+  title: string
+  date: string | null
+  meetingId: string | null
+  /** Best-guess real contact for THIS recording (null when unclear). */
+  bestGuessId: string | null
+  bestGuessName: string | null
+  /** How the best guess was derived. */
+  method: 'speaker-map' | 'attendee-context' | 'unclear'
+  /** Human phrase for the signal ("Hurtado was an attendee"). */
+  signal: string
+  /** Existing stored decision: contact id, or null when explicitly marked Unclear. */
+  resolvedContactId: string | null
+  resolved: boolean
+}
+
+export interface BucketResolution {
+  contactId: string
+  name: string
+  candidates: AmbiguousCandidate[]
+  recordings: BucketRecording[]
+}
+
+export interface AmbiguousBucket {
+  contactId: string
+  name: string
+  candidates: AmbiguousCandidate[]
+  recordingCount: number
+  resolvedCount: number
+  pendingCount: number
+}
+
+/** Build placeholders (?, ?, …) for an IN clause of `n` items. */
+function inPlaceholders(n: number): string {
+  return new Array(n).fill('?').join(',')
+}
+
+/** Compute the full per-recording resolution view for one bucket contact. */
+function buildBucketResolution(
+  contact: { id: string; name: string },
+  allContacts: Array<{ id: string; name: string }>
+): BucketResolution {
+  const amb = detectAmbiguousName(contact.name, allContacts, contact.id)
+  const candidates: AmbiguousCandidate[] = amb.matches.map((m) => ({ id: m.id, name: m.name }))
+  const candNameById = new Map(candidates.map((c) => [c.id, c.name]))
+  const candIds = candidates.map((c) => c.id)
+  const nameKey = normalizeName(contact.name)
+
+  const recRows =
+    candIds.length === 0
+      ? []
+      : queryAll<{ recordingId: string; filename: string | null; date: string | null; meetingId: string | null; subject: string | null }>(
+          `SELECT DISTINCT r.id AS recordingId, r.filename AS filename, r.date_recorded AS date,
+                  r.meeting_id AS meetingId, m.subject AS subject
+             FROM recordings r
+             JOIN meetings m ON m.id = r.meeting_id
+             JOIN meeting_contacts mc ON mc.meeting_id = m.id
+            WHERE mc.contact_id = ?
+            ORDER BY r.date_recorded DESC`,
+          [contact.id]
+        )
+
+  const recIds = recRows.map((r) => r.recordingId)
+  const meetingIds = [...new Set(recRows.map((r) => r.meetingId).filter((x): x is string => !!x))]
+
+  // Batch the three signal sources so the whole bucket costs a fixed number of queries.
+  const speakerByRec = new Map<string, Set<string>>() // recording → candidate ids named as speakers
+  if (recIds.length > 0 && candIds.length > 0) {
+    for (const row of queryAll<{ recording_id: string; contact_id: string }>(
+      `SELECT DISTINCT recording_id, contact_id FROM transcript_speakers
+        WHERE recording_id IN (${inPlaceholders(recIds.length)}) AND contact_id IN (${inPlaceholders(candIds.length)})`,
+      [...recIds, ...candIds]
+    )) {
+      let s = speakerByRec.get(row.recording_id)
+      if (!s) speakerByRec.set(row.recording_id, (s = new Set()))
+      s.add(row.contact_id)
+    }
+  }
+
+  const attendeeByMeeting = new Map<string, Set<string>>() // meeting → candidate ids attending
+  if (meetingIds.length > 0 && candIds.length > 0) {
+    for (const row of queryAll<{ meeting_id: string; contact_id: string }>(
+      `SELECT meeting_id, contact_id FROM meeting_contacts
+        WHERE meeting_id IN (${inPlaceholders(meetingIds.length)}) AND contact_id IN (${inPlaceholders(candIds.length)})`,
+      [...meetingIds, ...candIds]
+    )) {
+      let s = attendeeByMeeting.get(row.meeting_id)
+      if (!s) attendeeByMeeting.set(row.meeting_id, (s = new Set()))
+      s.add(row.contact_id)
+    }
+  }
+
+  const resolutionByRec = new Map<string, string | null>() // recording → resolved contact id (null = Unclear)
+  if (recIds.length > 0) {
+    for (const row of queryAll<{ recording_id: string; resolved_contact_id: string | null }>(
+      `SELECT recording_id, resolved_contact_id FROM mention_resolutions
+        WHERE source_name = ? AND recording_id IN (${inPlaceholders(recIds.length)})`,
+      [nameKey, ...recIds]
+    )) {
+      resolutionByRec.set(row.recording_id, row.resolved_contact_id)
+    }
+  }
+
+  const lastName = (n: string): string => {
+    const toks = (n || '').trim().split(/\s+/)
+    return toks.length > 1 ? toks[toks.length - 1] : n
+  }
+
+  const recordings: BucketRecording[] = recRows.map((r) => {
+    const spoken = speakerByRec.get(r.recordingId)
+    let bestGuessId: string | null = null
+    let method: BucketRecording['method'] = 'unclear'
+    let signal = 'No attendee or speaker signal — assign manually.'
+
+    if (spoken && spoken.size === 1) {
+      bestGuessId = [...spoken][0]
+      method = 'speaker-map'
+      signal = `${lastName(candNameById.get(bestGuessId) || '')} named as a speaker`
+    } else {
+      const attending = r.meetingId ? attendeeByMeeting.get(r.meetingId) : undefined
+      if (attending && attending.size === 1) {
+        bestGuessId = [...attending][0]
+        method = 'attendee-context'
+        signal = `${lastName(candNameById.get(bestGuessId) || '')} was an attendee`
+      } else if (attending && attending.size > 1) {
+        signal = `${attending.size} candidates attended — ambiguous`
+      }
+    }
+
+    const decided = resolutionByRec.has(r.recordingId)
+    const resolvedContactId = decided ? resolutionByRec.get(r.recordingId) ?? null : null
+
+    return {
+      recordingId: r.recordingId,
+      title: r.subject || r.filename || r.recordingId,
+      date: r.date,
+      meetingId: r.meetingId,
+      bestGuessId,
+      bestGuessName: bestGuessId ? candNameById.get(bestGuessId) ?? null : null,
+      method,
+      signal,
+      resolvedContactId,
+      resolved: decided
+    }
+  })
+
+  return { contactId: contact.id, name: contact.name, candidates, recordings }
+}
+
+/** Every contact that is an ambiguous mention bucket, with resolution progress. */
+export function getAmbiguousBuckets(): AmbiguousBucket[] {
+  const contacts = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
+  const buckets: AmbiguousBucket[] = []
+  for (const c of contacts) {
+    const amb = detectAmbiguousName(c.name, contacts, c.id)
+    if (!amb.ambiguous) continue
+    const res = buildBucketResolution(c, contacts)
+    const resolvedCount = res.recordings.filter((r) => r.resolved).length
+    buckets.push({
+      contactId: c.id,
+      name: c.name,
+      candidates: res.candidates,
+      recordingCount: res.recordings.length,
+      resolvedCount,
+      pendingCount: res.recordings.length - resolvedCount
+    })
+  }
+  // Most recordings first — the biggest buckets are the most valuable to split.
+  buckets.sort((a, b) => b.recordingCount - a.recordingCount)
+  return buckets
+}
+
+/** Set of contact ids that are ambiguous buckets (for callers that must skip merges). */
+export function getAmbiguousBucketIds(): Set<string> {
+  const contacts = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
+  const ids = new Set<string>()
+  for (const c of contacts) {
+    if (detectAmbiguousName(c.name, contacts, c.id).ambiguous) ids.add(c.id)
+  }
+  return ids
+}
+
+/** Full per-recording resolution view for one bucket contact, or null if not a bucket. */
+export function getBucketResolution(contactId: string): BucketResolution | null {
+  const contacts = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
+  const contact = contacts.find((c) => c.id === contactId)
+  if (!contact) return null
+  const amb = detectAmbiguousName(contact.name, contacts, contact.id)
+  if (!amb.ambiguous) return null
+  return buildBucketResolution(contact, contacts)
+}
+
+/** A stored per-recording mention decision (decided=false ⇒ resolve normally). */
+export interface MentionDecision {
+  decided: boolean
+  /** Resolved contact id, or null when the user explicitly marked it Unclear. */
+  contactId: string | null
+}
+
+/** Look up a stored per-recording resolution for a raw mention name. */
+export function getMentionResolution(recordingId: string, sourceName: string): MentionDecision {
+  const row = queryOne<{ resolved_contact_id: string | null }>(
+    'SELECT resolved_contact_id FROM mention_resolutions WHERE recording_id = ? AND source_name = ?',
+    [recordingId, normalizeName(sourceName)]
+  )
+  return row ? { decided: true, contactId: row.resolved_contact_id } : { decided: false, contactId: null }
+}
+
+/** Upsert a per-recording mention resolution inside an existing transaction (no save). */
+export function recordMentionResolutionNoSave(
+  recordingId: string,
+  sourceName: string,
+  contactId: string | null,
+  method: string,
+  confidence: number
+): void {
+  const key = normalizeName(sourceName)
+  if (!recordingId || !key) return
+  runNoSave(
+    `INSERT OR REPLACE INTO mention_resolutions
+       (id, recording_id, source_name, resolved_contact_id, method, confidence, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), recordingId, key, contactId, method, confidence, new Date().toISOString()]
+  )
+}
+
+/**
+ * Assign (or clear) the real contact a bucket mention denotes in one recording.
+ * Stores the decision and, when a contact is chosen, links that recording's meeting
+ * to them so the attribution follows. `contactId = null` records an explicit
+ * "Unclear" so the sweep and re-analysis leave that recording alone. Auto-saves.
+ */
+export function resolveMention(
+  recordingId: string,
+  sourceName: string,
+  contactId: string | null,
+  method = 'manual',
+  confidence = 1.0
+): void {
+  runInTransaction(() => {
+    recordMentionResolutionNoSave(recordingId, sourceName, contactId, method, confidence)
+    if (contactId) {
+      const rec = queryOne<{ meeting_id: string | null }>('SELECT meeting_id FROM recordings WHERE id = ?', [
+        recordingId
+      ])
+      if (rec?.meeting_id) {
+        runNoSave('INSERT OR IGNORE INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, ?)', [
+          rec.meeting_id,
+          contactId,
+          'attendee'
+        ])
+        recomputeContactMeetingCount(contactId)
+      }
+    }
   })
 }
 

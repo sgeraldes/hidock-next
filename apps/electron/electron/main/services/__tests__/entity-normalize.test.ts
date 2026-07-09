@@ -13,7 +13,11 @@ import {
   levenshtein,
   fuzzyNameScore,
   isOppositeGenderSpanishPair,
-  cleanRole
+  cleanRole,
+  isSingleToken,
+  hasSurname,
+  firstNameNicknameMatch,
+  detectAmbiguousName
 } from '../entity-normalize'
 
 describe('normalizeName', () => {
@@ -125,5 +129,75 @@ describe('cleanRole', () => {
     expect(cleanRole('VP (Sales)')).toBe('VP (Sales)')
     expect(cleanRole(null)).toBe('')
     expect(cleanRole(undefined)).toBe('')
+  })
+})
+
+describe('single-token / surname helpers', () => {
+  it('detects single-token names', () => {
+    expect(isSingleToken('Sergio')).toBe(true)
+    expect(isSingleToken('  Sergi  ')).toBe(true)
+    expect(isSingleToken('Sergio Hurtado')).toBe(false)
+    expect(isSingleToken('')).toBe(false)
+  })
+
+  it('detects surname-bearing names', () => {
+    expect(hasSurname('Sergio Hurtado')).toBe(true)
+    expect(hasSurname('Sergio')).toBe(false)
+  })
+
+  it('matches a first name / nickname against a full name (accent + prefix aware)', () => {
+    expect(firstNameNicknameMatch('Sergio', 'Sergio Hurtado')).toBe(true)
+    expect(firstNameNicknameMatch('Sergi', 'Sergio Hurtado')).toBe(true) // nickname prefix
+    expect(firstNameNicknameMatch('Santi', 'Santiago Rojas')).toBe(true)
+    expect(firstNameNicknameMatch('Sebas', 'Sebastián Herrera')).toBe(true) // accent-folded
+    expect(firstNameNicknameMatch('Sergio', 'Reyes Sergio')).toBe(false) // first token is Reyes
+    expect(firstNameNicknameMatch('Al', 'Alejandro Ruiz')).toBe(false) // too short
+  })
+})
+
+describe('detectAmbiguousName', () => {
+  const corpus = [
+    { id: 'c-sh', name: 'Sergio Hurtado' },
+    { id: 'c-sr', name: 'Sergio Reyes' },
+    { id: 'c-o', name: 'Oscar Ruiz' },
+    { id: 'c-santi1', name: 'Santiago Rojas' },
+    { id: 'c-santi2', name: 'Santiago Arboleda' },
+    { id: 'c-seb1', name: 'Sebastián Geraldes' },
+    { id: 'c-seb2', name: 'Sebastián Herrera' }
+  ]
+
+  it('flags a bare first name that fits two distinct surname-bearers', () => {
+    const r = detectAmbiguousName('Sergio', corpus)
+    expect(r.ambiguous).toBe(true)
+    expect(r.matches.map((m) => m.id).sort()).toEqual(['c-sh', 'c-sr'])
+  })
+
+  it('flags nicknames (Sergi/Santi/Sebas) as the same bucket', () => {
+    expect(detectAmbiguousName('Sergi', corpus).ambiguous).toBe(true)
+    expect(detectAmbiguousName('Santi', corpus).ambiguous).toBe(true)
+    expect(detectAmbiguousName('Sebas', corpus).ambiguous).toBe(true)
+  })
+
+  it('does NOT flag a bare name with a single match', () => {
+    expect(detectAmbiguousName('Oscar', corpus).ambiguous).toBe(false)
+  })
+
+  it('does NOT flag a full (surname-bearing) name', () => {
+    expect(detectAmbiguousName('Sergio Hurtado', corpus).ambiguous).toBe(false)
+  })
+
+  it('counts duplicate rows of one person as a single distinct match', () => {
+    const dup = [
+      { id: 'c-1', name: 'Sergio Hurtado' },
+      { id: 'c-2', name: 'Sergio Hurtado' } // duplicate contact, same person
+    ]
+    expect(detectAmbiguousName('Sergio', dup).ambiguous).toBe(false)
+  })
+
+  it('excludes the bucket contact itself via selfId', () => {
+    const withBucket = [...corpus, { id: 'c-bucket', name: 'Sergio' }]
+    const r = detectAmbiguousName('Sergio', withBucket, 'c-bucket')
+    expect(r.matches.some((m) => m.id === 'c-bucket')).toBe(false)
+    expect(r.ambiguous).toBe(true)
   })
 })

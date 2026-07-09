@@ -28,6 +28,11 @@ import {
 } from './entity-normalize'
 import { nameRarity, type Rarity } from './name-rarity'
 
+import {
+  detectAmbiguousName,
+  type AmbiguityResult,
+} from './entity-normalize'
+
 export {
   normalizeName,
   stripDiacritics,
@@ -37,7 +42,13 @@ export {
   levenshtein,
   fuzzyNameScore,
   isOppositeGenderSpanishPair,
+  nameTokens,
+  isSingleToken,
+  hasSurname,
+  firstNameNicknameMatch,
+  detectAmbiguousName,
 } from './entity-normalize'
+export type { AmbiguityResult, AmbiguityMatch } from './entity-normalize'
 export { nameRarity } from './name-rarity'
 
 export interface ResolveContext {
@@ -52,7 +63,16 @@ export interface ResolveResult {
   /** Base-rate label for a fuzzy match (present only when common/rare) — the merge
    *  card frames a 'common' match with a "verify carefully" caution. */
   rarity?: Rarity
+  /** True when the name is a bare first-name/nickname bucket denoting several distinct
+   *  people and no single one could be picked from context — callers must NOT auto-link
+   *  or auto-merge it; it needs per-recording resolution instead. */
+  ambiguous?: boolean
 }
+
+/** Confidence for a bare first name disambiguated to the sole matching meeting attendee. */
+const ATTENDEE_CONTEXT_CONFIDENCE = 0.85
+/** Confidence returned for an unresolvable ambiguous bucket — below SUGGEST, never links. */
+const AMBIGUOUS_BUCKET_CONFIDENCE = 0.4
 
 /** Highest fuzzy+boost confidence we allow — keeps fuzzy below the exact-email 1.0. */
 const FUZZY_CAP = 0.97
@@ -164,10 +184,38 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
   const rejectedId = aliasRow && aliasRow.source === 'rejected' ? aliasRow.contact_id : null
   const blocked = (id: string): boolean => rejectedId !== null && id === rejectedId
 
+  const hasPositiveAlias = !!aliasRow && aliasRow.source !== 'rejected'
+
   // Tier 1 — exact email (only when the name is itself an email).
   if (looksLikeEmail(raw)) {
     const c = queryOne<{ id: string }>('SELECT id FROM contacts WHERE LOWER(email) = ? LIMIT 1', [raw.toLowerCase()])
     if (c && !blocked(c.id)) return { id: c.id, confidence: 1.0, method: 'email' }
+  }
+
+  const candidates = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
+
+  // Ambiguous-bucket guard — runs BEFORE the exact-name/alias tiers so a literal
+  // "Sergio" contact is never auto-linked as if it were a real person when the name
+  // fits several distinct surname-bearing people. A user-settled positive alias for
+  // this exact spelling still wins (checked next); a rejected alias only blocks its
+  // one target. With meeting context we split by attendee: exactly one matching
+  // attendee resolves to them; zero or several keep it in the bucket, flagged.
+  if (!hasPositiveAlias) {
+    const amb: AmbiguityResult = detectAmbiguousName(raw, candidates)
+    if (amb.ambiguous) {
+      const attendees = coOccurringContactIds(ctx)
+      const present = amb.matches.filter((m) => attendees.has(m.id) && !blocked(m.id))
+      if (present.length === 1) {
+        return { id: present[0].id, confidence: ATTENDEE_CONTEXT_CONFIDENCE, method: 'attendee-context' }
+      }
+      const bucket = queryOne<{ id: string }>('SELECT id FROM contacts WHERE LOWER(name) = ? LIMIT 1', [norm])
+      return {
+        id: bucket && !blocked(bucket.id) ? bucket.id : null,
+        confidence: AMBIGUOUS_BUCKET_CONFIDENCE,
+        method: 'ambiguous-bucket',
+        ambiguous: true,
+      }
+    }
   }
 
   // Tier 2 — exact case-insensitive name.
@@ -175,14 +223,13 @@ export function resolveContact(name: string, ctx?: ResolveContext): ResolveResul
   if (exact && !blocked(exact.id)) return { id: exact.id, confidence: 0.95, method: 'exact-name' }
 
   // Tier 3 — positive alias.
-  if (aliasRow && aliasRow.source !== 'rejected') {
-    const c = getContactById(aliasRow.contact_id)
+  if (hasPositiveAlias) {
+    const c = getContactById(aliasRow!.contact_id)
     if (c && !blocked(c.id)) {
-      return { id: c.id, confidence: aliasRow.confidence ?? 0.9, method: 'alias' }
+      return { id: c.id, confidence: aliasRow!.confidence ?? 0.9, method: 'alias' }
     }
   }
 
-  const candidates = queryAll<{ id: string; name: string }>('SELECT id, name FROM contacts')
   const foldedTarget = accentFoldedKey(raw)
 
   // Tier 4 — accent/diacritic-folded name (Oscar ~ Óscar).

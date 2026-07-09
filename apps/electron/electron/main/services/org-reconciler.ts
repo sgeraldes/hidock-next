@@ -21,6 +21,10 @@ import {
   meetingBaseUid,
   insertIdentitySuggestion,
   getAllRecordingPreassignments,
+  getMentionResolution,
+  recordMentionResolutionNoSave,
+  getAmbiguousBuckets,
+  getBucketResolution,
   type RecordingPreassignment
 } from './database'
 import { resolveContact, resolveProject } from './entity-resolver'
@@ -314,6 +318,25 @@ export function repairEscapedMeetingText(): number {
   return repaired
 }
 
+/** Idempotently link a contact to a meeting and refresh its meeting count/last-seen. */
+function linkContactToMeeting(contactId: string, meetingId: string | undefined, now: string): void {
+  if (!contactId || !meetingId) return
+  const link = queryOne<{ meeting_id: string }>(
+    `SELECT meeting_id FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?`,
+    [meetingId, contactId]
+  )
+  if (!link) {
+    run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, 'attendee')`, [meetingId, contactId])
+  }
+  run(
+    `UPDATE contacts SET
+       meeting_count = (SELECT COUNT(1) FROM meeting_contacts mc WHERE mc.contact_id = contacts.id),
+       last_seen_at = ?
+     WHERE id = ?`,
+    [now, contactId]
+  )
+}
+
 /**
  * Persist people + project extracted from a transcript by the AI analysis.
  * The published Outlook ICS feed carries no attendee data, so transcripts are
@@ -322,6 +345,10 @@ export function repairEscapedMeetingText(): number {
  */
 export function applyTranscriptEntities(opts: {
   meetingId?: string
+  /** The recording this analysis came from. When present, a stored per-recording
+   *  mention resolution is honored, and an attendee-context split is remembered so a
+   *  future re-analysis attributes the same mention to the same real person. */
+  recordingId?: string
   participants?: Array<{ name: string; role?: string }>
   project?: { name: string; is_new?: boolean }
 }): { contacts: number; projectLinked: boolean } {
@@ -347,10 +374,47 @@ export function applyTranscriptEntities(opts: {
       const name = (person.name || '').trim()
       if (!name || name.length < 2 || isGenericSpeakerLabel(name)) continue
 
+      let contactId: string | null = null
+
+      // 0. Honor a stored per-recording resolution first (user pick or auto-split) —
+      // it overrides the resolver so a re-analysis never re-buckets a settled mention.
+      if (opts.recordingId) {
+        const decision = getMentionResolution(opts.recordingId, name)
+        if (decision.decided) {
+          if (decision.contactId) {
+            contactId = decision.contactId
+          } else {
+            // Explicitly marked Unclear — leave it unattributed, do not create.
+            continue
+          }
+          linkContactToMeeting(contactId, opts.meetingId, now)
+          continue
+        }
+      }
+
       // Confidence-scored resolution replaces the old exact-name lookup — this is
       // what stops the duplicate factory (INTELLIGENCE.md §2).
       const res = resolveContact(name, { meetingId: opts.meetingId })
-      let contactId: string | null = null
+
+      // Ambiguous bare-first-name bucket ("Sergio" = several real people): keep the
+      // mention in the bucket, NEVER auto-link to one surname-bearer and NEVER queue a
+      // merge. It gets split per recording via the "Resolve per meeting" surface.
+      if (res.ambiguous) {
+        if (res.id) {
+          contactId = res.id
+        } else {
+          const id = randomUUID()
+          run(
+            `INSERT INTO contacts (id, name, type, role, first_seen_at, last_seen_at, meeting_count)
+             VALUES (?, ?, 'unknown', ?, ?, ?, 0)`,
+            [id, name, person.role ?? null, now, now]
+          )
+          contactId = id
+          contacts++
+        }
+        linkContactToMeeting(contactId, opts.meetingId, now)
+        continue
+      }
 
       if (res.id && res.confidence >= AUTO_LINK_THRESHOLD) {
         // High confidence — link the existing contact, never create.
@@ -358,6 +422,11 @@ export function applyTranscriptEntities(opts: {
         if (person.role) {
           const existing = queryOne<{ role?: string }>(`SELECT role FROM contacts WHERE id = ?`, [contactId])
           if (existing && !existing.role) run(`UPDATE contacts SET role = ? WHERE id = ?`, [person.role, contactId])
+        }
+        // Remember an attendee-context split so re-analysis attributes it the same way
+        // instead of re-running the bucket guess (only meaningful with a recording).
+        if (res.method === 'attendee-context' && opts.recordingId) {
+          recordMentionResolutionNoSave(opts.recordingId, name, contactId, 'attendee-context', res.confidence)
         }
       } else if (res.id && res.confidence >= SUGGEST_THRESHOLD) {
         // Mid confidence — queue a reviewable suggestion; do NOT create or link.
@@ -381,23 +450,7 @@ export function applyTranscriptEntities(opts: {
       }
 
       if (contactId && opts.meetingId) {
-        const link = queryOne<{ meeting_id: string }>(
-          `SELECT meeting_id FROM meeting_contacts WHERE meeting_id = ? AND contact_id = ?`,
-          [opts.meetingId, contactId]
-        )
-        if (!link) {
-          run(`INSERT INTO meeting_contacts (meeting_id, contact_id, role) VALUES (?, ?, 'attendee')`, [
-            opts.meetingId,
-            contactId
-          ])
-        }
-        run(
-          `UPDATE contacts SET
-             meeting_count = (SELECT COUNT(1) FROM meeting_contacts mc WHERE mc.contact_id = contacts.id),
-             last_seen_at = ?
-           WHERE id = ?`,
-          [now, contactId]
-        )
+        linkContactToMeeting(contactId, opts.meetingId, now)
       }
     }
 
@@ -829,6 +882,38 @@ export function mergeDuplicateMeetingOccurrences(): number {
   return mergedGroups
 }
 
+/**
+ * Auto-split ambiguous mention buckets: for each bucket ("Sergio" = several real
+ * people), walk its recordings and, where the signal is unambiguous — the transcript
+ * names exactly one candidate as a speaker, or exactly one candidate attended the
+ * linked meeting — pin that recording's mention to the real person. Recordings with
+ * no signal (or a tie) are left for the user's "Resolve per meeting" review. Already-
+ * resolved recordings are skipped, so this is idempotent and safe to re-run.
+ */
+export function autoSplitAmbiguousBuckets(): { buckets: number; resolved: number } {
+  const buckets = getAmbiguousBuckets()
+  let resolvedTotal = 0
+  const now = new Date().toISOString()
+  for (const b of buckets) {
+    const res = getBucketResolution(b.contactId)
+    if (!res) continue
+    const toResolve = res.recordings.filter((r) => !r.resolved && r.method !== 'unclear' && r.bestGuessId)
+    if (toResolve.length === 0) continue
+    runInTransaction(() => {
+      for (const r of toResolve) {
+        const conf = r.method === 'speaker-map' ? 0.9 : 0.85
+        recordMentionResolutionNoSave(r.recordingId, res.name, r.bestGuessId as string, r.method, conf)
+        linkContactToMeeting(r.bestGuessId as string, r.meetingId ?? undefined, now)
+        resolvedTotal++
+      }
+    })
+  }
+  if (resolvedTotal > 0) {
+    console.log(`[OrgReconciler] Auto-split ${resolvedTotal} bucket mentions across ${buckets.length} buckets`)
+  }
+  return { buckets: buckets.length, resolved: resolvedTotal }
+}
+
 /** Full reconciliation pass — run after calendar syncs and at startup. */
 export function reconcileOrganization(): void {
   try {
@@ -860,5 +945,10 @@ export function reconcileOrganization(): void {
     mergeDuplicateContacts()
   } catch (e) {
     console.error('[OrgReconciler] duplicate contact merge failed:', e)
+  }
+  try {
+    autoSplitAmbiguousBuckets()
+  } catch (e) {
+    console.error('[OrgReconciler] ambiguous-bucket auto-split failed:', e)
   }
 }
