@@ -20,6 +20,13 @@ import {
   type RecordingPreassignment
 } from '../services/database'
 import { getRecordingFiles, deleteRecording as deleteRecordingFile, getRecordingsPath } from '../services/file-storage'
+import {
+  scoreMeetingCandidates,
+  deriveTranscriptTitle,
+  deriveTranscriptSummary,
+  countTranscriptSpeakers,
+  buildContentText
+} from '../services/recording-match-scoring'
 import { copyFileSync, existsSync, statSync } from 'fs'
 import { basename, join, extname } from 'path'
 import { randomUUID } from 'crypto'
@@ -355,7 +362,15 @@ export function registerRecordingHandlers(): void {
     return getRecordingFiles()
   })
 
-  // Get meeting candidates for a recording (for manual linking)
+  // Get meeting candidates for a recording (for manual linking).
+  //
+  // Returns candidates re-scored at fetch time (see recording-match-scoring.ts):
+  // stored candidates are unioned with meetings near the recording so a content
+  // match can surface a meeting the auto-correlator never scored, every candidate
+  // gets an honest time+content score with a human-readable reason, and the field
+  // is sorted (overlaps first, then by score). `recordingContext` carries the
+  // transcript-derived title/summary/speaker count so the dialog can show what
+  // the recording is actually about.
   ipcMain.handle('recordings:getCandidates', async (_, recordingId: unknown) => {
     try {
       if (typeof recordingId !== 'string' || !recordingId) {
@@ -366,10 +381,81 @@ export function registerRecordingHandlers(): void {
       // link dialog can still offer meetings near the recording's date.
       const recording = resolveRecordingId(recordingId)
       if (!recording) {
-        return { success: true, data: [] }
+        return { success: true, data: [], recordingContext: null }
       }
-      const data = getCandidatesForRecordingWithDetails(recording.id)
-      return { success: true, data }
+
+      const transcript = getTranscriptByRecordingId(recording.id)
+      const recordingContext = {
+        title: deriveTranscriptTitle(transcript),
+        summary: deriveTranscriptSummary(transcript),
+        speakerCount: countTranscriptSpeakers(transcript),
+        hasTranscript: !!transcript
+      }
+
+      // Union the stored candidates with meetings near the recording, keyed by
+      // meeting id (stored rows win — they carry the real candidate id and any
+      // user confirmation). Nearby-only meetings get a synthetic id.
+      const byMeeting = new Map<string, ReturnType<typeof getCandidatesForRecordingWithDetails>[number]>()
+      for (const candidate of getCandidatesForRecordingWithDetails(recording.id)) {
+        byMeeting.set(candidate.meetingId, candidate)
+      }
+      try {
+        for (const meeting of getMeetingsNearDate(recording.date_recorded)) {
+          if (!byMeeting.has(meeting.id)) {
+            byMeeting.set(meeting.id, {
+              id: `nearby_${meeting.id}`,
+              recordingId: recording.id,
+              meetingId: meeting.id,
+              subject: meeting.subject,
+              startTime: meeting.start_time,
+              endTime: meeting.end_time,
+              confidenceScore: 0,
+              matchReason: null,
+              isAiSelected: false,
+              isUserConfirmed: false
+            })
+          }
+        }
+      } catch (nearbyError) {
+        // Nearby meetings are best-effort enrichment — never fail the dialog for it.
+        console.error('recordings:getCandidates nearby lookup failed:', nearbyError)
+      }
+
+      const candidates = Array.from(byMeeting.values())
+      const scored = scoreMeetingCandidates(
+        {
+          dateRecorded: recording.date_recorded,
+          durationSeconds: recording.duration_seconds,
+          contentText: buildContentText(transcript)
+        },
+        candidates.map((c) => ({
+          meetingId: c.meetingId,
+          subject: c.subject,
+          startTime: c.startTime,
+          endTime: c.endTime
+        }))
+      )
+      const scoreByMeeting = new Map(scored.map((s) => [s.meetingId, s]))
+
+      const data = candidates
+        .map((candidate) => {
+          const score = scoreByMeeting.get(candidate.meetingId)
+          if (!score) return candidate
+          return {
+            ...candidate,
+            confidenceScore: score.confidenceScore,
+            matchReason: score.matchReason,
+            isAiSelected: score.isBestMatch
+          }
+        })
+        .sort((a, b) => {
+          const sa = scoreByMeeting.get(a.meetingId)
+          const sb = scoreByMeeting.get(b.meetingId)
+          const overlapDelta = (sb?.hasOverlap ? 1 : 0) - (sa?.hasOverlap ? 1 : 0)
+          return overlapDelta !== 0 ? overlapDelta : b.confidenceScore - a.confidenceScore
+        })
+
+      return { success: true, data, recordingContext }
     } catch (error) {
       console.error('recordings:getCandidates error:', error)
       return { success: false, data: [], error: error instanceof Error ? error.message : 'Unknown error' }
