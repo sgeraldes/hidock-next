@@ -430,7 +430,7 @@ CREATE TABLE IF NOT EXISTS transcript_speakers (
 -- Mention resolutions: per-recording assignment of an ambiguous bucket name
 -- (a bare first name like "Sergio" that could be several people) to the real
 -- contact it denotes IN THAT recording. source_name is the raw spoken/extracted
--- name; resolved_contact_id is the chosen person (NULL = user marked it Unclear).
+-- name and resolved_contact_id is the chosen person (NULL = marked Unclear).
 -- One decision per (recording, name) so a re-analysis honors it instead of
 -- re-bucketing. See detectAmbiguousName + the "Resolve per meeting" surface.
 CREATE TABLE IF NOT EXISTS mention_resolutions (
@@ -5358,15 +5358,23 @@ export interface BucketRecording {
   title: string
   date: string | null
   meetingId: string | null
+  /** False when the recording is not linked to any meeting (link it first). */
+  meetingLinked: boolean
+  /** Whether the linked meeting carries CALENDAR attendee data (attendees/organizer
+   *  email). Currently false for all meetings until the M365 connector backfills —
+   *  the card uses this to be honest that context is transcript-derived. */
+  meetingHasCalendarAttendees: boolean
   /** Best-guess real contact for THIS recording (null when unclear). */
   bestGuessId: string | null
   bestGuessName: string | null
-  /** How the best guess was derived. */
-  method: 'speaker-map' | 'attendee-context' | 'unclear'
+  /** How the best guess was derived (see signal-tiers.ts for the hierarchy). */
+  method: 'attendee-email' | 'speaker-map' | 'attendee-context' | 'unclear'
   /** Human phrase for the signal ("Hurtado was an attendee"). */
   signal: string
   /** Existing stored decision: contact id, or null when explicitly marked Unclear. */
   resolvedContactId: string | null
+  /** The method of the existing stored decision (drives upgrade-only re-sweeps). */
+  resolvedMethod: string | null
   resolved: boolean
 }
 
@@ -5419,6 +5427,28 @@ function buildBucketResolution(
   const recIds = recRows.map((r) => r.recordingId)
   const meetingIds = [...new Set(recRows.map((r) => r.meetingId).filter((x): x is string => !!x))]
 
+  // Which of these meetings carry CALENDAR attendee data (attendees JSON / organizer
+  // email) vs transcript-derived people only. Drives the attendee-email (tier 2) vs
+  // attendee-context (tier 4) distinction and the card's honest "no attendee list"
+  // message. Currently empty for all meetings until M365 backfills (see signal-tiers).
+  const calendarMeetings = new Set<string>()
+  if (meetingIds.length > 0) {
+    for (const row of queryAll<{ id: string; attendees: string | null; organizer_email: string | null }>(
+      `SELECT id, attendees, organizer_email FROM meetings WHERE id IN (${inPlaceholders(meetingIds.length)})`,
+      meetingIds
+    )) {
+      const hasOrganizer = !!(row.organizer_email && row.organizer_email.trim())
+      let hasAttendees = false
+      try {
+        const parsed = row.attendees ? (JSON.parse(row.attendees) as unknown[]) : []
+        hasAttendees = Array.isArray(parsed) && parsed.length > 0
+      } catch {
+        hasAttendees = false
+      }
+      if (hasOrganizer || hasAttendees) calendarMeetings.add(row.id)
+    }
+  }
+
   // Batch the three signal sources so the whole bucket costs a fixed number of queries.
   const speakerByRec = new Map<string, Set<string>>() // recording → candidate ids named as speakers
   if (recIds.length > 0 && candIds.length > 0) {
@@ -5446,14 +5476,14 @@ function buildBucketResolution(
     }
   }
 
-  const resolutionByRec = new Map<string, string | null>() // recording → resolved contact id (null = Unclear)
+  const resolutionByRec = new Map<string, { contactId: string | null; method: string | null }>()
   if (recIds.length > 0) {
-    for (const row of queryAll<{ recording_id: string; resolved_contact_id: string | null }>(
-      `SELECT recording_id, resolved_contact_id FROM mention_resolutions
+    for (const row of queryAll<{ recording_id: string; resolved_contact_id: string | null; method: string | null }>(
+      `SELECT recording_id, resolved_contact_id, method FROM mention_resolutions
         WHERE source_name = ? AND recording_id IN (${inPlaceholders(recIds.length)})`,
       [nameKey, ...recIds]
     )) {
-      resolutionByRec.set(row.recording_id, row.resolved_contact_id)
+      resolutionByRec.set(row.recording_id, { contactId: row.resolved_contact_id, method: row.method })
     }
   }
 
@@ -5463,12 +5493,21 @@ function buildBucketResolution(
   }
 
   const recordings: BucketRecording[] = recRows.map((r) => {
+    const meetingLinked = !!r.meetingId
+    const calendarBacked = !!r.meetingId && calendarMeetings.has(r.meetingId)
     const spoken = speakerByRec.get(r.recordingId)
     let bestGuessId: string | null = null
     let method: BucketRecording['method'] = 'unclear'
-    let signal = 'No attendee or speaker signal — assign manually.'
+    let signal: string
+
+    if (!meetingLinked) {
+      signal = 'Not linked to a meeting — link it first for automatic resolution.'
+    } else {
+      signal = 'No attendee or speaker signal — assign manually.'
+    }
 
     if (spoken && spoken.size === 1) {
+      // A user-confirmed speaker map is stronger than transcript co-presence.
       bestGuessId = [...spoken][0]
       method = 'speaker-map'
       signal = `${lastName(candNameById.get(bestGuessId) || '')} named as a speaker`
@@ -5476,26 +5515,38 @@ function buildBucketResolution(
       const attending = r.meetingId ? attendeeByMeeting.get(r.meetingId) : undefined
       if (attending && attending.size === 1) {
         bestGuessId = [...attending][0]
-        method = 'attendee-context'
-        signal = `${lastName(candNameById.get(bestGuessId) || '')} was an attendee`
+        const who = lastName(candNameById.get(bestGuessId) || '')
+        if (calendarBacked) {
+          method = 'attendee-email'
+          signal = `${who} was a calendar attendee`
+        } else {
+          // Meeting people are transcript-derived (no calendar attendees yet) — honest.
+          method = 'attendee-context'
+          signal = `${who} was in this meeting (from transcript)`
+        }
       } else if (attending && attending.size > 1) {
-        signal = `${attending.size} candidates attended — ambiguous`
+        signal = `${attending.size} candidates in this meeting — ambiguous`
+      } else if (meetingLinked && !calendarBacked) {
+        signal = 'No attendee list for this meeting — connect Microsoft 365 for automatic resolution.'
       }
     }
 
-    const decided = resolutionByRec.has(r.recordingId)
-    const resolvedContactId = decided ? resolutionByRec.get(r.recordingId) ?? null : null
+    const stored = resolutionByRec.get(r.recordingId)
+    const decided = stored !== undefined
 
     return {
       recordingId: r.recordingId,
       title: r.subject || r.filename || r.recordingId,
       date: r.date,
       meetingId: r.meetingId,
+      meetingLinked,
+      meetingHasCalendarAttendees: calendarBacked,
       bestGuessId,
       bestGuessName: bestGuessId ? candNameById.get(bestGuessId) ?? null : null,
       method,
       signal,
-      resolvedContactId,
+      resolvedContactId: decided ? stored!.contactId : null,
+      resolvedMethod: decided ? stored!.method : null,
       resolved: decided
     }
   })

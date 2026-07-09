@@ -7,11 +7,14 @@ const rec = (over: Partial<BucketRecording>): BucketRecording => ({
   title: 'Rec',
   date: null,
   meetingId: 'm',
+  meetingLinked: true,
+  meetingHasCalendarAttendees: false,
   bestGuessId: null,
   bestGuessName: null,
   method: 'unclear',
   signal: '',
   resolvedContactId: null,
+  resolvedMethod: null,
   resolved: false,
   ...over
 })

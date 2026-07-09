@@ -29,6 +29,7 @@ import {
 } from './database'
 import { resolveContact, resolveProject } from './entity-resolver'
 import { isGenericSpeakerLabel, cleanRole } from './entity-normalize'
+import { canUpgrade, methodConfidence } from './signal-tiers'
 import { randomUUID } from 'crypto'
 
 /** Resolver thresholds (INTELLIGENCE.md §2): ≥0.8 auto-link, 0.5–0.8 suggest, <0.5 create. */
@@ -885,10 +886,15 @@ export function mergeDuplicateMeetingOccurrences(): number {
 /**
  * Auto-split ambiguous mention buckets: for each bucket ("Sergio" = several real
  * people), walk its recordings and, where the signal is unambiguous — the transcript
- * names exactly one candidate as a speaker, or exactly one candidate attended the
- * linked meeting — pin that recording's mention to the real person. Recordings with
- * no signal (or a tie) are left for the user's "Resolve per meeting" review. Already-
- * resolved recordings are skipped, so this is idempotent and safe to re-run.
+ * names exactly one candidate as a speaker, or exactly one candidate is present in the
+ * linked meeting — pin that recording's mention to the real person. Recordings with no
+ * signal (or a tie) are left for the user's "Resolve per meeting" review.
+ *
+ * UPGRADE-ONLY and re-runnable (see signal-tiers.ts): a recording is (re)resolved only
+ * when the available signal OUTRANKS any existing stored resolution — a 'manual' user
+ * pick is never overwritten, and equal/lower signals are left alone (idempotent). This
+ * is what lets a re-sweep upgrade transcript-derived guesses to 'attendee-email' once
+ * the M365 connector backfills real calendar attendees.
  */
 export function autoSplitAmbiguousBuckets(): { buckets: number; resolved: number } {
   const buckets = getAmbiguousBuckets()
@@ -897,12 +903,13 @@ export function autoSplitAmbiguousBuckets(): { buckets: number; resolved: number
   for (const b of buckets) {
     const res = getBucketResolution(b.contactId)
     if (!res) continue
-    const toResolve = res.recordings.filter((r) => !r.resolved && r.method !== 'unclear' && r.bestGuessId)
+    const toResolve = res.recordings.filter(
+      (r) => r.method !== 'unclear' && r.bestGuessId && canUpgrade(r.resolvedMethod, r.method)
+    )
     if (toResolve.length === 0) continue
     runInTransaction(() => {
       for (const r of toResolve) {
-        const conf = r.method === 'speaker-map' ? 0.9 : 0.85
-        recordMentionResolutionNoSave(r.recordingId, res.name, r.bestGuessId as string, r.method, conf)
+        recordMentionResolutionNoSave(r.recordingId, res.name, r.bestGuessId as string, r.method, methodConfidence(r.method))
         linkContactToMeeting(r.bestGuessId as string, r.meetingId ?? undefined, now)
         resolvedTotal++
       }

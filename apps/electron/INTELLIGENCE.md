@@ -222,3 +222,55 @@ step is the safety net, not a substitute for the gate.
 
 Discovery's `evidence.autoMergeable` flag never bypasses this — it only pre-selects
 the card; execution is always an explicit, journaled, reversible click.
+
+## 9. Ambiguous mention buckets + signal hierarchy (BUILT — schema v35)
+
+A bare first name or nickname ("Sergio", "Sergi", "Santi", "Sebas") linked to dozens
+of recordings is NOT a person — it is an **unresolved mention bucket** that may denote
+several distinct people (Sergio Hurtado, Sergio Reyes). Merging real people into it,
+or it into one of them, is wrong for ~half the mentions. Detection is a pure, tested
+predicate (`detectAmbiguousName`): a single-token/nickname name that prefix- or
+accent-matches ≥2 **distinct surname-bearing** contacts. Such a name is resolved
+**per recording**, never by a global merge:
+
+- The resolver never auto-links a bare first name to one of several surname-matches.
+  With meeting context, exactly one matching attendee resolves it; zero or several
+  keep it in the bucket, flagged `ambiguous`.
+- `mention_resolutions(recording_id, source_name → resolved_contact_id, method)` stores
+  the per-recording decision (UNIQUE per pair; `NULL` contact = explicit "Unclear").
+- The "Resolve per meeting" card groups a bucket's recordings by best guess (with the
+  signal shown), offering per-group "Assign all N" + per-recording override; discovery
+  no longer proposes merging a real person into a bucket.
+
+### Signal hierarchy (design principle — `signal-tiers.ts` is the source of truth)
+
+> "this is better and easier if there is a meeting related, with calendar, emails, than
+> if we rely completely on context." — prefer objective meeting/calendar/email evidence
+> over transcript context; **never auto-link on LLM inference.**
+
+| Tier | Method | ~Confidence | Source |
+|---|---|---|---|
+| 1 | `connector-email` | 1.00 | Connector-confirmed identity (email match: M365/Slack/Bamboo) |
+| 2 | `attendee-email` | 0.90 | Linked-meeting attendee from **calendar** data (`attendees`/`organizer_email`) |
+| — | `manual` | (user) | Explicit human pick in the card. **Sovereign — never auto-overwritten.** |
+| 3 | `speaker-map` | 0.85 | User-confirmed transcript speaker assignment (`transcript_speakers`) |
+| 4 | `attendee-context` | 0.70 | Sole candidate among the meeting's people, but those people are **transcript-derived** (today's reality — weak) |
+| 5 | `lexical` | 0.60 | Full-name mention / co-presence in the transcript |
+| 6 | `inferred` | — | LLM-inferred. **Never auto-links.** |
+
+**CRITICAL DB FACT (verified read-only 2026-07-09):** 0 of 1,951 meetings carry
+attendee JSON or `organizer_email` — the Outlook ICS feed strips them, so **all** current
+`meeting_contacts` links are transcript-derived. Consequences, all built:
+- `attendee-context` sits at Tier 4 (weak) today; `attendee-email` (Tier 2) only appears
+  once a connector backfills real attendees.
+- The auto-split sweep (`autoSplitAmbiguousBuckets`, run in `reconcileOrganization` +
+  `identity:autoSplitBuckets`) is **upgrade-only and re-runnable** (`canUpgrade`): a
+  higher-tier signal overwrites a lower-tier resolution, an equal/lower one is left alone
+  (idempotent), and a `manual` pick is never touched. So when the **M365 connector**
+  backfills real calendar attendees, a re-sweep upgrades those recordings
+  `attendee-context → attendee-email` automatically.
+- The card is **honest** about weak context: when a meeting has no calendar attendees it
+  says "No calendar attendee lists yet — connect Microsoft 365 for automatic resolution"
+  rather than showing a transcript guess as if it were authoritative. An **unlinked**
+  recording's first action is "Link recording to its meeting" (linkage is upstream of
+  identity).

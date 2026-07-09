@@ -118,4 +118,27 @@ describe('ambiguous mention buckets', () => {
     expect(sergio.resolvedCount).toBe(3)
     expect(sergio.pendingCount).toBe(0)
   })
+
+  it('never overwrites the manual r3 decision on re-sweep', () => {
+    autoSplitAmbiguousBuckets()
+    expect(getMentionResolution('r3', 'Sergio')).toEqual({ decided: true, contactId: 'c-sh' })
+    const r3 = getBucketResolution('c-bucket')!.recordings.find((r) => r.recordingId === 'r3')!
+    expect(r3.resolvedMethod).toBe('manual')
+  })
+
+  it('upgrades a transcript-attendee guess to attendee-email when calendar attendees arrive', () => {
+    // Before: r1 was resolved via transcript co-presence (attendee-context).
+    const before = getBucketResolution('c-bucket')!.recordings.find((r) => r.recordingId === 'r1')!
+    expect(before.resolvedMethod).toBe('attendee-context')
+
+    // M365 backfills real calendar attendees on m1 → the signal is now calendar-backed.
+    run(`UPDATE meetings SET organizer_email = 'sergio.hurtado@acme.com' WHERE id = 'm1'`)
+    const result = autoSplitAmbiguousBuckets()
+    expect(result.resolved).toBeGreaterThanOrEqual(1)
+
+    const after = getBucketResolution('c-bucket')!.recordings.find((r) => r.recordingId === 'r1')!
+    expect(after.meetingHasCalendarAttendees).toBe(true)
+    expect(after.resolvedMethod).toBe('attendee-email') // upgraded
+    expect(after.resolvedContactId).toBe('c-sh') // same person, stronger signal
+  })
 })

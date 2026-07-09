@@ -774,11 +774,14 @@ export interface ElectronAPI {
           title: string
           date: string | null
           meetingId: string | null
+          meetingLinked: boolean
+          meetingHasCalendarAttendees: boolean
           bestGuessId: string | null
           bestGuessName: string | null
-          method: 'speaker-map' | 'attendee-context' | 'unclear'
+          method: 'attendee-email' | 'speaker-map' | 'attendee-context' | 'unclear'
           signal: string
           resolvedContactId: string | null
+          resolvedMethod: string | null
           resolved: boolean
         }>
       } | null
