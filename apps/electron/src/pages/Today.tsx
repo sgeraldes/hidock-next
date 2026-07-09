@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { EntityMention, MeetingHoverCard, meetingHoverWillHaveContent } from '@/components/entity'
 import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { TodayIdentitySuggestions } from '@/components/identity/TodayIdentitySuggestions'
 import { LiveRecordingCard, parseRecordingStart } from '@/components/LiveRecordingCard'
 import { cn } from '@/lib/utils'
@@ -131,6 +132,25 @@ function formatClock(d: Date): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+/**
+ * Full "start–end" range for a meeting row. Duration is decision-relevant, so
+ * every zone variant shows it. `compact` drops the start's meridiem when it
+ * matches the end's ("12:00–01:00 PM") to save horizontal space in the slim rows.
+ */
+function formatTimeRange(startIso?: string, endIso?: string, compact = false): string {
+  const start = formatTime(startIso)
+  const end = formatTime(endIso)
+  if (!start) return ''
+  if (!end) return start
+  if (compact) {
+    const sm = start.match(/([AP]M)$/i)
+    const em = end.match(/([AP]M)$/i)
+    const startPart = sm && em && sm[1].toUpperCase() === em[1].toUpperCase() ? start.replace(/\s*[AP]M$/i, '') : start
+    return `${startPart}–${end}`
+  }
+  return `${start}–${end}`
+}
+
 function formatDay(iso?: string): string {
   if (!iso) return ''
   const d = new Date(iso)
@@ -207,6 +227,7 @@ const CategoryDot = ({ vm, className }: { vm: MeetingVM; className?: string }) =
       vm.dimmed && 'opacity-50',
       className
     )}
+    title={MEETING_CATEGORY_LABELS[vm.category]}
     aria-hidden="true"
   />
 )
@@ -683,8 +704,8 @@ export function Today() {
         )}
       >
         <CategoryDot vm={vm} className="h-2 w-2" />
-        <span className="w-20 flex-shrink-0 text-xs font-medium tabular-nums text-foreground/55">
-          {formatTime(m.start_time)}
+        <span className="w-28 flex-shrink-0 whitespace-nowrap text-xs font-medium tabular-nums text-foreground/55">
+          {formatTimeRange(m.start_time, m.end_time, true)}
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1.5">
@@ -714,8 +735,8 @@ export function Today() {
         )}
       >
         <CategoryDot vm={vm} className="h-2 w-2 opacity-70" />
-        <span className="w-20 flex-shrink-0 text-xs font-medium tabular-nums text-foreground/50">
-          {formatTime(m.start_time)}
+        <span className="w-28 flex-shrink-0 whitespace-nowrap text-xs font-medium tabular-nums text-foreground/50">
+          {formatTimeRange(m.start_time, m.end_time, true)}
         </span>
         <span
           className={cn(
@@ -766,7 +787,14 @@ export function Today() {
                 subject: m.subject,
                 attendeeCount: participantsByMeeting[m.id]?.length || undefined
               })
-              return <span key={m.id} className={cn('h-1.5 w-1.5 rounded-full', CATEGORY_DOT[cat])} aria-hidden="true" />
+              return (
+                <span
+                  key={m.id}
+                  className={cn('h-1.5 w-1.5 rounded-full', CATEGORY_DOT[cat])}
+                  title={MEETING_CATEGORY_LABELS[cat]}
+                  aria-hidden="true"
+                />
+              )
             })}
           </span>
         </button>
@@ -774,15 +802,15 @@ export function Today() {
           <div className="mt-1 space-y-0.5 pl-6">
             {group.meetings.map((m) => {
               const vm = buildVM(m)
-              return (
+              const node = (
                 <button
-                  key={m.id}
                   onClick={() => navigate(`/meeting/${m.id}`)}
+                  data-testid="capsule-row"
                   className="flex w-full items-center gap-3 rounded-md px-3 py-1.5 text-left text-sm opacity-80 transition-colors hover:bg-muted/50 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  <span className={cn('h-2 w-2 flex-shrink-0 rounded-full', CATEGORY_DOT[vm.category])} aria-hidden="true" />
-                  <span className="w-20 flex-shrink-0 text-xs tabular-nums text-foreground/55">
-                    {formatTime(m.start_time)}
+                  <CategoryDot vm={vm} className="h-2 w-2" />
+                  <span className="w-28 flex-shrink-0 whitespace-nowrap text-xs tabular-nums text-foreground/55">
+                    {formatTimeRange(m.start_time, m.end_time, true)}
                   </span>
                   <span className={cn('min-w-0 flex-1 truncate text-foreground/80', vm.cancelled && 'line-through')}>
                     {m.subject}
@@ -790,6 +818,7 @@ export function Today() {
                   <RecordingMic vm={vm} />
                 </button>
               )
+              return withHover(m, node)
             })}
           </div>
         )}
@@ -855,9 +884,9 @@ export function Today() {
                 <Clock className="h-4 w-4" />
                 Your day
               </span>
-              {/* Category legend on hover. */}
-              <HoverCard openDelay={100}>
-                <HoverCardTrigger asChild>
+              {/* Category legend — click to open (discoverable, not hover-only). */}
+              <Popover>
+                <PopoverTrigger asChild>
                   <button
                     className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-normal text-foreground/45 transition-colors hover:text-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     aria-label="Meeting category legend"
@@ -865,19 +894,19 @@ export function Today() {
                     <Info className="h-3.5 w-3.5" />
                     Legend
                   </button>
-                </HoverCardTrigger>
-                <HoverCardContent align="end" className="w-52">
+                </PopoverTrigger>
+                <PopoverContent align="end" className="w-52 p-3">
                   <div className="space-y-1.5">
                     <div className="text-xs font-semibold text-foreground/70">Meeting types</div>
                     {CATEGORY_ORDER.map((c) => (
                       <div key={c} className="flex items-center gap-2 text-xs">
-                        <span className={cn('h-2.5 w-2.5 rounded-full', CATEGORY_DOT[c])} />
+                        <span className={cn('h-2.5 w-2.5 rounded-full', CATEGORY_DOT[c])} aria-hidden="true" />
                         <span className="text-foreground/70">{MEETING_CATEGORY_LABELS[c]}</span>
                       </div>
                     ))}
                   </div>
-                </HoverCardContent>
-              </HoverCard>
+                </PopoverContent>
+              </Popover>
             </CardTitle>
           </CardHeader>
           <CardContent>

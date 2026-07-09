@@ -313,7 +313,9 @@ export const MEETING_CATEGORY_LABELS: Record<MeetingCategory, string> = {
   one_on_one: '1:1',
   external: 'Client / external',
   personal: 'Personal',
-  general: 'Other'
+  // Neutral fallback when a category can't be confidently derived — reads as
+  // "just a meeting", not a mystery color.
+  general: 'Meeting'
 }
 
 /**
