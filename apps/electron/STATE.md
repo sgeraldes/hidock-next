@@ -65,10 +65,45 @@ Late-night wave (all landed, gated, pushed, live-verified on the real app):
   with the chip. Live-verified (fallback path — 0 recordings after midnight);
   digest list surfaces with the next recorded day. Suite at 2,270.
 
-ALL user-audit items from 2026-07-08 are addressed. Remaining work is gated
-on user decisions (Context Graph priority vs. connectors, Process-All budget,
-old-transcript upgrades). NOTHING in flight. Tree clean, pushed through
-6d1f6265 (+ this docs commit).
+## 2026-07-09 early-AM wave (SIX parallel agents; all landed/gated/pushed
+through cde8f755; schema now v35; suite 2,375):
+- **Context Graph** (fe711048): Knowledge Graph replaced — interactive force
+  graph (13,387 nodes live), neighborhood focus, search, R4c contact-id
+  re-key + ingest UNIQUE-collision fix, getNeighborhood IPC wired into RAG.
+  POLISH NEEDED (live-walk findings): initial render is the whole-graph
+  hairball (brief said neighborhood-first) + garbage entity nodes ("All
+  attendees", "Team", "Project Manager") need extraction stop-words.
+- **Connector platform** (b99ad7b9/6c670fa6/72a75c11/a8eaead0):
+  @hidock/connectors host contract+registry; C3 M365/Graph connector
+  (device-code MSAL — user must register an Entra app; Settings walks
+  through it); C2 Slack connector (98ac13f7/5fc0b168, 43 tests) registered.
+  Settings→Connectors live. Connector-tables migration DEFERRED (encrypted
+  connectors.json suffices; take next free schema version when needed).
+- **Transcript upgrade** (b91270b7 + rework swept into 72a75c11): LLM-free
+  triage + cheap text reformat. REAL live-DB counts: only 9 flat legacy
+  transcripts (4 reformat — kicked tonight; 5 flagged for user's
+  re-transcription call). The "278 old transcripts" memory figure was the
+  STALE C:\Users\Sebastian\HiDock legacy DB.
+- **Ambiguous-name identity** (6b0ba5bb/cde8f755/fcadde5a): bare-first-name
+  buckets (11 live: Sebas 64, Sebastián 57, Luis 37, Santi 36...) resolve
+  PER RECORDING, not by merging. Signal hierarchy codified (signal-tiers.ts,
+  INTELLIGENCE.md §9): connector-email > calendar-attendee > manual-sovereign
+  > speaker-map > transcript-context > lexical; LLM never auto-links.
+  Upgrade-only re-runnable sweep → M365 attendee backfill auto-upgrades.
+  Resolve-per-meeting cards live on People. DB FACT: 0/1,951 meetings have
+  ICS attendee data (Outlook feed strips them) — M365 connector is the fix.
+- Backlog processing RUNNING (user-ordered): ~1,700 queued via Process All,
+  newest-first, est $60-100 Gemini Flash (user offered local-ASR reroute —
+  no decision yet; queue continues).
+- PROCESS LESSONS (add to agent-dispatch): 6 agents sharing one working
+  tree caused 2 git races (commit-sweep, index clobber) — next wave:
+  isolation:worktree or serialized commits. detect-secrets pragma needed
+  for key-NAME constants.
+
+Data noise spotted: surname-fragment contacts ("Sergio Tado" ≈ mangled
+Hurtado) — normal merge-flow candidates.
+
+NOTHING in flight. Pushed through cde8f755.
 
 ## 2. DEVICE STATE
 
