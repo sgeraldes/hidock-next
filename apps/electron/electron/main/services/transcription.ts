@@ -1561,6 +1561,7 @@ Meeting ${i + 1}: "${m.subject}"
         : undefined) ?? recording.meeting_id ?? getRecordingById(recordingId)?.meeting_id
     const applied = applyTranscriptEntities({
       meetingId: linkedMeetingId ?? undefined,
+      recordingId,
       participants: analysis.participants,
       project: analysis.project
     })
