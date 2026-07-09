@@ -25,6 +25,7 @@ import {
   getIdentitySuggestions,
   acceptIdentitySuggestion,
   rejectIdentitySuggestion,
+  supersedeOrphanedSuggestions,
   getMergeJournal,
   unmergeContacts,
   getMentionSnippets,
@@ -175,6 +176,26 @@ describe('alias memory + identity suggestion flows', () => {
       (s) => s.target_id === 'k7' && s.candidate_name === 'Marín Duarte'
     )!
     expect(JSON.parse(siblingB.evidence!).superseded).toBe(true)
+  })
+
+  it('supersedeOrphanedSuggestions drops pending suggestions whose keeper was absorbed by a direct merge', () => {
+    contact('kd1', 'Nouman Ali')
+    contact('kd2', 'Real Nouman')
+    // A sibling suggestion still targets kd1 as its keeper.
+    insertIdentitySuggestion('person', 'Numan Ali', 'kd1', 0.7, { keeperId: 'kd1', loserId: 'unresolved-x' })
+    const before = getIdentitySuggestions('pending').find((s) => s.target_id === 'kd1' && s.candidate_name === 'Numan Ali')
+    expect(before).toBeDefined()
+
+    // A direct merge (third-door / swap / group) folds the keeper kd1 into kd2.
+    mergeContacts('kd2', 'kd1')
+    expect(queryOne('SELECT id FROM contacts WHERE id = ?', ['kd1'])).toBeUndefined()
+
+    // Its orphaned sibling must be superseded, not left pointing at a dead keeper.
+    const superseded = supersedeOrphanedSuggestions('person')
+    expect(superseded).toBeGreaterThanOrEqual(1)
+    expect(getIdentitySuggestions('pending').some((s) => s.target_id === 'kd1')).toBe(false)
+    const rej = getIdentitySuggestions('rejected').find((s) => s.target_id === 'kd1' && s.candidate_name === 'Numan Ali')!
+    expect(JSON.parse(rej.evidence!).superseded).toBe(true)
   })
 
   it('getContactAliases returns non-rejected aliases newest-first and excludes rejected blocks', () => {

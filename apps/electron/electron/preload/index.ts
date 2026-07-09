@@ -629,6 +629,9 @@ export interface ElectronAPI {
       error?: string
     }>
     rejectSuggestion: (id: string) => Promise<{ success: boolean; data?: any; error?: string }>
+    supersedeOrphaned: (
+      kind?: 'person' | 'project'
+    ) => Promise<{ success: boolean; data?: { superseded: number }; error?: string }>
     discoverContacts: () => Promise<{
       success: boolean
       data?: { candidatePairs: number; suggestionsCreated: number; autoMergeable: number }
@@ -1112,6 +1115,7 @@ const electronAPI: ElectronAPI = {
     getSuggestions: (status?: 'pending' | 'accepted' | 'rejected') => callIPC('identity:getSuggestions', status),
     acceptSuggestion: (id: string) => callIPC('identity:acceptSuggestion', id),
     rejectSuggestion: (id: string) => callIPC('identity:rejectSuggestion', id),
+    supersedeOrphaned: (kind?: 'person' | 'project') => callIPC('identity:supersedeOrphaned', kind),
     discoverContacts: () => callIPC('identity:discoverContacts'),
     discoverProjects: () => callIPC('identity:discoverProjects'),
     getMergeJournal: (request) => callIPC('identity:getMergeJournal', request),

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { IdentitySuggestionsSection } from '../IdentitySuggestionsSection'
 import { TodayIdentitySuggestions } from '../TodayIdentitySuggestions'
@@ -43,14 +43,17 @@ const mockGetMentionSnippets = vi.fn()
 const mockGetMergeImpact = vi.fn()
 const mockGetPersonContext = vi.fn()
 const mockGetMergeJournal = vi.fn()
+const mockSupersedeOrphaned = vi.fn()
 const mockContactsGetAll = vi.fn()
 const mockContactsMerge = vi.fn()
+const mockContactsUpdate = vi.fn()
 
 global.window.electronAPI = {
   identity: {
     getSuggestions: mockGetSuggestions,
     acceptSuggestion: mockAccept,
     rejectSuggestion: mockReject,
+    supersedeOrphaned: mockSupersedeOrphaned,
     getMentionSnippets: mockGetMentionSnippets,
     getMergeImpact: mockGetMergeImpact,
     getPersonContext: mockGetPersonContext,
@@ -60,6 +63,7 @@ global.window.electronAPI = {
     getById: mockContactGetById,
     getAll: mockContactsGetAll,
     merge: mockContactsMerge,
+    update: mockContactsUpdate,
     unmerge: mockContactUnmerge
   },
   projects: {
@@ -91,11 +95,13 @@ beforeEach(() => {
   mockGetMergeImpact.mockResolvedValue({ success: true, data: { keeper: 1, loser: 1 } })
   mockGetPersonContext.mockResolvedValue({ success: true, data: { people: [], topics: [] } })
   mockGetMergeJournal.mockResolvedValue({ success: true, data: [{ id: 'j-new' }] })
+  mockSupersedeOrphaned.mockResolvedValue({ success: true, data: { superseded: 0 } })
   mockContactsGetAll.mockResolvedValue({
     success: true,
     data: { contacts: [{ id: 'c-real', name: 'Sebastian Geraldes', role: 'Engineer', meeting_count: 5 }], total: 1 }
   })
   mockContactsMerge.mockResolvedValue({ success: true, data: { id: 'c-real', name: 'Sebastian Geraldes' } })
+  mockContactsUpdate.mockResolvedValue({ success: true, data: { id: 'c1', name: 'Nouman' } })
 })
 
 describe('IdentitySuggestionsSection', () => {
@@ -117,7 +123,8 @@ describe('IdentitySuggestionsSection', () => {
   it('resolves a zero-match transcript lookup to the extracted-from-analysis note (never stuck loading)', async () => {
     renderSection()
     expect((await screen.findAllByText(/extracted from meeting analysis/i)).length).toBeGreaterThan(0)
-    expect(screen.queryByText(/checking transcripts/i)).not.toBeInTheDocument()
+    // Both the keeper panel and the candidate row settle (keeper resolves a tick later).
+    await waitFor(() => expect(screen.queryByText(/checking transcripts/i)).not.toBeInTheDocument())
     expect(screen.queryByText(/no transcript mentions/i)).not.toBeInTheDocument()
   })
 
@@ -325,6 +332,86 @@ describe('IdentitySuggestionsSection', () => {
     await waitFor(() =>
       expect(mockContactsMerge).toHaveBeenCalledWith({ keeperId: 'c-real', loserId: 'l1' })
     )
+  })
+
+  it('consolidates a shared-target group into ONE keeper panel above the candidate rows', async () => {
+    const second = { ...suggestion, id: 's2', candidate_name: 'Sebi', confidence: 0.66 }
+    mockGetSuggestions.mockResolvedValue({ success: true, data: [suggestion, second] })
+    renderSection()
+    // Two candidates, but the keeper ("Keeps" panel) is rendered exactly once.
+    expect(await screen.findByText(/2 names may be/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByText('Keeps', { exact: true })).toHaveLength(1))
+    // Each candidate still has its own decision.
+    expect(screen.getAllByRole('button', { name: /Merge .* into/i })).toHaveLength(2)
+  })
+
+  it('direction swap inverts the merge ids (keeps the candidate instead)', async () => {
+    mockContactGetById.mockResolvedValue({ success: true, data: { contact: { name: 'Yaraví' } } })
+    mockGetSuggestions.mockResolvedValue({ success: true, data: [mergeSuggestion] })
+    renderSection()
+
+    // Flip the direction: "Keep 'Yeraví' instead".
+    const swap = await screen.findByRole('button', { name: /Keep 'Yeraví' instead/i })
+    fireEvent.click(swap)
+
+    // Confirming now merges the target (c1) INTO the candidate (l1), not the reverse.
+    fireEvent.click(await screen.findByRole('button', { name: /Keep 'Yeraví' and merge Yaraví in/i }))
+    await waitFor(() => expect(mockContactsMerge).toHaveBeenCalledWith({ keeperId: 'l1', loserId: 'c1' }))
+  })
+
+  it('group-canonical action merges every candidate, applies a typed name, and offers ONE undo', async () => {
+    mockContactGetById.mockResolvedValue({ success: true, data: { contact: { name: 'Nauman' } } })
+    const disc1 = {
+      id: 'd1',
+      kind: 'person' as const,
+      candidate_name: 'Nauman',
+      target_id: 'c1',
+      confidence: 0.75,
+      evidence: JSON.stringify({ keeperId: 'c1', loserId: 'la', keeperName: 'Nauman' }),
+      status: 'pending' as const,
+      created_at: '2026-07-08T10:00:00Z'
+    }
+    const disc2 = { ...disc1, id: 'd2', candidate_name: 'Numan', evidence: JSON.stringify({ keeperId: 'c1', loserId: 'lb' }) }
+    mockGetSuggestions
+      .mockResolvedValueOnce({ success: true, data: [disc1, disc2] })
+      .mockResolvedValue({ success: true, data: [] })
+
+    renderSection()
+
+    // Open the canonical chooser and type the correct spelling.
+    fireEvent.click(await screen.findByRole('button', { name: /All the same person/i }))
+    fireEvent.click(await screen.findByText(/correct name is different/i))
+    fireEvent.change(await screen.findByLabelText(/Correct canonical name/i), { target: { value: 'Nouman' } })
+    fireEvent.click(screen.getByRole('button', { name: /Merge all into the chosen name/i }))
+
+    // Every candidate is accepted (folded into the keeper) and the keeper is renamed.
+    await waitFor(() => expect(mockAccept).toHaveBeenCalledWith('d1'))
+    await waitFor(() => expect(mockAccept).toHaveBeenCalledWith('d2'))
+    await waitFor(() => expect(mockContactsUpdate).toHaveBeenCalledWith({ id: 'c1', name: 'Nouman' }))
+
+    // One undo covering the batch — here it restores the prior canonical name.
+    const undo = await screen.findByRole('button', { name: /Undo/i })
+    fireEvent.click(undo)
+    await waitFor(() => expect(mockContactsUpdate).toHaveBeenCalledWith({ id: 'c1', name: 'Nauman' }))
+  })
+
+  it('resolves the candidate mention state even when profiles change mid-lookup (regression)', async () => {
+    // Force the race: transcript lookups stay pending until we release them, while the
+    // keeper profile resolves immediately and re-runs the mention effect. The first
+    // (superseded) batch must still commit — otherwise the candidate stays stuck.
+    const releases: Array<(v: unknown) => void> = []
+    mockGetMentionSnippets.mockImplementation(() => new Promise((res) => releases.push(res)))
+    renderSection()
+
+    // Wait until BOTH the candidate lookup and the (post-profile) keeper lookup are queued.
+    await waitFor(() => expect(releases.length).toBeGreaterThanOrEqual(2))
+    await act(async () => {
+      releases.forEach((r) => r({ success: true, data: { snippets: [], recordingIds: [] } }))
+    })
+
+    // The candidate/duplicate panel resolves — never stuck on "checking transcripts…".
+    expect((await screen.findAllByText(/extracted from meeting analysis/i)).length).toBeGreaterThan(0)
+    expect(screen.queryByText(/checking transcripts/i)).not.toBeInTheDocument()
   })
 })
 

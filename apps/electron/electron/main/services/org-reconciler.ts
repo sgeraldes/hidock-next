@@ -24,7 +24,7 @@ import {
   type RecordingPreassignment
 } from './database'
 import { resolveContact, resolveProject } from './entity-resolver'
-import { isGenericSpeakerLabel } from './entity-normalize'
+import { isGenericSpeakerLabel, cleanRole } from './entity-normalize'
 import { randomUUID } from 'crypto'
 
 /** Resolver thresholds (INTELLIGENCE.md §2): ≥0.8 auto-link, 0.5–0.8 suggest, <0.5 create. */
@@ -342,7 +342,8 @@ export function applyTranscriptEntities(opts: {
             .slice(0, 5)
         : []
 
-    for (const person of opts.participants ?? []) {
+    for (const rawPerson of opts.participants ?? []) {
+      const person = { ...rawPerson, role: cleanRole(rawPerson.role) || undefined }
       const name = (person.name || '').trim()
       if (!name || name.length < 2 || isGenericSpeakerLabel(name)) continue
 

@@ -14,6 +14,7 @@ import {
   getIdentitySuggestions,
   acceptIdentitySuggestion,
   rejectIdentitySuggestion,
+  supersedeOrphanedSuggestions,
   getMergeJournal,
   getMergeImpact,
   getMentionSnippets,
@@ -92,6 +93,32 @@ export function registerIdentityHandlers(): void {
       return error('DATABASE_ERROR', 'Failed to reject identity suggestion', err)
     }
   })
+
+  /**
+   * Keeper-death cascade: after a merge performed outside the accept flow (third-door
+   * merge-into, direction swap, or group-canonical batch), supersede every pending
+   * suggestion whose keeper (target_id) no longer exists. Optional kind filter.
+   * Returns { superseded }.
+   */
+  ipcMain.handle(
+    'identity:supersedeOrphaned',
+    async (_, kind?: unknown): Promise<Result<{ superseded: number }>> => {
+      try {
+        let k: 'person' | 'project' | undefined
+        if (kind !== undefined && kind !== null) {
+          const parsed = z.enum(['person', 'project']).safeParse(kind)
+          if (!parsed.success) {
+            return error('VALIDATION_ERROR', 'Invalid kind filter', parsed.error.format())
+          }
+          k = parsed.data
+        }
+        return success({ superseded: supersedeOrphanedSuggestions(k) })
+      } catch (err) {
+        console.error('identity:supersedeOrphaned error:', err)
+        return error('DATABASE_ERROR', 'Failed to supersede orphaned suggestions', err)
+      }
+    }
+  )
 
   /**
    * Primary-source evidence for a name: transcript excerpts where it literally

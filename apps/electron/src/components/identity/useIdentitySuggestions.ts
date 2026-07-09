@@ -115,6 +115,21 @@ export function useIdentitySuggestions() {
   const resolvingMentions = useRef<Set<string>>(new Set())
   const resolvingImpacts = useRef<Set<string>>(new Set())
   const resolvingContexts = useRef<Set<string>>(new Set())
+  // A single mounted flag, NOT a per-run `cancelled` flag. The lazy-resolve effects
+  // below depend on `profiles`, which updates as profiles stream in — so an in-flight
+  // batch is routinely superseded by a re-run. Gating the commit on a per-run
+  // `cancelled` flag dropped those results on the floor while their keys stayed in the
+  // `resolving` set, so a name that was mid-lookup when profiles changed got stuck on
+  // "checking transcripts…" forever (topics, keyed by id in a different effect, still
+  // loaded — the exact production symptom). Committing whenever still mounted makes the
+  // additive, id/name-keyed caches converge regardless of re-run timing.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
@@ -143,7 +158,6 @@ export function useIdentitySuggestions() {
     }
     if (wanted.size === 0) return
     for (const id of wanted.keys()) resolving.current.add(id)
-    let cancelled = false
     ;(async () => {
       const updates: Record<string, MiniProfile> = {}
       await Promise.all(
@@ -152,13 +166,10 @@ export function useIdentitySuggestions() {
           if (profile) updates[id] = profile
         })
       )
-      if (!cancelled && Object.keys(updates).length > 0) {
+      if (mountedRef.current && Object.keys(updates).length > 0) {
         setProfiles((prev) => ({ ...prev, ...updates }))
       }
     })()
-    return () => {
-      cancelled = true
-    }
   }, [suggestions, profiles])
 
   // Lazily fetch primary-source mention evidence for each distinct name — the
@@ -178,7 +189,6 @@ export function useIdentitySuggestions() {
     }
     if (names.size === 0) return
     for (const key of names.keys()) resolvingMentions.current.add(key)
-    let cancelled = false
     ;(async () => {
       const updates: Record<string, MentionResult> = {}
       await Promise.all(
@@ -197,13 +207,11 @@ export function useIdentitySuggestions() {
           }
         })
       )
-      if (!cancelled && Object.keys(updates).length > 0) {
+      // Commit whenever still mounted — never gate on a per-run flag (see mountedRef).
+      if (mountedRef.current && Object.keys(updates).length > 0) {
         setMentions((prev) => ({ ...prev, ...updates }))
       }
     })()
-    return () => {
-      cancelled = true
-    }
   }, [suggestions, profiles, mentions])
 
   // Lazily fetch the pre-merge blast radius for each discovery suggestion (one that
@@ -216,7 +224,6 @@ export function useIdentitySuggestions() {
     })
     if (pending.length === 0) return
     for (const s of pending) resolvingImpacts.current.add(s.id)
-    let cancelled = false
     ;(async () => {
       const updates: Record<string, MergeImpact> = {}
       await Promise.all(
@@ -234,13 +241,10 @@ export function useIdentitySuggestions() {
           }
         })
       )
-      if (!cancelled && Object.keys(updates).length > 0) {
+      if (mountedRef.current && Object.keys(updates).length > 0) {
         setImpacts((prev) => ({ ...prev, ...updates }))
       }
     })()
-    return () => {
-      cancelled = true
-    }
   }, [suggestions, impacts])
 
   // Lazily fetch graph-neighborhood context for each PERSON side of a suggestion —
@@ -259,7 +263,6 @@ export function useIdentitySuggestions() {
     }
     if (wanted.size === 0) return
     for (const k of wanted) resolvingContexts.current.add(k)
-    let cancelled = false
     ;(async () => {
       const updates: Record<string, PersonContext> = {}
       await Promise.all(
@@ -272,13 +275,10 @@ export function useIdentitySuggestions() {
           }
         })
       )
-      if (!cancelled && Object.keys(updates).length > 0) {
+      if (mountedRef.current && Object.keys(updates).length > 0) {
         setContexts((prev) => ({ ...prev, ...updates }))
       }
     })()
-    return () => {
-      cancelled = true
-    }
   }, [suggestions, contexts])
 
   // Backward-compatible map of target_id → display name (used by the Today card).
@@ -348,12 +348,20 @@ export function useIdentitySuggestions() {
     [suggestions]
   )
 
-  // Third door: fold the reviewed duplicate (loserId) into a DIFFERENT chosen keeper
-  // than the suggestion proposed. Performs a real contact merge, offers the same
-  // time-boxed Undo (via the newest merge-journal entry), retires the now-moot
-  // suggestion, and refetches.
-  const mergeInto = useCallback(
-    async (suggestionId: string, keeperId: string, loserId: string, keeperName: string) => {
+  // A single contact merge performed OUTSIDE the accept flow (the third-door
+  // "merge into someone else" and the per-candidate direction swap). Merges loserId
+  // into keeperId, retires the reviewed suggestion, supersedes any siblings orphaned
+  // by an absorbed keeper (keeper-death cascade), offers a time-boxed Undo, and
+  // refetches. `title`/`body` let each caller phrase the outcome.
+  const performDirectMerge = useCallback(
+    async (opts: {
+      suggestionId: string
+      keeperId: string
+      loserId: string
+      title: string
+      body: string
+    }) => {
+      const { suggestionId, keeperId, loserId, title, body } = opts
       const snapshot = suggestions
       setSuggestions((prev) => prev.filter((s) => s.id !== suggestionId)) // optimistic
       try {
@@ -371,10 +379,12 @@ export function useIdentitySuggestions() {
 
         // Retire the original suggestion so it never re-surfaces (best-effort).
         window.electronAPI.identity.rejectSuggestion(suggestionId).catch(() => {})
+        // The merge may have absorbed a keeper that other suggestions still target.
+        window.electronAPI.identity.supersedeOrphaned?.('person').catch(() => {})
 
         toast.success(
-          'Merged into a different person',
-          `Records were folded into ${keeperName}.`,
+          title,
+          body,
           journalId
             ? {
                 duration: 10000,
@@ -404,6 +414,110 @@ export function useIdentitySuggestions() {
     [suggestions, load]
   )
 
+  // Third door: fold the reviewed duplicate (loserId) into a DIFFERENT chosen keeper
+  // than the suggestion proposed.
+  const mergeInto = useCallback(
+    (suggestionId: string, keeperId: string, loserId: string, keeperName: string) =>
+      performDirectMerge({
+        suggestionId,
+        keeperId,
+        loserId,
+        title: 'Merged into a different person',
+        body: `Records were folded into ${keeperName}.`
+      }),
+    [performDirectMerge]
+  )
+
+  // Direction swap: invert the proposed pairing so the CANDIDATE becomes the keeper
+  // (e.g. "Keep Nouman instead" — the target's records fold into the candidate).
+  const swapMerge = useCallback(
+    (suggestionId: string, candidateId: string, targetId: string, candidateName: string) =>
+      performDirectMerge({
+        suggestionId,
+        keeperId: candidateId,
+        loserId: targetId,
+        title: `Kept ${candidateName}`,
+        body: `The other spelling became an alias of ${candidateName}.`
+      }),
+    [performDirectMerge]
+  )
+
+  // Group-canonical "All the same person…": fold every candidate in the group into one
+  // chosen keeper. Reuses the vetted accept path per candidate (each merges its loser
+  // into the keeper — recording the variant name as an alias — or aliases a bare
+  // mention), optionally renames the keeper to a canonical/typed name, supersedes any
+  // orphaned siblings, and exposes ONE Undo that reverses every merge (newest-first)
+  // and restores the name. `suggestionIds` is every candidate suggestion in the group.
+  const mergeGroup = useCallback(
+    async (opts: {
+      keeperId: string
+      keeperName: string
+      suggestionIds: string[]
+      finalName?: string
+    }) => {
+      const { keeperId, keeperName, suggestionIds, finalName } = opts
+      const snapshot = suggestions
+      const idSet = new Set(suggestionIds)
+      setSuggestions((prev) => prev.filter((s) => !idSet.has(s.id))) // optimistic: whole group
+      try {
+        // Accept each candidate in turn. Discovery pairings merge (returning a journal
+        // id for undo); bare mentions alias. Sequential so shared-loser cases settle in
+        // order.
+        const journalIds: string[] = []
+        for (const id of suggestionIds) {
+          const res = await window.electronAPI.identity.acceptSuggestion(id)
+          if (res.success && res.data?.mergeJournalId) journalIds.push(res.data.mergeJournalId)
+        }
+
+        // Apply the canonical name if the user chose a different one (or typed one).
+        const rename = !!finalName && finalName.trim() !== '' && finalName.trim() !== keeperName.trim()
+        if (rename) {
+          await window.electronAPI.contacts.update({ id: keeperId, name: finalName!.trim() })
+        }
+
+        // Sweep any sibling suggestions whose keeper was absorbed by the batch.
+        window.electronAPI.identity.supersedeOrphaned?.('person').catch(() => {})
+
+        const undoable = journalIds.length > 0 || rename
+        toast.success(
+          'Merged the group',
+          rename
+            ? `Everyone was folded into ${finalName!.trim()}.`
+            : `Everyone was folded into ${keeperName}.`,
+          undoable
+            ? {
+                duration: 12000,
+                action: {
+                  label: 'Undo',
+                  onClick: async () => {
+                    try {
+                      // Reverse every merge newest-first, then restore the prior name.
+                      for (const jid of [...journalIds].reverse()) {
+                        await window.electronAPI.contacts.unmerge(jid)
+                      }
+                      if (rename) {
+                        await window.electronAPI.contacts.update({ id: keeperId, name: keeperName })
+                      }
+                      toast.info('Group merge undone', 'The separate records were restored.')
+                    } catch {
+                      toast.error('Undo failed', 'Some records could not be separated again.')
+                    } finally {
+                      load(true)
+                    }
+                  }
+                }
+              }
+            : undefined
+        )
+        load(true)
+      } catch (err) {
+        setSuggestions(snapshot) // rollback
+        toast.error('Failed to merge the group', err instanceof Error ? err.message : 'Unknown error')
+      }
+    },
+    [suggestions, load]
+  )
+
   return {
     suggestions,
     loading,
@@ -415,6 +529,8 @@ export function useIdentitySuggestions() {
     reload: load,
     accept,
     reject,
-    mergeInto
+    mergeInto,
+    swapMerge,
+    mergeGroup
   }
 }

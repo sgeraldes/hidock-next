@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Check, Search } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
+import { cleanRole } from '@/lib/roleHygiene'
 
 /** Minimal contact shape the picker needs (from contacts:getAll). */
 interface PickerContact {
@@ -28,7 +29,7 @@ function initialOf(name: string): string {
 }
 
 function secondaryLine(c: PickerContact): string {
-  const roleCompany = [c.role, c.company].filter(Boolean).join(' · ')
+  const roleCompany = [cleanRole(c.role), c.company].filter(Boolean).join(' · ')
   return roleCompany || c.email || ''
 }
 

@@ -5037,6 +5037,7 @@ export function supersedeSuggestionsForMergedLoser(
   loserId: string,
   exceptId: string
 ): number {
+  const table = kind === 'person' ? 'contacts' : 'projects'
   const pending = queryAll<IdentitySuggestion>(
     "SELECT * FROM identity_suggestions WHERE status = 'pending' AND kind = ? AND id != ?",
     [kind, exceptId]
@@ -5049,7 +5050,10 @@ export function supersedeSuggestionsForMergedLoser(
     } catch {
       ev = {}
     }
-    if (s.target_id !== loserId && ev.loserId !== loserId) continue
+    // Keeper-death cascade: also drop a suggestion whose keeper (target_id) is gone —
+    // a merge may have absorbed the keeper itself, not just the reviewed loser.
+    const targetGone = !queryOne<{ id: string }>(`SELECT id FROM ${table} WHERE id = ?`, [s.target_id])
+    if (s.target_id !== loserId && ev.loserId !== loserId && !targetGone) continue
     ev.superseded = true
     runNoSave("UPDATE identity_suggestions SET status = 'rejected', evidence = ? WHERE id = ?", [
       JSON.stringify(ev),
@@ -5058,6 +5062,41 @@ export function supersedeSuggestionsForMergedLoser(
     superseded++
   }
   return superseded
+}
+
+/**
+ * Keeper-death cascade for merges performed OUTSIDE the accept flow (the "merge into
+ * someone else" third door, a direction swap, or a group-canonical batch). Any of
+ * those can absorb a suggestion's keeper (target_id) into a different entity, leaving
+ * sibling suggestions pointing at a keeper row that no longer exists. This flips every
+ * such orphaned pending suggestion to 'rejected' with evidence.superseded=true (status
+ * only — no rejected-alias block, so a legitimate future pairing is not poisoned).
+ * Standalone + transactional; returns the number superseded.
+ */
+export function supersedeOrphanedSuggestions(kind?: 'person' | 'project'): number {
+  return runInTransaction(() => {
+    const pending = kind
+      ? queryAll<IdentitySuggestion>("SELECT * FROM identity_suggestions WHERE status = 'pending' AND kind = ?", [kind])
+      : queryAll<IdentitySuggestion>("SELECT * FROM identity_suggestions WHERE status = 'pending'")
+    let superseded = 0
+    for (const s of pending) {
+      const table = s.kind === 'person' ? 'contacts' : 'projects'
+      if (queryOne<{ id: string }>(`SELECT id FROM ${table} WHERE id = ?`, [s.target_id])) continue
+      let ev: Record<string, unknown> = {}
+      try {
+        ev = s.evidence ? (JSON.parse(s.evidence) as Record<string, unknown>) : {}
+      } catch {
+        ev = {}
+      }
+      ev.superseded = true
+      runNoSave("UPDATE identity_suggestions SET status = 'rejected', evidence = ? WHERE id = ?", [
+        JSON.stringify(ev),
+        s.id
+      ])
+      superseded++
+    }
+    return superseded
+  })
 }
 
 /**

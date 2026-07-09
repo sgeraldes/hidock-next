@@ -12,7 +12,8 @@ import {
   isGenericSpeakerLabel,
   levenshtein,
   fuzzyNameScore,
-  isOppositeGenderSpanishPair
+  isOppositeGenderSpanishPair,
+  cleanRole
 } from '../entity-normalize'
 
 describe('normalizeName', () => {
@@ -110,5 +111,19 @@ describe('isOppositeGenderSpanishPair', () => {
     expect(isOppositeGenderSpanishPair('carlos', 'carlas')).toBe(false) // ends s, not a/o
     expect(isOppositeGenderSpanishPair('ana', 'ano')).toBe(true) // short but valid a/o swap
     expect(isOppositeGenderSpanishPair('fernando lopez', 'fernanda garcia')).toBe(false) // two tokens differ
+  })
+})
+
+describe('cleanRole', () => {
+  it('strips extraction-artifact parentheticals (EN + ES)', () => {
+    expect(cleanRole('Engineer (mencionado)')).toBe('Engineer')
+    expect(cleanRole('Product Manager (mentioned)')).toBe('Product Manager')
+    expect(cleanRole('Designer (inferred)')).toBe('Designer')
+    expect(cleanRole('PM · Client (inferido)')).toBe('PM · Client')
+  })
+  it('keeps meaningful parentheticals and is empty-safe', () => {
+    expect(cleanRole('VP (Sales)')).toBe('VP (Sales)')
+    expect(cleanRole(null)).toBe('')
+    expect(cleanRole(undefined)).toBe('')
   })
 })

@@ -34,6 +34,28 @@ export function isGenericSpeakerLabel(value: string): boolean {
   return /^speaker\s*\d*$/i.test((value || '').trim())
 }
 
+/**
+ * Words that mark a role parenthetical as an extraction artifact ("Engineer
+ * (mencionado)") rather than a meaningful qualifier ("VP (Sales)"). EN + ES. Kept in
+ * sync with the renderer helper in src/lib/roleHygiene.ts.
+ */
+const ROLE_ARTIFACT_PARENS = new RegExp(
+  '\\s*\\((?:[^)]*\\b(?:mencionad[oa]s?|mentioned|inferred|inferid[oa]s?|assumed|asumid[oa]s?|' +
+    'posible|possible|probable|likely|guess(?:ed)?|unverified|unconfirmed|no confirmad[oa]|' +
+    'sin confirmar|unknown|desconocid[oa]|implied|implicad[oa])\\b[^)]*)\\)',
+  'gi'
+)
+
+/** Strip extraction-artifact parentheticals from a role before storing it. Idempotent. */
+export function cleanRole(role: string | null | undefined): string {
+  if (!role) return ''
+  return role
+    .replace(ROLE_ARTIFACT_PARENS, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s*[-–—,·|/]\s*$/, '')
+    .trim()
+}
+
 /** Classic Levenshtein edit distance between two strings. */
 export function levenshtein(a: string, b: string): number {
   if (a === b) return 0
