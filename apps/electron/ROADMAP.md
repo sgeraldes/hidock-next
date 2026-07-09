@@ -41,6 +41,8 @@ INTERACTIVITY_PLAN.md, OVERNIGHT_PLAN.md.*
   re-transcription upgrades them (needs backlog decision, see A20).
 - MeetingDetail start/end time editing (form scaffolding exists, no inputs).
 - March backlog: BUG-R1/R3 re-scan loop, DevicePipeline Phase 2.
+- ~135 ESLint warnings repo-wide (react/no-unescaped-entities and friends) —
+  none blocking, needs a dedicated burn-down pass.
 - PROJECT identity-suggestion cards lag the contact cards: they still show
   bare "matched by fuzzy" jargon, "No verbatim mentions — extracted from
   meeting analysis" as their only evidence, and 62% pairs across clearly

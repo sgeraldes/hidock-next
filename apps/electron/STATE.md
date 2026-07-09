@@ -24,7 +24,24 @@ All three audit-fix slices LANDED (2026-07-08 evening, all pushed):
   re-run independently (typecheck 0, 2,183 tests green), verified live
   (SOURCE renders the recording filename + date as a Library link).
 
-NOTHING in flight. Tree clean, all pushed through df5b1ab8.
+Design-language rollout (queue item 1) — three more surfaces landed 2026-07-08
+late evening, all gated (typecheck 0, full suite green) + verified live via CDP:
+- ae14b750 Library list: human times replace .hda filenames, status legend
+  popover, hover elevation/stagger, meeting provenance chips, EmptyState.
+- 6531c4ba Projects: sidebar row treatment, Knowledge card now lists actual
+  clickable items → Library, tooltips on all glyphs. (Members add/remove
+  skipped — no IPC exists yet.)
+- 26f78eeb People: card hover-cards (lazy personContext), PersonDetail pass,
+  REAL Add Person dialog + new contacts:create IPC with duplicate guard.
+- 0d50b5ac fix: Projects hub was fully evicted (clipped, unreachable) by the
+  taller redesigned suggestion cards — now a compact "N suggestions — Review"
+  banner when a project is open. Found ONLY by the live walk; unit tests
+  passed throughout. Suite at 2,201.
+
+Remaining from queue item 1: Calendar surface design round; Actionables kept
+its old orange side-stripe cards (B7 content done, visual language not).
+
+NOTHING in flight. Tree clean, all pushed through 0d50b5ac.
 
 ## 2. DEVICE STATE
 
