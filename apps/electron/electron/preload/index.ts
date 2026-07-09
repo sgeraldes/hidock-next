@@ -278,6 +278,14 @@ export interface ElectronAPI {
     unassignSpeaker: (request: { recordingId: string; speakerLabel: string }) => Promise<Result<void>>
   }
 
+  // Old-transcript triage + text reformat (Library "Upgrade Transcripts")
+  transcriptUpgrade: {
+    scan: (req?: { threshold?: number }) => Promise<Result<any>>
+    run: (req?: { threshold?: number }) => Promise<Result<any>>
+    getStatus: (req?: { threshold?: number }) => Promise<Result<any>>
+    getRecommended: () => Promise<Result<string[]>>
+  }
+
   // Today briefing (single round-trip payload for the Today page)
   briefing: {
     get: () => Promise<{ success: boolean; data?: any; error?: string }>
@@ -586,6 +594,14 @@ export interface ElectronAPI {
     sync: (id: string, containerId?: string) => Promise<IngestionOutcome>
     searchPeople: (query: string) => Promise<ExternalPerson[]>
     onStatusChanged: (callback: (payload: { id: string; status: ConnectorStatus }) => void) => () => void
+  }
+
+  // Transcript upgrade — triage + reformat old flat transcripts (b91270b7)
+  transcriptUpgrade: {
+    scan: (req?: { threshold?: number }) => Promise<Result<any>>
+    run: (req?: { threshold?: number }) => Promise<Result<any>>
+    getStatus: (req?: { threshold?: number }) => Promise<Result<any>>
+    getRecommended: () => Promise<Result<string[]>>
   }
 
   // Migration - Database schema migration to V11 (Knowledge Captures)
@@ -909,6 +925,13 @@ const electronAPI: ElectronAPI = {
     unassignSpeaker: (request) => callIPC('transcripts:unassignSpeaker', request)
   },
 
+  transcriptUpgrade: {
+    scan: (req) => callIPC('transcript-upgrade:scan', req),
+    run: (req) => callIPC('transcript-upgrade:run', req),
+    getStatus: (req) => callIPC('transcript-upgrade:getStatus', req),
+    getRecommended: () => callIPC('transcript-upgrade:getRecommended')
+  },
+
   briefing: {
     get: () => callIPC('briefing:get')
   },
@@ -1013,6 +1036,13 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.on('connectors:status-changed', handler)
       return () => ipcRenderer.removeListener('connectors:status-changed', handler)
     }
+  },
+
+  transcriptUpgrade: {
+    scan: (req) => callIPC('transcript-upgrade:scan', req),
+    run: (req) => callIPC('transcript-upgrade:run', req),
+    getStatus: (req) => callIPC('transcript-upgrade:getStatus', req),
+    getRecommended: () => callIPC('transcript-upgrade:getRecommended')
   },
 
   migration: {
