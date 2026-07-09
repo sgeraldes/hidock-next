@@ -135,7 +135,7 @@ class EventHandlersMixin:
         )
         return new_dir
 
-    def _on_file_button1_press(self, event):  # Identical to original logic
+    def _on_file_button1_press(self, event):
         """
         Handles the Button-1 press event on the file Treeview.
 
