@@ -160,6 +160,17 @@ export interface GetContactByIdRequest {
 }
 
 /**
+ * Request to create a new contact (manual "Add Person")
+ */
+export interface CreateContactRequest {
+  name: string
+  email?: string | null
+  type?: 'team' | 'candidate' | 'customer' | 'external' | 'unknown'
+  role?: string
+  company?: string
+}
+
+/**
  * Request to update contact
  */
 export interface UpdateContactRequest {
@@ -337,6 +348,7 @@ export interface ArtifactsAPI {
 export interface ContactsAPI {
   getAll: (request?: GetContactsRequest) => Promise<Result<GetContactsResponse>>
   getById: (id: string) => Promise<Result<ContactWithMeetings>>
+  create: (request: CreateContactRequest) => Promise<Result<Person>>
   update: (request: UpdateContactRequest) => Promise<Result<Contact>>
   merge: (request: MergeContactsRequest) => Promise<Result<Person>>
 }

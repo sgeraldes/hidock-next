@@ -23,6 +23,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
+import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card'
+import { PersonHoverCard } from '@/components/entity'
+import { AddPersonDialog } from '@/components/people/AddPersonDialog'
 import {
   IdentitySuggestionsSection,
   type IdentitySuggestionsSectionHandle
@@ -74,6 +77,9 @@ export function People() {
   // Discovery sweep: analyze contacts for possible duplicates → new suggestions.
   const [discovering, setDiscovering] = useState(false)
   const suggestionsRef = useRef<IdentitySuggestionsSectionHandle>(null)
+
+  // Add Person dialog
+  const [addDialogOpen, setAddDialogOpen] = useState(false)
 
   // Debounce: skip firing on initial mount
   const isFirstMount = useRef(true)
@@ -307,6 +313,17 @@ export function People() {
     }
   }
 
+  /** Human phrase describing a person's type, for the colored-glyph tooltips. */
+  const getTypeLabel = (type: PersonType): string => {
+    switch (type) {
+      case 'team': return 'Team member'
+      case 'candidate': return 'Candidate'
+      case 'customer': return 'Customer'
+      case 'external': return 'External contact'
+      default: return 'Unclassified contact'
+    }
+  }
+
   return (
     <div className="relative flex flex-col h-full">
       {/* Header */}
@@ -344,8 +361,8 @@ export function People() {
             <Button
               size="sm"
               variant="default"
-              title="Coming soon"
-              onClick={() => toast.info('Coming soon', 'Contact creation is not yet available.')}
+              title="Add a person by hand"
+              onClick={() => setAddDialogOpen(true)}
             >
               <UserPlus className="h-4 w-4 mr-2" />
               Add Person
@@ -447,34 +464,41 @@ export function People() {
           ) : (
             <div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {sortedPeople.map((person) => {
+              {sortedPeople.map((person, index) => {
                 const isSelected = selectedForMerge.some((p) => p.id === person.id)
-                return (
+                const typeLabel = getTypeLabel(person.type)
+                const card = (
                 <Card
-                  key={person.id}
                   className={cn(
-                    "group transition-all cursor-pointer overflow-hidden shadow-sm hover:shadow-md",
+                    "group animate-rise-in lift cursor-pointer overflow-hidden shadow-sm border-border/70 dark:border-white/[0.06]",
                     mergeMode ? "hover:border-primary/70" : "hover:border-primary/50",
                     isSelected && "ring-2 ring-primary border-primary"
                   )}
+                  style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }}
                   onClick={() => (mergeMode ? toggleSelectForMerge(person) : navigate(`/person/${person.id}`))}
                   aria-pressed={mergeMode ? isSelected : undefined}
                 >
                   <CardHeader className="pb-3 bg-muted/5 group-hover:bg-muted/10 transition-colors">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
-                        <div className={cn(
-                          "w-10 h-10 rounded-xl flex items-center justify-center text-lg font-bold shadow-sm border",
-                          getTypeColor(person.type)
-                        )}>
+                        <div
+                          className={cn(
+                            "w-10 h-10 rounded-xl flex items-center justify-center text-lg font-bold shadow-sm border",
+                            getTypeColor(person.type)
+                          )}
+                          title={typeLabel}
+                        >
                           {person.name.charAt(0)}
                         </div>
                         <div className="min-w-0">
                           <CardTitle className="text-base truncate">{person.name}</CardTitle>
-                          <span className={cn(
-                            "inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider mt-1",
-                            getTypeColor(person.type)
-                          )}>
+                          <span
+                            className={cn(
+                              "inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider mt-1",
+                              getTypeColor(person.type)
+                            )}
+                            title={typeLabel}
+                          >
                             {person.type}
                           </span>
                         </div>
@@ -550,6 +574,26 @@ export function People() {
                     )}
                   </CardContent>
                 </Card>
+                )
+
+                // Merge mode turns cards into selection targets, so suppress the
+                // hover card there (its "open person" intent would mislead). Outside
+                // merge mode, hovering reveals the net-new detail the card omits —
+                // recent meetings — fetched lazily only when the card opens.
+                if (mergeMode) {
+                  return <div key={person.id}>{card}</div>
+                }
+                return (
+                  <HoverCard key={person.id} openDelay={220} closeDelay={120}>
+                    <HoverCardTrigger asChild>{card}</HoverCardTrigger>
+                    <HoverCardContent align="start" className="w-72">
+                      <PersonHoverCard
+                        id={person.id}
+                        name={person.name}
+                        visibleFields={['name', 'type', 'role', 'company', 'email', 'meetings', 'lastSeen']}
+                      />
+                    </HoverCardContent>
+                  </HoverCard>
                 )
               })}
             </div>
@@ -642,6 +686,17 @@ export function People() {
           </div>
         </div>
       )}
+
+      {/* Add Person dialog */}
+      <AddPersonDialog
+        open={addDialogOpen}
+        onOpenChange={setAddDialogOpen}
+        onCreated={(person) => {
+          loadPeople(0)
+          navigate(`/person/${person.id}`)
+        }}
+        onOpenExisting={(existingId) => navigate(`/person/${existingId}`)}
+      />
 
       {/* Delete Confirmation AlertDialog (replaces confirm()) */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>

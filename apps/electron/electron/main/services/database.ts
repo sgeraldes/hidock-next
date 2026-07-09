@@ -3504,6 +3504,56 @@ export function upsertContact(contact: Omit<Contact, 'created_at'>): Contact {
   }
 }
 
+/**
+ * Create a brand-new contact from explicit user input (the "Add Person" dialog).
+ * Unlike {@link upsertContact} — which folds attendee sightings into an existing
+ * email-matched row and bumps meeting_count — this always inserts a fresh row
+ * with meeting_count 0, since a manually added person has no interactions yet.
+ */
+export function createContact(input: {
+  name: string
+  email?: string | null
+  type?: string
+  role?: string | null
+  company?: string | null
+  notes?: string | null
+}): Contact {
+  const id = randomUUID()
+  const now = new Date().toISOString()
+  const contact: Contact = {
+    id,
+    name: input.name,
+    email: input.email ?? null,
+    type: input.type || 'unknown',
+    role: input.role ?? null,
+    company: input.company ?? null,
+    notes: input.notes ?? null,
+    tags: null,
+    first_seen_at: now,
+    last_seen_at: now,
+    meeting_count: 0,
+    created_at: now
+  }
+  run(
+    `INSERT INTO contacts (id, name, email, type, role, company, notes, tags, first_seen_at, last_seen_at, meeting_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      contact.id,
+      contact.name,
+      contact.email,
+      contact.type,
+      contact.role,
+      contact.company,
+      contact.notes,
+      contact.tags,
+      contact.first_seen_at,
+      contact.last_seen_at,
+      contact.meeting_count
+    ]
+  )
+  return contact
+}
+
 export function updateContact(id: string, updates: Partial<Contact>): void {
   const fields: string[] = []
   const params: unknown[] = []

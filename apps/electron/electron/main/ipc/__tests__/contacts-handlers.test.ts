@@ -18,6 +18,8 @@ vi.mock('../../services/database', () => ({
   runInTransaction: vi.fn((fn) => fn()),
   getContacts: vi.fn(),
   getContactById: vi.fn(),
+  getContactByName: vi.fn(),
+  createContact: vi.fn(),
   updateContact: vi.fn(),
   deleteContact: vi.fn(),
   getMeetingsForContact: vi.fn(),
@@ -38,13 +40,71 @@ describe('Contacts IPC Handlers', () => {
     vi.clearAllMocks()
   })
 
-  it('should register all handlers including delete', () => {
+  it('should register all handlers including create and delete', () => {
     registerContactsHandlers()
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:getAll', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:getById', expect.any(Function))
+    expect(ipcMain.handle).toHaveBeenCalledWith('contacts:create', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:update', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:delete', expect.any(Function))
     expect(ipcMain.handle).toHaveBeenCalledWith('contacts:getForMeeting', expect.any(Function))
+  })
+
+  it('should create a new contact (contacts:create)', async () => {
+    const { getContactByName, createContact } = await import('../../services/database')
+    vi.mocked(getContactByName).mockReturnValue(undefined)
+    vi.mocked(createContact).mockReturnValue({
+      id: 'new-id',
+      name: 'Jane Doe',
+      email: 'jane@example.com',
+      type: 'team',
+      role: 'Engineer',
+      company: null,
+      notes: null,
+      tags: null,
+      first_seen_at: '2025-01-01',
+      last_seen_at: '2025-01-01',
+      meeting_count: 0,
+      created_at: '2025-01-01'
+    } as any)
+
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find((call) => call[0] === 'contacts:create')?.[1]
+    const result = (await handler?.({} as any, {
+      name: '  Jane Doe  ',
+      email: 'jane@example.com',
+      role: 'Engineer',
+      type: 'team'
+    })) as any
+
+    expect(result.success).toBe(true)
+    expect(result.data.id).toBe('new-id')
+    // Name is trimmed before the duplicate check + insert.
+    expect(getContactByName).toHaveBeenCalledWith('Jane Doe')
+    expect(createContact).toHaveBeenCalledWith(expect.objectContaining({ name: 'Jane Doe', type: 'team' }))
+  })
+
+  it('should reject creating a contact with no name (VALIDATION_ERROR)', async () => {
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find((call) => call[0] === 'contacts:create')?.[1]
+    const result = (await handler?.({} as any, { name: '   ' })) as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('should guard against duplicate names and surface the existing id (DUPLICATE_ENTRY)', async () => {
+    const { getContactByName, createContact } = await import('../../services/database')
+    vi.mocked(getContactByName).mockReturnValue({ id: 'existing-id', name: 'Jane Doe' } as any)
+
+    registerContactsHandlers()
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find((call) => call[0] === 'contacts:create')?.[1]
+    const result = (await handler?.({} as any, { name: 'jane doe' })) as any
+
+    expect(result.success).toBe(false)
+    expect(result.error.code).toBe('DUPLICATE_ENTRY')
+    expect(result.error.details.existingId).toBe('existing-id')
+    expect(createContact).not.toHaveBeenCalled()
   })
 
   it('should map database row to Person interface including new fields', async () => {

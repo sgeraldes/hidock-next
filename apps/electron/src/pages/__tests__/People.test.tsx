@@ -61,9 +61,10 @@ const mockMerge = vi.fn().mockResolvedValue({ success: true, data: { id: 'p2', n
 global.window.electronAPI = {
   contacts: {
     getAll: mockGetAll,
+    create: vi.fn().mockResolvedValue({ success: true, data: { id: 'new-1', name: 'New Person' } }),
     delete: vi.fn().mockResolvedValue({ success: true }),
     merge: mockMerge,
-    getById: vi.fn().mockResolvedValue({ success: true, data: { contact: { name: 'Target' } } })
+    getById: vi.fn().mockResolvedValue({ success: true, data: { contact: { name: 'Target' }, meetings: [] } })
   },
   projects: {
     getById: vi.fn().mockResolvedValue({ success: true, data: { project: { name: 'Target' } } })
@@ -411,6 +412,22 @@ describe('People Page', () => {
     // Instruction banner is shown and the card is selected (not navigated away)
     expect(screen.getByText(/Merge mode:/)).toBeInTheDocument()
     expect(screen.getByText('Mario')).toBeInTheDocument()
+  })
+
+  // Add Person — the header button now opens a real dialog (was a stub toast)
+  it('opens the Add Person dialog from the header button', async () => {
+    render(
+      <MemoryRouter>
+        <People />
+      </MemoryRouter>
+    )
+    await screen.findByText('Mario')
+
+    fireEvent.click(screen.getByRole('button', { name: /Add Person/ }))
+
+    // Dialog opens: its description and required name field appear.
+    expect(await screen.findByText(/Create a contact by hand/)).toBeInTheDocument()
+    expect(screen.getByLabelText(/Name/)).toBeInTheDocument()
   })
 
   // Discovery sweep — button calls the IPC, shows a result toast, and refetches suggestions

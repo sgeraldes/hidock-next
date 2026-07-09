@@ -445,6 +445,17 @@ export function PersonDetail() {
     }
   }
 
+  /** Human phrase describing a person's type, for the colored-glyph tooltips. */
+  const getTypeLabel = (type: PersonType): string => {
+    switch (type) {
+      case 'team': return 'Team member'
+      case 'candidate': return 'Candidate'
+      case 'customer': return 'Customer'
+      case 'external': return 'External contact'
+      default: return 'Unclassified contact'
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -472,10 +483,13 @@ export function PersonDetail() {
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div className="flex items-center gap-3">
-              <div className={cn(
-                "w-12 h-12 rounded-2xl flex items-center justify-center text-xl font-bold shadow-sm border",
-                getTypeColor(person.type)
-              )}>
+              <div
+                className={cn(
+                  "w-12 h-12 rounded-2xl flex items-center justify-center text-xl font-bold shadow-sm border",
+                  getTypeColor(person.type)
+                )}
+                title={getTypeLabel(person.type)}
+              >
                 {person.name.charAt(0)}
               </div>
               <div>
@@ -508,10 +522,13 @@ export function PersonDetail() {
                       </SelectContent>
                     </Select>
                   ) : (
-                    <span className={cn(
-                      "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider",
-                      getTypeColor(person.type)
-                    )}>
+                    <span
+                      className={cn(
+                        "px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider",
+                        getTypeColor(person.type)
+                      )}
+                      title={getTypeLabel(person.type)}
+                    >
                       {person.type}
                     </span>
                   )}
@@ -570,7 +587,7 @@ export function PersonDetail() {
         <div className="max-w-5xl mx-auto p-6 space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {/* Left Column: Info Card */}
-            <div className="space-y-6">
+            <div className="space-y-6 animate-rise-in">
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Information</CardTitle>
@@ -782,7 +799,7 @@ export function PersonDetail() {
             </div>
 
             {/* Right Column: Timeline & Knowledge */}
-            <div className="md:col-span-2 space-y-6">
+            <div className="md:col-span-2 space-y-6 animate-rise-in" style={{ animationDelay: '60ms' }}>
               <div className="w-full">
                 <div className="grid w-full grid-cols-2 bg-muted/50 p-1 rounded-lg">
                   <button
@@ -818,19 +835,19 @@ export function PersonDetail() {
                       meetings.map((meeting) => (
                         <HoverCard key={meeting.id}>
                           <HoverCardTrigger asChild>
-                            <Card className="group hover:border-primary/30 transition-all cursor-pointer overflow-hidden shadow-sm" onClick={() => navigate(`/meeting/${meeting.id}`)}>
-                              <div className="flex items-stretch h-full">
-                                <div className="w-1 bg-muted group-hover:bg-primary transition-colors" />
-                                <div className="flex-1 p-4">
-                                  <div className="flex items-start justify-between">
-                                    <div>
-                                      <h3 className="text-sm font-semibold group-hover:text-primary transition-colors">{meeting.subject}</h3>
-                                      <p className="text-xs text-muted-foreground mt-1">
-                                        {formatDateTime(meeting.start_time)}
-                                      </p>
-                                    </div>
-                                    <ExternalLink className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                            <Card
+                              className="group lift cursor-pointer overflow-hidden shadow-sm border-border/70 dark:border-white/[0.06] hover:border-primary/40"
+                              onClick={() => navigate(`/meeting/${meeting.id}`)}
+                            >
+                              <div className="p-4">
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <h3 className="text-sm font-semibold group-hover:text-primary transition-colors truncate">{meeting.subject}</h3>
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                      {formatDateTime(meeting.start_time)}
+                                    </p>
                                   </div>
+                                  <ExternalLink className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                                 </div>
                               </div>
                             </Card>

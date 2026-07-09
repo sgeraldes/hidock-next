@@ -40,6 +40,18 @@ export const UpdateContactRequestSchema = z.object({
 })
 
 /**
+ * Create contact request — a manually added person ("Add Person" dialog).
+ * Only name is required; email/role/type are optional refinements.
+ */
+export const CreateContactRequestSchema = z.object({
+  name: z.string().trim().min(1).max(500),
+  email: z.string().email().max(500).nullable().optional(),
+  type: z.enum(['team', 'candidate', 'customer', 'external', 'unknown']).optional(),
+  role: OptionalStringSchema,
+  company: OptionalStringSchema
+})
+
+/**
  * Delete contact request
  */
 export const DeleteContactRequestSchema = z.object({
@@ -88,6 +100,7 @@ export const ContactCreateSchema = z.object({
 export type GetContactsRequest = z.infer<typeof GetContactsRequestSchema>
 export type GetContactByIdRequest = z.infer<typeof GetContactByIdRequestSchema>
 export type UpdateContactRequest = z.infer<typeof UpdateContactRequestSchema>
+export type CreateContactRequest = z.infer<typeof CreateContactRequestSchema>
 export type DeleteContactRequest = z.infer<typeof DeleteContactRequestSchema>
 export type MergeContactsRequest = z.infer<typeof MergeContactsRequestSchema>
 export type ContactRole = z.infer<typeof ContactRoleSchema>

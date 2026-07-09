@@ -57,6 +57,7 @@ import type {
   RAGStatus,
   GetContactsRequest,
   GetContactsResponse,
+  CreateContactRequest,
   UpdateContactRequest,
   GetProjectsRequest,
   GetProjectsResponse,
@@ -173,6 +174,7 @@ export interface ElectronAPI {
   contacts: {
     getAll: (request?: GetContactsRequest) => Promise<Result<GetContactsResponse>>
     getById: (id: string) => Promise<Result<ContactWithMeetings>>
+    create: (request: CreateContactRequest) => Promise<Result<Person>>
     update: (request: UpdateContactRequest) => Promise<Result<Contact>>
     delete: (id: string) => Promise<Result<void>>
     merge: (request: { keeperId: string; loserId: string }) => Promise<Result<Person>>
@@ -728,6 +730,7 @@ const electronAPI: ElectronAPI = {
   contacts: {
     getAll: (request) => callIPC('contacts:getAll', request),
     getById: (id) => callIPC('contacts:getById', id),
+    create: (request) => callIPC('contacts:create', request),
     update: (request) => callIPC('contacts:update', request),
     delete: (id) => callIPC('contacts:delete', id),
     merge: (request) => callIPC('contacts:merge', request),

@@ -9,6 +9,8 @@ import { z } from 'zod'
 import {
   getContacts,
   getContactById,
+  getContactByName,
+  createContact,
   updateContact,
   deleteContact,
   getMeetingsForContact,
@@ -23,6 +25,7 @@ import { success, error, Result } from '../types/api'
 import {
   GetContactsRequestSchema,
   GetContactByIdRequestSchema,
+  CreateContactRequestSchema,
   UpdateContactRequestSchema,
   DeleteContactRequestSchema,
   MergeContactsRequestSchema
@@ -92,6 +95,45 @@ export function registerContactsHandlers(): void {
       } catch (err) {
         console.error('contacts:getById error:', err)
         return error('DATABASE_ERROR', 'Failed to fetch contact', err)
+      }
+    }
+  )
+
+  /**
+   * Create a new contact (manual "Add Person"). Guards against an exact
+   * (case-insensitive) name collision so the user opens the existing contact
+   * rather than silently minting a twin — the renderer surfaces the existing id.
+   */
+  ipcMain.handle(
+    'contacts:create',
+    async (_, request: unknown): Promise<Result<Person>> => {
+      try {
+        const parsed = CreateContactRequestSchema.safeParse(request)
+        if (!parsed.success) {
+          return error('VALIDATION_ERROR', 'Invalid create request', parsed.error.format())
+        }
+
+        const name = parsed.data.name.trim()
+        const existing = getContactByName(name)
+        if (existing) {
+          return error('DUPLICATE_ENTRY', `A contact named ${existing.name} already exists`, {
+            existingId: existing.id,
+            existingName: existing.name
+          })
+        }
+
+        const created = createContact({
+          name,
+          email: parsed.data.email ?? null,
+          type: parsed.data.type,
+          role: parsed.data.role ?? null,
+          company: parsed.data.company ?? null
+        })
+
+        return success(mapToPerson(created))
+      } catch (err) {
+        console.error('contacts:create error:', err)
+        return error('DATABASE_ERROR', 'Failed to create contact', err)
       }
     }
   )
