@@ -38,10 +38,31 @@ late evening, all gated (typecheck 0, full suite green) + verified live via CDP:
   banner when a project is open. Found ONLY by the live walk; unit tests
   passed throughout. Suite at 2,201.
 
-Remaining from queue item 1: Calendar surface design round; Actionables kept
-its old orange side-stripe cards (B7 content done, visual language not).
+Late-night wave (all landed, gated, pushed, live-verified on the real app):
+- cfb80f4a Actionables visual pass (side-stripes gone, humanized type labels).
+- ee859997/de00e560/884c8bbb Calendar: category color language + legend,
+  honest states ("Not linked to a meeting", "Scheduled — not recorded"),
+  unlinked blocks show transcript titles, hover leads with title/summary.
+- 30348b17 Verify-Recording-Match decidability: header shows transcript
+  title/summary/speakers; real scoring (overlap fraction + proximity +
+  LLM-free lexical title↔subject signal with reason phrases; best-match
+  preselect). User's Rec46 case verified live: Retro Belcorp 65% best match
+  ("Title mentions 'retro', 'belcorp'"), others 19%/5% with honest reasons.
+- 8e2086bb Claude Code handoff loop: "Open in Claude Code" launches a
+  terminal in the resolved folder (pick → project folder_path → saved
+  handoffDirectory), generation moves items out of Pending + toast w/ file.
+- 58d1f98d **P0: knowledge_captures was EMPTY BY OMISSION — never populated**
+  (NOT a wipe; forensics: no freelist pages, no dangling FKs, migrateToV11
+  never ran). Fix: capture creation wired into transcription, boot self-heal
+  backfill (ran live: 183 captures created), mass-delete tripwire on
+  protected tables, rotating boot backups (hidock.db.bak-<date>, keep 3).
+  DB snapshot kept at F:\HiDock-Next-Data\data\hidock.db.snapshot-2026-07-08-2355.
 
-NOTHING in flight. Tree clean, all pushed through 0d50b5ac.
+Next from the user's audit: Today follow-up card = day digest (13-meeting day
+under-served by single recentKnowledge[0] card; show meeting subject+time
+alongside transcript title). Suite at 2,258.
+
+NOTHING in flight. Tree clean, all pushed through 58d1f98d.
 
 ## 2. DEVICE STATE
 
