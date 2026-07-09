@@ -29,7 +29,9 @@
     "node": ">=18.0.0"
   },
   "license": "MIT",
-  "dependencies": {},
+  "dependencies": {
+    "@hidock/connectors": "file:../connectors"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "tsup": "^8.5.1",

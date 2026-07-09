@@ -59,9 +59,11 @@ export {
 // Sync
 export { compareTs, maxTs, syncChannel, type SyncChannelOptions } from './sync.js'
 
-// Connector
+// Connector + host registration (descriptor + context-bound factory)
 export {
   createSlackConnector,
+  slackConnectorFactory,
+  slackDescriptor,
   SLACK_CONNECTOR_TYPE,
   SLACK_REQUIRED_SCOPES,
   SlackConnector

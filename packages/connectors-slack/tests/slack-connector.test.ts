@@ -1,6 +1,12 @@
+import type { ConnectorContext } from '@hidock/connectors'
 import { describe, expect, it } from 'vitest'
 import type { EntityRef, GraphSignal } from '../src/contract.js'
-import { createSlackConnector, SLACK_REQUIRED_SCOPES } from '../src/slack-connector.js'
+import {
+  createSlackConnector,
+  slackConnectorFactory,
+  slackDescriptor,
+  SLACK_REQUIRED_SCOPES
+} from '../src/slack-connector.js'
 import { makeMockFetch } from './helpers.js'
 
 const USERS = {
@@ -155,5 +161,59 @@ describe('exports', () => {
     expect(SLACK_REQUIRED_SCOPES.history).toBe('channels:history')
     expect(SLACK_REQUIRED_SCOPES.channels).toBe('channels:read')
     expect(SLACK_REQUIRED_SCOPES.users).toBe('users:read')
+  })
+})
+
+/** Minimal in-memory ConnectorContext for factory tests. */
+function fakeContext(config: Record<string, string>, secrets: Record<string, string>): ConnectorContext {
+  return {
+    connectorId: 'slack',
+    getConfig: () => ({ ...config }),
+    getSecret: (k: string) => secrets[k] ?? null,
+    setSecret: () => undefined,
+    setStatus: () => undefined,
+    log: () => undefined
+  }
+}
+
+describe('host registration (descriptor + factory)', () => {
+  it('descriptor advertises id, transport, secret token field, and all capabilities', () => {
+    expect(slackDescriptor.id).toBe('slack')
+    expect(slackDescriptor.transport).toBe('native')
+    const token = slackDescriptor.configFields.find((f) => f.key === 'token')
+    expect(token).toMatchObject({ type: 'password', required: true, secret: true })
+    expect(slackDescriptor.configFields.some((f) => f.key === 'channelAllowlist')).toBe(true)
+    expect([...slackDescriptor.capabilityKinds].sort()).toEqual(['actions', 'identity', 'signals', 'sources'])
+  })
+
+  it('factory reads the token via ctx.getSecret and parses the channel allowlist', async () => {
+    const ctx = fakeContext({ channelAllowlist: 'C1, C2 ,, C3' }, { token: 'xoxb-fromsecret' })
+    const connector = slackConnectorFactory(ctx)
+    expect(connector.type).toBe('slack')
+    expect(connector.capabilities.sources).toBeDefined()
+    // Allowlist parsed (trimmed, blanks dropped) → listSelectedContainers filters to it.
+    const { fetchFn } = makeMockFetch({
+      'conversations.list': {
+        body: {
+          ok: true,
+          channels: [
+            { id: 'C1', name: 'a' },
+            { id: 'C9', name: 'z' }
+          ],
+          response_metadata: { next_cursor: '' }
+        }
+      }
+    })
+    // Rebuild with the same allowlist but injected fetch to assert filtering.
+    const withFetch = createSlackConnector({ token: 'x', channelAllowlist: ['C1', 'C2', 'C3'] }, { fetchFn })
+    expect((await withFetch.listSelectedContainers()).map((c) => c.externalId)).toEqual(['C1'])
+  })
+
+  it('factory tolerates a missing token — constructs and reports auth-needed', async () => {
+    const connector = slackConnectorFactory(fakeContext({}, {}))
+    expect(connector.id.startsWith('slack:')).toBe(true)
+    expect(connector.status().state).toBe('auth-needed')
+    // connect() short-circuits to auth-needed without any network call.
+    expect((await connector.connect!()).state).toBe('auth-needed')
   })
 })

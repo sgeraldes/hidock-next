@@ -83,7 +83,9 @@ export class SlackClient {
   private readonly sleep: (ms: number) => Promise<void>
 
   constructor(token: string, deps: SlackClientDeps = {}) {
-    if (!token) throw new Error('SlackClient requires a token')
+    // An empty token is tolerated at construction (the host builds connectors to
+    // render Settings before they are configured). Calls made with an empty token
+    // simply fail auth at the API (not_authed) → surfaced as auth-needed.
     this.token = token
     this.baseUrl = deps.baseUrl ?? DEFAULT_BASE_URL
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES

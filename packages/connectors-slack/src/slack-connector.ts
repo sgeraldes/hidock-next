@@ -30,6 +30,7 @@ import type {
   SourceContainer,
   SourceProvider
 } from './contract.js'
+import type { ConnectorContext, ConnectorDescriptor, ConnectorFactory } from '@hidock/connectors'
 import {
   bestName,
   channelToSourceContainer,
@@ -89,7 +90,9 @@ export class SlackConnector implements Connector, IdentityProvider, SourceProvid
       signals: this
     }
     // Stable id so the host can key persisted cursors/identities across restarts.
-    this.id = `slack:${hashToken(config.token)}`
+    // Empty token → stable literal id so the host can still enumerate/register it.
+    this.id = config.token ? `slack:${hashToken(config.token)}` : 'slack:unconfigured'
+    if (!config.token) this.status_ = { state: 'auth-needed', message: 'token missing' }
   }
 
   readonly id: string
@@ -100,6 +103,10 @@ export class SlackConnector implements Connector, IdentityProvider, SourceProvid
 
   /** Validate the token and move to connected/auth-needed. Idempotent. */
   async connect(): Promise<ConnectorStatus> {
+    if (!this.config.token) {
+      this.status_ = { state: 'auth-needed', message: 'token missing' }
+      return this.status_
+    }
     try {
       const res = await this.client.authTest()
       this.status_ = { state: 'connected', message: res.team ? `Connected to ${res.team}` : undefined }
@@ -254,4 +261,73 @@ function hashToken(token: string): string {
   let h = 5381
   for (let i = 0; i < token.length; i++) h = ((h << 5) + h + token.charCodeAt(i)) >>> 0
   return h.toString(16)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Host registration — descriptor + context-bound factory
+//
+// The host registry maps `descriptor.id → factory`. The factory receives a
+// ConnectorContext and reads the token via ctx.getSecret('token') (secrets live
+// in safeStorage, never in the DB) and the channel allowlist via ctx.getConfig().
+// The host can register this connector WITHOUT editing this package.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Settings → Connectors metadata for Slack. */
+export const slackDescriptor: ConnectorDescriptor = {
+  id: SLACK_CONNECTOR_TYPE,
+  displayName: 'Slack',
+  description:
+    'Sync selected Slack channels as living message logs (+ image attachments), map users to contacts for identity resolution, and send messages from a person surface.',
+  transport: 'native',
+  auth: {
+    kind: 'api-key',
+    setupSteps: [
+      'Create a Slack app at https://api.slack.com/apps (or reuse an existing one).',
+      `Add the required bot/user token scopes: ${SLACK_REQUIRED_SCOPES.history}, ${SLACK_REQUIRED_SCOPES.channels}, ${SLACK_REQUIRED_SCOPES.users} (plus ${SLACK_REQUIRED_SCOPES.usersEmail} for email-confident identity match and ${SLACK_REQUIRED_SCOPES.chatWrite} for the send-message action).`,
+      'Install the app to your workspace and copy the token (xoxb-… or xoxp-…).',
+      'Paste the token below and pick the channels to sync.'
+    ],
+    docsUrl: 'https://api.slack.com/authentication/token-types'
+  },
+  configFields: [
+    {
+      key: 'token',
+      label: 'Slack token',
+      type: 'password',
+      required: true,
+      secret: true,
+      placeholder: 'xoxb-… or xoxp-…',
+      help: 'Bot or user token. Stored encrypted; never written to the database.'
+    },
+    {
+      key: 'channelAllowlist',
+      label: 'Channels to sync',
+      type: 'text',
+      required: false,
+      placeholder: 'C0123ABCD, C0456EFGH',
+      help: 'Comma-separated channel IDs to sync. Leave empty to sync none until you opt channels in.'
+    }
+  ],
+  capabilityKinds: ['identity', 'sources', 'actions', 'signals']
+}
+
+/** Parse the comma-separated `channelAllowlist` config field into ids. */
+function parseAllowlist(value: unknown): string[] {
+  return String(value ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+/**
+ * Host factory: builds a Slack connector bound to a runtime ConnectorContext.
+ * Register with `descriptor.id` ('slack') → this factory in the host registry.
+ */
+export const slackConnectorFactory: ConnectorFactory = (ctx: ConnectorContext) => {
+  const token = ctx.getSecret('token') ?? ''
+  const cfg = ctx.getConfig()
+  return createSlackConnector({
+    token,
+    channelAllowlist: parseAllowlist(cfg.channelAllowlist)
+  })
 }

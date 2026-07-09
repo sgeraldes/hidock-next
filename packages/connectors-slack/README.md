@@ -70,14 +70,31 @@ first (backfill) sync.
 then throwing `SlackRateLimitError`. Backoff delay is injectable (`deps.sleep`)
 so tests never wait. `Retry-After` is clamped to [1s, 300s].
 
-## Contract reconciliation
+## Host registration
 
-`src/contract.ts` is a **verified zero-drift mirror** of the canonical
-`@hidock/connectors` contract (`packages/connectors/src/types.ts`). It is kept
-local so this package stays independently green while the host package is
-finalized. Swapping to the published types is a single-file change — see the
-header of `src/contract.ts` for the exact re-export and the one-line dependency
-add. No other file imports the contract directly.
+The package exports everything the host registry needs — no host-side glue in
+this package:
+
+- `slackDescriptor: ConnectorDescriptor` — Settings → Connectors metadata
+  (id `slack`, transport `native`, auth setup steps, config fields
+  `token` [password/secret/required] and `channelAllowlist` [text], and all four
+  capability kinds).
+- `slackConnectorFactory: ConnectorFactory` — `(ctx: ConnectorContext) => Connector`;
+  reads the token via `ctx.getSecret('token')` (secrets live in safeStorage,
+  never the DB) and the channel allowlist via `ctx.getConfig()`.
+
+Register `slackDescriptor.id → slackConnectorFactory` in the host registry. A
+connector built with no token constructs cleanly and reports `auth-needed`
+(so it renders in Settings before it is configured).
+
+## Contract reconciliation — DONE
+
+`src/contract.ts` now **re-exports** the canonical contract from
+`@hidock/connectors` (`packages/connectors/src/types.ts`, committed `b99ad7b9`),
+which adopted this connector's mirror shapes verbatim — single source of truth,
+zero drift. The dependency is wired as `"@hidock/connectors": "file:../connectors"`.
+No other file in this package references the host package for the base contract
+types.
 
 ## Development
 
