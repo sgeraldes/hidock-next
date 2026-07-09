@@ -41,6 +41,13 @@ INTERACTIVITY_PLAN.md, OVERNIGHT_PLAN.md.*
   re-transcription upgrades them (needs backlog decision, see A20).
 - MeetingDetail start/end time editing (form scaffolding exists, no inputs).
 - March backlog: BUG-R1/R3 re-scan loop, DevicePipeline Phase 2.
+- PROJECT identity-suggestion cards lag the contact cards: they still show
+  bare "matched by fuzzy" jargon, "No verbatim mentions — extracted from
+  meeting analysis" as their only evidence, and 62% pairs across clearly
+  different clients (e.g. "Antamina VMWare Migration" vs "BHD Leon
+  Migration"). Needs the contact-card B7 treatment: evidence phrases,
+  shared-people/topics context, and a lower floor (or caution) when there
+  are zero verbatim mentions.
 - Test suite prints "Not implemented: HTMLCanvasElement getContext" (jsdom
   lacks canvas; waveform components render in tests). Harmless-looking but
   noisy — silence via a canvas mock in test setup or install `canvas` dev dep.
