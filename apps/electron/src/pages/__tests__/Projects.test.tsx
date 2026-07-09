@@ -116,6 +116,9 @@ beforeEach(() => {
       topics: []
     }
   })
+  // clearAllMocks resets call history but not implementations, so reset the shared
+  // getSuggestions mock to an empty queue each test (individual tests override it).
+  ;(global.window.electronAPI as any).identity.getSuggestions.mockResolvedValue({ success: true, data: [] })
 })
 
 describe('Projects Page', () => {
@@ -321,7 +324,9 @@ describe('Projects Page', () => {
 
   // The Projects suggestions section is filtered to kind='project' only
   it('renders only project-kind identity suggestions in the filtered section', async () => {
-    ;(global.window.electronAPI as any).identity.getSuggestions.mockResolvedValueOnce({
+    // getSuggestions has two consumers now (the section's queue + the page's banner
+    // count), so return the data for every call rather than just the first.
+    ;(global.window.electronAPI as any).identity.getSuggestions.mockResolvedValue({
       success: true,
       data: [
         {
@@ -381,6 +386,64 @@ describe('Projects Page', () => {
     // Clicking a row navigates to /library with that item pre-selected.
     fireEvent.click(row)
     expect(mockNavigate).toHaveBeenCalledWith('/library', { state: { selectedId: 'k1' } })
+  })
+
+  // Regression (hub eviction): with a project open AND project suggestions present, the
+  // hub must stay reachable — suggestions collapse into a compact banner, not the full
+  // (viewport-height) cards that previously pushed the hub's flex-1 to zero height.
+  it('keeps the project hub reachable when suggestions exist, expanding on Review', async () => {
+    // Keeper (pr9) resolves to a distinct name so "Project Alpha" is unambiguous in the
+    // sidebar; the selected project (pr1) still loads its full detail shape.
+    ;(global.window.electronAPI as any).projects.getById = vi.fn().mockImplementation((id: string) =>
+      id === 'pr9'
+        ? Promise.resolve({ success: true, data: { project: { id: 'pr9', name: 'KeeperProject' }, meetings: [], topics: [] } })
+        : mockGetById(id)
+    )
+    ;(global.window.electronAPI as any).identity.getSuggestions.mockResolvedValue({
+      success: true,
+      data: [
+        {
+          id: 'sg-project',
+          kind: 'project',
+          candidate_name: 'ProjectCandidate',
+          target_id: 'pr9',
+          confidence: 0.75,
+          evidence: null,
+          status: 'pending',
+          created_at: '2026-07-08T10:00:00Z'
+        }
+      ]
+    })
+
+    render(
+      <MemoryRouter>
+        <Projects />
+      </MemoryRouter>
+    )
+
+    await screen.findByText('Project Alpha')
+    fireEvent.click(screen.getByText('Project Alpha'))
+
+    // The hub the user clicked is rendered (header heading + Knowledge card content)...
+    expect(await screen.findByRole('heading', { name: 'Project Alpha' })).toBeInTheDocument()
+    expect(await screen.findByText('Kickoff notes')).toBeInTheDocument()
+
+    // ...and suggestions appear as a compact banner, NOT the full section (the candidate
+    // card is not mounted yet).
+    const reviewBtn = await screen.findByRole('button', { name: /Review 1 project name suggestion/i })
+    expect(reviewBtn).toBeInTheDocument()
+    expect(screen.queryByText(/ProjectCandidate/)).not.toBeInTheDocument()
+
+    // Clicking Review expands the full section (candidate now visible) with a Back control.
+    fireEvent.click(reviewBtn)
+    expect((await screen.findAllByText(/ProjectCandidate/)).length).toBeGreaterThan(0)
+    const backBtn = screen.getByRole('button', { name: /Back to Project Alpha/i })
+    expect(backBtn).toBeInTheDocument()
+
+    // Collapsing back returns to the hub and hides the full section.
+    fireEvent.click(backBtn)
+    expect(await screen.findByRole('button', { name: /Review 1 project name suggestion/i })).toBeInTheDocument()
+    expect(screen.queryByText(/ProjectCandidate/)).not.toBeInTheDocument()
   })
 
   it('offers a "View all in Library" affordance on the knowledge card', async () => {

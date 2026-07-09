@@ -24,6 +24,7 @@ import {
   Pencil,
   Sparkles,
   ChevronRight,
+  ChevronLeft,
   ArrowRight,
   BookOpen
 } from 'lucide-react'
@@ -132,6 +133,41 @@ export function Projects() {
   const [discovering, setDiscovering] = useState(false)
   const suggestionsRef = useRef<IdentitySuggestionsSectionHandle>(null)
 
+  // Identity suggestions coexist with the project hub. When a project is open the
+  // full group cards would overflow the (non-scrolling) main pane and evict the hub
+  // the user just clicked, so we collapse them into a compact banner that expands on
+  // demand. This count decides whether that banner appears; the section itself still
+  // owns the live queue (we do NOT modify it), so we re-read the count on collapse.
+  const [projectSuggestionCount, setProjectSuggestionCount] = useState(0)
+  const [reviewExpanded, setReviewExpanded] = useState(false)
+
+  const refreshSuggestionCount = useCallback(async () => {
+    try {
+      const res = await window.electronAPI.identity.getSuggestions('pending')
+      const count =
+        res.success && Array.isArray(res.data)
+          ? (res.data as Array<{ kind?: string }>).filter((s) => s.kind === 'project').length
+          : 0
+      setProjectSuggestionCount(count)
+    } catch {
+      setProjectSuggestionCount(0)
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshSuggestionCount()
+  }, [refreshSuggestionCount])
+
+  const collapseReview = useCallback(() => {
+    setReviewExpanded(false)
+    refreshSuggestionCount()
+  }, [refreshSuggestionCount])
+
+  // Selecting/deselecting a project always lands on the hub, never mid-review.
+  useEffect(() => {
+    setReviewExpanded(false)
+  }, [activeProject?.id])
+
   const navigate = useNavigate()
 
   // Debounce: skip firing on initial mount
@@ -190,6 +226,7 @@ export function Projects() {
           `${candidatePairs} candidate pairs analyzed, ${suggestionsCreated} new ${suggestionsCreated === 1 ? 'suggestion' : 'suggestions'}, ${autoMergeable} high-confidence`
         )
         suggestionsRef.current?.reload()
+        refreshSuggestionCount()
       } else {
         toast.error('Discovery failed', result.error || 'Unknown error')
       }
@@ -199,7 +236,7 @@ export function Projects() {
     } finally {
       setDiscovering(false)
     }
-  }, [])
+  }, [refreshSuggestionCount])
 
   // Projects are already filtered server-side by searchQuery and statusFilter
   const filteredProjects = projects
@@ -628,12 +665,53 @@ export function Projects() {
       </aside>
 
       {/* Main Detail Area */}
-      <main className="flex-1 flex flex-col min-w-0">
-        {/* Project identity suggestions (self-hides when empty; populated by Discover) */}
-        <div className="px-8 pt-6 empty:hidden">
-          <IdentitySuggestionsSection kind="project" ref={suggestionsRef} />
-        </div>
-        {activeProject && detailLoading ? (
+      <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {/* Project identity suggestions.
+            - No project open: full section inline (self-hides when empty; populated by Discover).
+            - Project open + suggestions present: a compact one-line banner so the hub the user
+              selected stays reachable. "Review" expands the full section; "Back" collapses it. */}
+        {activeProject && projectSuggestionCount > 0 ? (
+          reviewExpanded ? (
+            <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
+              <button
+                type="button"
+                onClick={collapseReview}
+                className="flex items-center gap-2 px-8 pt-6 pb-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 rounded"
+                aria-label={`Back to ${activeProject.name}`}
+              >
+                <ChevronLeft className="h-4 w-4" />
+                Back to {activeProject.name}
+              </button>
+              <div className="flex-1 overflow-auto px-8 pb-6">
+                <IdentitySuggestionsSection kind="project" ref={suggestionsRef} />
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setReviewExpanded(true)}
+              className="mx-8 mt-6 mb-2 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-sm hover:bg-amber-500/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+              aria-label={`Review ${projectSuggestionCount} project name ${projectSuggestionCount === 1 ? 'suggestion' : 'suggestions'}`}
+            >
+              <Sparkles className="h-4 w-4 text-amber-500 flex-shrink-0" />
+              <span className="font-medium">
+                {projectSuggestionCount} project name {projectSuggestionCount === 1 ? 'suggestion' : 'suggestions'}
+              </span>
+              <span className="text-xs text-muted-foreground hidden sm:inline">— possible duplicate names to confirm</span>
+              <span className="ml-auto inline-flex items-center gap-1 text-primary font-medium">
+                Review <ChevronRight className="h-4 w-4" />
+              </span>
+            </button>
+          )
+        ) : (
+          !activeProject && (
+            <div className="px-8 pt-6 empty:hidden">
+              <IdentitySuggestionsSection kind="project" ref={suggestionsRef} />
+            </div>
+          )
+        )}
+        {!(activeProject && projectSuggestionCount > 0 && reviewExpanded) && (
+          activeProject && detailLoading ? (
           <div className="flex-1 flex flex-col items-center justify-center">
             <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground mb-4" />
             <p className="text-sm text-muted-foreground">Loading project details...</p>
@@ -1133,6 +1211,7 @@ export function Projects() {
               Create New Project
             </Button>
           </div>
+        )
         )}
       </main>
 
