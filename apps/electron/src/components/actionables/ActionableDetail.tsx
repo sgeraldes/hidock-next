@@ -12,6 +12,26 @@ interface ActionableDetailProps {
   resolveRecipient: (value?: string | null) => ResolvedContact | undefined
 }
 
+/** The subset of a recording row the source panel needs to render a link. */
+interface SourceRecording {
+  id: string
+  filename: string
+  original_filename: string | null
+  date_recorded: string | null
+  meeting_id: string | null
+}
+
+/**
+ * Resolved source of an actionable. `source_knowledge_id` holds a knowledge-
+ * capture id when one existed at detection time, but a RAW RECORDING id when no
+ * capture was created (transcription.ts stores `knowledgeCapture?.id || recordingId`).
+ * We resolve both, mirroring the backend (output-generator.ts).
+ */
+type ResolvedSource =
+  | { kind: 'capture'; capture: KnowledgeCapture }
+  | { kind: 'recording'; recording: SourceRecording }
+  | { kind: 'none' }
+
 function DetailSection({
   icon: Icon,
   label,
@@ -40,34 +60,49 @@ function DetailSection({
  */
 export function ActionableDetail({ actionable, resolveRecipient }: ActionableDetailProps) {
   const navigate = useNavigate()
-  const [source, setSource] = useState<KnowledgeCapture | null>(null)
+  const [source, setSource] = useState<ResolvedSource>({ kind: 'none' })
   const [sourceLoading, setSourceLoading] = useState(true)
 
   const template = getTemplateInfo(actionable.suggestedTemplate)
 
-  // Lazily fetch the source knowledge capture only when the card is expanded
-  // (this component mounts on expand), so collapsed cards make no extra IPC call.
+  // Lazily resolve the source only when the card is expanded (this component
+  // mounts on expand), so collapsed cards make no extra IPC call. Try the
+  // knowledge-capture path first; if that misses, the id is a raw recording id.
   useEffect(() => {
     let cancelled = false
     setSourceLoading(true)
-    window.electronAPI.knowledge
-      .getById(actionable.sourceKnowledgeId)
-      .then((kc) => {
-        if (!cancelled) setSource(kc)
-      })
-      .catch(() => {
-        if (!cancelled) setSource(null)
-      })
-      .finally(() => {
+    ;(async () => {
+      try {
+        const kc = await window.electronAPI.knowledge.getById(actionable.sourceKnowledgeId)
+        if (cancelled) return
+        if (kc) {
+          setSource({ kind: 'capture', capture: kc })
+          return
+        }
+        // Capture lookup missed — resolve the same id as a recording.
+        const rec = await window.electronAPI.recordings.getById(actionable.sourceKnowledgeId)
+        if (cancelled) return
+        setSource(rec ? { kind: 'recording', recording: rec } : { kind: 'none' })
+      } catch {
+        if (!cancelled) setSource({ kind: 'none' })
+      } finally {
         if (!cancelled) setSourceLoading(false)
-      })
+      }
+    })()
     return () => {
       cancelled = true
     }
   }, [actionable.sourceKnowledgeId])
 
-  const sourceTitle = source?.title?.trim() || 'Source recording'
-  const sourceDate = source?.capturedAt ? formatDateTime(source.capturedAt) : null
+  const capture = source.kind === 'capture' ? source.capture : null
+  const recording = source.kind === 'recording' ? source.recording : null
+
+  const captureTitle = capture?.title?.trim() || 'Source recording'
+  const captureDate = capture?.capturedAt ? formatDateTime(capture.capturedAt) : null
+
+  const recordingTitle =
+    recording?.original_filename?.trim() || recording?.filename?.trim() || 'Recording'
+  const recordingDate = recording?.date_recorded ? formatDateTime(recording.date_recorded) : null
 
   return (
     <div className="mt-4 border-t pt-4 space-y-4">
@@ -94,30 +129,54 @@ export function ActionableDetail({ actionable, resolveRecipient }: ActionableDet
         </div>
       </DetailSection>
 
-      {/* Source — clickable meeting (hover card) or recording link */}
+      {/* Source — clickable meeting (hover card) or recording/library link.
+          Resolves a knowledge capture OR a raw recording id; honest fallback. */}
       <DetailSection icon={CalendarDays} label="Source">
         {sourceLoading ? (
           <span className="text-xs text-muted-foreground">Loading source…</span>
-        ) : source?.meetingId ? (
+        ) : capture?.meetingId ? (
           <span className="inline-flex items-center gap-1.5 flex-wrap">
-            <EntityMention type="meeting" id={source.meetingId} name={sourceTitle} showIcon />
-            {sourceDate && <span className="text-xs text-muted-foreground">· {sourceDate}</span>}
+            <EntityMention type="meeting" id={capture.meetingId} name={captureTitle} showIcon />
+            {captureDate && <span className="text-xs text-muted-foreground">· {captureDate}</span>}
           </span>
-        ) : source?.sourceRecordingId ? (
+        ) : capture?.sourceRecordingId ? (
           <button
             type="button"
             onClick={() =>
-              navigate('/library', { state: { selectedId: source.sourceRecordingId } })
+              navigate('/library', { state: { selectedId: capture.sourceRecordingId } })
             }
             className="inline-flex items-center gap-1.5 text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
           >
             <FileText className="h-3.5 w-3.5 shrink-0" />
-            <span className="font-medium">{sourceTitle}</span>
-            {sourceDate && <span className="text-xs text-muted-foreground">· {sourceDate}</span>}
+            <span className="font-medium">{captureTitle}</span>
+            {captureDate && <span className="text-xs text-muted-foreground">· {captureDate}</span>}
+            <ArrowRight className="h-3 w-3 shrink-0 opacity-60" />
+          </button>
+        ) : capture ? (
+          // Capture exists but links to no meeting/recording — its title is real
+          // content, so surface it as inert text rather than "unavailable".
+          <span className="text-xs text-muted-foreground">
+            {captureTitle}
+            {captureDate ? ` · ${captureDate}` : ''}
+          </span>
+        ) : recording?.meeting_id ? (
+          <span className="inline-flex items-center gap-1.5 flex-wrap">
+            <EntityMention type="meeting" id={recording.meeting_id} name={recordingTitle} showIcon />
+            {recordingDate && <span className="text-xs text-muted-foreground">· {recordingDate}</span>}
+          </span>
+        ) : recording ? (
+          <button
+            type="button"
+            onClick={() => navigate('/library', { state: { selectedId: recording.id } })}
+            className="inline-flex items-center gap-1.5 text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
+          >
+            <FileText className="h-3.5 w-3.5 shrink-0" />
+            <span className="font-medium">{recordingTitle}</span>
+            {recordingDate && <span className="text-xs text-muted-foreground">· {recordingDate}</span>}
             <ArrowRight className="h-3 w-3 shrink-0 opacity-60" />
           </button>
         ) : (
-          <span className="text-xs text-muted-foreground">{sourceTitle}{sourceDate ? ` · ${sourceDate}` : ''}</span>
+          <span className="text-xs text-muted-foreground italic">Source unavailable</span>
         )}
       </DetailSection>
 
