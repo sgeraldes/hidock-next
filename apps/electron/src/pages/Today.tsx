@@ -14,6 +14,9 @@ import {
   Video,
   Mic,
   ChevronRight,
+  ChevronDown,
+  Link2Off,
+  Loader2,
   CheckCircle2,
   Info,
   Settings as SettingsIcon
@@ -45,6 +48,7 @@ import {
   type RecordingSpan
 } from '@/lib/meeting-timing'
 import { CATEGORY_DOT, CATEGORY_CHIP, CATEGORY_ORDER } from '@/lib/meeting-category-colors'
+import { UNLINKED_STATE_LABEL } from '@/lib/calendar-utils'
 import type { Contact } from '@/types'
 
 const TODAY_PARTICIPANT_LIMIT = 4
@@ -77,6 +81,10 @@ interface BriefingRecentItem {
   summary?: string
   actionItems: string[]
   wordCount?: number
+  meetingId?: string
+  meetingSubject?: string
+  meetingStart?: string
+  meetingEnd?: string
 }
 
 interface BriefingActionable {
@@ -93,6 +101,8 @@ interface BriefingActionable {
 interface BriefingData {
   todayMeetings: BriefingMeeting[]
   recentKnowledge: BriefingRecentItem[]
+  todayFollowUps?: BriefingRecentItem[]
+  todayRecordingsPending?: number
   pendingActionables: BriefingActionable[]
   calendar: { configured: boolean; syncEnabled: boolean; lastSyncAt: string | null }
   stats: { transcribedCount: number; indexedChunks: number; pendingActionables: number }
@@ -246,6 +256,9 @@ export function Today() {
   const [recordedOnDeviceByMeeting, setRecordedOnDeviceByMeeting] = useState<Record<string, boolean>>({})
   // Which earlier-group capsules the user has expanded (keyed by block start ms).
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  // Which follow-up digest rows the user has manually toggled (keyed by recordingId).
+  // The most-recent row defaults expanded; this tracks explicit user overrides.
+  const [expandedFollowUps, setExpandedFollowUps] = useState<Set<string>>(new Set())
 
   const deviceRecording = useAppStore((s) => s.deviceRecording)
   const activeRecordingFilename = useAppStore((s) => s.activeRecordingFilename)
@@ -570,10 +583,20 @@ export function Today() {
   }, [ribbonSignature, data?.calendar.configured])
 
   const latest = data?.recentKnowledge[0]
+  const followUps = data?.todayFollowUps ?? []
+  const pendingCount = data?.todayRecordingsPending ?? 0
 
   const generateFor = (sourceId: string, templateId: string) => {
     navigate('/actionables', { state: { sourceId, action: 'generate', templateId } })
   }
+
+  const toggleFollowUp = (key: string) =>
+    setExpandedFollowUps((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
 
   const toggleGroup = (key: string) =>
     setExpandedGroups((prev) => {
@@ -827,6 +850,119 @@ export function Today() {
     return new Date(a.m.start_time).getTime() - new Date(b.m.start_time).getTime()
   })
 
+  // ── Follow-up digest (today's recorded + transcribed meetings) ─────────────
+
+  /** Which meeting this follow-up came from: calendar subject + time, or the honest unlinked state. */
+  const FollowUpIdentity = (item: BriefingRecentItem) => {
+    if (!item.meetingSubject) {
+      return (
+        <div className="flex items-center gap-1.5 text-xs font-medium text-foreground/55">
+          <Link2Off className="h-3.5 w-3.5 flex-shrink-0" aria-hidden="true" />
+          {UNLINKED_STATE_LABEL}
+        </div>
+      )
+    }
+    const time = formatTime(item.meetingStart)
+    return (
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="truncate text-sm font-semibold text-foreground">{item.meetingSubject}</span>
+        {time && (
+          <span className="flex-shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-primary">
+            {time}
+          </span>
+        )}
+      </div>
+    )
+  }
+
+  const followUpMeta = (item: BriefingRecentItem) =>
+    [
+      formatDay(item.dateRecorded),
+      `${item.wordCount ?? '—'} words`,
+      item.actionItems.length > 0
+        ? `${item.actionItems.length} action ${item.actionItems.length === 1 ? 'item' : 'items'}`
+        : null
+    ]
+      .filter(Boolean)
+      .join(' · ')
+
+  /** Detail body reused by expanded digest rows and the fallback card. */
+  const FollowUpDetail = (item: BriefingRecentItem) => (
+    <div className="space-y-3">
+      {item.summary && <p className="text-sm text-muted-foreground">{item.summary}</p>}
+      {item.actionItems.length > 0 && (
+        <ul className="space-y-1 text-sm">
+          {item.actionItems.slice(0, 4).map((a, i) => (
+            <li key={i} className="flex gap-2">
+              <span className="text-muted-foreground">→</span>
+              <span className="line-clamp-2">{a}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex flex-wrap gap-2 pt-1">
+        <Button size="sm" onClick={() => generateFor(item.recordingId, 'claude_code_prompt')}>
+          <Terminal className="mr-2 h-4 w-4" />
+          Claude Code handoff
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => generateFor(item.recordingId, 'meeting_minutes')}>
+          <FileText className="mr-2 h-4 w-4" />
+          Meeting minutes
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => navigate('/assistant', { state: { contextId: item.recordingId } })}
+        >
+          <Bot className="mr-2 h-4 w-4" />
+          Ask the assistant
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => navigate('/library', { state: { selectedId: item.recordingId } })}
+        >
+          Open in Library
+          <ArrowRight className="ml-1 h-4 w-4" />
+        </Button>
+      </div>
+    </div>
+  )
+
+  /** One collapsible digest row. Newest (index 0) defaults expanded; the set stores overrides. */
+  const FollowUpRow = (item: BriefingRecentItem, index: number) => {
+    const defaultExpanded = index === 0
+    const expanded = expandedFollowUps.has(item.recordingId) ? !defaultExpanded : defaultExpanded
+    return (
+      <div
+        key={item.recordingId}
+        style={{ animationDelay: `${Math.min(index, 6) * 45}ms` }}
+        className="animate-rise-in rounded-xl border border-border/70 bg-card dark:border-white/[0.06]"
+      >
+        <button
+          onClick={() => toggleFollowUp(item.recordingId)}
+          aria-expanded={expanded}
+          data-testid="followup-row"
+          className="lift flex w-full items-start gap-3 rounded-xl px-4 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <ChevronDown
+            className={cn(
+              'mt-0.5 h-4 w-4 flex-shrink-0 text-foreground/45 transition-transform',
+              !expanded && '-rotate-90'
+            )}
+            aria-hidden="true"
+          />
+          <div className="min-w-0 flex-1">
+            {FollowUpIdentity(item)}
+            <div className="mt-0.5 truncate text-xs text-foreground/60">{item.title}</div>
+            <div className="mt-0.5 text-[11px] text-muted-foreground">{followUpMeta(item)}</div>
+          </div>
+        </button>
+        {expanded && <div className="px-4 pb-4 pl-11">{FollowUpDetail(item)}</div>}
+      </div>
+    )
+  }
+
   return (
     <div ref={scrollRef} className="h-full overflow-y-auto bg-background">
       <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
@@ -1003,63 +1139,69 @@ export function Today() {
           </CardContent>
         </Card>
 
-        {/* Follow up on your last meeting */}
-        {latest && (
+        {/* Today's follow-ups — the day's recorded + transcribed meetings, newest first */}
+        {followUps.length > 0 ? (
+          <Card className="animate-rise-in border-primary/30 bg-primary/[0.03]">
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center justify-between text-base">
+                <span className="flex items-center gap-2">
+                  <Sparkles className="h-4 w-4 text-amber-500" />
+                  Today&apos;s follow-ups
+                </span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  {followUps.length} {followUps.length === 1 ? 'meeting' : 'meetings'}
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {followUps.map((item, i) => FollowUpRow(item, i))}
+              {pendingCount > 0 && (
+                <div
+                  className="flex items-center gap-2 px-1 pt-1 text-xs text-muted-foreground"
+                  data-testid="followup-pending"
+                >
+                  <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                  {pendingCount} of today&apos;s recordings still processing
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ) : pendingCount > 0 ? (
           <Card className="animate-rise-in border-primary/30 bg-primary/[0.03]">
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Sparkles className="h-4 w-4 text-amber-500" />
-                Follow up on your last meeting
+                Today&apos;s follow-ups
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div
+                className="flex items-center gap-2 text-sm text-muted-foreground"
+                data-testid="followup-pending"
+              >
+                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                {pendingCount} of today&apos;s recordings still processing
+              </div>
+            </CardContent>
+          </Card>
+        ) : latest ? (
+          <Card className="animate-rise-in border-primary/30 bg-primary/[0.03]">
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Sparkles className="h-4 w-4 text-amber-500" />
+                Latest analyzed meeting
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               <div>
-                <div className="font-semibold">{latest.title}</div>
-                <div className="text-xs text-muted-foreground">
-                  {formatDay(latest.dateRecorded)} · {latest.wordCount ?? '—'} words
-                  {latest.actionItems.length > 0 && ` · ${latest.actionItems.length} action items detected`}
-                </div>
-                {latest.summary && <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">{latest.summary}</p>}
+                {FollowUpIdentity(latest)}
+                <div className="mt-0.5 truncate text-xs text-foreground/60">{latest.title}</div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground">{followUpMeta(latest)}</div>
               </div>
-              {latest.actionItems.length > 0 && (
-                <ul className="space-y-1 text-sm">
-                  {latest.actionItems.slice(0, 4).map((a, i) => (
-                    <li key={i} className="flex gap-2">
-                      <span className="text-muted-foreground">→</span>
-                      <span className="line-clamp-1">{a}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <div className="flex flex-wrap gap-2 pt-1">
-                <Button size="sm" onClick={() => generateFor(latest.recordingId, 'claude_code_prompt')}>
-                  <Terminal className="mr-2 h-4 w-4" />
-                  Claude Code handoff
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => generateFor(latest.recordingId, 'meeting_minutes')}>
-                  <FileText className="mr-2 h-4 w-4" />
-                  Meeting minutes
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => navigate('/assistant', { state: { contextId: latest.recordingId } })}
-                >
-                  <Bot className="mr-2 h-4 w-4" />
-                  Ask the assistant
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => navigate('/library', { state: { selectedId: latest.recordingId } })}
-                >
-                  Open in Library
-                  <ArrowRight className="ml-1 h-4 w-4" />
-                </Button>
-              </div>
+              {FollowUpDetail(latest)}
             </CardContent>
           </Card>
-        )}
+        ) : null}
 
         {/* Identity suggestions (renders only when the queue is non-empty) */}
         <TodayIdentitySuggestions />
