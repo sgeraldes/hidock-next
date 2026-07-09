@@ -105,6 +105,44 @@ interface ContextGraphData {
   edges: Array<{ id: string; source: string; target: string; type: string; weight: number }>
 }
 
+/** A lens node: a graph node annotated with its stratum band + effective date. */
+interface ContextLensNode extends ContextGraphNode {
+  stratum: 'strategic' | 'operational' | 'people' | 'evidence'
+  dateMs: number | null
+}
+
+/** A stratified, time-aware lens payload. */
+interface ContextLensData {
+  center: string | null
+  nodes: ContextLensNode[]
+  edges: Array<{ id: string; source: string; target: string; type: string; weight: number }>
+  referenceMs: number | null
+}
+
+/** A one-line entity descriptor (lens center / provenance node). */
+interface LensCenter {
+  id: string
+  type: string
+  label: string
+  contactId?: string
+  meetingId?: string
+  projectId?: string
+}
+
+type ProvenanceEntityDTO = LensCenter & { dateMs: number | null }
+
+/** The evidence path + narrative behind a decision / risk / action. */
+interface ProvenanceDTO {
+  node: ProvenanceEntityDTO | null
+  meetings: ProvenanceEntityDTO[]
+  people: ProvenanceEntityDTO[]
+  projects: ProvenanceEntityDTO[]
+  actions: ProvenanceEntityDTO[]
+  pathIds: string[]
+  narrative: string
+  dateMs: number | null
+}
+
 /** Project issue / risk / note (v29). */
 interface ProjectNote {
   id: string
@@ -690,6 +728,18 @@ export interface ElectronAPI {
       data?: { removedNodes: number; removedEdges: number }
       error?: string
     }>
+    getLens: (
+      centerId: string | null,
+      hops?: number,
+      windowDays?: number | null,
+      cap?: number
+    ) => Promise<{ success: boolean; data?: ContextLensData; error?: string }>
+    defaultCenter: (
+      ownerContactId?: string | null
+    ) => Promise<{ success: boolean; data?: LensCenter | null; error?: string }>
+    provenance: (
+      entityId: string
+    ) => Promise<{ success: boolean; data?: ProvenanceDTO; error?: string }>
   }
 
   // Identity suggestions (Round 4a) — the resolver's 0.5–0.8 review queue
@@ -1269,6 +1319,11 @@ const electronAPI: ElectronAPI = {
     search: (query: string) => callIPC('contextGraph:search', query),
     rekey: () => callIPC('contextGraph:rekey'),
     prune: () => callIPC('contextGraph:prune'),
+    getLens: (centerId: string | null, hops?: number, windowDays?: number | null, cap?: number) =>
+      callIPC('contextGraph:getLens', centerId, hops, windowDays, cap),
+    defaultCenter: (ownerContactId?: string | null) =>
+      callIPC('contextGraph:defaultCenter', ownerContactId),
+    provenance: (entityId: string) => callIPC('contextGraph:provenance', entityId),
   },
 
   // Identity suggestions (Round 4a)

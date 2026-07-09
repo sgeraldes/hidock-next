@@ -28,6 +28,9 @@ import {
   searchGraphNodes,
   rekeyExistingPersonNodes,
   pruneGenericGraphNodes,
+  queryLens,
+  pickLensCenter,
+  queryProvenance,
 } from '../services/knowledge-graph-service'
 import { getContactByName } from '../services/database'
 
@@ -198,6 +201,57 @@ export function registerKnowledgeGraphHandlers(): void {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       console.error('[contextGraph:rekey] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // Stratified, time-aware lens — a scoped, reasoning-level perspective. centerId
+  // null → whole-graph lens (top-degree hubs). windowDays null → no time filter.
+  ipcMain.handle(
+    'contextGraph:getLens',
+    async (_event, centerId?: unknown, hops?: unknown, windowDays?: unknown, cap?: unknown) => {
+      try {
+        const center = typeof centerId === 'string' && centerId.trim() ? centerId.trim() : null
+        const h = typeof hops === 'number' && hops > 0 ? Math.min(hops, 3) : 2
+        const w =
+          windowDays === null || windowDays === undefined
+            ? null
+            : typeof windowDays === 'number' && windowDays > 0
+              ? windowDays
+              : null
+        const c = typeof cap === 'number' && cap > 0 ? Math.min(cap, 400) : undefined
+        return { success: true, data: queryLens(center, { hops: h, windowDays: w, cap: c }) }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e)
+        console.error('[contextGraph:getLens] Error:', e)
+        return { success: false, error: msg }
+      }
+    }
+  )
+
+  // The default lens center: the owner's person node (when known) or the
+  // highest-degree person. Optional ownerContactId biases the choice.
+  ipcMain.handle('contextGraph:defaultCenter', async (_event, ownerContactId?: unknown) => {
+    try {
+      const owner = typeof ownerContactId === 'string' && ownerContactId.trim() ? ownerContactId.trim() : null
+      return { success: true, data: pickLensCenter(owner) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:defaultCenter] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // Provenance trail for an entity — the evidence path + narrative behind it.
+  ipcMain.handle('contextGraph:provenance', async (_event, entityId: unknown) => {
+    try {
+      if (!entityId || typeof entityId !== 'string') {
+        return { success: false, error: 'entityId must be a non-empty string' }
+      }
+      return { success: true, data: queryProvenance(entityId as string) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:provenance] Error:', e)
       return { success: false, error: msg }
     }
   })

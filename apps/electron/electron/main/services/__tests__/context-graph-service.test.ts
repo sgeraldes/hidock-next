@@ -44,6 +44,9 @@ import {
   resolveEntityToNodeId,
   findMentionedEntity,
   neighborhoodFacts,
+  queryLens,
+  pickLensCenter,
+  queryProvenance,
 } from '../knowledge-graph-service'
 
 const FAKE_JSON = JSON.stringify({
@@ -162,5 +165,97 @@ describe('Context Graph service', () => {
     const facts = neighborhoodFacts(entity!.id, 1)
     expect(facts).toContain('Mario')
     expect(facts.length).toBeGreaterThan(0)
+  })
+})
+
+describe('Context Lens service', () => {
+  const RICH_JSON = JSON.stringify({
+    people: [{ name: 'Mario', skills: ['SQL'] }],
+    topics: ['Roadmap'],
+    projects: ['Phoenix'],
+    decisions: ['Adopt weekly releases'],
+    action_items: [{ text: 'Ship v1', owner: 'Mario' }],
+    risks: [{ text: 'Timeline tight', raised_by: 'Mario' }],
+    next_steps: ['Book the retro'],
+  })
+
+  async function seedRich() {
+    dbRun('INSERT OR IGNORE INTO contacts (id, name, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?)', [
+      'c-mario',
+      'Mario',
+      '2026-06-01',
+      '2026-06-01',
+    ])
+    dbRun('INSERT OR IGNORE INTO recordings (id, filename, date_recorded, meeting_id) VALUES (?, ?, ?, ?)', [
+      'rec-rich',
+      'rich.hda',
+      '2026-06-15',
+      null,
+    ])
+    dbRun('INSERT OR IGNORE INTO transcripts (id, recording_id, full_text, language) VALUES (?, ?, ?, ?)', [
+      'tx-rich',
+      'rec-rich',
+      'Mario decided weekly releases for Phoenix and flagged the timeline risk.',
+      'en',
+    ])
+    ;(complete as any).mockResolvedValue(RICH_JSON)
+    await ingestFromDbTranscripts()
+  }
+
+  it('queryLens annotates nodes with stratum + dateMs and covers all bands', async () => {
+    await seedRich()
+    const lens = queryLens('c-mario', { hops: 2, windowDays: null })
+    expect(lens.center).toBeTruthy()
+    // Every node carries a stratum + a dateMs field.
+    expect(lens.nodes.every((n) => typeof n.stratum === 'string')).toBe(true)
+    const strata = new Set(lens.nodes.map((n) => n.stratum))
+    expect(strata.has('people')).toBe(true)
+    expect(strata.has('evidence')).toBe(true)
+    expect(strata.has('operational')).toBe(true)
+    expect(strata.has('strategic')).toBe(true)
+    // The meeting node carries the recording date.
+    const meeting = lens.nodes.find((n) => n.type === 'meeting')!
+    expect(meeting.dateMs).not.toBeNull()
+    // referenceMs reflects the newest activity.
+    expect(lens.referenceMs).not.toBeNull()
+    // Person node keeps its contact click-through id.
+    const mario = lens.nodes.find((n) => n.type === 'person')!
+    expect(mario.contactId).toBe('c-mario')
+  })
+
+  it('queryLens (whole-graph, center null) returns a stratified capped lens', async () => {
+    await seedRich()
+    const lens = queryLens(null, { cap: 50, windowDays: null })
+    expect(lens.center).toBeNull()
+    expect(lens.nodes.length).toBeGreaterThan(2)
+    expect(lens.nodes.every((n) => typeof n.stratum === 'string')).toBe(true)
+  })
+
+  it('pickLensCenter returns the highest-degree person by default', async () => {
+    await seedRich()
+    const center = pickLensCenter()
+    expect(center).toBeTruthy()
+    expect(center!.type).toBe('person')
+    expect(center!.label).toBe('Mario')
+  })
+
+  it('queryProvenance derives the decision evidence path + narrative', async () => {
+    await seedRich()
+    const store = getKnowledgeGraphStore()
+    const decision = store.findNodes({ type: 'decision' })[0]
+    const prov = queryProvenance(decision.id)
+    expect(prov.node?.type).toBe('decision')
+    expect(prov.meetings.length).toBeGreaterThan(0)
+    expect(prov.narrative).toContain('Decided')
+    expect(prov.pathIds).toContain(decision.id)
+    // The evidence meeting carries a click-through date.
+    expect(prov.dateMs).not.toBeNull()
+  })
+
+  it('queryProvenance returns empty for an unknown entity', async () => {
+    await seedRich()
+    const prov = queryProvenance('decision:not-a-real-node')
+    expect(prov.node).toBeNull()
+    expect(prov.pathIds).toHaveLength(0)
   })
 })

@@ -281,6 +281,377 @@ export function personProfile(store: KnowledgeGraphStore, personName: string): P
   }
 }
 
+// ===========================================================================
+// Context lens — stratified, time-aware neighborhood + provenance
+//
+// The whole-graph force layout cannot show REASONING: it renders typed nodes as
+// undifferentiated physics. A lens fixes that by (a) scoping to a perspective
+// (one entity's neighborhood, or the recent whole graph) and (b) annotating every
+// node with the two axes that carry meaning — a STRATUM (abstraction level) and a
+// DATE (recency). The renderer lays nodes out in horizontal strata bands ordered
+// by time; the structure itself then reads as reasoning, not soup.
+// ===========================================================================
+
+/**
+ * Abstraction strata, top-down. The renderer stacks these as horizontal bands:
+ * strategy at the top, the evidence it rests on at the bottom.
+ */
+export type Stratum = 'strategic' | 'operational' | 'people' | 'evidence'
+
+/** Bands in top-to-bottom render order. */
+export const STRATA: readonly Stratum[] = ['strategic', 'operational', 'people', 'evidence'] as const
+
+/**
+ * Which stratum each node type belongs to. Every {@link NodeType} is covered:
+ * decisions/risks are the reasoning layer; projects/actions/next steps/topics are
+ * the work; people are the actors; meetings are the evidence everything derives
+ * from. Skills sit with people (competencies), topics with the work.
+ */
+export const STRATUM_OF: Record<string, Stratum> = {
+  decision: 'strategic',
+  risk: 'strategic',
+  project: 'operational',
+  action_item: 'operational',
+  next_step: 'operational',
+  topic: 'operational',
+  person: 'people',
+  skill: 'people',
+  meeting: 'evidence',
+}
+
+/** The stratum for a node type — unknown types fall to the work band. */
+export function stratumOf(type: string): Stratum {
+  return STRATUM_OF[type] ?? 'operational'
+}
+
+/** A day in milliseconds — the unit for lens time windows. */
+export const DAY_MS = 86_400_000
+
+/**
+ * Parse a node's own date signal to epoch ms, or null. Meetings carry
+ * `props.date` (the recording date); every node carries `created_at`. Returns
+ * null when neither parses — callers then derive a date from linked evidence.
+ */
+export function ownDateMs(node: GraphNode): number | null {
+  const props = node.props ? safeParse(node.props) : {}
+  const raw = (typeof props.date === 'string' && props.date) || node.created_at || ''
+  if (!raw) return null
+  const t = Date.parse(raw)
+  return Number.isNaN(t) ? null : t
+}
+
+function safeParse(json: string): Record<string, unknown> {
+  try {
+    return JSON.parse(json) as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+/** A lens node: a graph node annotated with its stratum and effective date. */
+export interface LensNode extends GraphNodeWithDegree {
+  stratum: Stratum
+  /**
+   * Effective recency (epoch ms) or null. A meeting uses its own date; any other
+   * node inherits the newest date among the meetings it touches in this lens,
+   * falling back to its own `created_at`. This is what the renderer orders x by.
+   */
+  dateMs: number | null
+}
+
+export interface LensGraph {
+  /** The seed entity the lens is centered on (undefined for a whole-graph lens). */
+  center: GraphNode | undefined
+  nodes: LensNode[]
+  edges: GraphEdgeLite[]
+  /**
+   * The most recent activity across the lens (epoch ms) — the reference "now"
+   * that time-window chips (7d/30d/90d) are measured back from. Anchoring to the
+   * newest activity (not the wall clock) keeps a "last 30 days" lens meaningful
+   * for historical data instead of silently empty.
+   */
+  referenceMs: number | null
+}
+
+export interface LensOptions {
+  /** Hops to expand a centered lens (default 2 — reaches evidence→work→strategy). */
+  hops?: number
+  /** Node cap for a whole-graph lens (centerId null). Ignored when centered. */
+  cap?: number
+  /**
+   * Keep only nodes whose effective date is within this many days of the lens's
+   * newest activity (undated nodes and the center are always kept). null/undefined
+   * = no time filter (the "All" chip).
+   */
+  windowDays?: number | null
+}
+
+/** Assign each subgraph node a stratum + an effective date derived from evidence. */
+function annotateLens(sub: SubGraph): LensNode[] {
+  // Map every meeting node to its date up front.
+  const meetingDate = new Map<string, number | null>()
+  for (const n of sub.nodes) {
+    if (n.type === 'meeting') meetingDate.set(n.id, ownDateMs(n))
+  }
+
+  // Undirected adjacency within the subgraph.
+  const adj = new Map<string, Set<string>>()
+  for (const e of sub.edges) {
+    if (!adj.has(e.source_id)) adj.set(e.source_id, new Set())
+    if (!adj.has(e.target_id)) adj.set(e.target_id, new Set())
+    adj.get(e.source_id)!.add(e.target_id)
+    adj.get(e.target_id)!.add(e.source_id)
+  }
+
+  return sub.nodes.map((n) => {
+    let dateMs: number | null
+    if (n.type === 'meeting') {
+      dateMs = meetingDate.get(n.id) ?? ownDateMs(n)
+    } else {
+      // Newest date among adjacent meetings (the evidence this node emerged from).
+      let best: number | null = null
+      for (const nbr of adj.get(n.id) ?? []) {
+        const md = meetingDate.get(nbr)
+        if (md != null && (best == null || md > best)) best = md
+      }
+      dateMs = best ?? ownDateMs(n)
+    }
+    return { ...n, stratum: stratumOf(n.type), dateMs }
+  })
+}
+
+/**
+ * Build a stratified, time-aware lens. When `centerId` is given, the lens is that
+ * node's neighborhood; when null, it's the top-degree slice of the whole graph.
+ * Nodes are annotated with stratum + effective date, and optionally filtered to a
+ * recent time window (measured back from the newest activity in the lens).
+ */
+export function lensGraph(
+  store: KnowledgeGraphStore,
+  centerId: string | null,
+  opts: LensOptions = {}
+): LensGraph {
+  const hops = opts.hops ?? 2
+  const sub = centerId
+    ? neighborhood(store, centerId, hops)
+    : fullGraph(store, opts.cap ?? 200)
+
+  let nodes = annotateLens(sub)
+
+  // Reference "now" = newest activity in the lens.
+  let referenceMs: number | null = null
+  for (const n of nodes) {
+    if (n.dateMs != null && (referenceMs == null || n.dateMs > referenceMs)) referenceMs = n.dateMs
+  }
+
+  // Time-window filter: drop dated nodes older than the window; always keep the
+  // center and undated nodes.
+  const windowDays = opts.windowDays
+  if (windowDays != null && windowDays > 0 && referenceMs != null) {
+    const cutoff = referenceMs - windowDays * DAY_MS
+    const centerNodeId = sub.center?.id ?? null
+    nodes = nodes.filter(
+      (n) => n.id === centerNodeId || n.dateMs == null || n.dateMs >= cutoff
+    )
+  }
+
+  const kept = new Set(nodes.map((n) => n.id))
+  const edges = sub.edges.filter((e) => kept.has(e.source_id) && kept.has(e.target_id))
+
+  return { center: sub.center, nodes, edges, referenceMs }
+}
+
+/**
+ * Choose the default lens center: the graph node for the app owner when known
+ * (a person keyed by `contact:<ownerContactId>`), otherwise the highest-degree
+ * person — the natural ego of the user's own context. Returns undefined when the
+ * graph has no people yet.
+ */
+export function pickDefaultCenter(
+  store: KnowledgeGraphStore,
+  ownerContactId?: string | null
+): GraphNode | undefined {
+  if (ownerContactId) {
+    const key = `contact:${ownerContactId}`.toLowerCase().trim()
+    const owner = store.db.queryOne<GraphNode>(
+      "SELECT * FROM graph_nodes WHERE type = 'person' AND norm_key = ?",
+      [key]
+    )
+    if (owner) return owner
+  }
+  const degrees = degreeMap(store)
+  const persons = store.db.queryAll<GraphNode>("SELECT * FROM graph_nodes WHERE type = 'person'")
+  let best: GraphNode | undefined
+  let bestDeg = -1
+  for (const p of persons) {
+    const d = degrees.get(p.id) ?? 0
+    // Deterministic tie-break: higher degree, then lexicographically smaller id.
+    if (d > bestDeg || (d === bestDeg && best && p.id < best.id)) {
+      bestDeg = d
+      best = p
+    }
+  }
+  return best
+}
+
+// ---------------------------------------------------------------------------
+// Provenance — the "why" behind a decision / risk / action
+// ---------------------------------------------------------------------------
+
+export interface ProvenanceEntity {
+  id: string
+  type: string
+  label: string
+  dateMs: number | null
+}
+
+export interface Provenance {
+  /** The node whose provenance this is (null when the id is unknown). */
+  node: ProvenanceEntity | null
+  /** The meeting(s) this node emerged from — the evidence. */
+  meetings: ProvenanceEntity[]
+  /** People present / responsible. */
+  people: ProvenanceEntity[]
+  /** Project(s) it belongs to. */
+  projects: ProvenanceEntity[]
+  /** Downstream actions it led to (for decisions/risks). */
+  actions: ProvenanceEntity[]
+  /** Every node on the evidence path (incl. the node itself) — the highlight set. */
+  pathIds: string[]
+  /** One-line human narrative, e.g. `Decided in "Kickoff" · 2026-06-01 · with Alice`. */
+  narrative: string
+  /** The primary date of the evidence path. */
+  dateMs: number | null
+}
+
+/** Format an epoch-ms date as YYYY-MM-DD (UTC), or '' when null. Deterministic. */
+export function formatDateMs(ms: number | null): string {
+  if (ms == null) return ''
+  const d = new Date(ms)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toISOString().slice(0, 10)
+}
+
+function joinNames(entities: ProvenanceEntity[], max = 3): string {
+  const names = entities.slice(0, max).map((e) => e.label)
+  const extra = entities.length - names.length
+  const base = names.join(', ')
+  return extra > 0 ? `${base} +${extra}` : base
+}
+
+/**
+ * Derive the evidence path for a node: the meeting(s) it emerged from, the people
+ * present, the project it belongs to, and the actions it led to — plus a one-line
+ * narrative. Powers the provenance trail (highlight + side panel) in the UI.
+ */
+export function provenance(store: KnowledgeGraphStore, nodeId: string): Provenance {
+  const empty: Provenance = {
+    node: null,
+    meetings: [],
+    people: [],
+    projects: [],
+    actions: [],
+    pathIds: [],
+    narrative: '',
+    dateMs: null,
+  }
+  const centerNode = store.db.queryOne<GraphNode>('SELECT * FROM graph_nodes WHERE id = ?', [nodeId])
+  if (!centerNode) return empty
+
+  const sub = neighborhood(store, nodeId, 2)
+  const dateFor = new Map<string, number | null>()
+  for (const n of sub.nodes) {
+    if (n.type === 'meeting') dateFor.set(n.id, ownDateMs(n))
+  }
+
+  const asEntity = (n: GraphNode): ProvenanceEntity => ({
+    id: n.id,
+    type: n.type,
+    label: n.label,
+    dateMs: n.type === 'meeting' ? (dateFor.get(n.id) ?? ownDateMs(n)) : ownDateMs(n),
+  })
+
+  const meetings: ProvenanceEntity[] = []
+  const people: ProvenanceEntity[] = []
+  const projects: ProvenanceEntity[] = []
+  const actions: ProvenanceEntity[] = []
+  for (const n of sub.nodes) {
+    if (n.id === centerNode.id) continue
+    if (n.type === 'meeting') meetings.push(asEntity(n))
+    else if (n.type === 'person') people.push(asEntity(n))
+    else if (n.type === 'project') projects.push(asEntity(n))
+    else if (n.type === 'action_item' || n.type === 'next_step') actions.push(asEntity(n))
+  }
+
+  // Newest meeting is the primary evidence.
+  meetings.sort((a, b) => (b.dateMs ?? 0) - (a.dateMs ?? 0))
+  const primaryMeeting = meetings[0]
+  const dateMs = primaryMeeting?.dateMs ?? ownDateMs(centerNode)
+  const dateStr = formatDateMs(dateMs)
+
+  const mtg = primaryMeeting ? `"${primaryMeeting.label}"` : ''
+  const names = joinNames(people)
+  let narrative: string
+  switch (centerNode.type) {
+    case 'decision': {
+      const parts = [`Decided${mtg ? ` in ${mtg}` : ''}`]
+      if (dateStr) parts.push(dateStr)
+      if (names) parts.push(`with ${names}`)
+      narrative = parts.join(' · ')
+      if (actions.length > 0) narrative += ` → led to ${actions.length} action${actions.length === 1 ? '' : 's'}`
+      break
+    }
+    case 'risk': {
+      const parts = [`Raised${names ? ` by ${names}` : ''}`]
+      if (mtg) parts.push(`in ${mtg}`)
+      if (dateStr) parts.push(dateStr)
+      narrative = parts.join(' · ')
+      break
+    }
+    case 'action_item':
+    case 'next_step': {
+      const parts = [mtg ? `From ${mtg}` : 'Action']
+      if (dateStr) parts.push(dateStr)
+      if (names) parts.push(`owned by ${names}`)
+      narrative = parts.join(' · ')
+      break
+    }
+    case 'meeting': {
+      const parts = ['Meeting']
+      if (dateStr) parts.push(dateStr)
+      if (people.length) parts.push(`${people.length} ${people.length === 1 ? 'person' : 'people'}`)
+      if (projects.length) parts.push(joinNames(projects))
+      narrative = parts.join(' · ')
+      break
+    }
+    default: {
+      const parts = [centerNode.label]
+      if (dateStr) parts.push(dateStr)
+      if (meetings.length) parts.push(`${meetings.length} meeting${meetings.length === 1 ? '' : 's'}`)
+      narrative = parts.join(' · ')
+    }
+  }
+
+  const pathIds = [
+    centerNode.id,
+    ...meetings.map((m) => m.id),
+    ...people.map((p) => p.id),
+    ...projects.map((p) => p.id),
+    ...actions.map((a) => a.id),
+  ]
+
+  return {
+    node: asEntity(centerNode),
+    meetings,
+    people,
+    projects,
+    actions,
+    pathIds: [...new Set(pathIds)],
+    narrative,
+    dateMs,
+  }
+}
+
 /**
  * All nodes and edges related to a specific meeting.
  * meetingId can be either the graph node id (type:slug) or the props.meetingId value.

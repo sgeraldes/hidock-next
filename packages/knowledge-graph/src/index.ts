@@ -28,6 +28,15 @@ export {
   neighborhood,
   pruneGenericNodes,
   DEFAULT_OVERVIEW_NODE_LIMIT,
+  lensGraph,
+  pickDefaultCenter,
+  provenance,
+  stratumOf,
+  ownDateMs,
+  formatDateMs,
+  STRATA,
+  STRATUM_OF,
+  DAY_MS,
 } from './queries.js'
 export type {
   AttendeeResult,
@@ -38,4 +47,10 @@ export type {
   GraphNodeWithDegree,
   SubGraph,
   PruneResult,
+  Stratum,
+  LensNode,
+  LensGraph,
+  LensOptions,
+  Provenance,
+  ProvenanceEntity,
 } from './queries.js'

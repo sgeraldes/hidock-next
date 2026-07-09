@@ -21,6 +21,9 @@ import {
   fullGraph,
   neighborhood,
   pruneGenericNodes,
+  lensGraph,
+  pickDefaultCenter,
+  provenance,
   DEFAULT_OVERVIEW_NODE_LIMIT,
 } from '@hidock/knowledge-graph'
 import type {
@@ -33,6 +36,8 @@ import type {
   MeetingGraph,
   GraphNode,
   SubGraph,
+  LensGraph,
+  Provenance,
 } from '@hidock/knowledge-graph'
 import { complete } from '@hidock/ai-providers'
 import type { ProviderConfig } from '@hidock/ai-providers'
@@ -483,24 +488,27 @@ function projectNameIndex(): Map<string, string> {
   return m
 }
 
+/** Enrich a raw graph node into a context DTO node with click-through ids. */
+function nodeToDTO(n: GraphNode & { degree?: number }, projects: Map<string, string>): ContextGraphNode {
+  const props = parseProps(n.props)
+  const dto: ContextGraphNode = {
+    id: n.id,
+    type: n.type,
+    label: n.label,
+    degree: n.degree ?? 0,
+  }
+  if (n.type === 'person' && typeof props.contactId === 'string') dto.contactId = props.contactId
+  if (n.type === 'meeting' && typeof props.meetingId === 'string') dto.meetingId = props.meetingId
+  if (n.type === 'project') {
+    const pid = projects.get((n.label || '').toLowerCase().trim())
+    if (pid) dto.projectId = pid
+  }
+  return dto
+}
+
 function toDTO(sub: SubGraph): ContextGraphData {
   const projects = projectNameIndex()
-  const nodes: ContextGraphNode[] = sub.nodes.map((n) => {
-    const props = parseProps(n.props)
-    const dto: ContextGraphNode = {
-      id: n.id,
-      type: n.type,
-      label: n.label,
-      degree: (n as { degree?: number }).degree ?? 0,
-    }
-    if (n.type === 'person' && typeof props.contactId === 'string') dto.contactId = props.contactId
-    if (n.type === 'meeting' && typeof props.meetingId === 'string') dto.meetingId = props.meetingId
-    if (n.type === 'project') {
-      const pid = projects.get((n.label || '').toLowerCase().trim())
-      if (pid) dto.projectId = pid
-    }
-    return dto
-  })
+  const nodes: ContextGraphNode[] = sub.nodes.map((n) => nodeToDTO(n, projects))
   const edges = sub.edges.map((e) => ({
     id: e.id,
     source: e.source_id,
@@ -643,4 +651,146 @@ export function neighborhoodFacts(entityId: string, hops = 1, maxFacts = 20): st
   }
   if (lines.length === 0) return ''
   return `Context graph — ${center.label} (${center.type}):\n${lines.join('\n')}`
+}
+
+// ---------------------------------------------------------------------------
+// Context Lens — stratified, time-aware perspective + provenance
+// ---------------------------------------------------------------------------
+
+export interface ContextLensNode extends ContextGraphNode {
+  /** Abstraction band: strategic | operational | people | evidence. */
+  stratum: string
+  /** Effective recency (epoch ms) for time ordering + age decay, or null. */
+  dateMs: number | null
+}
+
+export interface ContextLensData {
+  center: string | null
+  nodes: ContextLensNode[]
+  edges: Array<{ id: string; source: string; target: string; type: string; weight: number }>
+  /** Newest activity in the lens — the reference the time chips measure back from. */
+  referenceMs: number | null
+}
+
+/** A one-line entity descriptor for the lens center / provenance nodes. */
+export interface LensCenter {
+  id: string
+  type: string
+  label: string
+  contactId?: string
+  meetingId?: string
+  projectId?: string
+}
+
+export interface ProvenanceDTO {
+  node: (LensCenter & { dateMs: number | null }) | null
+  meetings: Array<LensCenter & { dateMs: number | null }>
+  people: Array<LensCenter & { dateMs: number | null }>
+  projects: Array<LensCenter & { dateMs: number | null }>
+  actions: Array<LensCenter & { dateMs: number | null }>
+  pathIds: string[]
+  narrative: string
+  dateMs: number | null
+}
+
+function toLensDTO(lens: LensGraph): ContextLensData {
+  const projects = projectNameIndex()
+  const nodes: ContextLensNode[] = lens.nodes.map((n) => ({
+    ...nodeToDTO(n, projects),
+    stratum: n.stratum,
+    dateMs: n.dateMs,
+  }))
+  const edges = lens.edges.map((e) => ({
+    id: e.id,
+    source: e.source_id,
+    target: e.target_id,
+    type: e.type,
+    weight: e.weight,
+  }))
+  return { center: lens.center?.id ?? null, nodes, edges, referenceMs: lens.referenceMs }
+}
+
+/**
+ * A stratified, time-aware lens. `centerEntityId` accepts any id form (graph
+ * node id, contact id, meeting id, project id, or bare name); null builds a
+ * whole-graph lens capped to the highest-degree hubs. `windowDays` filters to
+ * recent activity (null = All).
+ */
+export function queryLens(
+  centerEntityId: string | null,
+  opts: { hops?: number; cap?: number; windowDays?: number | null } = {}
+): ContextLensData {
+  const store = getKnowledgeGraphStore()
+  let centerNodeId: string | null = null
+  if (centerEntityId) {
+    centerNodeId = resolveEntityToNodeId(centerEntityId)
+    if (!centerNodeId) return { center: null, nodes: [], edges: [], referenceMs: null }
+  }
+  return toLensDTO(lensGraph(store, centerNodeId, opts))
+}
+
+/**
+ * The default lens center — the app owner's person node when known, else the
+ * highest-degree person (the natural ego of the user's own context). Returns
+ * null when the graph has no people yet.
+ */
+export function pickLensCenter(ownerContactId?: string | null): LensCenter | null {
+  const store = getKnowledgeGraphStore()
+  const node = pickDefaultCenter(store, ownerContactId ?? undefined)
+  if (!node) return null
+  const projects = projectNameIndex()
+  const dto = nodeToDTO({ ...node, degree: 0 }, projects)
+  return { id: dto.id, type: dto.type, label: dto.label, contactId: dto.contactId }
+}
+
+/**
+ * Provenance for an entity: the meeting(s) it emerged from, people present, the
+ * project it belongs to, downstream actions, and a one-line narrative. Accepts
+ * any id form. Returns an empty provenance when the entity is unknown.
+ */
+export function queryProvenance(entityId: string): ProvenanceDTO {
+  const store = getKnowledgeGraphStore()
+  const nodeId = resolveEntityToNodeId(entityId)
+  const empty: ProvenanceDTO = {
+    node: null,
+    meetings: [],
+    people: [],
+    projects: [],
+    actions: [],
+    pathIds: [],
+    narrative: '',
+    dateMs: null,
+  }
+  if (!nodeId) return empty
+  const prov: Provenance = provenance(store, nodeId)
+  const projects = projectNameIndex()
+  const mapEntity = (e: {
+    id: string
+    type: string
+    label: string
+    dateMs: number | null
+  }): LensCenter & { dateMs: number | null } => {
+    // Reuse click-through enrichment by looking up the full node for ids.
+    const full = store.getNode(e.id)
+    const base = full ? nodeToDTO({ ...full, degree: 0 }, projects) : { id: e.id, type: e.type, label: e.label, degree: 0 }
+    return {
+      id: base.id,
+      type: base.type,
+      label: base.label,
+      contactId: base.contactId,
+      meetingId: base.meetingId,
+      projectId: base.projectId,
+      dateMs: e.dateMs,
+    }
+  }
+  return {
+    node: prov.node ? mapEntity(prov.node) : null,
+    meetings: prov.meetings.map(mapEntity),
+    people: prov.people.map(mapEntity),
+    projects: prov.projects.map(mapEntity),
+    actions: prov.actions.map(mapEntity),
+    pathIds: prov.pathIds,
+    narrative: prov.narrative,
+    dateMs: prov.dateMs,
+  }
 }
