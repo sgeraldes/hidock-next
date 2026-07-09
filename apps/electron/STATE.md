@@ -19,11 +19,12 @@ All three audit-fix slices LANDED (2026-07-08 evening, all pushed):
 - b95ecbe2 Actionables decidability (inline ActionableDetail, per-template
   "Generate X" labels, WILL GENERATE panel) — verified live.
 
-| Agent | Scope | Files |
-|---|---|---|
-| fix-actionable-source | Found in re-walk: actionables store `knowledgeCapture?.id \|\| recordingId` in source_knowledge_id (transcription.ts:1499); ActionableDetail only resolves the capture path → SOURCE renders dead "Source recording" text. Fix: dual resolution (capture → recording fallback, like output-generator.ts:133) + honest "Source unavailable" + tests | ActionableDetail.tsx, maybe recordings IPC |
+- f0ca8653 actionable source dual-resolution (capture → recording fallback,
+  honest "Source unavailable") — found in the re-walk, fixed by agent, gates
+  re-run independently (typecheck 0, 2,183 tests green), verified live
+  (SOURCE renders the recording filename + date as a Library link).
 
-On its report: gate (typecheck + full test:run), commit, push.
+NOTHING in flight. Tree clean, all pushed through df5b1ab8.
 
 ## 2. DEVICE STATE
 
