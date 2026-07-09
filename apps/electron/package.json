@@ -24,10 +24,13 @@
     "test:performance": "vitest run src/__tests__/performance"
   },
   "dependencies": {
+    "@azure/msal-node": "^5.4.0",
     "@electron-toolkit/preload": "^3.0.1",
     "@google/generative-ai": "^0.21.0",
     "@hidock/ai-providers": "file:../../packages/ai-providers",
     "@hidock/calendar-sync": "file:../../packages/calendar-sync",
+    "@hidock/connectors": "file:../../packages/connectors",
+    "@hidock/connectors-slack": "file:../../packages/connectors-slack",
     "@hidock/database": "file:../../packages/database",
     "@hidock/jensen-protocol": "file:../../packages/jensen-protocol",
     "@hidock/knowledge-graph": "file:../../packages/knowledge-graph",

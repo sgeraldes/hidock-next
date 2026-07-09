@@ -330,6 +330,11 @@ export interface ConnectorDescriptor {
 /** Flat map of a connector's config values. */
 export type ConnectorConfig = Record<string, string | number | boolean>
 
+export interface ConnectorConnectOptions {
+  /** True for a user-initiated connect that may drive an interactive flow. */
+  interactive?: boolean
+}
+
 export interface Connector {
   id: string
   kind: ConnectorTransport
@@ -342,9 +347,14 @@ export interface Connector {
   /**
    * Lifecycle (all optional — a config-only connector like Slack may omit them;
    * the host then derives connectivity from required config/secrets presence).
+   *
+   * `connect(opts)`: pass `{ interactive: true }` for a user-initiated sign-in
+   * (may drive an interactive flow such as device-code). Omit / `false` for a
+   * silent startup resume — a connector MUST NOT launch an interactive prompt
+   * in the non-interactive case (report 'auth-needed' instead).
    */
   configure?(config: ConnectorConfig): Promise<void> | void
-  connect?(): Promise<ConnectorStatus> | ConnectorStatus
+  connect?(opts?: ConnectorConnectOptions): Promise<ConnectorStatus> | ConnectorStatus
   disconnect?(): Promise<void> | void
 }
 

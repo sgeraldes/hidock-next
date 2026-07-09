@@ -7,6 +7,7 @@ import { useAppStore, useCalendarSyncing } from '@/store/useAppStore'
 import { useConfigStore } from '@/store/domain/useConfigStore'
 import { formatBytes } from '@/lib/utils'
 import { HealthCheck } from '@/components/HealthCheck'
+import { ConnectorsSettings } from '@/components/settings/ConnectorsSettings'
 import { toast } from '@/components/ui/toaster'
 import type { StorageInfo, AppConfig } from '@/types'
 
@@ -611,6 +612,9 @@ export function Settings() {
               </div>
             </CardContent>
           </Card>
+
+          {/* Connectors (Layer 2): external-system integrations */}
+          <ConnectorsSettings />
 
           {/* Transcription Settings */}
           <Card>

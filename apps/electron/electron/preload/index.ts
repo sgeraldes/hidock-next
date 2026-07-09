@@ -1,4 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type {
+  ConnectorSummary,
+  ConnectorStatus,
+  ExternalPerson,
+  IngestionOutcome,
+  SourceContainer,
+} from '@hidock/connectors'
 
 /**
  * B-SET-004 / QAM-002: QA logging check via localStorage bridge.
@@ -567,6 +574,20 @@ export interface ElectronAPI {
   // Artifacts - entity-type foundation (C0): import files as captures
   artifacts: ArtifactsAPI
 
+  // Connectors (Layer 2) — Settings → Connectors UI bridge
+  connectors: {
+    list: () => Promise<ConnectorSummary[]>
+    get: (id: string) => Promise<ConnectorSummary>
+    configure: (id: string, values: Record<string, string | number | boolean>) => Promise<ConnectorSummary>
+    connect: (id: string) => Promise<ConnectorSummary>
+    disconnect: (id: string) => Promise<ConnectorSummary>
+    listContainers: (id: string) => Promise<SourceContainer[]>
+    setSourceEnabled: (id: string, containerId: string, enabled: boolean) => Promise<ConnectorSummary>
+    sync: (id: string, containerId?: string) => Promise<IngestionOutcome>
+    searchPeople: (query: string) => Promise<ExternalPerson[]>
+    onStatusChanged: (callback: (payload: { id: string; status: ConnectorStatus }) => void) => () => void
+  }
+
   // Migration - Database schema migration to V11 (Knowledge Captures)
   migration: MigrationAPI
 
@@ -718,6 +739,52 @@ export interface ElectronAPI {
         confidence: number | null
         created_at: string
       }>
+      error?: string
+    }>
+    getAmbiguousBuckets: () => Promise<{
+      success: boolean
+      data?: Array<{
+        contactId: string
+        name: string
+        candidates: Array<{ id: string; name: string }>
+        recordingCount: number
+        resolvedCount: number
+        pendingCount: number
+      }>
+      error?: string
+    }>
+    getBucketResolution: (
+      contactId: string
+    ) => Promise<{
+      success: boolean
+      data?: {
+        contactId: string
+        name: string
+        candidates: Array<{ id: string; name: string }>
+        recordings: Array<{
+          recordingId: string
+          title: string
+          date: string | null
+          meetingId: string | null
+          bestGuessId: string | null
+          bestGuessName: string | null
+          method: 'speaker-map' | 'attendee-context' | 'unclear'
+          signal: string
+          resolvedContactId: string | null
+          resolved: boolean
+        }>
+      } | null
+      error?: string
+    }>
+    resolveMention: (request: {
+      recordingId: string
+      sourceName: string
+      contactId: string | null
+      method?: string
+    }) => Promise<{ success: boolean; data?: { ok: true }; error?: string }>
+    autoSplitBuckets: () => Promise<{
+      success: boolean
+      data?: { buckets: number; resolved: number }
       error?: string
     }>
   }
@@ -929,6 +996,23 @@ const electronAPI: ElectronAPI = {
     pickAndImport: () => callIPC('artifacts:pickAndImport'),
     getForCapture: (knowledgeCaptureId) => callIPC('artifacts:getForCapture', knowledgeCaptureId),
     openInFolder: (id) => callIPC('artifacts:openInFolder', id)
+  },
+
+  connectors: {
+    list: () => callIPC('connectors:list'),
+    get: (id) => callIPC('connectors:get', id),
+    configure: (id, values) => callIPC('connectors:configure', id, values),
+    connect: (id) => callIPC('connectors:connect', id),
+    disconnect: (id) => callIPC('connectors:disconnect', id),
+    listContainers: (id) => callIPC('connectors:listContainers', id),
+    setSourceEnabled: (id, containerId, enabled) => callIPC('connectors:setSourceEnabled', id, containerId, enabled),
+    sync: (id, containerId) => callIPC('connectors:sync', id, containerId),
+    searchPeople: (query) => callIPC('connectors:searchPeople', query),
+    onStatusChanged: (callback) => {
+      const handler = (_e: unknown, payload: { id: string; status: ConnectorStatus }) => callback(payload)
+      ipcRenderer.on('connectors:status-changed', handler)
+      return () => ipcRenderer.removeListener('connectors:status-changed', handler)
+    }
   },
 
   migration: {
@@ -1176,7 +1260,12 @@ const electronAPI: ElectronAPI = {
     getMentionSnippets: (name: string, limit?: number) =>
       callIPC('identity:getMentionSnippets', { name, limit }),
     getPersonContext: (idOrName: string) => callIPC('identity:getPersonContext', idOrName),
-    getAliases: (contactId: string) => callIPC('identity:getAliases', contactId)
+    getAliases: (contactId: string) => callIPC('identity:getAliases', contactId),
+    getAmbiguousBuckets: () => callIPC('identity:getAmbiguousBuckets'),
+    getBucketResolution: (contactId: string) => callIPC('identity:getBucketResolution', contactId),
+    resolveMention: (request: { recordingId: string; sourceName: string; contactId: string | null; method?: string }) =>
+      callIPC('identity:resolveMention', request),
+    autoSplitBuckets: () => callIPC('identity:autoSplitBuckets')
   },
 
   // Domain Event Listener

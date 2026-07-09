@@ -198,6 +198,13 @@ async function initializeServices(): Promise<void> {
   // CS-010: Initialize calendar auto-sync after IPC handlers and DB are ready
   initializeCalendarAutoSync()
 
+  // Connectors (Layer 2): build the host + attempt silent (non-interactive)
+  // resume for connectors that already have credentials. Never launches an
+  // interactive sign-in on startup; failures are best-effort.
+  import('./services/connectors')
+    .then(({ initConnectors }) => initConnectors())
+    .catch((e) => console.error('[Connectors] startup wiring failed:', e))
+
   updateSplashStatus('Starting application...', 100)
 }
 

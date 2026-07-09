@@ -221,12 +221,12 @@ export class ConnectorHost {
     return true
   }
 
-  async connect(id: string): Promise<ConnectorStatus> {
+  async connect(id: string, opts?: { interactive?: boolean }): Promise<ConnectorStatus> {
     const inst = this.instance(id)
     this.patchStatus(id, { state: 'connecting', message: 'Connecting…' })
     try {
       if (inst.connect) {
-        const status = await inst.connect()
+        const status = await inst.connect(opts)
         this.patchStatus(id, status)
       } else {
         // Config-only connector: connectivity derives from required config.
