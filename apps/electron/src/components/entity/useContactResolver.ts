@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 /**
  * Client-side name/email → canonical contact resolver.
  *
- * Several surfaces (KnowledgeGraph rows, Actionables recipients) carry raw name
+ * Several surfaces (Context Graph rows, Actionables recipients) carry raw name
  * or email strings rather than contact ids. This hook loads all contacts ONCE
  * into a module-level cache and resolves those strings to real contact ids so
  * they can be rendered as navigable <EntityMention> people. Resolution is

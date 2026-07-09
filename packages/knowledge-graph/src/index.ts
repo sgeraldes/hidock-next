@@ -15,11 +15,22 @@ export type {
 } from './extract.js'
 
 export { ingestExtraction } from './ingest.js'
+export type { PersonResolver, IngestOptions } from './ingest.js'
 
 export {
   topAttendeesForProjectOrTopic,
   topSkillDemonstrators,
   personProfile,
   meetingSummaryGraph,
+  fullGraph,
+  neighborhood,
 } from './queries.js'
-export type { AttendeeResult, SkillDemonstratorResult, PersonProfile, MeetingGraph } from './queries.js'
+export type {
+  AttendeeResult,
+  SkillDemonstratorResult,
+  PersonProfile,
+  MeetingGraph,
+  GraphEdgeLite,
+  GraphNodeWithDegree,
+  SubGraph,
+} from './queries.js'

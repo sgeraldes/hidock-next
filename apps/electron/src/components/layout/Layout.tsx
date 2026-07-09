@@ -55,7 +55,7 @@ const navigationSections: NavigationSection[] = [
       { name: 'Library', href: '/library', icon: BookOpen },
       { name: 'Assistant', href: '/assistant', icon: Bot },
       { name: 'Explore', href: '/explore', icon: Compass },
-      { name: 'Knowledge Graph', href: '/knowledge-graph', icon: Network }
+      { name: 'Context Graph', href: '/context-graph', icon: Network }
     ]
   },
   {

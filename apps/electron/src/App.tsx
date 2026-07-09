@@ -24,7 +24,7 @@ const PersonDetail = lazyWithRetry(() => import('@/pages/PersonDetail'))
 const Projects = lazyWithRetry(() => import('@/pages/Projects'))
 const Actionables = lazyWithRetry(() => import('@/pages/Actionables'))
 const Settings = lazyWithRetry(() => import('@/pages/Settings'))
-const KnowledgeGraph = lazyWithRetry(() => import('@/pages/KnowledgeGraph'))
+const ContextGraph = lazyWithRetry(() => import('@/pages/ContextGraph'))
 
 function App(): React.ReactElement {
   // Keep the applied theme reconciled with the persisted preference + OS.
@@ -204,15 +204,17 @@ function App(): React.ReactElement {
             }
           />
           <Route
-            path="/knowledge-graph"
+            path="/context-graph"
             element={
               <ErrorBoundary>
-                <Suspense fallback={<LoadingSpinner message="Loading knowledge graph..." />}>
-                  <KnowledgeGraph />
+                <Suspense fallback={<LoadingSpinner message="Loading context graph..." />}>
+                  <ContextGraph />
                 </Suspense>
               </ErrorBoundary>
             }
           />
+          {/* Legacy path — the surface was renamed Knowledge Graph → Context Graph. */}
+          <Route path="/knowledge-graph" element={<Navigate to="/context-graph" replace />} />
         </Routes>
       </Layout>
     </ToastProvider>

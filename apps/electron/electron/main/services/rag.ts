@@ -305,8 +305,24 @@ class RAGService {
       })
     }
 
-    // Combine pinned context and search results
-    const allContextParts = [...pinnedContextParts, ...contextParts]
+    // Ground with Context Graph facts when the question names a known
+    // person/project — the assistant walks graph edges, not just vector chunks.
+    // Loaded lazily so RAG's static import graph stays free of the ingest/LLM
+    // stack (keeps this path testable without mocking the whole graph service).
+    const graphContextParts: string[] = []
+    try {
+      const { findMentionedEntity, neighborhoodFacts } = await import('./knowledge-graph-service')
+      const entity = findMentionedEntity(message)
+      if (entity) {
+        const facts = neighborhoodFacts(entity.id, 1)
+        if (facts) graphContextParts.push(facts)
+      }
+    } catch (e) {
+      console.warn('[RAG] Context Graph grounding skipped:', e)
+    }
+
+    // Combine pinned context, graph facts, and search results
+    const allContextParts = [...pinnedContextParts, ...graphContextParts, ...contextParts]
 
     // Prepare messages
     const contextText =

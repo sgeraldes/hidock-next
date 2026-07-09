@@ -33,6 +33,13 @@ export interface GraphEdge {
 export interface UpsertNodeInput {
   type: NodeType
   label: string
+  /**
+   * Stable identity key for dedup, independent of the display label. When
+   * omitted the label is the key (the historical, name-keyed behaviour). Supply
+   * it to key a node by a canonical id — e.g. a person by contact id
+   * (`contact:<id>`) so every name variant folds into one node.
+   */
+  key?: string
   props?: Record<string, unknown>
   now?: string
 }
@@ -66,6 +73,20 @@ function makeEdgeId(sourceId: string, targetId: string, type: string): string {
   return `edge:${slug}`
 }
 
+/**
+ * Short deterministic hash of a string (FNV-1a, base36). Used to disambiguate
+ * a node id when two distinct norm_keys slugify to the same id — keeps ids
+ * stable and collision-free without a random component.
+ */
+function shortHash(input: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(36)
+}
+
 export class KnowledgeGraphStore {
   /** Exposed publicly so query functions can access it directly. */
   readonly db: GraphDb
@@ -94,9 +115,9 @@ export class KnowledgeGraphStore {
    * If not: insert with deterministic id derived from type+norm_key.
    * Returns the node id.
    */
-  upsertNode({ type, label, props, now = '' }: UpsertNodeInput): string {
-    const normKey = normalizeLabel(label)
-    const id = makeNodeId(type, normKey)
+  upsertNode({ type, label, key, props, now = '' }: UpsertNodeInput): string {
+    // Identity key drives dedup; the label is display-only. Defaults to label.
+    const normKey = normalizeLabel(key ?? label)
     const propsJson = props != null ? JSON.stringify(props) : null
 
     const existing = this.db.queryOne<{ id: string; props: string | null }>(
@@ -117,6 +138,20 @@ export class KnowledgeGraphStore {
         [label, merged != null ? JSON.stringify(merged) : null, now, existing.id]
       )
       return existing.id
+    }
+
+    // New node. The id is a slug of norm_key, but two distinct norm_keys can
+    // slugify to the same id (collapsed punctuation, 64-char truncation). That
+    // is the root cause of the "UNIQUE constraint failed: graph_nodes.id" ingest
+    // error: the (type,norm_key) lookup above misses, then the INSERT collides
+    // on the primary key. Detect a taken id and derive a stable, hashed variant.
+    let id = makeNodeId(type, normKey)
+    const clash = this.db.queryOne<{ norm_key: string }>(
+      'SELECT norm_key FROM graph_nodes WHERE id = ?',
+      [id]
+    )
+    if (clash && clash.norm_key !== normKey) {
+      id = `${id}__${shortHash(normKey)}`.slice(0, 96)
     }
 
     this.db.run(

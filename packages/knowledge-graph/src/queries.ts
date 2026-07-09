@@ -26,6 +26,116 @@ export interface MeetingGraph {
   edges: Array<{ id: string; source_id: string; target_id: string; type: string; weight: number }>
 }
 
+export interface GraphEdgeLite {
+  id: string
+  source_id: string
+  target_id: string
+  type: string
+  weight: number
+}
+
+/** A node with its total (undirected) degree — how many edges touch it. */
+export interface GraphNodeWithDegree extends GraphNode {
+  degree: number
+}
+
+export interface SubGraph {
+  /** The seed node the neighborhood was expanded from (undefined if not found). */
+  center: GraphNode | undefined
+  nodes: GraphNodeWithDegree[]
+  edges: GraphEdgeLite[]
+}
+
+/** Global edge-degree map: node id → number of incident edges (both directions). */
+function degreeMap(store: KnowledgeGraphStore): Map<string, number> {
+  const rows = store.db.queryAll<{ node_id: string; c: number }>(
+    `SELECT node_id, COUNT(*) AS c FROM (
+       SELECT source_id AS node_id FROM graph_edges
+       UNION ALL
+       SELECT target_id AS node_id FROM graph_edges
+     ) GROUP BY node_id`
+  )
+  const m = new Map<string, number>()
+  for (const r of rows) m.set(r.node_id, r.c)
+  return m
+}
+
+/**
+ * The full graph: every node (annotated with its global degree) and every edge.
+ * `limit` caps the node count, keeping the highest-degree nodes (the hubs) plus
+ * every edge that connects two kept nodes — enough for an overview render.
+ */
+export function fullGraph(store: KnowledgeGraphStore, limit?: number): SubGraph {
+  const degrees = degreeMap(store)
+  const allNodes = store.db
+    .queryAll<GraphNode>('SELECT * FROM graph_nodes')
+    .map((n) => ({ ...n, degree: degrees.get(n.id) ?? 0 }))
+
+  let nodes = allNodes
+  if (limit != null && allNodes.length > limit) {
+    nodes = [...allNodes].sort((a, b) => b.degree - a.degree).slice(0, limit)
+  }
+  const kept = new Set(nodes.map((n) => n.id))
+
+  const edges = store.db
+    .queryAll<GraphEdgeLite>('SELECT id, source_id, target_id, type, weight FROM graph_edges')
+    .filter((e) => kept.has(e.source_id) && kept.has(e.target_id))
+
+  return { center: undefined, nodes, edges }
+}
+
+/**
+ * BFS neighborhood around a node id, expanding up to `hops` (default 1, clamped
+ * 1–3). Returns the reachable nodes (with degree) and the edges among them.
+ * The graph is treated as undirected for traversal.
+ */
+export function neighborhood(
+  store: KnowledgeGraphStore,
+  nodeId: string,
+  hops = 1
+): SubGraph {
+  const center = store.db.queryOne<GraphNode>('SELECT * FROM graph_nodes WHERE id = ?', [nodeId])
+  if (!center) return { center: undefined, nodes: [], edges: [] }
+
+  const maxHops = Math.max(1, Math.min(hops, 3))
+  const reached = new Set<string>([nodeId])
+  let frontier = [nodeId]
+
+  for (let depth = 0; depth < maxHops && frontier.length > 0; depth++) {
+    const placeholders = frontier.map(() => '?').join(',')
+    const rows = store.db.queryAll<{ source_id: string; target_id: string }>(
+      `SELECT source_id, target_id FROM graph_edges
+       WHERE source_id IN (${placeholders}) OR target_id IN (${placeholders})`,
+      [...frontier, ...frontier]
+    )
+    const next: string[] = []
+    for (const r of rows) {
+      for (const nid of [r.source_id, r.target_id]) {
+        if (!reached.has(nid)) {
+          reached.add(nid)
+          next.push(nid)
+        }
+      }
+    }
+    frontier = next
+  }
+
+  const ids = [...reached]
+  const degrees = degreeMap(store)
+  const nodes: GraphNodeWithDegree[] = []
+  for (const id of ids) {
+    const node = store.db.queryOne<GraphNode>('SELECT * FROM graph_nodes WHERE id = ?', [id])
+    if (node) nodes.push({ ...node, degree: degrees.get(node.id) ?? 0 })
+  }
+
+  const kept = new Set(ids)
+  const edges = store.db
+    .queryAll<GraphEdgeLite>('SELECT id, source_id, target_id, type, weight FROM graph_edges')
+    .filter((e) => kept.has(e.source_id) && kept.has(e.target_id))
+
+  return { center, nodes, edges }
+}
+
 /**
  * People who ATTENDED meetings ABOUT a given topic or project (by label, fuzzy match),
  * ranked by number of meetings attended.
@@ -89,9 +199,11 @@ export function topSkillDemonstrators(
  */
 export function personProfile(store: KnowledgeGraphStore, personName: string): PersonProfile | undefined {
   const normName = personName.toLowerCase().trim()
+  // Match on label as well as norm_key: contact-keyed person nodes carry
+  // `contact:<id>` as their norm_key, so a name search must fall back to label.
   const personNode = store.db.queryOne<GraphNode>(
-    `SELECT * FROM graph_nodes WHERE type = 'person' AND norm_key LIKE ?`,
-    [`%${normName}%`]
+    `SELECT * FROM graph_nodes WHERE type = 'person' AND (norm_key LIKE ? OR LOWER(label) LIKE ?)`,
+    [`%${normName}%`, `%${normName}%`]
   )
   if (!personNode) return undefined
 

@@ -18,12 +18,25 @@ import {
   topSkillDemonstrators,
   personProfile,
   meetingSummaryGraph,
+  fullGraph,
+  neighborhood,
 } from '@hidock/knowledge-graph'
-import type { GraphDb, LlmExtractor, AttendeeResult, SkillDemonstratorResult, PersonProfile, MeetingGraph, GraphNode } from '@hidock/knowledge-graph'
+import type {
+  GraphDb,
+  LlmExtractor,
+  PersonResolver,
+  AttendeeResult,
+  SkillDemonstratorResult,
+  PersonProfile,
+  MeetingGraph,
+  GraphNode,
+  SubGraph,
+} from '@hidock/knowledge-graph'
 import { complete } from '@hidock/ai-providers'
 import type { ProviderConfig } from '@hidock/ai-providers'
 import { getConfig } from './config'
-import { run, queryAll, queryOne } from './database'
+import { run, queryAll, queryOne, getContactById } from './database'
+import { resolveContact } from './entity-resolver'
 
 // ---------------------------------------------------------------------------
 // GraphDb adapter — bridges the app's database exports to the GraphDb interface
@@ -93,6 +106,34 @@ function providerConfigFromSettings(): ProviderConfig | null {
 }
 
 // ---------------------------------------------------------------------------
+// Person identity resolution (R4c — key person nodes by contact id)
+// ---------------------------------------------------------------------------
+
+/** The confidence at/above which we key a person node by contact id (the
+ *  resolver's auto-link line). Below it, the node stays name-keyed. */
+const REKEY_CONFIDENCE = 0.8
+
+/**
+ * A PersonResolver for graph ingest: turns a raw name into a canonical contact
+ * identity when the shared entity resolver is confident enough, using meeting
+ * co-occurrence as context. Returns null (→ name-keyed node) otherwise.
+ */
+function makePersonResolver(meetingId?: string): PersonResolver {
+  return (name: string) => {
+    try {
+      const r = resolveContact(name, meetingId ? { meetingId } : undefined)
+      if (r.id && r.confidence >= REKEY_CONFIDENCE) {
+        const contact = getContactById(r.id)
+        return { id: r.id, label: contact?.name ?? name }
+      }
+    } catch (e) {
+      console.warn('[KnowledgeGraph] person resolve failed:', e)
+    }
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Ingestion from DB transcripts
 // ---------------------------------------------------------------------------
 
@@ -154,7 +195,10 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
         date: row.date_recorded ?? undefined,
       }
       const extraction = await extractGraphFromTranscript(row.full_text, meta, llm)
-      ingestExtraction(store, extraction, meta, new Date().toISOString())
+      ingestExtraction(store, extraction, meta, {
+        now: new Date().toISOString(),
+        resolvePerson: makePersonResolver(row.meeting_id ?? undefined),
+      })
 
       // Mark as ingested
       run(
@@ -167,6 +211,16 @@ export async function ingestFromDbTranscripts(): Promise<IngestResult> {
       result.errors.push({ transcriptId: row.id, error: msg })
       console.error(`[KnowledgeGraph] Failed to ingest transcript ${row.id}:`, e)
     }
+  }
+
+  // Bring any legacy name-keyed person nodes onto the contact-id identity.
+  try {
+    const rk = rekeyExistingPersonNodes()
+    if (rk.rekeyed + rk.merged > 0) {
+      console.log(`[KnowledgeGraph] Re-keyed ${rk.rekeyed} + merged ${rk.merged} person node(s) by contact id`)
+    }
+  } catch (e) {
+    console.warn('[KnowledgeGraph] Person re-key pass failed (non-fatal):', e)
   }
 
   return result
@@ -236,7 +290,10 @@ export async function ingestFromFolder(folderPath: string): Promise<IngestResult
       }
 
       const extraction = await extractGraphFromTranscript(content, meta, llm)
-      ingestExtraction(store, extraction, meta, new Date().toISOString())
+      ingestExtraction(store, extraction, meta, {
+        now: new Date().toISOString(),
+        resolvePerson: makePersonResolver(),
+      })
 
       run(
         'INSERT OR IGNORE INTO graph_ingested_transcripts (transcript_id, ingested_at) VALUES (?, ?)',
@@ -298,4 +355,276 @@ export function queryStats(): { nodes: number; edges: number; nodesByType: Recor
 export function queryListNodes(type?: string): GraphNode[] {
   const store = getKnowledgeGraphStore()
   return store.findNodes(type ? { type: type as any } : {})
+}
+
+// ---------------------------------------------------------------------------
+// R4c migration — re-key existing name-keyed person nodes by contact id
+// ---------------------------------------------------------------------------
+
+interface PersonNodeRow {
+  id: string
+  label: string
+  norm_key: string
+  props: string | null
+}
+
+/**
+ * LLM-free surgery that brings already-ingested (name-keyed) person nodes onto
+ * the contact-id identity. For each person node not yet keyed by `contact:*`,
+ * resolve its label to a contact; if confident, either fold it into the
+ * existing contact-keyed node (repointing edges) or relabel it in place.
+ *
+ * Idempotent: contact-keyed nodes are skipped, so re-running is a no-op.
+ */
+export function rekeyExistingPersonNodes(): { rekeyed: number; merged: number; skipped: number } {
+  const store = getKnowledgeGraphStore()
+  const db = store.db
+  const result = { rekeyed: 0, merged: 0, skipped: 0 }
+
+  const nameKeyed = db.queryAll<PersonNodeRow>(
+    "SELECT id, label, norm_key, props FROM graph_nodes WHERE type = 'person' AND norm_key NOT LIKE 'contact:%'"
+  )
+
+  for (const node of nameKeyed) {
+    let contactId: string | null = null
+    try {
+      const r = resolveContact(node.label)
+      if (r.id && r.confidence >= REKEY_CONFIDENCE) contactId = r.id
+    } catch {
+      contactId = null
+    }
+    if (!contactId) {
+      result.skipped++
+      continue
+    }
+
+    const contactKey = `contact:${contactId}`
+    const canonicalLabel = getContactById(contactId)?.name ?? node.label
+    const keeper = db.queryOne<{ id: string }>(
+      "SELECT id FROM graph_nodes WHERE type = 'person' AND norm_key = ?",
+      [contactKey]
+    )
+
+    if (keeper && keeper.id !== node.id) {
+      // Fold this node into the existing contact-keyed node. Repoint edges
+      // (UNIQUE(source,target,type) collisions are ignored → move what fits,
+      // drop the rest), then delete the loser.
+      db.run('UPDATE OR IGNORE graph_edges SET source_id = ? WHERE source_id = ?', [keeper.id, node.id])
+      db.run('DELETE FROM graph_edges WHERE source_id = ?', [node.id])
+      db.run('UPDATE OR IGNORE graph_edges SET target_id = ? WHERE target_id = ?', [keeper.id, node.id])
+      db.run('DELETE FROM graph_edges WHERE target_id = ?', [node.id])
+      db.run('DELETE FROM graph_nodes WHERE id = ?', [node.id])
+      result.merged++
+    } else if (!keeper) {
+      // No contact-keyed node yet — relabel this one in place. Edges reference
+      // the node id (unchanged), so nothing else needs repointing.
+      let props: Record<string, unknown> = {}
+      if (node.props) {
+        try {
+          props = JSON.parse(node.props) as Record<string, unknown>
+        } catch {
+          props = {}
+        }
+      }
+      props.contactId = contactId
+      db.run('UPDATE graph_nodes SET norm_key = ?, label = ?, props = ?, updated_at = ? WHERE id = ?', [
+        contactKey,
+        canonicalLabel,
+        JSON.stringify(props),
+        new Date().toISOString(),
+        node.id,
+      ])
+      result.rekeyed++
+    } else {
+      result.skipped++
+    }
+  }
+
+  return result
+}
+
+// ---------------------------------------------------------------------------
+// Context Graph — visualization + neighborhood retrieval
+// ---------------------------------------------------------------------------
+
+export interface ContextGraphNode {
+  id: string
+  type: string
+  label: string
+  degree: number
+  /** Click-through target ids, present per node type. */
+  contactId?: string
+  meetingId?: string
+  projectId?: string
+}
+
+export interface ContextGraphData {
+  center: string | null
+  nodes: ContextGraphNode[]
+  edges: Array<{ id: string; source: string; target: string; type: string; weight: number }>
+}
+
+function parseProps(props: string | null | undefined): Record<string, unknown> {
+  if (!props) return {}
+  try {
+    return JSON.parse(props) as Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+/** Cache of lowercased project name → id, rebuilt per graph assembly (cheap). */
+function projectNameIndex(): Map<string, string> {
+  const rows = queryAll<{ id: string; name: string }>('SELECT id, name FROM projects')
+  const m = new Map<string, string>()
+  for (const r of rows) m.set((r.name || '').toLowerCase().trim(), r.id)
+  return m
+}
+
+function toDTO(sub: SubGraph): ContextGraphData {
+  const projects = projectNameIndex()
+  const nodes: ContextGraphNode[] = sub.nodes.map((n) => {
+    const props = parseProps(n.props)
+    const dto: ContextGraphNode = {
+      id: n.id,
+      type: n.type,
+      label: n.label,
+      degree: (n as { degree?: number }).degree ?? 0,
+    }
+    if (n.type === 'person' && typeof props.contactId === 'string') dto.contactId = props.contactId
+    if (n.type === 'meeting' && typeof props.meetingId === 'string') dto.meetingId = props.meetingId
+    if (n.type === 'project') {
+      const pid = projects.get((n.label || '').toLowerCase().trim())
+      if (pid) dto.projectId = pid
+    }
+    return dto
+  })
+  const edges = sub.edges.map((e) => ({
+    id: e.id,
+    source: e.source_id,
+    target: e.target_id,
+    type: e.type,
+    weight: e.weight,
+  }))
+  return { center: sub.center?.id ?? null, nodes, edges }
+}
+
+/** The whole graph (capped to the highest-degree `limit` nodes) for an overview render. */
+export function queryContextGraph(limit = 600): ContextGraphData {
+  const store = getKnowledgeGraphStore()
+  return toDTO(fullGraph(store, limit))
+}
+
+/**
+ * Resolve an arbitrary entity id (graph node id, contact id, meeting id, project
+ * id, or a bare name) to a graph node id, so callers can pass a domain id.
+ */
+export function resolveEntityToNodeId(entityId: string): string | null {
+  const store = getKnowledgeGraphStore()
+  const db = store.db
+
+  // 1. Direct graph node id.
+  const direct = db.queryOne<{ id: string }>('SELECT id FROM graph_nodes WHERE id = ?', [entityId])
+  if (direct) return direct.id
+
+  // 2. Person node carrying this contact id.
+  const person = db.queryOne<{ id: string }>(
+    "SELECT id FROM graph_nodes WHERE type = 'person' AND JSON_EXTRACT(props, '$.contactId') = ?",
+    [entityId]
+  )
+  if (person) return person.id
+
+  // 3. Meeting node carrying this meeting id.
+  const meeting = db.queryOne<{ id: string }>(
+    "SELECT id FROM graph_nodes WHERE type = 'meeting' AND JSON_EXTRACT(props, '$.meetingId') = ?",
+    [entityId]
+  )
+  if (meeting) return meeting.id
+
+  // 4. Project id → project name → project node (name-keyed).
+  const project = queryOne<{ name: string }>('SELECT name FROM projects WHERE id = ?', [entityId])
+  if (project) {
+    const norm = project.name.toLowerCase().trim().replace(/\s+/g, ' ')
+    const pnode = db.queryOne<{ id: string }>(
+      "SELECT id FROM graph_nodes WHERE type = 'project' AND norm_key = ?",
+      [norm]
+    )
+    if (pnode) return pnode.id
+  }
+
+  // 5. Bare name → any node whose label matches.
+  const byLabel = db.queryOne<{ id: string }>('SELECT id FROM graph_nodes WHERE LOWER(label) = ?', [
+    entityId.toLowerCase().trim(),
+  ])
+  return byLabel?.id ?? null
+}
+
+/** Neighborhood (1–3 hops) around an entity, resolved from any id form. */
+export function queryNeighborhood(entityId: string, hops = 1): ContextGraphData {
+  const store = getKnowledgeGraphStore()
+  const nodeId = resolveEntityToNodeId(entityId)
+  if (!nodeId) return { center: null, nodes: [], edges: [] }
+  return toDTO(neighborhood(store, nodeId, hops))
+}
+
+/** Find graph nodes whose label matches a query — powers search-to-focus. */
+export function searchGraphNodes(query: string, limit = 12): ContextGraphNode[] {
+  const store = getKnowledgeGraphStore()
+  const q = query.trim().toLowerCase()
+  if (!q) return []
+  const rows = store.db.queryAll<GraphNode>(
+    'SELECT * FROM graph_nodes WHERE LOWER(label) LIKE ? ORDER BY LENGTH(label) ASC LIMIT ?',
+    [`%${q}%`, limit]
+  )
+  return toDTO({ center: undefined, nodes: rows.map((n) => ({ ...n, degree: 0 })), edges: [] }).nodes
+}
+
+/**
+ * Find the person/project graph node whose label is named in a block of text
+ * (longest label wins). Precise substring match — powers the RAG grounding hook
+ * without over-triggering on stray words. Returns null when nothing is named.
+ */
+export function findMentionedEntity(text: string): ContextGraphNode | null {
+  const haystack = ` ${text.toLowerCase()} `
+  const store = getKnowledgeGraphStore()
+  const rows = store.db.queryAll<GraphNode>(
+    "SELECT * FROM graph_nodes WHERE type IN ('person', 'project')"
+  )
+  let best: GraphNode | null = null
+  for (const n of rows) {
+    const label = (n.label || '').trim().toLowerCase()
+    if (label.length < 3) continue
+    if (haystack.includes(` ${label} `) || haystack.includes(` ${label}`) || haystack.includes(`${label} `)) {
+      if (!best || label.length > best.label.trim().length) best = n
+    }
+  }
+  if (!best) return null
+  return toDTO({ center: undefined, nodes: [{ ...best, degree: 0 }], edges: [] }).nodes[0]
+}
+
+/**
+ * Compact, human-readable facts about an entity's neighborhood — one line per
+ * connected entity. Used to ground the assistant/RAG with graph context.
+ * Returns '' when nothing is found (caller appends nothing).
+ */
+export function neighborhoodFacts(entityId: string, hops = 1, maxFacts = 20): string {
+  const data = queryNeighborhood(entityId, hops)
+  if (!data.center || data.nodes.length <= 1) return ''
+
+  const byId = new Map(data.nodes.map((n) => [n.id, n]))
+  const center = byId.get(data.center)
+  if (!center) return ''
+
+  const lines: string[] = []
+  for (const e of data.edges) {
+    if (lines.length >= maxFacts) break
+    const src = byId.get(e.source)
+    const tgt = byId.get(e.target)
+    if (!src || !tgt) continue
+    if (src.id !== center.id && tgt.id !== center.id) continue
+    const rel = e.type.toLowerCase().replace(/_/g, ' ')
+    lines.push(`- ${src.label} ${rel} ${tgt.label}`)
+  }
+  if (lines.length === 0) return ''
+  return `Context graph — ${center.label} (${center.type}):\n${lines.join('\n')}`
 }

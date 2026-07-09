@@ -80,6 +80,24 @@ import type {
 } from '../../src/types/knowledge'
 import type { PipelineState } from '../main/types/device-pipeline'
 
+/** A Context Graph node with its degree + click-through ids (mirrors the service DTO). */
+interface ContextGraphNode {
+  id: string
+  type: string
+  label: string
+  degree: number
+  contactId?: string
+  meetingId?: string
+  projectId?: string
+}
+
+/** A Context Graph payload: nodes + edges (+ the focused center, if any). */
+interface ContextGraphData {
+  center: string | null
+  nodes: ContextGraphNode[]
+  edges: Array<{ id: string; source: string; target: string; type: string; weight: number }>
+}
+
 /** Project issue / risk / note (v29). */
 interface ProjectNote {
   id: string
@@ -625,6 +643,21 @@ export interface ElectronAPI {
     resolvePerson: (name: string) => Promise<{ success: boolean; data?: Contact | null; error?: string }>
   }
 
+  // Context Graph — interactive visualization + neighborhood retrieval
+  contextGraph: {
+    getGraph: (limit?: number) => Promise<{ success: boolean; data?: ContextGraphData; error?: string }>
+    getNeighborhood: (
+      entityId: string,
+      hops?: number
+    ) => Promise<{ success: boolean; data?: ContextGraphData; error?: string }>
+    search: (query: string) => Promise<{ success: boolean; data?: ContextGraphNode[]; error?: string }>
+    rekey: () => Promise<{
+      success: boolean
+      data?: { rekeyed: number; merged: number; skipped: number }
+      error?: string
+    }>
+  }
+
   // Identity suggestions (Round 4a) — the resolver's 0.5–0.8 review queue
   identity: {
     getSuggestions: (
@@ -1119,6 +1152,15 @@ const electronAPI: ElectronAPI = {
     meetingGraph: (meetingId: string) => callIPC('graph:meetingGraph', meetingId),
     listNodes: (type?: string) => callIPC('graph:listNodes', type),
     resolvePerson: (name: string) => callIPC('graph:resolvePerson', name),
+  },
+
+  // Context Graph — interactive visualization + neighborhood retrieval
+  contextGraph: {
+    getGraph: (limit?: number) => callIPC('contextGraph:getGraph', limit),
+    getNeighborhood: (entityId: string, hops?: number) =>
+      callIPC('contextGraph:getNeighborhood', entityId, hops),
+    search: (query: string) => callIPC('contextGraph:search', query),
+    rekey: () => callIPC('contextGraph:rekey'),
   },
 
   // Identity suggestions (Round 4a)

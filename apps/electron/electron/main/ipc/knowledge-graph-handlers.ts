@@ -23,6 +23,10 @@ import {
   queryPersonProfile,
   queryMeetingGraph,
   queryListNodes,
+  queryContextGraph,
+  queryNeighborhood,
+  searchGraphNodes,
+  rekeyExistingPersonNodes,
 } from '../services/knowledge-graph-service'
 import { getContactByName } from '../services/database'
 
@@ -141,6 +145,58 @@ export function registerKnowledgeGraphHandlers(): void {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       console.error('[graph:resolvePerson] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // Context Graph — interactive visualization + neighborhood retrieval
+  // -------------------------------------------------------------------------
+
+  ipcMain.handle('contextGraph:getGraph', async (_event, limit?: unknown) => {
+    try {
+      const cap = typeof limit === 'number' && limit > 0 ? Math.min(limit, 2000) : undefined
+      return { success: true, data: queryContextGraph(cap) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:getGraph] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  ipcMain.handle('contextGraph:getNeighborhood', async (_event, entityId: unknown, hops?: unknown) => {
+    try {
+      if (!entityId || typeof entityId !== 'string') {
+        return { success: false, error: 'entityId must be a non-empty string' }
+      }
+      const h = typeof hops === 'number' ? hops : 1
+      return { success: true, data: queryNeighborhood(entityId as string, h) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:getNeighborhood] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  ipcMain.handle('contextGraph:search', async (_event, query: unknown) => {
+    try {
+      if (!query || typeof query !== 'string') {
+        return { success: false, error: 'query must be a non-empty string' }
+      }
+      return { success: true, data: searchGraphNodes(query as string) }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:search] Error:', e)
+      return { success: false, error: msg }
+    }
+  })
+
+  ipcMain.handle('contextGraph:rekey', async () => {
+    try {
+      return { success: true, data: rekeyExistingPersonNodes() }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('[contextGraph:rekey] Error:', e)
       return { success: false, error: msg }
     }
   })
