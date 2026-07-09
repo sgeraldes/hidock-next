@@ -1,5 +1,6 @@
 import { Plus, FileUp, FolderOpen, Download, Zap, RefreshCw, LayoutGrid, List } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { TranscriptUpgradeButton } from './TranscriptUpgradeButton'
 
 interface LibraryHeaderProps {
   stats: {
@@ -120,6 +121,8 @@ export function LibraryHeader({
               )}
             </Button>
           )}
+
+          <TranscriptUpgradeButton />
 
           <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
             <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />

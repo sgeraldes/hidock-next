@@ -640,6 +640,28 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_capture ON artifacts(knowledge_capture_
 CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind);
 CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash ON artifacts(content_hash);
 
+-- Old-transcript triage (transcript-upgrade). Records the importance score and
+-- reformat/re-transcription decision for pre-speaker-turns ("flat") transcripts,
+-- keyed by transcript. Created every boot via Phase 1/4 (no SCHEMA_VERSION bump).
+CREATE TABLE IF NOT EXISTS transcript_triage (
+    transcript_id TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL,
+    is_legacy_format INTEGER DEFAULT 0,
+    triage_score INTEGER,
+    triage_band TEXT,
+    triage_signals TEXT,
+    recommended_retranscription INTEGER DEFAULT 0,
+    reformat_status TEXT DEFAULT 'none',
+    reformat_error TEXT,
+    reformatted_at TEXT,
+    assessed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (transcript_id) REFERENCES transcripts(id),
+    FOREIGN KEY (recording_id) REFERENCES recordings(id)
+);
+CREATE INDEX IF NOT EXISTS idx_transcript_triage_recording ON transcript_triage(recording_id);
+CREATE INDEX IF NOT EXISTS idx_transcript_triage_recommend ON transcript_triage(recommended_retranscription);
+CREATE INDEX IF NOT EXISTS idx_transcript_triage_reformat ON transcript_triage(reformat_status);
+
 `
 
 // Migration functions for schema upgrades

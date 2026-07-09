@@ -25,6 +25,7 @@ import { registerBriefingHandlers } from './briefing-handlers'
 import { registerActionItemsHandlers } from './action-items-handlers'
 import { registerIdentityHandlers } from './identity-handlers'
 import { registerArtifactHandlers } from './artifact-handlers'
+import { registerTranscriptUpgradeHandlers } from './transcript-upgrade-handlers'
 
 export function registerIpcHandlers(): void {
   // Register all IPC handlers
@@ -58,6 +59,7 @@ export function registerIpcHandlers(): void {
   registerActionItemsHandlers()
   registerIdentityHandlers()
   registerArtifactHandlers()
+  registerTranscriptUpgradeHandlers()
 
   console.log('All IPC handlers registered')
 }
