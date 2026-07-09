@@ -21,6 +21,7 @@ import {
   LibraryFilters,
   SourceRow,
   SourceCard,
+  StatusLegend,
   EmptyState,
   DeviceDisconnectBanner,
   BulkActionsBar,
@@ -997,6 +998,15 @@ export function Library() {
               onAddRecording={handleAddRecording}
             />
           ) : (
+            <div className="animate-rise-in">
+              {compactView && (
+                <div className="mb-2 flex items-center justify-between px-1">
+                  <span className="text-xs text-muted-foreground">
+                    {filteredRecordings.length} shown
+                  </span>
+                  <StatusLegend />
+                </div>
+              )}
             <div
               style={{
                 height: `${rowVirtualizer.getTotalSize()}px`,
@@ -1132,6 +1142,7 @@ export function Library() {
                   })}
                 </div>
               )}
+            </div>
             </div>
           )}
         </div>

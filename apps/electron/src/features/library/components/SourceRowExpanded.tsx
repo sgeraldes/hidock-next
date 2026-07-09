@@ -65,6 +65,10 @@ export const SourceRowExpanded = memo(function SourceRowExpanded({
             <p>{recording.title}</p>
           </div>
         )}
+        <div className="col-span-2">
+          <p className="text-xs font-medium text-muted-foreground mb-1">File</p>
+          <p className="truncate font-mono text-xs" title={recording.filename}>{recording.filename}</p>
+        </div>
       </div>
 
       {/* Linked Meeting */}

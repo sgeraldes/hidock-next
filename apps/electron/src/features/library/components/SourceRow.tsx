@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Play, X, AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal } from 'lucide-react'
+import { Play, X, AlertCircle, Download, Trash2, Wand2, Sparkles, FileText, RefreshCw, AudioLines, MoreHorizontal, Calendar } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -10,7 +10,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
-import { formatDate, formatDuration } from '@/lib/utils'
+import { formatDate, formatTime, formatDuration, formatDateTime } from '@/lib/utils'
 import { Meeting, Transcript } from '@/types'
 import { UnifiedRecording, hasLocalPath } from '@/types/unified-recording'
 import { StatusIcon } from './StatusIcon'
@@ -71,7 +71,9 @@ export const SourceRow = memo(function SourceRow({
 
   // Smart title
   const { primaryText, source: titleSource } = getDisplayTitle(recording, meeting, transcript)
-  const showFilenameInSecondary = titleSource !== 'filename'
+  // The machine filename is noise in the prime space — it lives in the row's
+  // hover tooltip and the expanded row, never on the always-visible second line.
+  const titleIsFilename = titleSource === 'filename'
 
   const handleCheckboxClick = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -87,23 +89,35 @@ export const SourceRow = memo(function SourceRow({
     onClick?.()
   }
 
-  // Build secondary line: date + duration + filename (when title isn't filename)
+  // Build secondary line: human date + start time + duration. The start time
+  // (previously buried inside the machine filename, e.g. "190246") is now read
+  // straight from the recording's timestamp \u2014 "Wed, Jul 8 \u00B7 7:02 PM \u00B7 44m 40s".
   const secondaryParts: string[] = []
   secondaryParts.push(formatDate(recording.dateRecorded))
+  secondaryParts.push(formatTime(recording.dateRecorded))
   if (recording.duration) {
     secondaryParts.push(formatDuration(recording.duration))
   }
-  if (showFilenameInSecondary) {
-    secondaryParts.push(recording.filename)
-  }
   const secondaryText = secondaryParts.join(' \u00B7 ')
+  // Tooltip on the second line surfaces the raw filename when it isn't already
+  // the title, so the machine name stays discoverable without cluttering the row.
+  const secondaryTitle = titleIsFilename ? undefined : recording.filename
 
   return (
     <div
       className={[
-        '@container flex items-center justify-between py-2 px-3 hover:bg-muted/50 cursor-pointer transition-colors',
-        // Selection/active state shown via background tint (no side-stripe border)
-        isActiveSource ? 'bg-primary/15' : isSelected ? 'bg-primary/10' : ''
+        '@container flex items-center justify-between py-2 px-3 cursor-pointer',
+        'transition-[background-color,box-shadow] duration-150',
+        // Hover reads as a gentle elevation (bg + inner ring — the row list is
+        // overflow-clipped, so an inset ring conveys lift where a drop shadow can't).
+        'hover:bg-muted/60 hover:ring-1 hover:ring-inset hover:ring-border',
+        // Selection/active state shown via background tint + inset accent ring
+        // (no side-stripe border, per the design rules).
+        isActiveSource
+          ? 'bg-primary/15 ring-1 ring-inset ring-primary/30'
+          : isSelected
+            ? 'bg-primary/10 ring-1 ring-inset ring-primary/20'
+            : ''
       ].filter(Boolean).join(' ')}
       role="option"
       onClick={handleRowClick}
@@ -124,10 +138,33 @@ export const SourceRow = memo(function SourceRow({
 
         {/* Content area — flex-1 to fill remaining space */}
         <div className="flex-1 min-w-0">
-          <p className="font-medium text-sm line-clamp-2 text-foreground leading-tight" title={primaryText}>
-            {searchQuery ? highlightText(primaryText, searchQuery) : primaryText}
-          </p>
-          <p className="text-xs text-muted-foreground truncate leading-tight mt-0.5">
+          <div className="flex items-start gap-1.5 min-w-0">
+            <p className="font-medium text-sm line-clamp-2 text-foreground leading-tight min-w-0" title={primaryText}>
+              {searchQuery ? highlightText(primaryText, searchQuery) : primaryText}
+            </p>
+            {/* Provenance chip: the row is linked to a calendar meeting. Surfaces the
+                connection the system already knows (B1) without repeating the subject. */}
+            {meeting && (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      className="mt-[3px] inline-flex shrink-0 text-primary/70"
+                      role="img"
+                      aria-label={`Linked to calendar meeting: ${meeting.subject}`}
+                    >
+                      <Calendar className="h-3 w-3" aria-hidden="true" />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p>Linked to calendar meeting</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{formatDateTime(meeting.start_time)}</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground truncate leading-tight mt-0.5" title={secondaryTitle}>
             {searchQuery ? highlightText(secondaryText, searchQuery) : secondaryText}
           </p>
         </div>
