@@ -82,10 +82,10 @@ the living artifact; INTELLIGENCE.md §5 keeps the per-surface rollup.
 ### Today
 | Function | Click | Edit | Discover | Identity | Notes |
 |---|---|---|---|---|---|
-| Meeting rows | 90 | 0 | 20→60* | 40→70* | *participants agent in flight |
+| Meeting rows (ribbon) | 90 | 0 | 80 | 70 | end times all variants, hover cards on capsule rows, legend popover, dot tooltips (verified live 07-08) |
 | Follow-up CTAs | 95 | n/a | 70 | n/a | |
 | Pending actionables | 70 | 30 | 50 | 40 | recipients now chips |
-| Identity suggestions card | 90 | 90 | 85 | 95 | |
+| Identity suggestions card | 90 | 90 | 85 | 95 | group cards: canonical-name picker verified live (Nauman→Nouman) |
 | Recent knowledge | 90 | 0 | 50 | 60 | dates are mentions |
 | Stats line | 0 | n/a | 30 | n/a | could deep-link |
 
@@ -132,6 +132,15 @@ the living artifact; INTELLIGENCE.md §5 keeps the per-surface rollup.
 | Attendees (detail) | 80 | 80 | 50→75* | 85 | empty-ICS state* |
 | Subject/location/desc/organizer | n/a | 85 | 60 | 70 | times not editable |
 | Linked recordings | 85 | 85 | 70 | 80 | |
+
+### Actionables
+| Function | Click | Edit | Discover | Identity | Notes |
+|---|---|---|---|---|---|
+| Cards → inline detail | 90 | 0 | 85 | 60 | expand: full quote, WILL GENERATE panel, detected date (verified live 07-08) |
+| Approve button | 95 | n/a | 90 | n/a | per-template "Generate X" labels |
+| Source link | 40 | 0 | 40 | 50 | recording-id sources render dead text — fix-actionable-source agent in flight |
+| Recipients | 70 | 0 | 60 | 70 | chips in detail |
+| Filters/pagination | 90 | n/a | 70 | n/a | |
 
 ### Assistant / Explore / Graph
 | Function | Click | Edit | Discover | Identity | Notes |
