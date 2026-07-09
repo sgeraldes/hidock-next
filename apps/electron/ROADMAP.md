@@ -41,6 +41,9 @@ INTERACTIVITY_PLAN.md, OVERNIGHT_PLAN.md.*
   re-transcription upgrades them (needs backlog decision, see A20).
 - MeetingDetail start/end time editing (form scaffolding exists, no inputs).
 - March backlog: BUG-R1/R3 re-scan loop, DevicePipeline Phase 2.
+- Test suite prints "Not implemented: HTMLCanvasElement getContext" (jsdom
+  lacks canvas; waveform components render in tests). Harmless-looking but
+  noisy — silence via a canvas mock in test setup or install `canvas` dev dep.
 
 ## C. Forward map (priority order)
 1. **Merge journal + unmerge (v30)** — explicit user ask, only designed. NEXT.
